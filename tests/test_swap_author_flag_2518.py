@@ -247,3 +247,31 @@ def test_control_second_session_operator_swap_hands_off_warm():
 def test_swap_without_the_author_argument_is_a_type_error():
     with pytest.raises(TypeError, match="agent_authored"):
         Session().swap({"components": []})
+
+
+@needs_runtime
+def test_cli_repair_by_the_operator_hands_off_warm(tmp_path, capsys):
+    """`revl repair` on the command line: the operator wrote the composition
+    and the candidate, so the swap is not agent-authored even while the
+    server's trust global holds its untrusted default."""
+    import json
+
+    from revl.__main__ import main
+
+    _untrusted()
+    running = tmp_path / "running.rvl"
+    running.write_text(OPERATOR, encoding="utf-8")
+    candidate = tmp_path / "candidate.rvl"
+    candidate.write_text(REST + _app('realm("tenant_a")') + OPERATOR_MIXED,
+                         encoding="utf-8")
+    policy = tmp_path / "policy.txt"
+    policy.write_text("component * may self-repair\n"
+                      "self-repair may touch *\nself-repair may widen\n",
+                      encoding="utf-8")
+    rc = main(["repair", str(running), "--component", "Mixed",
+               "--candidate", str(candidate),
+               "--self-repair-policy", str(policy), "--json"])
+    dossier = json.loads(capsys.readouterr().out)
+    assert rc == 0, dossier
+    assert dossier["incident"]["status"] == repair_mod.STATUS_REPAIRED, dossier
+    assert dossier["remediation"]["swap"]["handoff"]["board"]["migrated"] is True
