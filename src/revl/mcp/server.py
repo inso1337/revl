@@ -1424,6 +1424,14 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     origin = _origin(stored, _dependency_buffers(compile_report))
     authored = _authored_host_bodies(full, source, modules)
     running = SESSION.ir
+    # issue #2487: carried text may not move a surviving provider out of its
+    # realm by leaving its clause out; jailed `files` alone are the operator's
+    if source is not None or modules:
+        refused = _realm_removal_refused(
+            running, full,
+            _edit._candidate_texts({"source": source, "modules": modules}))
+        if refused is not None:
+            return refused
     # issue #1704: the same preflight revl_edit carries, read off the
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
@@ -1601,6 +1609,21 @@ def _source_set(arguments: dict) -> dict:
                           "`files` or `source` to read from")
 
 
+def _realm_removal_refused(running: dict, full: dict,
+                           texts: dict | None = None) -> dict | None:
+    """The swap doors' half of issue #2487 (`revl_edit`/`revl_change` run it in
+    `edit.admit`): `None`, or the refusal of a candidate that moves an admitted
+    provision out of its realm. `texts` lets the refusal carry the line."""
+    try:
+        _edit._check_realm_removal(running, full, texts)
+    except RevlError as error:
+        rejected = report(error)
+        rejected.update(admitted=False, swapped=False,
+                        note="the running composition is untouched")
+        return rejected
+    return None
+
+
 def _swap_server_side(replacing: tuple) -> dict:
     """Swap the source the session already holds — no inline source resent."""
     vs = _edit.virtual_source(SESSION)
@@ -1626,6 +1649,13 @@ def _swap_server_side(replacing: tuple) -> dict:
                             "composition on its own")
         return rejected
     running = SESSION.ir
+    # issue #2487: only text that arrived over the transport (inline source or
+    # an edited buffer) compiled under the profile; unedited jailed files are
+    # the operator's own and may legitimately differ from what is running
+    if vs.get("source") is not None or _edit.file_modules(vs):
+        refused = _realm_removal_refused(running, full, _edit._candidate_texts(vs))
+        if refused is not None:
+            return refused
     radius = _authoring_loop.blast_radius(running, full)  # issue #1704
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
