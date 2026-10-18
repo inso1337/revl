@@ -89,6 +89,12 @@ def _sidecar(base: Path) -> Path:
     return base / ".revl" / "knowledge"
 
 
+def _in_sidecar(path: str) -> bool:
+    """Whether `path` lies directly in a `.revl/knowledge/` directory, however
+    the root is spelled."""
+    return Path(path).parent.parts[-2:] == (".revl", "knowledge")
+
+
 def _export_dir(base: Path) -> Path:
     return base / ".revl" / "export"
 
@@ -120,7 +126,8 @@ def _minted(base: Path) -> tuple[Path, dict]:
     out = _call("revl_export", {"with_knowledge": True})
     assert out["ok"] is True, out
     record_file = _sidecar(base) / f"{added['note']['id']}.json"
-    assert str(record_file) in out["written"], out
+    assert [Path(p).name for p in out["written"]
+            if _in_sidecar(p)] == [record_file.name], out
     record = json.loads(record_file.read_text(encoding="utf-8"))
     assert record["id"] == added["note"]["id"]
     _reset()
@@ -193,7 +200,7 @@ def test_a_well_formed_record_file_round_trips_unchanged(root):
     out = _call("revl_export", {"with_knowledge": True})
     assert out["ok"] is True, out
     assert {p: p.read_bytes() for p in _sidecar(root).iterdir()} == records
-    assert not any(str(_sidecar(root)) in p for p in out["written"]), out
+    assert not any(_in_sidecar(p) for p in out["written"]), out
 
 
 # ------------------------------------ sidecar targets pass the export checks
@@ -213,7 +220,7 @@ def test_a_sidecar_target_that_appeared_is_never_replaced(root, monkeypatch):
     def racing(held, arguments, skipped=None):
         plan = planned(held, arguments, skipped)
         for target, _ in plan:
-            if Path(target).parent == _sidecar(root):
+            if _in_sidecar(target):
                 Path(target).parent.mkdir(parents=True, exist_ok=True)
                 Path(target).write_text("operator bytes\n", encoding="utf-8")
                 raced.append(Path(target))
@@ -252,7 +259,7 @@ def test_the_plan_marks_each_sidecar_entry(root):
                                     "kind": "rationale", "body": "why"})["ok"]
     held = server_mod._edit.running_source(server_mod.SESSION)
     plan = server_mod._export_plan(held, {"with_knowledge": True})
-    marks = {(Path(entry[0]).parent == _sidecar(root), entry.new_only)
+    marks = {(_in_sidecar(entry[0]), entry.new_only)
              for entry in plan}
     assert marks == {(True, True), (False, False)}, plan
 
