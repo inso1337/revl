@@ -36,6 +36,8 @@
 
 ["reference", "src/revl/errors.py"]
 
+["reference", "src/revl/export_area.py"]
+
 ["reference", "src/revl/fmt.py"]
 
 ["reference", "src/revl/gen_types.py"]
