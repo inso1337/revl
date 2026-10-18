@@ -52,6 +52,7 @@ from .typecheck import (
     _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
+    bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
     infer_ir,
@@ -7621,10 +7622,9 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         param_types = _arrow_param_types(expr)
         for param, ptype in zip(expr.params, param_types):
             inner[param] = False
-            if ptype:
-                inner_type_env[param] = ptype
-            else:
-                inner_type_env.pop(param, None)
+            # issue #2588: an unknown parameter type is recorded as unknown,
+            # not dropped, so the name cannot fall through to a top-level fn
+            _bind_typed_local(inner_type_env, param, ptype or None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
         _b1_capture_check(expr, type_env, types, filename, expr.line)
         node = {"kind": "arrow",
@@ -7665,9 +7665,12 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             payload_type = _arm_payload_type(scrutinee_type, pattern, types)
             if bind is not None:
                 inner_scope[bind] = False
-                inner_type_env.pop(bind, None)
-                if payload_type is not None:
-                    inner_type_env[bind] = payload_type
+                # issue #2588: the binder occupies its name even when its
+                # payload type is unknown (an applied generic variant, here).
+                # Dropped from the type env, `ch` in `Jj(ch) => "${ch}"` was
+                # typed as any top-level `fn ch` of the compile, a private
+                # one in a file this one never imports included.
+                _bind_typed_local(inner_type_env, bind, payload_type)
             arm = {
                 "pattern": pattern,
                 "bind": _predeclared_mangle(bind) if bind is not None else None,
