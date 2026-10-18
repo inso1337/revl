@@ -6345,14 +6345,30 @@ def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
     return found
 
 
+def _v3_has_unbound_arg(surface, types: dict) -> bool:
+    """Does the surface type carry an unbound (`any`) type argument of a
+    generic variant at any depth? `Mb[Mb[any]]` does (issue #2497), `Mb[any]`
+    does, `List[Mb[Int]]` does not."""
+    if not isinstance(surface, str):
+        return False
+    s = surface.strip()
+    generic = _v3_generic_variant(s, types)
+    if generic is not None and "any" in generic[2]:
+        return True
+    if "[" in s and s.endswith("]"):
+        return any(_v3_has_unbound_arg(a, types)
+                   for a in _v3_split_generic(s[s.index("[") + 1: -1]))
+    return False
+
+
 def _v3_list_elem(item_types: list, types: dict):
-    """The element type of an unpinned list literal: the first item type whose
-    generic variant arguments are all bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`,
-    issue #2471), else the first item type known at all."""
+    """The element type of an unpinned list literal: the first item type with
+    no unbound generic variant argument at any depth (`[Nn, Jj(4)]` is a
+    `List[Mb[Int]]`, issue #2471; `[Jj(Nn), Jj(Jj(1)), Nn]` is a
+    `List[Mb[Mb[Int]]]`, issue #2497), else the first item type known at all."""
     known = [t for t in item_types if t]
     for t in known:
-        generic = _v3_generic_variant(t, types)
-        if generic is None or "any" not in generic[2]:
+        if not _v3_has_unbound_arg(t, types):
             return t
     return known[0] if known else None
 

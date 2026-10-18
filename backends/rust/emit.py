@@ -7202,6 +7202,10 @@ class _V3Ctx:
         # reset per fn by `_emit_v3_functions`, empty everywhere the reuse
         # context is not established.
         self.multi_use: set[str] = set()
+        # issue #2497: reads per name in the body being rendered, so a `let`
+        # nothing reads again can be typed (or refused) where rustc has no
+        # later use to infer from
+        self.read_counts: dict[str, int] = {}
         # `id()` of every `for` node whose bare-name iterable is dead after the
         # loop and so may be MOVED rather than `.clone()`d (item 437f); reset per
         # fn by `_emit_v3_functions`, empty in every other emit context.
@@ -8758,6 +8762,43 @@ def _guard_frame_neutral_loop(body) -> None:
                 "while/for body (docs/design/379-break-continue.md)")
 
 
+def _v3_dead_let_annotation(node: dict, ctx: _V3Ctx) -> str:
+    """The type annotation of a `let` the body never reads again, when its
+    value alone does not fix one (issue #2497). rustc infers a `let`'s type
+    from a later use; with none, a bare `None` is E0282, so it is typed
+    `Option<Value>`, the erased type go gives it (`RevlOpt[any]`). A
+    payload-less case of a generic variant (`let x = Nn`) is refused by name
+    instead, as go refuses it: `Value` is no instantiation a later reader of
+    the program would expect."""
+    value = node.get("value")
+    if not isinstance(value, dict):
+        return ""
+    if value.get("kind") == "var" and value.get("name") == "None":
+        return ": Option<Value>"
+    if value.get("kind") == "adt":
+        _v3_refuse_unbound_case(value, node.get("name"), ctx)
+    return ""
+
+
+def _v3_refuse_unbound_case(value: dict, binding, ctx: _V3Ctx) -> None:
+    """Refuse the construction of a generic variant's payload-less case whose
+    type argument nothing pins (issue #2497): neither a flow target nor a
+    payload, and no later read of the binding for rustc to infer one from.
+    Same wording as the go emitter's `_v3_refuse_unbound`."""
+    case = value.get("case")
+    adt = ctx.case_adt.get(case)
+    spec = ctx.types.get(adt) if adt else None
+    params = list((spec or {}).get("params") or [])
+    if not params or ctx.case_payload.get(case) is not None:
+        return
+    raise EmitError(
+        f"variant case `{case}`: type '{adt}[{', '.join(params)}]' has no "
+        f"type argument for {', '.join(params)} at this construction - "
+        "neither its flow target nor its payload pins it, and nothing reads "
+        f"`{binding}` later for rustc to infer one from; annotate the value "
+        "or pass it where a typed parameter pins it")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -8801,6 +8842,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 elem = ctx.vec_elems.get(node.get("name"))
                 if isinstance(elem, str):
                     annot = f": Vec<{_rust_type(elem, ctx.types)}>"
+            elif ctx.read_counts.get(node.get("name"), 0) == 0:
+                annot = _v3_dead_let_annotation(node, ctx)
             out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
@@ -9110,6 +9153,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         ctx.current_return = fn.get("returns")
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
+        ctx.read_counts = counts
         # The textual count, widened by the reads a LOOP repeats (#1157): a name
         # spelled once inside a `while`/`for` body is still consumed on every
         # iteration, so it is a reuse even though the count says one.
@@ -9572,6 +9616,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
             ctx.var_types = {}
             counts: dict[str, int] = {}
             _body_multi_use(test["body"], counts)
+            ctx.read_counts = counts
             ctx.multi_use = ({n for n, c in counts.items() if c > 1}
                              | _loop_repeated_reads(test["body"]))
             ctx.movable_for_iterables = _movable_for_iterables(
