@@ -101,12 +101,14 @@ composition and a runtime surprise. You get a refusal and a reason.
 
 Vendored text is admitted as an untrusted author. A truc is registry text, not
 your own source, so `add`, `assemble`, `assemble --check` and the remainder
-`rm` re-admits compile every vendored row under the untrusted-author profile:
-the one `truc apply` confines a stack layer with, and the one the MCP server
-applies to an author by default. A row that ships a host body (`@py` and the
-like) is refused, and the refusal names it. `truc add NAME --trust-host-code`
-or `truc assemble --trust-host-code` admits it for that one command and names
-on stderr each row the flag unlocked. The flag is read from the command line
+`rm` re-admits compile every vendored row under the untrusted-author profile
+the MCP server applies to an author by default. A row that ships a host body
+(`@py` and the like) is refused, and the refusal names it. This profile does
+not bound a row's reach to a granted service set at add time; `truc apply`
+bounds reach when it confines a stack layer, as it does today.
+`truc add NAME --trust-host-code` or `truc assemble --trust-host-code` admits
+a host body for that one command and names on stderr each row the flag
+unlocked. The flag is read from the command line
 only, never from the environment or `truc.toml`. `add` records how the row was
 admitted in its `truc.lock` entry, `admitted.admission`: `profiled`, or
 `trusted-host-code` when only the flag admitted it. That record is bound to the

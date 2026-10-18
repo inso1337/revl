@@ -462,8 +462,10 @@ def admit_all(ordered_json: str, lock_json: str = "",
 
     Who wrote a row decides how it compiles (issue #2552). A row with no name
     is the project's own entry and compiles as the operator. A named row is
-    vendored registry text and compiles under the untrusted-author profile,
-    the profile `truc apply` confines a stack layer with. Its host code is
+    vendored registry text and compiles under the untrusted-author profile
+    the MCP server applies to an author by default. That profile leaves the
+    reach allowlist off: reach is bounded later, when `truc apply` confines a
+    stack layer to its granted services, not here. Its host code is
     admitted only when `trust_host_code` (the command's `--trust-host-code`) is
     set, or when `lock_json` records that a flagged `add` admitted these exact
     bytes. Each row admitted that way is named on stderr and listed in the
