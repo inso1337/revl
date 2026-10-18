@@ -816,22 +816,16 @@ def _beside(current: dict, chain: list[dict]) -> list[dict]:
     return [note for note in current.values() if note.get("changes") in ids]
 
 
-#: how far a note's author is trusted, for reading a block back over it
-#: (issue #2577). A trust this does not name ranks as an operator's for the
-#: note's author and lowest for the block's
-_IMPORT_RANK = {"untrusted": 0, "publisher": 1, "operator": 2}
-
-
 def _outranks(owner, writer) -> bool:
     """Whether a note by `owner` is trusted further than `writer`, the author
-    of a block read back over it: an untrusted author's block never
-    supersedes an operator's or a publisher's note, through an export copy
-    or an adopted one. Decided before any supersede is made, so the block is
-    kept beside the note rather than lost to a refused supersede."""
-    def trust(author):
-        return author.get("trust") if isinstance(author, dict) else None
-    return (_IMPORT_RANK.get(trust(owner), _IMPORT_RANK["operator"])
-            > _IMPORT_RANK.get(trust(writer), 0))
+    of a block read back over it (issue #2577), in the order `_check_rank`
+    refuses a supersede by (`TRUST_RANK`; an unlabelled owner ranks as an
+    operator, an unlabelled writer lowest): an untrusted author's block
+    never supersedes an operator's or a publisher's note, through an export
+    copy or an adopted one. Decided before any supersede is made, so the
+    block is kept beside the note rather than lost to a refused supersede."""
+    return (TRUST_RANK.get(_trust_of(owner), TRUST_RANK["operator"])
+            > TRUST_RANK.get(_trust_of(writer), 0))
 
 
 def _import_block(session, vs: dict, existing: dict | None, body: str,
