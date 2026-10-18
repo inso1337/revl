@@ -245,7 +245,7 @@ def _run_undo(args) -> int:
             if i == 0:
                 session.load(ir, config, origin=origin)
             else:
-                session.swap(ir, origin=origin)
+                session.swap(ir, origin=origin, agent_authored=False)
         result = session.undo(to_session)
     except (SessionError, RevlError) as error:
         print(f"refused: {error}", file=sys.stderr)

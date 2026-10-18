@@ -162,7 +162,7 @@ def test_spent_grant_does_not_rearm_across_swap(sink):
     # the hash binding genuinely does not contain this: the closure is identical
     assert (session._approval_candidate_hashes(gen1)["Biller"]
             == session._approval_candidate_hashes(gen2)["Biller"])
-    _tolerate(session.swap, gen2)
+    _tolerate(session.swap, gen2, agent_authored=False)
     assert _lines(sink) == ["charge:hi"]           # NOT ['charge:hi', 'charge:hi']
 
 
@@ -176,7 +176,7 @@ def test_spent_grant_does_not_rearm_across_rollback(sink):
     _grant(session, gen1)
     session.load(gen1, record=True)
     assert _lines(sink) == ["charge:one"]
-    session.swap(quiet)                            # installs cleanly, no crossing
+    session.swap(quiet, agent_authored=False)                            # installs cleanly, no crossing
     assert _lines(sink) == ["charge:one"]
     _tolerate(session.rollback)                    # rollback re-activates gen1
     assert _lines(sink) == ["charge:one"]          # NOT [..., 'charge:one']

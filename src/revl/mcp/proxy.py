@@ -461,7 +461,9 @@ class Proxy:
                 refusal = leases.check_swap(self.session, {"source": source})
                 if refusal is not None:
                     raise SessionError(refusal.message)
-                self.session.swap(ir, origin={"source": source})
+                # the proxy renders this source itself (see `_compile`)
+                self.session.swap(ir, origin={"source": source},
+                                  agent_authored=False)
         except (RevlError, SessionError, ApprovalRequired) as error:
             reason = (f"the proxy could not put its reclassified surface live "
                       f"({type(error).__name__}: {error}), so this tool is refused "

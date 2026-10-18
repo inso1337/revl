@@ -304,12 +304,12 @@ def test_an_operator_swap_that_rewrites_a_reviewed_component_re_offers(sink):
     assert session._owner.prompts["perCall"] == 0
 
     # a byte-identical re-materialization is not a change (the control).
-    session.swap(copy.deepcopy(reviewed))
+    session.swap(copy.deepcopy(reviewed), agent_authored=False)
     assert session.call("gw", "send", [STRIPE, "again"])["result"] is None
     assert session._owner.prompts["perCall"] == 0
 
     # rewriting the reviewed component's body, same name, does re-offer.
-    session.swap(copy.deepcopy(rewritten))
+    session.swap(copy.deepcopy(rewritten), agent_authored=False)
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "rewritten"])
     assert session._auto_rules[0]["suspended"] is True

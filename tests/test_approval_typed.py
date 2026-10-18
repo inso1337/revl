@@ -142,7 +142,7 @@ def test_swap_invalidates_a_standing_approval(sink):
     session.approve_ticket(e1.value.ticket["hash"])
     # swap in a semantically-changed Agent: the reach-closure candidate hash
     # moves, so the standing approval no longer covers the re-issued call.
-    session.swap(compile_source(_SWAPPED, "typed_approval.rvl"))
+    session.swap(compile_source(_SWAPPED, "typed_approval.rvl"), agent_authored=False)
     with pytest.raises(ApprovalRequired) as e2:
         session.call("ops", "shout", [sink, "hi"])
     assert e2.value.ticket["candidateHash"] != e1.value.ticket["candidateHash"]

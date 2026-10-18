@@ -349,7 +349,9 @@ class SwapRemediation(RemediationStrategy):
     name = "swap"
 
     def remediate(self, session, ir: dict, origin: dict | None) -> dict:
-        state = session.swap(ir, origin=origin)
+        from .server import AUTHORING  # noqa: PLC0415 - cycle
+        state = session.swap(ir, origin=origin,
+                             agent_authored=AUTHORING.profile() is not None)
         return {"strategy": self.name, "applied": True, "swap": state}
 
 

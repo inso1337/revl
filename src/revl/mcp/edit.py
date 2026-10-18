@@ -1029,7 +1029,9 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                 "note": "proposed and verified: admission and every gate passed "
                         "against the running composition, which is unchanged. "
                         "Commit it, or discard it"}
-    state = session.swap(ir, origin=_origin_from(vs))
+    from .server import AUTHORING  # noqa: PLC0415 - lazy, avoids an import cycle
+    state = session.swap(ir, origin=_origin_from(vs),
+                         agent_authored=AUTHORING.profile() is not None)
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),

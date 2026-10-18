@@ -1436,7 +1436,8 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
     try:
-        state = SESSION.swap(full, origin=origin)
+        state = SESSION.swap(full, origin=origin,
+                             agent_authored=AUTHORING.profile() is not None)
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
@@ -1658,7 +1659,8 @@ def _swap_server_side(replacing: tuple) -> dict:
             return refused
     radius = _authoring_loop.blast_radius(running, full)  # issue #1704
     try:
-        state = SESSION.swap(full, origin=_edit._origin_from(vs))
+        state = SESSION.swap(full, origin=_edit._origin_from(vs),
+                             agent_authored=AUTHORING.profile() is not None)
     except SessionError as error:
         return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,

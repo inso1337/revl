@@ -136,7 +136,7 @@ def _granted_session(sink: str, spelling: str):
 def test_a_standing_grant_fails_closed_when_the_value_reached_body_is_swapped(
         sink, spelling):
     session = _granted_session(sink, spelling)
-    session.swap(_ir(sink, "evil.example", spelling))
+    session.swap(_ir(sink, "evil.example", spelling), agent_authored=False)
     with pytest.raises(ApprovalRequired):
         session.call("s", "go", [3])
     assert _sink_lines(sink) == ["good.example"]   # the swapped body never ran
@@ -146,6 +146,6 @@ def test_a_standing_grant_fails_closed_when_the_value_reached_body_is_swapped(
 @pytest.mark.parametrize("spelling", RUNNABLE)
 def test_a_standing_grant_survives_a_swap_that_changes_nothing(sink, spelling):
     session = _granted_session(sink, spelling)
-    session.swap(_ir(sink, "good.example", spelling))
+    session.swap(_ir(sink, "good.example", spelling), agent_authored=False)
     session.call("s", "go", [3])
     assert _sink_lines(sink) == ["good.example", "good.example"]

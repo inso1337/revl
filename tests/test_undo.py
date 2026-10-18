@@ -131,8 +131,8 @@ def _built_history() -> Session:
     """A session with three retained generations: base, +Front, retuned."""
     session = Session()
     session.load(compile_source(BASE, "a.rvl"), origin={"source": BASE})
-    session.swap(compile_source(WITH_FRONT, "a.rvl"), origin={"source": WITH_FRONT})
-    session.swap(compile_source(RETUNED, "a.rvl"), origin={"source": RETUNED})
+    session.swap(compile_source(WITH_FRONT, "a.rvl"), origin={"source": WITH_FRONT}, agent_authored=False)
+    session.swap(compile_source(RETUNED, "a.rvl"), origin={"source": RETUNED}, agent_authored=False)
     return session
 
 
@@ -294,8 +294,8 @@ def test_undo_to_a_generation_aged_out_of_the_bounded_history(monkeypatch):
     monkeypatch.setattr("revl.mcp.session.HISTORY_LIMIT", 2)
     session = Session()
     session.load(compile_source(BASE, "a.rvl"), origin={"source": BASE})
-    session.swap(compile_source(WITH_FRONT, "a.rvl"), origin={"source": WITH_FRONT})
-    session.swap(compile_source(RETUNED, "a.rvl"), origin={"source": RETUNED})
+    session.swap(compile_source(WITH_FRONT, "a.rvl"), origin={"source": WITH_FRONT}, agent_authored=False)
+    session.swap(compile_source(RETUNED, "a.rvl"), origin={"source": RETUNED}, agent_authored=False)
     try:
         # only the last two generations survive the bound
         assert [e["generation"] for e in session._history] == [2, 3]

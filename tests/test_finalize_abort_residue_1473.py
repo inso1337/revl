@@ -105,7 +105,7 @@ def test_a_failing_escrowed_undo_is_residue_and_the_others_still_run(
     wal_path = str(tmp_path / "escrow.wal")
     session = _recorded_session(wal_path, "escrow_1473.rvl")
     _stash_all(session, files)
-    session.swap(compile_source(SOURCE, "escrow_1473.rvl"))
+    session.swap(compile_source(SOURCE, "escrow_1473.rvl"), agent_authored=False)
     assert len(session._owner._escrow) == 3
 
     verdict = session.abort()          # on main this raised
