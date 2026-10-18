@@ -594,11 +594,77 @@ def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
     return text.count("\n", 0, match.start()) + 1 if match else 0
 
 
+def _realm_sets(ir: dict) -> dict[str, frozenset[str]]:
+    """`component -> every realm its placements name`, the set the policy
+    selects a component by (`policy.component_realms`): the values of its
+    `isolate` map, provide and require keys alike."""
+    return {comp.get("name"): frozenset(
+                realm for realm in (comp.get("isolate") or {}).values()
+                if realm is not None)
+            for comp in ir.get("components") or []}
+
+
+def _shrunk_realm_sets(admitted: dict,
+                       candidate: dict) -> list[tuple[str, list[str]]]:
+    """`(component, realms it left)` for every component the candidate keeps
+    by name that ends with a smaller realm set (issue #2586).
+
+    The per-key walks compare a `(component, key)` pair and exempt one the
+    candidate no longer has, so a component that renames the key it is placed
+    under, or drops it for a shared-realm key, ends in fewer realms with
+    nothing compared. The policy selects a component for realm-scoped rules by
+    its whole set, so it has left the rules written for the realms it lost.
+
+    Only a realm the candidate still places some component in counts: the
+    operator's rules for it stay in force, and the component is outside them.
+    A realm no component of the candidate is placed in was retired as a
+    whole, with its keys; no rule has anything left to select there. A
+    component absent from the candidate is withdrawn and exempt."""
+    before = _realm_sets(admitted)
+    after = _realm_sets(candidate)
+    live = frozenset().union(*after.values())
+    return [(name, sorted((before[name] - after[name]) & live))
+            for name in sorted(before, key=lambda n: n or "")
+            if name in after and (before[name] - after[name]) & live]
+
+
+def _refuse_realm_set_shrink(admitted: dict, candidate: dict,
+                             texts: dict | None) -> None:
+    """Raise the G9 refusal for the first component `_shrunk_realm_sets`
+    finds, pointing at it in the candidate's text."""
+    shrunk = _shrunk_realm_sets(admitted, candidate)
+    if not shrunk:
+        return
+    name, lost = shrunk[0]
+    filename = _component_source(candidate, name)
+    realms = ", ".join(f'realm("{r}")' for r in lost)
+    raise RevlError(
+        filename or "<candidate>", _component_line(texts, filename, name),
+        f"admission refused: this author cannot shrink the realm set of "
+        f"`{name}`: the admitted generation places it in {realms} and the "
+        f"candidate does not",
+        hint="a realm-scoped allow or deny rule selects a component by every "
+             "realm it is placed in, whichever key carries the placement, so "
+             "renaming the key or taking a shared-realm key instead moves the "
+             "component out of the rules written for that realm. Keep the "
+             "placement, withdraw the component, or have an operator move it "
+             "through the gated swap (issue #2586)",
+        code="G9", category="admission",
+        navigate=_realm_removal_navigate([r for _n, rs in shrunk for r in rs]),
+    )
+
+
+def _component_source(candidate: dict, name: str) -> str | None:
+    """The file the candidate's component `name` comes from."""
+    return next((c.get("source") for c in candidate.get("components") or []
+                 if c.get("name") == name), None)
+
+
 def check_no_realm_removal(admitted: dict | None, candidate: dict,
                            profile: AdmissionProfile | None,
                            texts: dict | None = None) -> None:
     """Refuse an untrusted edit that moves a surviving provider or requirer out
-    of its realm (issues #2487, #2585), the deletion half of
+    of its realm (issues #2487, #2585, #2586), the deletion half of
     `check_no_realm_placement`.
 
     Writing `isolate <key> in realm("...")` is refused; deleting an admitted
@@ -619,11 +685,17 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     an untrusted author may add. So a key a surviving component requires in a
     realm must still be required in that realm.
 
+    Neither walk sees a component that renames the key it is placed under, or
+    drops it for a shared-realm key: the old pair is gone, so nothing is
+    compared (issue #2586). The policy selects a component by its whole realm
+    set, so a component the candidate keeps by name must not end with fewer
+    realms than it had, where a realm it left is still in use. That check runs
+    last, so the per-key refusals keep their text.
+
     Withdrawing a component takes its placements with it, which moves nothing
-    and is unaffected, as is renaming the key itself: the old key is
-    withdrawn, and a realm consumer that still requires it is left unbound,
-    since binding is per (key, realm). So is a trusted author (`None` profile)
-    and a first generation (`admitted is None`).
+    and is unaffected, as is a realm no component of the candidate is placed
+    in, which was retired with its keys. So is a trusted author (`None`
+    profile) and a first generation (`admitted is None`).
 
     `texts` maps each candidate filename to its text, so the refusal points at
     the line the component starts on."""
@@ -632,6 +704,7 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     moved = _removed_provision_realms(admitted, candidate)
     required = _removed_requirement_realms(admitted, candidate)
     if not moved and not required:
+        _refuse_realm_set_shrink(admitted, candidate, texts)
         return
     if moved:
         name, key, realm, now, was = moved[0]
@@ -641,8 +714,7 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
         was, what = name, "requirement"
     where = "the shared realm" if now is None else f'realm("{now}")'
     origin = "" if was == name else f" on `{was}`"
-    filename = next((c.get("source") for c in candidate.get("components") or []
-                     if c.get("name") == name), None)
+    filename = _component_source(candidate, name)
     raise RevlError(
         filename or "<candidate>", _component_line(texts, filename, name),
         f"admission refused: this author cannot remove the realm placement of "
