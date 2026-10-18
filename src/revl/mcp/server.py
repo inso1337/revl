@@ -1512,6 +1512,14 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
     # realm by leaving its clause out; jailed `files` alone are the operator's
+    # issue #2587: compared are the running generation and `full`, the
+    # candidate compiled as a complete composition. `full` is the whole
+    # program `SESSION.swap` installs below, with nothing of the running one
+    # merged in, so it is the merged post-swap generation the edit door also
+    # compares against. A component the candidate leaves out is withdrawn by
+    # this swap and takes its placements with it; one it carries is compared
+    # per key for what it provides (#2523) and per name for what it requires
+    # (#2585).
     if source is not None or modules:
         refused = _realm_removal_refused(
             running, full,
