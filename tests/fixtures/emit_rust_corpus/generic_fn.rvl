@@ -84,3 +84,26 @@ test "generic_in_test" {
   let x = None
   assert s + t == "st"
 }
+
+// issue #2545: an explicit type-parameter list reaches the IR, so `Elem` is a
+// type parameter and not an opaque type; a type parameter only the return
+// mentions is bound from the type the call flows into: a `let` or `var`
+// annotation, a reassigned binding, a parameter, a return.
+fn first[Elem](xs: List[Elem]) -> Elem { return xs[0] }
+fn empty[T]() -> List[T] { return [] }
+fn count(xs: List[Int]) -> Int { return xs.length() }
+fn fresh() -> List[Str] { return empty() }
+fn relay[U]() -> List[U] { return empty() }
+pub fn tp1() -> Int { return first([4, 5]) + first(wrap(1)) }
+pub fn tp2() -> Int {
+  let xs: List[Int] = empty()
+  var ys: List[Str] = empty()
+  ys = empty()
+  let zs: List[Bool] = relay()
+  return xs.length() + count(empty()) + fresh().length() + zs.length() + ys.length()
+}
+
+test "type_params" {
+  assert tp1() == 5
+  assert tp2() == 0
+}

@@ -142,6 +142,12 @@
 
 ["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_refuse_unbound_case", 7, 7]
 
+["reason", "issue-2545-type-parameter-residuals", "issue #2545: an explicit type-parameter list (`type_params` in the IR fn) and a type parameter only the return mentions, bound from the type the call flows into, are held by the corpus document generic_fn.rvl. What remains: the explicit-list branch for a callee or function the corpus reaches through the other path, a listed name no signature mentions, and the bail-outs that leave a call alone (no return-only parameter, a parameter still unbound, an argument that is not such a call, a slot spelled with the outer callee's own type parameter)."]
+
+["function", "issue-2545-type-parameter-residuals", "_v3_arg_expected", 2, 2]
+
+["function", "issue-2545-type-parameter-residuals", "_v3_fn_type_params", 1, 1]
+
 ["reason", "item-421-f5-a-document-that-declares-a", "Item 421 F5: a document that declares a `Secret[T]` AND returns a `Result` from a provided method serializes the Err half through this funnel rather than `_result_to_json`, because the failure text is the one thing crossing the seam that has to be scrubbed. No corpus document does both: the rust byte-agreement corpus reaches the bridge (service.rvl, services_multi.rvl) but holds no document declaring a `Secret[T]` at all, and the port (selfhost/emit_rust.rvl) carries no `_SECRET_MODE` and emits no funnel call, so a secret-bearing bridge document could not be a byte-identical corpus case. The reference half is pinned by tests/test_rust_seam_failure_scrub.py::test_secret_mode_emits_the_funnel_and_the_shared_marker."]
 
 ["function", "item-421-f5-a-document-that-declares-a", "_result_to_json_funneled", 1, 1]

@@ -1044,6 +1044,23 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlLoadOrder := []string{}
+	defer func() {
+		for _i := len(_revlLoadOrder) - 1; _i >= 0; _i-- {
+			_f, _ok := _fibers[_revlLoadOrder[_i]]
+			if !_ok {
+				continue
+			}
+			delete(_fibers, _revlLoadOrder[_i])
+			func() {
+				defer func() { _ = recover() }()
+				_f.Dispose()
+				for _j := 0; _j < 200 && _f.State() != stc.StateGone && _f.State() != stc.StateFailed; _j++ {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+		}
+	}()
 	_revlAt := "start"
 	defer func() {
 		if r := recover(); r != nil {
@@ -1053,10 +1070,11 @@ func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 	_revlAt = "load Crasher"
 	{
 		_f := LoadCrasher(root)
+		_fibers["Crasher"] = _f
+		_revlLoadOrder = append(_revlLoadOrder, "Crasher")
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"crasher lifecycle boots and unloads clean\": load Crasher", err)
 		}
-		_fibers["Crasher"] = _f
 	}
 	_revlAt = "unload Crasher"
 	if _f, _ok := _fibers["Crasher"]; _ok {

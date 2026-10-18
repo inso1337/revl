@@ -130,6 +130,11 @@ def test_explicit_and_implicit_emit_identical_ir():
                               'fn g() -> Str { return id("hi") }')
     implicit = compile_source("fn id(x: T) -> T { return x }\n"
                               'fn g() -> Str { return id("hi") }')
+    # issue #2545: the explicit list rides the IR as `type_params` (the go and
+    # rust tiers need it to tell `Elem` from an opaque type); every other byte
+    # is the implicit form's
+    assert explicit["functions"][0].pop("type_params") == ["T"]
+    assert "type_params" not in implicit["functions"][0]
     assert explicit["functions"] == implicit["functions"]
 
 

@@ -926,6 +926,23 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlLoadOrder := []string{}
+	defer func() {
+		for _i := len(_revlLoadOrder) - 1; _i >= 0; _i-- {
+			_f, _ok := _fibers[_revlLoadOrder[_i]]
+			if !_ok {
+				continue
+			}
+			delete(_fibers, _revlLoadOrder[_i])
+			func() {
+				defer func() { _ = recover() }()
+				_f.Dispose()
+				for _j := 0; _j < 200 && _f.State() != stc.StateGone && _f.State() != stc.StateFailed; _j++ {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+		}
+	}()
 	_revlAt := "start"
 	defer func() {
 		if r := recover(); r != nil {
@@ -935,10 +952,11 @@ func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 	_revlAt = "load Issuer"
 	{
 		_f := LoadIssuer(root)
+		_fibers["Issuer"] = _f
+		_revlLoadOrder = append(_revlLoadOrder, "Issuer")
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"the issuer activates and reverts its pool\": load Issuer", err)
 		}
-		_fibers["Issuer"] = _f
 	}
 	_revlAt = "unload Issuer"
 	if _f, _ok := _fibers["Issuer"]; _ok {

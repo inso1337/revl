@@ -1110,6 +1110,129 @@ component C {
     assert "`Map` has no method `lookup`" in err
 
 
+# ---- issue #2491: a host verb on a host local checks argument TYPES -------
+# `_check_host_verb` held a host-local verb call to its count only, so
+# `pool.query(1)` compiled in an activation or provide-method body while the
+# same call on a constructor-tracked receiver in a fn body was refused T1. Both
+# positions now give the one `host_family_check` refusal.
+
+def _refusal(source: str) -> RevlError:
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(source)
+    return excinfo.value
+
+
+_JOBS_SVC = "service Jobs { fn run(sql: Str) -> Int }\n"
+
+
+def test_2491_host_verb_wrong_first_arg_type_in_activation_body_is_refused():
+    # call site: _lower_postfix (lower.py:17121): an `effect` statement in an activation body
+    err = _refusal("""
+component C {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  effect pool.query(1)
+  undo   pool.execute("rollback")
+}""")
+    assert err.code == "T1"
+    assert err.message == "host `Pool.query` argument expects `Str`, got `Int`"
+
+
+def test_2491_host_map_args_are_not_compared_on_a_host_local():
+    # call site: _lower_postfix (lower.py:17121): activation and provide-method Map calls
+    # a host Map's key and value types are the resource's own (`Map[Int, Str]`,
+    # #2034; the tiers' generic `Map[K, V]`), which a host local does not
+    # carry, so neither is compared to the row's `Str`; the count still is
+    ir = compile_source(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  effect store.insert(0, 1)
+  undo   store.remove(0)
+  let ok = effect store.insert_if_absent("seen", 2) undo store.remove("seen")
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(5, 6)
+      undo   store.remove(5)
+    }
+  }
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+    err = _refusal("""
+component C {
+  let store = effect Map.new() undo store.drop()
+  effect store.insert(0)
+  undo   store.remove(0)
+}""")
+    assert err.code == "HOST-ARITY"
+
+
+def test_2491_an_argument_whose_inference_fails_is_not_compared():
+    # call site: _lower_component_pure_expr (lower.py:10031): a pure provide-method body
+    # inference adds no refusal of its own: `Int32.to_str()` has no checker
+    # row, but the go tier renders it (backends/go/test_emit_go.py), so an
+    # argument whose inference raises is left uncompared
+    ir = compile_source("""
+service Shows { fn show(w: Int32) -> Int }
+component C provides shows: Shows {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  provide shows {
+    fn show(w) = pool.query(w.to_str())
+  }
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+
+
+def test_2491_host_verb_wrong_arg_type_in_provide_method_pure_body_is_refused():
+    # call site: _lower_component_pure_expr (lower.py:10031): a pure provide-method body
+    err = _refusal(_JOBS_SVC + """
+component C provides jobs: Jobs {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  provide jobs {
+    fn run(sql) = pool.query(true)
+  }
+}""")
+    assert err.code == "T1"
+    assert err.message == "host `Pool.query` argument expects `Str`, got `Bool`"
+
+
+def test_2491_message_equals_the_fn_body_receiver_message():
+    # call site: _lower_postfix (lower.py:17121) against the fn-body receiver path
+    # the same verb and the same mismatch on a constructor-tracked receiver in
+    # a fn body: the refusal a host local gives must be that one, byte for byte
+    ordinary = _refusal("""
+fn f() {
+  let p = Pool.open("db", 4)
+  p.query(7)
+}""")
+    host_local = _refusal("""
+component C {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  effect pool.query(7)
+  undo   pool.execute("rollback")
+}""")
+    assert (host_local.code, host_local.message, host_local.hint) == \
+        (ordinary.code, ordinary.message, ordinary.hint)
+
+
+def test_2491_right_arg_types_are_admitted_on_host_locals():
+    # call sites: _lower_postfix (lower.py:17121), _lower_component_pure_expr (lower.py:10031)
+    # positive control: each host-local Pool verb gets a `Str` argument, plus
+    # one host-local verb argument whose inference fails (`Int32.to_str()`,
+    # no checker row), which `_host_arg_types` leaves uncompared
+    ir = compile_source("""
+service Jobs { fn run(sql: Str) -> Int  fn show(w: Int32) -> Int }
+component C provides jobs: Jobs {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  effect pool.execute("begin")
+  undo   pool.execute("rollback")
+  provide jobs {
+    fn run(sql) = pool.query(sql)
+    fn show(w) = pool.query(w.to_str())
+  }
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+
+
 def test_the_documented_surface_still_compiles_and_results_stay_opaque():
     # every method examples/tenants.rvl uses, plus the result flowing into a
     # typed return — the result of a stub is NOT claimed, so this stays silent

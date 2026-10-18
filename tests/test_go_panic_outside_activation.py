@@ -222,11 +222,11 @@ lifecycle test "a panicking timer" {
 lifecycle test "the next test still runs" {
   load Agent
   unload Agent
+  assert no_residue
 }
 """
-# (no `assert no_residue` in this survivor: the failed test stopped before its
-# `unload Ticker`, so the package-global host counter still holds its timer,
-# the same leak any failed step leaves on this tier)
+# (the failed test stopped before its `unload Ticker`; since issue #2505 the
+# driver disposes what it left loaded, so its timer is not counted here)
 
 
 def test_a_timer_body_panicking_on_advance_fails_that_test_only(tmp_path):

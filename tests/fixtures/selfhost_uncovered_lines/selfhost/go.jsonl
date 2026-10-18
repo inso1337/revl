@@ -58,6 +58,14 @@
 
 ["function", "issue-2495-generic-call-residuals", "v3_subst", 1, 1]
 
+["reason", "issue-2545-type-parameter-residuals", "issue #2545: an explicit type-parameter list (`type_params` in the IR fn) and a type parameter only the return mentions, bound from the type the call flows into, are held by the corpus document generic_fn.rvl. What remains: the explicit-list branch for a callee or function the corpus reaches through the other path, a listed name no signature mentions, and the bail-outs that leave a call alone (no return-only parameter, a parameter still unbound, an argument that is not such a call, a slot spelled with the outer callee's own type parameter)."]
+
+["function", "issue-2545-type-parameter-residuals", "callee_tparams", 1, 1]
+
+["function", "issue-2545-type-parameter-residuals", "explicit_instantiation", 1, 1]
+
+["function", "issue-2545-type-parameter-residuals", "fn_type_params", 1, 1]
+
 ["reason", "item-130-issue-81-issue-1321-the-marker", "Item 130 / issue #81 / issue #1321: the marker the port emits for each `components` entry this pure typed-core port does not carry, and the guard that suppresses it. The naming arm is REACHED now, by both documents in tests/fixtures/emit_go_refusals/ (issue #1431): the reference refuses each by name and the port answers its component with `<<UNSUPPORTED-COMPONENT:Agent>>`. So `component_is_observable` is fully covered and the rest dropped 17 -> 4. Still unreached: the suppressing arm (`uncarried_components` returning no markers, and `any_component_is_observable` returning False). The `functions` and `types` arms of `carries_pure_declarations` are reached now, by the combined path's corpus documents (issue #106). No emit_go_corpus document declares a component: a components-only one is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED. The suppressing arm is pinned instead by tests/test_selfhost_emit_go.py::test_an_incidental_component_on_the_pure_path_is_not_marked, and the naming arms by test_a_components_only_document_names_every_component and test_an_observable_component_on_the_pure_path_is_named_by_the_port."]
 
 ["function", "item-130-issue-81-issue-1321-the-marker", "any_component_is_observable", 1, 1]

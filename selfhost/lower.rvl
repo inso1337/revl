@@ -29691,6 +29691,68 @@ fn pins_empty_literal(node: Str, declared: Str) -> Bool {
   return node == "{\"kind\":\"list\",\"items\":[]}" && declared.startsWith("List[")
 }
 
+// `_pin_return_only_call` (issue #2545): an annotated `let`/`var` pins a call
+// to a callee with a type parameter only its return mentions (`fn empty[T]()
+// -> List[T]`), because no argument can bind it and the IR `let` keeps no
+// annotation. Which callees qualify is read off the `rog` rows
+// `return_only_rows` adds to the body environment.
+fn pins_return_only_call(node: Str, env: List[Bind]) -> Bool {
+  let head = "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\""
+  if (!node.startsWith(head)) { return false }
+  var n = ""
+  var i = head.length()
+  while (i < node.length() && node.charAt(i) != "\"") {
+    n = n.concat(node.charAt(i))
+    i += 1
+  }
+  return n != "" && tenv_get(env, "rog ".concat(n)) == "1"
+}
+
+// The `?`-marked type parameters a marked spelling mentions, in first-use order.
+fn marked_tparam_names(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i) == "?") {
+      var j = i + 1
+      var w = ""
+      while (j < s.length() && ty_ident_char(s.charAt(j))) {
+        w = w.concat(s.charAt(j))
+        j += 1
+      }
+      if (w != "" && !contains(out, w)) { out = out.push(w) }
+      i = j
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+// `_return_only_tparams`, as one `rog <name>` row per declared callee whose
+// return mentions a type parameter no parameter does. The rows are read from
+// the signature table `sig_binds` builds, the reference's `FNS_KEY`.
+fn return_only_rows(ts: List[Token], base: List[Bind],
+                    al: Map[Str, Str]) -> List[Bind] {
+  let sigs = sig_binds(ts, base, al)
+  var out = base
+  var i = base.length()
+  while (i < sigs.length()) {
+    let row = sigs[i]
+    if (row.name.startsWith("sigr ")) {
+      let n = row.name.slice(5, row.name.length())
+      let inParams = marked_tparam_names(tenv_get(sigs, sig_key("sigp", n)))
+      var only = false
+      for (w of marked_tparam_names(row.ty)) {
+        if (!contains(inParams, w)) { only = true }
+      }
+      if (only) { out = tenv_put(out, "rog ".concat(n), "1") }
+    }
+    i += 1
+  }
+  return out
+}
+
 fn is_compound_op(ts: List[Token], k: Str) -> Bool {
   return k == "+" || k == "-" || k == "*" || k == "/" || k == "%"
 }
@@ -31036,6 +31098,12 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       value = value.slice(0, value.length() - 1)
         .concat(",\"expected\":").concat(jstr(declared)).concat("}")
     }
+    // issue #2545: `_pin_return_only_call`, after the empty-literal pin; the
+    // two are disjoint (a pin needs a literal, this one a call)
+    if (declared != "" && pins_return_only_call(rjs, env)) {
+      value = value.slice(0, value.length() - 1)
+        .concat(",\"expected\":").concat(jstr(declared)).concat("}")
+    }
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false")
       .concat(own_birth_marker(births, i)).concat("}")
@@ -31865,7 +31933,9 @@ fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Boo
   // the body sees the MARKED signature (`_lower_fns`: `marked_params` /
   // `marked_returns`); the IR keeps the author's spelling, which is why
   // `retJson` above is taken off the bare type.
-  let tps = collect_tparams(ps.ps, retBare, cases, explicit_tparams(ts, i))
+  // issue #2545: the author's explicit list rides the IR (`type_params`)
+  let xtps = explicit_tparams(ts, i)
+  let tps = collect_tparams(ps.ps, retBare, cases, xtps)
   let retTy = mark_tparams(retBare, tps)
   let cache_pure = ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")
   if (cache_pure) { reti += 2 }
@@ -31888,6 +31958,7 @@ fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Boo
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
     .concat(bodyjs).concat("]")
     .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "")
+    .concat(xtps.length() > 0 ? ",\"type_params\":[".concat(str_list_json(xtps)).concat("]") : "")
     .concat(strip ? "" : (contains(colored, nm) ? ",\"async\":true" : "")).concat("}")
   return { js: js, i: bend }
 }
@@ -33369,7 +33440,7 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   let fnty = plan.origins.length() == 0 ? [] : module_callable_fnty(ts, plan.al)
   let a = ir_walk(ts, 0, mk_iracc("", "", false, false, plan.colored, slots), fname, al, src_text(src))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
-  let fo = fns_walk(ts, 0, "", case_binds(ts, plan.al), plan.colored, own_program_summary(ts),
+  let fo = fns_walk(ts, 0, "", return_only_rows(ts, case_binds(ts, plan.al), plan.al), plan.colored, own_program_summary(ts),
                     plan.al, plan.monos, plan.origins, fnty, Map.empty())
   // issue #2317: the lifted block-arm helpers join after every module fn and
   // before the `_revl_sync` clones; a clone calls its origin's helpers.
@@ -33403,7 +33474,7 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   // section sits after `secrets` and before the closing brace, and an EMPTY
   // section writes no key at all (a document with no test in it stays
   // byte-identical to what this producer emitted before).
-  let secs = test_secs_walk(ts, 0, { tests: "", faults: "" }, case_binds(ts, al),
+  let secs = test_secs_walk(ts, 0, { tests: "", faults: "" }, return_only_rows(ts, case_binds(ts, al), al),
                             own_program_summary(ts), al)
   if (secs.tests != "") { out = out.concat(", \"tests\": [").concat(secs.tests).concat("]") }
   if (secs.faults != "") {

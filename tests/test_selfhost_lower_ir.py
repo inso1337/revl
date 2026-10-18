@@ -443,6 +443,50 @@ def test_native_ir_pins_an_empty_collection_literal(lower_to_ir):
     assert native == reference
 
 
+def test_native_ir_carries_an_explicit_type_parameter_list(lower_to_ir):
+    """Issue #2545: the author's `[Elem]` list rides the IR fn as
+    `type_params`, in declaration order, so the go and rust tiers can tell a
+    listed `Elem` from an opaque nominal type. A fn with no list carries no
+    key, so its IR is unchanged."""
+    source = (
+        "fn first[Elem](xs: List[Elem]) -> Elem { return xs[0] }\n"
+        "fn second[Key, Val](k: Key, v: Val) -> Val { return v }\n"
+        "fn id[T](x: T) -> T { return x }\n"
+        "fn plain(x: Int) -> Int { return x }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert [f.get("type_params") for f in reference] == [
+        ["Elem"], ["Key", "Val"], ["T"], None]
+    assert native == reference
+
+
+def test_native_ir_pins_a_call_with_a_return_only_type_parameter(lower_to_ir):
+    """Issue #2545: an annotated `let`/`var` pins a call whose callee has a
+    type parameter only its return mentions (`fn empty[T]() -> List[T]`)
+    with the annotation, as it pins an empty literal: no argument can bind
+    the parameter and the IR `let` keeps no annotation. A call whose type
+    parameters the arguments bind, and an unannotated `let`, carry nothing."""
+    source = (
+        "fn empty[T]() -> List[T] { return [] }\n"
+        "fn wrap[T](x: T) -> List[T] { return [x] }\n"
+        "fn conv[A, B](a: A) -> List[B] { return [] }\n"
+        "fn f() -> Int {\n"
+        "  let xs: List[Int] = empty()\n"
+        "  var ys: List[Str] = conv(1)\n"
+        "  let zs: List[Int] = wrap(1)\n"
+        "  let ws = wrap(2)\n"
+        "  return xs.length() + ys.length() + zs.length() + ws.length()\n"
+        "}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    lets = [s["value"] for s in reference[3]["body"] if s["step"] == "let"]
+    assert [v.get("expected") for v in lets] == [
+        "List[Int]", "List[Str]", None, None]
+    assert native == reference
+
+
 def test_native_ir_marks_a_width_coercion_on_an_annotated_let(lower_to_ir):
     """Item 391 — `_mark_widen` runs at the same annotated-`let` position it runs
     at for a call argument and a return. The self-host carried the argument and

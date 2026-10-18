@@ -1481,10 +1481,21 @@ def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
     The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
     params typed `T`, with no parameter list), so the emitter applies the
     checker's implicit rule (`is_tparam_name`): a single-uppercase name that
-    no `type` declares is a type parameter. issue #2495"""
+    no `type` declares is a type parameter. issue #2495
+
+    An explicit list (`fn first[Elem](xs: List[Elem]) -> Elem`) rides the IR
+    as `type_params` and is used instead, in declaration order: with one the
+    checker turns the heuristic off, so `Elem` is a type parameter and a stray
+    `E` is not. A listed name no parameter or return mentions is dropped, as
+    nothing at a call could bind it. issue #2545"""
     found: list[str] = []
     declared = types if isinstance(types, dict) else {}
     surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    explicit = fn.get("type_params")
+    if isinstance(explicit, list) and explicit:
+        used = {w for s in surfaces if isinstance(s, str)
+                for w in _RUST_TYPE_WORD.findall(s)}
+        return [t for t in explicit if isinstance(t, str) and t in used]
     for surface in surfaces:
         if not isinstance(surface, str):
             continue
@@ -6720,7 +6731,8 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
         if callee.get("kind") != "var":
             return False
         cn = callee.get("name")
-        generic = _v3_generic_call(cn, node.get("args") or [], ctx)
+        generic = _v3_generic_call(cn, node.get("args") or [], ctx,
+                                   node.get("expected"))
         ret = ctx.fn_returns.get(cn)
         return (_v3_subst(ret, generic[1]) if generic is not None else ret) == "Str"
     if kind == "field":
@@ -7044,7 +7056,8 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                 cn = callee.get("name")
                 if cn in ctx.case_adt:
                     return ctx.case_adt.get(cn)
-                generic = _v3_generic_call(cn, node.get("args") or [], ctx)
+                generic = _v3_generic_call(cn, node.get("args") or [], ctx,
+                                           node.get("expected"))
                 if generic is not None:
                     # issue #2495: `id(p)` answers the instantiation, not `T`
                     return _v3_subst(ctx.fn_returns.get(cn), generic[1])
@@ -7684,7 +7697,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         if "callee" in node:
             callee_node = node.get("callee") or {}
             arg_nodes = node.get("args") or []
-            arg_exprs = [_render_expr(a, ctx, rename) for a in arg_nodes]
+            # issue #2545: a generic callee is bound once, up front, so the
+            # type each argument flows into can bind a return-only type
+            # parameter of a call in that argument
+            outer_name = (callee_node.get("name")
+                          if callee_node.get("kind") == "var" else None)
+            outer_generic = _v3_generic_call(outer_name, arg_nodes, ctx,
+                                             node.get("expected") or expected)
+            arg_exprs = [
+                _render_expr(a, ctx, rename, expected=_v3_arg_expected(
+                    outer_name, outer_generic, i, a, ctx))
+                for i, a in enumerate(arg_nodes)]
             args = ", ".join(arg_exprs)
             # A method/host call MOVES each by-value argument into the callee, so
             # a reused non-Copy argument (`amb.push(cn)` then `ct.remove(&cn)`,
@@ -7738,7 +7761,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # `Any`/`Value` slot is boxed (`_coerce_any_arg`). A borrowed `&str`
             # slot (item 282) is never an `Any` slot, so the two never overlap.
             param_types = ctx.fn_param_types.get(callee_name, [])
-            generic = _v3_generic_call(callee_name, arg_nodes, ctx)
+            generic = outer_generic
             if generic is not None:
                 # issue #2495: a slot typed by the callee's type parameter is
                 # the instantiation the arguments bind, never the erased
@@ -7754,6 +7777,8 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             ]
             # item 277: a viewed callee takes its `&[char]` companions last.
             bv_args += _char_view_args(callee_name, arg_nodes, arg_exprs, ctx)
+            # issue #2545: a return-only type parameter is written at the call
+            callee += _v3_turbofish(callee_name, generic, ctx)
             return f"{callee}({', '.join(bv_args)})"
         # component form: `target.method(args)`.
         target = node.get("target") or {}
@@ -9281,12 +9306,16 @@ def _v3_unify(pattern, actual, params, bound: dict) -> None:
                 _v3_unify(pi, ai, params, bound)
 
 
-def _v3_generic_call(name, arg_nodes, ctx: "_V3Ctx"):
+def _v3_generic_call(name, arg_nodes, ctx: "_V3Ctx", expected=None):
     """For a call to a generic function (issue #2495): the parameter types
     with each type parameter the arguments bind replaced by its binding, the
     binding itself, and the callee's type parameters; else None. A parameter
     nothing binds stays as spelled: rustc infers it from where the result
-    flows."""
+    flows. One the arguments leave unbound is then bound from `expected`, the
+    type the result flows into (a `let` annotation, a parameter, a return),
+    by unifying the declared return against it (issue #2545); that type is
+    spelled in the caller's scope, so a `T` in it is the enclosing function's
+    own type parameter."""
     tparams = ctx.fn_tparams.get(name) if name else None
     if not tparams:
         return None
@@ -9297,7 +9326,61 @@ def _v3_generic_call(name, arg_nodes, ctx: "_V3Ctx"):
         if isinstance(actual, str) and not any(
                 w in tparams for w in _RUST_TYPE_WORD.findall(actual)):
             _v3_unify(pattern, actual, tparams, bound)
+    if isinstance(expected, str) and any(t not in bound for t in tparams):
+        _v3_unify(ctx.fn_returns.get(name), expected, tparams, bound)
     return [_v3_subst(p, bound) for p in params], bound, tparams
+
+
+def _v3_return_only_tparams(name, ctx: "_V3Ctx") -> list:
+    """The callee's type parameters no parameter mentions (`fn empty[T]() ->
+    List[T]`): only the expected type can bind one. issue #2545"""
+    tparams = ctx.fn_tparams.get(name) if name else None
+    if not tparams:
+        return []
+    used = {w for p in ctx.fn_param_types.get(name) or [] if isinstance(p, str)
+            for w in _RUST_TYPE_WORD.findall(p)}
+    return [t for t in tparams if t not in used]
+
+
+def _v3_turbofish(name, generic, ctx: "_V3Ctx") -> str:
+    """`::<i64>` for a call whose callee has a type parameter only its return
+    mentions, once the expected type binds it; else "" (issue #2545).
+
+    rustc cannot infer such a parameter from a later use through a trait
+    method (E0283), so the binding is written at the call; a parameter the
+    arguments bind, or leave unbound, is `_`, which rustc infers as before.
+    A return-only parameter nothing binds leaves the call as it was, and
+    rustc still refuses it by name."""
+    if generic is None:
+        return ""
+    only = _v3_return_only_tparams(name, ctx)
+    bound, tparams = generic[1], generic[2]
+    if not only or any(t not in bound for t in only):
+        return ""
+    return "::<" + ", ".join(
+        _rust_type(bound[t], ctx.types) if t in only else "_"
+        for t in tparams) + ">"
+
+
+def _v3_arg_expected(callee_name, generic, idx: int, arg, ctx: "_V3Ctx"):
+    """The type an argument flows into, handed to the argument only when it is
+    a call with a return-only type parameter (issue #2545), so every other
+    argument renders exactly as before. A slot still spelled with the outer
+    callee's own unbound type parameter is no binding for the inner call."""
+    if not (isinstance(arg, dict) and arg.get("kind") == "call"):
+        return None
+    inner = arg.get("callee") or {}
+    if inner.get("kind") != "var" or not _v3_return_only_tparams(inner.get("name"), ctx):
+        return None
+    if callee_name not in ctx.fn_tparams:
+        return None  # an extern's slot or a function value's: not a binding here
+    params = generic[0] if generic is not None else ctx.fn_param_types.get(callee_name) or []
+    slot = params[idx] if idx < len(params) else None
+    outer = ctx.fn_tparams.get(callee_name) or []
+    if not isinstance(slot, str) or any(
+            w in outer for w in _RUST_TYPE_WORD.findall(slot)):
+        return None
+    return slot
 
 
 def _v3_fn_generics(fn: dict, tparams: list[str], ctx: "_V3Ctx") -> str:

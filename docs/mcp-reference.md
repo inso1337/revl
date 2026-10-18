@@ -87,10 +87,11 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+| the held-source note on a refused or failed answer: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit of a loaded composition | `revl_verbs {name: "revl_export", args: {}}`, `ready` (`revl_export` is not a listed verb) |
 
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
-remedy.
+load remedy.
 
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
@@ -1032,7 +1033,12 @@ disagreeing until `revl_export` runs. The verbs of the change loop
 (when a composition is loaded; see its section) carry
 `"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
 file whose held text differs from the bytes on disk. When `inSync` is false on
-a success, the answer also carries a `note` naming `revl_export`. It is a
+a success, the answer also carries a `note` naming `revl_export`. Any answer
+that carries that note also carries a `next` that calls it through the
+`revl_verbs` hatch, `revl_verbs {name: "revl_export", args: {}}` (issue #2537;
+`revl_export` is not a listed verb), unless the running composition is already
+on disk and only an open edit buffer differs, when an export would write
+nothing. It is a
 sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
 *speculative draft* differs from what is running, so it is `false` in exactly
 the case a stale disk is easy to miss. An inline-loaded composition names no
@@ -1128,6 +1134,14 @@ export builds a file name from such an id (one is listed in `skipped`, issue
 another Unicode line separator or a byte-order mark is refused, since a `//`
 comment cannot carry it. A vendored truc's records and its `component.rvl` are
 left alone (issue #1769, see docs/registry.md §1.4).
+
+A session loaded from an export copy also reads the records of the file it
+copies, and writes its own records only under the export directory, beside
+the copy (issue #2575). A session that loads an export copy together with an
+operator file counts as the author's as a whole: its knowledge export is
+refused, the refusal names the record paths that would land outside the
+export directory, and nothing is written. Load the copy on its own to export
+its notes.
 
 Also under every trust: an inline export's `path` and every module must land
 inside the export directory, only `.rvl` modules the program reaches by `use`

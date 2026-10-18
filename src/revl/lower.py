@@ -47,6 +47,7 @@ from .typecheck import (
     compatible,
     format_type,
     host_check,
+    host_family_check,
     _HOST_ACQUIRE_VERBS,
     _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
@@ -1117,35 +1118,67 @@ def _host_result_type(acquire: dict, env: "Env") -> str | None:
     return _HOST_RESULT_SIG.get(f"{family}.{acquire.get('method')}")
 
 
-def _check_host_verb(family: str, verb: str, argc: int,
+# issue #2491: host families whose argument types a host-local verb call does
+# not compare to the `_HOST_ARG_SIG` row. A host Map's key and value types are
+# the resource's own (`Map[Int, Str]`, `Map[Str, Int]`; the tiers' generic
+# `Map[K, V]`, items 113/176, #2034), which a host local does not carry, so the
+# row's `Str, Str` would refuse valid programs. Reconciling the row is
+# docs/design/397-insert-if-absent.md's item. The count is still checked.
+_HOST_UNCOMPARED_ARG_FAMILIES = frozenset({"Map"})
+
+
+def _host_arg_types(family: str, args: list, env: "Env",
+                    filename: str | None, line: int) -> list:
+    """The argument types a host-local verb call is checked with (#2491).
+
+    One entry per argument; None means "not compared". Inference adds no
+    refusal of its own here: an argument whose inference raises is left
+    uncompared, as one whose type is unknown is, so only a definite mismatch
+    against the row refuses. A family in `_HOST_UNCOMPARED_ARG_FAMILIES` is
+    not inferred at all."""
+    if family in _HOST_UNCOMPARED_ARG_FAMILIES:
+        return [None] * len(args)
+    out = []
+    for a in args:
+        try:
+            out.append(infer_ir(a, env.type_env, env.types, env.services,
+                                filename, line))
+        except RevlError:
+            out.append(None)
+    return out
+
+
+def _check_host_verb(family: str, verb: str, arg_types: list,
                      filename: str | None, line: int) -> None:
-    """Admit a verb call on a host-provenance local (item 401).
+    """Admit a verb call on a host-provenance local (item 401, issue #2491).
 
     The known surface is the family's stub verbs (`_HOST_FAMILIES`, derived
     from `_HOST_ARG_SIG`) plus, for a host Map, the iteration verbs
     (`_HOST_MAP_ITER_VERBS`). A verb in neither is refused with the same named
     HOST-METHOD diagnostic the constructor-tracked receiver path uses, naming
-    the FULL surface — so a typo or a value-Map method wrongly aimed at a host
+    the FULL surface, so a typo or a value-Map method wrongly aimed at a host
     Map (`store.lookup(k)`, which no host runtime backs) is a compile error
     here rather than an unchecked pass-through that only crashes at the host
     runtime (the item-84 shape).
 
-    Only the VERB NAME and ARITY are checked, never the argument TYPES: a host
-    Map's key and value are generically typed on the tiers that genericized it
-    (`Map[V]`; items 113/176), the checker's `["Str","Str"]` row is the known
-    frontier/emitter disagreement the host boundary already carries opaquely
-    (`_HOST_ARG_SIG` header; docs/design/397-insert-if-absent.md), and the
-    pre-item-401 pass-through type-checked nothing here. Enforcing the row's
-    `Str` would reject valid programs (`m.insert(k, double(v))` with a non-Str
-    value/key), which is a separate frontier decision, not item 401's.
+    A stub verb is then held to its declared row by `host_family_check`, the
+    check a constructor-tracked receiver in a fn body (`let p = Pool.open(..)`,
+    `p.query(1)`) already gets: the same HOST-ARITY refusal for a wrong count and
+    the same T1 refusal for an argument whose type is not its parameter's, so
+    `pool.query(1)` reads the same in an activation body as in a fn body. An
+    argument whose type the checker cannot infer (a host verb's opaque result)
+    is not judged, exactly as there. The iteration verbs take no arguments and
+    are held to their count only.
+
+    The types come from `_host_arg_types`: a host Map's arguments, and any
+    argument whose inference fails, are not compared.
     """
     family_surface = _HOST_FAMILIES.get(family, {})
     iter_verbs = _HOST_MAP_ITER_VERBS if family == "Map" else {}
     if verb in family_surface:
-        arity = len(family_surface[verb])
-    elif verb in iter_verbs:
-        arity = iter_verbs[verb]
-    else:
+        host_family_check(family, verb, arg_types, filename, line)
+        return
+    if verb not in iter_verbs:
         if filename:
             surface = ", ".join(sorted(set(family_surface) | set(iter_verbs)))
             raise RevlError(
@@ -1156,13 +1189,13 @@ def _check_host_verb(family: str, verb: str, argc: int,
                      "every tier and only fails at the host runtime",
                 code="HOST-METHOD", category="host-boundary")
         return
-    if filename and argc != arity:
+    arity = iter_verbs[verb]
+    if filename and len(arg_types) != arity:
         raise RevlError(
             filename, line,
             f"host `{family}.{verb}` takes {arity} argument"
-            f"{'' if arity == 1 else 's'}, got {argc}",
-            hint=f"the signature is `.{verb}("
-                 f"{', '.join(family_surface.get(verb, [])) if verb in family_surface else ''})`",
+            f"{'' if arity == 1 else 's'}, got {len(arg_types)}",
+            hint=f"the signature is `.{verb}()`",
             code="HOST-ARITY", category="host-boundary")
 
 
@@ -2212,6 +2245,14 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # so every existing fn's IR is byte-identical.
         if getattr(decl, "cache", None) is not None:
             entry["cache"] = _cache_ir(decl.cache)
+        # issue #2545: the author's explicit type-parameter list, in declaration
+        # order. With a list the checker turns the single-uppercase heuristic
+        # off (`fn first[Elem](xs: List[Elem]) -> Elem`), so an emitter that
+        # only saw the parameter spellings could not tell `Elem` from an opaque
+        # nominal type. Absent when the author wrote no list, so every IR
+        # document without one stays byte-identical.
+        if getattr(decl, "type_params", None):
+            entry["type_params"] = list(decl.type_params)
         if decl.source:
             _retarget_holes(entry["body"], decl.source)
         fns.append(entry)
@@ -2234,9 +2275,10 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
     `validate_explicit_tparams`), plus — only when the decl carries NO list —
     the implicit single-uppercase names (roadmap 75(c): an explicit list
     turns the heuristic off; declared means declared).
-    Marked types never reach the IR — this table is the checker's view, and
-    `_lower_fns`/`_lower_externs` emit the author's spelling, byte-identical
-    whether a parameter was implicit or explicit."""
+    Marked types never reach the IR: this table is the checker's view, and
+    `_lower_fns`/`_lower_externs` emit the author's spelling. An explicit
+    list does reach it, as the fn's `type_params` (issue #2545), and an
+    implicit and an explicit function differ by that key alone."""
     declared = {name: spec for name, spec in (types or {}).items()
                 if not name.startswith("__")}
     sigs: dict = {}
@@ -6676,6 +6718,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
+        _pin_return_only_call(declared, lowered_value, types)
         body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -7172,6 +7215,44 @@ def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
         # a positional emitter — the wasm tier — has no element to infer from and
         # refuses. The author's annotation is the pin, threaded onto the literal
         # exactly as the empty-Map case above, so the emitter can type it.
+        node["expected"] = declared
+
+
+def _return_only_tparams(sig: dict | None) -> list[str]:
+    """The type parameters a signature mentions in its return and in no
+    parameter (`fn empty[T]() -> List[T]`), in first-use order. No argument
+    can bind one, so only the position the call's result flows into can."""
+    if not isinstance(sig, dict) or not sig.get("tparams"):
+        return []
+    tparams = sig["tparams"]
+    in_params = {w for p in sig.get("params") or [] if isinstance(p, str)
+                 for w in _TYPE_WORD_RE.findall(p)}
+    found: list[str] = []
+    for w in _TYPE_WORD_RE.findall(sig.get("returns") or ""):
+        if w in tparams and w not in in_params and w not in found:
+            found.append(w)
+    return found
+
+
+def _pin_return_only_call(declared: str | None, node: dict | None,
+                          types: dict | None) -> None:
+    """An annotated `let`/`var` pins a call whose callee has a type parameter
+    only its return mentions (issue #2545).
+
+    `let xs: List[Int] = empty()` with `fn empty[T]() -> List[T]` passes the
+    checker, which binds `T` from the annotation, but the IR `let` keeps no
+    annotation, so the go and rust tiers had nothing to bind `T` from (go:
+    `cannot infer T`, rust: E0283). The annotation rides the call as
+    ``"expected": "List[Int]"``, the same marker an empty literal gets. It is
+    additive and appears only on such a call, so every other document stays
+    byte-identical."""
+    if declared is None or not isinstance(node, dict) or node.get("kind") != "call":
+        return
+    callee = node.get("callee")
+    if not (isinstance(callee, dict) and callee.get("kind") == "var"):
+        return
+    sig = ((types or {}).get(FNS_KEY) or {}).get(callee.get("name"))
+    if _return_only_tparams(sig):
         node["expected"] = declared
 
 
@@ -9994,8 +10075,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # instead of compiling as a pass-through that only crashes at the
             # host runtime, the item-84 shape.
             if scope.get(root) in env.host_locals:
+                family = env.host_locals[scope[root]]
                 _check_host_verb(
-                    env.host_locals[scope[root]], method, len(args),
+                    family, method,
+                    _host_arg_types(family, args, env, filename, line),
                     filename, line)
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
@@ -17082,8 +17165,10 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
         with _emit_head_args(env, mode) as amode:
             host_args = [_lower_expr(a, env, amode) for a in op.args]
         if node.get("kind") == "name" and node.get("id") in env.host_locals:
+            family = env.host_locals[node["id"]]
             _check_host_verb(
-                env.host_locals[node["id"]], op.name, len(host_args),
+                family, op.name,
+                _host_arg_types(family, host_args, env, env.filename, op.line),
                 env.filename, op.line)
         node = {
             "kind": "call",

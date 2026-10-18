@@ -1851,8 +1851,10 @@ def test_a_pool_collision_still_renames_the_host_side():
 
 
 # --- a lifecycle test with no `unload` (issue #1559) -------------------------
-# The unload waits are the lifecycle's only use of `time`, so a test without an
-# `unload` step imported it unused and the package did not build.
+# The unload waits were the lifecycle's only use of `time`, so a test without an
+# `unload` step imported it unused and the package did not build. Since issue
+# #2505 every lifecycle test also waits in its leftover dispose, so `time` is
+# imported and used; the import must never be left unused.
 
 _NO_UNLOAD = """
 service S { fn bump(x: Int) -> Int }
@@ -1865,11 +1867,11 @@ lifecycle test "a call without an unload" {
 """
 
 
-def test_a_lifecycle_test_without_unload_does_not_import_time():
+def test_a_lifecycle_test_without_unload_imports_time_only_with_a_use():
     from revl import compile_source  # noqa: PLC0415
     code = emit.emit(compile_source(_NO_UNLOAD, "no_unload.rvl"))
-    assert '\t"time"' not in code
-    assert "time." not in code.replace("runtime.", "")
+    assert '\t"time"' in code
+    assert "time.Sleep(" in code.replace("runtime.", "")
 
 
 @pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")

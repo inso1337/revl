@@ -157,7 +157,10 @@ def test_the_refusal_offers_revl_export_not_the_unusable_undo(tree):
     _load(tree)
     _change(tree)
     refused = _call("revl_unload", {})
-    assert refused["next"] == {"tool": "revl_export", "arguments": {},
+    # revl_export is outside the listed tier, so the call goes through the
+    # hatch (issue #2537)
+    assert refused["next"] == {"tool": "revl_verbs",
+                               "arguments": {"name": "revl_export", "args": {}},
                                "ready": True}
     assert "revl_export" in refused["diagnostics"][0]["message"]
     assert "undo" not in refused
@@ -308,7 +311,8 @@ def test_a_cold_files_draft_is_refused_once_its_holes_are_filled(tree):
     refused = _call("revl_unload", {})
     assert refused["ok"] is False and refused["refused"] is True
     assert refused["disk"] == {"inSync": False, "stale": [str(path)]}
-    assert "revl_export" in refused["next"]["tool"]
+    # nothing is loaded, so an export would refuse: no ready `next` (issue #2537)
+    assert "next" not in refused
     assert server_mod.SESSION.pending_draft is not None
     gone = _call("revl_unload", {"force": True})
     assert gone["ok"] is True and gone["discardedDraft"] is True

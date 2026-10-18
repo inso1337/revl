@@ -636,7 +636,7 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
       let nm = value_str(value_field(callee, "name"))
       if (is_builtin_ctor(nm)) { return infer_ctor(nm, value_list(value_field(node, "args")), ctx) }
       // issue #2495: `id(p)` answers the instantiation, not `T`
-      let g = go_generic_call(nm, value_list(value_field(node, "args")), ctx)
+      let g = go_generic_call(nm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
       if (g.generic) { return v3_subst(map_get(ctx.fr, nm), g.mapping) }
       let fr = map_get(ctx.fr, nm)
       if (fr != "") { return fr }
@@ -916,7 +916,8 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
       // instantiation the arguments bind, and an `Int` literal in a bare
       // `T` slot is spelled `int64(..)`
       declared = param_types
-      g = go_generic_call(cn, value_list(value_field(node, "args")), ctx)
+      let pinned = value_str(value_field(node, "expected"))
+      g = go_generic_call(cn, value_list(value_field(node, "args")), ctx, pinned != "" ? pinned : expected)
       if (g.generic) { param_types = g.params }
     }
   }
@@ -939,7 +940,8 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
   }
   let host = host_constructor(callee, ctx)
   if (host != "") { return `${host}(${args.join(", ")})` }
-  let csrc = render_expr(callee, ctx, "")
+  // issue #2545: a return-only type parameter is written at the call
+  let csrc = render_expr(callee, ctx, "").concat(explicit_instantiation(cn, g, ctx))
   return `${csrc}(${args.join(", ")})`
 }
 
@@ -1554,6 +1556,13 @@ fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
   var found: List[Str] = []
   var surfaces = function_params(ctx.signatures, name)
   surfaces = surfaces.push(map_get(ctx.fr, name))
+  // issue #2545: the callee's explicit list, when it wrote one
+  for (sig of ctx.signatures) {
+    if (value_str(value_field(sig, "name")) == name && value_is_null(value_field(sig, "bodies"))) {
+      let listed = listed_type_params(sig, surfaces)
+      if (listed.given) { return listed.names }
+    }
+  }
   for (surface of surfaces) {
     for (word of type_words(surface)) {
       if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && !list_contains(ctx.tnames, word) && !list_contains(found, word)) {
@@ -1571,7 +1580,10 @@ fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
 // does: Go infers a type argument from a typed argument, never from where
 // the result flows. `generic` is false for every other callee.
 type GenericCall = { generic: Bool, params: List[Str], mapping: Map[Str, Str], tparams: List[Str] }
-fn go_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx) -> GenericCall {
+// A type parameter the arguments leave unbound is then bound from `expected`,
+// the type the result flows into (a `let` annotation, a parameter, a return),
+// by unifying the declared return against it (issue #2545).
+fn go_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx, expected: Str) -> GenericCall {
   let tparams = callee_tparams(name, ctx)
   if (tparams.length() == 0) { return { generic: false, params: [], mapping: Map.empty(), tparams: [] } }
   let params = function_params(ctx.signatures, name)
@@ -1584,11 +1596,42 @@ fn go_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx) -> GenericCall {
     if (actual != "" && !mentions) { bound = v3_unify(params[i], actual, tparams, bound) }
     i = i + 1
   }
+  var unbound = false
+  for (t of tparams) { if (!bound.has(t)) { unbound = true } }
+  if (expected != "" && unbound) { bound = v3_unify(map_get(ctx.fr, name), expected, tparams, bound) }
   var mapping: Map[Str, Str] = Map.empty()
   for (t of tparams) { mapping = mapping.set(t, bound.lookup(t) ?? "any") }
   var subst: List[Str] = []
   for (p of params) { subst = subst.push(v3_subst(p, mapping)) }
   return { generic: true, params: subst, mapping: mapping, tparams: tparams }
+}
+
+// `_go_v3_explicit_instantiation` (issue #2545): `[int64]` for a call whose
+// callee has a type parameter only its return mentions, once the expected
+// type binds it; else "". The list runs up to the last return-only parameter
+// (Go infers the trailing rest) and is written only when every parameter in
+// it is bound.
+fn explicit_instantiation(name: Str, g: GenericCall, ctx: Ctx) -> Str {
+  if (!g.generic) { return "" }
+  let params = function_params(ctx.signatures, name)
+  var used: List[Str] = []
+  for (p of params) { for (w of type_words(p)) { used = used.push(w) } }
+  var last = 0 - 1
+  var i = 0
+  while (i < g.tparams.length()) {
+    if (!list_contains(used, g.tparams[i])) { last = i }
+    i = i + 1
+  }
+  if (last < 0) { return "" }
+  var items: List[Str] = []
+  var j = 0
+  while (j <= last) {
+    let b = g.mapping.lookup(g.tparams[j]) ?? "any"
+    if (b == "any") { return "" }
+    items = items.push(go_type(b))
+    j = j + 1
+  }
+  return `[${items.join(", ")}]`
 }
 
 // `_go_v3_typed_generic_arg`: an `Int` literal passed where a generic
@@ -1624,7 +1667,7 @@ fn flow_hints(body: List[Any], ret_type: Str, ctx: Ctx) -> Map[Str, Str] {
         let args = value_list(value_field(n, "args"))
         // issue #2495: a generic callee's `T` is no flow target; the
         // instantiation the other arguments bind is
-        let g = go_generic_call(cn, args, ctx)
+        let g = go_generic_call(cn, args, ctx, value_str(value_field(n, "expected")))
         if (g.generic) { params = g.params }
         var i = 0
         while (i < args.length() && i < params.length()) {
@@ -2458,6 +2501,27 @@ fn type_words(surface: Str) -> List[Str] {
   return out
 }
 
+// issue #2545: an explicit list (`fn first[Elem](xs: List[Elem]) -> Elem`)
+// rides the IR as `type_params` and is used instead of the heuristic, in
+// declaration order: with one the checker turns the heuristic off. A listed
+// name no parameter or return mentions is dropped, as nothing at a call could
+// bind it. `given` is false when the function wrote no list.
+type ListedTparams = { given: Bool, names: List[Str] }
+fn listed_type_params(fnode: Any, surfaces: List[Str]) -> ListedTparams {
+  let listed = value_list(value_field(fnode, "type_params"))
+  if (listed.length() == 0) { return { given: false, names: [] } }
+  var used: List[Str] = []
+  for (surface of surfaces) {
+    for (word of type_words(surface)) { used = used.push(word) }
+  }
+  var names: List[Str] = []
+  for (t of listed) {
+    let n = value_str(t)
+    if (list_contains(used, n)) { names = names.push(n) }
+  }
+  return { given: true, names: names }
+}
+
 // `_v3_fn_type_params` (issue #2495): the type parameters of a function
 // signature, in first-use order. The IR carries the author's spelling
 // (`fn id[T](x: T) -> T` arrives as params typed `T`, with no parameter
@@ -2468,6 +2532,8 @@ fn fn_type_params(fnode: Any, tnames: List[Str]) -> List[Str] {
   var surfaces: List[Str] = []
   for (p of value_list(value_field(fnode, "params"))) { surfaces = surfaces.push(value_str(value_field(p, "type"))) }
   surfaces = surfaces.push(value_str(value_field(fnode, "returns")))
+  let listed = listed_type_params(fnode, surfaces)
+  if (listed.given) { return listed.names }
   for (surface of surfaces) {
     for (word of type_words(surface)) {
       if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && !list_contains(tnames, word) && !list_contains(found, word)) {

@@ -1311,6 +1311,9 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         extra = {"loaded": True}
         if ignored:
             extra["note"] = _files_ignored_note("nothing was booted")
+            nxt = _export_next_if_owed()
+            if nxt is not None:
+                extra["next"] = nxt
         return _session_error(
             "a composition is already running and no draft is held, so "
             "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
@@ -1908,6 +1911,8 @@ def _tool_edit(arguments: dict, verify=None, caller: str = "revl_edit",
         # the note is composed here, not at the drop: whether the held source
         # has reached disk is a question about what the edit just did
         result = {**result, "note": _files_ignored_note(existing=result.get("note"))}
+        if not _disk_state()["inSync"]:
+            _with_export_next(result)
     return {**result, "loaded": True} if loaded is not None else result
 
 
@@ -2070,6 +2075,36 @@ _DISK_NOTE = "the held source differs from disk; call revl_export to write it"
 _DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 
+def _export_next() -> dict:
+    """The call a disk note's prose names (issue #2537): `revl_export`, through
+    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb
+    and a function-calling client emits calls only for listed tools. Ready: a
+    disk note exists only for a composition loaded from files, whose export
+    takes no arguments."""
+    return _remedy.call(_disclosure.DISCOVERY,
+                        {_disclosure.HATCH_NAME: "revl_export",
+                         _disclosure.HATCH_ARGS: {}})
+
+
+def _export_next_if_owed() -> dict | None:
+    """`_export_next`, unless an export would write nothing. The disk note is
+    judged on the working source, which includes an open edit buffer; the
+    export writes the running composition's source (`running_source`), so a
+    stale buffer over an exported composition has a note and nothing to export."""
+    if _disk_state_of(_edit.running_source(SESSION))["inSync"]:
+        return None
+    return _export_next()
+
+
+def _with_export_next(payload: dict) -> dict:
+    """`payload` with the export `next`, unless it already carries one or an
+    export would write nothing."""
+    nxt = _export_next_if_owed()
+    if nxt is not None:
+        payload.setdefault("next", nxt)
+    return payload
+
+
 def _diverges(text, path) -> bool:
     """Whether this held text differs from the bytes on disk (issue #2032).
 
@@ -2162,11 +2197,13 @@ def _unload_stale_refusal(disk: dict) -> dict:
     stale paths are named, and the remedy is a callable `next` — `revl_export`
     writes the held source out — never the returned `undo`."""
     stale = ", ".join(disk["stale"])
+    # no `next` for a cold draft (nothing is loaded to export) or an open buffer
+    # over an exported composition (an export would write nothing)
     return _session_error(
         f"refused: the held source of {stale} has not reached disk and this "
         "unload would destroy it; call revl_export to write it, or pass "
         "`force: true` to discard it",
-        refused=True, disk=disk, next=_remedy.call("revl_export", {}))
+        refused=True, disk=disk, next=_export_next_if_owed())
 
 
 def _ride_disk(name: str, payload) -> None:
@@ -2195,6 +2232,7 @@ def _ride_disk(name: str, payload) -> None:
     if not disk["inSync"] and payload.get("ok") and not payload.get("note"):
         payload["note"] = (_DISK_NOTE_REVERT if name in _DISK_REVERTS
                            else _DISK_NOTE)
+        _with_export_next(payload)
 
 
 # -- the `files` argument (issue #2035) -------------------------------------
@@ -2412,9 +2450,13 @@ def _write_back_targets(held: dict, arguments: dict,
     records = ([_Target(p, t, new_only=True)
                 for p, t in _notes.sidecar_writes(SESSION, held, skipped)]
                if with_knowledge else [])
+    # a composition loaded from the export area keeps its records inside it
+    # (issue #2575)
     _export_jail.check_write_back([p for p, _ in targets],
                                   [p for p, _ in records],
-                                  _notes.sidecar_dir(held))
+                                  _notes.sidecar_dir(held),
+                                  jailed=any(_export_jail.in_export_area(p)
+                                             for p in held["files"]))
     return targets + records
 
 
@@ -3499,6 +3541,7 @@ def _note_session_check_disk(payload):
     if (SESSION.loaded and isinstance(payload, dict) and payload.get("ok")
             and not payload.get("note") and not _disk_state()["inSync"]):
         payload["note"] = _DISK_NOTE
+        _with_export_next(payload)
     return payload
 
 
@@ -3519,6 +3562,7 @@ def _note_held_file_differs(arguments: dict, payload) -> dict:
              for p in arguments.get("files") or []]
     if diverged_paths(texts, [p for p in named if p in texts]):
         payload["note"] = _CHECK_FILE_DIFFERS_NOTE
+        _with_export_next(payload)
     return payload
 
 

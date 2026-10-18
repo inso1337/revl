@@ -133,14 +133,88 @@ learned from `xs` and threaded into the function-type argument; `B` is learned
 from the function's result and threaded into `List[B]`. Full higher-kinded
 types are out of scope.
 
-## The marker never reaches the IR
+## What reaches the IR
 
-Marking is purely the checker's internal view. `_signature_table` marks the
-declared parameters (`T` → `?T`) so the rest of the checker can tell a
-universally quantified `T` from a nominal type, but `_lower_fns` /
-`_lower_externs` emit the author's spelling. A function's IR is **byte-identical
-whether its parameter was implicit or explicit** — the explicit form is a
-front-end convenience that leaves lowering and every backend untouched. This is
-pinned by `test_explicit_and_implicit_emit_identical_ir` and
-`test_explicit_type_parameter_marker_never_reaches_the_ir` in
-`tests/test_generics_explicit.py`.
+The `?T` marking is the checker's internal view and never reaches the IR.
+`_signature_table` marks the declared parameters (`T` becomes `?T`) so the
+rest of the checker can tell a universally quantified `T` from a nominal type.
+`_lower_fns` and `_lower_externs` emit the author's spelling
+(`test_explicit_type_parameter_marker_never_reaches_the_ir` in
+`tests/test_generics_explicit.py`).
+
+Two things about a generic function do reach the IR (issue #2545). Both are
+additive: a document that uses neither keeps its bytes.
+
+**`type_params`.** A function with an explicit list carries it, in
+declaration order. A function with no list carries no key. An implicit and an
+explicit `id` differ only by this key
+(`test_explicit_and_implicit_emit_identical_ir`).
+
+```json
+{"name": "first", "params": [{"name": "xs", "type": "List[Elem]"}],
+ "returns": "Elem", "public": false, "body": [...], "type_params": ["Elem"]}
+```
+
+The go and rust tiers read the list ahead of the single-uppercase heuristic.
+Without the list they cannot tell `Elem` from an opaque type. A listed name
+that no parameter or return mentions is dropped, because nothing at a call
+could bind it.
+
+```go
+func first[Elem any](xs []Elem) Elem {
+```
+
+```rust
+fn first<Elem: Clone>(xs: &[Elem]) -> Elem {
+```
+
+**The `"expected"` pin.** No argument can bind a type parameter that only the
+return mentions (`fn empty[T]() -> List[T]`). An annotated `let` or `var`
+therefore pins its annotation onto such a call, the same marker an empty
+literal gets:
+
+```json
+{"step": "let", "name": "xs",
+ "value": {"kind": "call", "callee": {"kind": "var", "name": "empty"},
+           "args": [], "expected": "List[Int]"},
+ "mutable": false}
+```
+
+The tiers bind the parameter by unifying the declared return against the type
+the result flows into. That type comes from the pin, a reassigned binding's
+type, a parameter slot or the enclosing function's return. They write the
+binding at the call, because neither Go nor rustc infers it from a later use:
+
+```go
+xs := empty[int64]()
+cs := conv[int64, string](int64(1)) // up to the last return-only parameter
+count(empty[int64]())
+return empty[U]() // inside `fn relay[U]() -> List[U]`
+```
+
+```rust
+let xs = empty::<i64>();
+count(&empty::<i64>())
+let cs = conv::<_, String>(1i64); // `A` is inferred from the argument
+```
+
+Go writes the type arguments up to the last return-only one, since a
+prefix is all Go accepts, and infers the rest. Rust writes `_` for every parameter rustc can infer itself.
+
+With no expected type the call is left alone, and the native compiler
+refuses it loudly:
+
+```revl
+fn empty[T]() -> List[T] { return [] }
+pub fn g() -> Int { let xs = empty() return xs.length() }
+```
+
+```text
+go:   in call to empty, cannot infer T
+rust: error[E0283]: type annotations needed for `Vec<_>`
+```
+
+These shapes are covered by `backends/go/test_type_params_go_2545.py`,
+`backends/rust/test_type_params_rust_2545.py`, the self-host IR agreement
+tests in `tests/test_selfhost_lower_ir.py`, and the `generic_fn.rvl` emitter
+corpus documents.

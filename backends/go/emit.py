@@ -4814,6 +4814,43 @@ def _component_has_config(name, components):
     return False
 
 
+def _emit_lifecycle_leftover_dispose(out) -> None:
+    """Dispose, LIFO, every fiber a lifecycle test loaded and did not unload
+    (issue #2505).
+
+    The host resource counter and the clock's timers are package-global, so a
+    test that stops before its `unload` steps (a failed `assert`, a failed
+    load, a panic recovered since #2481) left its timers and host objects
+    counted, and the next test's `assert no_residue` failed on them. py's
+    driver disposes what is left in its `finally`
+    (backends/python/emit.py `_emit_lifecycle_test`); this is that `finally`.
+
+    It is deferred before the #2481 recover, so it runs after it: the panic is
+    already a test failure when teardown starts. Each dispose recovers its own
+    panic, as py's `except Exception: pass` does, so a failing teardown
+    cannot take the binary down. A fiber that failed to load ends `Failed`,
+    not `Gone`, so the wait stops at either.
+    """
+    out.append("\t_revlLoadOrder := []string{}")
+    out.append("\tdefer func() {")
+    out.append("\t\tfor _i := len(_revlLoadOrder) - 1; _i >= 0; _i-- {")
+    out.append("\t\t\t_f, _ok := _fibers[_revlLoadOrder[_i]]")
+    out.append("\t\t\tif !_ok {")
+    out.append("\t\t\t\tcontinue")
+    out.append("\t\t\t}")
+    out.append("\t\t\tdelete(_fibers, _revlLoadOrder[_i])")
+    out.append("\t\t\tfunc() {")
+    out.append("\t\t\t\tdefer func() { _ = recover() }()")
+    out.append("\t\t\t\t_f.Dispose()")
+    out.append("\t\t\t\tfor _j := 0; _j < 200 && _f.State() != stc.StateGone && "
+               "_f.State() != stc.StateFailed; _j++ {")
+    out.append("\t\t\t\t\ttime.Sleep(5 * time.Millisecond)")
+    out.append("\t\t\t\t}")
+    out.append("\t\t\t}()")
+    out.append("\t\t}")
+    out.append("\t}()")
+
+
 def _emit_stc_lifecycle_tests(ir, out) -> None:
     """`lifecycle test` blocks (syntax-2.0 §7.1) as `func TestXxx(t *testing.T)`
     driving the live stc-go runtime (FR-5).
@@ -4869,6 +4906,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
         out.append("func %s(revlT *testing.T) {" % tname)
         out.append("\troot := stc.New()")
         out.append("\t_fibers := map[string]*stc.Fiber{}")
+        _emit_lifecycle_leftover_dispose(out)
         # issue #2481: a provide method a driver step calls, or a timer body
         # an `advance` fires, runs on THIS goroutine and outside any `Apply`,
         # so its panic killed the test binary and every later test with it.
@@ -4918,11 +4956,15 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 else:
                     sig = "Load%s(root)" % cname
                 out.append("\t\t_f := %s" % sig)
+                # issue #2505: tracked before `Ready`, as py records the plug
+                # before `_revl_load_failed`, so a failed load is disposed too.
+                out.append("\t\t_fibers[%s] = _f" % _go_string(component))
+                out.append("\t\t_revlLoadOrder = append(_revlLoadOrder, %s)"
+                           % _go_string(component))
                 out.append("\t\tif err := _f.Ready(stdctx.Background()); err != nil {")
                 out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, err)'
                            % _go_string(where + ": load " + component))
                 out.append("\t\t}")
-                out.append("\t\t_fibers[%s] = _f" % _go_string(component))
                 out.append("\t}")
             elif kind == "unload":
                 component = step["component"]
@@ -6363,10 +6405,21 @@ def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
     The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
     params typed `T`, with no parameter list), so the emitter applies the
     checker's implicit rule (`is_tparam_name`): a single-uppercase name that
-    no `type` declares is a type parameter. issue #2495"""
+    no `type` declares is a type parameter. issue #2495
+
+    An explicit list (`fn first[Elem](xs: List[Elem]) -> Elem`) rides the IR
+    as `type_params` and is used instead, in declaration order: with one the
+    checker turns the heuristic off, so `Elem` is a type parameter and a stray
+    `E` is not. A listed name no parameter or return mentions is dropped, as
+    nothing at a call could bind it. issue #2545"""
     found: list[str] = []
     declared = types if isinstance(types, dict) else {}
     surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    explicit = fn.get("type_params")
+    if isinstance(explicit, list) and explicit:
+        used = {w for s in surfaces if isinstance(s, str)
+                for w in _V3_TYPE_WORD.findall(s)}
+        return [t for t in explicit if isinstance(t, str) and t in used]
     for surface in surfaces:
         if not isinstance(surface, str):
             continue
@@ -6821,7 +6874,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             nm = callee.get("name")
             if nm in ("Some", "None", "Ok", "Err"):
                 return _go_v3_infer_ctor(nm, node.get("args") or [], ctx)
-            generic = _go_v3_generic_call(nm, node.get("args") or [], ctx)
+            generic = _go_v3_generic_call(nm, node.get("args") or [], ctx,
+                                          node.get("expected"))
             if generic is not None:
                 # issue #2495: `id(p)` answers the instantiation, not `T`
                 return _v3_subst(ctx.function_ret.get(nm), generic[1])
@@ -6936,7 +6990,8 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
             name = callee.get("name") if callee.get("kind") == "var" else None
             params = (ctx.function_params.get(name)
                       or ctx.extern_params.get(name) or [])
-            generic = _go_v3_generic_call(name, node.get("args") or [], ctx)
+            generic = _go_v3_generic_call(name, node.get("args") or [], ctx,
+                                          node.get("expected"))
             if generic is not None:
                 # issue #2495: a generic callee's `T` is no flow target; the
                 # instantiation the other arguments bind is
@@ -6948,14 +7003,18 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
     return hints
 
 
-def _go_v3_generic_call(name, arg_nodes, ctx: _V3GoCtx):
+def _go_v3_generic_call(name, arg_nodes, ctx: _V3GoCtx, expected=None):
     """For a call to a generic function (issue #2495): the parameter types
     with each type parameter replaced by what the arguments bind it to, the
     binding itself, and the callee's type parameters; else None.
 
     A parameter nothing binds becomes `any`, as an unpinned Opt/Result
     parameter does: Go infers a type argument from a typed argument, never
-    from where the result flows."""
+    from where the result flows. A type parameter the arguments leave unbound
+    is then bound from `expected`, the type the result flows into (a `let`
+    annotation, a parameter, a return), by unifying the declared return
+    against it (issue #2545); `_go_v3_explicit_instantiation` writes that
+    binding at the call, since Go never infers it."""
     tparams = ctx.function_tparams.get(name) if name else None
     if not tparams:
         return None
@@ -6965,8 +7024,36 @@ def _go_v3_generic_call(name, arg_nodes, ctx: _V3GoCtx):
         actual = _go_v3_infer_type(arg, ctx)
         if isinstance(actual, str) and not _v3_mentions_any(actual, tparams):
             _v3_unify(pattern, actual, tparams, bound)
+    if isinstance(expected, str) and any(t not in bound for t in tparams):
+        # the expected type is spelled in the CALLER's scope, so a `T` in it
+        # is the enclosing function's own type parameter, which Go accepts
+        # as a type argument (`empty[T]()`)
+        _v3_unify(ctx.function_ret.get(name), expected, tparams, bound)
     mapping = {t: bound.get(t, "any") for t in tparams}
     return [_v3_subst(p, mapping) for p in params], mapping, tparams
+
+
+def _go_v3_explicit_instantiation(name, generic, ctx: _V3GoCtx) -> str:
+    """`[int64]` for a call whose callee has a type parameter only its return
+    mentions (`fn empty[T]() -> List[T]`), once the expected type binds it;
+    else "" (issue #2545).
+
+    Go infers a type argument from the arguments only, so such a call is
+    `cannot infer T` without the list. The list runs up to the last
+    return-only parameter (Go infers the trailing rest) and is written only
+    when every parameter in it is bound; otherwise the call is left as it was
+    and go still refuses it by name."""
+    if generic is None:
+        return ""
+    _, mapping, tparams = generic
+    params = ctx.function_params.get(name) or []
+    only = [t for t in tparams if not any(_v3_mentions_any(p, [t]) for p in params)]
+    if not only:
+        return ""
+    prefix = tparams[: max(tparams.index(t) for t in only) + 1]
+    if any(mapping.get(t, "any") == "any" for t in prefix):
+        return ""
+    return "[" + ", ".join(_go_v3_type(mapping[t], ctx.types) for t in prefix) + "]"
 
 
 def _v3_mentions_any(surface, names) -> bool:
@@ -7376,7 +7463,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         elif cname and not is_ctor:
             param_types = (ctx.function_params.get(cname)
                            or ctx.extern_params.get(cname))
-            generic = _go_v3_generic_call(cname, arg_nodes, ctx)
+            generic = _go_v3_generic_call(cname, arg_nodes, ctx,
+                                          node.get("expected") or expected)
             if generic is not None:
                 param_types = generic[0]
         arg_renders = []
@@ -7395,6 +7483,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if host is not None:
             return f"{host}({', '.join(arg_renders)})"
         callee_src = _go_v3_expr(callee, ctx)
+        # issue #2545: a return-only type parameter is written at the call
+        callee_src += _go_v3_explicit_instantiation(cname, generic, ctx)
         return f"{callee_src}({', '.join(arg_renders)})"
 
     if kind == "field":
@@ -12979,9 +13069,11 @@ _TIME_USE = re.compile(r"\btime\.")
 
 def _drop_unused_time_import(module: str) -> str:
     """Remove the `"time"` import from a module that never uses it (issue
-    #1559). A `lifecycle test` imports `time` for the unload waits
-    (`time.Sleep`), but one with no `unload` step emits none, and go refuses
-    to build a package with an unused import. Deciding on the finished text
+    #1559). A `lifecycle test` imports `time` for its waits (`time.Sleep`).
+    Before issue #2505 one with no `unload` step emitted none; every lifecycle
+    test now waits in its leftover dispose, so it always uses `time`, but other
+    writers still may not, and go refuses to build a package with an unused
+    import. Deciding on the finished text
     covers every writer of `time.` at once (a lifecycle wait, the teardown
     preamble's budgets, the timer preamble). The match is conservative: any
     `time.` token keeps the import, so the worst case is the old behavior."""
