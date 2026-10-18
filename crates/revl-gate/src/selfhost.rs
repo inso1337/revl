@@ -22262,10 +22262,6 @@ fn fb_refusal_at(ts: Vec<Token>, i: i64, gtys: Vec<Bind>, al: std::collections::
     return fb_refusal_at(ts.clone(), skip_line(&ts, i), gtys.clone(), al.clone());
 }
 
-fn tb_names_only() -> String {
-    return String::from("tb names only");
-}
-
 fn tb_dup_msg(kind: &str, name: &str) -> String {
     return tagged("TEST", &((((String::from("duplicate ").revl_concat(&kind)).revl_concat(" `")).revl_concat(&name)).revl_concat("`")));
 }
@@ -22304,7 +22300,7 @@ fn tb_refusal_at(ts: Vec<Token>, i: i64, gtys: Vec<Bind>, al: std::collections::
                     return pv;
                 }
             }
-            if (prop && (tenv_get(&gtys, &tb_names_only()) != "1")) {
+            if prop {
                 let pe = close_paren(&ts, (i).checked_add(3i64).expect("revl: Int overflow"));
                 let v = tb_body(ts.clone(), (pe).checked_add(1i64).expect("revl: Int overflow"), (qe).checked_sub(1i64).expect("revl: Int overflow"), params_at(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow")).ps, gtys.clone(), al.clone());
                 if (v.v != "") {
@@ -22368,7 +22364,7 @@ fn tb_prop_params(ss: &[WfSite], k: i64, nm: &str, env: &[Bind], al: std::collec
     if (w.v != "") {
         return w;
     }
-    let g = tb_gen(&(ss)[(k) as usize].ty, nm, env, al.clone(), &(vec![]), &(vec![]));
+    let g = tb_gen(&alias_subst((ss)[(k) as usize].ty.clone(), al.clone()), nm, env, al.clone(), &(vec![]), &(vec![]));
     if (g != "") {
         return mk_verd(g.clone(), (ss)[(k) as usize].line.clone());
     }
@@ -22489,8 +22485,7 @@ fn test_refusals(ts: Vec<Token>, gtys: Vec<Bind>, al: std::collections::HashMap<
     if (tv.v != "") {
         out.push(tv.clone());
     }
-    let pg = if (rp_aliases(&ts).revl_length() == 0i64) { gtys.clone() } else { tenv_put(&gtys, tb_names_only(), String::from("1")) };
-    let pv = tb_refusal_at(ts.clone(), 0i64, pg, al.clone(), true, vec![]);
+    let pv = tb_refusal_at(ts.clone(), 0i64, gtys.clone(), al.clone(), true, vec![]);
     if (pv.v != "") {
         out.push(pv.clone());
     }
