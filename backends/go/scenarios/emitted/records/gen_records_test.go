@@ -616,6 +616,23 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlLoadOrder := []string{}
+	defer func() {
+		for _i := len(_revlLoadOrder) - 1; _i >= 0; _i-- {
+			_f, _ok := _fibers[_revlLoadOrder[_i]]
+			if !_ok {
+				continue
+			}
+			delete(_fibers, _revlLoadOrder[_i])
+			func() {
+				defer func() { _ = recover() }()
+				_f.Dispose()
+				for _j := 0; _j < 200 && _f.State() != stc.StateGone && _f.State() != stc.StateFailed; _j++ {
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+		}
+	}()
 	_revlAt := "start"
 	defer func() {
 		if r := recover(); r != nil {
@@ -625,18 +642,20 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 	_revlAt = "load Registry"
 	{
 		_f := LoadRegistry(root)
+		_fibers["Registry"] = _f
+		_revlLoadOrder = append(_revlLoadOrder, "Registry")
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"records/lists/variants round-trip through a live provide method\": load Registry", err)
 		}
-		_fibers["Registry"] = _f
 	}
 	_revlAt = "load Front"
 	{
 		_f := LoadFront(root)
+		_fibers["Front"] = _f
+		_revlLoadOrder = append(_revlLoadOrder, "Front")
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"records/lists/variants round-trip through a live provide method\": load Front", err)
 		}
-		_fibers["Front"] = _f
 	}
 	_revlAt = "call dir.make"
 	var ada Person
