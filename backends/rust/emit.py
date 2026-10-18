@@ -6692,6 +6692,26 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
         return ctx.var_types.get(node.get("id") or node.get("name")) == "Str"
     if kind == "bin" and node.get("op") == "+":
         return _v3_is_str(node.get("left"), ctx) or _v3_is_str(node.get("right"), ctx)
+    # issue #2496: a call's declared return (`f("a") + f("b")`), a record
+    # field read or a list index that is a `Str` concatenates through
+    # `format!` like a `Str` local, since `String + String` is E0308. Each
+    # asks `_v3_infer_type` only about a CHILD node (`_v3_infer_type` itself
+    # ends in `_v3_is_str`, so asking it about this node would not return).
+    if kind == "call":
+        callee = node.get("callee") or {}
+        if callee.get("kind") != "var":
+            return False
+        cn = callee.get("name")
+        generic = _v3_generic_call(cn, node.get("args") or [], ctx)
+        ret = ctx.fn_returns.get(cn)
+        return (_v3_subst(ret, generic[1]) if generic is not None else ret) == "Str"
+    if kind == "field":
+        target_ty = _v3_infer_type(node.get("target"), ctx)
+        if not isinstance(target_ty, str):
+            return False
+        return ctx.record_field_types(target_ty).get(node.get("name")) == "Str"
+    if kind == "index":
+        return _list_element_type(_v3_infer_type(node.get("target"), ctx)) == "Str"
     return False
 
 
