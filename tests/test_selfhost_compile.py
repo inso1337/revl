@@ -3520,3 +3520,35 @@ def test_provide_return_refusal_native_agrees(compile_to, name):
     reference = _reference_refusal(source)
     assert message in reference
     assert compile_to(source, "py") == f"REFUSED|T1|{reference}"
+
+
+# Issue #2490: a provide-method parameter or local named `Some`/`Ok` is the
+# callee of `Some(1)`, in both strata and in both compilers. The documents are
+# tests/test_2490_provide_local_constructor_name.py's: the native compile of
+# the admitted program is the reference's, byte for byte, and a wrong call on
+# the local meets the reference's refusal, since the self-host checker reads a
+# local of function type ahead of the case table as the reference does.
+
+
+def _local_callee_docs():
+    from _load_by_path import load_by_path
+    return load_by_path(
+        "test_2490_provide_local_constructor_name",
+        ROOT / "tests" / "test_2490_provide_local_constructor_name.py")
+
+
+def test_a_local_constructor_name_callee_compiles_natively_as_the_reference(
+        compile_to, reference_emit):
+    source = _local_callee_docs().PROVIDE
+    got = compile_to(source, "py")
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), got[:200]
+    assert got == reference_emit["py"](compile_source(source, "t.rvl"))
+
+
+@pytest.mark.parametrize(
+    "name", sorted(_local_callee_docs().LOCAL_CALLEE_REFUSED))
+def test_local_callee_refusal_native_agrees(compile_to, name):
+    source, _twin, message = _local_callee_docs().LOCAL_CALLEE_REFUSED[name]
+    reference = _reference_refusal(source)
+    assert message in reference
+    assert compile_to(source, "py") == f"REFUSED|T1|{reference}"

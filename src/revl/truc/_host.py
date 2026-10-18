@@ -43,6 +43,8 @@ import json
 import os
 import pathlib
 import re
+import stat
+import tempfile
 
 #: The names TOML lets us write bare. Anything else is quoted, which is what
 #: keeps `pg_database = { registry = "local" }` spelled the way the docs and
@@ -143,12 +145,59 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 def _symlink_refusal(path: pathlib.Path, rel: str) -> TrucNameRefusal:
     """The refusal for a destination that is a link: the same words
-    `_vendor_dir` uses for a linked directory, aimed at the entry instead."""
+    `_vendor_dir` uses for a linked directory, aimed at the entry instead.
+    A project file (`truc.lock`, `truc.toml`, `build/`) gets the same rule in
+    words that name the project instead of `trucs/`."""
+    if not rel.startswith("trucs/"):
+        return TrucNameRefusal(
+            f"refusing to write `{rel}`: it is a symlink to "
+            f"{os.readlink(path)!r}, and truc writes only files that are the "
+            f"project's own, never through a link (the target may be outside "
+            f"the project). Remove the link and re-run.")
     return TrucNameRefusal(
         f"refusing to write `{rel}`: it is a symlink to "
         f"{os.readlink(path)!r}, and a truc's bytes are the ones under "
         f"the project's own `trucs/` directory. Remove the link (or "
         f"vendor the truc into the project) and re-run.")
+
+
+#: The project files truc rewrites, relative to the project directory.
+_PROJECT_FILES = ("truc.lock", "truc.toml")
+
+
+def _refuse_project_links(project_dir: str) -> None:
+    """Refuse, before the first write of a commit, a project file that is a
+    link. The writes below refuse it too, but by then `trucs/` has already been
+    changed; checking first keeps "a refusal leaves the project untouched"."""
+    for rel in _PROJECT_FILES:
+        path = pathlib.Path(project_dir, rel)
+        if path.is_symlink():
+            raise _symlink_refusal(path, rel)
+
+
+def _write_lock(project_dir: str, lock: dict) -> None:
+    """Write `truc.lock` through a temp file in the same directory, renamed
+    into place, so a crash never leaves a half-written lock. A link at the
+    target is refused first: `os.replace` would swap the link itself rather
+    than follow it, silently discarding what the project pinned there."""
+    path = pathlib.Path(project_dir, "truc.lock")
+    if path.is_symlink():
+        raise _symlink_refusal(path, "truc.lock")
+    fd, tmp = tempfile.mkstemp(dir=project_dir, prefix=".truc.lock.",
+                               suffix=".tmp")
+    try:
+        # mkstemp makes the file 0600; give it the mode `write_text` would have
+        # (0666 under the umask), on the open fd rather than the path.
+        if hasattr(os, "fchmod"):
+            umask = os.umask(0)
+            os.umask(umask)
+            os.fchmod(fd, 0o666 & ~umask)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(lock, indent=2))
+        os.replace(tmp, path)
+    except BaseException:
+        pathlib.Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _write_no_follow(path: pathlib.Path, text: str, rel: str) -> None:
@@ -384,9 +433,12 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     if not manifest_json:
         return "skipped"
     out = pathlib.Path(project_dir, "build")
+    if out.is_symlink():
+        raise _symlink_refusal(out, "build")
     out.mkdir(parents=True, exist_ok=True)
     data = json.loads(manifest_json)
-    (out / "assembly.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _write_no_follow(out / "assembly.json", json.dumps(data, indent=2),
+                     "build/assembly.json")
     return "written"
 
 
@@ -514,6 +566,67 @@ def apply(project_dir: str, trust_host_code: bool) -> str:
 _VENDORED_FILES = ("component.rvl", "manifest.json", "dossier.json")
 
 
+def _source_refusal(path: pathlib.Path, rel: str, what: str) -> TrucNameRefusal:
+    """The refusal for a registry-entry source that is not the entry's own
+    regular file, naming the file and saying that links are refused."""
+    return TrucNameRefusal(
+        f"refusing to vendor `{rel}`: it is {what}, and truc vendors only "
+        f"regular files that sit inside the registry entry; links are refused "
+        f"(a link can point at any file the operator can read). Replace it "
+        f"with the file itself and re-run.")
+
+
+def _read_registry_file(path: pathlib.Path, rel: str) -> str | None:
+    """The text of one registry-entry source, or None when it is absent.
+
+    `exists()` and `read_text` both follow a link, and `exists()` is False
+    through a dangling one, so the file is `lstat`ed instead: a link, or
+    anything that is not a regular file, is refused by name. The read then opens
+    with `O_NOFOLLOW` where the platform has it, so a link swapped in after the
+    check still cannot be read through."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(mode):
+        raise _source_refusal(path, rel, f"a symlink to {os.readlink(path)!r}")
+    if not stat.S_ISREG(mode):
+        raise _source_refusal(path, rel, "not a regular file")
+    try:
+        # O_NONBLOCK: a source swapped for a FIFO after the lstat must not
+        # block the open; the fstat below then refuses it.
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW
+                     | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        if path.is_symlink():
+            raise _source_refusal(path, rel, "a symlink") from None
+        raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise _source_refusal(path, rel, "not a regular file")
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _registry_sources(src_dir: pathlib.Path, name: str) -> list[tuple[str, str]]:
+    """(`<file>`, text) for each of the entry's `_VENDORED_FILES` that exists.
+
+    The entry directory and its `components/` parent are walked too: a link at
+    either is as far outside the registry as a linked file. All of it is read
+    before the first write, so a refusal leaves the project untouched."""
+    for directory, rel in ((src_dir.parent, "components"),
+                           (src_dir, f"components/{name}")):
+        if directory.is_symlink():
+            raise _source_refusal(directory, rel,
+                                  f"a symlink to {os.readlink(directory)!r}")
+    out = []
+    for fname in _VENDORED_FILES:
+        text = _read_registry_file(src_dir / fname, f"components/{name}/{fname}")
+        if text is not None:
+            out.append((fname, text))
+    return out
+
+
 #: where an entry keeps its knowledge records, in the registry and vendored
 _KNOWLEDGE_DIR = "knowledge"
 
@@ -598,6 +711,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     add = plan["lockAdd"]
     name = _check_name(add["name"])
     reg_name = _check_name(add["registry"], "registry")
+    _refuse_project_links(project_dir)
 
     manifest = json.loads(toml_manifest(project_dir))
     reg_abs = (manifest.get("registries") or {}).get(reg_name) or manifest.get("registry")
@@ -610,8 +724,8 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     # just as well-formed either way.
     src_dir = pathlib.Path(reg_abs, "components", name)
     dst_dir = _vendor_dir(project_dir, name)
-    copies = [(fname, src_dir / fname) for fname in _VENDORED_FILES
-              if (src_dir / fname).exists()]
+    sources = _registry_sources(src_dir, name)
+    copies: list[tuple[str, pathlib.Path]] = []
     # the entry's knowledge records travel with it (issue #1769), one file per
     # record under `trucs/<name>/knowledge/`, as they sit in the registry
     copies += _knowledge_copies(src_dir)
@@ -620,11 +734,13 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     if (dst_dir / _KNOWLEDGE_DIR).is_symlink():
         raise _symlink_refusal(dst_dir / _KNOWLEDGE_DIR,
                                f"trucs/{name}/{_KNOWLEDGE_DIR}")
-    for fname, _ in copies:
+    for fname in [f for f, _ in sources] + [f for f, _ in copies]:
         if (dst_dir / fname).is_symlink():
             raise _symlink_refusal(dst_dir / fname, f"trucs/{name}/{fname}")
     dst_dir.mkdir(parents=True, exist_ok=True)
     _clear_vendored_knowledge(dst_dir)
+    for fname, text in sources:
+        _write_no_follow(dst_dir / fname, text, f"trucs/{name}/{fname}")
     for fname, sp in copies:
         if fname.startswith(_KNOWLEDGE_DIR + "/"):
             (dst_dir / _KNOWLEDGE_DIR).mkdir(exist_ok=True)
@@ -659,7 +775,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         lock = {"lockVersion": 0, "registryIndexVersion": index_version, "trucs": []}
     lock["trucs"] = [r for r in (lock.get("trucs") or [])
                      if r.get("name") != name] + [lock_row]
-    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+    _write_lock(project_dir, lock)
 
     _toml_add_truc(project_dir, name, reg_name)
     return "committed"
@@ -834,7 +950,7 @@ def _toml_add_truc(project_dir: str, name: str, registry: str) -> None:
         if not text.endswith("\n"):
             text += "\n"
         text += f"\n[trucs]\n{line}\n"
-    p.write_text(text, encoding="utf-8")
+    _write_no_follow(p, text, "truc.toml")
 
 
 def commit_rm(project_dir: str, plan_json: str) -> str:
@@ -851,6 +967,7 @@ def commit_rm(project_dir: str, plan_json: str) -> str:
         return "skipped"
     plan = json.loads(plan_json)
     name = _check_name(plan["name"])
+    _refuse_project_links(project_dir)
 
     # un-vendor: the whole registry-entry mirror under trucs/<name>/ (§5).
     import shutil  # noqa: PLC0415 — stdlib, only needed on the rm path
@@ -865,7 +982,7 @@ def commit_rm(project_dir: str, plan_json: str) -> str:
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
         lock["trucs"] = [r for r in (lock.get("trucs") or [])
                          if r.get("name") != name]
-        lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+        _write_lock(project_dir, lock)
 
     _toml_rm_truc(project_dir, name)
     return "removed"
@@ -896,7 +1013,7 @@ def _toml_rm_truc(project_dir: str, name: str) -> None:
     new = "\n".join(out)
     if text.endswith("\n") and not new.endswith("\n"):
         new += "\n"
-    p.write_text(new, encoding="utf-8")
+    _write_no_follow(p, new, "truc.toml")
 
 
 # -- ship / publish (emission[registry]; slice S4) --------------------------

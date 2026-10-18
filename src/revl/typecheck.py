@@ -2867,14 +2867,15 @@ def builtin_case_call_type(node: dict, tenv: dict, types: dict, services: dict,
 
     Issue #2483: the IR `call` arm typed these as nothing, so
     `effect put(Some("x"))` met a declared `Opt[Int]` parameter unjudged in a
-    component while a `fn` body refused it. None for any other call, and for a
-    local of function type that shadows the case name."""
+    component while a `fn` body refused it. None for any other call. A local
+    that shadows the case name never reaches here: every stratum lowers its
+    call as a `call` on a `name` node carrying the local's escape (`Some_`),
+    which `local_function_call_type` types (issue #2490)."""
     callee = node.get("callee")
     if not isinstance(callee, dict) or callee.get("kind") != "var":
         return None
     name = callee.get("name")
-    if name not in ("Some", "Ok", "Err") \
-            or parse_type(tenv.get(name))[0] == FN_HEAD:
+    if name not in ("Some", "Ok", "Err"):
         return None
     case = (types.get(CASES_KEY) or {}).get(name)
     if case is None or not str(case.get("adt") or "").startswith(
@@ -2927,18 +2928,80 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     parameter, a record field read into a `let` …)."""
     _, parts = parse_type(fn_type)
     params, returns = parts[:-1], parts[-1]
-    if filename and len(expr.args) != len(params):
+    check_function_value_arity(what, fn_type, params, len(expr.args),
+                               filename, line)
+    _check_arrow_args(expr.args, params, tenv, types, filename, what)
+    return function_value_result(what, params, returns, arg_types, types,
+                                 filename, line)
+
+
+def local_function_call_type(node: dict, tenv: dict, types: dict,
+                             services: dict, filename: str | None,
+                             line: int) -> str | None:
+    """The type of a lowered call on a local of function type, the `call` on
+    a `name` node a component position writes for a parameter or `let`-bound
+    arrow (`g(1)` in a provide method), as `infer_ast` types the same call
+    through `call_function_value`: the arity and every argument are held to
+    the function type, and the result is its return.
+
+    Issue #2490: a provide-method parameter named `Some` is the callee of
+    `Some(1)` as it is in a `fn` body, and this arm gives that call the type
+    the `fn` body gives it; before it the call typed as nothing. None for any
+    other callee, and for a name the type environment does not hold as a
+    function type."""
+    callee = node.get("callee")
+    if not isinstance(callee, dict) or callee.get("kind") != "name":
+        return None
+    name = callee.get("id")
+    fn_type = tenv.get(name)
+    head, parts = parse_type(fn_type)
+    if head != FN_HEAD:
+        return None
+    params, returns = parts[:-1], parts[-1]
+    args = node.get("args") or []
+    what = f"`{surface_name(name)}`"
+    check_function_value_arity(what, fn_type, params, len(args), filename, line)
+    arg_types = [infer_ir(a, tenv, types, services, filename, line)
+                 for a in args]
+    return function_value_result(what, params, returns, arg_types, types,
+                                 filename, line)
+
+
+def surface_name(name: str) -> str:
+    """The spelling the author wrote for a lowered local `name`: a binding
+    that spells a host predeclared name (`Some`, `len`) is escaped by one
+    trailing `_` at lowering (`lower._predeclared_mangle`, injective), and a
+    message names the local as the `fn` body's checker does, not its escape.
+    Any other name is its own spelling."""
+    from .lower import _predeclared_mangle
+    if name.endswith("_") and _predeclared_mangle(name[:-1]) == name:
+        return name[:-1]
+    return name
+
+
+def check_function_value_arity(what: str, fn_type: str, params: list,
+                               given: int, filename: str | None,
+                               line: int) -> None:
+    """Refuse a call through a value of function type that does not supply
+    exactly its declared arity. Shared by the AST and IR call arms."""
+    if filename and given != len(params):
         rendered = ", ".join(render_type(p) or "_" for p in params) or "no arguments"
         raise RevlError(
             filename, line,
             f"{what} is a `{render_type(fn_type)}` and takes {len(params)} "
-            f"argument(s), {len(expr.args)} given",
+            f"argument(s), {given} given",
             hint=f"its parameters are `({rendered})` — revl has no default, "
                  "optional, or variadic parameters, so every call supplies "
                  "exactly the declared arity",
             code="T1", category="type-mismatch",
         )
-    _check_arrow_args(expr.args, params, tenv, types, filename, what)
+
+
+def function_value_result(what: str, params: list, returns: str,
+                          arg_types: list, types: dict,
+                          filename: str | None, line: int) -> str | None:
+    """Hold each argument to its parameter type and answer the call's type.
+    Shared by the AST and IR call arms."""
     if filename:
         for i, (p, a) in enumerate(zip(params, arg_types)):
             if p and a and not compatible(p, a, types):
@@ -3277,6 +3340,10 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                                               filename, line)
         if builtin_case is not None:
             return builtin_case
+        local_call = local_function_call_type(node, tenv, types, services,
+                                              filename, line)
+        if local_call is not None:
+            return local_call
         target = node.get("target")
         if isinstance(target, dict) and target.get("kind") == "req":
             svc = services.get(tenv.get(f"req.{target.get('name')}") or "")

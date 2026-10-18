@@ -20757,12 +20757,6 @@ fn tk_fnvalue_named(n: &str, c: CallN, env: &[Bind], argTys: &[String]) -> TCall
     if sig_declared(env, n) {
         return tk_miss();
     }
-    if ((((n == "Some") || (n == "None")) || (n == "Ok")) || (n == "Err")) {
-        return tk_miss();
-    }
-    if (tenv_get(env, &(String::from("case ").revl_concat(&n))) != "") {
-        return tk_miss();
-    }
     let t = tenv_get(env, n);
     if (!tk_is_fn_ty(&t)) {
         return tk_miss();
@@ -29386,12 +29380,26 @@ fn cir_widen(js: String, expected: String, actual: String) -> String {
     return (((js.revl_slice(0i64, (js.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(", \"widen\": ")).revl_concat(&jstr(&w))).revl_concat("}");
 }
 
-fn method_param_binds(pnames: &[String], decl: &[ParamN], al: std::collections::HashMap<String, String>) -> Vec<Bind> {
+fn method_param_binds(pnames: Vec<String>, decl: Vec<ParamN>, al: std::collections::HashMap<String, String>, sc: Vec<Bind>, hostSc: Vec<String>) -> Vec<Bind> {
     let mut out: Vec<Bind> = vec![];
     let mut i = 0i64;
     while (i < pnames.revl_length()) {
         let raw = if (i < decl.revl_length()) { (decl)[(i) as usize].ty.clone() } else { String::from("") };
+        let safe = safe_name((pnames)[(i) as usize].clone(), &concat_binds(sc.clone(), out.clone()), &hostSc);
         out.push(Bind { name: (pnames)[(i) as usize].clone(), ty: if (raw == "") { String::from("") } else { taint_strip(alias_subst(raw.clone(), al.clone())) } });
+        if (safe != (pnames)[(i) as usize]) {
+            out.push(Bind { name: String::from("rename ").revl_concat(&(pnames)[(i) as usize]), ty: safe.clone() });
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn method_param_ids(pnames: &[String], pbinds: &[Bind]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < pnames.revl_length()) {
+        out.push(cir_safe_of(pbinds, (pnames)[(i) as usize].clone()));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -29988,7 +29996,7 @@ fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: C
     Expr::Var(root_) => if contains__m2(&cx.reqs, &root_) { cir_reqcall(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if contains__m2(&hostSc, &root_) { cir_hostverb(root_.clone(), &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if is_host_root(&root_) { cir_hostacq(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (instance_comp(&sc, fl.target.clone()) != "") { cir_hostverb(root_.clone(), &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (scope_has(&sc, &root_) && is_builtin_method(&fl.name)) { cir_builtin(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) } } } } },
     _ => if is_builtin_method(&fl.name) { cir_builtin_recv(fl.target.clone(), &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) },
 } } },
-    Expr::Var(nm) => if (tagged_case_adt(&cx.cases, &nm) != "") { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if cir_calls_a_value(&nm, &sc, cx.clone()) { cir_value_call(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } },
+    Expr::Var(nm) => if ((tagged_case_adt(&cx.cases, &nm) != "") && (!scope_has(&sc, &nm))) { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if cir_calls_a_value(&nm, &sc, cx.clone()) { cir_value_call(nm.clone(), args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } },
     _ => mk_irres(false, String::from("")),
 };
 }
@@ -30012,18 +30020,15 @@ fn cir_nullary_case(n: &str, cx: CCtx) -> bool {
 }
 
 fn cir_calls_a_value(nm: &str, sc: &[Bind], cx: CCtx) -> bool {
-    if ((((nm == "Some") || (nm == "None")) || (nm == "Ok")) || (nm == "Err")) {
-        return false;
-    }
     return (scope_has(sc, nm) && (bind_lookup(&cx.fns, nm, 0i64) == ""));
 }
 
-fn cir_value_call(nm: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+fn cir_value_call(nm: String, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     let a = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
     if (!a.ok) {
         return mk_irres(false, String::from(""));
     }
-    return mk_irres(true, (((String::from("{\"kind\": \"call\", \"callee\": {\"kind\": \"name\", \"id\": ").revl_concat(&jstr(nm))).revl_concat("}, \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
+    return mk_irres(true, (((String::from("{\"kind\": \"call\", \"callee\": {\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&cir_safe_of(&sc, nm.clone())))).revl_concat("}, \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
 }
 
 fn cir_adt(adt: &str, case_: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
@@ -30586,9 +30591,14 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         if (!ve.ok) {
             return mk_irres(false, String::from(""));
         }
-        let step = (((((String::from("{\"step\": \"let\", \"name\": ").revl_concat(&jstr(&name))).revl_concat(", \"value\": ")).revl_concat(&ve.js)).revl_concat(", \"mutable\": ")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat("}");
+        let safe = safe_name(name.clone(), &sc, &hostSc);
+        let step = (((((String::from("{\"step\": \"let\", \"name\": ").revl_concat(&jstr(&safe))).revl_concat(", \"value\": ")).revl_concat(&ve.js)).revl_concat(", \"mutable\": ")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        let sc2 = env_mut_put(&(sc.revl_push(Bind { name: name.clone(), ty: value_ty(r.e.clone(), cenv_ir(cx.clone(), sc.clone())) })), &name, mutable);
+        let mut sc1 = sc.revl_push(Bind { name: name.clone(), ty: value_ty(r.e.clone(), cenv_ir(cx.clone(), sc.clone())) });
+        if (safe != name) {
+            sc1.push(Bind { name: String::from("rename ").revl_concat(&name), ty: safe.clone() });
+        }
+        let sc2 = env_mut_put(&sc1, &name, mutable);
         return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc2.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if (atk(&ts, lo, "ident") && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "=")) {
@@ -30604,7 +30614,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         if (!ve.ok) {
             return mk_irres(false, String::from(""));
         }
-        let step = (((String::from("{\"step\": \"assign\", \"name\": ").revl_concat(&jstr(&name))).revl_concat(", \"value\": ")).revl_concat(&ve.js)).revl_concat("}");
+        let step = (((String::from("{\"step\": \"assign\", \"name\": ").revl_concat(&jstr(&cir_safe_of(&sc, name.clone())))).revl_concat(", \"value\": ")).revl_concat(&ve.js)).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
@@ -30751,8 +30761,8 @@ fn cir_prov_methods(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, sc: Vec<Bind>, h
     let nm = tkc(&ts, (head).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (head).checked_add(3i64).expect("revl: Int overflow"));
     let pnames = param_names(&ps.ps);
-    let pjson = str_list_json(&pnames);
-    let pbinds = method_param_binds(&pnames, &svc_method_params(ts.clone(), svc, &nm), cx.al.clone());
+    let pbinds = method_param_binds(pnames.clone(), svc_method_params(ts.clone(), svc, &nm), cx.al.clone(), sc.clone(), hostSc.clone());
+    let pjson = str_list_json(&method_param_ids(&pnames, &pbinds));
     let mret = svc_method_ret(ts.clone(), svc, &nm, cx.al.clone());
     let mut h = ps.i;
     if atk(&ts, h, "arrow") {
@@ -32297,6 +32307,9 @@ fn infer_ctor(callee: Expr, args: Vec<Expr>, env: Vec<Bind>) -> String {
     _ => String::from(""),
 };
     if (nm == "") {
+        return String::from("");
+    }
+    if tk_is_fn_ty(&tenv_get(&env, &nm)) {
         return String::from("");
     }
     let arg0 = if (args.revl_length() > 0i64) { infer((args)[(0i64) as usize].clone(), env.clone()) } else { String::from("") };
