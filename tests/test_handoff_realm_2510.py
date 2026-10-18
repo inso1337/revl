@@ -4,10 +4,12 @@
 Before the fix the swap path captured and restored hand-off state keyed by the
 provided key only, so a successor in another realm that re-provided the key
 and declared `handoff` inherited a realm-scoped store. Both of the issue's
-reproductions run here as the untrusted author over the MCP session (no
-operator flags), on examples/tenants.rvl with `handoff kv: Map[Str, Str]`
-added to TenantAStore. A successor whose (key, realm) has no capture starts
-cold, and the swap result's `handoff` block says so by name.
+reproductions ran as the untrusted author over the MCP session; the first
+now runs as the operator, since the untrusted author's rename that drops the
+clause is refused at admission (issue #2523). Both run on
+examples/tenants.rvl with `handoff kv: Map[Str, Str]` added to TenantAStore.
+A successor whose (key, realm) has no capture starts cold, and the swap
+result's `handoff` block says so by name.
 
 These drive a live composition, so they need the cordis-py runtime.
 """
@@ -119,6 +121,12 @@ LEAK = "\n".join([
 
 @needs_runtime
 def test_reproduction_1_rename_dropping_isolate_starts_cold(tmp_path, monkeypatch):
+    """The untrusted author may no longer rename the provider while dropping
+    its clause (issue #2523), so this runs as the operator, who may: the
+    hand-off is still matched by (key, realm), not by who wrote the edit."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
     target = _loaded(tmp_path, monkeypatch)
     changed = _edit(target, [
         {"anchor": "component TenantAStore", "replacement": "component Renamed"},
@@ -178,6 +186,10 @@ def test_control_same_realm_successor_still_migrates(tmp_path, monkeypatch):
 
 @needs_runtime
 def test_control_successor_without_handoff_starts_cold(tmp_path, monkeypatch):
+    """As the operator, for the reason reproduction 1 gives (issue #2523)."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
     target = _loaded(tmp_path, monkeypatch)
     changed = _edit(target, [
         {"anchor": "component TenantAStore", "replacement": "component Renamed"},
