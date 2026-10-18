@@ -121,8 +121,9 @@ compile it as your own: `--trust-exported` where the command takes it,
 otherwise copying the file out of the export directory.
 
 The rule decides by the file. Text a program holds in memory and compiles
-under a file's name counts when that name, as given, lies under
-`.revl/export/` and a file is there. Text compiled under a label that is not a
+under a file's name counts when a file is there and the name, as given or as
+it resolves, lies under `.revl/export/`; an admission against a running
+composition asks by the name as given. Text compiled under a label that is not a
 file on disk (a virtual or relative name, a path remembered from an earlier
 read, or text held only in memory) does not reach the rule and compiles as
 before; that gap is tracked in issue #2563.

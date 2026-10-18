@@ -13,10 +13,12 @@ ask it. It lives outside `revl.mcp` so that compiling never imports the server
 (issue #1780).
 
 The rule decides by files. A file read from disk is asked about as named and
-as it resolves through symbolic links. Text the caller holds in memory is
-asked about by the name it is compiled under, and only when that name lies
-inside an export directory does the rule look at the disk, to see that a file
-is there. Text compiled under a label that names no file (a virtual or
+as it resolves through symbolic links, and so is text a caller holds in
+memory under the name of a file that exists (one it read itself). The one
+exception is an admission against a running composition, the hot path: its
+in-memory text is asked about by the name it is compiled under, and only when
+that name lies inside an export directory does the rule look at the disk, to
+see that a file is there. Text compiled under a label that names no file (a virtual or
 relative name, a path remembered from an earlier read, or text held only in
 memory) compiles exactly as it did before the rule (issue #2563).
 """
@@ -136,10 +138,13 @@ class CliRule:
 
     @staticmethod
     def exported_text(path: str) -> bool:
-        """Whether text held in memory and compiled under the name `path` is
-        an exported file's: the name lies inside an export directory and a
-        file is there. A name outside one is decided without touching the
-        disk, and a name with no file behind it compiles as before."""
+        """The admission hot path's question about text held in memory and
+        compiled under the name `path` against a running composition: the
+        name lies inside an export directory and a file is there. A name
+        outside one is decided without touching the disk (no `stat`, issue
+        #2195), and a name with no file behind it compiles as before. Every
+        other compile of in-memory text asks `exported`, which also follows
+        the name through symbolic links."""
         return (not os.path.basename(path).startswith("<")
                 and named_in_export_area(path) and os.path.isfile(path))
 
@@ -163,8 +168,10 @@ class CliRule:
     def source_profile(self, filename: str, profile):
         """The profile `compile_source` uses for text labelled `filename` when
         nothing else is read: the author's when `filename` names a file on
-        disk under the export directory, else `profile` unchanged."""
-        if not self.exported_text(filename):
+        disk under the export directory, as named or as it resolves (a
+        caller that read the file itself, such as `revl adapt`, passes the
+        name it read it by), else `profile` unchanged."""
+        if not self.exported(filename):
             return profile
         if self.trust:
             self._say([filename], TRUSTED_LINE)
@@ -177,14 +184,19 @@ class CliRule:
                                 else PROFILED_COPY)
 
     def compile_files(self, compile_once, paths, sources, profile, profiles,
-                      operator_sources, report):
+                      operator_sources, report, admitting: bool = False):
         """Run `compile_once(sources=, profile=, profiles=, operator_sources=,
-        report=)` for a `compile_files` call under this rule."""
+        report=)` for a `compile_files` call under this rule. `admitting` is a
+        compile against a running composition (the admission hot path): its
+        in-memory text is asked about by name first (`exported_text`). Any
+        other in-memory text whose name is a file, such as text a caller read
+        from that file itself, is asked about as named and as it resolves."""
         sources = {os.path.abspath(k): v for k, v in (sources or {}).items()}
+        held = self.exported_text if admitting else self.exported
 
         def is_exported(path: str) -> bool:
             if os.path.abspath(path) in sources:
-                return self.exported_text(path)
+                return held(path)
             return self.exported(path)
 
         if self.trust:
@@ -202,7 +214,7 @@ class CliRule:
             if report is not None:
                 report.update(seen)
             return document
-        authored = {p: t for p, t in sources.items() if self.exported_text(p)}
+        authored = {p: t for p, t in sources.items() if held(p)}
         authored.update({p: t for p, t in exported_texts(
             [p for p in paths
              if os.path.abspath(p) not in sources and self.exported(p)]).items()

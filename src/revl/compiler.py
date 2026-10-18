@@ -1233,7 +1233,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             return _compile_files(paths, manifest, replacing, **kwargs)
 
         return rule.compile_files(once, paths, sources, profile, profiles,
-                                  operator_sources, report)
+                                  operator_sources, report,
+                                  admitting=manifest is not None)
     return _compile_files(paths, manifest, replacing, sources, profile,
                           profiles, operator_sources, report)
 

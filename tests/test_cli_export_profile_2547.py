@@ -204,14 +204,18 @@ def test_the_note_names_the_flag_the_command_takes(root, capsys):
     assert "pass --trust-exported" in err, err
 
 
+@pytest.mark.parametrize("command", [["compile", "-o", "ir.json"], ["run"],
+                                     ["audit"], ["fmt"]])
 @pytest.mark.parametrize("spelling", ["--trust-e", "--trust-export",
                                       "--trust-exporte"])
-def test_an_abbreviation_of_the_flag_is_refused(root, capsys, spelling):
+def test_an_abbreviation_of_the_flag_is_refused(root, capsys, command,
+                                                spelling):
     """Only the full spelling turns the rule off for a command."""
     exported = _write(_export_dir(root) / "x.rvl")
     with pytest.raises(SystemExit) as stopped:
-        main(["compile", str(exported), "-o", "ir.json", spelling])
+        main([command[0], str(exported), *command[1:], spelling])
     assert stopped.value.code != 0
+    assert "unrecognized arguments" in capsys.readouterr().err
     assert not (root / "ir.json").exists()
 
 
@@ -361,3 +365,26 @@ def test_the_rule_uses_the_servers_default_authoring_profile(bindings):
     assert author_profile(base) == AuthoringTrust(
         realm_bindings=bindings).profile()
     assert author_profile(base).untrusted
+
+
+def test_text_read_through_a_link_into_the_export_directory_is_profiled(
+        root):
+    """`revl adapt` and the formatter read a file themselves and compile its
+    text under the name they read it by. A link outside the export directory
+    to an exported file is still the author's file; the operator's own file
+    compiles as before."""
+    from revl.cli.adapt import _load  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+    from revl.formatter import _compile_ir  # noqa: PLC0415
+
+    exported = _write(_export_dir(root) / "x.rvl")
+    link = root / "ops.rvl"
+    link.symlink_to(exported)
+    with pytest.raises(RevlError, match=PROFILED):
+        _load(str(link))
+    ir, error = _compile_ir(HOSTED, str(link))
+    assert ir is None and PROFILED in str(error), error
+    operator = _write(root / "own.rvl")
+    assert _load(str(operator))["components"]
+    ir, error = _compile_ir(HOSTED, str(operator))
+    assert error is None and ir["components"], error
