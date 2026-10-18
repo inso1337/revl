@@ -99,6 +99,24 @@ If a fetched truc would break G2 or exceed its declared capabilities (G4),
 assemble stops and tells you which piece, and why. You do not get a broken
 composition and a runtime surprise. You get a refusal and a reason.
 
+Vendored text is admitted as an untrusted author. A truc is registry text, not
+your own source, so `add`, `assemble`, `assemble --check` and the remainder
+`rm` re-admits compile every vendored row under the untrusted-author profile
+the MCP server applies to an author by default. A row that ships a host body
+(`@py` and the like) is refused, and the refusal names it. This profile does
+not bound a row's reach to a granted service set at add time; `truc apply`
+bounds reach when it confines a stack layer, as it does today.
+`truc add NAME --trust-host-code` or `truc assemble --trust-host-code` admits
+a host body for that one command and names on stderr each row the flag
+unlocked. The flag is read from the command line
+only, never from the environment or `truc.toml`. `add` records how the row was
+admitted in its `truc.lock` entry, `admitted.admission`: `profiled`, or
+`trusted-host-code` when only the flag admitted it. That record is bound to the
+row's pinned `sourceHash`, so a later `assemble` admits exactly those bytes
+without the flag. A lock row with no record (written before this rule) is
+admitted under the current rule; if it needs host code, re-add it with the
+flag. The project's own entry files keep operator trust.
+
 ### `truc ship`
 
 Publish. `ship` is the verb the ecosystem already uses, and it means the same

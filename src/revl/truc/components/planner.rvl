@@ -29,7 +29,9 @@ type IndexRow  = { name: Str, sourceHash: Str }
 // field — `v.manifest` — rather than reached out of a re-parsed `Any` (a field
 // read off `Any` is now refused by the frontend; the manifest is a nested JSON
 // value, hence `Any`).
-type Verdict   = { ok: Bool, diagnostic: Str, manifest: Any }
+// `trusted` names the vendored rows whose host code was admitted with the
+// untrusted-author profile lifted (--trust-host-code, or a lock record of it).
+type Verdict   = { ok: Bool, diagnostic: Str, manifest: Any, trusted: List[Str] }
 type Drift     = { ok: Bool, message: Str }
 
 // The wiring of the gate's own composition manifest (admit_all's `manifest`),
@@ -45,7 +47,9 @@ type Wiring  = { provided: List[Str], needs: List[Need] }
 // ---- shapes crossing out ----
 
 type Report   = { code: Int, message: Str, sources: Str, commit: Str }
-type LockAdd  = { name: Str, registry: Str }
+// `admission` is how the gate admitted the row: "profiled", or
+// "trusted-host-code" when only --trust-host-code admitted its host code.
+type LockAdd  = { name: Str, registry: Str, admission: Str }
 type Commit   = { lockAdd: LockAdd }
 type RmCommit = { name: Str }
 
@@ -231,8 +235,8 @@ fn plan_assemble_report(dj: Str, vj: Str, gj: Str) -> Str {
   return report(0, msg, manifestStr, "")
 }
 
-fn build_commit(name: Str) -> Str {
-  let c: Commit = { lockAdd: { name: name, registry: "local" } }
+fn build_commit(name: Str, admission: Str) -> Str {
+  let c: Commit = { lockAdd: { name: name, registry: "local", admission: admission } }
   return json_stringify(c)
 }
 
@@ -253,7 +257,10 @@ fn plan_add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str {
     return report(1, `truc: refused — "${name}" would not join the assembly:
 `.concat(v.diagnostic), "", "")
   }
-  return report(0, `truc: added "${name}" — admitted, vendored into trucs/, pinned in truc.lock`, "", build_commit(name))
+  if (list_has(v.trusted, name)) {
+    return report(0, `truc: added "${name}" — admitted with its host code trusted by --trust-host-code, vendored into trucs/, pinned in truc.lock (which records the trust)`, "", build_commit(name, "trusted-host-code"))
+  }
+  return report(0, `truc: added "${name}" — admitted as an untrusted author, vendored into trucs/, pinned in truc.lock`, "", build_commit(name, "profiled"))
 }
 
 // ---- rm: does the remainder still satisfy every requirement? (§8.1) ----

@@ -1679,6 +1679,10 @@ ACCEPTED_PROG_EXPR = [
     ("", "s(1)"),
     ("type S = A(Int) | B", "q(A(1))"),
     ("type List = { x: Int }", "List"),
+    # a template is a Str once its operands check (issue #2478)
+    ("type Shape = Circle(Float) | Square", "`r${Circle(1.0)}`"),
+    ("type Shape = Circle(Float) | Square", "`a${`b${Circle(1)}`}`"),
+    ("", "`n=${Some(1)}`"),
 ]
 
 REJECTED_PROG_EXPR = [
@@ -1698,6 +1702,10 @@ REJECTED_PROG_EXPR = [
     ("type T = A(Int32) | B", "A(1)"),
     ("type T = A(Int32) | B", "A(2.5)"),
     ("type L = L(List[Int]) | N", "L(1)"),
+    # ... and inside a template interpolation (issue #2478)
+    ("type Shape = Circle(Float) | Square", "`r${Circle(\"a\")}`"),
+    ("type W = Wrap(Int)", "`a${`b${Wrap(2.5)}`}`"),
+    ("", "`x${Some(1).foo}`"),
     # ordering / arithmetic on non-numeric heads
     ("", "Some(1) < Some(2)"),
     ("", "Some(1) + 1"),

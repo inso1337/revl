@@ -257,7 +257,7 @@ component Shipper provides ship: Shipper {
     fn run(projectDir, name) {
       let ctx = emit host_ship_context(projectDir)
       let ordered = ship_ordered(ctx)
-      let audit = emit host_admit_all(ordered)
+      let audit = emit host_admit_all(ordered, "", false)
       let source = ship_source(ctx)
       let fresh = emit host_gauntlet(source)
       let release = emit host_release_facts(projectDir, name)
