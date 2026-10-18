@@ -31,9 +31,10 @@ from revl.truc import reproduce as R  # noqa: E402
 REGISTRY = ROOT / "registry"
 COMPONENT = "user_cache"
 
-# Not shipped (a near miss of a real name), and two path-shaped spellings. The
-# last one is the dangerous shape: `backends.py` names a real module of the
-# `backends` namespace, not one of its emitter packages.
+# Not shipped (a near miss of a real name), and two path-shaped spellings that
+# would be spliced into the dotted module path. Each ends up as an import of a
+# `backends.<junk>.emit` module that does not exist, so on the base they read
+# as an absent emitter (cannot verify, exit 0) instead of a refusal.
 REFUSED_NAMES = ["py2", "../x", "backends.py"]
 
 # The directory names under backends/, the names an entry records.
@@ -154,20 +155,22 @@ def test_a_shipped_name_is_still_imported(registry, monkeypatch, name):
     assert report.ok
 
 
-def test_a_shipped_backend_still_reproduces(registry):
-    """Positive control, passes on the base: the python emitter re-emits the
-    rebuilt IR and the recorded hash matches."""
-    from revl.registry import _sha256  # noqa: PLC0415
-
-    ir = compile_files([str(_entry(registry) / "component.rvl")])
-    emitted, refusal = R._emit_backend_source("python", ir)
-    assert refusal is None, refusal
-    if emitted is None:
-        pytest.skip("python backend emitter not importable in this environment")
-    _record(registry, "python", _sha256(emitted))
+@pytest.mark.parametrize("name", REFUSED_NAMES)
+def test_an_unshipped_name_with_no_recorded_hash_is_still_refused(
+        registry, import_log, name, capsys):
+    """The name is checked before the record is read: an entry that records an
+    unshipped backend with no `sourceSha256` is a refusal too, not a quiet
+    `cannot verify` with exit 0."""
+    _entry(registry).joinpath("artifacts.json").write_text(
+        json.dumps({"backends": {name: {}}}))
 
     report = R.reproduce(COMPONENT, registry=str(registry))
 
-    art = _tier(report, f"{R.TIER_ARTIFACT} [python]")
-    assert art is not None and art.status == R.OK, art
-    assert report.ok
+    arts = _artifact_checks(report)
+    assert len(arts) == 1, [(c.tier, c.status) for c in arts]
+    assert arts[0].status == R.MISMATCH, (arts[0].status, arts[0].detail)
+    assert name in arts[0].detail and COMPONENT in arts[0].detail
+    assert not report.ok
+    assert R.run([COMPONENT, "--registry", str(registry)]) == 1
+    assert "MISMATCH" in capsys.readouterr().out
+    assert import_log == [], import_log

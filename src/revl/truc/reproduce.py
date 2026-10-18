@@ -704,15 +704,16 @@ def _check_artifacts(entry_dir: Path, ir: dict) -> list[Check]:
         spec = record[backend] or {}
         recorded_hash = spec.get("sourceSha256") or ""
         label = f"{TIER_ARTIFACT} [{backend}]"
-        if not recorded_hash:
-            checks.append(Check(label, UNVERIFIED,
-                                f"{backend}: recorded artifact has no sourceSha256"))
-            continue
         unshipped = _unshipped_backend(backend, entry_dir.name)
         if unshipped is not None:
             # A recorded claim this toolchain cannot honour, and nothing was
-            # imported for it (issue #2556).
+            # imported for it (issue #2556). Checked before the hash is read,
+            # so an unshipped name with no hash is still a refusal.
             checks.append(Check(label, MISMATCH, unshipped, recorded_hash, ""))
+            continue
+        if not recorded_hash:
+            checks.append(Check(label, UNVERIFIED,
+                                f"{backend}: recorded artifact has no sourceSha256"))
             continue
         emitted, refusal = _emit_backend_source(backend, ir)
         if refusal is not None:
