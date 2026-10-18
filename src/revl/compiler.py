@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import contextvars
 import os
 import re
 import textwrap
@@ -33,6 +35,51 @@ from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
 from .typecheck import format_type, parse_type
+
+
+# issue #2547: the rule for files under `.revl/export/`, an
+# `export_jail.CliRule`. It is ON by default for every compile in the process
+# (one shared `CliRule`, made on first use), so the command line and every
+# library caller that names a file on disk get it with no wiring of their own.
+# It decides by files that exist: text compiled under a label that is not a
+# file on disk compiles exactly as before (issue #2563).
+# `export_rule` installs another one, or turns it off, for one context only
+# (a context variable, reset on the way out even when the body raises, and
+# unseen by any other thread or task): `revl.__main__.main` installs the one
+# for its command (`export_jail.cli_rule`, which carries `--trust-exported`),
+# and only the MCP server turns it off, for `revl mcp serve` and for every
+# request `mcp.server.handle` answers, because the server decides how each
+# file compiles by its own path rule and `--author-trust` (#2546).
+_RULE_OFF = object()
+_RULE: contextvars.ContextVar = contextvars.ContextVar("revl_export_rule",
+                                                       default=None)
+_DEFAULT_RULE = None
+
+
+def _export_rule():
+    """The rule in force for this compile, or `None` when it is off."""
+    global _DEFAULT_RULE
+    rule = _RULE.get()
+    if rule is _RULE_OFF:
+        return None
+    if rule is not None:
+        return rule
+    if _DEFAULT_RULE is None:
+        from .mcp.export_jail import CliRule  # noqa: PLC0415: no cycle at load
+
+        _DEFAULT_RULE = CliRule()
+    return _DEFAULT_RULE
+
+
+@contextlib.contextmanager
+def export_rule(rule):
+    """Compile under `rule` (a `CliRule`), or with the rule off when `rule` is
+    `None`, inside the `with` body only."""
+    token = _RULE.set(_RULE_OFF if rule is None else rule)
+    try:
+        yield rule
+    finally:
+        _RULE.reset(token)
 
 
 def _default_search_path() -> list[str]:
@@ -967,6 +1014,10 @@ def compile_source(source: str, filename: str = "<string>",
     disk to the exact text it compiled for it.
     """
     if manifest is None and not modules:
+        rule = _export_rule()
+        if rule is not None and rule.applies(profile):
+            # issue #2547: text read from a file under `.revl/export/`
+            profile = rule.source_profile(filename, profile)
         program = Parser(source, filename).parse()
         if program.uses:
             use = program.uses[0]
@@ -1167,7 +1218,31 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     `compile_source`: it carries `report["dependencies"]`, every user-origin
     module the loader read from the disk mapped to the text compiled for it.
     It is never part of the returned document.
+
+    Under the export rule (`_export_rule`, issue #2547), on unless the MCP
+    server turned it off, an operator compile that names or reaches a file
+    under `.revl/export/` compiles that file as author-written, under the
+    authoring profile.
     """
+    rule = _export_rule()
+    if rule is not None and rule.applies(profile):
+        def once(**kwargs) -> dict:
+            return _compile_files(paths, manifest, replacing, **kwargs)
+
+        return rule.compile_files(once, paths, sources, profile, profiles,
+                                  operator_sources, report)
+    return _compile_files(paths, manifest, replacing, sources, profile,
+                          profiles, operator_sources, report)
+
+
+def _compile_files(paths: list[str], manifest: dict | None = None,
+                   replacing: tuple[str, ...] = (),
+                   sources: dict[str, str] | None = None,
+                   profile: AdmissionProfile | None = None,
+                   profiles: dict[str, AdmissionProfile | None] | None = None,
+                   operator_sources: dict[str, str] | None = None,
+                   report: dict | None = None) -> dict:
+    """One compile, exactly as the caller asked: `compile_files` above."""
     # item 426 S4: resolve the per-root profile map keyed by abspath. Every root
     # in `paths` gets an entry: its own profile from `profiles` (looked up by the
     # given spelling or its abspath) or, failing that, the single `profile`

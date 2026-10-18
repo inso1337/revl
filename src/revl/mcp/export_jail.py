@@ -26,7 +26,10 @@ flag, and `revl_export` is reached only over the transport.
 * TRUST: a file inside any `.revl/export/` directory is the agent's, by path,
   always. Named in `files` or reached by `use`, its text compiles under the
   authoring profile with no operator text to diff against, exactly as if it
-  had been sent inline. The manifest never decides who wrote a file.
+  had been sent inline. The manifest never decides who wrote a file. Every
+  other compile applies the same rule to a file on disk there, and every
+  `revl` command does unless it is given `--trust-exported` (`CliRule`, issue
+  #2547).
 
 An export also writes only `.rvl` modules (an inline one, only those the
 program reaches by `use`), a destination may not be a symbolic link, and a
@@ -40,9 +43,11 @@ and case-folded.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import sys
 import unicodedata
 
 EXPORT_DIR = os.path.join(".revl", "export")
@@ -112,15 +117,23 @@ def export_dirs(roots) -> tuple[str, ...]:
     return tuple(os.path.join(root, EXPORT_DIR) for root in roots)
 
 
-def in_export_area(path: str) -> bool:
-    """Whether `path` resolves inside any `.revl/export` directory, whichever
-    root it was written under. Compared case-insensitively: on a filesystem
-    that folds case, `.REVL/Export` IS the export directory, and on one that
-    does not, counting it as one only ever profiles more."""
-    parts = [_fold(part) for part in _real(path).split(os.sep)]
+def _under_export_dir(path: str) -> bool:
+    parts = [_fold(part) for part in path.split(os.sep)]
     width = len(_EXPORT_PARTS)
     return any(tuple(parts[i:i + width]) == _EXPORT_PARTS
                for i in range(len(parts) - width + 1))
+
+
+def in_export_area(path: str) -> bool:
+    """Whether `path` lies inside any `.revl/export` directory, whichever root
+    it was written under: as named (absolute, `..` folded away) or as it
+    resolves through symbolic links. Either one is enough, since counting a
+    file as author-written only ever adds the profile. Compared
+    case-insensitively: on a filesystem that folds case, `.REVL/Export` IS the
+    export directory, and on one that does not, counting it as one only ever
+    profiles more. The server and the command line both decide by this."""
+    return (_under_export_dir(os.path.normpath(os.path.abspath(path)))
+            or _under_export_dir(_real(path)))
 
 
 def _sha256(text: str) -> str:
@@ -182,8 +195,10 @@ def _rel_in_root(path: str, root: str) -> str:
 def export_copy(path: str, roots) -> str:
     """Where an export writes the held text of the loaded file `path`: the
     file itself when it is inside an export directory, else its copy at the
-    same path under its root's export directory."""
-    if in_export_area(path):
+    same path under its root's export directory. Decided by where `path`
+    resolves only, never by its spelling: a link inside the export directory
+    to an operator file is not a place an export writes through."""
+    if _under_export_dir(_real(path)):
         return path
     root = _root_of(path, roots)
     if root is None:
@@ -387,3 +402,183 @@ def check_operator_files(paths, latches=()) -> None:
             f"refused: {', '.join(hit)} is an operator configuration file or an "
             "emergency-stop latch; revl_export never creates or replaces one; "
             "nothing was written")
+
+
+# ------------------------------------------------------------------ the CLI
+
+
+class CliRule:
+    """The command line's half of the TRUST rule (issue #2547): a file under a
+    `.revl/export/` directory is author-written whoever loads it, so `revl`
+    compiles it under the authoring profile the server uses by default, the
+    same way the server's `compile_under_authoring` does: its text rides in
+    memory with no operator text to diff against, and a pass that reads one
+    from disk by `use` is repeated with it riding, until a pass reads none.
+
+    One is in force for every compile in the process unless the MCP server
+    turned it off (see `compiler.export_rule`); `revl.__main__.main` installs
+    the one for the command it dispatches (see `cli_rule`). With `trust` (the
+    command was given `--trust-exported`) the files compile as the operator's
+    own and one line on stderr names them. `offer_flag` says whether the
+    command takes that flag, so the note names it only where it works. The
+    rule is never read from the environment or a configuration file."""
+
+    def __init__(self, trust: bool = False, offer_flag: bool = False) -> None:
+        self.trust = trust
+        self.offer_flag = offer_flag
+        self._said: set[str] = set()
+
+    @staticmethod
+    def exported(path: str) -> bool:
+        """Whether the compile input `path` is an author-written file: a file
+        that exists on disk and lies inside an export directory. A label that
+        names no file (a `<...>` placeholder, a virtual or relative name with
+        nothing behind it) is not decided here; it compiles exactly as it did
+        before this rule."""
+        return (not os.path.basename(path).startswith("<")
+                and os.path.isfile(path) and in_export_area(path))
+
+    @staticmethod
+    def author_profile(base=None):
+        """The authoring profile the server compiles agent text under by
+        default, carrying the operator's realm bindings from `base`."""
+        from .server import AuthoringTrust  # noqa: PLC0415: only when needed
+
+        return AuthoringTrust(
+            realm_bindings=tuple(getattr(base, "realm_bindings", ()) or ())
+        ).profile()
+
+    def applies(self, profile) -> bool:
+        """Whether a compile under `profile` is one this rule decides: an
+        operator compile (no profile, or one that does not distrust the
+        author). A compile already under an untrusted author's profile keeps
+        its own."""
+        return profile is None or not profile.untrusted
+
+    def _say(self, paths, text: str) -> None:
+        fresh = sorted({os.path.abspath(p) for p in paths} - self._said)
+        if fresh:
+            self._said.update(fresh)
+            print(text.format(", ".join(fresh)), file=sys.stderr)
+
+    def source_profile(self, filename: str, profile):
+        """The profile `compile_source` uses for text labelled `filename` when
+        nothing else is read: the author's when `filename` is a file on disk
+        under the export directory, else `profile` unchanged."""
+        if not self.exported(filename):
+            return profile
+        if self.trust:
+            self._say([filename], TRUSTED_LINE)
+            return profile
+        self._say([filename], self._profiled_line())
+        return self.author_profile(profile)
+
+    def _profiled_line(self) -> str:
+        return PROFILED_LINE + (PROFILED_FLAG if self.offer_flag
+                                else PROFILED_COPY)
+
+    def compile_files(self, compile_once, paths, sources, profile, profiles,
+                      operator_sources, report):
+        """Run `compile_once(sources=, profile=, profiles=, operator_sources=,
+        report=)` for a `compile_files` call under this rule."""
+        sources = {os.path.abspath(k): v for k, v in (sources or {}).items()}
+        if self.trust:
+            seen: dict = {}
+            document = compile_once(sources=sources or None, profile=profile,
+                                    profiles=profiles,
+                                    operator_sources=operator_sources,
+                                    report=seen)
+            reached = (list(paths) + list(sources)
+                       + list(seen.get("disk_reads") or ()))
+            self._say([p for p in reached if self.exported(p)], TRUSTED_LINE)
+            if report is not None:
+                report.update(seen)
+            return document
+        authored = {p: t for p, t in sources.items() if self.exported(p)}
+        authored.update({p: t for p, t in exported_texts(
+            [p for p in paths if self.exported(p)]).items()
+            if p not in authored})
+        # what the caller supplied in memory and is not exported is the
+        # operator's own text, so the diff rule does not count it as authored
+        operator = {p: t for p, t in sources.items() if p not in authored}
+        operator.update(operator_sources or {})
+        while True:
+            seen = {}
+            if authored:
+                self._say(authored, self._profiled_line())
+                author = self.author_profile(profile)
+                document = compile_once(
+                    sources={**sources, **authored}, profile=author,
+                    profiles=_profile_exported(profiles, author),
+                    operator_sources=operator, report=seen)
+            else:
+                document = compile_once(
+                    sources=sources or None, profile=profile,
+                    profiles=profiles, operator_sources=operator_sources,
+                    report=seen)
+            pending = {p: t for p, t in (seen.get("disk_reads") or {}).items()
+                       if p not in authored and self.exported(p)}
+            if not pending:
+                break
+            authored.update(pending)
+        if report is not None:
+            report.update(seen)
+            roots = {os.path.abspath(p) for p in paths}
+            riding = {p: t for p, t in authored.items()
+                      if p not in roots and p not in sources}
+            if riding:
+                report["dependencies"] = {
+                    **(report.get("dependencies") or {}), **riding}
+        return document
+
+
+PROFILED_LINE = ("note: {} lies under .revl/export/, so it is author-written and "
+                 "compiles under the authoring profile")
+# the end of the note: the flag where the command takes it, else the one way
+# that works everywhere (`truc` and library callers take no such flag)
+PROFILED_FLAG = "; pass --trust-exported to compile it as your own"
+PROFILED_COPY = ("; to compile it as your own, copy it out of the export "
+                 "directory")
+TRUSTED_LINE = "--trust-exported: compiled as the operator's own: {}"
+
+
+def _profile_exported(profiles, author):
+    """`profiles` with every exported root that would compile as the
+    operator's moved to the authoring profile."""
+    if profiles is None:
+        return None
+    return {p: (author if CliRule.exported(p)
+                and (prof is None or not prof.untrusted) else prof)
+            for p, prof in profiles.items()}
+
+
+@contextlib.contextmanager
+def cli_rule(trust_exported: bool = False, off: bool = False,
+             offer_flag: bool = True):
+    """Install the rule for one command (see `CliRule`): with
+    `--trust-exported` when the command was given it, or `off` for `revl mcp
+    serve`, whose server decides by its own path rule. `offer_flag` is whether
+    the command takes `--trust-exported`. The rule is set for this context
+    only and restored on the way out (`compiler.export_rule`)."""
+    from .. import compiler  # noqa: PLC0415
+
+    rule = None if off else CliRule(trust=bool(trust_exported),
+                                    offer_flag=offer_flag)
+    with compiler.export_rule(rule):
+        yield rule
+
+
+def server_door(handle):
+    """`handle` with the rule off for every request it answers: the MCP
+    server compiles a file under `.revl/export/` by its own path rule and the
+    operator's `--author-trust` (issue #2524), never by this one as well."""
+    import functools  # noqa: PLC0415
+
+    from .. import compiler  # noqa: PLC0415
+
+    @functools.wraps(handle)
+    def answered(*args, **kwargs):
+        with compiler.export_rule(None):
+            return handle(*args, **kwargs)
+
+    return answered

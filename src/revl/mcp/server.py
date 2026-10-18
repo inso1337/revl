@@ -6515,3 +6515,10 @@ def serve(stdin=None, stdout=None, before=None) -> int:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()
     return 0
+
+
+# issue #2547: the export rule is on for every other compile in the process;
+# the server decides how each file compiles by its own path rule and the
+# operator's `--author-trust`, so every request `handle` answers runs with it
+# off, whichever entry reached it (`revl mcp serve`, a test, an embedder).
+handle = _export_jail.server_door(handle)

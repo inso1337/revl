@@ -1070,6 +1070,21 @@ export of the held source.
   always. Loaded by `files` or reached by `use`, it compiles under the
   authoring profile with no operator text to diff against, exactly as the
   same text sent inline. The manifest never decides who wrote a file.
+- Every compile outside the server applies the same rule to a file on disk
+  (issue #2547): the command line, and any program that imports the compiler
+  and names the file by its path. A file is under an export directory when it
+  exists and its path, as named or as it resolves through symbolic links, has
+  a `.revl/export` directory among its ancestors (compared case-folded;
+  `.revl/exportX/` is not one). Every `revl` command that compiles such a
+  file, named on the command line or reached by `use`, compiles it under the
+  authoring profile the server uses by default and says so in a `note:` line
+  on stderr. `--trust-exported`, given to one command, compiles it as the
+  operator's own instead and prints one line on stderr naming each file it
+  compiled that way. The flag is never read from the environment or a
+  configuration file, and `revl mcp serve` does not take it: the server
+  decides by `--author-trust`. Text compiled under a label that is not a file
+  on disk does not reach the rule yet (issue #2563). See "Files under
+  `.revl/export/`" in docs/commands-reference.md.
 
 `with_knowledge: true` also writes the session's notes: each live note as a
 marked comment above its anchor (in the export copy), and every record not yet

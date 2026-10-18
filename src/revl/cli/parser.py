@@ -123,7 +123,9 @@ def _add_serve_operator_arguments(serve) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
-    parser = argparse.ArgumentParser(prog="revl")
+    # no abbreviations, in any command (issue #2547): `--trust-e` must not
+    # pass for `--trust-exported`, nor a prefix for any other flag
+    parser = argparse.ArgumentParser(prog="revl", allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
 
     cmd = sub.add_parser("compile", help="compile .rvl files to a backend IR document")
@@ -2721,4 +2723,36 @@ def build_parser() -> argparse.ArgumentParser:
              "reproduce); the tail is passed through unchanged (docs/truc.md)")
     truc_cmd.add_argument("truc_args", nargs=argparse.REMAINDER, metavar="...",
                           help="the truc verb and its arguments, forwarded as-is")
+    _add_trust_exported(parser)
     return parser
+
+
+#: The commands that do not take `--trust-exported` (issue #2547): `mcp
+#: serve`, whose own door decides how each file compiles by `--author-trust`,
+#: and `truc`, whose tail is forwarded verbatim to the component manager.
+_NO_TRUST_EXPORTED = (("mcp", "serve"), ("truc",))
+
+
+def _add_trust_exported(parser, path: tuple = ()) -> None:
+    """Give every leaf command `--trust-exported` (issue #2547). Without it, a
+    file under `.revl/export/` compiles under the authoring profile; with it,
+    as the operator's own, for this one command only. Every parser in the tree
+    also refuses abbreviated flags, so only the full spelling opts out."""
+    parser.allow_abbrev = False
+    actions = [a for a in parser._actions
+               if isinstance(a, argparse._SubParsersAction)]
+    if not actions:
+        if path not in _NO_TRUST_EXPORTED:
+            parser.add_argument(
+                "--trust-exported", action="store_true",
+                help="compile files under .revl/export/ as your own instead of "
+                     "under the authoring profile they get by default, for "
+                     "this command only; stderr names each file it compiled "
+                     "that way")
+        return
+    seen: set[int] = set()
+    for action in actions:
+        for name, child in action.choices.items():
+            if id(child) not in seen:
+                seen.add(id(child))
+                _add_trust_exported(child, path + (name,))

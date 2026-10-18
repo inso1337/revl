@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -191,3 +192,134 @@ def test_a_case_alias_of_the_export_directory_is_still_it(root, capsys):
     assert rc != 0 and ir is None, err
     if alias.exists():
         assert PROFILED in err, err
+
+
+# ------------------------------------------------------ the note and the flag
+
+
+def test_the_note_names_the_flag_the_command_takes(root, capsys):
+    exported = _write(_export_dir(root) / "x.rvl")
+    rc, err, ir = _compile(capsys, exported)
+    _assert_profiled(rc, err, ir)
+    assert "pass --trust-exported" in err, err
+
+
+@pytest.mark.parametrize("spelling", ["--trust-e", "--trust-export",
+                                      "--trust-exporte"])
+def test_an_abbreviation_of_the_flag_is_refused(root, capsys, spelling):
+    """Only the full spelling turns the rule off for a command."""
+    exported = _write(_export_dir(root) / "x.rvl")
+    with pytest.raises(SystemExit) as stopped:
+        main(["compile", str(exported), "-o", "ir.json", spelling])
+    assert stopped.value.code != 0
+    assert not (root / "ir.json").exists()
+
+
+# ------------------------------------------------------ other entries
+
+
+def test_a_library_caller_gets_the_rule_by_default(root):
+    """The rule is on for every compile in the process, not only one that
+    starts in `main`: a program that imports the compiler and names an
+    exported file gets the authoring profile, and the operator's file
+    compiles as before."""
+    from revl.compiler import compile_files, compile_source  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    exported = _write(_export_dir(root) / "x.rvl")
+    with pytest.raises(RevlError, match=PROFILED):
+        compile_files([str(exported)])
+    with pytest.raises(RevlError, match=PROFILED):
+        compile_source(HOSTED, str(exported))
+    operator = _write(root / "ops.rvl")
+    assert compile_files([str(operator)])["components"]
+    assert compile_source(HOSTED, str(operator))["components"]
+
+
+def _admit(path: Path) -> dict:
+    from revl.truc._host import admit_all  # noqa: PLC0415
+
+    return json.loads(admit_all(json.dumps(
+        [{"path": str(path), "source": HOSTED, "name": "x"}])))
+
+
+def test_the_truc_host_entry_profiles_an_exported_file(root, capsys):
+    """truc's admission loop compiles in-memory text under the file's own
+    path, so an exported file is profiled there too."""
+    exported = _export_dir(root) / "trucs" / "x" / "component.rvl"
+    _write(exported)
+    refused = _admit(exported)
+    assert refused["ok"] is False, refused
+    assert PROFILED in refused["diagnostic"], refused
+    # truc takes no --trust-exported, so the note does not offer it
+    err = capsys.readouterr().err
+    assert "copy it out of the export directory" in err, err
+    assert "--trust-exported" not in err, err
+    # control: the same text at an operator path is admitted
+    admitted = _admit(_write(root / "trucs" / "x" / "component.rvl"))
+    assert admitted["ok"] is True, admitted
+
+
+# ------------------------------------------------------ the server's door
+
+
+@pytest.fixture
+def trusted_server(root):
+    from revl.mcp import server  # noqa: PLC0415
+
+    old = server.AUTHORING
+    server.set_authoring_trust(roots=(str(root),))
+    server.set_authoring_trust(host_code=True)
+    assert server.AUTHORING.profile() is None
+    try:
+        yield server
+    finally:
+        server.AUTHORING = old
+
+
+def test_the_server_decides_inside_its_door_and_the_rule_holds_outside(
+        trusted_server, root):
+    """A trusted server compiles an exported file by its own rule alone, and
+    the same file outside a request is the author's again."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    exported = _write(_export_dir(root) / "x.rvl")
+    reply = trusted_server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "revl_check",
+                   "arguments": {"files": [str(exported)]}}})
+    assert reply["result"]["structuredContent"]["ok"] is True, reply
+    with pytest.raises(RevlError, match=PROFILED):
+        compile_files([str(exported)])
+
+
+def test_the_rule_is_back_after_a_request_that_raises(root):
+    from revl import compiler  # noqa: PLC0415
+    from revl.mcp.export_jail import server_door  # noqa: PLC0415
+
+    inside = []
+
+    def failing(message):
+        inside.append(compiler._export_rule())
+        raise RuntimeError("request failed")
+
+    with pytest.raises(RuntimeError):
+        server_door(failing)({})
+    assert inside == [None]
+    assert compiler._export_rule() is not None
+
+
+def test_turning_the_rule_off_is_unseen_by_another_thread(root):
+    from revl import compiler  # noqa: PLC0415
+    from revl.mcp.export_jail import cli_rule  # noqa: PLC0415
+
+    seen = []
+    with cli_rule(off=True):
+        assert compiler._export_rule() is None
+        other = threading.Thread(
+            target=lambda: seen.append(compiler._export_rule()))
+        other.start()
+        other.join()
+    assert seen and seen[0] is not None
+    assert compiler._export_rule() is not None
