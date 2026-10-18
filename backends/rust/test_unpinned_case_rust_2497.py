@@ -9,9 +9,10 @@ by name.
 WHAT IS EMITTED NOW. A `let` whose value is a bare `None` and whose name
 the body never reads again is annotated `Option<Value>`, the erased type go
 gives it. A `let` of a payload-less case of a generic variant that nothing
-reads again is refused by name, with go's wording. A `let` the body does
-read is left to rustc, which infers the type from that use, exactly as
-before.
+reads again is refused by name, with the prefix of go's refusal. A `let`
+the body does read, or a `var` the body later assigns, is left to rustc,
+which infers the type from that use (or from the assigned value), exactly
+as before.
 
 The run test executes the program's `test` block on the py tier and on rust
 and asserts both pass. It needs `cargo` and skips without it; a skip is not
@@ -104,8 +105,58 @@ pub fn h() -> Int {
 """
 
 
+# A `var` that is never read but later ASSIGNED is not dead: the assignment
+# pins its type for rustc (`x = Some(1)` makes `x` an `Option<i64>`), and an
+# `Option<Value>` annotation or a refusal there would break a program that
+# built before.
+ASSIGNED = """\
+type Mb[T] = Jj(T) | Nn
+
+fn un(m: Mb[Int]) -> Int {
+  return match m {
+    Jj(x) => x,
+    Nn => 0,
+  }
+}
+
+pub fn h() -> Int {
+  var x = None
+  x = Some(1)
+  return 2
+}
+
+pub fn k() -> Int {
+  var y = Nn
+  y = Jj(3)
+  return un(y)
+}
+
+test "assigned" {
+  assert h() == 2
+  assert k() == 3
+}
+"""
+
+
 def _ir():
     return compile_source(PROGRAM, "unpinned_case_2497.rvl")
+
+
+def test_a_var_assigned_later_is_left_to_rustc():
+    src = rust_emit.emit(compile_source(ASSIGNED, "assigned_2497.rvl"))
+    assert "let mut x = None" in src and "let mut x: " not in src, src
+    assert "let mut y = Mb::Nn;" in src, src
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is not installed")
+def test_rust_builds_a_var_assigned_later_like_py():
+    ir = compile_source(ASSIGNED, "assigned_2497.rvl")
+    py_status, py_message = RUNNERS["py"](ir)
+    assert py_status == "pass", py_message
+    status, message = RUNNERS["rust"](compile_source(ASSIGNED, "assigned_2497.rvl"))
+    if status == "skip":
+        pytest.skip(message)
+    assert status == "pass", message
 
 
 def test_a_dead_none_let_is_typed_and_a_live_one_is_left_to_rustc():

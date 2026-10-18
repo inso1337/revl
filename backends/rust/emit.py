@@ -327,6 +327,24 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+def _body_assigned_names(body: object) -> set[str]:
+    """Every name a function body ASSIGNS (`x = Some(1)`) after its
+    declaration. `_body_multi_use` counts reads only, so a `var` the body
+    never reads but later assigns would otherwise look dead to
+    `_v3_dead_let_annotation`; the assignment pins its type for rustc, so
+    it is not (issue #2497)."""
+    names: set[str] = set()
+    if isinstance(body, dict):
+        if body.get("step") == "assign" and isinstance(body.get("name"), str):
+            names.add(body["name"])
+        for value in body.values():
+            names |= _body_assigned_names(value)
+    elif isinstance(body, list):
+        for item in body:
+            names |= _body_assigned_names(item)
+    return names
+
+
 # Step -> the field(s) carrying the names that step DECLARES. A declaration is
 # what makes a name loop-local: the iteration gets its own value, so moving it
 # strands nothing. `assign` is deliberately ABSENT — a rebind under a branch
@@ -7206,6 +7224,7 @@ class _V3Ctx:
         # nothing reads again can be typed (or refused) where rustc has no
         # later use to infer from
         self.read_counts: dict[str, int] = {}
+        self.assigned_names: set[str] = set()
         # `id()` of every `for` node whose bare-name iterable is dead after the
         # loop and so may be MOVED rather than `.clone()`d (item 437f); reset per
         # fn by `_emit_v3_functions`, empty in every other emit context.
@@ -8763,10 +8782,11 @@ def _guard_frame_neutral_loop(body) -> None:
 
 
 def _v3_dead_let_annotation(node: dict, ctx: _V3Ctx) -> str:
-    """The type annotation of a `let` the body never reads again, when its
-    value alone does not fix one (issue #2497). rustc infers a `let`'s type
-    from a later use; with none, a bare `None` is E0282, so it is typed
-    `Option<Value>`, the erased type go gives it (`RevlOpt[any]`). A
+    """The type annotation of a `let` the body never reads nor assigns
+    again, when its value alone does not fix one (issue #2497). rustc infers
+    a `let`'s type from a later use; with none, a bare `None` is E0282, so
+    it is typed `Option<Value>`, the erased type go gives it
+    (`RevlOpt[any]`). A
     payload-less case of a generic variant (`let x = Nn`) is refused by name
     instead, as go refuses it: `Value` is no instantiation a later reader of
     the program would expect."""
@@ -8783,8 +8803,9 @@ def _v3_dead_let_annotation(node: dict, ctx: _V3Ctx) -> str:
 def _v3_refuse_unbound_case(value: dict, binding, ctx: _V3Ctx) -> None:
     """Refuse the construction of a generic variant's payload-less case whose
     type argument nothing pins (issue #2497): neither a flow target nor a
-    payload, and no later read of the binding for rustc to infer one from.
-    Same wording as the go emitter's `_v3_refuse_unbound`."""
+    payload, and no later read or assignment of the binding for rustc to
+    infer one from. Same prefix as the go emitter's `_v3_refuse_unbound`; the
+    tail names rustc's later-use inference, which Go does not have."""
     case = value.get("case")
     adt = ctx.case_adt.get(case)
     spec = ctx.types.get(adt) if adt else None
@@ -8842,7 +8863,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 elem = ctx.vec_elems.get(node.get("name"))
                 if isinstance(elem, str):
                     annot = f": Vec<{_rust_type(elem, ctx.types)}>"
-            elif ctx.read_counts.get(node.get("name"), 0) == 0:
+            elif (ctx.read_counts.get(node.get("name"), 0) == 0
+                    and node.get("name") not in ctx.assigned_names):
                 annot = _v3_dead_let_annotation(node, ctx)
             out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
@@ -9154,6 +9176,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
         ctx.read_counts = counts
+        ctx.assigned_names = _body_assigned_names(fn.get("body") or [])
         # The textual count, widened by the reads a LOOP repeats (#1157): a name
         # spelled once inside a `while`/`for` body is still consumed on every
         # iteration, so it is a reuse even though the count says one.
@@ -9617,6 +9640,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
             counts: dict[str, int] = {}
             _body_multi_use(test["body"], counts)
             ctx.read_counts = counts
+            ctx.assigned_names = _body_assigned_names(test["body"])
             ctx.multi_use = ({n for n, c in counts.items() if c > 1}
                              | _loop_repeated_reads(test["body"]))
             ctx.movable_for_iterables = _movable_for_iterables(
