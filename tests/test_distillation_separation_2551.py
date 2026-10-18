@@ -108,14 +108,14 @@ def _offer_from_ledger(session, sink_path: str, token: str) -> str:
 
 
 @pytest.fixture
-def unattributed_offer(fresh, monkeypatch):
+def unattributed_offer(fresh, monkeypatch):  # noqa: F811
     """Separation on, no operator bound, an offer the author side can apply."""
     _load_gated(fresh)
     return _stub_offer(fresh, monkeypatch)
 
 
 @pytest.fixture
-def ungated_offer(fresh, monkeypatch):
+def ungated_offer(fresh, monkeypatch):  # noqa: F811
     """The same session with separation off."""
     _load_gated(fresh)
     fresh.approval_separation = False
@@ -123,13 +123,13 @@ def ungated_offer(fresh, monkeypatch):
 
 
 @pytest.fixture
-def caller_offer(fresh, sink):
+def caller_offer(fresh, sink):  # noqa: F811
     """An offer from the ledger of an operator that may make calls."""
     return _offer_from_ledger(fresh, sink, "agent")
 
 
 @pytest.fixture
-def approver_offer(fresh, sink):
+def approver_offer(fresh, sink):  # noqa: F811
     """An offer from the ledger of an operator granted `approve` only."""
     return _offer_from_ledger(fresh, sink, "human")
 
@@ -137,7 +137,7 @@ def approver_offer(fresh, sink):
 # ------------------------------------------------------------------ controls
 
 
-def test_a_direct_standing_grant_with_no_operator_bound_is_refused(fresh):
+def test_a_direct_standing_grant_with_no_operator_bound_is_refused(fresh):  # noqa: F811
     _load_gated(fresh)
     refused = _call("revl_approve", {"capability": "announce", "uses": 3})
     assert refused["ok"] is False, refused
@@ -145,7 +145,7 @@ def test_a_direct_standing_grant_with_no_operator_bound_is_refused(fresh):
     assert not fresh._grants
 
 
-def test_a_direct_standing_grant_by_an_operator_that_may_call_is_refused(fresh):
+def test_a_direct_standing_grant_by_an_operator_that_may_call_is_refused(fresh):  # noqa: F811
     _load_gated(fresh)
     _bind(fresh, "agent")
     refused = _call("revl_approve", {"capability": "announce", "uses": 1})
@@ -159,7 +159,7 @@ def test_a_direct_standing_grant_by_an_operator_that_may_call_is_refused(fresh):
 
 @GAP
 def test_apply_with_no_operator_bound_is_refused_and_installs_nothing(
-        fresh, unattributed_offer):
+        fresh, unattributed_offer):  # noqa: F811
     verdict = _call("revl_apply_distillation", {"offerId": unattributed_offer})
     assert verdict["ok"] is False, verdict
     assert "no operator profile is bound" in _why(verdict), verdict
@@ -170,7 +170,7 @@ def test_apply_with_no_operator_bound_is_refused_and_installs_nothing(
 
 @GAP
 def test_apply_by_an_operator_that_may_call_is_refused_and_the_offer_stays(
-        fresh, caller_offer):
+        fresh, caller_offer):  # noqa: F811
     offer_id = caller_offer
     verdict = _call("revl_apply_distillation", {"offerId": offer_id})
     assert verdict["ok"] is False, verdict
@@ -185,7 +185,7 @@ def test_apply_by_an_operator_that_may_call_is_refused_and_the_offer_stays(
 
 
 def test_apply_by_an_operator_that_cannot_call_installs_the_rule(
-        fresh, approver_offer):
+        fresh, approver_offer):  # noqa: F811
     verdict = _call("revl_apply_distillation", {"offerId": approver_offer})
     assert verdict["ok"] is True and verdict["applied"] is True, verdict
     assert len(_installed(fresh)) == 1
@@ -193,7 +193,7 @@ def test_apply_by_an_operator_that_cannot_call_installs_the_rule(
 
 
 def test_apply_with_separation_off_installs_the_rule_with_no_operator(
-        fresh, ungated_offer):
+        fresh, ungated_offer):  # noqa: F811
     verdict = _call("revl_apply_distillation", {"offerId": ungated_offer})
     assert verdict["ok"] is True and verdict["applied"] is True, verdict
     assert len(_installed(fresh)) == 1
