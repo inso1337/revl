@@ -311,7 +311,8 @@ def test_a_cold_files_draft_is_refused_once_its_holes_are_filled(tree):
     refused = _call("revl_unload", {})
     assert refused["ok"] is False and refused["refused"] is True
     assert refused["disk"] == {"inSync": False, "stale": [str(path)]}
-    assert refused["next"]["arguments"]["name"] == "revl_export"
+    # nothing is loaded, so an export would refuse: no ready `next` (issue #2537)
+    assert "next" not in refused
     assert server_mod.SESSION.pending_draft is not None
     gone = _call("revl_unload", {"force": True})
     assert gone["ok"] is True and gone["discardedDraft"] is True

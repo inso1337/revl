@@ -87,7 +87,7 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
-| a refusal that carries the held-source note: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit | `revl_verbs {name: "revl_export", args: {}}`, `ready` (`revl_export` is not a listed verb) |
+| the held-source note on a refused or failed answer: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit of a loaded composition | `revl_verbs {name: "revl_export", args: {}}`, `ready` (`revl_export` is not a listed verb) |
 
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a

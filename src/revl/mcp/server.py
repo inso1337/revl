@@ -2187,11 +2187,13 @@ def _unload_stale_refusal(disk: dict) -> dict:
     stale paths are named, and the remedy is a callable `next` — `revl_export`
     writes the held source out — never the returned `undo`."""
     stale = ", ".join(disk["stale"])
+    # no `next` for a cold draft (nothing is loaded to export) or an open buffer
+    # over an exported composition (an export would write nothing)
     return _session_error(
         f"refused: the held source of {stale} has not reached disk and this "
         "unload would destroy it; call revl_export to write it, or pass "
         "`force: true` to discard it",
-        refused=True, disk=disk, next=_export_next())
+        refused=True, disk=disk, next=_export_next_if_owed())
 
 
 def _ride_disk(name: str, payload) -> None:
