@@ -1674,7 +1674,9 @@ for the reuse check to find an existing fix), and the loop runs unattended:
 gauntlet → boundary policy → capability-widening ack → hot-swap, authorized by
 the SELF-REPAIR POLICY. A candidate that would WIDEN what the composition
 reaches PAUSES for a human ack (`awaiting-ack`) instead of swapping; an
-ineligible component halts. Returns the INCIDENT DOSSIER reconstructed from the
+ineligible component halts. An untrusted candidate (inline `source` or
+`modules`) that removes a surviving provider's realm placement is `rejected`
+with `blockedBy: realm` and a G9 diagnostic, `apply: false` included. Returns the INCIDENT DOSSIER reconstructed from the
 causal trace ([repair-loop.md](repair-loop.md)).
 
 - Inputs: `component` (required); `trace` (item-27 lifecycle events) or

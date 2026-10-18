@@ -180,3 +180,76 @@ def test_repair_from_jailed_files_alone_is_admitted(loaded):
     result = _call("revl_repair", _repair_args({"files": [str(loaded)]}))
     assert result["incident"]["status"] == repair_mod.STATUS_REPAIRED, result
     assert _realms("Vault") == {}
+
+
+# ---------------------------------------------------------------------------
+# By-design passes. Each moves no admitted provision out of its realm, so the
+# check lets it through; these pass on base as well and pin that it still does.
+
+HANDOFF = VAULT.replace("  " + CLAUSE + "\n",
+                        "  " + CLAUSE + "\n  handoff kv: Map[Str, Str]\n")
+
+
+def _state(component: str) -> list:
+    session = server_mod.SESSION
+    fiber = session._driver.fibers.get(component)
+    return [res.__revl_state__() for res in session._frame_resources(fiber)]
+
+
+def _provides(component: str) -> list:
+    for comp in server_mod.SESSION.ir["components"]:
+        if comp["name"] == component:
+            return sorted(comp.get("provides") or {})
+    raise AssertionError(f"{component} is not running")
+
+
+@pytest.fixture
+def loaded_with_state(clean_session):
+    path = clean_session / "vault.rvl"
+    path.write_text(HANDOFF)
+    assert _call("revl_load", {"files": [str(path)]})["ok"] is True
+    store = server_mod.SESSION._frame_resources(
+        server_mod.SESSION._driver.fibers["Vault"])[0]
+    store.insert("secret", "tenant-a-data")
+    assert _state("Vault") == [{"secret": "tenant-a-data"}]
+    return path
+
+
+def test_a_renamed_provider_starts_cold_and_is_admitted(loaded_with_state):
+    """A renamed provider is a new provider: the shared realm is where new
+    untrusted source goes, and with no `handoff` it gets none of the old
+    store, so nothing realm-scoped moves."""
+    renamed = WITHOUT_CLAUSE.replace("component Vault", "component Renamed")
+    result = _call("revl_repair", _repair_args({"source": renamed}))
+    assert result["incident"]["status"] == repair_mod.STATUS_REPAIRED, result
+    names = {c["name"] for c in server_mod.SESSION.ir["components"]}
+    assert names == {"Renamed"}
+    assert _realms("Renamed") == {}
+    assert _state("Renamed") == [{}]
+
+
+def test_a_key_rename_withdraws_the_old_key_and_is_admitted(loaded_with_state):
+    """`kv` to `kv2`: the realm-scoped `kv` provision is withdrawn with its key
+    rather than moved, and `kv2` is a new provision in the shared realm."""
+    rekeyed = (WITHOUT_CLAUSE.replace("provides kv: Kv", "provides kv2: Kv")
+               .replace("provide kv {", "provide kv2 {"))
+    result = _call("revl_repair", _repair_args({"source": rekeyed}))
+    assert result["incident"]["status"] == repair_mod.STATUS_REPAIRED, result
+    assert _provides("Vault") == ["kv2"]
+    assert _realms("Vault") == {}
+
+
+# The registry `need` path hands the reused provider's text to the loop as an
+# inline `source`, so it is checked as one. Unlike the two above, this is a
+# refusal and fails on base.
+
+def test_a_reused_candidate_that_leaves_the_clause_out_is_refused(
+        loaded, monkeypatch):
+    chosen = {"source": WITHOUT_CLAUSE, "modules": None}
+    monkeypatch.setattr(repair_mod, "_reuse_check",
+                        lambda _args, _ir: {"ran": True, "chosen": chosen,
+                                            "candidates": [chosen]})
+    result = _call("revl_repair", {"component": "Vault", "need": "service Kv",
+                                   "selfRepairPolicy": POLICY})
+    assert result["candidate"]["origin"] == "reused", result
+    _assert_refused(result)
