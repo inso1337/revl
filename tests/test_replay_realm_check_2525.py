@@ -14,6 +14,7 @@ untrusted undo or rollback that removes no placement is admitted.
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -180,3 +181,22 @@ def test_untrusted_rollback_that_keeps_every_placement_is_admitted(clean_session
     result = _call("revl_rollback", {})
     assert result["ok"] is True and result.get("rolledBack") is True, result
     assert _realms("Vault") == {"kv": "tenant_a"}
+
+
+def test_operator_cli_undo_of_a_placement_is_admitted(placed, tmp_path,
+                                                       capsys):
+    """`revl undo history.json` is the operator's command line: it replays the
+    history into its own session, with no authoring profile, so the realm
+    check (an authoring rule) must not refuse it, whatever the MCP server's
+    author trust is set to."""
+    from revl.__main__ import main
+
+    assert server_mod.AUTHORING.profile() is not None  # the MCP author is untrusted
+    doc = server_mod.SESSION.history_document()
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps(doc))
+    rc = main(["undo", str(path)])
+    captured = capsys.readouterr()
+    assert REFUSAL not in captured.out + captured.err, captured
+    assert rc == 0, captured
+    assert "undone: generation" in captured.out, captured

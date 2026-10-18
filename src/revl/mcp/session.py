@@ -2558,7 +2558,7 @@ class Session:
             })
         return report or None
 
-    def rollback(self) -> dict:
+    def rollback(self, *, profile=None) -> dict:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
         # The pointers are deliberately NOT cleared here. `swap` saves them
@@ -2571,9 +2571,10 @@ class Session:
         # rollback to a generation that no longer activates).
         restored, restored_origin = self.previous, self.previous_origin
         # issue #2525: the restored generation is a candidate like any other.
-        # An untrusted author may not use it to move an admitted provider out
-        # of its realm; refused here, before any teardown.
-        self._refuse_realm_removal(restored)
+        # An untrusted author (`profile`, None for an operator) may not use it
+        # to move an admitted provider out of its realm; refused here, before
+        # any teardown.
+        self._refuse_realm_removal(restored, profile)
         # what the cold start below discards, read BEFORE it runs (issue
         # #2424): afterwards the live state is already gone.
         held, unread = self._live_state_or_reason()
@@ -2606,16 +2607,17 @@ class Session:
             "rolledBack": True,
             "stateDropped": self._rollback_state_dropped(held, unread, withdrawn)}
 
-    def _refuse_realm_removal(self, target: dict) -> None:
+    def _refuse_realm_removal(self, target: dict, profile) -> None:
         """Refuse a rollback target that moves a provider still admitted out of
-        the realm the running generation places it in, for an untrusted author
-        (issue #2525). The G9 admission refusal becomes a `SessionError`, raised
-        before anything is torn down."""
+        the realm the running generation places it in, for the author whose
+        admission `profile` is given; None (an operator) is never refused
+        (issue #2525). The G9 admission refusal becomes a `SessionError`,
+        raised before anything is torn down."""
+        from ..admit_profile import check_no_realm_removal  # noqa: PLC0415
         from ..errors import RevlError  # noqa: PLC0415
-        from .edit import _check_realm_removal  # noqa: PLC0415
 
         try:
-            _check_realm_removal(self.ir, target)
+            check_no_realm_removal(self.ir, target, profile)
         except RevlError as error:
             message = error.message + (f" ({error.hint})" if error.hint else "")
             raise SessionError(
@@ -3161,7 +3163,7 @@ class Session:
                 f"may be missing from `components`")
         return out
 
-    def undo(self, to: int | None = None) -> dict:
+    def undo(self, to: int | None = None, *, profile=None) -> dict:
         """Return to an earlier generation — and be, itself, a gated change.
 
         `undo()` returns to generation N−1; `undo(to=g)` to any still-retained
@@ -3211,11 +3213,12 @@ class Session:
         try:
             target_ir = _recompile(target["snapshot"]["sources"],
                                    admitted_name(target["snapshot"]))
-            # issue #2525: an untrusted author may not undo an admitted
-            # provider out of its realm; refused like any target that no
-            # longer admits, before it goes live.
-            from .edit import _check_realm_removal  # noqa: PLC0415
-            _check_realm_removal(self.ir, target_ir)
+            # issue #2525: an untrusted author (`profile`, None for an
+            # operator) may not undo an admitted provider out of its realm;
+            # refused like any target that no longer admits, before it goes
+            # live.
+            from ..admit_profile import check_no_realm_removal  # noqa: PLC0415
+            check_no_realm_removal(self.ir, target_ir, profile)
         except RevlError as error:
             diag = classify(error)
             # nothing ran, so no state was dropped: the list stays as the
