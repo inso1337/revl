@@ -25,7 +25,8 @@ flag, and `revl_export` is reached only over the transport.
   written); no other manifest is read. A missing, unreadable or malformed
   manifest records nothing, so it refuses the overwrite: it fails closed. A
   manifest, and the digest record beside it (`digests.json`, issue #2577),
-  is never an export target, under any spelling.
+  is never an export target, nor a directory any target lies under, under
+  any spelling.
 * TRUST: a file inside any `.revl/export/` directory is the agent's, by path,
   always. Named in `files` or reached by `use`, its text compiles under the
   authoring profile with no operator text to diff against, exactly as if it
@@ -72,6 +73,8 @@ MANIFEST = "manifest.json"
 # every other digest an export wrote: the ones a later export replaced in the
 # manifest, and the loaded text's of a copy with carriage returns (issue #2577)
 DIGESTS = "digests.json"
+# the export directory's parts below a root (`_names_a_record`)
+_EXPORT_PARTS = tuple(EXPORT_DIR.split(os.sep))
 
 # the files the server opened as operator configuration: (st_dev, st_ino) of
 # those that exist, and the case-folded realpath of every one
@@ -266,24 +269,41 @@ def _digests_of(root: str) -> str:
 
 
 def _recorded_digests(record: str) -> dict:
-    """`{sha256: relpath}` from a digest record, or nothing at all unless it
-    is exactly `{"digests": {str: str}}`: a damaged or hand-edited record is
-    ignored, never fatal, and the next export that adds to it starts it
-    again."""
+    """`{sha256: relpath}` from a digest record, or nothing at all when it is
+    missing or damaged (`_parsed_record`)."""
+    return _parsed_record(record) or {}
+
+
+def _parsed_record(record: str) -> dict | None:
+    """`{sha256: relpath}` from the digest record at `record`: empty when
+    nothing is there, None when it is damaged, that is anything but a
+    readable file holding exactly `{"digests": {str: str}}`. A damaged record
+    is ignored, never fatal, and reported (`damaged_records`); the next
+    export that adds to it starts it again."""
+    if not os.path.lexists(record):
+        return {}
     text = _read_exact(record)
     if text is None:
-        return {}
+        return None
     try:
         document = json.loads(text)
     except (ValueError, RecursionError):
-        return {}
+        return None
     digests = document.get("digests") if isinstance(document, dict) else None
     if not isinstance(digests, dict) or set(document) != {"digests"}:
-        return {}
+        return None
     if not all(isinstance(sha, str) and isinstance(key, str)
                for sha, key in digests.items()):
-        return {}
+        return None
     return dict(digests)
+
+
+def damaged_records(roots) -> list[str]:
+    """The digest record of each of `roots` that is there but damaged
+    (`_parsed_record`), as a load and an export report it: what it held no
+    longer matches an adopted copy."""
+    return [record for record in (_digests_of(root) for root in roots)
+            if _parsed_record(record) is None]
 
 
 def exported_as(text: str, roots) -> str | None:
@@ -475,13 +495,27 @@ def _is_latch(path: str, latches) -> bool:
 
 def _is_manifest(path: str, roots) -> bool:
     """Whether `path` names an export manifest or a digest record: any
-    `manifest.json` or `digests.json` inside an export directory, under any
-    spelling, or a link to a root's own."""
-    named = any(_fold(os.path.basename(p)) in (MANIFEST, DIGESTS)
-                and in_export_area(p)
+    `manifest.json` or `digests.json` inside an export directory, or any
+    path under a directory of either name there (`_names_a_record`), under
+    any spelling, or a link to a root's own."""
+    named = any((_fold(os.path.basename(p)) in (MANIFEST, DIGESTS)
+                 and in_export_area(p)) or _names_a_record(p)
                 for p in (os.path.abspath(path), _real(path)))
     return named or any(_same_file(path, _manifest_of(root))
                         or _same_file(path, _digests_of(root)) for root in roots)
+
+
+def _names_a_record(path: str) -> bool:
+    """Whether the spelling `path` has `manifest.json` or `digests.json` as
+    any part after a `.revl/export` directory, compared case-folded (issue
+    #2577). A write there would make the name a directory, and every later
+    write of the record by that name would fail. Reads nothing from the
+    disk."""
+    parts = [_fold(part) for part in path.split(os.sep)]
+    width = len(_EXPORT_PARTS)
+    return any(tuple(parts[i:i + width]) == _EXPORT_PARTS
+               and any(part in (MANIFEST, DIGESTS) for part in parts[i + width:])
+               for i in range(len(parts) - width + 1))
 
 
 def check_not_manifest(paths, roots) -> None:
@@ -491,8 +525,9 @@ def check_not_manifest(paths, roots) -> None:
     hit = [p for p in paths if _is_manifest(p, roots)]
     if hit:
         raise ExportRefused(
-            f"refused: {', '.join(hit)} is the export manifest or its digest "
-            "record, which only revl_export writes; nothing was written")
+            f"refused: {', '.join(hit)} is, or lies under the name of, the "
+            "export manifest or its digest record, which only revl_export "
+            "writes; nothing was written")
 
 
 def check_operator_files(paths, latches=()) -> None:

@@ -1257,7 +1257,11 @@ reaches it (a case alias, a link), so its blocks import as `author: {kind:
 vendor, trust: untrusted}`, the floor the vendored records get when no
 signature covers them, and are marked `vendored`, so an export never writes
 them to the project's sidecar. An unchanged block is never re-attributed: it
-keeps its record and that record's trust.
+keeps its record and that record's trust. A changed block never supersedes a
+note whose author is trusted further than the block's (an operator's or a
+publisher's note under an untrusted author's block, issue #2577): that note
+stays live, and the block becomes a note of its own beside it, at the same
+anchor, with `changes` naming it, riding as its own trust allows.
 
 **Adopting an export** (issue #2577). Copying a file out of `.revl/export/`
 into the project adopts its code, not the author's notes. A loaded file
@@ -1270,26 +1274,38 @@ copy replaced, and the loaded text's of a copy with carriage returns. So a
 copy adopted byte for byte matches, and so does one whose line ends were
 converted (a load reads `\r\n` and `\r` as `\n`), however often the export
 is written again; a byte-order mark, an added trailing newline or any other
-changed byte does not. Only `revl_export` writes either file, and neither is
-ever an export target; a damaged or hand-edited `digests.json` is ignored.
+changed byte does not. Only `revl_export` writes either file, and neither
+is ever an export target, nor a directory any export target lies under. An
+export writes the digest record before the manifest, so a stop between the
+two loses no digest; when the record write fails the export fails too,
+naming the record, with the manifest left as it was: a record is never lost
+silently. A damaged `digests.json` (not JSON, the wrong shape, or not a
+readable file) is ignored and reported: the load and the export results
+name it in `exportRecordDamaged`, and the next export that adds to it starts
+it again. A record removed by hand cannot be told from one no export has
+needed yet, so a copy that only it matched then loads as the operator's.
 
 An adopted copy's changed and unrecorded blocks import as `author: {kind:
 agent, trust: untrusted, adoptedFrom: <the export copy, relative to its
 root>}`: they ride exactly as an untrusted add does (the body withheld until
 the note carries evidence), a sidecar export writes them with that label,
-and a changed body is an untrusted supersede, never an operator one. A
-block is changed only when its body differs from every note on its id's
-supersede chain, so reloading the same copy once its notes were exported
-with `with_knowledge` records nothing more. The load answers with
-`notesAdopted`, one entry per such block: `id` (the new note), `symbol`,
-`file`, `adoptedFrom`, and `block`, which is `changed` for a recorded note's
-rewritten body (with `supersedes` naming the note it replaces) or
-`unrecorded`. The field is
-absent when nothing was adopted, and it never carries a body: read one with
-`revl_knowledge {op: query, id}`. No verb promotes an adopted note. An
-operator who wants one as their own adds it, or supersedes it, with
-`revl_knowledge` from a session at operator trust, or writes the block into
-the file themselves, which ends the match below.
+and a changed body is an untrusted supersede, never an operator one, or,
+over an operator's or a publisher's note, a note beside it naming it in
+`changes`. A block is changed only when its body differs from every note on
+its id's supersede chain and every note beside one, so reloading the same
+copy once its notes were exported with `with_knowledge` records nothing
+more. A block reverted to the body of an older note on its chain is
+unchanged too: nothing is recorded or listed, and the chain's last note
+stands. The load answers with `notesAdopted`, one entry per such block:
+`id` (the new note), `symbol`, `file`, `adoptedFrom`, and `block`, which is
+`changed` for a recorded note's rewritten body (with `supersedes` naming
+the note it replaces, or `changes` naming the note trusted further that it
+stands beside) or `unrecorded`. The field is absent when nothing was
+adopted, and it never carries a body: read one with `revl_knowledge {op:
+query, id}`. No verb promotes an adopted note. An operator who wants one as
+their own adds it, or supersedes it, with `revl_knowledge` from a session
+at operator trust, or writes the block into the file themselves, which ends
+the match below.
 
 Any other file holds bytes no MCP verb wrote, so its blocks import as
 `author: {kind: human, trust: operator}`. That includes an adopted copy the

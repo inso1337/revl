@@ -1144,11 +1144,15 @@ def _ride_knowledge(name: str, payload, arguments: dict | None = None) -> None:
         if name == "revl_load" and payload.get("ok"):
             _notes.load_sidecar(SESSION, vs)
             # issue #2577: the blocks an adopted export copy brought in, shown
-            # to the operator at the load that read them
+            # to the operator at the load that read them, and any digest record
+            # too damaged to match one
             adopted = _notes.adopted_blocks(
                 _notes.import_marked(SESSION, vs, _file_roots()))
             if adopted:
                 payload["notesAdopted"] = adopted
+            damaged = _export_jail.damaged_records(_file_roots())
+            if damaged:
+                payload["exportRecordDamaged"] = damaged
             _notes.load_vendored(SESSION, vs)
         if moved or name == "revl_load":
             _notes.refresh(SESSION, vs)
@@ -2253,7 +2257,8 @@ def _tool_export(arguments: dict) -> dict:
     file, created exclusively, never compiled (issue #2534), each named by
     its record id and passing the same checks as every other target (issue
     #2564). A write that fails part way raises `ExportIncomplete`, naming the
-    files that landed."""
+    files that landed. So does a digest record write that fails, and the
+    manifest is then left as it was (`_record_export`, issue #2577)."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
@@ -2263,6 +2268,9 @@ def _tool_export(arguments: dict) -> dict:
         plan = _export_plan(held, arguments, skipped)
     except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
+    # issue #2577: a damaged digest record is reported; this export starts it
+    # again only when it adds to it
+    damaged = _export_jail.damaged_records(_file_roots())
     written: list = []
     stopped = None
     try:
@@ -2276,29 +2284,46 @@ def _tool_export(arguments: dict) -> dict:
     finally:
         # recorded only once its bytes are on disk: a failed write records
         # nothing, so the manifest never vouches for bytes no export wrote
-        roots = _file_roots()
-        # issue #2577: read before the manifests change, since it keeps the
-        # digests they are about to replace
-        digests = _export_jail.digest_writes(written, roots)
-        for path, text in _export_jail.manifest_writes(written, roots):
-            _write_atomic(path, text)
-        for path, text in digests:
-            try:
-                _write_atomic(path, text)
-            except OSError:
-                pass  # a record not kept leaves a later copy unmatched, no more
-    if stopped is not None:
-        # issue #2534: say which files did land, so the operator can find them
+        unkept = _record_export(written)
+    if stopped is not None or unkept is not None:
+        # issue #2534: say which files did land, so the operator can find them;
+        # issue #2577: a record not kept is reported, never passed over
         landed = [p for p, _ in written]
+        stop = stopped or unkept
         raise _export_jail.ExportIncomplete(
-            *stopped, landed,
-            _export_jail.recorded_paths(landed, _file_roots())) from stopped[1]
+            *stop, landed,
+            [] if unkept else _export_jail.recorded_paths(landed, _file_roots())
+        ) from stop[1]
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
     if skipped:
         payload["skipped"] = skipped
+    if damaged:
+        payload["exportRecordDamaged"] = damaged
     return payload
+
+
+def _record_export(written) -> tuple | None:
+    """Record the `written` (path, text) pairs of an export, on disk: each
+    root's digest record first, then its manifest (issue #2577). The record
+    keeps every digest the manifest is about to replace, read before either
+    changes, so an export stopped between the two loses none. A record write
+    that fails writes no manifest, so the manifest keeps the digests it
+    held, and comes back as (path, error) for the export to report: a copy
+    no record keeps would later load as the operator's. None when every
+    record was kept."""
+    roots = _file_roots()
+    digests = _export_jail.digest_writes(written, roots)
+    manifests = _export_jail.manifest_writes(written, roots)
+    for path, text in digests:
+        try:
+            _write_atomic(path, text)
+        except OSError as error:
+            return path, error
+    for path, text in manifests:
+        _write_atomic(path, text)
+    return None
 
 
 def _export_plan(held: dict, arguments: dict,

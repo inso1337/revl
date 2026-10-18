@@ -322,7 +322,7 @@ def served(note: dict) -> dict:
     """A note as it rides: its body only if the ride policy allows it."""
     shown = {k: note[k] for k in ("id", "kind", "anchor", "author", "status",
                                   "evidence", "supersedes", "supersededBy",
-                                  "vendored")
+                                  "changes", "vendored")
              if note.get(k) is not None}
     untrusted = note["author"].get("trust") == "untrusted"
     allowed = (RIDE_POLICY == "all"

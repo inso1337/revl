@@ -25,8 +25,10 @@ notes an agent (or a human, through an export) adds on top:
 * the ROUND TRIP: an export renders each live note as a marked comment block
   above its anchor (`// note k_<id>:`, the body, then `// [k_<id>]`), and a
   load reads marked blocks back. A body that differs from the record becomes a
-  supersede, and a marked block with no record a new note, authored by whoever
-  wrote the file (issue #2550): an untrusted agent for a file under
+  supersede (or, when the record's author is trusted further than the file's
+  writer, a note beside it naming it in `changes`, issue #2577), and a marked
+  block with no record a new note, authored by whoever wrote the file (issue
+  #2550): an untrusted agent for a file under
   `.revl/export/` or for an adopted copy of an export elsewhere (issue
   #2577), an untrusted vendor for a vendored truc's component, a
   human at operator trust for any other file.
@@ -669,18 +671,21 @@ def adopted_blocks(created: list[dict]) -> list[dict]:
     """The records among `created` (what `import_marked` returned) read from
     an adopted export copy (issue #2577), as the load reports them: the new
     note, its symbol and file, the export it came from, and whether it
-    changed a recorded note's body (naming that note) or had no record. The
-    body is not repeated: it rides by the note's trust."""
+    changed a recorded note's body, naming that note as the one it
+    `supersedes` or, for a note trusted further, the one it `changes`, or
+    had no record. The body is not repeated: it rides by the note's trust."""
     out = []
     for record in created:
         source = (record.get("author") or {}).get("adoptedFrom")
         if source is None:
             continue
+        changed = record.get("supersedes") or record.get("changes")
         entry = {"id": record["id"], "symbol": record["anchor"]["symbol"],
                  "file": record["anchor"]["path"], "adoptedFrom": source,
-                 "block": "changed" if record.get("supersedes") else "unrecorded"}
-        if record.get("supersedes"):
-            entry["supersedes"] = record["supersedes"]
+                 "block": "changed" if changed else "unrecorded"}
+        for field in ("supersedes", "changes"):
+            if record.get(field):
+                entry[field] = record[field]
         out.append(entry)
     return out
 
@@ -713,11 +718,57 @@ def _chain(current: dict, note_id: str) -> list[dict]:
     return chain
 
 
+def _beside(current: dict, chain: list[dict]) -> list[dict]:
+    """The notes recorded beside one of `chain`'s in place of a supersede
+    (`changes`, issue #2577). A block whose body is one of theirs was read
+    back already, so reloading the same copy records nothing more."""
+    ids = {note["id"] for note in chain}
+    return [note for note in current.values() if note.get("changes") in ids]
+
+
+#: how far a note's author is trusted, for reading a block back over it
+#: (issue #2577). A trust this does not name ranks as an operator's for the
+#: note's author and lowest for the block's
+_IMPORT_RANK = {"untrusted": 0, "publisher": 1, "operator": 2}
+
+
+def _outranks(owner, writer) -> bool:
+    """Whether a note by `owner` is trusted further than `writer`, the author
+    of a block read back over it: an untrusted author's block never
+    supersedes an operator's or a publisher's note, through an export copy
+    or an adopted one. Decided before any supersede is made, so the block is
+    kept beside the note rather than lost to a refused supersede."""
+    def trust(author):
+        return author.get("trust") if isinstance(author, dict) else None
+    return (_IMPORT_RANK.get(trust(owner), _IMPORT_RANK["operator"])
+            > _IMPORT_RANK.get(trust(writer), 0))
+
+
+def _import_block(session, vs: dict, existing: dict | None, body: str,
+                  symbol: str, author: dict) -> dict:
+    """Record a block's `body`, read back over `existing` (the last note on
+    its chain, or None for a block with no record), by `author`: a supersede
+    of `existing`, unless its author is trusted further (`_outranks`). Then
+    the block is a note beside it naming it in `changes` (issue #2577): the
+    original stays live, and the author's text rides as the author's trust
+    allows. Raises `NoteError` as `add` does."""
+    kind = existing["kind"] if existing is not None else "doc"
+    beside = existing is not None and _outranks(existing.get("author"), author)
+    record = add(session, vs, {"kind": kind, "body": body}, symbol,
+                 author=dict(author),
+                 supersedes=existing["id"] if existing and not beside else None)
+    if beside:
+        record = {**record, "changes": existing["id"]}
+        _records(session)[record["id"]] = record
+    return record
+
+
 def import_marked(session, vs: dict, roots=()) -> list[dict]:
     """Read the marked blocks of the loaded files back. A body that differs
-    from every note on its id's supersede chain (`_chain`) supersedes the
-    last of them, and a block with no record becomes a note, authored by
-    whoever wrote the file (`_import_author`, decided once per file); an
+    from every note on its id's supersede chain (`_chain`), and from every
+    note beside one (`_beside`), is recorded over the last of them
+    (`_import_block`), and a block with no record becomes a note, authored
+    by whoever wrote the file (`_import_author`, decided once per file); an
     adopted export copy's records are the ones `adopted_blocks` lists.
     `roots` are the sanctioned roots whose export records name an adopted
     copy (the server passes its own); with none, no file counts as one."""
@@ -734,22 +785,20 @@ def import_marked(session, vs: dict, roots=()) -> list[dict]:
             if note_id is None:
                 continue
             chain = _chain(current, note_id)
-            if any(note["body"] == body for note in chain):
+            if any(note["body"] == body
+                   for note in chain + _beside(current, chain)):
                 continue
-            existing = chain[-1] if chain else None
             if parsed is None:
                 parsed = _parsed(text, name)
             program, decls, nodes = parsed
             symbol = _k.anchor_of(text, name, block, decls, nodes, program)[0]
             if symbol is None:
                 continue
-            kind = existing["kind"] if existing is not None else "doc"
             if author is None:
                 author = _import_author(name, text, roots)
             try:
-                record = add(session, vs, {"kind": kind, "body": body},
-                             symbol, author=dict(author),
-                             supersedes=existing["id"] if existing else None)
+                record = _import_block(session, vs, chain[-1] if chain else None,
+                                       body, symbol, author)
             except NoteError:
                 continue
             created.append(_mark_vendored(session, record, name))
