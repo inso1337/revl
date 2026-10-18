@@ -143,9 +143,10 @@ def _state(component: str) -> list:
 
 
 def test_a_renamed_provider_without_handoff_starts_cold(clean_session):
-    """Renaming the provider while dropping its clause is not refused: the
-    renamed component is a new provider. That is safe only because, with no
-    `handoff` on the successor, it starts with an empty store. The original
+    """Renaming the provider while dropping its clause moves the provision
+    under a new name, which an untrusted author may not do (issue #2523). A
+    trusted operator may, and the renamed component is a new provider: with
+    no `handoff` on the successor it starts with an empty store. The original
     declares `handoff kv`, so its state is captured, and a marker written
     straight into its store must not reach the successor. (`who` is
     TenantAApp's own seed, re-run against the new provider.)"""
@@ -159,11 +160,14 @@ def test_a_renamed_provider_without_handoff_starts_cold(clean_session):
         server_mod.SESSION._driver.fibers["TenantAStore"])[0]
     store.insert("secret", "tenant-a-data")
     assert _state("TenantAStore") == [{"who": "alice", "secret": "tenant-a-data"}]
-    renamed = _call("revl_change", {"commit": True, "edit": {
-        "target": str(path), "edits": [
-            {"anchor": "component TenantAStore", "replacement": "component Renamed"},
-            {"anchor": CLAUSE, "replacement": ""},
-            {"anchor": "handoff kv: Map[Str, Str]", "replacement": ""}]}})
+    edit = {"target": str(path), "edits": [
+        {"anchor": "component TenantAStore", "replacement": "component Renamed"},
+        {"anchor": CLAUSE, "replacement": ""},
+        {"anchor": "handoff kv: Map[Str, Str]", "replacement": ""}]}
+    refused = _call("revl_change", {"commit": True, "edit": edit})
+    assert not refused.get("swapped") and REFUSAL in _messages(refused), refused
+    server_mod.set_authoring_trust(host_code=True)
+    renamed = _call("revl_change", {"commit": True, "edit": edit})
     assert renamed.get("swapped") is True, renamed
     assert _realms("Renamed") == {}
     assert _state("Renamed") == [{"who": "alice"}]
