@@ -2298,7 +2298,7 @@ def _edit_loaded_result(arguments: dict, verify, commit: bool) -> dict:
 
 def _tool_rollback(_arguments: dict) -> dict:
     try:
-        return {"ok": True, **SESSION.rollback()}
+        return {"ok": True, **SESSION.rollback(profile=AUTHORING.profile())}
     except SessionError as error:
         # a rollback refused after its teardown restarted the running
         # generation cold, and says which state that dropped (issue #2424)
@@ -2331,7 +2331,7 @@ def _tool_undo(arguments: dict) -> dict:
     if not SESSION.loaded:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
-        result = SESSION.undo(arguments.get("to"))
+        result = SESSION.undo(arguments.get("to"), profile=AUTHORING.profile())
     except SessionError as error:
         return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the

@@ -504,27 +504,48 @@ def check_no_realm_placement(root_programs: list[Program],
         )
 
 
-def _removed_provision_realms(admitted: dict,
-                              candidate: dict) -> list[tuple[str, str, str, str | None]]:
-    """`(component, key, admitted realm, candidate realm)` for every provision
-    whose realm the candidate moves: a component in both generations that still
-    provides `key`, where the admitted generation placed `key` in a realm and
-    the candidate places it elsewhere or nowhere (the shared realm)."""
-    running = {c.get("name"): c for c in admitted.get("components") or []}
-    moved = []
-    for comp in candidate.get("components") or []:
-        before = running.get(comp.get("name"))
-        if before is None:
-            continue
-        placed = before.get("isolate") or {}
-        now = comp.get("isolate") or {}
-        # provisions only: an untrusted author can already add a shared-realm
-        # `requires` and copy data out through it, so a requirer that drops its
-        # realm adds nothing this check could refuse
+def _provisions(ir: dict) -> set[tuple[str, str, str | None]]:
+    """`(component, key, realm)` for every provision in `ir`; `None` is the
+    shared realm."""
+    out = set()
+    for comp in ir.get("components") or []:
+        placed = comp.get("isolate") or {}
         for key in comp.get("provides") or {}:
-            realm = placed.get(key)
-            if realm is not None and now.get(key) != realm:
-                moved.append((comp["name"], key, realm, now.get(key)))
+            out.add((comp.get("name"), key, placed.get(key)))
+    return out
+
+
+def _removed_provision_realms(admitted: dict,
+                              candidate: dict
+                              ) -> list[tuple[str, str, str, str | None, str]]:
+    """`(component, key, admitted realm, candidate realm, admitted component)`
+    for every realm-placed provision the candidate moves out of its realm.
+
+    Compared per `(key, realm)` across every component, not per surviving
+    component name (issue #2523): a provider renamed while its clause is
+    dropped is a different name holding the same key, and a by-name
+    comparison saw no survivor and so nothing moved. The admitted generation
+    provides `key` in `realm`; the candidate provides `key` in no component in
+    that realm, yet still provides `key` through a provision the admitted
+    generation did not have (a new component, or an old one in a new realm).
+    That provision is where the key went, and it names the component the
+    refusal points at. A key the candidate no longer provides anywhere, or
+    provides only through provisions that were already admitted unchanged
+    (a second tenant's store), was withdrawn with its provider: nothing
+    moved."""
+    before = _provisions(admitted)
+    after = _provisions(candidate)
+    still = {(key, realm) for _c, key, realm in after}
+    fresh = sorted(after - before, key=lambda p: (p[0] or "", p[1], p[2] or ""))
+    moved = []
+    for was, key, realm in sorted(before, key=lambda p: (p[0] or "", p[1],
+                                                         p[2] or "")):
+        if realm is None or (key, realm) in still:
+            continue
+        for comp, new_key, now in fresh:
+            if new_key == key:
+                moved.append((comp, key, realm, now, was))
+                break
     return moved
 
 
@@ -552,14 +573,17 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     provision, and the data behind it, from a realm-scoped boundary into the
     shared realm, where any shared-realm component may bind it. That is the
     authority widening the placement refusal exists to stop, reached by
-    deletion. So for a component that is in the admitted generation and in the
-    candidate, and still provides the key, the candidate must keep the realm
-    the admitted generation placed it in.
+    deletion. So a key the admitted generation provides in a realm, and the
+    candidate still provides, must still be provided in that realm, whichever
+    component provides it now: renaming the provider in the same edit is the
+    same move under a new name (issue #2523).
 
     Only provisions are compared. A requirer that leaves its realm binds a
     shared-realm provider instead, which an untrusted author may already add,
     so it gains nothing. Withdrawing the provider takes its provision with it,
-    which moves nothing and is unaffected; so is a trusted author (`None`
+    which moves nothing and is unaffected, as is renaming the key itself: the
+    old key is withdrawn, and a realm consumer that still requires it is left
+    unbound, since binding is per (key, realm). So is a trusted author (`None`
     profile) and a first generation (`admitted is None`).
 
     `texts` maps each candidate filename to its text, so the refusal points at
@@ -569,23 +593,25 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     moved = _removed_provision_realms(admitted, candidate)
     if not moved:
         return
-    name, key, realm, now = moved[0]
+    name, key, realm, now, was = moved[0]
     where = "the shared realm" if now is None else f'realm("{now}")'
+    origin = "" if was == name else f" on `{was}`"
     filename = next((c.get("source") for c in candidate.get("components") or []
                      if c.get("name") == name), None)
     raise RevlError(
         filename or "<candidate>", _component_line(texts, filename, name),
         f"admission refused: this author cannot remove the realm placement of "
-        f"`{name}`: the admitted `isolate {key} in realm(\"{realm}\")` would "
-        f"move its `{key}` provision to {where}",
-        hint="removing a realm clause from a provider that stays admitted makes "
+        f"`{name}`: the admitted `isolate {key} in realm(\"{realm}\")`{origin} "
+        f"would move its `{key}` provision to {where}",
+        hint="removing a realm clause from a provider that stays admitted, "
+             "or from one renamed in the same edit, makes "
              "its provision, and the data behind it, bindable by any "
              "shared-realm component, which widens authority as surely as "
              "naming a realm does. Keep the clause, withdraw the component "
              "instead, or have an operator move it through the gated swap "
-             "(issue #2487)",
+             "(issues #2487, #2523)",
         code="G9", category="admission",
-        navigate=_realm_removal_navigate([r for _n, _k, r, _w in moved]),
+        navigate=_realm_removal_navigate([m[2] for m in moved]),
     )
 
 
