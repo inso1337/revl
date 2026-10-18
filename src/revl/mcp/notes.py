@@ -11,7 +11,9 @@ notes an agent (or a human, through an export) adds on top:
   `<composition dir>/.revl/knowledge/<id>.json`, so two lanes never write the
   same file. It is read at `revl_load` and written only by `revl_export
   {with_knowledge: true}`, each record as a new file created exclusively,
-  never over one already there (issue #2534): disk is an export (issue #1696);
+  never over one already there (issue #2534): disk is an export (issue #1696).
+  An id is `k_` and twelve lower-case hex digits; a record file holding any
+  other id is ignored, and no file name is built from one (issue #2564);
 * TRUST follows authorship. Under the untrusted-author profile an agent's note
   is `trust: untrusted`, and by default only an evidence-backed untrusted note
   rides with its body; an evidence-free one rides as its id and kind, with the
@@ -41,7 +43,10 @@ EVIDENCE_KINDS = ("diagnostic", "query", "audit", "test", "issue")
 BODY_LIMIT = 2048
 PER_ANCHOR_LIMIT = 16
 SIDECAR = os.path.join(".revl", "knowledge")
-TRAILER = re.compile(r"^\[(k_[0-9a-f]{12})\]$")
+#: a record id, the only one the store mints and the only one a sidecar file
+#: name is built from (issue #2564)
+RECORD_ID = re.compile(r"k_[0-9a-f]{12}")
+TRAILER = re.compile(rf"^\[({RECORD_ID.pattern})\]$")
 
 #: the ride policy and `served` live in `revl.knowledge`, outside `revl.mcp`, so
 #: the registry serves a shipped record by the same rule (issue #1780)
@@ -363,7 +368,8 @@ def sidecar_dir(vs: dict) -> str | None:
 
 
 def load_sidecar(session, vs: dict) -> int:
-    """Read every record of the composition's sidecar into the session."""
+    """Read every record of the composition's sidecar into the session. A
+    record whose id is not a record id is ignored (issue #2564)."""
     session.note_records = {}
     directory = sidecar_dir(vs)
     if directory is None or not os.path.isdir(directory):
@@ -377,15 +383,44 @@ def load_sidecar(session, vs: dict) -> int:
                 record = json.load(handle)
         except (OSError, ValueError):
             continue
-        if isinstance(record, dict) and isinstance(record.get("id"), str):
+        if isinstance(record, dict) and is_record_id(record.get("id")):
             _records(session)[record["id"]] = record
             count += 1
     return count
 
 
-def sidecar_writes(session, vs: dict) -> list[tuple[str, str]]:
+def is_record_id(value) -> bool:
+    """Whether `value` is a record id: `k_` and twelve lower-case hex digits."""
+    return isinstance(value, str) and RECORD_ID.fullmatch(value) is not None
+
+
+def record_path(directory: str, record_id) -> str | None:
+    """`<directory>/<record_id>.json`, or None unless `record_id` is a record
+    id and the joined path lies directly under `directory` (issue #2564)."""
+    if not is_record_id(record_id):
+        return None
+    name = f"{record_id}.json"
+    if os.sep in name or (os.altsep and os.altsep in name) or ".." in name:
+        return None
+    real = os.path.realpath(directory)
+    if os.path.dirname(os.path.normpath(os.path.join(real, name))) != real:
+        return None
+    return os.path.join(directory, name)
+
+
+def is_record_path(path: str, directory: str | None) -> bool:
+    """Whether `path` is a sidecar record file of `directory`."""
+    name = os.path.basename(path)
+    return (directory is not None and name.endswith(".json")
+            and record_path(directory, name[:-len(".json")]) == path)
+
+
+def sidecar_writes(session, vs: dict,
+                   skipped: list | None = None) -> list[tuple[str, str]]:
     """(path, text) of every record not yet in the sidecar. A vendored record is
-    the vendor's, so it never lands in the project's sidecar."""
+    the vendor's, so it never lands in the project's sidecar. A record whose
+    id is not a record id names no file: it is added to `skipped`, never
+    written (issue #2564)."""
     directory = sidecar_dir(vs)
     if directory is None:
         return []
@@ -393,7 +428,11 @@ def sidecar_writes(session, vs: dict) -> list[tuple[str, str]]:
     for record in _records(session).values():
         if record.get("vendored"):
             continue
-        path = os.path.join(directory, f"{record['id']}.json")
+        path = record_path(directory, record.get("id"))
+        if path is None:
+            if skipped is not None:
+                skipped.append(f"knowledge record {record.get('id')!r}")
+            continue
         if not os.path.exists(path):
             out.append((path, json.dumps(record, indent=2, sort_keys=True) + "\n"))
     return out
@@ -587,5 +626,6 @@ def _parsed(text: str, name: str) -> tuple:
 __all__ = ["KINDS", "EVIDENCE_KINDS", "query_verbs", "RERUNNABLE", "run_evidence",
            "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
+           "RECORD_ID", "is_record_id", "record_path", "is_record_path",
            "load_vendored", "vendored_trucs", "vendored_path",
            "render", "import_marked"]

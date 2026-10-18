@@ -61,6 +61,9 @@ from ..export_area import fold as _fold
 from ..export_area import read_exact as _read_exact
 from ..export_area import real as _real
 from ..export_area import under_export_dir as _under_export_dir
+# the one record-id rule: a sidecar target is checked by the function that
+# built its name (issue #2564)
+from .notes import is_record_path
 
 MANIFEST = "manifest.json"
 
@@ -312,13 +315,20 @@ def check_inline(path: str, modules: dict, roots) -> None:
             "there; nothing was written")
 
 
-def check_write_back(paths) -> None:
-    """Refuse writing a files-loaded composition back as a non-`.rvl` file."""
+def check_write_back(paths, records=(), record_dir: str | None = None) -> None:
+    """Refuse writing a files-loaded composition back as a non-`.rvl` file,
+    and a knowledge sidecar record (`records`) anywhere but directly under
+    its sidecar directory, named by a record id (issue #2564)."""
     not_rvl = [p for p in paths if not p.endswith(".rvl")]
     if not_rvl:
         raise ExportRefused(
             f"refused: {', '.join(not_rvl)} is not a .rvl file; revl_export "
             "writes only revl modules; nothing was written")
+    misplaced = [p for p in records if not is_record_path(p, record_dir)]
+    if misplaced:
+        raise ExportRefused(
+            f"refused: {', '.join(misplaced)} is not a knowledge record file "
+            "of the sidecar directory; nothing was written")
 
 
 def check_note_bodies(notes) -> None:

@@ -1121,7 +1121,10 @@ in the sidecar (`revl_knowledge`). A sidecar record is a JSON file under
 `.revl/knowledge/`, outside the export directory because `revl_load` and `truc`
 read the records there; it is never compiled, and it is created exclusively,
 so a file already at that path, even one that appeared after the checks ran,
-stops the export instead of being replaced (issue #2534). A note whose body holds a carriage return,
+stops the export instead of being replaced (issue #2534). A record file whose
+id is not `k_` and twelve lower-case hex digits is ignored at load, and no
+export builds a file name from such an id (one is listed in `skipped`, issue
+#2564). A note whose body holds a carriage return,
 another Unicode line separator or a byte-order mark is refused, since a `//`
 comment cannot carry it. A vendored truc's records and its `component.rvl` are
 left alone (issue #1769, see docs/registry.md §1.4).

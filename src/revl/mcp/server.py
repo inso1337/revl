@@ -2245,8 +2245,10 @@ def _tool_export(arguments: dict) -> dict:
 
     Knowledge sidecars (`with_knowledge`) are the one write outside the export
     directory: new JSON files under `.revl/knowledge/` beside the first loaded
-    file, created exclusively, never compiled (issue #2534). A write that
-    fails part way raises `ExportIncomplete`, naming the files that landed."""
+    file, created exclusively, never compiled (issue #2534), each named by
+    its record id and passing the same checks as every other target (issue
+    #2564). A write that fails part way raises `ExportIncomplete`, naming the
+    files that landed."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
@@ -2256,15 +2258,13 @@ def _tool_export(arguments: dict) -> dict:
         plan = _export_plan(held, arguments, skipped)
     except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
-    sidecar = _notes.sidecar_dir(held)
     written: list = []
     stopped = None
     try:
-        for path, text in plan:
-            if sidecar is not None and os.path.dirname(path) == sidecar:
-                _write_new(path, text)
-            else:
-                _write_atomic(path, text)
+        for entry in plan:
+            path, text = entry
+            # the writer follows the entry's own mark (issue #2564)
+            (_write_new if entry.new_only else _write_atomic)(path, text)
             written.append((path, text))
     except OSError as error:
         stopped = (path, error)
@@ -2296,7 +2296,8 @@ def _export_plan(held: dict, arguments: dict,
     what it may replace. There is no in-place path."""
     roots = _file_roots()
     if held.get("files"):
-        targets = _write_back_targets(held, arguments)
+        targets = _write_back_targets(held, arguments,
+                                      skipped if skipped is not None else [])
     else:
         targets = _inline_targets(held, arguments, roots,
                                   skipped if skipped is not None else [])
@@ -2329,10 +2330,24 @@ def _live_latches() -> list:
         getattr(SESSION, "_slo_latch", None)]
 
 
-def _write_back_targets(held: dict, arguments: dict) -> list[tuple[str, str]]:
+class _Target(tuple):
+    """One export plan entry, `(path, text)`. `new_only` marks a knowledge
+    sidecar record, which is created as a new file and never replaces one
+    (issue #2534); the writer is chosen by this mark, never by where the
+    path lies (issue #2564)."""
+
+    def __new__(cls, path: str, text: str, *, new_only: bool = False):
+        entry = super().__new__(cls, (path, text))
+        entry.new_only = new_only
+        return entry
+
+
+def _write_back_targets(held: dict, arguments: dict,
+                        skipped: list) -> list[_Target]:
     """A files-loaded composition: each loaded file whose held text differs
     from its export copy, written to that copy under the export directory,
-    never over the operator's file (plus knowledge sidecars on request)."""
+    never over the operator's file (plus knowledge sidecars on request). The
+    sidecar records are checked with the copies, before either is planned."""
     with_knowledge = arguments.get("with_knowledge") is True
     # a vendored truc's records are the vendor's: never rendered, never
     # copied into the project's sidecar. Nothing is rendered INTO a vendored
@@ -2350,12 +2365,15 @@ def _write_back_targets(held: dict, arguments: dict) -> list[tuple[str, str]]:
             text = _notes.render(text, path, [n for n in all_notes
                                                if n["anchor"]["path"] == path])
         targets.append((path, text))
-    targets = [(_export_jail.export_copy(p, roots), t)
+    targets = [_Target(_export_jail.export_copy(p, roots), t)
                for p, t in targets if _diverges(t, p)]
-    _export_jail.check_write_back([p for p, _ in targets])
-    if with_knowledge:
-        targets += _notes.sidecar_writes(SESSION, held)
-    return targets
+    records = ([_Target(p, t, new_only=True)
+                for p, t in _notes.sidecar_writes(SESSION, held, skipped)]
+               if with_knowledge else [])
+    _export_jail.check_write_back([p for p, _ in targets],
+                                  [p for p, _ in records],
+                                  _notes.sidecar_dir(held))
+    return targets + records
 
 
 def _inline_targets(held: dict, arguments: dict, roots: tuple[str, ...],
@@ -2379,8 +2397,8 @@ def _inline_targets(held: dict, arguments: dict, roots: tuple[str, ...],
     reached = _export_jail.reached_modules(held.get("source") or "", modules)
     skipped.extend(sorted(k for k in modules if k not in reached))
     modules = {k: v for k, v in modules.items() if k in reached}
-    return list(zip(placed(modules),
-                    [held["source"], *modules.values()]))
+    return [_Target(p, t) for p, t in zip(placed(modules),
+                                          [held["source"], *modules.values()])]
 
 
 def _write_new(path: str, text: str) -> None:
