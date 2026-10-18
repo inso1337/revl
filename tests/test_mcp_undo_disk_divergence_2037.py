@@ -120,8 +120,9 @@ def _exported_then_reverted(tree, verb) -> dict:
     changed = _change(tree)
     assert changed["ok"] is True and changed["committed"] is True, changed
     exported = _call("revl_export", {})
-    assert exported["written"] == [str(tree["mem"])], exported
-    assert '== "b"' in tree["mem"].read_text(encoding="utf-8")
+    assert exported["written"] == [str(_exported(tree["mem"]))], exported
+    assert '== "b"' in _exported(tree["mem"]).read_text(encoding="utf-8")
+    assert '== "b"' not in tree["mem"].read_text(encoding="utf-8")
     return _call(verb, {})
 
 
@@ -146,7 +147,7 @@ def test_acceptance_1_undo_names_the_retracted_change_left_on_disk(tree):
     result = _exported_then_reverted(tree, "revl_undo")
     assert result["ok"] is True and result["undone"] is True, result
     # the trap, unchanged and now reported: the session reverted, disk did not
-    assert '== "b"' in tree["mem"].read_text(encoding="utf-8")
+    assert '== "b"' in _exported(tree["mem"]).read_text(encoding="utf-8")
     assert result["disk"] == {"inSync": False, "stale": [str(tree["mem"])]}
 
 
@@ -159,7 +160,7 @@ def test_acceptance_2_every_revert_reports_the_divergence(tree, verb):
     assert result["ok"] is True, result
     assert result["disk"] == {"inSync": False, "stale": [str(tree["mem"])]}
     # the change really is still on disk, not merely reported as such
-    assert '== "b"' in tree["mem"].read_text(encoding="utf-8")
+    assert '== "b"' in _exported(tree["mem"]).read_text(encoding="utf-8")
 
 
 # ------------------------------------------ acceptance 3: the clean case
@@ -185,10 +186,10 @@ def test_acceptance_4_the_export_after_an_undo_writes_the_reverted_text(tree):
     result = _exported_then_reverted(tree, "revl_undo")
     assert result["disk"]["inSync"] is False
     exported = _call("revl_export", {})
-    assert exported["ok"] is True and exported["written"] == [str(tree["mem"])]
+    assert exported["ok"] is True and exported["written"] == [str(_exported(tree["mem"]))]
     assert exported["disk"] == {"inSync": True, "stale": []}
-    assert tree["mem"].read_text(encoding="utf-8") == _held(tree)
-    assert '== "b"' not in tree["mem"].read_text(encoding="utf-8")
+    assert _exported(tree["mem"]).read_text(encoding="utf-8") == _held(tree)
+    assert '== "b"' not in _exported(tree["mem"]).read_text(encoding="utf-8")
 
 
 # ------------------------------- naming the verb that writes the revert out
@@ -221,7 +222,8 @@ def test_the_report_is_exactly_what_an_export_would_write(tree, verb):
     plan's target list."""
     result = _exported_then_reverted(tree, verb)
     plan = server_mod._export_plan(edit_mod.running_source(server_mod.SESSION), {})
-    assert result["disk"]["stale"] == [path for path, _text in plan]
+    assert [str(_exported(p)) for p in result["disk"]["stale"]] == [
+        path for path, _text in plan]
     assert result["disk"]["stale"] == [str(tree["mem"])]
 
 
@@ -254,3 +256,11 @@ def test_the_revert_verb_names_the_verb_that_writes_it_out(verb, monkeypatch):
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     described = {t["name"]: t["description"] for t in listed["result"]["tools"]}
     assert "revl_export" in described[verb]
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

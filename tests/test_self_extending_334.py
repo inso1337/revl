@@ -300,7 +300,7 @@ def test_edge1_activation_error_reverts_to_gen_N(gate_factory):
     driver._settle = _cancel_beta
     try:
         with pytest.raises(SessionError) as excinfo:
-            session.swap(compile_source(succ, "succ.rvl"))
+            session.swap(compile_source(succ, "succ.rvl"), agent_authored=False)
         assert "swap rejected" in str(excinfo.value)
 
         state = session.state()
@@ -339,7 +339,7 @@ def test_swap_health_gate_reverts_failed_and_pending_directly(artifact):
         session = Session()
         session.load(copy.deepcopy(base_ir), record=True)
         with pytest.raises(SessionError) as excinfo:
-            session.swap(compile_source(src, "cand.rvl"))
+            session.swap(compile_source(src, "cand.rvl"), agent_authored=False)
         assert "swap rejected" in str(excinfo.value)
         # gen N still serving — the successor never became live.
         assert session.state()["providedKeys"] == ["greeter"]

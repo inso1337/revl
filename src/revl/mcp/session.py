@@ -1778,7 +1778,7 @@ class Session:
         return module
 
     def swap(self, ir: dict, origin: dict | None = None,
-             migrate: str = "generational") -> dict:
+             migrate: str = "generational", *, agent_authored: bool) -> dict:
         """Replace the running composition. The caller has already had the
         candidate admitted; this performs the transition.
 
@@ -1824,7 +1824,7 @@ class Session:
         self._refuse_if_halted("swap")   # item 443
         checkpoint = _LoadCheckpoint(self)
         try:
-            plan = self._plan_swap(driver, ir, migrate)
+            plan = self._plan_swap(driver, ir, migrate, agent_authored)
         except BaseException as exc:
             checkpoint.restore(self)
             _name_the_candidate(exc, ir)
@@ -1835,7 +1835,8 @@ class Session:
             _name_the_candidate(exc, ir)
             raise
 
-    def _plan_swap(self, driver, ir: dict, migrate: str) -> "_SwapPlan":
+    def _plan_swap(self, driver, ir: dict, migrate: str,
+                   agent_authored: bool) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering
         the successor, and capturing the state that crosses. The running
         generation is still live and serving throughout, and nothing here may
@@ -1906,8 +1907,7 @@ class Session:
             if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
-                         agent_authored=(migrate == "declared"
-                                         or self._serves_untrusted_author()),
+                         agent_authored=(migrate == "declared" or agent_authored),
                          pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
@@ -2452,17 +2452,6 @@ class Session:
         frame = handle._frame()
         return list(frame._resources) if frame is not None else []
 
-    def _serves_untrusted_author(self) -> bool:
-        """Whether this is the MCP server's session and the server compiles
-        what its agent sends under the untrusted-author profile
-        (`AUTHORING.profile()`, the trust `compile_under_authoring` and the
-        edit path apply). Read off the loaded server module, never imported
-        here: an embedded session has no transport author."""
-        server = sys.modules.get("revl.mcp.server")
-        if server is None or getattr(server, "SESSION", None) is not self:
-            return False
-        return server.AUTHORING.profile() is not None
-
     def _restore_provider_state(self, new_ir: dict, pre: dict,
                                 agent_authored: bool = False) -> dict:
         """Thread each captured provider state onto the successor that
@@ -2586,7 +2575,7 @@ class Session:
         # migration back), so it stays byte-identical to the pre-item-10 path.
         try:
             result = self.swap(restored, origin=restored_origin,
-                               migrate="respawn")
+                               migrate="respawn", agent_authored=False)
         except Exception as error:  # noqa: BLE001 - re-raised below
             # The generation counter moves at the teardown and nowhere before
             # it, so a failure that left it alone left the running generation
@@ -3243,7 +3232,7 @@ class Session:
         # history, so an undo can itself be undone (git-revert of a git-revert).
         state = self.swap(
             target_ir, origin=_origin_from(target["snapshot"]["sources"]),
-            migrate="respawn")
+            migrate="respawn", agent_authored=False)
         return {
             "undone": True,
             "toGeneration": target["generation"],

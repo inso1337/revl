@@ -136,11 +136,15 @@ def test_hatch_call_checks_the_named_verbs_schema():
 
 def test_export_overwrite_string_true_writes(clean_session):
     assert _call("revl_load", {"source": INLINE})["ok"] is True
-    target = clean_session / "out.rvl"
-    target.write_text("stale\n", encoding="utf-8")
+    # issue #2524: an inline export lands in the export directory and replaces
+    # only a file an earlier export wrote
+    target = clean_session / ".revl" / "export" / "out.rvl"
+    assert _call("revl_export", {"path": str(target)})["ok"] is True
+    refused = _call("revl_export", {"path": str(target), "overwrite": "false"})
+    assert refused["ok"] is False, refused
     out = _call("revl_export", {"path": str(target), "overwrite": "true"})
     assert out["ok"] is True, out
-    assert target.read_text(encoding="utf-8") != "stale\n"
+    assert out["written"] == [str(target)]
     assert out["argumentsCanonicalised"]["keys"] == ["overwrite"]
 
 

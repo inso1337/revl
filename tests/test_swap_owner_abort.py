@@ -138,7 +138,7 @@ def test_abort_after_swap_restores_the_post_swap_mutation(artifact):
     session.load(_ir(), record=True)
 
     # swap to a fresh successor generation (a plain, non-instance swap).
-    session.swap(_ir())
+    session.swap(_ir(), agent_authored=False)
 
     # the successor's frame MUST have joined the new generation's owner registry
     # — the exact regression: without the owner scoping it captured None.
@@ -172,8 +172,8 @@ def test_abort_after_swap_restores_the_post_swap_mutation(artifact):
 def test_abort_restores_across_multiple_swap_generations(artifact):
     session = _session()
     session.load(_ir(), record=True)
-    session.swap(_ir())   # generation 2
-    session.swap(_ir())   # generation 3
+    session.swap(_ir(), agent_authored=False)   # generation 2
+    session.swap(_ir(), agent_authored=False)   # generation 3
 
     frame = _sole_registered_frame(session)
     assert frame in session._owner._registry
@@ -200,7 +200,7 @@ def test_abort_after_swap_works_more_than_once_per_process(tmp_path):
 
         session = _session()
         session.load(_ir(), record=True)
-        session.swap(_ir())
+        session.swap(_ir(), agent_authored=False)
         session.call("ops", "stash", [target])
         assert _mutated(target), f"cycle {i}: mutation did not apply"
 
@@ -219,7 +219,7 @@ def test_abort_after_swap_works_more_than_once_per_process(tmp_path):
 def test_non_witnessed_swap_is_transparent(artifact):
     session = _session()
     session.load(_plain_ir())
-    session.swap(_plain_ir())
+    session.swap(_plain_ir(), agent_authored=False)
 
     # the owner is scoped, but with nothing witnessed there is nothing to escrow,
     # nothing queued, and no prompt raised — the scoping is inert.

@@ -369,6 +369,22 @@ def test_native_ir_erases_a_transparent_type_alias(lower_to_ir):
         assert native[section] == reference[section], section
 
 
+def test_native_ir_erases_a_transparent_type_alias_in_a_hole(lower_to_ir):
+    """Issue #2514: the reference's alias sweep walks every node by field, so
+    the `hole[Count]` annotation inside a body is erased like any other
+    (`_ANNOTATION_FIELDS` lists `ExprHole.type`). The self-host's `hole_json`
+    wrote the annotation as spelled; both must say `Int`."""
+    source = (
+        "type Count = Int\n"
+        "fn helper(x: Int) -> Int { return hole[Count] \"a function body\" }\n"
+    )
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    hole = reference["functions"][0]["body"][0]["expr"]
+    assert hole["kind"] == "hole" and hole["type"] == "Int"
+    assert native["functions"] == reference["functions"]
+
+
 def test_native_ir_keeps_a_single_case_nominal(lower_to_ir):
     """The other side of #1148's classifier. `type Status = Pending` names no
     declared type and no builtin, which is where TypeScript raises TS2304 — so

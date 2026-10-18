@@ -706,9 +706,9 @@ flow into.
 
 `alias ` rows carry the fixed-point alias table, and they are the finding.
 An arrow's annotations are the one declared spelling this walk meets with no
-token span behind it: the reference rewrites them in `_subst_body_annotations`,
-inside the body, rather than in the declaration sweep every other site goes
-through. Without the same substitution `let f = (v: Count): Sku => "x"` holds
+token span behind it: the reference rewrites them in `_subst_annotations`,
+the field walk that reaches a body annotation and a declaration site alike
+(issues #2514 and #2515). Without the same substitution `let f = (v: Count): Sku => "x"` holds
 its body to `Sku` where the reference holds it to `Str`, and that is a FALSE
 REJECTION, the one direction this gate may not err in. It showed on
 `tests/fixtures/emit_py_corpus/type_aliases.rvl` in the census and on no unit

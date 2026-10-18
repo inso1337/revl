@@ -419,7 +419,7 @@ def test_swap_changing_the_closure_invalidates_the_grant(sink):
     session.call("ops", "shout", [sink, "before"])  # covered pre-swap
     assert session._grants_consumed == 1
 
-    session.swap(compile_source(_SOURCE_SWAPPED, "standing_approval2.rvl"))
+    session.swap(compile_source(_SOURCE_SWAPPED, "standing_approval2.rvl"), agent_authored=False)
     with pytest.raises(ApprovalRequired):           # candidate hash moved
         session.call("ops", "shout", [sink, "after"])
     assert session._grants_consumed == 1            # the stale grant covered nothing

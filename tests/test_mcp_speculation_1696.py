@@ -181,10 +181,13 @@ def test_export_writes_exactly_the_held_source(files_loaded):
     assert _set_now(12, commit=True)["committed"] is True
     assert files_loaded.read_text(encoding="utf-8") == SOURCE   # not yet
     exported = _call("revl_export", {})
-    assert exported["ok"] is True and exported["written"] == [str(files_loaded)]
+    assert exported["ok"] is True and exported["written"] == [
+        str(_exported(files_loaded))]
     snapshot = _call("revl_snapshot", {})["snapshot"]["sources"]["files_content"]
-    assert files_loaded.read_text(encoding="utf-8") == snapshot[str(files_loaded)]
-    assert "fn now() = 12" in files_loaded.read_text(encoding="utf-8")
+    copy = _exported(files_loaded)
+    assert copy.read_text(encoding="utf-8") == snapshot[str(files_loaded)]
+    assert "fn now() = 12" in copy.read_text(encoding="utf-8")
+    assert files_loaded.read_text(encoding="utf-8") == SOURCE  # never over it
     assert _call("revl_export", {})["written"] == []     # nothing left to write
 
 
@@ -200,13 +203,18 @@ def test_inline_export_needs_a_path_inside_the_roots(clean_session, tmp_path_fac
     outside = tmp_path_factory.mktemp("elsewhere") / "x.rvl"
     refused = _call("revl_export", {"path": str(outside)})
     assert refused["ok"] is False and not outside.exists()
-    target = clean_session / "out.rvl"
+    # issue #2524: under a closed authoring trust an inline composition is
+    # exported into the root's export directory, never beside operator files
+    beside = clean_session / "out.rvl"
+    assert _call("revl_export", {"path": str(beside)})["ok"] is False
+    assert not beside.exists()
+    target = clean_session / ".revl" / "export" / "out.rvl"
     assert _call("revl_export", {"path": str(target)})["written"] == [str(target)]
     assert target.read_text(encoding="utf-8") == SOURCE
     again = _call("revl_export", {"path": str(target)})
     assert again["ok"] is False and "already exists" in again["diagnostics"][0]["message"]
     assert _call("revl_export", {"path": str(target), "overwrite": True})["ok"] is True
-    assert not any(name.endswith(".revl-export") for name in os.listdir(clean_session))
+    assert not any(name.endswith(".revl-export") for name in os.listdir(target.parent))
 
 
 # ------------------------------------------------ drafts
@@ -241,3 +249,11 @@ def test_an_export_says_it_has_no_inverse(files_loaded):
     exported = _call("revl_export", {})
     assert exported["ok"] is True, exported
     assert exported["undo"] is None and "disk" in exported["undoReason"]
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

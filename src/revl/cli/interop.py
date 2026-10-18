@@ -347,6 +347,18 @@ def _run_mcp(args) -> int:
             providers=providers or None,
             roots=tuple(getattr(args, "root", None) or ()) or None,
         )
+        # issue #2524: the files this server reads as operator configuration.
+        # No export may replace one, whichever directory it sits in.
+        from ..mcp.export_jail import protect_operator_files  # noqa: PLC0415
+
+        protect_operator_files([
+            getattr(args, "operator_profile", None), getattr(args, "policy", None),
+            getattr(args, "restore", None), os.environ.get("REVL_ESTOP_LATCH"),
+            # issue #2535: the latch beside the WAL, which need not exist yet
+            f"{args.wal}.estop" if getattr(args, "wal", None) else None,
+            getattr(args, "tls_cert", None), getattr(args, "tls_key", None),
+            getattr(args, "tls_client_ca", None),
+            *(getattr(args, "provider", None) or [])])
         exposure = None
         if getattr(args, "http", None):
             exposure, code = _http_exposure(args)

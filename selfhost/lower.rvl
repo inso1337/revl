@@ -15429,8 +15429,8 @@ fn tk_arrow_env(ps: List[ParamN], i: Int, env: List[Bind]) -> List[Bind] {
 
 // Rule G's resolution, as a spelling transform, in the reference's own order:
 // a TRANSPARENT ALIAS is erased first (an arrow's annotations live inside a
-// body, so `_subst_body_annotations` rewrites them rather than the declaration
-// sweep, but the substitution is the same one), then a name the ENCLOSING `fn`
+// body, which the reference's one field walk, `_subst_annotations`, reaches
+// with the same substitution as a declaration site), then a name the ENCLOSING `fn`
 // quantifies is marked `?T` and is a wildcard downstream. Every other name is
 // left exactly as written, which is what makes `(x: Q): Q => x` a `(Q) -> Q`
 // that `Int` does not flow into.
@@ -16383,7 +16383,7 @@ fn fb_one(ts: List[Token], i: Int, hi: Int, al: Map[Str, Str]) -> FbStepR {
       let tr = type_at(ts, j + 1)
       // a WRITTEN annotation is the checking position for the initialiser and
       // the type the name takes, so it is erased here exactly as a declaration
-      // site's is (`_subst_body_annotations`): `let c: Count = 1` types as an
+      // site's is (`_subst_annotations`): `let c: Count = 1` types as an
       // `Int` binding, not a `Count` one.
       if (tr.ok) { dty = alias_subst(taint_strip(tr.ty), al) }
       j = tr.i
@@ -17199,11 +17199,9 @@ fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind],
 // (`_collect`) after the link and raises on its FIRST refusal: a `duplicate
 // test` name, else the first refusing statement, in declaration order. A
 // `lifecycle test` shares the plain pass's name table, and its body is the
-// lifecycle walk's, not this one's. A prop test body keeps its annotations as
-// written (`_subst_body_annotations` erases only `test` bodies), so where the
-// text declares an alias the prop BODIES are left undecided. Their names are
-// still checked: the `tb names only` row says so.
-fn tb_names_only() -> Str { return "tb names only" }
+// lifecycle walk's, not this one's. A prop test's parameters and body have
+// their aliases erased exactly as a `fn`'s are (issue #2514: the reference's
+// alias sweep walks every declaration by field, prop tests included).
 
 fn tb_dup_msg(kind: Str, name: Str) -> Str {
   return tagged("TEST", "duplicate ".concat(kind).concat(" `").concat(name).concat("`"))
@@ -17239,7 +17237,7 @@ fn tb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind], al: Map[Str, Str],
         let pv = tb_prop_params(wf_params_from(ts, i + 4, false, []), 0, nm, gtys, al)
         if (pv.v != "") { return pv }
       }
-      if (prop && tenv_get(gtys, tb_names_only()) != "1") {
+      if (prop) {
         let pe = close_paren(ts, i + 3)
         let v = tb_body(ts, pe + 1, qe - 1, params_at(ts, i + 4).ps, gtys, al)
         if (v.v != "") { return v }
@@ -17282,14 +17280,15 @@ fn tb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind], al: Map[Str, Str],
 }
 
 // Each prop test parameter in order: `check_type_wellformed`, then
-// `_check_generatable`, both at the parameter's line. The written spelling is
-// what the reference reads, so an alias is not erased here.
+// `_check_generatable`, both at the parameter's line. The alias sweep runs
+// before either, so `_check_generatable` reads the ERASED spelling (issue
+// #2514): `n: Count` over `type Count = Int` generates as an `Int`.
 fn tb_prop_params(ss: List[WfSite], k: Int, nm: Str, env: List[Bind],
                   al: Map[Str, Str]) -> Verd {
   if (k >= ss.length()) { return no_verd() }
   let w = wf_site_verd(ss[k])
   if (w.v != "") { return w }
-  let g = tb_gen(ss[k].ty, nm, env, al, [], [])
+  let g = tb_gen(alias_subst(ss[k].ty, al), nm, env, al, [], [])
   if (g != "") { return mk_verd(g, ss[k].line) }
   return tb_prop_params(ss, k + 1, nm, env, al)
 }
@@ -17401,10 +17400,7 @@ fn test_refusals(ts: List[Token], gtys: List[Bind], al: Map[Str, Str]) -> List[V
   var out: List[Verd] = []
   let tv = tb_refusal_at(ts, 0, gtys, al, false, [])
   if (tv.v != "") { out = out.push(tv) }
-  // where the text declares an alias the prop BODIES are left undecided (see
-  // the head of this section), but the name check reads no annotation
-  let pg = rp_aliases(ts).length() == 0 ? gtys : tenv_put(gtys, tb_names_only(), "1")
-  let pv = tb_refusal_at(ts, 0, pg, al, true, [])
+  let pv = tb_refusal_at(ts, 0, gtys, al, true, [])
   if (pv.v != "") { out = out.push(pv) }
   return out
 }
@@ -19708,7 +19704,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // are collected at exactly this point in `check_and_lower`, in that order.
   // Empty for `admit_src` and for any admission that neither swaps state nor
   // withdraws anything, so all of those stay byte-identical.
-  refs = append_verds(refs, handoff_refusals(pg.comps, hands, poisoned, 0))
+  refs = append_verds(refs, handoff_refusals(pg.comps, hands, poisoned, al, 0))
   refs = append_verds(refs, wrefs)
   // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
   // once every component is lowered, before the G2/G3 link — the reference's
@@ -22559,12 +22555,17 @@ fn handoff_drift_msg(key: Str, newName: Str, accepted: Str, oldName: Str,
 // is compared. The running table is NOT filtered by the withdrawn set: the
 // provider being replaced is precisely the one whose exported state the
 // replacement has to accept.
+//
+// The incoming annotation is read ERASED (issue #2514: the reference's alias
+// sweep lists `HandoffStmt.state_type`, so `handoff db: S` over `type S = Str`
+// is compared, and reported, as `Str`); the running wire already carries the
+// erased spelling, since it is rendered from the lowered IR.
 fn handoff_refusals(comps: List[CompD], hands: List[MHand],
-                    poisoned: List[Str], i: Int) -> List[Verd] {
+                    poisoned: List[Str], al: Map[Str, Str], i: Int) -> List[Verd] {
   if (i >= comps.length()) { return [] }
   let c = comps[i]
   if (c.hoff.name == "") {
-    return handoff_refusals(comps, hands, poisoned, i + 1)
+    return handoff_refusals(comps, hands, poisoned, al, i + 1)
   }
   // issue #1127: `_admit_handoff_replacement` runs over `live_components`,
   // which `check_and_lower` builds by DROPPING every component whose body
@@ -22578,14 +22579,15 @@ fn handoff_refusals(comps: List[CompD], hands: List[MHand],
   // remove a verdict from a component that is refused anyway, so it narrows
   // the NAME and never the verdict.
   if (contains(poisoned, c.name)) {
-    return handoff_refusals(comps, hands, poisoned, i + 1)
+    return handoff_refusals(comps, hands, poisoned, al, i + 1)
   }
   let old = find_mhand(hands, c.hoff.name, 0, { comp: "", key: "", ty: "" })
-  if (old.comp == "") { return handoff_refusals(comps, hands, poisoned, i + 1) }
-  if (ho_compatible(c.hoff.ty, old.ty)) {
-    return handoff_refusals(comps, hands, poisoned, i + 1)
+  if (old.comp == "") { return handoff_refusals(comps, hands, poisoned, al, i + 1) }
+  let accepted = alias_subst(c.hoff.ty, al)
+  if (ho_compatible(accepted, old.ty)) {
+    return handoff_refusals(comps, hands, poisoned, al, i + 1)
   }
-  return [mk_verd(tagged("G2", handoff_drift_msg(c.hoff.name, c.name, c.hoff.ty,
+  return [mk_verd(tagged("G2", handoff_drift_msg(c.hoff.name, c.name, accepted,
                                                  old.comp, old.ty)), c.line)]
 }
 
@@ -29439,8 +29441,8 @@ fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str, al: Map[Str, Str]) ->
   while (i < a.params.length()) {
     let p = a.params[i]
     // the author's annotation is erased exactly as a declaration-site one is:
-    // `_subst_body_annotations` reaches an arrow's `written_param_types` and
-    // `written_returns` inside a body, which the declaration sweep cannot see.
+    // `_subst_annotations` reaches an arrow's `written_param_types` and
+    // `written_returns` inside a body, by walking every field of every node.
     // The RESOLVED return follows from the same substitution, since an
     // unannotated arrow's return is inferred in this environment.
     let pty = p.ty != "" ? alias_subst(p.ty, al)
@@ -29541,8 +29543,12 @@ fn lir_match(m: MatchN, env: List[Bind], al: Map[Str, Str]) -> Str {
 // A hole with NO type anywhere is a reference REFUSAL (T3: nothing in its
 // context says what it must become), and `lower_to_ir` issues no diagnostics, so
 // it stays the `bad` node it was rather than inventing a type.
-fn hole_json(h: HoleN, expected: Str) -> Str {
-  let ty = h.ty != "" ? h.ty : expected
+//
+// The author's `hole[Count]` annotation is erased like every other written
+// annotation (issue #2514: the reference's `_ANNOTATION_FIELDS` lists
+// `ExprHole.type`), so the IR says `Int` on both sides.
+fn hole_json(h: HoleN, expected: Str, al: Map[Str, Str]) -> Str {
+  let ty = h.ty != "" ? alias_subst(h.ty, al) : expected
   if (ty == "") { return "{\"kind\":\"bad\"}" }
   var js = "{\"kind\":\"hole\",\"type\":".concat(jstr(ty))
     .concat(",\"file\":\"<string>\",\"line\":").concat(h.line.to_str())
@@ -29590,7 +29596,7 @@ fn lir_expr(e: Expr, env: List[Bind], al: Map[Str, Str]) -> Str {
     Templ(t)    => "{\"kind\":\"interp\",\"parts\":[".concat(lir_parts(t.parts, env, al)).concat("]}"),
     RecUpd(r)   => "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(r.base, env, al))
                      .concat(",\"updates\":[").concat(lir_updates(r.upds, 0, "", env, al)).concat("]}"),
-    Hole(h)     => hole_json(h, ""),
+    Hole(h)     => hole_json(h, "", al),
     // item 459 F1: `asset "<path>"` lowers on the reference to the RESOLVED
     // record `{ path, sha256 }` (`ExprAsset` IS an `ExprRecord`, and
     // `revl.hostref.resolve_assets` fills its two fields by reading the file
@@ -29753,7 +29759,7 @@ fn lir_rhs_exp(ts: List[Token], j: Int, env: List[Bind], expected: Str, al: Map[
   let r = expr_at(ts, j)
   if (is_bad(r.e) || r.i <= j) { return { js: "", ty: "", i: j, ok: false } }
   let js = match r.e {
-    Hole(h) => hole_json(h, expected),
+    Hole(h) => hole_json(h, expected, al),
     _       => lir_expr(r.e, env, al),
   }
   return { js: js, ty: infer(r.e, env), i: r.i, ok: true }

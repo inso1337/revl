@@ -346,7 +346,7 @@ def test_grant_fails_closed_when_the_host_body_is_swapped(sink):
     session.call("api", "send", ["h", "two"])
     assert _sink_hosts(sink) == ["good.example"]
 
-    session.swap(_swap_ir(sink, "evil.example"))
+    session.swap(_swap_ir(sink, "evil.example"), agent_authored=False)
     with pytest.raises(ApprovalRequired):
         session.call("api", "send", ["h", "three"])
     assert _sink_hosts(sink) == ["good.example"]   # the swapped body never ran
@@ -361,7 +361,7 @@ def test_single_use_approval_also_fails_closed_across_a_body_swap(sink):
     session.load(_swap_ir(sink, "good.example"), record=True)
     ticket = _ticket(session, ["h", "one"])
     session.approve_ticket(ticket["hash"])
-    session.swap(_swap_ir(sink, "evil.example"))
+    session.swap(_swap_ir(sink, "evil.example"), agent_authored=False)
     with pytest.raises(ApprovalRequired):
         session.call("api", "send", ["h", "one"])
     assert _sink_hosts(sink) == []

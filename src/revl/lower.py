@@ -110,6 +110,7 @@ from .parser import (
     BreakStmt,
     CallStmt,
     ComponentDecl,
+    ConfigField,
     ContinueStmt,
     EffectStmt,
     EmitExpr,
@@ -135,6 +136,7 @@ from .parser import (
     ExprStmt,
     ExprUn,
     ExprVar,
+    ExternDecl,
     FnDecl,
     FnParam,
     ForStmt,
@@ -151,10 +153,13 @@ from .parser import (
     LoadStmt,
     ListPattern,
     Lit,
+    MethodDecl,
     ModelRouteStmt,
     Postfix,
     Program,
+    ProvideMethod,
     ProvideStmt,
+    RecordField,
     RecordPattern,
     ResidueStmt,
     ReturnStmt,
@@ -168,6 +173,7 @@ from .parser import (
     TimerStmt,
     TypeDecl,
     UnloadStmt,
+    VariantCase,
     WhileStmt,
     LIST_TRANSFORMS,
     desugar_list_transform,
@@ -1301,130 +1307,85 @@ def _resolve_type_aliases(program: Program, filename: str) -> None:
             return format_type(head, [subst(a) for a in args])
         return resolved.get(head, head)
 
-    # every declaration site that carries a type annotation; kept in step with
-    # `_validate_declared_types` below, which enumerates the same surface
-    for fn in program.fn_decls:
-        for p in fn.params:
-            p.type = subst(p.type)
-        fn.returns = subst(fn.returns)
-    for ext in program.externs:
-        for p in ext.params:
-            p.type = subst(p.type)
-        ext.returns = subst(ext.returns)
-    for svc in program.services:
-        for m in svc.methods.values():
-            m.params = [(pname, subst(ptype)) for pname, ptype in m.params]
-            m.returns = subst(m.returns)
-    for decl in program.type_decls:
-        for fld in decl.fields:
-            fld.type = subst(fld.type)
-        for case in decl.cases:
-            case.payload = subst(case.payload)
-    for comp in program.components:
-        for cfg in comp.config:
-            cfg.type = subst(cfg.type)
-        for stmt in comp.body:
-            if not isinstance(stmt, ProvideStmt):
-                continue
-            for method in stmt.methods:
-                method.param_types = [subst(t) for t in method.param_types]
-                method.returns = subst(method.returns)
-                _subst_body_annotations(method.body, subst)
-    for fn in program.fn_decls:
-        _subst_body_annotations(fn.body, subst)
-    for test in program.tests:
-        _subst_body_annotations(test.body, subst)
-
+    _subst_annotations(program, subst)
     program.type_decls = [d for d in program.type_decls if d.name not in aliases]
 
 
-def _subst_body_annotations(stmts: list, subst) -> None:
-    """Expand type aliases in the annotations a *body* can carry.
+# Every AST field that holds a WRITTEN type annotation, by node kind. The alias
+# sweep (`_subst_annotations`) walks the whole program by dataclass field, so a
+# node kind it has never heard of is still descended into: a prop test, an
+# `emit`, an `effect`, an `endorse`, a `spawn` config, a `subscribe` stage and
+# every match arm are reached without being named (issues #2509, #2514, #2515
+# were each a kind a hand-written walker had skipped). What the walk cannot
+# know by itself is WHICH of a kind's fields are annotations, and that is this
+# table's one job. tests/test_alias_sweep_every_node_2514.py reads it by
+# reflection: a parser dataclass field whose name says type must be listed
+# here, or in that test's list of fields that are not written annotations.
+# `_validate_declared_types` below enumerates the declaration sites again.
+_ANNOTATION_FIELDS: dict[type, tuple[str, ...]] = {
+    FnParam: ("type",),                   # fn, extern and prop test parameters
+    FnDecl: ("returns",),
+    ExternDecl: ("returns",),
+    MethodDecl: ("returns",),             # `params` is a list of (name, type)
+    RecordField: ("type",),
+    VariantCase: ("payload",),
+    ConfigField: ("type",),
+    ProvideMethod: ("param_types", "returns"),
+    LetStmt: ("type",),                   # `let g: Handler = ...`
+    ExprArrow: ("written_param_types", "written_returns"),  # `(v: Handler) => ...`
+    ExprHole: ("type",),                  # `hole[Handler]`
+    HandoffStmt: ("state_type",),         # `handoff kv: Handler`
+}
 
-    `let g: Handler = …` and `(v: Handler) => …` are type annotations like any
-    other, but they live inside statements rather than at a declaration site,
-    so the declaration sweep above cannot reach them — and an alias that
-    survived here would reach the checker as an undeclared type name."""
-    def walk_expr(expr) -> None:
-        if isinstance(expr, ExprArrow):
-            # the author's annotations — `(v: Handler): Handler => …`. The
-            # checker's resolved fields are still empty here (alias expansion
-            # runs before checking, which is the whole point: an alias must not
-            # reach the checker as an undeclared type name).
-            expr.written_param_types = [subst(t) for t in expr.written_param_types]
-            expr.written_returns = subst(expr.written_returns)
-            walk_expr(expr.body)
-        elif isinstance(expr, ExprBin):
-            walk_expr(expr.left)
-            walk_expr(expr.right)
-        elif isinstance(expr, ExprUn):
-            walk_expr(expr.operand)
-        elif isinstance(expr, ExprCall):
-            walk_expr(expr.callee)
-            for arg in expr.args:
-                walk_expr(arg)
-        elif isinstance(expr, (ExprField, ExprOptField)):
-            walk_expr(expr.target)
-        elif isinstance(expr, ExprOptCall):
-            walk_expr(expr.target)
-            for arg in expr.args:
-                walk_expr(arg)
-        elif isinstance(expr, ExprIndex):
-            walk_expr(expr.target)
-            walk_expr(expr.index)
-        elif isinstance(expr, ExprIf):
-            walk_expr(expr.cond)
-            walk_expr(expr.then)
-            walk_expr(expr.otherwise)
-        elif isinstance(expr, ExprRecord):
-            for _, value in expr.fields:
-                walk_expr(value)
-        elif isinstance(expr, ExprRecordUpdate):
-            walk_expr(expr.base)
-            for _, value in expr.updates:
-                walk_expr(value)
-        elif isinstance(expr, ExprList):
-            for item in expr.items:
-                walk_expr(item)
-        elif isinstance(expr, ExprMatch):
-            walk_expr(expr.scrutinee)
-            for _, _, body in expr.arms:
-                walk_expr(body)
-                if isinstance(body, ExprBlockArm):
-                    for stmt in body.stmts:
-                        walk_stmt(stmt)
-                    walk_expr(body.tail)
-        elif isinstance(expr, Interp):
-            for kind, part in expr.parts:
-                if kind == "expr":
-                    walk_expr(part)
+# Fields the sweep leaves AS WRITTEN, by node kind. An extern's `config` block
+# keeps its alias names: `examples/rejections/g4_extern_config_alias_opaque.rvl`
+# documents that an alias there is refused as an opaque head, and the
+# self-host checker reports the same bytes, so the erasure stops at this edge.
+_UNSWEPT_FIELDS: dict[type, tuple[str, ...]] = {
+    ExternDecl: ("config",),
+}
 
-    def walk_stmt(stmt) -> None:
-        if isinstance(stmt, LetStmt):
-            stmt.type = subst(stmt.type)
-            walk_expr(stmt.value)
-        elif isinstance(stmt, (LetPatternStmt, AssignStmt)):
-            walk_expr(stmt.value)
-        elif isinstance(stmt, (ExprStmt, AssertStmt, FailStmt, AwaitStmt)):
-            walk_expr(stmt.expr)
-        elif isinstance(stmt, ReturnStmt):
-            if stmt.expr is not None:
-                walk_expr(stmt.expr)
-        elif isinstance(stmt, IfStmt):
-            walk_expr(stmt.cond)
-            for child in list(stmt.then) + list(stmt.otherwise or []):
-                walk_stmt(child)
-        elif isinstance(stmt, WhileStmt):
-            walk_expr(stmt.cond)
-            for child in stmt.body:
-                walk_stmt(child)
-        elif isinstance(stmt, ForStmt):
-            walk_expr(stmt.iterable)
-            for child in stmt.body:
-                walk_stmt(child)
 
-    for stmt in stmts:
-        walk_stmt(stmt)
+def _subst_annotations(root, subst) -> None:
+    """Apply `subst` to every written type annotation under `root`, in place.
+
+    The walk follows dataclass fields, lists, tuples and dict values rather
+    than a list of node kinds, so a statement or expression kind this module
+    has never heard of is still descended into. `_ANNOTATION_FIELDS` says
+    which fields to rewrite; a `MethodDecl` keeps its parameters as
+    `(name, type)` pairs, so it is the one kind handled by hand.
+    """
+    seen: set[int] = set()
+
+    def walk(node) -> None:
+        if node is None or isinstance(node, (str, bytes, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple, set, frozenset)):
+            for item in node:
+                walk(item)
+            return
+        if isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+            return
+        if not dataclasses.is_dataclass(node) or id(node) in seen:
+            return
+        seen.add(id(node))
+        annotated = next((names for kind, names in _ANNOTATION_FIELDS.items()
+                          if isinstance(node, kind)), ())
+        for name in annotated:
+            value = getattr(node, name)
+            setattr(node, name, [subst(t) for t in value]
+                    if isinstance(value, list) else subst(value))
+        if isinstance(node, MethodDecl):
+            node.params = [(pname, subst(ptype)) for pname, ptype in node.params]
+        unswept = next((names for kind, names in _UNSWEPT_FIELDS.items()
+                        if isinstance(node, kind)), ())
+        for fld in dataclasses.fields(node):
+            if fld.name not in annotated and fld.name not in unswept:
+                walk(getattr(node, fld.name))
+
+    walk(root)
 
 
 def _validate_delegate_service(filename: str, line: int, ptype: str | None,

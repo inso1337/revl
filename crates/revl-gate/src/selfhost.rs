@@ -22505,10 +22505,6 @@ fn fb_refusal_at(ts: Vec<Token>, i: i64, gtys: Vec<Bind>, al: std::collections::
     return fb_refusal_at(ts.clone(), skip_line(&ts, i), gtys.clone(), al.clone());
 }
 
-fn tb_names_only() -> String {
-    return String::from("tb names only");
-}
-
 fn tb_dup_msg(kind: &str, name: &str) -> String {
     return tagged("TEST", &((((String::from("duplicate ").revl_concat(&kind)).revl_concat(" `")).revl_concat(&name)).revl_concat("`")));
 }
@@ -22547,7 +22543,7 @@ fn tb_refusal_at(ts: Vec<Token>, i: i64, gtys: Vec<Bind>, al: std::collections::
                     return pv;
                 }
             }
-            if (prop && (tenv_get(&gtys, &tb_names_only()) != "1")) {
+            if prop {
                 let pe = close_paren(&ts, (i).checked_add(3i64).expect("revl: Int overflow"));
                 let v = tb_body(ts.clone(), (pe).checked_add(1i64).expect("revl: Int overflow"), (qe).checked_sub(1i64).expect("revl: Int overflow"), params_at(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow")).ps, gtys.clone(), al.clone());
                 if (v.v != "") {
@@ -22611,7 +22607,7 @@ fn tb_prop_params(ss: &[WfSite], k: i64, nm: &str, env: &[Bind], al: std::collec
     if (w.v != "") {
         return w;
     }
-    let g = tb_gen(&(ss)[(k) as usize].ty, nm, env, al.clone(), &(vec![]), &(vec![]));
+    let g = tb_gen(&alias_subst((ss)[(k) as usize].ty.clone(), al.clone()), nm, env, al.clone(), &(vec![]), &(vec![]));
     if (g != "") {
         return mk_verd(g.clone(), (ss)[(k) as usize].line.clone());
     }
@@ -22732,8 +22728,7 @@ fn test_refusals(ts: Vec<Token>, gtys: Vec<Bind>, al: std::collections::HashMap<
     if (tv.v != "") {
         out.push(tv.clone());
     }
-    let pg = if (rp_aliases(&ts).revl_length() == 0i64) { gtys.clone() } else { tenv_put(&gtys, tb_names_only(), String::from("1")) };
-    let pv = tb_refusal_at(ts.clone(), 0i64, pg, al.clone(), true, vec![]);
+    let pv = tb_refusal_at(ts.clone(), 0i64, gtys.clone(), al.clone(), true, vec![]);
     if (pv.v != "") {
         out.push(pv.clone());
     }
@@ -24418,7 +24413,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
         }
         ci = (ci).checked_add(1i64).expect("revl: Int overflow");
     }
-    refs = append_verds(refs.clone(), handoff_refusals(&pg.comps, &hands, &poisoned, 0i64));
+    refs = append_verds(refs.clone(), handoff_refusals(&pg.comps, &hands, &poisoned, al.clone(), 0i64));
     refs = append_verds(refs.clone(), wrefs.clone());
     let sv = check_spawn(&ts, pg.clone(), base.clone());
     if (sv.v != "") {
@@ -27326,25 +27321,26 @@ fn handoff_drift_msg(key: &str, newName: &str, accepted: &str, oldName: &str, ex
     return ((((((((((String::from("state hand-off on `").revl_concat(&key)).revl_concat("` differs from the running manifest: `")).revl_concat(&newName)).revl_concat("` accepts `")).revl_concat(&accepted)).revl_concat("`, but `")).revl_concat(&oldName)).revl_concat("` exports `")).revl_concat(&exported)).revl_concat("` — the successor cannot hold the predecessor's state, and ")).revl_concat("dropping it on the swap would be residue");
 }
 
-fn handoff_refusals(comps: &[CompD], hands: &[MHand], poisoned: &[String], i: i64) -> Vec<Verd> {
+fn handoff_refusals(comps: &[CompD], hands: &[MHand], poisoned: &[String], al: std::collections::HashMap<String, String>, i: i64) -> Vec<Verd> {
     if (i >= comps.revl_length()) {
         return vec![];
     }
     let c = (comps)[(i) as usize].clone();
     if (c.hoff.name == "") {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     if contains__m2(poisoned, &c.name) {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     let old = find_mhand(hands, &c.hoff.name, 0i64, MHand { comp: String::from(""), key: String::from(""), ty: String::from("") });
     if (old.comp == "") {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
-    if ho_compatible(c.hoff.ty.clone(), old.ty.clone()) {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+    let accepted = alias_subst(c.hoff.ty.clone(), al.clone());
+    if ho_compatible(accepted.clone(), old.ty.clone()) {
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
-    return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &c.hoff.ty, &old.comp, &old.ty)), c.line)];
+    return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &accepted, &old.comp, &old.ty)), c.line)];
 }
 
 pub fn admit_ambient(src: String, manifest: String) -> String {
@@ -33728,8 +33724,8 @@ fn lir_match(m: MatchN, env: Vec<Bind>, al: std::collections::HashMap<String, St
     return (((String::from("{\"kind\":\"match\",\"scrutinee\":").revl_concat(&lir_expr(m.scrut.clone(), env.clone(), al.clone()))).revl_concat(",\"arms\":[")).revl_concat(&arms)).revl_concat("]}");
 }
 
-fn hole_json(h: HoleN, expected: String) -> String {
-    let ty = if (h.ty != "") { h.ty } else { expected };
+fn hole_json(h: HoleN, expected: String, al: std::collections::HashMap<String, String>) -> String {
+    let ty = if (h.ty != "") { alias_subst(h.ty.clone(), al.clone()) } else { expected };
     if (ty == "") {
         return String::from("{\"kind\":\"bad\"}");
     }
@@ -33763,7 +33759,7 @@ fn lir_expr(e: Expr, env: Vec<Bind>, al: std::collections::HashMap<String, Strin
     Expr::Match(m) => { let m = *m; lir_match(m, env.clone(), al.clone()) },
     Expr::Templ(t) => (String::from("{\"kind\":\"interp\",\"parts\":[").revl_concat(&lir_parts(t.parts, env.clone(), al.clone()))).revl_concat("]}"),
     Expr::RecUpd(r) => { let r = *r; (((String::from("{\"kind\":\"record_update\",\"base\":").revl_concat(&lir_expr(r.base.clone(), env.clone(), al.clone()))).revl_concat(",\"updates\":[")).revl_concat(&lir_updates(r.upds.clone(), 0i64, String::from(""), env.clone(), al.clone()))).revl_concat("]}") },
-    Expr::Hole(h) => hole_json(h, String::from("")),
+    Expr::Hole(h) => hole_json(h, String::from(""), al.clone()),
     Expr::Asset(_) => String::from("{\"kind\":\"bad\"}"),
     Expr::Bad(m) => String::from("{\"kind\":\"bad\"}"),
     _ => unreachable!(),
@@ -33899,7 +33895,7 @@ fn lir_rhs_exp(ts: Vec<Token>, j: i64, env: Vec<Bind>, expected: String, al: std
         return RhsR { js: String::from(""), ty: String::from(""), i: j, ok: false };
     }
     let js = match r.e.clone() {
-    Expr::Hole(h) => hole_json(h, expected.clone()),
+    Expr::Hole(h) => hole_json(h, expected.clone(), al.clone()),
     _ => lir_expr(r.e.clone(), env.clone(), al.clone()),
 };
     return RhsR { js: js.clone(), ty: infer(r.e.clone(), env.clone()), i: r.i, ok: true };
