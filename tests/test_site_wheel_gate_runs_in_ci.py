@@ -45,7 +45,10 @@ from __future__ import annotations
 
 import re
 import subprocess
+import zipfile
 from pathlib import Path
+
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -54,6 +57,28 @@ PAGES = WORKFLOWS / "pages.yml"
 CI = WORKFLOWS / "ci.yml"
 TOOL = "tools/check_site_wheel.py"
 VENDORS = ("playground", "site")
+
+
+def test_a_misdirected_check_reports_zero_inputs_and_scope(tmp_path, monkeypatch,
+                                                          capsys):
+    checker = load_by_path("check_site_wheel", ROOT / TOOL)
+    wheel = tmp_path / "empty.whl"
+    with zipfile.ZipFile(wheel, "w"):
+        pass
+
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(checker, "_build_fresh", lambda out_dir: wheel)
+    monkeypatch.setattr(checker, "_tracked_members", lambda: None)
+    monkeypatch.setattr(checker.sys, "argv", [str(ROOT / TOOL)])
+
+    assert checker.main() == 1
+
+    output = capsys.readouterr().out
+    assert "pages workflow 0/1" in output
+    assert "page consumers 0/2" in output
+    assert "tracked source modules compared 0 (incomplete)" in output
+    assert "wheel source modules 0" in output
+    assert "does not execute the published playground" in output
 
 
 def _text(path: Path) -> str:

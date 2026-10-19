@@ -244,14 +244,19 @@ def _tracked_members() -> dict[str, None] | None:
     return out or None
 
 
-def _check_members(wheel: Path) -> list[str]:
+def _check_members(wheel: Path) -> tuple[list[str], int, int, bool]:
     expected = _tracked_members()
-    if expected is None:
-        return ["    (skipped: git could not list the vendored trees)"]
     with zipfile.ZipFile(wheel) as zf:
         got = {n for n in zf.namelist() if not n.startswith("revl-")}
         dist_info = {n for n in zf.namelist() if n.startswith("revl-")}
     problems: list[str] = []
+    if expected is None:
+        problems.append("    (skipped: git could not list the vendored trees)")
+        if not dist_info:
+            problems.append("    the build has no .dist-info; micropip cannot "
+                            "install it.")
+        return problems, 0, len(got), False
+
     missing = sorted(set(expected) - got)
     extra = sorted(got - set(expected))
     if missing:
@@ -265,7 +270,23 @@ def _check_members(wheel: Path) -> list[str]:
     if not dist_info:
         problems.append("    the build has no .dist-info; micropip cannot "
                         "install it.")
-    return problems
+    return problems, len(expected), len(got), True
+
+
+def _print_check_summary(workflows_found: int, consumers_found: int,
+                         tracked_modules: int, wheel_modules: int,
+                         inventory_complete: bool) -> None:
+    inventory = str(tracked_modules)
+    if not inventory_complete:
+        inventory += " (incomplete)"
+    print("site wheel inputs: "
+          f"pages workflow {workflows_found}/1; "
+          f"page consumers {consumers_found}/{len(CONSUMERS)}; "
+          f"tracked source modules compared {inventory}; "
+          f"wheel source modules {wheel_modules}")
+    print("Scope: checks the Pages build workflow, wheel names and package "
+          "members; it does not execute the published playground or verify "
+          "Pyodide behavior in a browser.")
 
 
 def main() -> int:
@@ -290,6 +311,8 @@ def main() -> int:
     problems: list[str] = []
 
     problems += _check_deploy_builds_the_wheel()
+    workflows_found = int((ROOT / PAGES_WORKFLOW).is_file())
+    consumers_found = sum(1 for rel in CONSUMERS if (ROOT / rel).is_file())
 
     # Build under ROOT: build_wheel prints its output path relative to ROOT, so
     # a scratch dir outside the tree would make that print raise.
@@ -297,7 +320,10 @@ def main() -> int:
     try:
         fresh = _build_fresh(tmp)
         problems += _check_consumers_name_the_built_wheel(fresh.name)
-        problems += _check_members(fresh)
+        member_problems, tracked_modules, wheel_modules, inventory_complete = (
+            _check_members(fresh)
+        )
+        problems += member_problems
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -308,9 +334,13 @@ def main() -> int:
         for line in problems:
             print(f"::warning::{line}" if not line.startswith("  ") else line)
         print("the site wheel's deploy contract is BROKEN (see above)")
+        _print_check_summary(workflows_found, consumers_found, tracked_modules,
+                             wheel_modules, inventory_complete)
         return 1
     print("site wheel deploy contract OK: pages.yml builds it before upload, "
           "the pages fetch the name it writes, and it vendors what git tracks")
+    _print_check_summary(workflows_found, consumers_found, tracked_modules,
+                         wheel_modules, inventory_complete)
     return 0
 
 
