@@ -851,8 +851,7 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
   if (k == "fn") {
     let fnm = value_str(value_field(node, "name"))
     let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
-    let ret = map_get(ctx.fr, fnm)
-    if (nb.length() > 0) { ret = v3_subst(ret, nb) }
+    let ret = nb.length() > 0 ? v3_subst(map_get(ctx.fr, fnm), nb) : map_get(ctx.fr, fnm)
     return ret == "Str"
   }
   if (k == "field") {
