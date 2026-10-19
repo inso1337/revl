@@ -1299,6 +1299,7 @@
   "1": [
    "examples/rejections/a5_compensatable_without_compensate.rvl",
    "examples/rejections/a5_no_inverse_declares_compensate.rvl",
+   "examples/rejections/shadowed_module_fn_call_provide_param.rvl",
    "oracle-accept:issue 1980: a literal key read restored the same way",
    "oracle-accept:issue 1980: a match restoring the value the body read",
    "oracle-accept:issue 1980: a write at another key between the read and the effect",
