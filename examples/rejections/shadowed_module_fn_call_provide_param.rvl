@@ -1,0 +1,26 @@
+// REJECTED — a provide-method PARAMETER takes the name of a module `fn` that
+// the same body CALLS, so `tag("x")` has two readings and the tiers do not pick
+// the same one: a python, TypeScript, Rust or Go local shadows the function,
+// while a Java local does not shadow a static method of that name. Rename the
+// parameter.
+//
+// The `let` form of the same shadowing is refused with this message (issue
+// #445, `shadowed_module_fn_call.rvl`), and a local named like a constructor
+// shadows it (#2490). The parameter form used to be the one case that
+// slipped past the check and dropped the binding silently: both compilers
+// lowered `tag("x")` to a call of the module `fn tag` (issue #2544).
+//
+// expected error:
+//   `tag` is bound here and called in this body
+
+fn tag(s: Str) -> Str { return s }
+
+service Cache {
+  fn f(tag: Str) -> Str
+}
+
+component C provides cache: Cache {
+  provide cache {
+    fn f(tag) = tag("x")
+  }
+}

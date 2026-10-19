@@ -8179,9 +8179,13 @@ def _binder_names(node, out: list) -> None:
 
     A parameter, a `let`/`var`, a destructure, a `for` bind, an arrow
     parameter, a match-arm payload, and the component-body binders (an effect
-    `let`, an approval `let`, a lifecycle `call ... as`). Traversal is generic
-    over the AST dataclasses so a binder form added to the grammar is covered
-    without a second edit here; only the RECOGNITION is enumerated.
+    `let`, an approval `let`, a lifecycle `call ... as`). A provide-method
+    parameter belongs here too: surfaces are comma-separated bare names rather
+    than `FnParam`s and every other walker reaches them through
+    `env.bind_params`, so without their own arm they were the one binding form
+    this scan did not see (issue #2544). Traversal is generic over the AST
+    dataclasses so a binder form added to the grammar is covered without a
+    second edit here; only the RECOGNITION is enumerated.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -8191,6 +8195,8 @@ def _binder_names(node, out: list) -> None:
         return
     if isinstance(node, (FnParam, LetStmt)):
         out.append((node.name, node.line))
+    elif isinstance(node, ProvideMethod):
+        out.extend((name, node.line) for name in node.params or [])
     elif isinstance(node, LetPatternStmt):
         pattern = node.pattern
         if isinstance(pattern, RecordPattern):
