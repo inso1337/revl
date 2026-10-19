@@ -41,7 +41,7 @@ _REFUSED = "`tag` is bound here and called in this body"
 def test_a_provide_method_parameter_shadowing_a_called_module_fn_is_refused():
     """The issue's own reproducer. Before the fix this compiled, and the
     lowered body called the module `fn tag` — the parameter was never read."""
-    with pytest.raises(RevlError, match="`tag` is bound here and called"):
+    with pytest.raises(RevlError, match=_REFUSED):
         compile_source(
             _TAG + _SERVICE + """
             component C provides cache: Cache {
@@ -57,7 +57,7 @@ def test_a_provide_method_parameter_shadowing_a_called_module_fn_is_refused():
 def test_the_fn_body_form_of_the_same_parameter_is_refused():
     """The twin strata the acceptance list names: the `fn` body already
     refused this, and it still does. The two now agree."""
-    with pytest.raises(RevlError, match="`tag` is bound here and called"):
+    with pytest.raises(RevlError, match=_REFUSED):
         compile_source(
             _TAG + """
             fn f(tag: (Str) -> Str) -> Str {
@@ -156,5 +156,5 @@ def test_two_methods_binding_sibling_names_each_refuse_only_their_own():
         }
         """
     )
-    with pytest.raises(RevlError, match="`tag` is bound here and called"):
+    with pytest.raises(RevlError, match=_REFUSED):
         compile_source(source, "t.rvl")
