@@ -58,9 +58,22 @@ _BASE = (_DECLS + "component ToolV1 provides tool: Tool {\n"
          "}\n")
 
 # the successor: its ACTIVATION reaches the operator's class-(c) emission, which
-# is what holds the swap on an approval ticket at all
-_CANDIDATE = (_DECLS + "component ToolV2 requires ops: Ops provides tool: Tool {\n"
+# is what holds the swap on an approval ticket at all.
+#
+# It carries a host body of its OWN (`candidate_note`), and that is deliberate
+# rather than incidental: the operator's `notify` is in the merged IR too, so a
+# ticket built from every body in the IR would report `notify` here and would be
+# reporting the OPERATOR's code as the author's. Giving the candidate its own
+# body means the assertion below is about a body the author really wrote, and it
+# keeps the test meaningful once attribution is narrowed: a correctly attributed
+# ticket still reports `candidate_note`, so the equality between the two doors
+# cannot be satisfied by both of them reporting nothing.
+_CANDIDATE = (_DECLS
+              + "extern emission[notify] fn candidate_note(msg: Str) = @py "
+                "{ return }\n"
+              + "component ToolV2 requires ops: Ops provides tool: Tool {\n"
               '  emit ops.stash("boot")\n'
+              '  emit candidate_note("candidate")\n'
               '  provide tool { fn describe() = "v2" }\n'
               "}\n")
 
