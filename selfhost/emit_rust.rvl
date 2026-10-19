@@ -851,7 +851,7 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
   if (k == "fn") {
     let fnm = value_str(value_field(node, "name"))
     let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
-    let ret = nb.length() > 0 ? v3_subst(map_get(ctx.fr, fnm), nb) : map_get(ctx.fr, fnm)
+    let ret = nb.keys().length() > 0 ? v3_subst(map_get(ctx.fr, fnm), nb) : map_get(ctx.fr, fnm)
     return ret == "Str"
   }
   if (k == "field") {
@@ -883,7 +883,7 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     let fnm = value_str(value_field(node, "name"))
     let declared = map_get(ctx.fr, fnm)
     let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
-    if (nb.length() > 0) { return v3_subst(declared, nb) }
+    if (nb.keys().length() > 0) { return v3_subst(declared, nb) }
     if (ctx.fr.has(fnm)) { return declared }
   }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
