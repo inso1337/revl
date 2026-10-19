@@ -18,7 +18,15 @@
 //   `shout`   — a NON-generic `Str`-returning call (`upper`) added to a generic
 //               one. `_v3_is_str`'s new `fn` arm answers this from the declared
 //               return alone, with no binding, which is the branch that would
-//               silently regress if the binding ever became mandatory.
+//               silently regress if the binding ever became mandatory;
+//   `inferred` — a plain `let` whose VALUE is the generic call, not a sum of two.
+//               Every other method here reaches `_v3_is_str` through a `+` node,
+//               so `_v3_infer_type`'s own `fn` arm was reached by nothing and the
+//               coverage gate said so: "reference/rust: `_v3_infer_type` went from
+//               2 to 3 uncovered statement(s). Logic arrived in a mirrored emitter
+//               that no corpus document reaches". This method is what reaches it.
+//               A `+` over two calls asks `_v3_infer_type` about the BINARY; a
+//               `let` bound to one call asks it about the CALL.
 fn id[T](x: T) -> T { return x }
 
 fn upper(s: Str) -> Str { return s }
@@ -27,6 +35,7 @@ service Greeter {
   fn hello(who: Str) -> Str
   fn nearest(with_str: Str) -> Str
   fn shout(who: Str) -> Str
+  fn inferred(who: Str) -> Str
 }
 
 component Hello provides greeting: Greeter {
@@ -40,6 +49,10 @@ component Hello provides greeting: Greeter {
     }
     fn shout(who) {
       return upper("hi ") + id(who)
+    }
+    fn inferred(who) {
+      let only = id(who)
+      return only + "!"
     }
   }
 }
