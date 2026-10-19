@@ -36,6 +36,7 @@ service Greeter {
   fn nearest(with_str: Str) -> Str
   fn shout(who: Str) -> Str
   fn inferred(who: Str) -> Str
+  fn inferred_plain(who: Str) -> Str
 }
 
 component Hello provides greeting: Greeter {
@@ -53,6 +54,10 @@ component Hello provides greeting: Greeter {
     fn inferred(who) {
       let only = id(who)
       return only + "!"
+    }
+    fn inferred_plain(who) {
+      let fixed = upper(who)
+      return fixed + "!"
     }
   }
 }
