@@ -27,9 +27,14 @@ service Greeter {
   fn hello(who: Str) -> Str
   fn nearest(with_str: Str) -> Str
   fn shout(who: Str) -> Str
+  fn inferred_fx(who: Str) -> Str
 }
 
-component Hello provides greeting: Greeter {
+service Log {
+  emission fn note(msg: Str)
+}
+
+component Hello requires log: Log provides greeting: Greeter {
   provide greeting {
     fn hello(who) {
       return id("hi ") + id(who)
@@ -40,6 +45,11 @@ component Hello provides greeting: Greeter {
     }
     fn shout(who) {
       return upper("hi ") + id(who)
+    }
+    fn inferred_fx(who) {
+      emit log.note("in")
+      let only = id(who)
+      return only + "!"
     }
   }
 }
