@@ -6,12 +6,11 @@ cascade refusal slipped through with a prose hint and no `next`. Two things
 are pinned here:
 
 * the cascade refusal, driven through the real dispatch (`handle()`), warm and
-  cold: `next` is the same `revl_change` with `cascade: true` and without
-  `commit` (the cascade withdraws more than the caller named, so a client that
-  follows `next` as-is gets the plan, and committing is a separate call). Sent
-  unchanged it answers `committed: false` with the cascade; its prose is
-  rendered from the same data (`remedy.describe`); a cold refusal keeps
-  `loaded: false`;
+  cold: `next` prefers the ready `revl_change` with `cascade: true`, followed by
+  an unready edit template for replacing the dependents. The cascade call never
+  carries `commit` (it removes more than the caller named), so sending it as-is
+  gets the plan and committing is a separate call. Its prose is rendered from
+  the same data (`remedy.describe`); a cold refusal keeps `loaded: false`;
 * a census built from the source of `src/revl/mcp/*.py` (not from a list of
   sites). It finds two kinds of refusal that name their remedy in prose, and
   requires each to carry `next`:
@@ -42,6 +41,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from revl.mcp import change as change_mod  # noqa: E402
 from revl.mcp import remedy  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
@@ -246,18 +246,36 @@ def _carried(kind: str, tmp_path: Path) -> dict:
 
 
 def _assert_the_cascade_next(refusal: dict, sent: dict) -> dict:
-    """`next` is one ready `revl_change` call: the call that was refused, with
-    the cascade asked for and never `commit`."""
-    nxt = refusal["next"]
+    """`next` prefers the ready cascade call, then offers an unready edit."""
+    options = refusal["next"]
+    assert isinstance(options, list) and len(options) == 2, options
+    nxt, replacement = options
     carried = {k: v for k, v in sent.items() if k != "commit"}
     assert nxt == remedy.call("revl_change", {
         **carried, "withdraw": {"component": "MemStore", "cascade": True}}), nxt
     assert "commit" not in nxt["arguments"]
     assert nxt["ready"] is True and "needs" not in nxt
     assert nxt["tool"] in {tool["name"] for tool in server_mod._ADVERTISED}
+    dependents = [entry["component"] for entry in refusal["plan"]["cascade"]]
+    replacement_context = {
+        key: sent[key] for key in
+        ("files", "source", "modules", "config", "record", "gauntlet")
+        if key in sent
+    }
+    assert replacement == remedy.call(
+        "revl_change",
+        {**replacement_context,
+         "edit": {"edits": [{"symbol": name} for name in dependents]}},
+        ready=False,
+        needs=("a `replacement` declaration for each dependent in `edit.edits`: "
+               + ", ".join(f"`{name}`" for name in dependents)),
+    )
+    assert "commit" not in replacement["arguments"]
+    assert "withdraw" not in replacement["arguments"]
     # the prose is rendered from the same data, so the two cannot disagree
     assert refusal["diagnostics"][0]["message"].endswith(remedy.describe(nxt))
-    assert "cascade: true" in refusal["hint"], "the prose hint stays"
+    assert "cascade: true" in refusal["hint"]
+    assert "second `next` option" in refusal["hint"]
     return nxt
 
 
@@ -303,13 +321,9 @@ def test_a_refused_commit_names_a_next_that_does_not_commit():
             "source": SOURCE}
     refusal = _call("revl_change", sent)
     assert refusal["ok"] is False and refusal["committed"] is False
-    assert refusal["next"]["arguments"] == {
-        "withdraw": {"component": "MemStore", "cascade": True},
-        "source": SOURCE}
-    assert refusal["next"]["ready"] is True
+    nxt = _assert_the_cascade_next(refusal, sent)
     assert "leaves out `commit`" in refusal["hint"]
-    assert "cascade: true" in refusal["hint"]
-    planned = _call(refusal["next"]["tool"], refusal["next"]["arguments"])
+    planned = _call(nxt["tool"], nxt["arguments"])
     assert planned["ok"] is True and planned["committed"] is False, planned
     assert [e["component"] for e in planned["plan"]["cascade"]] == ["ApiImpl"]
     assert _components() == {"MemStore", "ApiImpl", "FixedClock"}, "nothing committed"
@@ -319,3 +333,31 @@ def test_a_refused_commit_names_a_next_that_does_not_commit():
 def test_a_withdrawal_with_nothing_stranded_offers_no_cascade_call():
     refusal = _call("revl_change", {"withdraw": "FixedClock", "source": SOURCE})
     assert refusal["ok"] is True and "next" not in refusal, refusal
+
+
+def test_cascade_refusal_lists_each_dependent_for_replacement():
+    sent = {"withdraw": "MemStore", "source": SOURCE, "commit": True}
+    plan = {"cascade": [
+        {"component": "ApiImpl", "reason": "loses store"},
+        {"component": "StoreAudit", "reason": "loses store"},
+    ]}
+
+    refusal = change_mod.cascade_refusal(sent, plan)
+
+    cascade, replacement = refusal["next"]
+    assert cascade["ready"] is True
+    assert cascade["arguments"] == {
+        "withdraw": {"component": "MemStore", "cascade": True},
+        "source": SOURCE,
+    }
+    assert replacement == remedy.call(
+        "revl_change",
+        {"source": SOURCE, "edit": {"edits": [
+            {"symbol": "ApiImpl"}, {"symbol": "StoreAudit"},
+        ]}},
+        ready=False,
+        needs=("a `replacement` declaration for each dependent in `edit.edits`: "
+               "`ApiImpl`, `StoreAudit`"),
+    )
+    assert replacement["ready"] is False
+    assert "commit" not in replacement["arguments"]

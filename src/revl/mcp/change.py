@@ -99,14 +99,32 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
     if cascade or not stranded:
         return None
     lost = "; ".join(f"{entry['component']} {entry['reason']}" for entry in stranded)
-    # issue #2536: the remedy is the same call with `cascade: true`, so it is
-    # data (#1691) beside the prose; nothing is missing, hence ready. It never
-    # commits: the cascade withdraws more than the caller named, so a client
-    # that follows a ready `next` as-is gets the plan of the cascade, and
-    # committing it is a separate, chosen call
+    # issue #2536: the first preference is the same call with `cascade: true`,
+    # so it is data (#1691) beside the prose; nothing is missing, hence ready.
+    # It never commits: the cascade withdraws more than the caller named, so a
+    # client that follows it as-is gets the plan of the cascade, and committing
+    # it is a separate, chosen call.
     carried = {k: v for k, v in arguments.items() if k != "commit"}
-    nxt = _remedy.call("revl_change", {**carried, "withdraw": {
+    cascade_next = _remedy.call("revl_change", {**carried, "withdraw": {
         "component": component, "cascade": True}})
+    # The plan tells us which dependents lose a provider, but not the source
+    # they should be replaced with. Offer a second, explicitly unready edit
+    # template with each affected symbol pre-filled.
+    replacement_context = {
+        key: arguments[key] for key in
+        ("files", "source", "modules", "config", "record", "gauntlet")
+        if key in arguments
+    }
+    dependent_names = [entry["component"] for entry in stranded]
+    replacement_next = _remedy.call(
+        "revl_change",
+        {**replacement_context,
+         "edit": {"edits": [{"symbol": name} for name in dependent_names]}},
+        ready=False,
+        needs=("a `replacement` declaration for each dependent in `edit.edits`: "
+               + ", ".join(f"`{name}`" for name in dependent_names)),
+    )
+    nxt = [cascade_next, replacement_next]
     return {"ok": False, "admitted": False, "swapped": False,
             "diagnostics": [{"severity": "error", "code": "REVL",
                              "category": "admission",
@@ -115,9 +133,10 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
                                         f"provider: {lost}. "
                                         f"{_remedy.describe(nxt)}"}],
             "hint": "pass {withdraw: {component, cascade: true}} to withdraw the "
-                    "whole cascade together, or replace the dependents first"
-                    + (". `next` leaves out `commit`: it answers with the plan "
-                       "of the cascade, and committing it is a call of its own"
+                    "whole cascade together, or use the second `next` option to "
+                    "replace the dependents first"
+            + (". The first `next` option leaves out `commit`: it answers "
+               "with the cascade plan, and committing it is a call of its own"
                        if "commit" in arguments else ""),
             "next": nxt,
             **({"loaded": False} if cold else {}),
