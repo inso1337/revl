@@ -529,6 +529,14 @@ It is recorded in two places, and is explicit about which is real:
   `tokens.py` uses it verbatim instead of the proxy — so the next paid run
   upgrades the number from proxy to exact with no code change.
 
+Fresh model runs also record the provider's input-token count (`tokens_in`) and
+model-turn count (`turns`) for each spec/variant rep. For Cline, turns are its
+reported iterations and input tokens come from aggregate usage; compiler-feedback
+retries are summed into that rep. The run summary keeps each rep's pair and its
+input-tokens-per-turn ratio in a separate table, so a cheap or expensive rep is
+not hidden by an arm-wide average. The local runner records one turn per
+completion; providers that omit usage leave `tokens_in` blank.
+
 The committed figure today: **mean ~149 est. output tokens-to-green** across 136
 admitted components (real as-run cost $0.29). The costliest cells and the
 per-variant breakdown are in `results/tokens-to-green.md`.

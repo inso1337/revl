@@ -2,7 +2,8 @@
 """syntax-2.0 acceptance benchmark (docs/syntax-2.0.md §10).
 
 30 component specs x {v1, v2, v2host} x models; measures first-pass compile
-rate and iterations-to-green against the CURRENT checker in ../src/revl.
+rate and iterations-to-green against the CURRENT checker in ../src/revl, and
+records per-rep model turns and input-token usage when the runner reports them.
 
 Runners:
   cline  — drives the `cline` CLI non-interactively (real model calls; uses
@@ -211,6 +212,13 @@ def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
     return {
         "text": result.get("text", ""),
         "cost": usage.get("totalCost"),
+        # `iterations` is Cline's model-turn count for this task; aggregateUsage
+        # is the corresponding input-token total across those turns.
+        "turns": (result.get("iterations")
+                  if isinstance(result.get("iterations"), int)
+                  and not isinstance(result.get("iterations"), bool)
+                  and result["iterations"] >= 0 else None),
+        "tokens_in": _input_tokens(usage),
         # the exact output-token count behind the cost — the tokens-to-green
         # metric's real number (bench/tokens.py), which the committed corpora
         # only carry a proxy for. cline names it differently across versions.
@@ -281,6 +289,9 @@ def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
     return {
         "text": text,
         "cost": 0.0,
+        # The local adapter makes one completion request per runner invocation.
+        "turns": 1,
+        "tokens_in": completion.tokens_in,
         # completion_tokens counts the reasoning channel too, and that is the
         # number tokens-to-green wants: reasoning tokens are paid for.
         "output_tokens": completion.tokens_out,
@@ -303,6 +314,16 @@ def _output_tokens(usage: dict):
         value = usage.get(key)
         if isinstance(value, (int, float)):
             return int(value)
+    return None
+
+
+def _input_tokens(usage: dict):
+    """Model input tokens from a provider usage block, or None if absent."""
+    for key in ("totalInputTokens", "inputTokens", "promptTokens", "tokensIn",
+                "input_tokens", "prompt_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
     return None
 
 
@@ -431,6 +452,7 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
     return {"spec": spec["id"], "variant": variant, "summary": True,
             "model": reply.get("model"), "duration_s": dur,
             "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0,
+            "turns": reply.get("turns"), "tokens_in": reply.get("tokens_in"),
             "output_tokens": reply.get("output_tokens"),
             "reasoning_tokens": reply.get("reasoning_tokens"),
             "answer_from_reasoning": reply.get("answer_from_reasoning"),
@@ -565,6 +587,8 @@ def main():
             prompt, code, error = task, None, None
             green_at, cost_total, model_seen = None, 0.0, None
             tokens_total, tokens_seen = 0, False  # output tokens across attempts
+            turns_total, turns_seen = 0, False
+            tokens_in_total, tokens_in_seen = 0, False
             for attempt in range(1, args.max_iters + 1):
                 t0 = time.time()
                 try:
@@ -589,6 +613,16 @@ def main():
                 if reply.get("output_tokens") is not None:
                     tokens_total += reply["output_tokens"]
                     tokens_seen = True
+                if (isinstance(reply.get("turns"), int)
+                        and not isinstance(reply.get("turns"), bool)
+                        and reply["turns"] >= 0):
+                    turns_total += reply["turns"]
+                    turns_seen = True
+                if (isinstance(reply.get("tokens_in"), int)
+                        and not isinstance(reply.get("tokens_in"), bool)
+                        and reply["tokens_in"] >= 0):
+                    tokens_in_total += reply["tokens_in"]
+                    tokens_in_seen = True
                 model_seen = reply.get("model") or model_seen
                 code = extract_code(reply["text"])
                 adir = run_dir / spec["id"] / variant
@@ -599,6 +633,8 @@ def main():
                              "model": model_seen, "attempt": attempt, "ok": ok,
                              "error": error, "duration_s": dur,
                              "cost": reply.get("cost"),
+                             "turns": reply.get("turns"),
+                             "tokens_in": reply.get("tokens_in"),
                              "output_tokens": reply.get("output_tokens"),
                              # reasoning-model bookkeeping: output_tokens above
                              # includes the reasoning channel, so the split is
@@ -619,6 +655,11 @@ def main():
             rows.append({"spec": spec["id"], "variant": variant, "model": model_seen,
                          "summary": True, "green_at": green_at,
                          "cost_total": round(cost_total, 6),
+                         # Per-rep input spend and model turns, summed across
+                         # compiler-feedback invocations. Missing provider usage
+                         # stays null instead of being reported as zero.
+                         "turns": turns_total if turns_seen else None,
+                         "tokens_in": tokens_in_total if tokens_in_seen else None,
                          # tokens-to-green: the token economy's metric, recorded
                          # beside iterations-to-green (bench/tokens.py). None when
                          # the provider reported no token usage.
@@ -686,6 +727,28 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         cost = sum(r.get("cost_total") or 0 for r in vs)
         lines.append(f"| {variant} | {n} | {first}/{n} ({100 * first / n:.0f}%) "
                      f"| {len(green)}/{n} | {mean_iters} | {mean_toks} | ${cost:.2f} |")
+
+    usage_rows = [r for r in rows if r.get("summary")
+                  and (r.get("turns") is not None or r.get("tokens_in") is not None)]
+    if usage_rows:
+        lines += ["", "## Per-rep model usage", "",
+                  "Each row is one spec/variant rep. `turns` is the model-turn "
+                  "count (Cline iterations, summed across compiler-feedback "
+                  "calls); `tokens_in` is provider-reported input tokens, summed "
+                  "over the same calls. The final column keeps their ratio visible "
+                  "per rep instead of averaging different regimes together.", "",
+                  "| spec | variant | turns | tokens_in | tokens_in / turn |",
+                  "|---|---|---:|---:|---:|"]
+        for r in usage_rows:
+            turns = r.get("turns")
+            tokens_in = r.get("tokens_in")
+            turns_text = str(turns) if turns is not None else "—"
+            tokens_text = str(tokens_in) if tokens_in is not None else "—"
+            per_turn = (f"{tokens_in / turns:.0f}"
+                        if turns and tokens_in is not None else "—")
+            lines.append(f"| {r['spec']} | {r['variant']} | {turns_text} | "
+                         f"{tokens_text} | {per_turn} |")
+
     unsolved = [(r["spec"], r["variant"]) for r in finals if not r["green_at"]]
     if unsolved:
         lines += ["", "Unsolved: " + ", ".join(f"{s}/{v}" for s, v in unsolved)]

@@ -1,8 +1,9 @@
 # The token economy — make revl the cheapest language for an agent to write
 
 **Status:** metric + one compound verb implemented (roadmap item 50).
-- **Metric:** `bench/tokens.py`, committed snapshot `bench/results/tokens-to-green.md`,
-  pinned by `tests/test_tokens_to_green.py`.
+- **Metrics:** output tokens in `bench/tokens.py`, per-rep input tokens/turns in
+  `bench/run.py`, and the committed output-token snapshot
+  `bench/results/tokens-to-green.md`, pinned by `tests/test_tokens_to_green.py`.
 - **Compound verb:** `revl_ship` in `src/revl/mcp/ship.py`, registered in
   `src/revl/mcp/server.py`, pinned by `tests/test_mcp_ship.py`.
 - **Deferred this wave:** the terse authoring form (needs the parser — owned by
@@ -28,6 +29,13 @@ Committed snapshot (`bench/results/tokens-to-green.md`): across **136** admitted
 components, **mean 149 est. output tokens-to-green** (median 130). The costliest
 cells are ranked in that file so optimization has a target. Every later
 optimization on this item has to move *this* number before it ships.
+
+The same benchmark now records provider-reported input tokens (`tokens_in`)
+beside model turns (`turns`) for every spec/variant rep. Cline's iteration count
+and aggregate input usage are summed across that rep's compiler-feedback calls;
+the run summary reports the pair and tokens-in-per-turn ratio per rep. This
+keeps a cheaper or costlier rep visible instead of averaging it into an
+arm. Providers that do not report input usage leave `tokens_in` unset.
 
 There are two halves to the spend, and the metric names both:
 
