@@ -790,6 +790,7 @@ def test_bench_clients_send_through_the_adapter(fake):
     bench_run = _load_by_path("bench_run_1461", ROOT / "bench" / "run.py")
     row = bench_run.run_local("sys", "prompt", "m", fake.base + "/v1", 30)
     assert row["text"] == "hello from the fake"
+    assert row["tokens_in"] == 11 and row["turn_count"] == 1
     assert row["output_tokens"] == 7 and row["reasoning_tokens"] == 3
     assert fake.requests[-1]["path"] == "/v1/chat/completions"
 

@@ -28,6 +28,7 @@ Usage:
 import argparse
 import datetime
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -211,10 +212,14 @@ def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
     return {
         "text": result.get("text", ""),
         "cost": usage.get("totalCost"),
+        "tokens_in": _input_tokens(usage),
         # the exact output-token count behind the cost — the tokens-to-green
         # metric's real number (bench/tokens.py), which the committed corpora
         # only carry a proxy for. cline names it differently across versions.
         "output_tokens": _output_tokens(usage),
+        # Cline's iterations count model-loop turns inside this invocation;
+        # `attempt` below separately counts compiler-feedback retries.
+        "turn_count": _turn_count(result.get("iterations")),
         "model": model_info.get("id"),
         "provider": (model_info.get("provider") if isinstance(model_info, dict) else None),
     }
@@ -281,9 +286,12 @@ def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
     return {
         "text": text,
         "cost": 0.0,
+        "tokens_in": completion.tokens_in,
         # completion_tokens counts the reasoning channel too, and that is the
         # number tokens-to-green wants: reasoning tokens are paid for.
         "output_tokens": completion.tokens_out,
+        # This adapter call has one model request and no agent/tool loop.
+        "turn_count": 1,
         "reasoning_tokens": completion.reasoning_tokens,
         "reasoning_chars": len(reasoning),
         "answer_from_reasoning": from_reasoning,
@@ -303,6 +311,34 @@ def _output_tokens(usage: dict):
         value = usage.get(key)
         if isinstance(value, (int, float)):
             return int(value)
+    return None
+
+
+def _input_tokens(usage: dict):
+    """Provider-reported input tokens, or None when usage is unavailable."""
+    return _usage_count(usage, (
+        "inputTokens", "totalInputTokens", "tokensIn", "tokens_in",
+        "promptTokens", "prompt_tokens",
+    ))
+
+
+def _usage_count(usage: dict, keys: tuple[str, ...]) -> int | None:
+    """Return a non-negative integer usage value without inventing zero."""
+    if not isinstance(usage, dict):
+        return None
+    for key in keys:
+        value = usage.get(key)
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0):
+            return int(value)
+    return None
+
+
+def _turn_count(value) -> int | None:
+    """Cline reports the number of model-loop iterations for one task."""
+    if (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0 and int(value) == value):
+        return int(value)
     return None
 
 
@@ -415,7 +451,8 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
                               args.timeout, args.inline_system)
     except Exception as exc:
         print(f"  !! {spec['id']}/{variant}: runner error: {exc}", file=sys.stderr)
-        return {"spec": spec["id"], "variant": variant, "summary": True,
+        return {"spec": spec["id"], "variant": variant, "attempt": 1,
+                "summary": True,
                 "status": "error", "leaked": True, "leaked_categories": [],
                 "error": f"[runner error] {exc}", "duration_s": round(time.time() - t0, 2)}
     dur = round(time.time() - t0, 2)
@@ -428,9 +465,12 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
     extra = (" — " + ", ".join(rec["leaked_categories"])) if rec["leaked_categories"] \
         else (f" — {rec['error']}" if rec.get("error") else "")
     print(f"  {spec['id']}/{variant}: {flag}{extra}")
-    return {"spec": spec["id"], "variant": variant, "summary": True,
+    return {"spec": spec["id"], "variant": variant, "attempt": 1,
+            "summary": True,
             "model": reply.get("model"), "duration_s": dur,
             "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0,
+            "tokens_in": reply.get("tokens_in"),
+            "turn_count": reply.get("turn_count"),
             "output_tokens": reply.get("output_tokens"),
             "reasoning_tokens": reply.get("reasoning_tokens"),
             "answer_from_reasoning": reply.get("answer_from_reasoning"),
@@ -565,7 +605,12 @@ def main():
             prompt, code, error = task, None, None
             green_at, cost_total, model_seen = None, 0.0, None
             tokens_total, tokens_seen = 0, False  # output tokens across attempts
+            tokens_in_total, tokens_in_seen = 0, False
+            turn_count_total, turn_count_seen = 0, False
+            tokens_in_complete, turn_count_complete = True, True
+            invocation_count = 0
             for attempt in range(1, args.max_iters + 1):
+                invocation_count += 1
                 t0 = time.time()
                 try:
                     if args.runner == "mock":
@@ -577,6 +622,8 @@ def main():
                         reply = run_cline(system, prompt, args.model, args.provider,
                                           args.timeout, args.inline_system)
                 except Exception as exc:
+                    tokens_in_complete = False
+                    turn_count_complete = False
                     print(f"  !! {spec['id']}/{variant} attempt {attempt}: runner error: {exc}",
                           file=sys.stderr)
                     rows.append({"spec": spec["id"], "variant": variant,
@@ -589,6 +636,16 @@ def main():
                 if reply.get("output_tokens") is not None:
                     tokens_total += reply["output_tokens"]
                     tokens_seen = True
+                if reply.get("tokens_in") is not None:
+                    tokens_in_total += reply["tokens_in"]
+                    tokens_in_seen = True
+                else:
+                    tokens_in_complete = False
+                if reply.get("turn_count") is not None:
+                    turn_count_total += reply["turn_count"]
+                    turn_count_seen = True
+                else:
+                    turn_count_complete = False
                 model_seen = reply.get("model") or model_seen
                 code = extract_code(reply["text"])
                 adir = run_dir / spec["id"] / variant
@@ -599,6 +656,8 @@ def main():
                              "model": model_seen, "attempt": attempt, "ok": ok,
                              "error": error, "duration_s": dur,
                              "cost": reply.get("cost"),
+                             "tokens_in": reply.get("tokens_in"),
+                             "turn_count": reply.get("turn_count"),
                              "output_tokens": reply.get("output_tokens"),
                              # reasoning-model bookkeeping: output_tokens above
                              # includes the reasoning channel, so the split is
@@ -619,6 +678,12 @@ def main():
             rows.append({"spec": spec["id"], "variant": variant, "model": model_seen,
                          "summary": True, "green_at": green_at,
                          "cost_total": round(cost_total, 6),
+                         "tokens_in_to_green": (
+                             tokens_in_total if invocation_count and tokens_in_seen
+                             and tokens_in_complete else None),
+                         "turn_count_to_green": (
+                             turn_count_total if invocation_count and turn_count_seen
+                             and turn_count_complete else None),
                          # tokens-to-green: the token economy's metric, recorded
                          # beside iterations-to-green (bench/tokens.py). None when
                          # the provider reported no token usage.
@@ -668,8 +733,10 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
                      if v not in PROBED_VARIANTS]
     if revl_variants:
         lines += ["## revl variants — compile-gated (residue refused at compile)", "",
-                  "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | mean tokens-to-green | cost |",
-                  "|---|---|---|---|---|---|---|"]
+                  "| variant | specs | first-pass compile | green ≤ max iters | "
+                  "mean compile attempts | mean model turns | mean tokens_in | "
+                  "mean output tokens-to-green | cost |",
+                  "|---|---|---|---|---:|---:|---:|---:|---:|"]
     for variant in revl_variants:
         vs = [r for r in finals if r["variant"] == variant]
         if not vs:
@@ -683,9 +750,37 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         toks = [r["tokens_to_green"] for r in vs
                 if r["green_at"] and r.get("tokens_to_green") is not None]
         mean_toks = f"{sum(toks) / len(toks):.0f}" if toks else "—"
+        turns = [r["turn_count_to_green"] for r in vs
+                 if r.get("turn_count_to_green") is not None]
+        mean_turns = f"{sum(turns) / len(turns):.2f}" if turns else "—"
+        tokens_in = [r["tokens_in_to_green"] for r in vs
+                     if r.get("tokens_in_to_green") is not None]
+        mean_tokens_in = (f"{sum(tokens_in) / len(tokens_in):.0f}"
+                          if tokens_in else "—")
         cost = sum(r.get("cost_total") or 0 for r in vs)
         lines.append(f"| {variant} | {n} | {first}/{n} ({100 * first / n:.0f}%) "
-                     f"| {len(green)}/{n} | {mean_iters} | {mean_toks} | ${cost:.2f} |")
+                     f"| {len(green)}/{n} | {mean_iters} | {mean_turns} | "
+                     f"{mean_tokens_in} | {mean_toks} | ${cost:.2f} |")
+
+    invocation_rows = [r for r in rows if "attempt" in r]
+    if invocation_rows:
+        lines += ["", "## Model turns and input tokens per invocation", "",
+                  "Each row is one benchmark invocation. `turn_count` is the "
+                  "model-loop count inside it; `attempt` is the separate "
+                  "compiler-feedback retry index. Missing usage stays `—`.", "",
+                  "| spec | variant | attempt | turn_count | tokens_in | tokens_in / turn |",
+                  "|---|---|---:|---:|---:|---:|"]
+        for row in sorted(invocation_rows,
+                          key=lambda r: (r["spec"], r["variant"], r["attempt"])):
+            turns = row.get("turn_count")
+            tokens_in = row.get("tokens_in")
+            per_turn = (f"{tokens_in / turns:.0f}"
+                        if tokens_in is not None and turns else "—")
+            lines.append(
+                f"| {row['spec']} | {row['variant']} | {row['attempt']} | "
+                f"{turns if turns is not None else '—'} | "
+                f"{tokens_in if tokens_in is not None else '—'} | {per_turn} |"
+            )
     unsolved = [(r["spec"], r["variant"]) for r in finals if not r["green_at"]]
     if unsolved:
         lines += ["", "Unsolved: " + ", ".join(f"{s}/{v}" for s, v in unsolved)]
