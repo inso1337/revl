@@ -106,7 +106,7 @@ def _written(mod, workspace):
     witness = result.value
     sidecar = witness["preimage"]
     assert os.path.dirname(sidecar) == str(workspace / ws.PREIMAGE_DIRNAME)
-    assert open(sidecar).read() == "v1"
+    assert open(sidecar, encoding="utf-8").read() == "v1"
     return witness, str(workspace / "artifact.txt"), sidecar
 
 
@@ -119,17 +119,17 @@ def _written(mod, workspace):
 def test_an_untampered_restore_still_succeeds_silently(workspace):
     mod = _fs_module()
     witness, target, sidecar = _written(mod, workspace)
-    assert open(target).read() == "v2"
+    assert open(target, encoding="utf-8").read() == "v2"
 
     mod.restore(witness)                       # no raise, no diagnostics
 
-    assert open(target).read() == "v1", "the honest preimage was not restored"
+    assert open(target, encoding="utf-8").read() == "v1", "the honest preimage was not restored"
     assert not os.path.exists(sidecar), "the restore left its snapshot behind"
     assert not any((workspace / ws.PREIMAGE_DIRNAME).iterdir()), \
         "reversal is residue-free: the preimage directory is empty again"
 
     mod.restore(witness)                       # still idempotent on replay
-    assert open(target).read() == "v1"
+    assert open(target, encoding="utf-8").read() == "v1"
 
 
 def test_a_created_file_is_still_deleted_by_its_inverse(workspace):
@@ -156,7 +156,7 @@ def test_a_witness_that_carries_no_capture_still_restores(workspace):
 
     mod.restore(legacy)
 
-    assert open(target).read() == "v1"
+    assert open(target, encoding="utf-8").read() == "v1"
     assert not os.path.exists(sidecar)
 
 
@@ -181,9 +181,9 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
         mod.restore(witness)
     assert ei.value.code == "EIDENTITY"
 
-    assert open(target).read() == "v2", \
+    assert open(target, encoding="utf-8").read() == "v2", \
         "the tampered snapshot was installed over the target anyway"
-    assert open(sidecar).read() == "zz", "the refused sidecar was consumed"
+    assert open(sidecar, encoding="utf-8").read() == "zz", "the refused sidecar was consumed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
@@ -194,13 +194,13 @@ def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
     decoy = workspace / "decoy"
     decoy.write_text("v1", encoding="utf-8")   # same BYTES as the snapshot
     os.replace(str(decoy), sidecar)
-    assert open(sidecar).read() == "v1"
+    assert open(sidecar, encoding="utf-8").read() == "v1"
 
     with pytest.raises(ws.FsOpError) as ei:
         mod.restore(witness)
     assert ei.value.code == "EIDENTITY", \
         "a same-bytes inode swap is exactly what an identity check is for"
-    assert open(target).read() == "v2"
+    assert open(target, encoding="utf-8").read() == "v2"
     assert os.path.exists(sidecar)
 
 
@@ -218,7 +218,7 @@ def test_a_relinked_sidecar_is_refused_rather_than_installed(workspace):
     with pytest.raises(ws.FsOpError) as ei:
         mod.restore(witness)
     assert ei.value.code == "EMULTILINK"
-    assert open(target).read() == "v2"
+    assert open(target, encoding="utf-8").read() == "v2"
     assert alias.exists(), "the aliased snapshot was renamed away"
 
 
@@ -233,7 +233,7 @@ def test_a_sidecar_replaced_by_a_directory_is_refused(workspace):
     with pytest.raises(ws.FsOpError) as ei:
         mod.restore(witness)
     assert ei.value.code == "EOUTSIDE"
-    assert open(target).read() == "v2"
+    assert open(target, encoding="utf-8").read() == "v2"
 
 
 def test_the_installed_result_is_rechecked_after_the_rename(workspace, monkeypatch):

@@ -189,7 +189,9 @@ REGISTRY = [
         "hint": "`--write` re-measured every count but never writes a budget. "
                 "Each function the check names needs its budget (the last "
                 "field of its record) set BY HAND to the merged count, in this "
-                "merge commit. Lower is the goal; a raised budget needs a reason.",
+                "merge commit. Lower is the goal; a raised budget needs a reason. "
+                "A fall `origin/main` does not already record still fails: "
+                "`--write` re-measures, it does not make a branch-local fall pass.",
     },
     {
         "name": "docgen",

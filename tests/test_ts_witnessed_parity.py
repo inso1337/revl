@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +51,8 @@ for _p in (str(_ROOT / "src"), str(_BACKEND_PY)):
 
 import revl_shell_classify as _sc  # noqa: E402  (py classifier, the oracle)
 from revl.compiler import compile_files  # noqa: E402
+
+from _node_capability import node_ts_skip_reason  # noqa: E402
 
 
 def _load_ts_emit():
@@ -126,8 +127,10 @@ _EMISSION = [
 ]
 _CORPUS = _WITNESSED + _EMISSION
 
-_HAS_NODE = shutil.which("node") is not None
-_needs_node = pytest.mark.skipif(not _HAS_NODE, reason="node is required to run the emitted ts classifier")
+_NODE_TS_REASON = node_ts_skip_reason(
+    "node is required to run the emitted ts classifier")
+_needs_node = pytest.mark.skipif(
+    _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
 
 
 def _emit_ts_classifier(dest: Path) -> None:

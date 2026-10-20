@@ -161,10 +161,10 @@ def test_hand_editing_the_index_turns_the_check_red():
         dst = os.path.join(tmp, "registry")
         shutil.copytree(REGISTRY_DIR, dst)
         index_path = os.path.join(dst, "index.json")
-        index = json.loads(open(index_path).read())
+        index = json.loads(open(index_path, encoding="utf-8").read())
         # a hand-edit the generator would never produce
         index["components"]["pg_database"]["capabilities"] = ["forged"]
-        open(index_path, "w").write(json.dumps(index, indent=2) + "\n")
+        open(index_path, "w", encoding="utf-8").write(json.dumps(index, indent=2) + "\n")
         problems = registry.verify(dst)
         assert problems and any("index.json" in p for p in problems)
 
@@ -174,9 +174,9 @@ def test_tampering_with_a_manifest_turns_the_check_red():
         dst = os.path.join(tmp, "registry")
         shutil.copytree(REGISTRY_DIR, dst)
         mpath = os.path.join(dst, "components", "pg_database", "manifest.json")
-        manifest = json.loads(open(mpath).read())
+        manifest = json.loads(open(mpath, encoding="utf-8").read())
         manifest["boundary"] = {"forged": {"emissions": ["evil.exfiltrate"]}}
-        open(mpath, "w").write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        open(mpath, "w", encoding="utf-8").write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         problems = registry.verify(dst)
         assert any("pg_database" in p for p in problems)
 

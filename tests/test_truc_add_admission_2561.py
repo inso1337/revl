@@ -184,7 +184,7 @@ def test_cli_rm_takes_the_flag(tmp_path):
     proj = _toml_project(tmp_path, f'local = {{ path = "{registry}" }}')
     for name in ("pkg", "notes"):
         shutil.copytree(registry / "components" / name, proj / "trucs" / name)
-    with (proj / "truc.toml").open("a") as handle:
+    with (proj / "truc.toml").open("a", encoding="utf-8") as handle:
         handle.write('pkg = { registry = "local" }\n'
                      'notes = { registry = "local" }\n')
     (proj / "truc.lock").write_text(json.dumps({

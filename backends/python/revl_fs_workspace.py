@@ -1989,6 +1989,59 @@ def _parked_stat(real: str, what: str):
     return st
 
 
+def _parked_digest(real: str, what: str) -> str | None:
+    """The SHA-256 of a parked inode's bytes as bare lowercase hex, or `None`
+    when the inode cannot be opened for reading (issue #2650).
+
+    Read through the parent's directory fd, never a re-walked path string, and
+    opened `O_NOFOLLOW` on the leaf, for the same reason `_parked_stat` uses
+    `lstat` there: `rm` parks the caller's own file, so the leaf may be a
+    directory, a file that already carried a second link, or a file whose mode
+    denies read, and only a regular file this process can open `O_RDONLY` gets
+    a digest. A non-regular inode or an open/read refusal is `None`. The bytes
+    are read with `pread` from offset 0, like `_digest_held`, so the hash does
+    not disturb the descriptor's offset.
+
+    The two callers read `None` differently and deliberately. `park` records a
+    stat-only capture, because refusing an honest `rm` of a directory, of an
+    already-hardlinked file, or of a write-only file is over-refusal. `install`
+    fails closed, because a capture that RECORDED a digest says the file was
+    readable when it was parked, so not being able to re-read it now is drift,
+    never a reason to fall back to the stat fields a same-tick rewrite hides.
+    """
+    parent, leaf = _split(real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FsOpError(
+            "ERACE", f"the {what}'s directory disappeared mid-inverse",
+            real) from None
+    try:
+        try:
+            fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                         dir_fd=dirfd)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            h = hashlib.sha256()
+            offset = 0
+            while True:
+                chunk = os.pread(fd, 1 << 20, offset)
+                if not chunk:
+                    break
+                offset += len(chunk)
+                h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+
+
 def _refuse_substituted_kind(st, capture, real: str, what: str) -> None:
     """The two refusals `_checked_stat` states as constants for the preimage
     sidecar, stated against the capture instead (issue #1038).
@@ -2025,6 +2078,55 @@ def _refuse_substituted_kind(st, capture, real: str, what: str) -> None:
             real)
 
 
+def _refuse_drifted_digest(real: str, capture, what: str, sentence: str) -> None:
+    """Compare the parked file's current bytes to the digest
+    `park_captured_sidecar` recorded, or do nothing when the capture carries
+    none (issue #2650).
+
+    A capture with no `sha256` is a record written before the key existed (a
+    durable record replayed by `revl recover`), and it keeps the stat-only
+    behaviour, exactly as `install_captured_sidecar` keeps its stat comparison
+    for a witness that carries no capture at all. When the key IS present, a
+    mismatch, an unreadable file, or a value that is not a bare lowercase hex
+    digest is `EIDENTITY`: the point of the key is to catch the same-tick
+    rewrite the stat fields cannot see, so falling back to stat-only would
+    admit the very file it exists to refuse.
+
+    Named separately, like `_refuse_drifted_identity`, so the pre-rename and
+    post-rename passes of `install_parked_sidecar` state the same comparison
+    once rather than inlining two subtly different ones. It is deliberately
+    NOT shared with the `restore` path: the preimage sidecar is a file this
+    module created and can always read, while the parked file is the caller's
+    own and may not be readable at all."""
+    if not isinstance(capture, dict) or not capture:
+        return
+    recorded = capture.get("sha256")
+    if recorded is None:
+        return
+    if not isinstance(recorded, str) or \
+            re.fullmatch(r"[0-9a-f]{64}", recorded) is None:
+        raise FsOpError(
+            "EIDENTITY",
+            f"{sentence} (the recorded sha256 is not a lowercase SHA-256 "
+            f"digest); the reversal was refused rather than install a file "
+            f"that is not {what}",
+            real)
+    observed = _parked_digest(real, what)
+    if observed is None:
+        raise FsOpError(
+            "EIDENTITY",
+            f"{sentence} (the recorded sha256 could not be re-read); the "
+            f"reversal was refused rather than install a file that is not "
+            f"{what}",
+            real)
+    if observed != recorded:
+        raise FsOpError(
+            "EIDENTITY",
+            f"{sentence} (sha256 differs); the reversal was refused rather "
+            f"than install a file that is not {what}",
+            real)
+
+
 def park_captured_sidecar(src_real: str, dst_real: str) -> dict:
     """Park `src_real` in the garbage slot `dst_real` and return the parked
     inode's captured identity (issue #1038).
@@ -2037,9 +2139,24 @@ def park_captured_sidecar(src_real: str, dst_real: str) -> dict:
     inside the garbage directory's own fd, never from a re-walked path string,
     and it records the stamps AS THE PARK LEFT THEM: a rename bumps the inode's
     `ctime`, so capturing before it would record a `ctime_ns` no honest sidecar
-    could still have."""
+    could still have.
+
+    When the parked inode is a regular file that opens `O_RDONLY`, the capture
+    also carries `sha256`, the bare lowercase hex digest of its bytes (issue
+    #2650). The seven stat fields cannot see a same-length in-place rewrite on
+    a filesystem whose inode clock has not ticked; the digest can. Every other
+    parked kind, and a file whose mode denies read, stays stat-only, because
+    `_parked_digest` cannot read it and `rm` honestly accepts it. The key is
+    additive JSON: the witness version does not change, and an install that
+    predates the key ignores it."""
     replace_confined(src_real, dst_real)
-    return _capture_of(_parked_stat(dst_real, "garbage sidecar"))
+    st = _parked_stat(dst_real, "garbage sidecar")
+    capture = _capture_of(st)
+    if stat.S_ISREG(st.st_mode):
+        digest = _parked_digest(dst_real, "garbage sidecar")
+        if digest is not None:
+            capture["sha256"] = digest
+    return capture
 
 
 def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
@@ -2064,6 +2181,16 @@ def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
     forge; `ctime_ns` is what makes an in-place rewrite visible without
     re-reading the bytes, and unlike `mtime_ns` an unprivileged writer cannot
     set it back with `utimes`.
+
+    The stamps are not enough on a filesystem whose inode clock is coarse
+    relative to the write (issue #2650): a same-length in-place rewrite can
+    leave all seven fields identical. So when the capture carries the `sha256`
+    `park_captured_sidecar` recorded, the parked bytes are hashed through the
+    already-walked directory fd and compared on BOTH passes, before and after
+    the rename, with `EIDENTITY` on a mismatch. A recorded digest that cannot
+    be re-read is the same refusal: the check never falls back to stat-only. A
+    capture with no `sha256` (a record written before the key existed) keeps
+    the stat-only behaviour, so a legacy WAL still replays.
 
     The one difference from `install_captured_sidecar` is where the type and
     link-count expectations come from. The preimage sidecar is a file this
@@ -2097,12 +2224,18 @@ def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
     _refuse_drifted_identity(
         before, capture, SIDECAR_CAPTURE_FIELDS, src_real,
         "the garbage sidecar changed since it was parked", "the parked file")
+    _refuse_drifted_digest(
+        src_real, capture, "garbage sidecar",
+        "the garbage sidecar changed since it was parked")
     replace_confined(src_real, dst_real)
     after = _parked_stat(dst_real, "unremoved target")
     _refuse_substituted_kind(after, capture, dst_real, "unremoved target")
     _refuse_drifted_identity(
         after, capture, INSTALLED_CAPTURE_FIELDS, dst_real,
         "the unremoved target is not the parked file", "the parked file")
+    _refuse_drifted_digest(
+        dst_real, capture, "unremoved target",
+        "the unremoved target is not the parked file")
 
 
 def remove_confined(real: str) -> None:

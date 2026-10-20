@@ -483,7 +483,9 @@ It then runs every generator's own check, and stages what it resolved.
 - **The coverage ledger** (`tests/fixtures/selfhost_uncovered_lines/`) is
   handed to `tools/selfhost_line_coverage.py --write` as it stands, because
   that tool reads through conflict markers and re-measures every count. It
-  never writes a budget. When its `--check` names a function whose budget no
+  never writes a budget, and it does not make a branch-local fall pass: the
+  check holds each record to the `origin/main` baseline, so a fall has to land
+  there first. When its `--check` names a function whose budget no
   longer matches, set that budget by hand in the merge commit; the tool
   prints this step.
 - **Hand-maintained ratchets are never resolved for you.** The tool prints the

@@ -250,12 +250,12 @@ def test_write_restore_roundtrip_and_idempotent(workspace):
     art = str(workspace / "artifact.txt")
     w = mod.write("artifact.txt", "v2")
     assert isinstance(w, mod.Ok)
-    assert open(art).read() == "v2"          # mutated
+    assert open(art, encoding="utf-8").read() == "v2"          # mutated
     assert w.value["created"] is False
     mod.restore(w.value)
-    assert open(art).read() == "v1"          # preimage back
+    assert open(art, encoding="utf-8").read() == "v1"          # preimage back
     mod.restore(w.value)                      # idempotent: second replay no-ops
-    assert open(art).read() == "v1"
+    assert open(art, encoding="utf-8").read() == "v1"
 
 
 def test_write_of_new_file_undo_deletes_it(workspace):
@@ -275,7 +275,7 @@ def test_rm_unrm_roundtrip(workspace):
     r = mod.rm("stale.txt")
     assert isinstance(r, mod.Ok) and not os.path.exists(stale)
     mod.unrm(r.value)
-    assert os.path.exists(stale) and open(stale).read() == "junk"
+    assert os.path.exists(stale) and open(stale, encoding="utf-8").read() == "junk"
     mod.unrm(r.value)                          # idempotent
 
 

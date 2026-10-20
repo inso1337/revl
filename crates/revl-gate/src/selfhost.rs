@@ -2417,6 +2417,12 @@ fn v3_is_str(node: Value, ctx_: Ctx__m1) -> bool {
         let cn = value_str(value_field(callee.clone(), String::from("name")));
         return (v3_subst(map_get(ctx_.fr.clone(), cn.clone()), v3_generic_call(cn.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone(), value_str(value_field(node.clone(), String::from("expected"))))) == "Str");
     }
+    if (k == "fn") {
+        let fnm = value_str(value_field(node.clone(), String::from("name")));
+        let nb = v3_generic_call(fnm.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone(), value_str(value_field(node.clone(), String::from("expected"))));
+        let ret = if (({ let mut ks: std::vec::Vec<String> = nb.keys().cloned().collect(); ks.sort(); ks }).revl_length() > 0i64) { v3_subst(map_get(ctx_.fr.clone(), fnm.clone()), nb.clone()) } else { map_get(ctx_.fr.clone(), fnm.clone()) };
+        return (ret == "Str");
+    }
     if (k == "field") {
         let target_ty = v3_infer_type(value_field(node.clone(), String::from("target")), ctx_.clone());
         if (target_ty == "") {
@@ -2448,7 +2454,15 @@ fn v3_infer_type(node: Value, ctx_: Ctx__m1) -> String {
         return map_get(ctx_.ca.clone(), value_str(value_field(node.clone(), String::from("case"))));
     }
     if (k == "fn") {
-        return map_get(ctx_.fr.clone(), value_str(value_field(node.clone(), String::from("name"))));
+        let fnm = value_str(value_field(node.clone(), String::from("name")));
+        let declared = map_get(ctx_.fr.clone(), fnm.clone());
+        let nb = v3_generic_call(fnm.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone(), value_str(value_field(node.clone(), String::from("expected"))));
+        if (({ let mut ks: std::vec::Vec<String> = nb.keys().cloned().collect(); ks.sort(); ks }).revl_length() > 0i64) {
+            return v3_subst(declared.clone(), nb.clone());
+        }
+        if ctx_.fr.contains_key(&fnm) {
+            return declared;
+        }
     }
     if ((k == "call") && (!value_is_null(value_field(node.clone(), String::from("callee"))))) {
         let callee = value_field(node.clone(), String::from("callee"));
@@ -6459,16 +6473,16 @@ fn binds(comp: Value) -> Vec<String> {
     return out;
 }
 
-fn activation_ctx(tables: TypeTables, fr: std::collections::HashMap<String, String>, map_values: std::collections::HashMap<String, String>) -> Ctx__m1 {
-    let mut c = plain_ctx(tables.clone(), fr.clone());
+fn activation_ctx(tables: TypeTables, fr: std::collections::HashMap<String, String>, map_values: std::collections::HashMap<String, String>, functions: Vec<Value>) -> Ctx__m1 {
+    let mut c = plain_ctx(tables.clone(), fr.clone(), functions.clone());
     for b in { let mut ks: std::vec::Vec<String> = map_values.keys().cloned().collect(); ks.sort(); ks } {
         c = set_vt(c.clone(), b.clone(), format!("Map[{}]", map_get(map_values.clone(), b.clone())));
     }
     return c;
 }
 
-fn plain_ctx(tables: TypeTables, fr: std::collections::HashMap<String, String>) -> Ctx__m1 {
-    return Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: std::collections::HashMap::new(), bp: std::collections::HashMap::new(), flb: std::collections::HashMap::new(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
+fn plain_ctx(tables: TypeTables, fr: std::collections::HashMap<String, String>, functions: Vec<Value>) -> Ctx__m1 {
+    return Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: std::collections::HashMap::new(), bp: std::collections::HashMap::new(), flb: std::collections::HashMap::new(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: fn_params_map(functions.clone()), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
 }
 
 fn map_value_expr_type(node: Value, var_types: std::collections::HashMap<String, String>, comp: Value, services: Value, functions: Vec<Value>, ctx_: Ctx__m1) -> String {
@@ -7332,7 +7346,7 @@ fn fr_map(ir: Value) -> std::collections::HashMap<String, String> {
     return fr;
 }
 
-fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, tables: TypeTables, fr: std::collections::HashMap<String, String>, borrow: std::collections::HashMap<String, Vec<i64>>, list_borrow: std::collections::HashMap<String, Vec<i64>>, effectful: bool, use_mname: bool, map_values: std::collections::HashMap<String, String>) -> Vec<String> {
+fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, tables: TypeTables, fr: std::collections::HashMap<String, String>, borrow: std::collections::HashMap<String, Vec<i64>>, list_borrow: std::collections::HashMap<String, Vec<i64>>, effectful: bool, use_mname: bool, map_values: std::collections::HashMap<String, String>, functions: Vec<Value>) -> Vec<String> {
     let body = value_list(value_field(comp.clone(), String::from("body")));
     let svc_methods = value_field(value_field(services.clone(), srv.clone()), String::from("methods"));
     let mut out: Vec<String> = vec![];
@@ -7359,7 +7373,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
         if (!value_is_null(r.clone())) {
             ret = rust_type_t(r.clone(), tables.tn.clone());
         }
-        let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
+        let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: fn_params_map(functions.clone()), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
         if (effectful && method_has_effectful_steps(method.clone())) {
             out.push(format!("    fn {}(&self, {}) -> {} {{", mn, ps.revl_join(", "), ret));
             let bl = method_body_lines(comp.clone(), method.clone(), services.clone(), ctx_.clone(), 2i64);
@@ -7819,14 +7833,14 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
     let body = value_list(value_field(comp.clone(), String::from("body")));
     let cty = config_ty(comp.clone());
     let functions = value_list(value_field(ir.clone(), String::from("functions")));
-    let map_values = component_map_values(comp.clone(), services.clone(), functions.clone(), plain_ctx(tables.clone(), fr.clone()), tables.tn.clone());
+    let map_values = component_map_values(comp.clone(), services.clone(), functions.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()), tables.tn.clone());
     let mut out = emit_config_struct_lines(comp.clone());
     for key in value_keys(provs.clone()) {
         let srv = value_str(value_field(provs.clone(), key.clone()));
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone()))));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -7834,7 +7848,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
         out.extend((config_struct_field(comp.clone(), &key)).iter().cloned());
         out.push(String::from("}"));
         out.push(format!("impl {} for {} {{", svc_ident(srv.clone()), struct_));
-        out.extend((emit_provide_methods(comp.clone(), services.clone(), &key, srv.clone(), tables.clone(), fr.clone(), compute_str_param_borrows(functions.clone()), compute_list_param_borrows(functions.clone()), false, false, map_values.clone())).iter().cloned());
+        out.extend((emit_provide_methods(comp.clone(), services.clone(), &key, srv.clone(), tables.clone(), fr.clone(), compute_str_param_borrows(functions.clone()), compute_list_param_borrows(functions.clone()), false, false, map_values.clone(), functions.clone())).iter().cloned());
         out.push(String::from("}"));
         out.push(String::from(""));
     }
@@ -7864,7 +7878,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
         if (kind == "provide") {
             out.extend((emit_provide_construction(comp.clone(), step.clone(), false, 3i64)).iter().cloned());
         } else {
-            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone()), map_values.clone(), 3i64, tb, sb, ab.clone())).iter().cloned());
+            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone(), functions.clone()), map_values.clone(), 3i64, tb, sb, ab.clone())).iter().cloned());
             tb = (tb).checked_add(count_timers(vec![step.clone()])).expect("revl: Int overflow");
             sb = (sb).checked_add(count_stream_events(vec![step.clone()])).expect("revl: Int overflow");
             ab.extend((step_let_binds(vec![step.clone()])).iter().cloned());
@@ -7893,14 +7907,14 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
     let cty = config_ty(comp.clone());
     let has_eff = component_has_effectful_methods(comp.clone());
     let functions = value_list(value_field(ir.clone(), String::from("functions")));
-    let map_values = component_map_values(comp.clone(), services.clone(), functions.clone(), plain_ctx(tables.clone(), fr.clone()), tables.tn.clone());
+    let map_values = component_map_values(comp.clone(), services.clone(), functions.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()), tables.tn.clone());
     let mut out = emit_config_struct_lines(comp.clone());
     for key in value_keys(provs.clone()) {
         let srv = value_str(value_field(provs.clone(), key.clone()));
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone()))));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -7911,7 +7925,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         }
         out.push(String::from("}"));
         out.push(format!("impl {} for {} {{", svc_ident(srv.clone()), struct_));
-        out.extend((emit_provide_methods(comp.clone(), services.clone(), &key, srv.clone(), tables.clone(), fr.clone(), compute_str_param_borrows(functions.clone()), compute_list_param_borrows(functions.clone()), true, true, map_values.clone())).iter().cloned());
+        out.extend((emit_provide_methods(comp.clone(), services.clone(), &key, srv.clone(), tables.clone(), fr.clone(), compute_str_param_borrows(functions.clone()), compute_list_param_borrows(functions.clone()), true, true, map_values.clone(), functions.clone())).iter().cloned());
         out.push(String::from("}"));
         out.push(String::from(""));
     }
@@ -7943,7 +7957,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         if (kind == "provide") {
             out.extend((emit_provide_construction(comp.clone(), step.clone(), has_eff, 3i64)).iter().cloned());
         } else {
-            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone()), map_values.clone(), 3i64, tb, sb, ab.clone())).iter().cloned());
+            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone(), functions.clone()), map_values.clone(), 3i64, tb, sb, ab.clone())).iter().cloned());
             tb = (tb).checked_add(count_timers(vec![step.clone()])).expect("revl: Int overflow");
             sb = (sb).checked_add(count_stream_events(vec![step.clone()])).expect("revl: Int overflow");
             ab.extend((step_let_binds(vec![step.clone()])).iter().cloned());
