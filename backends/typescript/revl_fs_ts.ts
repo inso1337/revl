@@ -1314,11 +1314,15 @@ function parkedStat(real: string, what: string): fs.BigIntStats {
  * was fstat'd, never by reopening the name.
  *
  * The two callers read null differently and deliberately. `park` omits the
- * key, because refusing an honest `fsRm` of a directory, of an already-
- * hardlinked file, or of a write-only file is over-refusal. `install` fails
- * closed, because a capture that RECORDED a digest says the file was readable
- * when it was parked, so not being able to re-read it now is drift, never a
- * reason to fall back to the stat fields a same-tick rewrite hides. */
+ * key only when the parked inode is not a readable regular file, because
+ * refusing an honest `fsRm` of a directory or of a write-only file is
+ * over-refusal; a readable regular file is digested, and a second link does
+ * not stop it being one, so a hardlinked parked file is digested and
+ * compared too. `install` fails closed, because a capture that RECORDED a
+ * digest says the file was readable when it was parked, so not being able to
+ * re-read it now is drift, never a reason to fall back to the stat fields a
+ * same-tick rewrite hides. A capture with no key is a legacy record and
+ * keeps the stat-only comparison, so it still replays. */
 function parkedDigest(real: string, what: string): string | null {
   const [parent] = splitLeaf(real)
   try {
@@ -1522,8 +1526,9 @@ function rawParkCapturedSidecar(
  * capture with no `sha256` (a record written before the key existed, or a
  * parked inode that is not a readable regular file) keeps the stat-only
  * behaviour, so a legacy WAL still replays and an honest `fsRm` of a
- * directory, of an already-hardlinked file, or of a write-only file still
- * installs.
+ * directory or of a write-only file still installs. A parked hardlinked
+ * file that is readable is still a readable regular file, so it carries a
+ * digest and both passes compare it.
  *
  * The check runs again on the INSTALLED result, because the rename is by name,
  * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops

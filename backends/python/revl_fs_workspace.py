@@ -2189,11 +2189,15 @@ def _parked_digest(real: str, what: str) -> str | None:
     not disturb the descriptor's offset.
 
     The two callers read `None` differently and deliberately. `park` records a
-    stat-only capture, because refusing an honest `rm` of a directory, of an
-    already-hardlinked file, or of a write-only file is over-refusal. `install`
-    fails closed, because a capture that RECORDED a digest says the file was
-    readable when it was parked, so not being able to re-read it now is drift,
-    never a reason to fall back to the stat fields a same-tick rewrite hides.
+    stat-only capture only when the parked inode is not a readable regular
+    file, because refusing an honest `rm` of a directory or of a write-only
+    file is over-refusal; a readable regular file is digested, and a second
+    link does not stop it being one, so a hardlinked parked file is digested
+    and compared too. `install` fails closed, because a capture that RECORDED
+    a digest says the file was readable when it was parked, so not being able
+    to re-read it now is drift, never a reason to fall back to the stat
+    fields a same-tick rewrite hides. A capture with no key at all is a
+    legacy record and keeps the stat-only comparison, so it still replays.
     """
     parent, leaf = _split(real)
     try:
