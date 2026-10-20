@@ -10,8 +10,11 @@ open at the other two doors named in #2628:
   `source`/`modules` alone, so a `revl_load` whose candidate was export-area
   files returned a ticket naming the class-(c) crossing and nothing about the
   host code riding with it;
-- the shared `_compile` guard the check/admit/plan verbs dispatch through did
-  the same, so the bodies it remembered for a later ticket were empty.
+- the shared `_compile` guard the check and admit verbs dispatch through did
+  the same, so the bodies it remembered for a later ticket were empty. `plan`
+  is not one of them: `_tool_plan` calls `revl.plan.plan`, whose own `_compile`
+  lives in `plan.py`, writes no bodies and raises no approval ticket, so it
+  cannot report and is out of scope here.
 
 An export-area file is the author's by its PATH (`revl_export` writes source
 only under `<root>/.revl/export/`, and `export_area.py` reads that as
@@ -26,15 +29,15 @@ The two-sided shape of the swap test is kept here:
   alarm. It is also the direction the tempting simplification (stop passing
   `host_bodies=authored`) gets wrong.
 
-Two more tests pin the other two callers the issue names. The shared
-`_compile` guard is driven over the transport through `revl_check`. The draft
-boot is not tested here: a draft filled over the transport always carries its
-edited buffer as a `modules` entry, so `_authored_host_bodies`' existing
-condition already calls it authored; a files working set with no edited
-buffers, which is the only shape `_boot`'s export-area check would decide, is
-refused by the compiler's own export-area rule under an open trust. `_boot`
-keeps its old behaviour for that caller, and the fix is exactly the two doors
-the issue proves open.
+Two more tests drive the shared `_compile` guard over the transport, through
+the two verbs that dispatch through it: `revl_check` and `revl_admit`. `plan`
+is not covered for the reason given above. The draft boot is not tested here:
+a draft filled over the transport always carries its edited buffer as a
+`modules` entry, so `_authored_host_bodies`' existing condition already calls
+it authored; a files working set with no edited buffers, which is the only
+shape `_boot`'s export-area check would decide, is refused by the compiler's
+own export-area rule under an open trust. `_boot` keeps its old behaviour for
+that caller, and the fix is exactly the two doors the issue proves open.
 """
 
 import importlib.util
@@ -42,6 +45,7 @@ from pathlib import Path
 
 import pytest
 
+from revl import compile_source
 from revl.export_area import EXPORT_DIR, in_export_area
 from revl.mcp import server
 
@@ -49,6 +53,16 @@ needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
     reason="loading and booting a live composition needs cordis-py "
            "(`sh backends/python/setup.sh`, run under backends/python/.venv)")
+
+# A running composition the emitter candidate can be admitted against: it
+# provides a key the candidate does not, so admission turns on the compile
+# rather than on a G2 collision.
+_RUNNING = (
+    "service Clock { fn tick() -> Int }\n"
+    "component Timer provides clock: Clock {\n"
+    "  provide clock { fn tick() = 1 }\n"
+    "}\n"
+)
 
 
 def _emitter(sink: str) -> str:
@@ -188,9 +202,10 @@ def test_a_load_of_operator_files_outside_the_export_area_reports_nothing(
 
 def test_the_shared_compile_guard_reports_export_area_files_and_only_those(
         transport, tmp_path):
-    """The check/admit/plan verbs dispatch through `_compile`, whose remembered
-    bodies a later class-(c) ticket names. It must carry the export-area part
-    of a `files` candidate too, and nothing for the operator's own files.
+    """`revl_check` and `revl_admit` dispatch through `_compile`, whose
+    remembered bodies a later class-(c) ticket names. It must carry the
+    export-area part of a `files` candidate too, and nothing for the
+    operator's own files.
 
     `revl_check` is the thinnest of those verbs, so a failure here is the
     guard's and not another verb's. Before this fix it recorded `[]` for the
@@ -217,5 +232,44 @@ def test_the_shared_compile_guard_reports_export_area_files_and_only_those(
     assert checked["ok"] is True, checked
     assert server._AUTHORED_HOST_BODIES == [], (
         "a check of the operator's own file recorded bodies as unreviewed "
+        f"agent host code: {server._AUTHORED_HOST_BODIES}")
+
+
+def test_the_shared_compile_guard_reports_export_area_files_through_admit(
+        transport, tmp_path):
+    """The same guard, driven through the other verb that dispatches through
+    `_compile`: `revl_admit`.
+
+    A fix that reached only `revl_check` would leave an export-area candidate
+    admitted against a running composition recorded as carrying no host code,
+    so the next class-(c) ticket would understate it again. The shape is the
+    check test's: the export-area file records `announce`, the operator's own
+    file overwrites that with `[]` and is not reported.
+    """
+    sink = str(tmp_path / "sink.log")
+    text = _emitter(sink)
+    exported = _exported(tmp_path, text)
+    running = compile_source(_RUNNING, "running.rvl")
+
+    admitted = transport("revl_admit", {"files": [str(exported)],
+                                        "manifest": running})
+    assert admitted["ok"] is True, admitted
+    assert admitted["admitted"] is True, admitted
+    assert [e["extern"] for e in server._AUTHORED_HOST_BODIES] == ["announce"], \
+        server._AUTHORED_HOST_BODIES
+
+    _reset()
+    operator_file = tmp_path / "operator.rvl"
+    operator_file.write_text(text, encoding="utf-8")
+    # The sentinel proves the operator admit OVERWRITES what the export admit
+    # recorded, rather than passing because nothing wrote the global at all.
+    server._AUTHORED_HOST_BODIES = [
+        {"extern": "sentinel", "classification": "emission", "backends": []}]
+
+    admitted = transport("revl_admit", {"files": [str(operator_file)],
+                                        "manifest": running})
+    assert admitted["ok"] is True, admitted
+    assert server._AUTHORED_HOST_BODIES == [], (
+        "an admit of the operator's own file recorded bodies as unreviewed "
         f"agent host code: {server._AUTHORED_HOST_BODIES}")
 
