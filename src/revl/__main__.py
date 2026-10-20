@@ -1069,13 +1069,13 @@ def _run_scaffold(args) -> int:
         document["path"] = args.out
         print(json.dumps(document, indent=2))
         if args.out:
-            with open(args.out, "w") as handle:
+            with open(args.out, "w", encoding="utf-8") as handle:
                 handle.write(document["source"])
         return 0
 
     source = build_skeleton(spec)
     if args.out:
-        with open(args.out, "w") as handle:
+        with open(args.out, "w", encoding="utf-8") as handle:
             handle.write(source)
         print(f"wrote {args.out}", file=sys.stderr)
     else:

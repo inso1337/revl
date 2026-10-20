@@ -347,6 +347,14 @@ CORPUS = [
     # of a bare `None` typed `Option<Value>`
     "generic_fn.rvl",
     "comp_provide_generic.rvl",  # issue #2495: a generic call in a provide method
+    "comp_provide_generic_add.rvl",  # issue #2558: `+` over two generic calls there
+    # issue #2558: the same call asked through `_v3_infer_type` rather than
+    # `_v3_is_str`, which the `+` documents do not reach: a `let` in an
+    # EFFECTFUL provide method is typed by `_provide_let_type`, so binding it to
+    # a generic module call executes the inference arm's substitution branch.
+    # A plain-return method with the same `let` measures nothing there, so the
+    # effect bracket is what the document is for.
+    "comp_provide_generic_let.rvl",
 ]
 
 

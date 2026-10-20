@@ -329,15 +329,20 @@ def test_drifting_component_bytes_refuse_to_boot(package):
     assert "components/planner.rvl" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("key", ["files", "imports"])
 @pytest.mark.parametrize("blank", ["", "   ", "not-a-hash", None, 64 * "z"])
-def test_a_row_with_no_usable_pin_refuses(package, blank):
+def test_a_row_with_no_usable_pin_refuses(package, blank, key):
     """A pin is required, not optional — the same rule `planner.plan_drift`
     applies to a project's trucs. A blank or malformed `sha256` refuses exactly
-    like a drifting one, so blanking a row is not a way to opt out."""
+    like a drifting one, so blanking a row is not a way to opt out. An
+    `imports` row (externs.rvl, issue #2561) is held to the same rule."""
     from revl.truc import _launcher
 
     doc = _read_lock(package)
-    doc["files"][0]["sha256"] = blank
+    if key == "files":
+        doc["files"][0]["sha256"] = blank
+    else:
+        doc["imports"] = [{"path": "externs.rvl", "sha256": blank}]
     _write_lock(package, doc)
     with pytest.raises(_launcher.BootstrapLockError) as excinfo:
         _launcher.component_files()
@@ -393,15 +398,42 @@ def test_an_unknown_lock_version_refuses(package, doc):
     assert "lockVersion" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("text", ["{not json", "[]", '{"lockVersion": 1}'])
-def test_an_unusable_lock_refuses(package, text):
+def _no_imports(doc: dict) -> str:
+    doc.pop("imports", None)
+    return json.dumps(doc)
+
+
+def _empty_imports(doc: dict) -> str:
+    doc["imports"] = []
+    return json.dumps(doc)
+
+
+def _import_outside(doc: dict) -> str:
+    doc["imports"] = [{"path": "../evil.rvl", "sha256": 64 * "0"}]
+    return json.dumps(doc)
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("{not json", ""),
+    ("[]", ""),
+    ('{"lockVersion": 1}', ""),
+    (_no_imports, "pins no imports"),
+    (_empty_imports, "pins no imports"),
+    (_import_outside, "leaves truc's package"),
+])
+def test_an_unusable_lock_refuses(package, text, reason):
     """Unparseable, not an object, or naming no files: each is a tampering
-    signal, and none of them degrades to compiling what is on disk."""
+    signal, and none of them degrades to compiling what is on disk. A lock
+    that drops or empties its `imports` list, or names an import outside the
+    package, refuses too: an import is bytes stage 0 compiles (issue #2561)."""
     from revl.truc import _launcher
 
+    if callable(text):
+        text = text(_read_lock(package))
     (package / "truc.lock").write_text(text)
-    with pytest.raises(_launcher.BootstrapLockError):
+    with pytest.raises(_launcher.BootstrapLockError) as excinfo:
         _launcher.component_files()
+    assert reason in str(excinfo.value)
 
 
 def test_the_launcher_exits_cleanly_on_a_refusal(package, capsys):

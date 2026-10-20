@@ -1,0 +1,45 @@
+// issue #2558: `+` over two GENERIC calls inside a provide method — the bug's
+// own spelling, `id("hi ") + id(who)`. The component dialect spells a call to a
+// module `fn` as a `{"kind": "fn", "name", "args"}` node, not the `call` node
+// the module-fn spine writes, so before this issue neither `_v3_is_str` nor
+// `_v3_infer_type` recognised it: each operand read as the callee's DECLARED
+// return `T` with nothing bound to it, the `+` was rendered as the arithmetic
+// `(id(..) + id(..))`, and cargo answered E0308 because `String + String` does
+// not exist. Bound from the arguments, each side is a `Str`, so the `+` is a
+// concatenation and renders `format!("{}{}", .., ..)`.
+//
+// Every method below reaches the seam only through the `fn` node, so none of
+// them built before the fix:
+//   `hello`   — two generic calls added to each other, the reported spelling;
+//   `nearest` — a generic call added to a `Str` PARAMETER, then to a provide-body
+//               `let` that is itself such a sum. The parameter is typed by
+//               `var_types`, not by either arm, so this one is the control: it
+//               worked before #2558 and must keep working after it;
+//   `shout`   — a NON-generic `Str`-returning call (`upper`) added to a generic
+//               one. `_v3_is_str`'s new `fn` arm answers this from the declared
+//               return alone, with no binding, which is the branch that would
+//               silently regress if the binding ever became mandatory.
+fn id[T](x: T) -> T { return x }
+
+fn upper(s: Str) -> Str { return s }
+
+service Greeter {
+  fn hello(who: Str) -> Str
+  fn nearest(with_str: Str) -> Str
+  fn shout(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn hello(who) {
+      return id("hi ") + id(who)
+    }
+    fn nearest(with_str) {
+      let both = id(with_str) + id("there")
+      return id("dear ") + both
+    }
+    fn shout(who) {
+      return upper("hi ") + id(who)
+    }
+  }
+}

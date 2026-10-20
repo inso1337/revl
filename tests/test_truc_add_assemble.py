@@ -76,7 +76,7 @@ def _hand_vendor(proj: Path, name: str) -> None:
     import shutil
 
     shutil.copytree(REGISTRY / "components" / name, proj / "trucs" / name)
-    with (proj / "truc.toml").open("a") as handle:
+    with (proj / "truc.toml").open("a", encoding="utf-8") as handle:
         handle.write(f'{name} = {{ registry = "local" }}\n')
     index = json.loads((REGISTRY / "index.json").read_text())
     lock = json.loads((proj / "truc.lock").read_text())

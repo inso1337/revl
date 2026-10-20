@@ -1019,11 +1019,26 @@ def released_versions(entry_dir: str | os.PathLike) -> list[str]:
     return sorted(names, key=lambda v: (_semver(v) is None, _semver(v) or (), v))
 
 
-def _compile_source(name: str, source: str) -> dict:
+def _compile_source(name: str, source: str,
+                    source_path: str | os.PathLike | None = None) -> dict:
     """Compile an in-memory component source under a stable virtual path, so the
     IR (and therefore the manifest and the bump) does not depend on where the
-    publisher's working copy happens to live."""
-    path = f"/__revl_registry__/{name}/component.rvl"
+    publisher's working copy happens to live.
+
+    `source_path` (issue #2563) is the real file this text came from, when there
+    is one — the project entry `truc ship` publishes. It is handed to the
+    compiler as the name of the text instead of the virtual label, so the export
+    rule (`export_area.CliRule`) decides whether the source is author-written by
+    THAT PATH, as it decides for every other file the compiler reads. Without it
+    the name is a label no file answers to, the rule sees nothing, and text an
+    agent exported into `.revl/export/` publishes with the operator's trust.
+
+    The name does not change what the release IS: both spellings end in
+    `component.rvl`, so the path normalization `attest.canonical_hash` applies
+    reduces them to the same document and the same composition hash.
+    """
+    path = (str(source_path) if source_path
+            else f"/__revl_registry__/{name}/component.rvl")
     return compile_files([path], sources={path: source})
 
 
@@ -1072,7 +1087,8 @@ def _unsafe_name_reason(name: str) -> str:
 def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
                   declared_version: str | None = None, *,
                   scheme: str = SCHEME_SEMVER,
-                  publisher: str | None = None) -> dict:
+                  publisher: str | None = None,
+                  source_path: str | os.PathLike | None = None) -> dict:
     """Everything a publish gate needs to decide whether this publish may
     proceed, computed from the registry exactly as it stands. Writes nothing.
 
@@ -1081,6 +1097,13 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
     here, in the registry, because these are registry semantics — `truc ship`
     reads the same facts to phrase its refusal, and `publish_release` re-checks
     them itself so the write path is not safe only because its caller looked.
+
+    `source_path` (issue #2563) is the real file `source` was read from, when
+    there is one, and is what the export rule decides the source's authorship
+    by. Passing none keeps the previous behaviour: the text is compiled under a
+    virtual label that names no file, without a profile. Making that default
+    refuse is the central rule's slice; this one makes the real file usable
+    here.
     """
     entry_dir = _components_dir(registry_dir) / name
     declared = (declared_version or "").strip()
@@ -1130,7 +1153,7 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
     # reads its IR, and a registry left holding a source the compiler refuses is
     # exactly the half-written state the empty-guard exists to prevent.
     try:
-        new_ir = _compile_source(name, source)
+        new_ir = _compile_source(name, source, source_path)
     except RevlError as error:
         refusals.append(f"{name} does not compile, so it cannot be published:\n{error}")
         return facts
@@ -1181,8 +1204,11 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
     # 4. the computed bump (item 64), and 5. the declared version against it.
     if previous and declared:
         prior_source = _read(entry_dir / "component.rvl")
+        # the entry's own `component.rvl` inside the registry: a file the
+        # PUBLISHER's own write put there, never an export directory's.
         try:
-            prior_ir = _compile_source(name, prior_source)
+            prior_ir = _compile_source(name, prior_source,
+                                       entry_dir / "component.rvl")
         except RevlError as error:
             facts["bumpCheck"] = BUMP_UNVERIFIABLE
             facts["bumpCheckReason"] = (
@@ -1299,7 +1325,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
                     description: str | None = None,
                     tags: list | None = None,
                     dossier_text: str | None = None,
-                    knowledge: list | None = None) -> dict:
+                    knowledge: list | None = None,
+                    source_path: str | os.PathLike | None = None) -> dict:
     """Publish `source` as `name` (a first release or an update), and return the
     release record. Raises `RevlError` on any refusal, having written nothing.
 
@@ -1309,12 +1336,19 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     in `<entry>/meta.json`, regenerates the index the way CI would, and attaches
     the derived changelog (item 261) for the release it publishes.
 
+    `source_path` (issue #2563) is the file `source` was read from, when there
+    is one, forwarded to `release_facts` so the export rule decides authorship
+    by where the bytes came from. A caller holding text from no file still
+    passes none and publishes as it did before, under the virtual label; the
+    fail-closed default for that case is the central rule's slice.
+
     Everything it records lands in a file under `components/<name>/`, and the
     regeneration is the LAST thing it does, so `verify` is empty on the registry
     it leaves behind.
     """
     facts = release_facts(registry_dir, name, source, version,
-                          scheme=scheme, publisher=publisher)
+                          scheme=scheme, publisher=publisher,
+                          source_path=source_path)
     if knowledge:
         check_knowledge(source, knowledge)   # before anything is written
     if facts["refusals"]:
@@ -1383,7 +1417,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
         from .changelog import derive_changelog  # noqa: PLC0415
         try:
             changelog = derive_changelog(
-                _compile_source(name, prior_source), _compile_source(name, source),
+                _compile_source(name, prior_source, entry_dir / "component.rvl"),
+                _compile_source(name, source, source_path),
                 previous if _semver(previous) else None,
                 from_label=f"{name}@{previous}", to_label=f"{name}@{declared}")
         except (RevlError, ValueError):

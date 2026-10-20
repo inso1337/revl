@@ -616,6 +616,42 @@ def test_a_java_reference_refusal_is_named_by_the_port(emitted, reference, rel, 
     assert marker in emitted["emit_java_src"](ir)
 
 
+# issue #2492: an extern with no `@java` body is refused by the reference from
+# inside `_emit_v3_externs`, which no byte-agreement document reaches: every
+# extern in the CORPUS carries an `@java` body, for the reference does not emit
+# one without it. The port emits no extern block at all, so the two halves used
+# to disagree silently. The port names the extern instead, in the spelling the
+# go, rust and ts ports already use for their own missing body.
+JAVA_NO_BODY_REFUSALS = [
+    ("emit_java_refusals/extern_no_java_body.rvl", "run_tool"),
+]
+
+
+@pytest.mark.parametrize("rel, extern", JAVA_NO_BODY_REFUSALS,
+                         ids=[rel.split("/")[1] for rel, _ in JAVA_NO_BODY_REFUSALS])
+def test_an_extern_with_no_java_body_is_a_named_refusal(emitted, reference, rel, extern):
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / rel)])
+    with pytest.raises(reference.EmitError,
+                       match=f"extern `{extern}` has no @java body"):
+        reference.emit(ir)
+    assert f"<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:{extern}>>" in emitted["emit_java_src"](ir)
+
+
+# every extern carrying a body emits no marker at all, so the marker is not a
+# blanket claim the port makes about documents the reference accepts.
+def test_an_extern_with_a_java_body_emits_no_refusal(emitted, reference, tmp_path):
+    path = tmp_path / "with_java_body.rvl"
+    path.write_text((
+        (ROOT / "tests" / "fixtures" / "emit_java_refusals"
+         / "extern_no_java_body.rvl").read_text().replace(
+            " = @py { return name } = @ts { return name; } = @rs { name } = @go { return name }",
+            " = @py { return name } = @java { return name; }")
+    ))
+    ir = compile_files([str(path)])
+    reference.emit(ir)
+    assert "<<UNSUPPORTED-EXTERN-NO-JAVA-BODY" not in emitted["emit_java_src"](ir)
+
+
 # The reference refuses a deferred emission before it looks at host keys, so a
 # document with both must surface the DEFERRED marker first on the port.
 NAMESPACED_AND_DEFERRED = """extern emission deferred fn deliver(sink: Str, msg: Str)
@@ -667,3 +703,35 @@ def test_a_refusal_before_a_fault_test_keeps_the_reference_order(
     markers = re.findall(r"<<UNSUPPORTED-[A-Z-]+:", emitted["emit_java_src"](ir))
     assert "<<UNSUPPORTED-FAULT-TEST:" in markers, markers
     assert markers[0] == first, markers
+
+
+# issue #2492: the reference emits the extern block while it builds the class
+# body, which it reaches BEFORE it renders components, and it renders
+# components before it refuses a required `Stream[T]` coeffect. So a document
+# carrying both a bodyless extern and a required stream must name the extern
+# first on the port. Read from the reference rather than assumed: emit.py
+# reaches _emit_v3_externs while extending the class body, and
+# _refuse_required_stream fires from component rendering.
+NO_JAVA_BODY_AND_REQUIRED_STREAM = (ROOT / "tests" / "fixtures"
+                                    / "emit_java_refusals"
+                                    / "extern_no_java_body.rvl").read_text() + """
+
+event Tap(key: tap_id) { tap_id: Str }
+service Sink { emission fn deliver(id: Str) }
+
+component Relay requires feed: Stream[Tap], sink: Sink {
+  on Tap as t { emit sink.deliver(t.tap_id) }
+}
+"""
+
+
+def test_a_bodyless_extern_is_named_before_a_required_stream(
+        emitted, reference, tmp_path):
+    path = tmp_path / "no_body_and_stream.rvl"
+    path.write_text(NO_JAVA_BODY_AND_REQUIRED_STREAM)
+    ir = compile_files([str(path)])
+    markers = re.findall(r"<<UNSUPPORTED-[A-Z-]+:", emitted["emit_java_src"](ir))
+    assert "<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:" in markers, markers
+    assert "<<UNSUPPORTED-REQUIRED-STREAM:" in markers, markers
+    assert (markers.index("<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:")
+            < markers.index("<<UNSUPPORTED-REQUIRED-STREAM:")), markers
