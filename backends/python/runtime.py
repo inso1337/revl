@@ -75,6 +75,7 @@ except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this mod
 _ENTRY_STAMP = itertools.count()
 
 __all__ = [
+    "CeilingExceeded", "CeilingUnmetered",
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
     "EstopHalted", "EstopRefused", "fail_error",
@@ -1385,9 +1386,127 @@ def revl_take_produced_by() -> "Optional[int]":
     return token
 
 
-def extern_emit(ctx, name: "str", fn, args: "tuple"):
+#: The three ceiling parameter names, canonical after `cap_order` (`requests`
+#: resolves to `calls`, `bytes` to `size`; `time` is already in ms). A symbolic
+#: ceiling is refused by `cap_order`, so every one that reaches here is an int.
+_CEILING_NAMES = ("calls", "size", "time")
+
+
+def _split_cap_params(spelling: str) -> list:
+    """The `name=value` parts inside a canonical capability spelling's
+    parentheses, split on top-level commas only (a quoted value may contain a
+    comma). Lexical, like the stored spelling itself; a spelling without
+    parentheses has no parts."""
+    start = spelling.find("(")
+    if start < 0 or not spelling.endswith(")"):
+        return []
+    body = spelling[start + 1:-1]
+    parts, buf, quote, escape = [], [], None, False
+    for ch in body:
+        if escape:
+            buf.append(ch)
+            escape = False
+        elif ch == "\\":
+            buf.append(ch)
+            escape = True
+        elif quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            buf.append(ch)
+            quote = ch
+        elif ch == ",":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _declared_ceilings(capabilities) -> tuple:
+    """The `(token, {kind: limit})` budget declarations a set of canonical
+    capability spellings carries, for the crossing meter (issue #2688).
+
+    The runtime receives the emitted module's declaration spellings verbatim, so
+    it reads the already-canonical parameters lexically: only integer values on
+    the three ceiling names take part, and a spelling with none is omitted. The
+    token rides through to the fault and the trace, so both name the declaration
+    a reviewer sees in the audit. A budget-free extern yields ()."""
+    out = {}
+    for spelling in capabilities or ():
+        if not isinstance(spelling, str):
+            continue
+        limits = {}
+        for part in _split_cap_params(spelling):
+            name, sep, value = part.partition("=")
+            name = name.strip()
+            if sep and name in _CEILING_NAMES \
+                    and value.strip().lstrip("-").isdigit():
+                limits[name] = int(value.strip())
+        if limits:
+            out[spelling] = limits
+    return tuple(out.items())
+
+
+class CeilingExceeded(RuntimeError):
+    """A declared emission ceiling was crossed while the program ran.
+
+    The statement a declared budget makes is a run-time one: `calls` can be
+    proved statically only for a body the cardinality analysis can count, and
+    the `*/host-extern case` is exactly the one it cannot (`bytes` and `time`
+    have no static analogue at all). This fault is the runtime answer: one
+    named type for all three ceiling kinds and every tier, carrying the
+    capability spelling, the kind, the declared limit and the observed count,
+    so a caller can tell which budget refused what (issue #2688)."""
+
+    def __init__(self, capability: str, kind: str, limit: int, observed: int,
+                 component: "Optional[str]" = None) -> None:
+        self.capability = capability
+        self.kind = kind
+        self.limit = limit
+        self.observed = observed
+        self.component = component
+        where = f" in component {component!r}" if component else ""
+        super().__init__(
+            f"declared {kind} ceiling {limit} on `{capability}` exceeded: "
+            f"observed {observed}{where}")
+
+
+class CeilingUnmetered(RuntimeError):
+    """A budgeted crossing reached the runtime with no activation frame.
+
+    The meter is per activation: an emitted component always installs a Frame,
+    so this is a path that is not an activation at all. Refusing is the
+    fail-closed choice: a declared ceiling that cannot be counted must not be
+    treated as unbounded (issue #2688)."""
+
+    def __init__(self, capability: str) -> None:
+        self.capability = capability
+        super().__init__(
+            f"declared ceiling on `{capability}` was reached outside an "
+            f"activation, so it cannot be metered")
+
+
+def _ceiling_now() -> float:
+    """The clock a declared `time` ceiling is measured against: the monotonic
+    clock, never wall-clock (a clock adjustment must not move a deadline). Kept
+    a module function so a test can substitute a controlled clock."""
+    return time.monotonic()
+
+
+def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
     """Fire a DIRECT host-extern emission (`emit announce(msg)`, a kind-3/4
     crossing) through the recording seam on `ctx` (item 414).
+
+    `caps` is the extern's declared capability spellings, passed verbatim by the
+    emitter only when one of them can carry a budget. `_declared_ceilings`
+    turns them into `((token, {kind: limit}), ...)`; an extern that declares
+    none keeps the pre-#2688 shape exactly. A declared one is metered by the
+    activation frame BEFORE the record and the host body: the crossing is
+    refused with :class:`CeilingExceeded` when it would take the observed
+    `calls`, `size` (payload bytes) or elapsed `time` past its declared limit.
 
     Without this the py tier compiled such a crossing to a bare module-level
     call, so the recorder never saw it, the WAL carried no `KIND_EMISSION` step
@@ -1410,6 +1529,19 @@ def extern_emit(ctx, name: "str", fn, args: "tuple"):
     _revl_transparent_frame = True
     # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
     _estop_check(name)
+    # issue #2688: the declared ceiling, enforced at the same seam and before
+    # the same point. Only a crossing that DECLARES a budget meters (and only a
+    # budgeted crossing traces), so an undeclared one is byte-identical.
+    ceilings = _declared_ceilings(caps) if caps else ()
+    frame = None
+    if ceilings:
+        frame = _frame_for_ctx(ctx)
+        if frame is None:
+            raise CeilingUnmetered(ceilings[0][0])
+        payload = None
+        if any("size" in limits for _token, limits in ceilings):
+            payload = len(_revl_canonical_args_bytes(args))
+        frame._meter_ceilings(ceilings, payload)
     record = getattr(ctx, "_revl_record_extern", None)
     step = record(name, args) if callable(record) else None
     try:
@@ -1431,11 +1563,15 @@ def extern_emit(ctx, name: "str", fn, args: "tuple"):
             outcome = getattr(ctx, "_revl_record_extern_outcome", None)
             if callable(outcome):
                 outcome(step, "emission-complete", None)
+            if frame is not None:
+                frame._check_time_ceilings(ceilings)
             return value
         return await_extern()
     outcome = getattr(ctx, "_revl_record_extern_outcome", None)
     if callable(outcome):
         outcome(step, "emission-complete", None)
+    if frame is not None:
+        frame._check_time_ceilings(ceilings)
     return result
 
 
@@ -3355,6 +3491,14 @@ class Frame:
     def __init__(self, ctx: Any, name: str) -> None:
         self.ctx = ctx
         self.name = name
+        # issue #2688: the declared-budget meters, one counter per capability
+        # declaration spelling (the token the emitter passed with its canonical
+        # ceilings), all scoped to this activation. Empty until a crossing
+        # declares a budget, so a budget-free component allocates three dicts
+        # and never touches them.
+        self._ceiling_calls: dict = {}
+        self._ceiling_bytes: dict = {}
+        self._ceiling_started: dict = {}
         self._adopted: list = []
         # item 243 (docs/design/243-witnessed-externs.md): the transactional
         # entries this activation registered, in registration order. A witnessed
@@ -3500,6 +3644,85 @@ class Frame:
             _LIVE_FRAMES.add(self)
             if _ESTOP is not None:
                 self._halted = True
+
+    def _meter_ceilings(self, declarations: tuple, payload: "Optional[int]") -> None:
+        """Meter one host-extern crossing against the ceilings it declares.
+
+        All-or-nothing: every declaration is CHECKED first and the counters are
+        committed only when no ceiling is crossed, so a refused crossing neither
+        spends a `calls` use nor charges its payload bytes. `payload` is the
+        canonical payload-byte count, supplied only when some declaration has a
+        `size` ceiling.
+
+        Semantics (named rather than implied, so the trace is readable):
+        * `calls` counts crossings per capability declaration per activation;
+          the crossing that would be number `limit + 1` is refused.
+        * `size` accumulates the canonical payload bytes per activation; the
+          crossing whose payload would take the total past `limit` is refused
+          before the host body runs, so the over-budget payload is never used.
+        * `time` is a deadline anchored at the capability's FIRST crossing in
+          the activation, measured on `_ceiling_now()` (monotonic, ms limits).
+          It is checked before every crossing, and again when the crossing
+          returns (`_check_time_ceilings`): a synchronous host call cannot be
+          preempted mid-call on this tier, so a call that itself overran faults
+          on return rather than never."""
+        now = _ceiling_now()
+        planned = []
+        for token, limits in declarations:
+            calls_observed = self._ceiling_calls.get(token, 0) + 1
+            limit = limits.get("calls")
+            if limit is not None and calls_observed > limit:
+                self._refuse_ceiling(token, "calls", limit, calls_observed)
+            size_observed = self._ceiling_bytes.get(token, 0) + (payload or 0)
+            limit = limits.get("size")
+            if limit is not None and size_observed > limit:
+                self._refuse_ceiling(token, "size", limit, size_observed)
+            started = self._ceiling_started.get(token)
+            if started is None:
+                started = now
+            limit = limits.get("time")
+            if limit is not None and (now - started) * 1000.0 > limit:
+                self._refuse_ceiling(token, "time", limit,
+                                     int((now - started) * 1000.0))
+            observed = {"calls": calls_observed, "size": size_observed,
+                        "time": int((now - started) * 1000.0)}
+            planned.append((token, limits, observed, started))
+        for token, limits, observed, started in planned:
+            self._ceiling_calls[token] = observed["calls"]
+            self._ceiling_bytes[token] = observed["size"]
+            self._ceiling_started.setdefault(token, started)
+            parts = " ".join(f"{kind}={observed[kind]}/{int(limit)}"
+                             for kind, limit in limits.items())
+            _record(f"ceiling {token} {parts}")
+
+    def _refuse_ceiling(self, token: str, kind: str, limit: int,
+                        observed: int) -> None:
+        """Record the crossing that spent the budget, then raise the named
+        fault. The trace line is the refusal's own, so a trace shows the
+        observed count that crossed rather than only the successes before it."""
+        _record(f"ceiling {token} {kind}={observed}/{int(limit)} refused")
+        raise CeilingExceeded(token, kind, int(limit), observed, self.name)
+
+    def _check_time_ceilings(self, declarations: tuple) -> None:
+        """The after-the-call half of a `time` ceiling.
+
+        A synchronous host body cannot be preempted on this tier, so a call
+        that ITSELF overran the deadline is caught when it returns rather than
+        never: the crossing faults and the activation does not continue on a
+        spent deadline. The before-the-crossing check in `_meter_ceilings`
+        still refuses a crossing whose deadline is already spent, so the next
+        crossing never starts."""
+        now = _ceiling_now()
+        for token, limits in declarations:
+            limit = limits.get("time")
+            if limit is None:
+                continue
+            started = self._ceiling_started.get(token)
+            if started is None:
+                continue
+            elapsed = int((now - started) * 1000.0)
+            if elapsed > limit:
+                self._refuse_ceiling(token, "time", limit, elapsed)
 
     def install(self, body: Callable) -> Any:
         """Install the component body (a generator function) as one effect.

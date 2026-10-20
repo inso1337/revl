@@ -446,6 +446,27 @@ The attestation (the audit `--json` externs/boundary surface) carries every
 declared budget verbatim as the capability's valuation, so a consumer reads the
 enforced ceiling off the same document as the reach.
 
+**Enforcement status (issue #2688).** The Python tier's host-extern crossing
+seam (`backends/python/runtime.py`, `extern_emit`) is the runtime meter. It
+checks every declaration BEFORE the WAL record and the host body, and refuses
+with the named `CeilingExceeded`:
+
+| kind    | observed                                        | fault                            |
+|---------|-------------------------------------------------|----------------------------------|
+| `calls` | per-activation crossing count, per capability   | `CeilingExceeded(kind="calls")`  |
+| `size`  | per-activation canonical payload-byte count     | `CeilingExceeded(kind="size")`   |
+| `time`  | deadline from the first crossing, monotonic clock, checked before each crossing and again on its return | `CeilingExceeded(kind="time")` |
+
+A metered crossing writes a `ceiling <token> <kind>=<observed>/<limit>` run
+trace event, and the refusal writes the same line with `refused` after it
+(never-reached is the absence of either), and the audit `--json`
+boundary/extern surface carries the ceiling spelling itself. A budgeted
+crossing with no activation frame cannot be attributed and is refused
+(`CeilingUnmetered`) rather than read as unbounded. Tier list: Python
+only, so far; the other five tiers and the direct required-service `size`/`time`
+case (the statically-counted path's `calls` is a compile refusal already) remain
+the Slice 3 follow-up.
+
 ### 3.3 Attenuation on delegation
 
 **Correction (HIGH finding).** A prior draft claimed this composes "for free"

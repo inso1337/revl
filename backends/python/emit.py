@@ -2567,12 +2567,23 @@ class _ComponentEmitter:
 
         The `await` stays OUTSIDE the helper: calling an async extern returns a
         coroutine, and the same rule `_expr`'s `fn` branch applies decides whether
-        this context settles it."""
+        this context settles it.
+
+        Issue #2688: when the extern DECLARES a `calls`/`size`/`time` budget, its
+        canonical capability spellings ride to the seam as `caps=`, where the
+        runtime parses them and the activation frame meters the crossing before
+        the host body runs. An extern with no budget passes nothing, so its
+        emitted call is byte-identical and no trace line is added."""
         self.uses.add("extern_emit")
         name = _ident(expr.get("name"), f"{where}: function")
         args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+        caps = tuple((self._extern_by_name.get(expr.get("name")) or {})
+                     .get("capabilities") or ())
+        budget = (f", caps={caps!r}"
+                  if any(marker in spelling for spelling in caps
+                         for marker in ("calls=", "size=", "time=")) else "")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
-                f"({args}{',' if args else ''}))")
+                f"({args}{',' if args else ''}){budget})")
         if self._in_async and not self._in_arrow \
                 and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
             return f"(await {call})"
