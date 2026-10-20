@@ -2066,7 +2066,10 @@ def _test_add_delete_override(changed, added, deleted, root):
             "full": False,
             "reason": ("only new test file(s) added: "
                        + " ".join(new_tests) + " -> targeted"),
-            "pytest": new_tests,
+            # An added test is a .py change and can carry an unpinned open(),
+            # so the whole-tree guard rides along even when select() is not
+            # reached for this diff.
+            "pytest": sorted(set(new_tests) | {OPEN_ENCODING_GUARD}),
             "backends": [],
             "gates": ["ruff"],
         }
@@ -2107,7 +2110,10 @@ def _test_add_delete_override(changed, added, deleted, root):
         "full": False,
         "reason": base["reason"] + "; + added test file(s) "
                   + " ".join(new_tests),
-        "pytest": sorted(set(base["pytest"]) | set(new_tests)),
+        # The added test files are .py changes, so a diff that adds one still
+        # carries the whole-tree guard even when the rest of it is not Python.
+        "pytest": sorted(set(base["pytest"]) | set(new_tests)
+                         | {OPEN_ENCODING_GUARD}),
         "backends": base["backends"],
         "gates": base["gates"],
     }

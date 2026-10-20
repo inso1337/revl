@@ -35,8 +35,9 @@ AMBIGUOUS CALLS, NAMED RATHER THAN GUESSED.
   attribute `.open` calls in this tree whose receiver is not proven a Path are
   different APIs: os.open 31, tarfile.open 6, replay.WriteAheadLog(...).open 74,
   Pool.open 16, provisions.open 15, and wal, self, self._revl_provisions, log and
-  opener 6. None of them takes a text encoding; os.open takes flags and
-  tarfile.open passes an encoding through to TarFile.
+  opener 6. None of them takes the `encoding` argument the way text-mode
+  `open` does; os.open takes flags and tarfile.open passes an encoding through
+  to TarFile.
 
 The inventory line the tree test asserts is a floor on the calls examined and an
 exact zero on the violations, so a receiver filter that silently drops calls

@@ -149,7 +149,9 @@ def test_added_test_file_alone_is_not_full():
     # Nothing else changed, so nothing but the new test can newly fail.
     r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
     assert r is not None and r["full"] is False
-    assert r["pytest"] == ["tests/test_newthing.py"]
+    # An added test is a .py change, so the whole-tree open-encoding guard
+    # rides along (issue #2648); nothing else is over-selected.
+    assert set(r["pytest"]) == {"tests/test_newthing.py", at.OPEN_ENCODING_GUARD}
     assert r["backends"] == []
 
 
@@ -437,7 +439,7 @@ def test_modified_test_file_without_importers_is_only_itself():
     """A leaf test nothing imports still selects just itself (no over-selection).
     A synthetic name is used so the assertion does not rot when tests are added."""
     r = sel("tests/test__no_importer_sentinel__.py")
-    # The whole-tree open-encoding guard rides on every narrow selection
+    # The whole-tree open-encoding guard rides on every .py change
     # (issue #2648), so it is the one extra node here.
     assert set(r["pytest"]) == {"tests/test__no_importer_sentinel__.py",
                                 at.OPEN_ENCODING_GUARD}
@@ -642,6 +644,12 @@ def test_a_python_change_carries_the_open_encoding_guard():
     assert at.OPEN_ENCODING_GUARD not in docs["pytest"], (
         "a documentation-only diff cannot add a Python open() call, and the "
         "docs-only selection has an exact cost bound."
+    )
+    added = at._test_add_delete_override(
+        ["tests/test_newthing.py"], {"tests/test_newthing.py"}, set(), ROOT)
+    assert added is not None and at.OPEN_ENCODING_GUARD in added["pytest"], (
+        "a diff that only adds a test file bypasses select(), so the added-test "
+        "path has to carry the guard itself."
     )
 
 
