@@ -294,6 +294,14 @@ def blast_radius(before: dict | None, after: dict) -> dict:
         radius[name] = {k: answer[k] for k in
                         ("cascade", "withdrawalOrder", "orphanedKeys", "breaks",
                          "precision") if k in answer}
+        # issue #2423: a spawned template is a component of the running IR but
+        # not of the linked ROOT manifest, so `withdrawal` answers `unknown
+        # component` and carries neither a cascade nor `breaks`. Its provisions
+        # come up per instance, so nothing at ROOT loses one: fill the empty
+        # answer rather than leaving a key the total below indexes absent.
+        for key in ("cascade", "withdrawalOrder", "orphanedKeys"):
+            radius[name].setdefault(key, [])
+        radius[name].setdefault("breaks", 0)
         if name not in {c["name"] for c in after.get("components") or []}:
             radius[name]["removed"] = True
     return {
