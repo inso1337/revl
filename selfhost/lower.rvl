@@ -14538,13 +14538,44 @@ fn tk_if_join(a: Str, b: Str, env: List[Bind]) -> TInf {
 // two walks below tested for `"expr"`, which no part carries, so every
 // `${...}` body went untyped and unlowered — the reference infers and lowers
 // each of them like any other expression.
+//
+// Issue #2459: the reference also REFUSES an operand whose static type is
+// compound (`_interp_refusal` in `src/revl/lower.py`'s `_mark_interp_type`): a
+// template renders Str/Int/Float/Bool, no two hosts agree on a compound value,
+// and `${f}` for a plain fn was emitted as `str(f)` here while the reference
+// refused it by name. The refusal is the reference's sentence; the type
+// spelling is rendered the way `tk_mismatch` renders one.
 fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
   if (i >= parts.length()) { return tk_ok("Str") }
   if (parts[i].kind == "e") {
     let r = tk_infer(parts[i].e, env)
     if (r.v != "") { return r }
+    let why = tk_interp_reason(r.ty, env)
+    if (why != "") {
+      return tk_no("T1", "`${...}` cannot interpolate ".concat(why)
+        .concat(" (`").concat(tk_render(r.ty)).concat("`)"))
+    }
   }
   return tk_parts(parts, i + 1, env)
+}
+
+// The reference's `_interp_refusal` answer for one operand type, "" when the
+// operand may be interpolated. Answered only for types this walk can PROVE
+// compound — an unknown, `Any`, a generic parameter and every scalar pass
+// through, which is the reference's own gradual silence.
+fn tk_interp_reason(t: Str, env: List[Bind]) -> Str {
+  if (t == "" || t == "Any" || t == "Value") { return "" }
+  if (t.startsWith("{")) { return "a record" }
+  if (tk_is_fn_ty(t)) { return "a compound value" }
+  let h = tkp_head(t)
+  if (h == "List" || h == "Map" || h == "Set" || h == "Opt" || h == "Result") {
+    return "a compound value"
+  }
+  if (ty_variant_decl(h, env)) { return "a variant" }
+  if (tk_record_base(h, env) || tenv_get(env, "grec ".concat(h)) != "") {
+    return "a record"
+  }
+  return ""
 }
 
 // ------------------------------------------------ the Float literal's own range

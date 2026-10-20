@@ -3535,6 +3535,47 @@ def test_a_wrong_typed_variant_payload_is_refused(compile_rvl, tier):
     assert got == "REFUSED|T1|" + message
 
 
+# Issue #2459: the reference refuses a `${...}` whose static type is compound
+# (`src/revl/lower.py`'s `_interp_refusal`); the native gate inferred the
+# operand and emitted it anyway, so `${f}` for a plain fn came out as `str(f)`.
+# One case per reason the reference names, so the sentence is pinned too.
+_INTERP_COMPOUND = {
+    "fn_value": ("fn f(x: Int) -> Int { return x }\n"
+                 "fn show() -> Str { return `${f}` }\n",
+                 "a compound value"),
+    "list": ("fn show(xs: List[Int]) -> Str { return `${xs}` }\n",
+             "a compound value"),
+    "opt": ("fn show(o: Opt[Int]) -> Str { return `${o}` }\n",
+            "a compound value"),
+    "record": ("type P = { x: Int }\n"
+               "fn show(p: P) -> Str { return `${p}` }\n",
+               "a record"),
+    "variant": ("type S = A(Int) | B\n"
+                "fn show(s: S) -> Str { return `${s}` }\n",
+                "a variant"),
+    "structural_record": ("fn show() -> Str {\n  let a = { h: 1 }\n"
+                          "  return `${a}`\n}\n",
+                          "a record"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_INTERP_COMPOUND))
+def test_a_compound_template_operand_is_refused(compile_rvl, tmp_path, name):
+    source, reason = _INTERP_COMPOUND[name]
+    message = _reference_refusal(source)
+    assert message.startswith(f"`${{...}}` cannot interpolate {reason} ("), message
+    got = compile_rvl["compile_to_at"](source, "py", str(tmp_path / "t.rvl"))
+    assert got == "REFUSED|T1|" + message
+
+
+def test_a_scalar_template_operand_still_compiles(compile_to):
+    """NON-VACUITY: the refusal names what it can prove compound, not every
+    template."""
+    source = ('fn show(s: Str, n: Int, x: Float, b: Bool) -> Str '
+              '{ return `${s}${n}${x}${b}` }\n')
+    assert not compile_to(source, "py").startswith("REFUSED|")
+
+
 # Issue #2447: the reference refuses a variant case call with the wrong number
 # of payload arguments. The documents are the reference's own table,
 # tests/test_case_call_arity.py; `selfhost/*.rvl` does not count the arguments
