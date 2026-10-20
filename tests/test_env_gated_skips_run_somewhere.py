@@ -1479,6 +1479,92 @@ def _runtime_gaps(gated: dict[str, list[str]],
     )
 
 
+def _runtime_selection_gaps(gated: dict[str, list[str]],
+                            selects) -> list[str]:
+    """Gated files the cordis-half driver's fallback selection would skip.
+
+    The comparison itself, kept free of both the driver import and the source
+    scan so the control below can drive it with text it writes, the same way
+    `_runtime_gaps` is.
+    """
+    return sorted(rel for rel in gated if not selects(rel))
+
+
+def _cordis_half():
+    """`tools/cordis_half.py`, imported the way its own tests import it."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        import cordis_half
+    finally:
+        sys.path.pop(0)
+    return cordis_half
+
+
+def test_every_runtime_gated_file_is_selected_by_the_cordis_half():
+    """The PR job's `STATUS none` must only ever mean "nothing here needs the
+    runtime", and it reads the file's TEXT, not this file's AST scan (a fresh
+    CI runner has no test dependency to import). So the two definitions have to
+    agree on every gated file: a file gated on the interpreter path alone
+    (`backends/python/.venv/bin/python`, no `cordis` in its text) is gated here
+    and invisible to the driver, so the cordis-affected job would skip the pin,
+    the setup, the run and the receipt and stay green while the file never
+    executes -- the silent pass issue #2642 is about, one layer up.
+
+    This invariant is what licenses that negative answer. The shape pin in
+    tests/test_ci_pr_cordis_affected_2642.py keeps the job's probe-false branch
+    to it, loud and visible.
+    """
+    driver = _cordis_half()
+    gated = _runtime_gated_files()
+    assert gated, (
+        "no runtime-gated file was found, so this invariant measures nothing")
+    missed = _runtime_selection_gaps(
+        gated,
+        lambda rel: driver.names_runtime(
+            (ROOT / rel).read_text(encoding="utf-8")))
+    assert not missed, (
+        "these files gate on the cordis-py runtime but do not name the token "
+        f"the cordis-affected job selects on ({driver.RUNTIME_TOKEN!r}), so "
+        "that job answers `STATUS none`, skips the runtime and stays green "
+        "while they never execute:\n"
+        + "\n".join(f"  {rel}" for rel in missed)
+        + "\n\nName the runtime itself in the gate, which is the token the "
+        "driver selects on, or teach the driver and this check the new shape "
+        "deliberately."
+    )
+
+
+def test_the_runtime_selection_check_can_actually_fail(tmp_path):
+    """A check that cannot fail proves nothing, so the invariant is driven with
+    the one shape it exists to catch: a gated file that names only the
+    interpreter path. The real driver must not select it, and the invariant's
+    comparison must report that as a gap."""
+    driver = _cordis_half()
+    tree = tmp_path / "repo"
+    (tree / "tests").mkdir(parents=True)
+    venv_gate = (
+        "import pytest\n"
+        "VENV = '/repo/backends/python/.venv/bin/python'\n"
+        "@pytest.mark.skipif(not VENV, reason='no runtime')\n"
+        "def test_x():\n    pass\n")
+    (tree / "tests" / "test_venv_only_gate.py").write_text(
+        venv_gate, encoding="utf-8")
+    (tree / "tests" / "test_names_cordis.py").write_text(
+        "CORDIS = 'cordis'\n", encoding="utf-8")
+
+    # the control's premise: this shape is exactly what the driver misses
+    assert not driver.names_runtime(venv_gate)
+    # and the real selection is neither empty nor indiscriminate, so the
+    # comparison below is not vacuous in either direction
+    assert driver.files_from_selection(["tests/"], tree) == [
+        "tests/test_names_cordis.py"]
+    assert _runtime_selection_gaps(
+        {"tests/test_venv_only_gate.py": ["not VENV"]},
+        lambda rel: driver.names_runtime(
+            (tree / rel).read_text(encoding="utf-8")),
+    ) == ["tests/test_venv_only_gate.py"]
+
+
 def test_every_cordis_gated_test_runs_in_a_job_that_provisions_the_runtime():
     """No runtime-gated test may pass by never running (issue #1067).
 

@@ -34,6 +34,8 @@ classified: `tests/test_ci_pr_queue_split_1678.py` and
 """
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -181,6 +183,13 @@ def test_the_guarded_half_runs_under_the_pin_before_the_receipt():
     script = run_step["run"]
     assert "tools/cordis_half.py --select" in script
     assert 'tee "$log"' in script, "the run's output is not captured for the receipt"
+    assert '--log "$log"' in script, (
+        "the receipt is not handed the captured log, so it reads back nothing"
+    )
+    assert "|| true" not in script, (
+        "a `|| true` swallows a failing guarded run or receipt, which is the "
+        "silent pass issue #2642 is about"
+    )
     assert '--pytest-exit "$rc"' in script
     assert '--selection "$SEL_PYTEST"' in script
     assert script.index("tools/cordis_half.py") < script.index(
@@ -191,6 +200,99 @@ def test_the_guarded_half_runs_under_the_pin_before_the_receipt():
         "the receipt step can no longer fail the job, so an all-skipped "
         "guarded selection would read green"
     )
+
+
+def _probe_script() -> str:
+    return _one_run_step("needed=1")["run"]
+
+
+def _probe_repo(tmp_path: Path, driver: str | None = None) -> Path:
+    """A throwaway tree the probe step can run in: the real driver (or a stub),
+    one test that names cordis and one that does not."""
+    tree = tmp_path / "repo"
+    (tree / "tools").mkdir(parents=True)
+    (tree / "tests").mkdir()
+    (tree / "tools" / "cordis_half.py").write_text(
+        driver if driver is not None else
+        (ROOT / "tools" / "cordis_half.py").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    (tree / "tests" / "test_plain_thing.py").write_text(
+        "def test_y():\n    pass\n", encoding="utf-8")
+    (tree / "tests" / "test_names_cordis.py").write_text(
+        "CORDIS = 'cordis'\n", encoding="utf-8")
+    return tree
+
+
+def _run_probe(tmp_path: Path, tree: Path, selection: str):
+    """The probe step's own shell, run against `tree`."""
+    out = tmp_path / "github_output"
+    out.write_text("", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "SEL_PYTEST": selection, "GITHUB_OUTPUT": str(out)}
+    done = subprocess.run(["sh", "-c", _probe_script()], cwd=tree, env=env,
+                          capture_output=True, text=True, timeout=120,
+                          check=False)
+    return done, out.read_text(encoding="utf-8")
+
+
+def test_the_probe_false_path_is_a_visible_licensed_skip():
+    """`STATUS none` is the only answer that skips the pin, the install, the
+    run and the receipt, so it has to be exactly that answer and not a
+    fall-through from another one, and the skip has to be visible: a green job
+    whose log does not say why reads as "the guarded half ran and passed"
+    (issue #2642's own failure). The negative answer is licensed by the
+    structural invariant in tests/test_env_gated_skips_run_somewhere.py (every
+    runtime-gated file names cordis, the token the driver selects on), and the
+    notice says so where the checks UI shows it."""
+    script = _probe_script()
+    assert script.count('echo "needed=0" >> "$GITHUB_OUTPUT"') == 1, (
+        "needed=0 is set somewhere other than the one accepted negative answer"
+    )
+    assert script.count('echo "needed=1" >> "$GITHUB_OUTPUT"') == 1
+    accept = script.index("grep -qx 'STATUS none'")
+    needed0 = script.index("needed=0")
+    assert accept < needed0, (
+        "the probe accepts the negative answer before reading it")
+    assert script.index('if [ "$rc" = "0" ]') < needed0, (
+        "the negative answer is accepted without requiring the driver's exit 0")
+    notice = [line for line in script.splitlines() if "::notice::" in line]
+    assert len(notice) == 1, (
+        "the probe-false skip is invisible in the checks UI")
+    assert "test_env_gated_skips_run_somewhere.py" in notice[0], (
+        "the skip does not name the invariant that licenses the negative "
+        "answer, so nothing ties the two together")
+    assert "skipped" in notice[0]
+    assert needed0 < script.index("::notice::") < script.index("elif"), (
+        "the notice is not inside the accepted negative-answer branch")
+    error = script.index("::error::")
+    assert "exit 1" in script[error:], (
+        "an unrecognised probe outcome falls through instead of failing")
+
+
+def test_the_probe_false_path_skip_is_driven_by_the_real_shell(tmp_path):
+    """The probe's shell is executed, not just read: a selection with no
+    cordis file takes the visible skip, a selection that names one is
+    needed=1 (no pin on a fresh tree: the driver's STATUS missing), and an
+    answer that is neither is a hard error, never a skip."""
+    tree = _probe_repo(tmp_path / "plain")
+    done, out = _run_probe(tmp_path, tree, "tests/test_plain_thing.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "needed=0" in out.splitlines(), out
+    assert "::notice::" in done.stdout
+    assert "skipped" in done.stdout
+
+    done, out = _run_probe(tmp_path, tree, "tests/test_names_cordis.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "needed=1" in out.splitlines(), out
+    assert "::notice::" not in done.stdout
+
+    stub = _probe_repo(tmp_path / "stub",
+                       driver='print("STATUS error unexpected answer")\n')
+    done, out = _run_probe(tmp_path, stub, "tests/test_plain_thing.py")
+    assert done.returncode != 0, (
+        "the probe accepted an answer that is neither STATUS none nor exit 10")
+    assert "::error::" in done.stdout
+    assert "needed=" not in out
 
 
 def test_a_full_selection_is_bounded_out_and_says_so():

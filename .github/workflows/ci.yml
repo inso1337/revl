@@ -1208,7 +1208,12 @@ jobs:
   # `frontend-cordis` covers the same guarded tests on every other event. The
   # selection is always the selector's, never a hardcoded list;
   # `tools/cordis_half.py`'s `STATUS none` is the allowed empty answer when no
-  # selected file names cordis, and the pin is not installed in that case.
+  # selected file names cordis, and the pin is not installed in that case. That
+  # negative answer is not assumed: the driver selects on a file naming cordis,
+  # and tests/test_env_gated_skips_run_somewhere.py holds every runtime-gated
+  # file in tests/ to that token, so `STATUS none` cannot hide one. The skip is
+  # a `::notice::` rather than a silent log line, and
+  # tests/test_ci_pr_cordis_affected_2642.py pins that branch.
   #
   # BOUNDED ON A FULL SELECTION: the selector falls back to the whole suite on
   # a diff it cannot narrow (this workflow's own file is one). The first run of
@@ -1308,7 +1313,13 @@ jobs:
           printf '%s\n' "$out"
           if [ "$rc" = "0" ] && printf '%s\n' "$out" | grep -qx 'STATUS none'; then
             echo "needed=0" >> "$GITHUB_OUTPUT"
-            echo "no selected test file names cordis: pin, runtime and pytest skipped"
+            # The negative answer is licensed, not assumed:
+            # test_env_gated_skips_run_somewhere.py holds every runtime-gated
+            # file in the root suite to the token this driver selects on, so
+            # `STATUS none` cannot hide one. The notice makes the skip visible
+            # in the checks UI, where a green job that skipped the guarded half
+            # in silence reads as a pass (issue #2642).
+            echo "::notice::no selected test file names cordis: pin, runtime and run skipped, licensed by the runtime-gated invariant in test_env_gated_skips_run_somewhere.py"
           elif [ "$rc" = "10" ]; then
             echo "needed=1" >> "$GITHUB_OUTPUT"
             echo "the selection names cordis: the pin and the run follow unless the selector answered FULL"
