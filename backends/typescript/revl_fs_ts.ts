@@ -1027,7 +1027,22 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     capture[SIDECAR_DIGEST_FIELD] = sha256OfFd(out)
     handle.capture = capture
   } catch (e) {
-    if (out >= 0) fs.closeSync(out)
+    if (out >= 0) {
+      // The sidecar was created but never reached `handle.preimage`, so
+      // `discardWrite` (which removes what the handle records) cannot clean it
+      // up: an ESNAPSHOT, from a failed copy, fchmod/futimes, fstat or digest,
+      // would otherwise leave the old-content copy inside the workspace root
+      // for the rest of the session. Remove it while the fd still holds it, and
+      // only while the name still resolves to that inode, so a lost race never
+      // deletes a file this call did not create. Best effort: the snapshot
+      // refusal is the failure the caller must see, not this cleanup.
+      try {
+        if (leafIsFd(out, dst)) removeConfined(dst)
+      } catch {
+        // leave the sidecar rather than mask the ESNAPSHOT below
+      }
+      fs.closeSync(out)
+    }
     const message = (e as { message?: string })?.message ?? String(e)
     throw new FsOpError(
       'ESNAPSHOT',
@@ -1158,6 +1173,24 @@ function rawInstallCapturedSidecar(
           `the ${what} is linked from a second name (${st.nlink} links), so `
           + 'installing it would hand a live alias to whoever holds the other '
           + 'name',
+          real,
+        )
+      }
+      // A capture always records `size` (`captureOf`), and this is the fstat of
+      // the same fd the digest read below would use, so a size that differs is
+      // already a refusal: the sidecar grew or shrank, and the reversal cannot
+      // install what was captured. Refuse it HERE, before the read, so a grown
+      // sidecar is not read in full on every restore attempt (issue #2652).
+      // `rename` preserves size, so the post-install pass can compare it too.
+      // A capture carrying no `size` stays stat-only, like one with no digest.
+      const expectedSize = capture?.size
+      if (typeof expectedSize === 'string'
+        && expectedSize !== String(st.size)) {
+        throw new FsOpError(
+          'EIDENTITY',
+          `the ${what} is not the captured preimage (size differs), so the `
+          + 'reversal was refused before reading it rather than install a file '
+          + 'that is not the captured preimage',
           real,
         )
       }

@@ -36,13 +36,16 @@ import * as path from 'node:path'
 import { FsOpError, fsRestore, fsWrite } from '../revl_fs_ts.ts'
 import type { WriteWitness } from '../revl_fs_ts.ts'
 
-// The second install pass can only be forced through the rename, and a digest
-// that cannot be re-read can only be forced through the read, so this file
-// wraps those two `node:fs` calls. Both hooks are empty unless a test sets one,
-// and the wrappers delegate to the real calls otherwise.
+// The second install pass can only be forced through the rename, a digest that
+// cannot be re-read can only be forced through the read, and a failure between
+// creating the snapshot sidecar and handing it to the handle can only be forced
+// at one of the syscalls in that window, so this file wraps those three
+// `node:fs` calls. All hooks are empty unless a test sets one, and the wrappers
+// delegate to the real calls otherwise.
 const hooks = vi.hoisted(() => ({
   beforeRename: undefined as (() => void) | undefined,
   failRead: undefined as (() => never) | undefined,
+  failFchmod: undefined as (() => never) | undefined,
 }))
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -61,6 +64,12 @@ vi.mock('node:fs', async (importOriginal) => {
       if (fail !== undefined) fail()
       return actual.readSync(...args)
     }) as typeof actual.readSync,
+    fchmodSync: ((...args: Parameters<typeof actual.fchmodSync>) => {
+      const fail = hooks.failFchmod
+      hooks.failFchmod = undefined
+      if (fail !== undefined) fail()
+      return actual.fchmodSync(...args)
+    }) as typeof actual.fchmodSync,
   }
 })
 
@@ -82,6 +91,7 @@ afterEach(() => {
   // leak into the next one.
   hooks.beforeRename = undefined
   hooks.failRead = undefined
+  hooks.failFchmod = undefined
   if (saved === undefined) delete process.env.REVL_FS_WORKSPACE
   else process.env.REVL_FS_WORKSPACE = saved
   fs.rmSync(base, { recursive: true, force: true })
@@ -293,6 +303,28 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
   })
 
+  it('refuses a grown sidecar before reading it', () => {
+    // A sidecar that grew no longer matches the captured size, which the
+    // recorded capture always carries. Refusing on that field BEFORE the digest
+    // read keeps a grown sidecar from being read in full on every restore. The
+    // read hook would blow up if the observation reached the read; the refusal
+    // must instead be `EIDENTITY` and the hook must still be armed, which is
+    // what proves the read was never attempted.
+    const { witness, target, sidecar } = written()
+    fs.appendFileSync(sidecar, 'x')
+    hooks.failRead = () => {
+      throw new Error('the grown sidecar was read')
+    }
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('size')
+    expect(hooks.failRead).toBeDefined()
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.existsSync(sidecar)).toBe(true)
+  })
+
   it('refuses one swapped for another inode', () => {
     const { witness, target, sidecar } = written()
     const decoy = path.join(ws, 'decoy')
@@ -324,5 +356,33 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
 
     expect(codeOf(() => fsRestore(witness))).toBe('EOUTSIDE')
     expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+  })
+})
+
+// ===========================================================================
+// A snapshot that fails after it created its sidecar removes that sidecar.
+// ===========================================================================
+
+describe('a failed snapshot leaves no sidecar behind', () => {
+  it('removes the sidecar it created when the copy fails', () => {
+    // `snapshotPreimage` creates the sidecar, then may throw at the copy, the
+    // mode/mtime restoration, the stat, or the digest. At that point the handle
+    // does not carry the preimage yet, so `discardWrite` (which removes what
+    // the handle records) removes nothing and the file would outlive the
+    // session inside the workspace. Forced here at `fchmod`, after the copy and
+    // before the capture, the same window an ENOSPC, EPERM, EIO or ESTALE
+    // throw lands in.
+    hooks.failFchmod = () => {
+      throw new Error('simulated fchmod failure')
+    }
+
+    const result = fsWrite('artifact.txt', 'v2')
+    if (result.kind !== 'Err') {
+      throw new Error('the snapshot failure was expected to refuse the write')
+    }
+    expect(result.value.code).toBe('ESNAPSHOT')
+
+    expect(fs.readFileSync(path.join(ws, 'artifact.txt'), 'utf-8')).toBe('v1')
+    expect(fs.readdirSync(path.join(ws, '.revl-fs-preimage'))).toEqual([])
   })
 })
