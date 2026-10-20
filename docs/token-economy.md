@@ -40,14 +40,15 @@ invocations store the two fields together: `turn_count` (model-loop turns) and
 `tokens_in` (provider-reported input tokens), plus the derived input tokens per
 turn. The raw pair remains visible so a low average cannot hide how many turns
 the invocation took. Providers that do not report input usage also remain
-unavailable; the report never substitutes zero or a proxy.
+unavailable; the report never substitutes zero or a proxy. Run-summary means
+use only admitted cells that recorded both fields, so the two means share one
+denominator. A local adapter call makes one request and therefore records a
+structural `turn_count` of 1; it does not report an agent tool-loop count.
 
-[Issue #2612](https://github.com/inso1337/revl/issues/2612) reports a measured
-case with 118,477 input tokens over 9.62 turns: 118,477 / 9.62 = 12,316 input
-tokens per turn. The reported one-turn reduction coincided with 15,115 fewer
-input tokens, or 12.8%. The issue does not link a committed raw run artifact,
-so these figures motivate the instrumentation and are not presented as a
-reproducible benchmark baseline.
+The discussion in [issue #2612](https://github.com/inso1337/revl/issues/2612)
+motivated the instrumentation, but it does not link a committed raw run
+artifact. This document does not carry forward an unverified per-turn baseline
+or reduction claim.
 
 There are two halves to the spend, and the metric names both:
 

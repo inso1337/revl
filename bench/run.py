@@ -317,7 +317,8 @@ def _output_tokens(usage: dict):
 def _input_tokens(usage: dict):
     """Provider-reported input tokens, or None when usage is unavailable."""
     return _usage_count(usage, (
-        "inputTokens", "totalInputTokens", "tokensIn", "tokens_in",
+        "inputTokens", "input_tokens", "totalInputTokens", "totalTokensIn",
+        "tokensIn", "tokens_in",
         "promptTokens", "prompt_tokens",
     ))
 
@@ -337,7 +338,7 @@ def _usage_count(usage: dict, keys: tuple[str, ...]) -> int | None:
 def _turn_count(value) -> int | None:
     """Cline reports the number of model-loop iterations for one task."""
     if (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and value >= 0 and int(value) == value):
+            and math.isfinite(value) and value >= 1 and int(value) == value):
         return int(value)
     return None
 
@@ -451,22 +452,20 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
                               args.timeout, args.inline_system)
     except Exception as exc:
         print(f"  !! {spec['id']}/{variant}: runner error: {exc}", file=sys.stderr)
-        return {"spec": spec["id"], "variant": variant, "attempt": 1,
-                "summary": True,
+        return {"spec": spec["id"], "variant": variant, "summary": True,
                 "status": "error", "leaked": True, "leaked_categories": [],
                 "error": f"[runner error] {exc}", "duration_s": round(time.time() - t0, 2)}
     dur = round(time.time() - t0, 2)
     code = extract_code(reply["text"])
     adir = run_dir / spec["id"] / variant
     adir.mkdir(parents=True, exist_ok=True)
-    (adir / "attempt-1.ts").write_text(code)
+    (adir / "attempt-1.ts").write_text(code, encoding="utf-8")
     rec = probe(code, cycles, f"{run_dir.name}__{spec['id']}")
     flag = {"clean": "clean", "leaked": "LEAK", "error": "error"}[rec["status"]]
     extra = (" — " + ", ".join(rec["leaked_categories"])) if rec["leaked_categories"] \
         else (f" — {rec['error']}" if rec.get("error") else "")
     print(f"  {spec['id']}/{variant}: {flag}{extra}")
-    return {"spec": spec["id"], "variant": variant, "attempt": 1,
-            "summary": True,
+    return {"spec": spec["id"], "variant": variant, "summary": True,
             "model": reply.get("model"), "duration_s": dur,
             "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0,
             "tokens_in": reply.get("tokens_in"),
@@ -570,9 +569,15 @@ def main():
     done: set = set()
     if args.resume:
         rows = read_jsonl(results_path)
+        done = {(r.get("spec"), r.get("variant")) for r in rows if r.get("summary")}
+        retrying = {(spec["id"], variant)
+                    for spec in specs for variant in variants
+                    if (spec["id"], variant) not in done}
+        # Discard an interrupted cell's rows before appending its retry.
+        rows = [r for r in rows
+                if (r.get("spec"), r.get("variant")) not in retrying]
         raw_rows = [r for r in rows
                     if r.get("summary") and r.get("variant") == RAW_TS_VARIANT]
-        done = {(r.get("spec"), r.get("variant")) for r in rows if r.get("summary")}
         print(f"resume: {len(done)} final cell(s) already in {results_path.name}")
 
     for spec in specs:
@@ -598,7 +603,9 @@ def main():
                 rows.append(raw)
                 if variant == RAW_TS_VARIANT:
                     raw_rows.append(raw)
-                results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+                results_path.write_text(
+                    "\n".join(json.dumps(r) for r in rows) + "\n",
+                    encoding="utf-8")
                 continue
 
             task = OUTPUT_REMINDER.format(brief=spec["brief"], services=spec["services"])
@@ -650,7 +657,8 @@ def main():
                 code = extract_code(reply["text"])
                 adir = run_dir / spec["id"] / variant
                 adir.mkdir(parents=True, exist_ok=True)
-                (adir / f"attempt-{attempt}.rvl").write_text(code)
+                (adir / f"attempt-{attempt}.rvl").write_text(
+                    code, encoding="utf-8")
                 ok, error = compile_check(code, f"{spec['id']}.rvl")
                 rows.append({"spec": spec["id"], "variant": variant,
                              "model": model_seen, "attempt": attempt, "ok": ok,
@@ -688,7 +696,9 @@ def main():
                          # beside iterations-to-green (bench/tokens.py). None when
                          # the provider reported no token usage.
                          "tokens_to_green": tokens_total if tokens_seen else None})
-            results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            results_path.write_text(
+                "\n".join(json.dumps(r) for r in rows) + "\n",
+                encoding="utf-8")
 
     write_summary(run_dir, rows, raw_rows, args)
     print(f"\nresults: {results_path}\nsummary: {run_dir / 'summary.md'}")
@@ -734,7 +744,8 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
     if revl_variants:
         lines += ["## revl variants — compile-gated (residue refused at compile)", "",
                   "| variant | specs | first-pass compile | green ≤ max iters | "
-                  "mean compile attempts | mean model turns | mean tokens_in | "
+                  "mean compile attempts | mean model turns to green | "
+                  "mean tokens_in to green | "
                   "mean output tokens-to-green | cost |",
                   "|---|---|---|---|---:|---:|---:|---:|---:|"]
     for variant in revl_variants:
@@ -750,11 +761,15 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         toks = [r["tokens_to_green"] for r in vs
                 if r["green_at"] and r.get("tokens_to_green") is not None]
         mean_toks = f"{sum(toks) / len(toks):.0f}" if toks else "—"
-        turns = [r["turn_count_to_green"] for r in vs
-                 if r.get("turn_count_to_green") is not None]
+        paired_metrics = [
+            r for r in vs
+            if r.get("green_at")
+            and r.get("turn_count_to_green") is not None
+            and r.get("tokens_in_to_green") is not None
+        ]
+        turns = [r["turn_count_to_green"] for r in paired_metrics]
         mean_turns = f"{sum(turns) / len(turns):.2f}" if turns else "—"
-        tokens_in = [r["tokens_in_to_green"] for r in vs
-                     if r.get("tokens_in_to_green") is not None]
+        tokens_in = [r["tokens_in_to_green"] for r in paired_metrics]
         mean_tokens_in = (f"{sum(tokens_in) / len(tokens_in):.0f}"
                           if tokens_in else "—")
         cost = sum(r.get("cost_total") or 0 for r in vs)
@@ -762,10 +777,15 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
                      f"| {len(green)}/{n} | {mean_iters} | {mean_turns} | "
                      f"{mean_tokens_in} | {mean_toks} | ${cost:.2f} |")
 
-    invocation_rows = [r for r in rows if "attempt" in r]
+    invocation_rows = [r for r in rows
+                       if not r.get("summary")
+                       and isinstance(r.get("attempt"), int)
+                       and not isinstance(r.get("attempt"), bool)]
     if invocation_rows:
         lines += ["", "## Model turns and input tokens per invocation", "",
-                  "Each row is one benchmark invocation. `turn_count` is the "
+                  "Each row is one compile-gated revl invocation. Probe-scored "
+                  "variants are summarized in their own sections. "
+                  "`turn_count` is the "
                   "model-loop count inside it; `attempt` is the separate "
                   "compiler-feedback retry index. Missing usage stays `—`.", "",
                   "| spec | variant | attempt | turn_count | tokens_in | tokens_in / turn |",
@@ -799,7 +819,8 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         lines += score_mcp.render_summary(mcp_rows, args.raw_ts_cycles)
         lines.append("")
 
-    (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
+    (run_dir / "summary.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

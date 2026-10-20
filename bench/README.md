@@ -532,7 +532,10 @@ It is recorded in two places, and is explicit about which is real:
 - **In future runs (exact when reported):** `run.py` captures cline's
   `output_tokens`, `tokens_in`, and `turn_count` per invocation in
   `results.jsonl`. Each run summary includes a paired invocation table and
-  per-variant means. Where a committed cell carries a recorded
+  per-variant means over admitted cells that recorded both input tokens and
+  turns. Local calls record one request as `turn_count: 1`; this is a structural
+  fact about the adapter, not an observed agent loop. Probe-scored variants are
+  summarized in separate sections, not the compiler-attempt table. Where a committed cell carries a recorded
   `output_tokens`, `tokens.py` uses it verbatim instead of the proxy. Historical
   corpora and providers without input usage or turn counts remain unavailable;
   the report does not infer zero or backfill them.
@@ -556,8 +559,11 @@ measured" contract in `../docs/guide-ai-agents.md`; this metric is the scale.
 
 `summary.md` per run reports, per variant: first-pass compile rate,
 green-within-max-iters, mean compiler-feedback attempts-to-green, mean model
-turns, mean `tokens_in`, mean tokens-to-green, and cost. Its invocation table
-keeps `turn_count` and `tokens_in` together for each model task. The §10
+turns-to-green, mean `tokens_in`-to-green, mean tokens-to-green, and cost. The
+turn and input-token means use the same admitted cells that recorded both
+measurements. Its invocation table keeps `turn_count` and `tokens_in` together
+for each compile-gated revl invocation; probe-scored variants have their own
+sections. The §10
 question is comparative: does 2.0 syntax (the TS-subset strata) compile
 *better or no worse* than the 1.x surface in models' hands, and do host blocks
 help or hurt? First-pass rate is the headline; attempts-to-green measures how

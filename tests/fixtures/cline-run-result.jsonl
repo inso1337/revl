@@ -1,0 +1,1 @@
+{"type":"run_result","text":"```revl\ncomponent Good {}\n```","iterations":4,"aggregateUsage":{"input_tokens":500,"output_tokens":120,"totalCost":0.25},"model":{"id":"model-x","provider":"provider-y"}}

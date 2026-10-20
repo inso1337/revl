@@ -419,7 +419,8 @@ def _unanswered_cells(run: str, attempt: int) -> set:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("attempt") == attempt and row.get("answer_from_reasoning"):
+        if (not row.get("summary") and row.get("attempt") == attempt
+                and row.get("answer_from_reasoning")):
             out.add((row.get("spec"), row.get("variant")))
     return out
 

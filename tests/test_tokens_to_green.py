@@ -166,9 +166,30 @@ def test_per_attempt_turns_and_tokens_in_remain_paired_through_green(
     ]
     assert cell["recorded_turn_count_to_green"] == 3
     assert cell["recorded_tokens_in_to_green"] == 200
-    assert cell["tokens_in_per_turn_to_green"] == 200 / 3
 
     report = "\n".join(tokens.render(["funded"], cells, sha="test"))
     assert "model turns and tokens_in by invocation" in report
     assert "| `funded/01-kv-provider/v1` | 1 | 2 | 120 | 60 |" in report
     assert "| `funded/01-kv-provider/v1` | 2 | 1 | 80 | 80 |" in report
+
+
+def test_unadmitted_cell_has_no_input_metrics_to_green(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    variant_dir = results / "funded" / "01-kv-provider" / "v1"
+    variant_dir.mkdir(parents=True)
+    (variant_dir / "attempt-1.rvl").write_text("still red\n")
+    (results / "funded" / "results.jsonl").write_text(
+        '{"spec":"01-kv-provider","variant":"v1","attempt":1,'
+        '"turn_count":2,"tokens_in":120}\n'
+    )
+    monkeypatch.setattr(tokens.rescore, "RESULTS", results)
+    monkeypatch.setattr(tokens, "_load_compiler", lambda root: (None, None, None))
+    monkeypatch.setattr(tokens.rescore, "score_one",
+                        lambda path, *args: {"ok": False})
+
+    cell = next(c for c in tokens.compute_run("funded", compiler_root=ROOT)
+                if c["variant"] == "v1")
+
+    assert cell["admitted"] is False
+    assert cell["recorded_turn_count_to_green"] is None
+    assert cell["recorded_tokens_in_to_green"] is None

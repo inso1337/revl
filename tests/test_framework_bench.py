@@ -959,6 +959,8 @@ def test_the_admits_column_excludes_unanswered_attempts_too(tmp_path, monkeypatc
     (run / "results.jsonl").write_text("\n".join([
         json.dumps({"spec": "01-a", "variant": "v2", "attempt": 1,
                     "answer_from_reasoning": True}),
+        json.dumps({"spec": "01-probe", "variant": "raw-ts", "attempt": 1,
+                    "summary": True, "answer_from_reasoning": True}),
         json.dumps({"spec": "02-b", "variant": "v2", "attempt": 1,
                     "answer_from_reasoning": False}),
     ]))

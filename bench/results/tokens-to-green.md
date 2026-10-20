@@ -17,7 +17,7 @@ first-pass rate does.
 ---
 
 ## tokens-to-green — output tokens spent per admitted component
-compiler: `2e19c2e5`  ·  reproduce: `python3 bench/tokens.py`
+compiler: `bc3ae802`  ·  reproduce: `python3 bench/tokens.py`
 
 The token every optimization must move: output tokens the model emitted across ALL attempts, up to and including the admitted one (retries included — a refused draft still cost its tokens). `est.` is a deterministic BPE-proxy over the committed generation files; **as-run $** is the real billed cost from the corpus. Green is recomputed against the current checker.
 

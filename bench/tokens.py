@@ -263,11 +263,13 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
                                      for m in attempt_metrics)
             turn_count_to_green = (
                 sum(m["turn_count"] for m in attempt_metrics)
-                if attempt_metrics and complete_turns else None
+                if green_at is not None and attempt_metrics and complete_turns
+                else None
             )
             tokens_in_to_green = (
                 sum(m["tokens_in"] for m in attempt_metrics)
-                if attempt_metrics and complete_tokens_in else None
+                if green_at is not None and attempt_metrics and complete_tokens_in
+                else None
             )
             cells.append({
                 "run": run,
@@ -281,10 +283,6 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
                 "attempt_metrics": attempt_metrics,
                 "recorded_turn_count_to_green": turn_count_to_green,
                 "recorded_tokens_in_to_green": tokens_in_to_green,
-                "tokens_in_per_turn_to_green": (
-                    tokens_in_to_green / turn_count_to_green
-                    if tokens_in_to_green is not None and turn_count_to_green else None
-                ),
                 "as_run_green_at": row.get("as_run_green_at"),
                 "as_run_cost_total": row.get("as_run_cost_total"),
             })
