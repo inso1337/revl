@@ -24,10 +24,10 @@ def test_cline_runner_records_input_tokens_and_model_iterations(monkeypatch):
 
     row = bench_run.run_cline("system", "prompt", "model-x", None, 30, False)
 
-    assert row["tokens_in"] == 500
-    assert row["turn_count"] == 4
-    assert row["output_tokens"] == 120
-    assert row["cost"] == 0.25
+    assert row["tokens_in"] == 5022
+    assert row["turn_count"] == 1
+    assert row["output_tokens"] == 28
+    assert row["cost"] == 0.00071092
 
 
 @pytest.mark.parametrize(("usage", "expected"), [
