@@ -224,6 +224,24 @@ def parse_type(name: str | None) -> tuple[str | None, list[str]]:
     return head, _split_top_level(rest[:-1])
 
 
+#: The heads that spell a function type. `parse_type` normalises the arrow
+#: spelling to `FN_HEAD`; the generic `Fn[...]` spelling keeps its own head,
+#: and taint.py already treats that head as a function type when it decides
+#: whether a closure carries a secret. Both spellings name a callable VALUE,
+#: so a binder of either must not be judged a call that fell through to a
+#: same-named module callable (#1823).
+_FUNCTION_TYPE_HEADS = frozenset((FN_HEAD, "Fn"))
+
+
+def is_function_type(name: str | None) -> bool:
+    """True if `name` is a function type in either spelling.
+
+    `Fn[Int, Int]` compiles on origin/main and the wasm tier's fixtures use
+    it, so the two spellings are one type for every decision that asks
+    "is this binder the callee?" -- the #2544 guard included."""
+    return parse_type(name)[0] in _FUNCTION_TYPE_HEADS
+
+
 # ------------------------------------------------- structural record types
 #
 # An anonymous record literal (`let a = { h: "x" }`) has no nominal name to look
@@ -2444,10 +2462,13 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             # callee, so this call names the same-named module `fn`/`extern`/
             # case and silently drops the binding. Refuse it by type. The
             # #1823 carve-out is above: a function-typed local is the callee
-            # and never reaches this guard. `Any`/`Value` are erased dynamic
-            # types that may hold a function, and a still-unknown binder is
-            # ⊥, so neither is "definitely not a function".
+            # and never reaches this guard, whichever spelling declared it
+            # (`(Int) -> Int` or `Fn[Int, Int]`, see `is_function_type`).
+            # `Any`/`Value` are erased dynamic types that may hold a function,
+            # and a still-unknown binder is ⊥, so neither is "definitely not
+            # a function".
             if (filename and local is not None
+                    and not is_function_type(local)
                     and head not in _OPEN_CALLABLE_HEADS):
                 refuse_call_on_non_function(name, local, filename, line)
             check_case_call_arity(expr, tenv, types, filename)
@@ -2963,8 +2984,9 @@ def refuse_call_on_non_function(name: str, local: str, filename: str,
     without a second edit. The one form whose item is untyped (`every … in`)
     is enumerated by `_binder_names` in lower.py and fails closed there.
     A local of function type never reaches here (the call is on the value,
-    #1823); `Any`/`Value` and a still-unknown binder (⊥) are left to the
-    ordinary checks so an open or untyped callable stays admitted.
+    #1823), in either spelling: `is_function_type` covers `(Int) -> Str` and
+    `Fn[Int, Int]`. `Any`/`Value` and a still-unknown binder (⊥) are left to
+    the ordinary checks so an open or untyped callable stays admitted.
     """
     rendered = render_type(local) or local
     raise RevlError(
@@ -3017,8 +3039,11 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
         # issue #2544, the case-constructor half: a call on a local lowers to
         # this `call`/`name` shape, while a case call lowers to a `var`, so a
         # non-function local here is the same dropped binding the AST guard
-        # refuses. `Any`/`Value` and a still-unknown binder stay admitted.
+        # refuses. A function-typed binder stays admitted whichever spelling
+        # declared it; `Any`/`Value` and a still-unknown binder stay admitted
+        # too.
         if (filename and fn_type is not None
+                and not is_function_type(fn_type)
                 and head not in _OPEN_CALLABLE_HEADS):
             refuse_call_on_non_function(surface_name(name), fn_type, filename,
                                         line)
@@ -3434,11 +3459,11 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         # callable, but if the type environment holds a binder of that name
         # that is NOT a function, the call was the same silent fall-through
         # `infer_ast` above refuses. A function-typed binder is the #1823
-        # carve-out and stays admitted; an open (`Any`/`Value`) or unknown
-        # (⊥) binder stays lenient.
+        # carve-out and stays admitted in either spelling; an open
+        # (`Any`/`Value`) or unknown (⊥) binder stays lenient.
         local = tenv.get(name)
         head = parse_type(local)[0]
-        if (filename and local is not None and head != FN_HEAD
+        if (filename and local is not None and not is_function_type(local)
                 and head not in _OPEN_CALLABLE_HEADS):
             refuse_call_on_non_function(name, local, filename, line)
         sig = (types.get(FNS_KEY) or {}).get(name)

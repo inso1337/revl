@@ -175,6 +175,33 @@ def test_a_function_valued_parameter_named_like_a_module_fn_is_admitted():
     assert method["body"]
 
 
+def test_the_fn_spelling_of_a_function_type_is_admitted_too():
+    """The same carve-out for the `Fn[...]` spelling. `Fn[Int, Int]` compiles
+    on origin/main (the wasm tier's fixtures use it, and taint.py already
+    treats the `Fn` head as a function type), and the first cut of the #2544
+    guard refused it: it compared the parsed head with `->` only. Both
+    spellings name a callable value, so neither may be judged a fall-through
+    to a same-named module callable. This is the minimal regression that the
+    wasm module's `test_v3_escaping_arrow_still_rejected` compiles."""
+    ir = compile_source(
+        "fn apply(f: Fn[Int, Int], x: Int) -> Int { return f(x) }\n",
+        "t.rvl",
+    )
+    assert [fn["name"] for fn in ir["functions"]] == ["apply"]
+    # the provide-method half, with a same-named module fn in scope
+    ir = compile_source(
+        "fn f(x: Int) -> Int { return x }\n"
+        "service M { fn go(f: Fn[Int, Int], n: Int) -> Int }\n"
+        "component C provides m: M {\n"
+        "  provide m { fn go(f, n) = f(n) }\n"
+        "}\n",
+        "t.rvl",
+    )
+    method = ir["components"][0]["body"][0]["methods"][0]
+    assert method["params"] == ["f", "n"]
+    assert method["body"]
+
+
 # -------------------------- the binder forms the carve-out must NOT widen to
 
 @pytest.mark.parametrize("source", [
@@ -320,3 +347,47 @@ def test_a_component_body_binding_still_pairs_with_a_call_in_a_method():
             "}\n",
             "t.rvl",
         )
+
+
+def test_a_sibling_method_binding_another_name_does_not_hide_the_refusal():
+    """Each provide method is its own emitted body, and the typecheck guard is
+    keyed on the type environment of the body it checks: the first method's
+    `tag` parameter is there as a `Str`, so its call is still refused when a
+    sibling method binds a DIFFERENT module fn name and never calls it. The
+    refusal is the typecheck one, not a component-wide lowering scan."""
+    source = (
+        "fn clean(s: Str) -> Str { return s }\n"
+        + _TAG + "service Cache {\n  fn f(tag: Str) -> Str\n"
+        "  fn g(clean: Str) -> Str\n}\n" + """
+        component C provides cache: Cache {
+          provide cache {
+            fn f(tag) = tag("x")
+            fn g(clean) = clean
+          }
+        }
+        """
+    )
+    with pytest.raises(RevlError, match=_REFUSED) as exc:
+        compile_source(source, "t.rvl")
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 10)
+
+
+def test_a_sibling_methods_call_does_not_make_a_parameter_ambiguous():
+    """A provide parameter binds only inside its own method, and only that
+    method's type environment holds it. Here `f`'s `tag` parameter is never
+    called there, and the call in `g` names the module fn, so nothing is
+    ambiguous: the two methods are separate emitted bodies, not one scope."""
+    ir = compile_source(
+        _TAG + "service Cache {\n  fn f(tag: Str) -> Str\n"
+        "  fn g(key: Str) -> Str\n}\n" + """
+        component C provides cache: Cache {
+          provide cache {
+            fn f(tag) = "x"
+            fn g(key) = tag(key)
+          }
+        }
+        """,
+        "t.rvl",
+    )
+    assert ir is not None
