@@ -467,6 +467,79 @@ def test_a_forgotten_count_or_budget_still_fails(lines, monkeypatch, tmp_path):
                for p in lines.check(moved))
 
 
+# --------------------------------------------------------------------------
+# issue #2643: the per-function view, and a rise message that names a command.
+#
+# The gate's refusal was correct and unusable: it named a function and two
+# counts, but a reader could not see which statements in a ten-thousand-line
+# reference emitter were uncovered without a root-suite cycle. `--functions` is
+# a read-only view and changes no verdict; the rise message names it and the
+# local rerun.
+
+
+def test_the_function_view_prints_uncovered_reference_lines(
+        lines, line_data, monkeypatch, capsys):
+    """The view has to answer the reviewer's first question: can the reader open
+    the reference module at the statement? So every number it prints is checked
+    against `backends/<tier>/emit.py` itself, and the recorded column against the
+    ledger. Reference only: self-host line numbers are emitted-python lines."""
+    rows = lines.function_view("rust", line_data)
+    by_name = {row["name"]: row for row in rows}
+    assert "_v3_infer_type" in by_name, (
+        "the rust view no longer names `_v3_infer_type`, the function the "
+        "issue's acceptance check is written against")
+    source = (ROOT / "backends" / "rust" / "emit.py").read_text().splitlines()
+    ledger = lines._load_ledger()["reference"]["rust"]["functions"]
+    for row in rows:
+        assert row["measured"] == len(row["uncovered_lines"]) > 0
+        assert row["recorded"] == ledger[row["name"]]["uncovered"]
+        for number, text in row["uncovered_lines"]:
+            assert text == source[number - 1].rstrip()
+
+    lines.report_functions("rust", line_data)
+    out = capsys.readouterr().out
+    assert "_v3_infer_type" in out
+    assert "recorded" in out and "measured" in out
+    assert "rule" in out and "--check" in out
+    number = by_name["_v3_infer_type"]["uncovered_lines"][0][0]
+    assert f"line {number}:" in out
+
+    monkeypatch.setattr(lines, "measure", lambda frontend=False: line_data["reference"])
+    assert lines.main(["--functions", "rust"]) == 0
+    assert "_v3_infer_type" in capsys.readouterr().out
+
+
+def test_the_rise_message_names_the_view_and_the_gate(lines, monkeypatch, tmp_path):
+    """The blocking message is the only place the reader meets the failure, so
+    it names the view with the tier filled in and the local rerun. The existing
+    remediation sentence stays: the view locates the statements, it does not
+    reach them."""
+    ledger = {half: {tier: _entry({"grew": ("a", 1)}) for tier in TIERS}
+              for half in ("reference", "selfhost")}
+    _ledger(lines, monkeypatch, tmp_path, ledger)
+    survey = {half: {tier: {"functions": {"grew": 3}, "sizes": {"grew": 3}}
+                     for tier in TIERS} for half in ("reference", "selfhost")}
+    rises = [p for p in lines.check(survey) if "went from 1 to 3" in p]
+    assert len(rises) == 2 * len(TIERS)
+    for tier in TIERS:
+        message = next(p for p in rises if p.startswith(f"reference/{tier}:"))
+        assert (f"python3 tools/selfhost_line_coverage.py --functions {tier}"
+                in message)
+        assert "python3 tools/selfhost_line_coverage.py --check" in message
+        assert "Add the corpus case" in message
+
+
+def test_the_view_is_exclusive_with_the_gate_and_write(lines, capsys):
+    """`--functions` is an output view, not a mode: pairing it with a command
+    that rewrites or verdicts has to be refused rather than silently resolved."""
+    for argv in (["--functions", "rust", "--check"],
+                 ["--functions", "rust", "--write"]):
+        with pytest.raises(SystemExit) as raised:
+            lines.main(argv)
+        assert raised.value.code == 2
+        assert "read-only view" in capsys.readouterr().err
+
+
 def test_write_resolves_a_conflicted_file(lines, monkeypatch, tmp_path):
     """The one-command resolution: `--write` reads through conflict markers,
     keeps the first copy of a doubled record and rewrites the file clean."""

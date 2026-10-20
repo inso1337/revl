@@ -144,6 +144,7 @@ Usage:
     python3 tools/selfhost_line_coverage.py            # the report
     python3 tools/selfhost_line_coverage.py --check    # the gate
     python3 tools/selfhost_line_coverage.py --write    # record the current state
+    python3 tools/selfhost_line_coverage.py --functions rust  # one tier's statements
     python3 tools/selfhost_line_coverage.py --frontend # also measure src/revl
 """
 
@@ -295,15 +296,24 @@ def _per_function(cov, path: Path) -> dict:
     owners = _owners(path)
     total: Counter[str] = Counter()
     absent: Counter[str] = Counter()
+    absent_lines: dict[str, list[int]] = {}
     for line in statements:
         total[owners.get(line, "<module>")] += 1
     for line in missing:
-        absent[owners.get(line, "<module>")] += 1
+        name = owners.get(line, "<module>")
+        absent[name] += 1
+        absent_lines.setdefault(name, []).append(line)
     return {
         "statements": len(statements),
         "uncovered": len(missing),
         "functions": {name: absent[name] for name in sorted(absent)},
         "sizes": {name: total[name] for name in sorted(total)},
+        # The counts above are the ledger's unit, because a ratchet keyed by
+        # line NUMBER churns on every edit above it. The numbers here are not
+        # for the ledger: they are what `--functions` prints, so a reader can
+        # open the reference module at the statement the corpus does not reach.
+        "uncovered_lines": {name: sorted(lines)
+                            for name, lines in sorted(absent_lines.items())},
     }
 
 
@@ -526,6 +536,9 @@ def measure_selfhost() -> dict:
             found["functions"] = {n: c for n, c in found["functions"].items()
                                   if n in declared}
             found["sizes"] = {n: c for n, c in found["sizes"].items() if n in declared}
+            found["uncovered_lines"] = {
+                n: lines for n, lines in found["uncovered_lines"].items()
+                if n in declared}
             found["declared"] = len(declared)
             # The ledger population is declared .rvl functions only. Do not
             # headline generated scaffolding statements that cannot receive a
@@ -843,7 +856,10 @@ def check(data: dict) -> list[str]:
                         f"the item-429(d) `Secret[T]` gap opened, and the oracle "
                         f"will stay green over it. Add the corpus case, or the "
                         f"refusal document if the reference refuses what reaches "
-                        f"it (tests/fixtures/emit_{tier}_refusals/).")
+                        f"it (tests/fixtures/emit_{tier}_refusals/). The "
+                        f"statements are `python3 tools/selfhost_line_coverage.py "
+                        f"--functions {tier}`; `python3 "
+                        f"tools/selfhost_line_coverage.py --check` reruns the gate.")
                 elif now < before:
                     problems.append(
                         f"{half}/{tier}: `{name}` is down to {now} uncovered "
@@ -973,6 +989,78 @@ def report(data: dict, full_tree: dict | None = None) -> None:
               "roadmap entry for the verdict.")
 
 
+def function_view(tier: str, data: dict | None = None) -> list[dict]:
+    """The REFERENCE half of one tier, per function, uncovered lines included.
+
+    The ledger is keyed by (qualified function, count) because line numbers
+    churn on every edit above them. This is the read-only view that puts the
+    numbers back on the lines: each row carries the function's recorded count,
+    its measured count, the statements it owns, and the uncovered statement
+    numbers with the source text `backends/<tier>/emit.py` has at them.
+
+    Reference only, deliberately. On the self-host half the traced lines belong
+    to the emitted python, not to `selfhost/emit_<tier>.rvl`, so a line number
+    there would send the reader to a file that does not exist. `data` is the
+    two-half map `main` measures (`{"reference": {...}, "selfhost": {...}}`), so
+    a caller that already has it passes it instead of paying for a second
+    session.
+    """
+    if tier not in TIERS:
+        raise SystemExit(f"unknown tier {tier!r}: one of {', '.join(TIERS)}")
+    measured = (data or {}).get("reference", {}).get(tier)
+    if measured is None:
+        measured = measure()[tier]
+    recorded = _flatten(_load_ledger().get("reference", {}).get(tier, {}))
+    source = (ROOT / "backends" / TIERS[tier] / "emit.py").read_text(
+        encoding="utf-8").splitlines()
+    rows = []
+    for name, numbers in measured["uncovered_lines"].items():
+        rows.append({
+            "name": name,
+            "recorded": recorded.get(name),
+            "measured": len(numbers),
+            "statements": measured["sizes"].get(name, len(numbers)),
+            "uncovered_lines": [
+                (number, source[number - 1].rstrip()
+                 if 0 < number <= len(source) else "")
+                for number in numbers],
+        })
+    rows.sort(key=lambda row: row["name"])
+    return rows
+
+
+def report_functions(tier: str, data: dict | None = None) -> None:
+    """Print `--functions TIER`: the reference half, functions that fail only.
+
+    A function whose measured count EQUALS its recorded count is left out: this
+    view exists to show what the gate is complaining about and where to read it,
+    and the gate's verdict remains `--check`'s. Exit code stays 0 (see main).
+    """
+    rows = [row for row in function_view(tier, data) if row["measured"] > 0]
+    ledger_file = LEDGER.relative_to(ROOT) / "reference" / f"{tier}.jsonl"
+    relative = ROOT / "backends" / TIERS[tier] / "emit.py"
+    print(f"REFERENCE {relative.relative_to(ROOT)}: functions (and the module "
+          f"body) whose corpus leaves statements unexecuted")
+    print(f"  recorded  uncovered count in {ledger_file}")
+    print("  measured  statements no corpus document executes")
+    print("  rule      --check fails when measured rises above or falls below "
+          "recorded; --write records a fall")
+    print()
+    total = sum(row["measured"] for row in rows)
+    for row in rows:
+        recorded = ("not recorded" if row["recorded"] is None
+                    else str(row["recorded"]))
+        print(f"  {row['name']}  recorded {recorded}  measured {row['measured']} "
+              f"of {row['statements']} statements")
+        for number, text in row["uncovered_lines"]:
+            print(f"    line {number}: {text}")
+        print()
+    print(f"  {len(rows)} function(s), {total} uncovered statement(s) in the "
+          f"reference half of {tier}.")
+    print("  rerun the gate with "
+          "`python3 tools/selfhost_line_coverage.py --check`.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="the gate")
@@ -980,7 +1068,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--full-tree", action="store_true",
                         help="also measure the reference against every `.rvl` in the "
                              "tree, to price 'more inputs' against 'author cases'")
+    parser.add_argument("--functions", metavar="TIER", choices=tuple(TIERS),
+                        help="read-only view: print the REFERENCE half of one tier "
+                             "function by function, with the uncovered statement "
+                             "lines and their source text")
     args = parser.parse_args(argv)
+
+    if args.functions and (args.check or args.write):
+        parser.error("--functions is a read-only view and is exclusive with "
+                     "--check and --write")
+    if args.functions:
+        report_functions(args.functions)
+        return 0
 
     reporting = not (args.check or args.write)
     data = {"reference": measure(frontend=reporting), "selfhost": measure_selfhost()}
