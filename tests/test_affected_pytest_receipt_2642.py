@@ -76,13 +76,57 @@ def test_zero_collected_for_a_requested_selection_is_red():
     assert "collected no tests" in verdict.reason
 
 
+_EMPTY_SHARD = ("REVL_TEST_SHARD 2/4: 0 file(s), 0 test(s) of 8 collected\n"
+                "\n"
+                "8 deselected in 0.17s\n")
+
+
 def test_an_empty_shard_is_the_only_allowed_zero():
     """The four-shard split may hand a shard no file; the other shards run it."""
-    verdict = _judge("no tests ran in 0.01s\n", pytest_exit=5,
-                     allow_empty_shard=True)
+    verdict = _judge(_EMPTY_SHARD, pytest_exit=5, allow_empty_shard=True)
     assert verdict.ok is True
     assert verdict.counts.collected == 0
     assert verdict.reason == "shard assigned no test file"
+
+
+def test_an_empty_shard_without_the_shard_record_is_red():
+    """A collection that came back empty is not the split's deliberate empty."""
+    verdict = _judge("8 deselected in 0.17s\n", pytest_exit=5,
+                     allow_empty_shard=True)
+    assert verdict.ok is False
+    assert verdict.exit_code == 5
+    assert "no shard recorded itself empty" in verdict.reason
+
+
+def test_allow_empty_shard_does_not_mask_an_all_skip_selection():
+    verdict = _judge("2 skipped in 1.10s\n", allow_empty_shard=True)
+    assert verdict.ok is False
+    assert verdict.exit_code == 3
+    assert verdict.counts.skipped == 2
+    assert verdict.reason == "every selected test was skipped (2 skipped, 0 executed)"
+
+
+def test_an_interrupted_pytest_is_red():
+    verdict = _judge("2 passed in 1.0s\n", pytest_exit=2)
+    assert verdict.ok is False
+    assert verdict.exit_code == 2
+    assert "did not complete" in verdict.reason
+
+
+def test_an_unreadable_summary_is_red():
+    verdict = _judge("something went wrong\n")
+    assert verdict.ok is False
+    assert verdict.exit_code == 1
+    assert "could not read a pytest summary" in verdict.reason
+
+
+def test_expected_failures_count_as_executed():
+    """xfail ran the test, so it is not an all-skip selection."""
+    verdict = _judge("2 xfailed in 1.0s\n")
+    assert verdict.ok is True
+    assert verdict.counts.passed == 0
+    assert verdict.counts.executed == 2
+    assert verdict.reason == "2 selected test(s) executed"
 
 
 def test_a_failure_is_never_green():
@@ -163,5 +207,9 @@ def test_the_affected_job_reads_the_summary_after_pytest():
     assert "--pytest-exit \"$rc\"" in script
     assert "--allow-empty-shard" in script, (
         "the four-shard split's deliberately empty shard would otherwise fail"
+    )
+    assert '[ "$SHARD_INDEX" != "1" ]' in script, (
+        "shard 1 always receives the heaviest unit, so an empty shard 1 must "
+        "not be allowed to pass without executing the selection"
     )
     assert "tee \"$log\"" in script, "the run's output is not captured for the receipt"

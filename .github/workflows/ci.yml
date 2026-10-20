@@ -1092,7 +1092,12 @@ jobs:
             echo "shard ${REVL_TEST_SHARD} was assigned no test file"
           fi
           allow_empty=""
-          if [ -n "${REVL_TEST_SHARD:-}" ]; then
+          if [ -n "${REVL_TEST_SHARD:-}" ] && [ "$SHARD_INDEX" != "1" ]; then
+            # shard 1 always receives the heaviest unit, so an empty collection
+            # there means the selection itself collected nothing. Only shards
+            # 2 to 4 (which are empty when a sharded selection has fewer files
+            # than shards) may pass with no tests, and the receipt also
+            # requires conftest's "0 file(s)" line for them.
             allow_empty="--allow-empty-shard"
           fi
           python3 tools/affected_pytest_receipt.py \

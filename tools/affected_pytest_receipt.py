@@ -50,6 +50,10 @@ _SUMMARY = re.compile(
     r"^(?P<body>.+?)\s+in\s+\d+(?:\.\d+)?s(?:\s+\([^)]*\))?$"
 )
 _NO_TESTS = re.compile(r"\bno tests ran\b")
+# tests/conftest.py prints this when the shard filter leaves nothing to run.
+# It is the only evidence that an empty pytest run is the shard split's
+# deliberate outcome rather than a selection that collected nothing.
+_EMPTY_SHARD = re.compile(r"REVL_TEST_SHARD \d+/\d+: 0 file\(s\)")
 
 # pytest summary word -> field name. "1 error" is singular in the summary.
 _KINDS = {
@@ -148,7 +152,13 @@ def judge(output: str, *, pytest_exit: int = 0,
     if pytest_exit == 5 or counts.no_tests or (
             counts.summary_found and counts.collected == 0):
         if allow_empty_shard:
-            return Verdict(True, 0, "shard assigned no test file", counts)
+            if _EMPTY_SHARD.search(_ANSI.sub("", output or "")):
+                return Verdict(True, 0, "shard assigned no test file", counts)
+            return Verdict(
+                False, 5,
+                "pytest collected no tests and no shard recorded itself empty",
+                counts,
+            )
         return Verdict(
             False, 5,
             "a selection was requested but pytest collected no tests",
@@ -177,7 +187,7 @@ def judge(output: str, *, pytest_exit: int = 0,
         )
     return Verdict(
         True, 0,
-        f"{counts.passed} selected test(s) executed"
+        f"{counts.executed} selected test(s) executed"
         + (f", {counts.skipped} skipped" if counts.skipped else ""),
         counts,
     )
