@@ -47,8 +47,9 @@ fn parse_cmd(argv: List[Str]) -> Cmd {
   }
   // 426 S6 — `truc apply [--trust-host-code]` and the two-word `truc stack
   // check`. The --trust-host-code flag is read at dispatch (an enum carries no
-  // payload), for `add` and `assemble` too (issue #2552); it is read from argv
-  // and nowhere else. A bare `truc stack` with no `check` is unknown.
+  // payload), for `add` and `assemble` too (issue #2552) and for `rm` (issue
+  // #2561); it is read from argv and nowhere else. A bare `truc stack` with
+  // no `check` is unknown.
   if (s == "apply") {
     return Apply
   }
@@ -69,7 +70,7 @@ component CliDispatch requires asm: Assembler, ship: Shipper provides cli: Cli {
   provide cli {
     fn run(argv) = match parse_cmd(argv) {
       Add           => emit asm.add(nth(argv, 1), has_flag(argv, "--trust-host-code")),
-      Rm            => emit asm.rm(nth(argv, 1)),
+      Rm            => emit asm.rm(nth(argv, 1), has_flag(argv, "--trust-host-code")),
       Assemble      => emit asm.assemble(has_flag(argv, "--trust-host-code")),
       AssembleCheck => emit asm.assemble_check(has_flag(argv, "--trust-host-code")),
       Ship          => emit ship.run(".", nth(argv, 1)),

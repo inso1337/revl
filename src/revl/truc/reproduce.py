@@ -198,9 +198,12 @@ def _resolve_registry(project_dir: str, registry_flag: str | None) -> str:
             str(toml), 0,
             "no truc.toml in this directory and no --registry given: cannot "
             "tell which registry to reproduce against")
-    from ._host import toml_manifest  # noqa: PLC0415, reuse truc's TOML reader
+    from ._host import TrucNameRefusal, toml_manifest  # noqa: PLC0415, reuse truc's TOML reader
 
-    manifest = json.loads(toml_manifest(project_dir))
+    try:
+        manifest = json.loads(toml_manifest(project_dir))
+    except TrucNameRefusal as error:
+        raise RevlError(str(toml), 0, str(error)) from error
     reg = manifest.get("registry") or ""
     if not reg or not os.path.isdir(reg):
         raise RevlError(

@@ -106,15 +106,34 @@ def _lock_rows(data: object) -> list[dict]:
     if not isinstance(files, list) or not files:
         raise _refuse("truc.lock names no component files; truc will not fall "
                       "back to compiling whatever is in components/")
+    return _pin_rows(files, "files")
+
+
+def _import_rows(data: dict) -> list[dict]:
+    """The validated `imports` rows of a parsed bootstrap lock: the files the
+    roots pull in by `use` (externs.rvl, the host surface), pinned exactly like
+    a root but not compiled as one. Mandatory for the same reason the roots
+    are: an import is bytes stage 0 compiles, so a lock that drops the list
+    would unpin them by deletion."""
+    imports = data.get("imports")
+    if not isinstance(imports, list) or not imports:
+        raise _refuse("truc.lock pins no imports; the files truc's components "
+                      "import (externs.rvl) must be pinned like the roots")
+    return _pin_rows(imports, "imports")
+
+
+def _pin_rows(entries: list, key: str) -> list[dict]:
+    """Each `{path, sha256}` row of the lock's `key` list, validated: an
+    object, a path named once, and a usable sha256 pin."""
     rows: list[dict] = []
     seen: set[str] = set()
-    for row in files:
+    for row in entries:
         if not isinstance(row, dict):
-            raise _refuse(f"truc.lock has a `files` entry that is not an "
+            raise _refuse(f"truc.lock has a `{key}` entry that is not an "
                           f"object: {row!r}")
         path = row.get("path")
         if not isinstance(path, str) or not path:
-            raise _refuse(f"truc.lock has a `files` entry with no path: {row!r}")
+            raise _refuse(f"truc.lock has a `{key}` entry with no path: {row!r}")
         if path in seen:
             raise _refuse(f"truc.lock names {path!r} twice")
         seen.add(path)
@@ -149,6 +168,10 @@ def component_files() -> list[str]:
     with them refuses to boot. Regenerate with
     `python -P -m revl.truc._relock` (the `-P` is the PYTHONSAFEPATH
     safety bit, issue #317).
+
+    The lock's `imports` rows (the files the roots `use`, externs.rvl) are
+    verified the same way and are not returned: they are pinned, not compiled
+    as roots (issue #2561).
     """
     lock = _HERE / "truc.lock"
     if not lock.is_file():
@@ -158,16 +181,22 @@ def component_files() -> list[str]:
     except (OSError, ValueError) as error:
         raise _refuse(f"truc.lock could not be read: {error}") from error
 
-    out: list[str] = []
-    for row in _lock_rows(data):
-        path = _contained_path(row["path"])
-        actual = _sha256_file(path)
-        if actual != row["sha256"]:
-            raise _refuse(
-                f"hash drift: {row['path']} ({actual}) does not match its "
-                f"truc.lock pin ({row['sha256']})")
-        out.append(str(path))
+    out = [str(_pinned_path(row)) for row in _lock_rows(data)]
+    for row in _import_rows(data):
+        _pinned_path(row)
     return out
+
+
+def _pinned_path(row: dict) -> Path:
+    """One validated lock row's file, contained in the package and matching
+    its pin, or a refusal naming both hashes."""
+    path = _contained_path(row["path"])
+    actual = _sha256_file(path)
+    if actual != row["sha256"]:
+        raise _refuse(
+            f"hash drift: {row['path']} ({actual}) does not match its "
+            f"truc.lock pin ({row['sha256']})")
+    return path
 
 
 def lock_document() -> dict:
@@ -175,17 +204,23 @@ def lock_document() -> dict:
     regenerator behind `python -P -m revl.truc._relock` (the `-P` is the
     PYTHONSAFEPATH safety bit, issue #317) and the regenerate-or-red
     test in `tests/test_truc_bootstrap.py`. It reads the committed lock
-    only for the file LIST (which components make up truc is a decision,
-    not something to be discovered by globbing) and recomputes every
-    hash."""
+    only for the file LISTS, the roots and their imports (which files make up
+    truc is a decision, not something to be discovered by globbing), and
+    recomputes every hash."""
     lock = _HERE / "truc.lock"
     data = json.loads(lock.read_text(encoding="utf-8"))
-    files = []
-    for row in data.get("files") or []:
-        rel = row["path"] if isinstance(row, dict) else row
-        files.append({"path": rel, "sha256": _sha256_file(_contained_path(rel))})
     return {"lockVersion": LOCK_VERSION, "note": data.get("note", ""),
-            "files": files}
+            "files": _repinned(data.get("files")),
+            "imports": _repinned(data.get("imports"))}
+
+
+def _repinned(rows: object) -> list[dict]:
+    """The rows of one lock list, each with its hash recomputed from disk."""
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        rel = row["path"] if isinstance(row, dict) else row
+        out.append({"path": rel, "sha256": _sha256_file(_contained_path(rel))})
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1070,17 +1070,41 @@ jobs:
             echo "a selection of ${count} node(s) runs whole in shard 1; nothing for shard ${SHARD_INDEX}"
             exit 0
           fi
+          # Issue #2642: capture the run and read its summary back. pytest
+          # exits 0 when every selected test was skipped (a cordis-guarded file
+          # on this runtime-less interpreter, for instance), so the raw exit
+          # status alone can report a whole selection as green without running
+          # it. tools/affected_pytest_receipt.py names the selected files and
+          # the passed, failed, errors, skipped and not-run counts, and fails
+          # the step unless the selection actually executed.
+          log=$(mktemp)
           rc=0
-          pytest $SEL_PYTEST -q || rc=$?
+          set +e
+          pytest $SEL_PYTEST -q 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
           if [ "$rc" = "5" ] && [ -n "${REVL_TEST_SHARD:-}" ]; then
             # pytest's "no tests collected": a shard can be handed no file when
             # the selection has fewer files than shards. The other shards ran
             # them, and the partition is pinned by
-            # tests/test_root_suite_shards_1774.py.
+            # tests/test_root_suite_shards_1774.py. The receipt is still read,
+            # so an empty shard is an allowed outcome only here.
             echo "shard ${REVL_TEST_SHARD} was assigned no test file"
-            rc=0
           fi
-          exit "$rc"
+          allow_empty=""
+          if [ -n "${REVL_TEST_SHARD:-}" ] && [ "$SHARD_INDEX" != "1" ]; then
+            # shard 1 always receives the heaviest unit, so an empty collection
+            # there means the selection itself collected nothing. Only shards
+            # 2 to 4 (which are empty when a sharded selection has fewer files
+            # than shards) may pass with no tests, and the receipt also
+            # requires conftest's "0 file(s)" line for them.
+            allow_empty="--allow-empty-shard"
+          fi
+          python3 tools/affected_pytest_receipt.py \
+            --log "$log" \
+            --pytest-exit "$rc" \
+            --selection "$SEL_PYTEST" \
+            $allow_empty
 
   # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
   # work absent from `main`, because each was merged into a base branch that

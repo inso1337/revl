@@ -189,7 +189,7 @@ def _worker(case, base, api, ws):
         ownership = _capture(Path(entries[0].witness["preimage"]))
         # Durable host ledger artifacts, outside the workspace; not runtime receipts.
         prepared = base / "prepared.json"
-        with prepared.open("w") as file:
+        with prepared.open("w", encoding="utf-8") as file:
             json.dump(ownership, file)
             file.flush()
             os.fsync(file.fileno())
@@ -201,7 +201,7 @@ def _worker(case, base, api, ws):
         report = session.commit_confirm(session.commit()["hash"])
         assert report["committed"], report
         assert all(e.discharged and not e.replayed for e in entries)
-        with (base / "confirmed.json").open("w") as file:
+        with (base / "confirmed.json").open("w", encoding="utf-8") as file:
             json.dump(report, file)
             file.flush()
             os.fsync(file.fileno())

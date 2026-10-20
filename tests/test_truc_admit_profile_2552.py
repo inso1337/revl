@@ -277,7 +277,7 @@ def test_cli_assemble_refuses_a_row_with_no_admission_record(tmp_path):
     registry = _registry(tmp_path, {"pkg": source})
     proj = _project(tmp_path, registry)
     shutil.copytree(registry / "components" / "pkg", proj / "trucs" / "pkg")
-    with (proj / "truc.toml").open("a") as handle:
+    with (proj / "truc.toml").open("a", encoding="utf-8") as handle:
         handle.write('pkg = { registry = "local" }\n')
     (proj / "truc.lock").write_text(_lock(
         "pkg", source, {"at": "2026-10-18T00:00:00Z", "indexVersion": "2"}))

@@ -292,10 +292,12 @@ def block_agents_mcp_count(current: str) -> str:
 
 
 def block_authoring_mcp_count(current: str) -> str:
-    """docs/authoring-for-agents.md's verb total. It was hand-maintained and
-    drifted (issue #939): the page still claimed the authoring verbs were
-    CLI-only after item 345 exposed them over MCP, and its total lagged the
-    registry. Generating it ties the page to `TOOLS` like the other two."""
+    """docs/authoring-for-agents.md's verb-surface pointer. It was
+    hand-maintained and drifted (issue #939): the page still claimed the
+    authoring verbs were CLI-only after item 345 exposed them over MCP, and
+    its total lagged the registry. The block now names the core tier and
+    points at the full list; the count is `--show mcp-verb-count` away
+    (#1768)."""
     mcp_tools()
     return (
         "`revl mcp serve` lists its core tier by default and `revl_verbs`\n"

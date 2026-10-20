@@ -54,11 +54,14 @@ const MUTATING_FS = new Set([
 ])
 
 /** The ONLY functions that are not a `syscall-time` implementation and may
- * still reach a mutating `fs.*` call. Both are private helpers of a listed
+ * still reach a mutating `fs.*` call. Each is a private helper of a listed
  * family: `sidecarDirReal` is how family 2 creates its directories, `openLeaf`
- * is how `openConfinedWrite` opens the leaf. Pinned here on purpose, a third
- * name appearing in this list is a review decision, not an edit. */
-const MUTATION_HELPERS = new Set(['sidecarDirReal', 'openLeaf'])
+ * is how `openConfinedWrite` opens the leaf, and `parkedDigest` is how the
+ * parked-sidecar family opens the parked leaf `O_RDONLY | O_NOFOLLOW` to hash
+ * it (issue #2666). Pinned here on purpose, a further name appearing in this
+ * list is a review decision, not an edit. */
+const MUTATION_HELPERS = new Set([
+  'sidecarDirReal', 'openLeaf', 'parkedDigest'])
 
 /** The namespace imports an entry point may not call into directly. */
 const HOST_NAMESPACES = new Set(['fs', 'path'])
