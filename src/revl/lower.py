@@ -8174,35 +8174,24 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
 #     Str)` sits beside `fn name(row: Row)` and never calls it.
 # ---------------------------------------------------------------------------
 
-def _binder_names(node, out: list, skip: tuple = ()) -> None:
+def _binder_names(node, out: list) -> None:
     """Append every `(name, line)` this subtree BINDS.
 
     A parameter, a `let`/`var`, a destructure, a `for` bind, an arrow
-    parameter, a match-arm payload, and the component-body binders (an effect
-    `let`, an approval `let`, a lifecycle `call ... as`). A provide-method
-    parameter belongs here too: surfaces are comma-separated bare names rather
-    than `FnParam`s and every other walker reaches them through
-    `env.bind_params`, so without their own arm they were the one binding form
-    this scan did not see (issue #2544). Traversal is generic over the AST
-    dataclasses so a binder form added to the grammar is covered without a
-    second edit here; only the RECOGNITION is enumerated.
-
-    `skip` is for a body that is not one scope: a component's provide methods
-    are separate emitted functions, so a parameter binds only in its own
-    method, and the component-level BINDER walk skips their subtrees.
+    parameter, a match-arm payload, the `every … in` item, and the
+    component-body binders (an effect `let`, an approval `let`, a lifecycle
+    `call ... as`). Traversal is generic over the AST dataclasses so a binder
+    form added to the grammar is covered without a second edit here; only the
+    RECOGNITION is enumerated.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
-            _binder_names(item, out, skip)
+            _binder_names(item, out)
         return
     if not dataclasses.is_dataclass(node) or isinstance(node, type):
         return
-    if skip and isinstance(node, skip):
-        return
     if isinstance(node, (FnParam, LetStmt)):
         out.append((node.name, node.line))
-    elif isinstance(node, ProvideMethod):
-        out.extend((name, node.line) for name in node.params or [])
     elif isinstance(node, LetPatternStmt):
         pattern = node.pattern
         if isinstance(pattern, RecordPattern):
@@ -8211,7 +8200,13 @@ def _binder_names(node, out: list, skip: tuple = ()) -> None:
             out.extend((name, pattern.line) for name in pattern.binds)
             if pattern.rest:
                 out.append((pattern.rest, pattern.line))
-    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt)):
+    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt,
+                           StreamIterStmt)):
+        # `every <x> in <sub>` binds its item for the body (item 130): the
+        # item's type can be absent (a plain iteration carries no contract),
+        # so the type environment cannot decide it the way it decides a typed
+        # provide-method parameter (#2544). Enumerated here so the form fails
+        # closed instead of silently calling a module `fn` of the same name.
         if isinstance(node.bind, str):
             out.append((node.bind, node.line))
     elif isinstance(node, ExprArrow):
@@ -8221,7 +8216,7 @@ def _binder_names(node, out: list, skip: tuple = ()) -> None:
             if len(arm) > 1 and isinstance(arm[1], str):
                 out.append((arm[1], node.line))
     for field in dataclasses.fields(node):
-        _binder_names(getattr(node, field.name, None), out, skip)
+        _binder_names(getattr(node, field.name, None), out)
 
 
 def _called_names(node, out: set) -> None:
@@ -8242,31 +8237,6 @@ def _called_names(node, out: set) -> None:
         _called_names(getattr(node, field.name, None), out)
 
 
-def _provide_methods(node) -> list:
-    """Every `ProvideMethod` under `node`, in source order.
-
-    A component is not one body: each provide method is emitted as its own
-    function, so its parameters are in scope only inside that method.
-    """
-    out: list = []
-
-    def walk(n) -> None:
-        if isinstance(n, (list, tuple)):
-            for item in n:
-                walk(item)
-            return
-        if not dataclasses.is_dataclass(n) or isinstance(n, type):
-            return
-        if isinstance(n, ProvideMethod):
-            out.append(n)
-            return
-        for field in dataclasses.fields(n):
-            walk(getattr(n, field.name, None))
-
-    walk(node)
-    return out
-
-
 def _refuse_callable_shadowing(program: Program, filename: str) -> None:
     """Refuse a body that both BINDS a name and CALLS it, where that name is
     also a module callable visible to the body.
@@ -8285,8 +8255,7 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         return
     externs = {ext.name for ext in program.externs}
 
-    def check(decl, visible: set, decl_file: str,
-              skip_binders: tuple = ()) -> None:
+    def check(decl, visible: set, decl_file: str) -> None:
         if not visible:
             return
         called: set = set()
@@ -8295,7 +8264,7 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         if not ambiguous:
             return
         binders: list = []
-        _binder_names(decl, binders, skip_binders)
+        _binder_names(decl, binders)
         for name, line in binders:
             if name not in ambiguous:
                 continue
@@ -8328,21 +8297,7 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
     # set is that same one.
     for decl in (list(program.components) + list(program.tests)
                  + list(program.prop_tests)):
-        decl_file = getattr(decl, "source", "") or filename
-        if not isinstance(decl, ComponentDecl):
-            check(decl, declared, decl_file)
-            continue
-        # A component is not one body: a provide method is emitted as its own
-        # function (backends/python/emit.py writes one `def` per method), so
-        # its parameters are in scope only there. Pair each method's binders
-        # with that method's calls, and leave the method subtrees out of the
-        # component's BINDER list so one method's parameter cannot be blamed
-        # for a sibling's call. Their CALLS stay in the component-level set:
-        # a component body's `let` is captured by the methods' closures, so a
-        # bare call there still pairs with it.
-        for method in _provide_methods(decl.body):
-            check(method, declared, decl_file)
-        check(decl, declared, decl_file, skip_binders=(ProvideMethod,))
+        check(decl, declared, getattr(decl, "source", "") or filename)
 
 
 def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:

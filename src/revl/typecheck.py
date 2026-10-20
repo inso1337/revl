@@ -2439,6 +2439,13 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             if parse_type(local)[0] == FN_HEAD:
                 return call_function_value(expr, local, f"`{name}`", arg_types,
                                            tenv, types, filename, line)
+            # issue #2544: a binder whose type is NOT a function cannot be the
+            # callee, so this call names the same-named module `fn`/`extern`/
+            # case and silently drops the binding. Refuse it by type. The
+            # #1823 carve-out is above: a function-typed local is the callee
+            # and never reaches this guard.
+            if filename and local is not None:
+                refuse_call_on_non_function(name, local, filename, line)
             check_case_call_arity(expr, tenv, types, filename)
             case = (types.get(CASES_KEY) or {}).get(name)
             params = generic_variant_params(case and case["adt"], types)
@@ -2933,6 +2940,34 @@ def check_case_arity(name: str, case: dict, given: int, filename: str,
     )
 
 
+def refuse_call_on_non_function(name: str, local: str, filename: str,
+                                line: int) -> None:
+    """Issue #2544: a call on a binder whose type is not a function.
+
+    `tag: Str` can never be the callee of `tag("x")`, so that call names the
+    same-named module `fn`/`extern`/case instead and the binding is silently
+    dropped. This guard is deliberately keyed on the TYPE ENVIRONMENT rather
+    than on a list of binder forms: every binder (`let`, `for`, arrow, match
+    arm, provide-method parameter, `every … in` bind) records itself with
+    `bind_local`/`bind_params`, so a form added later is covered without a
+    second edit and no form can be missed. A local of function type never
+    reaches here (the call is on the value, #1823), and a local of unknown
+    type (⊥) is left to the ordinary checks so an untyped callable stays
+    admitted.
+    """
+    rendered = render_type(local) or local
+    raise RevlError(
+        filename, line,
+        f"`{name}` is bound here as `{rendered}`, which is not a function, "
+        f"so it cannot be called",
+        hint=f"a call on `{name}` would reach the module callable of that name "
+             "and drop this binding; rename the binding, or give it a function "
+             "type (`(Int) -> Str`)",
+        code="T1", category="type-mismatch",
+        expected="a function type", actual=rendered,
+    )
+
+
 def call_function_value(expr, fn_type: str, what: str, arg_types: list,
                         tenv: dict, types: dict,
                         filename: str | None, line: int) -> str | None:
@@ -3376,6 +3411,14 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return None
     if kind == "fn":
         name = node.get("name")
+        # issue #2544, the provide-method half: a `fn` node names the module
+        # callable, but if the type environment holds a binder of that name
+        # that is NOT a function, the call was the same silent fall-through
+        # `infer_ast` above refuses. A function-typed binder is the #1823
+        # carve-out and stays admitted; an unknown (⊥) binder stays lenient.
+        local = tenv.get(name)
+        if filename and local is not None and parse_type(local)[0] != FN_HEAD:
+            refuse_call_on_non_function(name, local, filename, line)
         sig = (types.get(FNS_KEY) or {}).get(name)
         if sig is None:
             return None
