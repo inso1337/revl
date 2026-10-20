@@ -160,7 +160,7 @@ def test_v3_functions_golden_is_byte_identical():
     emit = _emitter()
     ir = compile_source((BACKEND / "golden" / "functions.revl").read_text(encoding="utf-8"))
     wat = emit.emit(ir)["functions"]
-    golden = (BACKEND / "golden" / "functions.wat").read_text()
+    golden = (BACKEND / "golden" / "functions.wat").read_text(encoding="utf-8")
     assert wat == golden, (
         "backends/wasm/golden/functions.wat drifted from the emitter. If the change "
         "is intended: python3 tools/regen_goldens.py wasm, then review the diff.")
@@ -175,7 +175,7 @@ def test_v3_try_expr_golden_is_byte_identical():
     ir = compile_source((BACKEND / "golden" / "try_expr.revl").read_text(encoding="utf-8"))
     wat = emit.emit(ir)["functions"]
     assert "unreachable" in wat
-    golden = (BACKEND / "golden" / "try_expr.wat").read_text()
+    golden = (BACKEND / "golden" / "try_expr.wat").read_text(encoding="utf-8")
     assert wat == golden, (
         "backends/wasm/golden/try_expr.wat drifted from the emitter. If the change "
         "is intended: python3 tools/regen_goldens.py wasm, then review the diff.")
