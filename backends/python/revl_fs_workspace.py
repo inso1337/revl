@@ -1814,7 +1814,12 @@ def snapshot_preimage(handle: WriteHandle) -> str:
         dirfd = _open_dirfd(directory)
         try:
             if not _clone_from_fd(handle.fd, dirfd, dst_leaf):
-                out = os.open(dst_leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                # O_RDWR, not O_WRONLY: `_capture_open_sidecar` below hashes the
+                # bytes through this same fd, and reading a write-only fd is
+                # EBADF (issue #2647). The leaf is created 0o600 and the access
+                # mode is fixed at open, so the later `fchmod` to the target's
+                # mode cannot revoke the read this open was granted.
+                out = os.open(dst_leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL,
                               0o600, dir_fd=dirfd)
                 try:
                     offset = 0

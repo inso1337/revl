@@ -205,6 +205,34 @@ def test_the_guarded_surface_refuses_a_target_the_confinement_check_cannot_open(
 
 
 # ===========================================================================
+# The portable copy path. Every host without the APFS clone takes it (all Linux
+# and Windows, non-APFS macOS), so the digest has to be captured there too.
+# ===========================================================================
+
+def test_the_portable_copy_path_records_the_sidecar_digest(root, frame,
+                                                          monkeypatch):
+    """The APFS clone path kept this evidence green on the one host that has it.
+    Everywhere else, all Linux and Windows plus non-APFS macOS, the snapshot
+    takes the portable pread/write copy. That copy opened the sidecar
+    `O_WRONLY`, so capturing the digest read a write-only fd and failed
+    `EBADF`: the write refused `ESNAPSHOT` and no portable-path witness ever
+    reached a restore. Forcing the fallback drives the copy path on every host,
+    so this fails before the sidecar fd is readable and passes after."""
+    monkeypatch.setattr(ws, "_clone_from_fd", lambda *a, **k: False)
+
+    witness, target, sidecar = _written(root, frame)   # ordinary overwrite
+
+    digest = witness["capture"][ws.SIDECAR_DIGEST_FIELD]
+    assert isinstance(digest, str) and len(digest) == 64
+    assert digest == hashlib.sha256(Path(sidecar).read_bytes()).hexdigest()
+
+    # The recorded digest is live evidence, not a dead field: the same witness
+    # restores the bytes the portable path snapshotted.
+    fs._witnessed_restore(witness)
+    assert open(target).read() == "v1"
+
+
+# ===========================================================================
 # The non-vacuity controls. Each passes BEFORE this change as well as after it;
 # without them every assertion below could be met by an inverse that always
 # refuses.
