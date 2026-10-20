@@ -173,6 +173,26 @@ def _leading_comment_source() -> str:
     )
 
 
+def _reached_helper_source(leading_comment: bool = False) -> str:
+    """The stateful operator fixture whose live template calls a REACHED
+    top-level helper: `Worker.version()` returns `helper()`, and the helper's
+    own body runs a `while`/`break`, which is what records a `line` in its IR.
+    The helper sits AFTER both components, so a comment above it moves only the
+    helper's source position: every component's text AND positions stay
+    identical."""
+    comment = "// above the reached helper\n\n" if leading_comment else ""
+    return _stateful_instance_source(1).replace(
+        "    fn version() = 1\n",
+        "    fn version() = helper()\n",
+    ) + (
+        "\n" + comment + "fn helper() -> Int {\n"
+        "  var i = 0\n"
+        "  while (i < 1) { break }\n"
+        "  return 1\n"
+        "}\n"
+    )
+
+
 def _call(tool: str, arguments: dict) -> dict:
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": tool, "arguments": arguments}})
@@ -730,6 +750,40 @@ def test_a_leading_comment_above_the_live_template_still_migrates(
                                "args": ["alice", "42"]})["ok"] is True
 
     swapped = _call("revl_swap", {"source": _leading_comment_source()})
+
+    assert swapped["ok"] is True, swapped
+    assert swapped["swapped"] is True
+    assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_leading_comment_above_a_reached_helper_still_migrates(
+        tmp_path, _fresh_server_session):
+    """Layout is not code, and the helper the template CALLS is part of the
+    template's identity too. The operator loads the stateful fixture from a
+    jailed file and seeds a live instance; `Worker.version()` calls a top-level
+    `helper()` whose `while`/`break` puts a `line` in the reached entry, and
+    the successor adds only a comment and a blank line above that helper. Every
+    component is byte for byte and position for position the same, and the
+    reached helper's code is unchanged, so the swap must land with generational
+    migration carrying the operator's state. Before the reached entries were
+    normalized recursively they kept the helper's `line`, so this textually
+    identical successor refused with STATE_UNDISCLOSED."""
+    server = _fresh_server_session
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_reached_helper_source(), encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    assert _call("revl_call", {"key": "admin", "method": "seed",
+                               "args": ["alice", "42"]})["ok"] is True
+
+    swapped = _call("revl_swap",
+                    {"source": _reached_helper_source(leading_comment=True)})
 
     assert swapped["ok"] is True, swapped
     assert swapped["swapped"] is True

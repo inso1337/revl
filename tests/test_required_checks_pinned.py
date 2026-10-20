@@ -66,7 +66,7 @@ observation of the server, not the intent, and no unit test can re-read it. So
 until that PATCH lands, `census-artifact` is intended-required and NOT enforced.
 
 NOTE on the partition counts: this partition marks 12 jobs intended-required
-(7 of them enforced) and 11 non-required, over the 23 jobs ci.yml defines. The
+(7 of them enforced) and 12 non-required, over the 24 jobs ci.yml defines. The
 two sides are reconciled at the branch-protection settings, which are out of
 tree; whichever is stale, this test at least makes the job-name side of the
 contract explicit and drift-proof. It reads ci.yml as text, so it needs no

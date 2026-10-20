@@ -9851,10 +9851,12 @@ def _base_manifest_hash_of(ir: dict | None) -> str | None:
 #: IR keys that spell WHERE a node sits, not what it does: the source position
 #: a comment or a blank line above it moves (`line`, and the span fields a
 #: future lowerer may add), or the file it was read from (`file`, `source`).
-#: `_component_signature` drops them recursively. This is load-bearing for the
-#: #2423 follow-up: a spawn step carries a `line`, so a leading comment above
-#: the live nested template used to move `_template_code` and refuse a
-#: textually identical template with STATE_UNDISCLOSED.
+#: `_component_signature` and `_template_code`'s reached entries drop them
+#: recursively. This is load-bearing for the #2423 follow-up: a spawn step
+#: carries a `line`, so a leading comment above the live nested template (or
+#: above a top-level helper the template reaches, whose `break` carries one)
+#: used to move `_template_code` and refuse a textually identical template with
+#: STATE_UNDISCLOSED.
 _LAYOUT_ONLY_IR_KEYS = frozenset({
     "line", "col", "column", "end_line", "offset", "span", "file", "source",
 })
@@ -9979,6 +9981,10 @@ def _template_code(ir: dict, name: str):
     while `Worker` stays byte-identical is therefore a change of the code the
     state is re-seated under, and refuses here rather than migrating.
 
+    Every side is normalized by `_code_shape` before comparison: the component
+    signature already was, and so are the reached entries, so a helper whose
+    only move is a comment or a blank line above it is still the same code.
+
     Returns `(component signatures, reached code)`, or `None` when the
     composition declares no such component."""
     components = {c["name"]: c for c in ir.get("components") or []
@@ -10016,8 +10022,12 @@ def _template_code(ir: dict, name: str):
             frontier.extend(providers.get(key, ()))
     code = {c: _component_signature(components[c])
             for c in seen if c in components}
-    entries = {n: {k: _plain(v) for k, v in entry.items() if k != "source"}
-               for n, entry in reached.items()}
+    # The reached entries get the SAME recursive layout drop as the component
+    # signature: a helper's body carries a `line` on a `break` (and the span
+    # fields a future lowerer may add), so a comment above a reached top-level
+    # fn would otherwise move this template's identity while every component's
+    # text stayed identical, and refuse a migration that changes no code.
+    entries = {n: _code_shape(_plain(entry)) for n, entry in reached.items()}
     return (code, entries)
 
 
