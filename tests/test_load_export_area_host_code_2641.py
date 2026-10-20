@@ -24,10 +24,12 @@ whatever the trust mode, exactly as the swap door does.
 The two-sided shape of the swap test is kept here:
 
 - an export-area load reports the host code the inline load reports;
-- a load of operator files OUTSIDE the export area reports nothing. That
-  direction is the operator's own program, and reporting it would be a false
-  alarm. It is also the direction the tempting simplification (stop passing
-  `host_bodies=authored`) gets wrong.
+- a load of operator files OUTSIDE the export area reports nothing while host
+  code is UNTRUSTED. That direction is the operator's own program, and
+  reporting it would be a false alarm. It is also the direction the tempting
+  simplification (stop passing `host_bodies=authored`) gets wrong. Under
+  `--author-trust trusted` the same file is agent text (issue #2672), and
+  tests/test_load_ticket_bodies_2675.py pins that direction.
 
 Two more tests drive the shared `_compile` guard over the transport, through
 the two verbs that dispatch through it: `revl_check` and `revl_admit`. `plan`
@@ -37,7 +39,9 @@ a draft filled over the transport always carries its edited buffer as a
 it authored; a files working set with no edited buffers, which is the only
 shape `_boot`'s export-area check would decide, is refused by the compiler's
 own export-area rule under an open trust. `_boot` keeps its old behaviour for
-that caller, and the fix is exactly the two doors the issue proves open.
+that caller. A trusted files-only candidate outside every export area is a
+separate wiring of the same call site (issue #2675), pinned in
+tests/test_load_ticket_bodies_2675.py.
 """
 
 import importlib.util
@@ -176,18 +180,23 @@ def test_an_export_area_load_reports_the_host_code_the_inline_one_does(
 
 
 @needs_cordis
-def test_a_load_of_operator_files_outside_the_export_area_reports_nothing(
+def test_an_untrusted_load_of_operator_files_outside_the_export_area_reports_nothing(
         transport, tmp_path):
     """The other direction, which the fix must not break.
 
     A candidate that is entirely jailed `files` OUTSIDE the export area is the
-    operator's own, and its host bodies are the operator's. Reporting them as
-    unreviewed agent code would raise a false alarm on the operator's own
-    program. This is what stops the tempting simplification from looking
-    correct: dropping `host_bodies=authored` would make the approval path
-    compute the bodies with no transport test at all, and this load would
-    report the operator's own `announce`.
+    operator's own while host code is UNTRUSTED, and its host bodies are the
+    operator's. Reporting them as unreviewed agent code would raise a false
+    alarm on the operator's own program. This is what stops the tempting
+    simplification from looking correct: dropping `host_bodies=authored` would
+    make the approval path compute the bodies with no transport test at all,
+    and this load would report the operator's own `announce`.
+
+    The trusted direction is the opposite (issue #2672): the vouched-for host
+    bodies can rewrite such a file on disk, so the candidate is agent text and
+    the ticket names it. tests/test_load_ticket_bodies_2675.py pins that.
     """
+    server.set_authoring_trust(host_code=False)
     sink = str(tmp_path / "sink.log")
     operator_file = tmp_path / "operator.rvl"
     operator_file.write_text(_emitter(sink), encoding="utf-8")

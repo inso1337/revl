@@ -1408,14 +1408,19 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict, *,
 
     `files` and `compile_report` are the load caller's candidate, so a load
     naming an export-area file reports the host code it carries exactly as a
-    swap does (issue #2641). `_exported_candidate` reads the named files and
-    the ones the compile reached by `use`. A draft boots through the same
-    function without them, which keeps its behaviour: a filled draft carries
-    its edited buffer in `modules`, so its bodies are reported as authored
-    before this value can matter."""
+    swap does (issue #2641), and a files-only candidate outside every export
+    area follows the compile's authored report under a trusted host-code author
+    (issue #2675): the same rule the swap ticket follows (issue #2672).
+    `_exported_candidate` reads the named files and the ones the compile
+    reached by `use`. A draft boots through the same function without them,
+    which keeps its behaviour: a filled draft carries its edited buffer in
+    `modules`, so its bodies are reported as authored before these values can
+    matter."""
+    compile_report = compile_report or {}
     authored = _authored_host_bodies(
         ir, source, modules,
-        export_area=_exported_candidate(files, compile_report or {}) is not None)
+        export_area=_exported_candidate(files, compile_report) is not None,
+        compile_authored=bool(compile_report.get("authored")))
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
