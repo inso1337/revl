@@ -8188,8 +8188,8 @@ def _binder_names(node, out: list, skip: tuple = ()) -> None:
     second edit here; only the RECOGNITION is enumerated.
 
     `skip` is for a body that is not one scope: a component's provide methods
-    are separate emitted functions, so the component-level walk skips their
-    subtrees and each method is checked on its own.
+    are separate emitted functions, so a parameter binds only in its own
+    method, and the component-level BINDER walk skips their subtrees.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -8224,27 +8224,22 @@ def _binder_names(node, out: list, skip: tuple = ()) -> None:
         _binder_names(getattr(node, field.name, None), out, skip)
 
 
-def _called_names(node, out: set, skip: tuple = ()) -> None:
+def _called_names(node, out: set) -> None:
     """Every name used in CALL position — the callee of `f(...)` where `f` is a
     bare name. A method call (`x.m()`), a module-alias call (`m.f()`) and an
     immediately applied arrow all name something other than a bare identifier,
     so none of them can be ambiguous.
-
-    `skip` is the same as in `_binder_names`: the component-level walk leaves
-    provide-method bodies to the per-method check.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
-            _called_names(item, out, skip)
+            _called_names(item, out)
         return
     if not dataclasses.is_dataclass(node) or isinstance(node, type):
-        return
-    if skip and isinstance(node, skip):
         return
     if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
         out.add(node.callee.name)
     for field in dataclasses.fields(node):
-        _called_names(getattr(node, field.name, None), out, skip)
+        _called_names(getattr(node, field.name, None), out)
 
 
 def _provide_methods(node) -> list:
@@ -8290,12 +8285,12 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         return
     externs = {ext.name for ext in program.externs}
 
-    def check(decl, visible: set, decl_file: str, skip_binders: tuple = (),
-              skip_calls: tuple = ()) -> None:
+    def check(decl, visible: set, decl_file: str,
+              skip_binders: tuple = ()) -> None:
         if not visible:
             return
         called: set = set()
-        _called_names(decl, called, skip_calls)
+        _called_names(decl, called)
         ambiguous = visible & called
         if not ambiguous:
             return
