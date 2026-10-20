@@ -157,7 +157,6 @@ def test_a_direct_standing_grant_by_an_operator_that_may_call_is_refused(fresh):
 # ---------------------------------------------------------------------- gaps
 
 
-@GAP
 def test_apply_with_no_operator_bound_is_refused_and_installs_nothing(
         fresh, unattributed_offer):  # noqa: F811
     verdict = _call("revl_apply_distillation", {"offerId": unattributed_offer})
@@ -168,7 +167,6 @@ def test_apply_with_no_operator_bound_is_refused_and_installs_nothing(
     assert fresh._distillation_seq == 0
 
 
-@GAP
 def test_apply_by_an_operator_that_may_call_is_refused_and_the_offer_stays(
         fresh, caller_offer):  # noqa: F811
     offer_id = caller_offer

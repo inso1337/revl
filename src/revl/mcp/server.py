@@ -877,11 +877,21 @@ def _compile(source: str | None, files: list[str] | None,
 
 
 def _authored_host_bodies(ir: dict, source: str | None,
-                          modules: dict | None) -> list:
+                          modules: dict | None, *,
+                          export_area: bool = False) -> list:
     """The agent-authored host bodies `ir` carries: empty unless the candidate
-    came over the transport under an open authoring trust."""
-    over_the_transport = source is not None or bool(modules)
-    return (_host_bodies(ir) if over_the_transport and AUTHORING.host_code
+    is the author's text under an open authoring trust.
+
+    `export_area` says the candidate carries a file inside an export directory.
+    Such a file is the author's by its path and always has been: `revl_export`
+    writes source only under `<root>/.revl/export/`, and `export_area.py` reads
+    that as authorship without consulting the trust at all. So this is not a
+    question about a profile, unlike the realm-removal check, which needs one to
+    have been applied to have something to compare against. Issue #2628: a swap
+    sent only as such a file reported no unreviewed host code, so the operator
+    approved a crossing without being told what the composition carried."""
+    authored = source is not None or bool(modules) or export_area
+    return (_host_bodies(ir) if authored and AUTHORING.host_code
             else [])
 
 
@@ -1510,10 +1520,21 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # issue #1779: and what this compile READ rides with it, so the swapped-in
     # generation anchors records to the files it actually compiled
     origin = _origin(stored, _dependency_buffers(compile_report))
-    authored = _authored_host_bodies(full, source, modules)
+    # issue #2628: read once, asked two different questions below. The ticket
+    # asks whether the author wrote this text, which for a file inside an
+    # export directory is yes by its path. The realm check asks whether a
+    # profile was applied, which needs the gate further down. Sharing the call
+    # keeps the two answers about the same files.
+    export_texts = _exported_candidate(files, compile_report)
+    authored = _authored_host_bodies(full, source, modules,
+                                     export_area=export_texts is not None)
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
-    # realm by leaving its clause out; jailed `files` alone are the operator's.
+    # realm by leaving its clause out. A swap of jailed `files` is exempt
+    # only when it carries no export-area text (issue #2600): a file inside
+    # the export area, named in `files` or reached by `use`, compiled under
+    # the profile as the agent's text (#2524), so the whole program is
+    # compared, operator files included, as for inline source.
     # issue #2587: compared are the running generation and `full`, the
     # candidate compiled as a complete composition. `full` is the whole
     # program `SESSION.swap` installs below, with nothing of the running one
@@ -1522,10 +1543,18 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # this swap and takes its placements with it; one it carries is compared
     # per key for what it provides (#2523) and per name for what it requires
     # (#2585).
-    if source is not None or modules:
+    # issue #2600: only text that actually compiled under the profile is
+    # compared. With `--author-trust trusted` the profile is none, so an
+    # export-area file compiles exactly as it did before #2524, it stays the
+    # operator's own, and a swap of it keeps the #2487 exemption. Deciding by
+    # path alone would refuse that operator a swap this door admitted before.
+    exported = (export_texts
+                if AUTHORING.profile() is not None else None)
+    if source is not None or modules or exported is not None:
         refused = _realm_removal_refused(
             running, full,
-            _edit._candidate_texts({"source": source, "modules": modules}))
+            {**(exported or {}),
+             **_edit._candidate_texts({"source": source, "modules": modules})})
         if refused is not None:
             return refused
     # issue #1704: the same preflight revl_edit carries, read off the
@@ -1546,6 +1575,32 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                           "blastRadius": radius, **_summary(full), **state,
                           **_effect_classes.report(full, running, against=True)},
                          before)
+
+
+def _exported_candidate(files: list[str] | None,
+                        compile_report: dict) -> dict | None:
+    """The export-area part of a `files` candidate (issue #2600), or `None`
+    when it has none: `{abspath: text}` of each file `files` names inside an
+    export directory and of each module there the compile reached by `use`.
+    `compile_under_authoring` compiled both under the profile as the agent's
+    text (#2524), and its report carries the reached ones as dependencies.
+    Whether a file counts is decided by its path, as the compile decided it;
+    a named file is read back only for the refusal's line, so one that no
+    longer reads still counts, with no text.
+
+    With an export-area part, the whole program is compared, so the texts
+    also carry the operator files the same compile read from disk (its
+    `disk_reads`, keyed by abspath like the rest), beneath the export-area
+    ones: a refusal of a component in an operator file names its line."""
+    named = [p for p in files or () if _export_jail.in_export_area(p)]
+    reached = {p: t for p, t in
+               (compile_report.get("dependencies") or {}).items()
+               if _export_jail.in_export_area(p)}
+    if not named and not reached:
+        return None
+    texts = {**(compile_report.get("disk_reads") or {}),
+             **_export_jail.exported_texts(named), **reached}
+    return {p: t for p, t in texts.items() if isinstance(t, str)}
 
 
 def _with_touched(result: dict, before: dict) -> dict:

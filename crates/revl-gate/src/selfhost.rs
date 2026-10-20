@@ -29551,8 +29551,8 @@ fn split_pipes(s: &str) -> Vec<String> {
 fn decl_params_of(ts: Vec<Token>, nm: &str) -> Vec<ParamN> {
     let mut j = 0i64;
     while ((j < ts.revl_length()) && (!atk(&ts, j, "eof"))) {
-        if ((atw(&ts, j, "fn") && (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text == nm)) && atk(&ts, (j).checked_add(2i64).expect("revl: Int overflow"), "(")) {
-            return fn_params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow")).ps;
+        if (atw(&ts, j, "fn") && (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text == nm)) {
+            return fn_params_at(ts.clone(), fn_params_i(&ts, j)).ps;
         }
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
@@ -33212,8 +33212,8 @@ fn mono_plan(fs: Vec<FnD>, colored: Vec<String>, sl: std::collections::HashMap<S
 fn decl_ret_of(ts: Vec<Token>, nm: &str, al: std::collections::HashMap<String, String>) -> String {
     let mut j = 0i64;
     while ((j < ts.revl_length()) && (!atk(&ts, j, "eof"))) {
-        if ((atw(&ts, j, "fn") && (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text == nm)) && atk(&ts, (j).checked_add(2i64).expect("revl: Int overflow"), "(")) {
-            let ps = fn_params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
+        if (atw(&ts, j, "fn") && (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text == nm)) {
+            let ps = fn_params_at(ts.clone(), fn_params_i(&ts, j));
             if atk(&ts, ps.i, "arrow") {
                 return alias_subst(type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow")).ty, al.clone());
             }

@@ -239,7 +239,7 @@ def _parse_dsl(text: str, source: str | None) -> SelfRepairPolicy:
 
 
 def _compile(candidate: dict, manifest: dict | None = None,
-             over_the_transport: bool = True):
+             over_the_transport: bool = True, report: dict | None = None):
     """Compile a candidate (`source` inline or `files` paths) through
     `server.compile_under_authoring`, the one compiler door for agent-supplied
     source. Returns the IR, or raises RevlError — the caller grades that.
@@ -248,7 +248,12 @@ def _compile(candidate: dict, manifest: dict | None = None,
     to `gauntlet.run` (which boots it). Compiling it with no profile made the
     repair loop a second door past the authoring trust `revl_check` /
     `revl_admit` / `revl_swap` enforce. Lazy import: `server` imports this
-    module."""
+    module.
+
+    `report` is the out-parameter that compile takes: the modules it read from
+    the disk mapped to the text it compiled for each. The realm check needs it
+    to know which files the compile reached under the profile (issue #2627),
+    which a `files` list alone cannot say."""
     from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
     source = candidate.get("source")
@@ -257,7 +262,8 @@ def _compile(candidate: dict, manifest: dict | None = None,
         raise ValueError("candidate provides neither `source` nor `files`")
     return compile_under_authoring(source, files, manifest=manifest,
                                    modules=candidate.get("modules"),
-                                   over_the_transport=over_the_transport)
+                                   over_the_transport=over_the_transport,
+                                   report=report)
 
 
 def _capabilities_reached(audit: dict) -> list[str]:
@@ -532,8 +538,10 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     # the candidate as a standalone composition — what a swap installs and what
     # the boundary/policy/widening gates read.
     try:
+        compile_report: dict = {}
         candidate_ir = _compile(candidate_arg,
-                                over_the_transport=over_the_transport)
+                                over_the_transport=over_the_transport,
+                                report=compile_report)
     except (RevlError, ValueError) as error:
         verdicts["policy"] = {"evaluated": False,
                               "reason": f"candidate is not a whole composition: {error}"}
@@ -542,7 +550,7 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     # -- realm placement (issue #2520): the swap below is `session.swap`, past
     # the realm-removal check `revl_edit`/`revl_change` run in `edit.admit`
     refusal = _realm_removal_refusal(running_ir, candidate_ir, candidate_arg,
-                                     over_the_transport)
+                                     over_the_transport, compile_report)
     if refusal is not None:
         verdicts["realm"] = {"evaluated": True, "refused": True,
                              "diagnostics": refusal}
@@ -603,29 +611,57 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     return verdicts, {"blocked": False, "reason": None, "candidate_ir": candidate_ir}
 
 
+def _exported_part(candidate_arg: dict, compile_report: dict | None,
+                   over_the_transport: bool) -> dict | None:
+    """The export-area part of a repair candidate (issue #2627), or `None`
+    when it has none or none of it is the agent's.
+
+    A `files` entry inside an export directory is agent text by its path, since
+    #2524 has `compile_under_authoring` compile it under the authoring profile,
+    so it is compared with the running generation like inline source instead of
+    being trusted for having arrived as a path. The swap door reads the same
+    part the same way (`server._exported_candidate`), and this shares it rather
+    than deciding the export area a second time.
+
+    That is only so while a profile is in play. A trusted operator has none, and
+    everything the CLI's `revl repair` compiles is the operator's own, so in
+    both cases the file keeps the #2487 exemption and nothing changes."""
+    if compile_report is None or not over_the_transport:
+        return None
+    from .server import AUTHORING, _exported_candidate  # noqa: PLC0415 - cycle
+    if AUTHORING.profile() is None:
+        return None
+    return _exported_candidate(candidate_arg.get("files"), compile_report)
+
+
 def _realm_removal_refusal(running_ir: dict | None, candidate_ir: dict,
-                           candidate_arg: dict,
-                           over_the_transport: bool) -> list[dict] | None:
+                           candidate_arg: dict, over_the_transport: bool,
+                           compile_report: dict | None = None) -> list[dict] | None:
     """The repair door's half of issue #2487: `None`, or the G9 diagnostics
     refusing a candidate that moves an admitted realm placement out of its
     realm.
 
-    The trust condition is `revl_swap`'s: only text carried by the transport
-    (inline `source`, `modules`) compiled under the authoring profile. Jailed
-    `files` alone are the operator's own, as is everything the CLI's
-    `revl repair` compiles (`over_the_transport=False`), and a trusted
-    operator has no profile, which the check itself lets through."""
+    The trust condition is `revl_swap`'s: text that compiled under the authoring
+    profile. That is inline `source` and `modules`, and since #2627 also a
+    `files` entry inside the export area, which #2524 compiles under the
+    profile as the agent's text. Jailed `files` outside it are the operator's
+    own, as is everything the CLI's `revl repair` compiles
+    (`over_the_transport=False`), and a trusted operator has no profile, which
+    the check itself lets through."""
     source = candidate_arg.get("source")
     modules = candidate_arg.get("modules")
-    if not over_the_transport or (source is None and not modules):
+    exported = _exported_part(candidate_arg, compile_report, over_the_transport)
+    if not over_the_transport or (source is None and not modules
+                                  and not exported):
         return None
     from ..diagnostics import report  # noqa: PLC0415
     from .edit import _candidate_texts, _check_realm_removal  # noqa: PLC0415
 
     try:
         _check_realm_removal(running_ir, candidate_ir,
-                             _candidate_texts({"source": source,
-                                               "modules": modules}))
+                             {**(exported or {}),
+                              **_candidate_texts({"source": source,
+                                                  "modules": modules})})
     except RevlError as error:
         return report(error)["diagnostics"]
     return None

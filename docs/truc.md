@@ -106,7 +106,8 @@ the MCP server applies to an author by default. A row that ships a host body
 (`@py` and the like) is refused, and the refusal names it. This profile does
 not bound a row's reach to a granted service set at add time; `truc apply`
 bounds reach when it confines a stack layer, as it does today.
-`truc add NAME --trust-host-code` or `truc assemble --trust-host-code` admits
+`truc add NAME --trust-host-code`, `truc assemble --trust-host-code` or
+`truc rm NAME --trust-host-code` admits
 a host body for that one command and names on stderr each row the flag
 unlocked. The flag is read from the command line
 only, never from the environment or `truc.toml`. `add` records how the row was

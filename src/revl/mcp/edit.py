@@ -1027,10 +1027,12 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     running = session.ir
     radius = blast_radius(running, ir)
     classes = _effect_classes.report(ir, running, against=True)
+    # issue #2454: a requirement nothing provides would keep its component
+    # PENDING, or, when it was already PENDING in the running generation, keep
+    # it PENDING past the commit (session.py's health gate lets that component
+    # through). Both paths say so, from the same helper.
+    unmet = unmet_requirements(ir)
     if not commit:
-        # issue #2454: a requirement nothing provides would keep its component
-        # PENDING, and the commit refused; the proposal says so now
-        unmet = unmet_requirements(ir)
         return {"ok": True, "edited": True, "admitted": True, "swapped": False,
                 "speculative": True, "_proposal": vs, "applied": applied,
                 "touched": _touched(before, vs), "blastRadius": radius,
@@ -1045,7 +1047,8 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
-            "blastRadius": radius, **_summary(ir), **state, **classes}
+            "blastRadius": radius, **_summary(ir), **state, **classes,
+            **({"unmetRequirements": unmet} if unmet else {})}
 
 
 def _candidate_texts(vs: dict) -> dict:

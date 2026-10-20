@@ -24792,11 +24792,18 @@ fn split_pipes(s: Str) -> List[Str] {
 
 // The declared parameters of `fn <nm>`, read off the first declaration that
 // spells the name.
+//
+// Issue #2603: the header is matched through `fn_params_i`, the same step over
+// a `[..]` type-parameter list every other declaration reader already uses.
+// Matched as `fn <nm>(` instead, a GENERIC callable (`fn id[T](x: T) -> T`)
+// matched no declaration at all, so this reader answered "no parameters" for
+// one — which is not a conservative refusal but a WRONG signature, and it
+// reaches the IR through `module_callable_fnty`.
 fn decl_params_of(ts: List[Token], nm: Str) -> List[ParamN] {
   var j = 0
   while (j < ts.length() && !atk(ts, j, "eof")) {
-    if (atw(ts, j, "fn") && tkc(ts, j + 1).text == nm && atk(ts, j + 2, "(")) {
-      return fn_params_at(ts, j + 3).ps
+    if (atw(ts, j, "fn") && tkc(ts, j + 1).text == nm) {
+      return fn_params_at(ts, fn_params_i(ts, j)).ps
     }
     j += 1
   }
@@ -28753,11 +28760,13 @@ fn mono_plan(fs: List[FnD], colored: List[Str], sl: Map[Str, List[Int]],
 
 // The DECLARED return type of module callable `fn <nm>` - the other half of the
 // signature `module_callable_fnty` renders.
+// Issue #2603: stepped over a `[..]` type-parameter list exactly as
+// `decl_params_of` above does, so a GENERIC callable has a return at all.
 fn decl_ret_of(ts: List[Token], nm: Str, al: Map[Str, Str]) -> Str {
   var j = 0
   while (j < ts.length() && !atk(ts, j, "eof")) {
-    if (atw(ts, j, "fn") && tkc(ts, j + 1).text == nm && atk(ts, j + 2, "(")) {
-      let ps = fn_params_at(ts, j + 3)
+    if (atw(ts, j, "fn") && tkc(ts, j + 1).text == nm) {
+      let ps = fn_params_at(ts, fn_params_i(ts, j))
       if (atk(ts, ps.i, "arrow")) { return alias_subst(type_at(ts, ps.i + 1).ty, al) }
       return ""
     }

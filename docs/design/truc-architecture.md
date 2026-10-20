@@ -78,7 +78,9 @@ service Fetch {                                   // one entry, verbatim
   emission[registry] fn entry(registry: Str, name: Str) -> Str  // {source,manifest,dossier?} JSON
 }
 service Gate {                                    // THE differentiator (§3)
-  emission[gate] fn admit(sourcesJson: Str, manifestJson: Str) -> Str  // verdict JSON
+  // ordered {path, source, name} rows, the project's truc.lock, and the
+  // command's --trust-host-code; returns the verdict JSON
+  emission[host_admit_all] fn admit_all(orderedJson: Str, lockJson: Str, trustHostCode: Bool) -> Str
 }
 service Workspace {                               // truc.toml / truc.lock / trucs/
   emission[fs] fn read(path: Str) -> Str
@@ -91,9 +93,9 @@ service Plan {                                    // PURE — the resolver brain
   fn drift(lockJson: Str, vendoredHashesJson: Str) -> Str   // hash mismatches
 }
 service Assembler {
-  emission[registry, gate, fs] fn add(name: Str) -> Str     // report JSON
-  emission[fs] fn rm(name: Str) -> Str
-  emission[gate, fs] fn assemble() -> Str
+  emission[fetch, gate, index, ws] fn add(name: Str, trustHostCode: Bool) -> Int
+  emission[gate, ws] fn rm(name: Str, trustHostCode: Bool) -> Int
+  emission[gate, ws] fn assemble(trustHostCode: Bool) -> Int
 }
 service Cli {
   emission[registry, gate, fs] fn run(argv: List[Str]) -> Int
@@ -268,7 +270,7 @@ name    = "myapp"
 entry   = ["src/main.rvl"]          # the project's own sources
 
 [registries]
-local = { path = "registry" }       # v1: a path. later: url = "https://…"
+local = { path = "registry" }       # a path; a `url` entry is refused (no fetch path ships yet)
 
 [trucs]
 user_cache  = { registry = "local" }
@@ -469,15 +471,17 @@ package, never a prior truc.
 ### 8.1 `truc add <name>`
 
 ```
-cli.run(["add", name])
-→ asm.add(name)
+cli.run(["add", name])              (or ["add", name, "--trust-host-code"])
+→ asm.add(name, has_flag(argv, "--trust-host-code"))
    ├ index.load(reg)               host_index_read      emission[registry]
    ├ (name ∉ index)                → refuse, exit 1 (with a did-you-mean later)
    ├ fetch.entry(reg, name)        host_entry_read      emission[registry]
    ├ sha256_hex(source) vs index row sourceHash         pure
    │    mismatch → refuse ("registry entry disagrees with its own index")
-   ├ current assembly manifest := gate.admit(entry sources ∪ vendored, …)
-   ├ gate.admit({name: source}, current)                emission[gate]
+   ├ ordered := entry sources, vendored rows, then the candidate   pure
+   ├ gate.admit_all(ordered, truc.lock, thc)           host_admit_all
+   │    each row joins the rows before it; a vendored row compiles as an
+   │    untrusted author unless thc or its lock record lifts that
    │    drift/G2 refusal → print diagnostic + why-trace, exit 1, disk untouched
    ├ ws.write(trucs/<name>/component.rvl, manifest.json[, dossier.json])
    ├ plan.lock_row(name, indexRow)  → ws.write(truc.lock)     pure → emission[fs]
@@ -488,6 +492,7 @@ cli.run(["add", name])
 lock row, the vendor dir; then run the §8.2 admit chain once to prove the
 remainder still assembles (a removal that strands a consumer is refused
 the same way — the gate's `removed` drift, `src/revl/admission.py:172`).
+`rm` takes `--trust-host-code` for that admit, as `assemble` does.
 
 ### 8.2 `truc assemble`
 

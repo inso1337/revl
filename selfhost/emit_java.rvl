@@ -3973,6 +3973,13 @@ pub fn emit_java_src(ir: Any) -> Str {
   // instead of silence, issue #1123), and a required stream, refused only while
   // the components are emitted, comes after it.
   out = out.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
+  // issue #2492: an extern with no `@java` body. The reference raises this one
+  // from inside the extern block, and that block is emitted while the class
+  // body is built, which the reference reaches BEFORE it renders components.
+  // So this marker belongs with the two whole-document refusals above rather
+  // than after them: it precedes the deferred in-file test section and the
+  // required-stream refusal, both of which the reference reaches later.
+  out = out.concat(extern_no_java_body_markers(ir))
   out = out.concat(deferred_test_markers(ir))
   out = out.concat(required_stream_markers(ir))
   out = out.concat(namespaced_key_markers(ir))
@@ -4051,6 +4058,26 @@ fn deferred_emission_markers(ir: Any) -> List[Str] {
       if (node_kind(n) == "fn" && list_contains(deferred, name) && !list_contains(out, mark)) {
         out = out.push(mark)
       }
+    }
+  }
+  return out
+}
+
+// `_emit_v3_externs`' refusal of an extern carrying no `@java` body: the
+// reference RAISES there (no @java body means the extern is not portable to
+// this backend). This port has no raise channel in the class body, so each
+// extern without a body is named after it, in the spelling the go, rust and
+// ts ports already use for their own missing body (issue #2492).
+fn extern_no_java_body_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (e of value_list(value_field(ir, "externs"))) {
+    let bodies = value_field(e, "bodies")
+    // `bodies` itself is absent for an extern declared with no `@..` body at
+    // all; a missing key and a missing `java` entry are the same refusal.
+    var missing = value_is_null(bodies)
+    if (!missing) { missing = value_is_null(value_field(bodies, "java")) }
+    if (missing) {
+      out = out.push(`<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:${fn_name(value_str(value_field(e, "name")))}>>`)
     }
   }
   return out
