@@ -24,7 +24,9 @@ a source that never compiles at all, which is exactly the unreachable
 assertion that has cost earlier changes dear.
 
 No cordis runtime: `publish_release` is the frontend compiler plus
-`registry.build_index`, so the CI frontend job enforces these.
+`registry.build_index`, so these run under the plain Python test job (3.12).
+They are NOT enforced by the `frontend` or `frontend-cordis` jobs: both are
+gated off pull requests, so a pull request never runs them.
 """
 
 import inspect
