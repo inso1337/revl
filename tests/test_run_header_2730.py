@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "backends" / "python"))
 
-from revl import attest  # noqa: E402
+from revl import RevlError, attest  # noqa: E402
 from revl import metrics as mt  # noqa: E402
 from revl import otel as ot  # noqa: E402
 from revl import run  # noqa: E402
@@ -139,7 +139,7 @@ def test_an_attestation_for_another_composition_is_refused(tmp_path):
     document, path = _attestation(
         tmp_path, source="service Other { fn ping() -> Str }\n")
     other = compile_source("service Mine { fn ping() -> Str }\n", "<attest>")
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RevlError) as exc:
         run._load_run_attestation(path, other)
     message = str(exc.value)
     assert "different composition" in message
@@ -149,7 +149,7 @@ def test_an_attestation_for_another_composition_is_refused(tmp_path):
 def test_a_non_attestation_document_is_refused(tmp_path):
     path = tmp_path / "notes.json"
     path.write_text(json.dumps({"kind": "something-else"}), encoding="utf-8")
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RevlError) as exc:
         run._load_run_attestation(path, {})
     assert "not a revl attestation" in str(exc.value)
 
@@ -179,3 +179,17 @@ def test_run_command_checks_the_attestation_before_booting(tmp_path, capsys):
     rc = run.run_command(SimpleNamespace(**base, attestation=str(wrong)))
     assert rc == 1
     assert "different composition" in capsys.readouterr().err
+
+
+def test_attestation_is_refused_with_placement(tmp_path, capsys):
+    """A placement run has no single causal trace, so the header has nowhere to
+    go; the pair is refused rather than accepting a flag that records nothing."""
+    from types import SimpleNamespace
+
+    source = tmp_path / "attested.rvl"
+    source.write_text("service Attested { fn ping() -> Str }\n", encoding="utf-8")
+    args = SimpleNamespace(files=[str(source)], backend="py",
+                           placement="placement.toml",
+                           attestation=str(tmp_path / "unused.json"))
+    assert run.run_command(args) == 2
+    assert "--placement" in capsys.readouterr().err

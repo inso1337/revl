@@ -2871,6 +2871,16 @@ def run_command(args, hold_once: bool = False) -> int:
                   file=sys.stderr)
             return 1
     if getattr(args, "placement", None):
+        # issue #2730 slice 1: an attested-run header belongs to ONE causal
+        # trace, and a placement run has no single trace to carry it. Refuse
+        # the pair rather than accept a flag that would silently record
+        # nothing.
+        if getattr(args, "attestation", None):
+            print("error: --attestation records the admitted composition on the "
+                  "py tier's causal trace, and a --placement run has no single "
+                  "trace to carry that header; drop one of the two or run "
+                  "without --placement", file=sys.stderr)
+            return 2
         # `--placement` splits the composition across processes, each with its
         # own tier; a top-level `--backend` would name one tier for the whole
         # composition, which the placement contradicts. Refuse loudly instead
