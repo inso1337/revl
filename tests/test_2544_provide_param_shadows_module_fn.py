@@ -10,8 +10,10 @@ value was never read. The `let` form of the same shadowing was refused (item
 The owner ruling applied here:
 
   * the function-valued parameter case (#1823) is LEGAL and carved out: a
-    parameter whose declared type is a function type and which is called IS
-    the callee, so nothing is shadowed;
+    parameter whose declared type is a function type and which is called is
+    admitted, and the reference and the self-host agree on the lowering, so
+    refusing it breaks #1823's byte-for-byte coverage. The carve-out is scoped
+    to that shape, not a repeal of the item-445 refusal for other binders;
   * the `Str`-shadowing case is refused on the TYPECHECK side, not by a
     blanket lowering refusal. `typecheck.refuse_call_on_non_function` sits
     after the function-type arm in `infer_ast`'s `ExprCall` and in
@@ -93,12 +95,26 @@ def test_the_extern_half_is_refused_by_the_same_rule():
     assert (exc.value.filename, exc.value.line) == ("t.rvl", 7)
 
 
+def test_the_fn_body_str_parameter_is_refused():
+    """The other stratum #2544's acceptance names. A `fn` body's `Str`
+    parameter named like a module fn and called was already refused by the
+    item-445 lowering scan, which runs before body typing; the typecheck rule
+    would refuse the same shape if that scan did not (the `let` control below
+    reaches the type environment through the same rule)."""
+    with pytest.raises(RevlError, match=_LOWER_REFUSED):
+        compile_source(
+            _TAG + "fn f(tag: Str) -> Str {\n  return tag(\"x\")\n}\n",
+            "t.rvl",
+        )
+
+
 # ------------------------------------------- the carve-out: this one is LEGAL
 
 def test_a_function_valued_parameter_named_like_a_module_fn_is_admitted():
     """The #1823 shape, restored: a module `fn f` in scope, a provide-method
-    parameter `f` of function type, and a call on it. `f(n)` IS the parameter,
-    so the ruling admits it (there is no dropped binding to refuse). The
+    parameter `f` of function type, and a call on it. The owner ruling admits
+    this shape, and the reference and the self-host lower it identically (the
+    byte-for-byte half is pinned in tests/test_selfhost_lower_ir.py). The
     module fn stays in scope, so the control is not the module fn's absence."""
     ir = compile_source(
         "fn f(x: Int) -> Int { return x }\n"
