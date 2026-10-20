@@ -28,6 +28,7 @@ from fnmatch import fnmatchcase
 from .. import cap_order
 from .. import intent as _intent
 from .._paths import backends_root, python_backend_emitter, venv_python
+from ..gate import _ir_referenced_names
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -9864,20 +9865,14 @@ def _component_signature(comp: dict) -> str:
 
 def _reached_code_names(node, acc: set) -> set:
     """Every top-level function or extern name an IR subtree calls or refers
-    to. A call or emission is `{"kind": "fn", "name": ...}`; a bare reference
-    the lowerer resolved to a module fn or an extern is `{"kind": "var",
-    "name": ...}`. A local binding (`{"kind": "name", "id": ...}`) and a field
-    or method label never name one, so they are not counted: a tree that merely
-    spells a label like a helper must not look like it reaches that helper."""
-    if isinstance(node, dict):
-        if (node.get("kind") in ("fn", "var")
-                and isinstance(node.get("name"), str)):
-            acc.add(node["name"])
-        for value in node.values():
-            _reached_code_names(value, acc)
-    elif isinstance(node, list):
-        for value in node:
-            _reached_code_names(value, acc)
+    to, accumulated into `acc`. The walk is the admission gate's
+    `_ir_referenced_names`, the one definition of the lowered IR's naming rule:
+    a call or emission is a `fn` node, a bare reference the lowerer resolved to
+    a module fn or an extern is a `var` node, and both name it in `name`. A
+    local binding and a field or method label name neither. Delegating rather
+    than re-spelling the kinds here is what keeps this template-code walk and
+    the gate's fail-closed reach check from drifting apart."""
+    _ir_referenced_names(node, acc)
     return acc
 
 
