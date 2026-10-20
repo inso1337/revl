@@ -869,10 +869,14 @@ def _compile(source: str | None, files: list[str] | None,
     `modules` is POSITIONAL and has no default: a verb passes the whole
     candidate, `*_candidate_of(arguments)`, or it does not compile. The
     keyword-with-default it used to be is how three verbs dropped it."""
+    compile_report: dict = {}
     ir = compile_under_authoring(source, files, manifest=manifest,
-                                 modules=modules, replacing=replacing)
+                                 modules=modules, replacing=replacing,
+                                 report=compile_report)
     global _AUTHORED_HOST_BODIES
-    _AUTHORED_HOST_BODIES = _authored_host_bodies(ir, source, modules)
+    _AUTHORED_HOST_BODIES = _authored_host_bodies(
+        ir, source, modules,
+        export_area=_exported_candidate(files, compile_report) is not None)
     return ir
 
 
@@ -1298,7 +1302,8 @@ def _tool_load(arguments: dict, compiled=None) -> dict:
             return _refused_by_lease(refusal)
     return _canonical.attach(
         _boot(ir, source, modules, arguments.get("config"),
-              _load_records(arguments.get("record")), origin), completed)
+              _load_records(arguments.get("record")), origin,
+              files=files, compile_report=compile_report), completed)
 
 
 def _load_records(requested) -> bool:
@@ -1339,10 +1344,22 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         next=_remedy.load_next())
 
 
-def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict, *,
+          files: list[str] | None = None,
+          compile_report: dict | None = None) -> dict:
     """Boot a compiled composition: `Session.load`, then record what it
-    authored. Shared by `revl_load` and a draft that has no holes left."""
-    authored = _authored_host_bodies(ir, source, modules)
+    authored. Shared by `revl_load` and a draft that has no holes left.
+
+    `files` and `compile_report` are the load caller's candidate, so a load
+    naming an export-area file reports the host code it carries exactly as a
+    swap does (issue #2641). `_exported_candidate` reads the named files and
+    the ones the compile reached by `use`. A draft boots through the same
+    function without them, which keeps its behaviour: a filled draft carries
+    its edited buffer in `modules`, so its bodies are reported as authored
+    before this value can matter."""
+    authored = _authored_host_bodies(
+        ir, source, modules,
+        export_area=_exported_candidate(files, compile_report or {}) is not None)
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
