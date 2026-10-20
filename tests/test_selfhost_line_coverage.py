@@ -503,7 +503,8 @@ def test_the_function_view_prints_uncovered_reference_lines(
     assert "_v3_infer_type" in by_name, (
         "the rust view no longer names `_v3_infer_type`, the function the "
         "issue's acceptance check is written against")
-    source = (ROOT / "backends" / "rust" / "emit.py").read_text().splitlines()
+    source = (ROOT / "backends" / "rust" / "emit.py").read_text(
+        encoding="utf-8").splitlines()
     ledger = lines._load_ledger()["reference"]["rust"]["functions"]
     for row in rows:
         assert row["measured"] == len(row["uncovered_lines"]) > 0
@@ -742,7 +743,7 @@ def test_the_e071d18ec_replay_fails_against_origin_main(
     message names the record, both counts, the measurement and the baseline."""
     def lower(ledger):
         path = ledger / "selfhost" / "rust.jsonl"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert '"callee_tparams", 1, 1]' in text
         path.write_text(text.replace('"callee_tparams", 1, 1]',
                                      '"callee_tparams", 0, 0]'))
@@ -784,7 +785,7 @@ def test_a_record_above_the_baseline_is_reported_not_refused(
     the check below already holds. Neither is the hiding direction."""
     def raise_record(ledger):
         path = ledger / "selfhost" / "rust.jsonl"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert '"callee_tparams", 1, 1]' in text
         path.write_text(text.replace('"callee_tparams", 1, 1]',
                                      '"callee_tparams", 2, 2]'))
