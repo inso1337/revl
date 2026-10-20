@@ -404,4 +404,48 @@ describe('a parked file whose bytes changed is refused', () => {
     expect(fs.existsSync(sidecar)).toBe(false)
     expect(capture.sha256).toBe(sha256('payload'))
   })
+
+  it('refuses a recorded digest that is not lowercase hex', () => {
+    // A value the capture spelled as a digest but that is not one is a corrupt
+    // record, not a legacy one: `refuseDriftedDigest` refuses it `EIDENTITY`
+    // rather than fall through to stat-only and drop the one check that does
+    // not depend on the clock. Peer py case:
+    // `test_a_recorded_digest_that_is_not_lowercase_hex_is_refused`.
+    const { witness, target, sidecar } = removed()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    witness.capture.sha256 = 'A'.repeat(64)  // hex, but not lowercase
+
+    const refused = refusalOf(() => fsUnrm(witness))
+    if (refused === null) {
+      throw new Error('the malformed digest was accepted and installed')
+    }
+    expect(refused.code).toBe('EIDENTITY')
+    expect(refused.message).toContain('not a lowercase SHA-256 digest')
+
+    expect(fs.existsSync(target)).toBe(false)
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('payload')
+  })
+
+  it('treats a present null digest as no digest and installs stat-only', () => {
+    // The stated parity gap, not an endorsement: py's shared
+    // `_refuse_drifted_identity` refuses a present-null `sha256` as
+    // `EIDENTITY`, while the ts side has no such shape check and
+    // `refuseDriftedDigest` returns on null. This pins the current ts
+    // behaviour so the divergence is explicit; refusing it belongs to a
+    // separate parity change.
+    const { witness, target, sidecar } = removed()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    const capture = witness.capture as { sha256?: string | null }
+    capture.sha256 = null
+
+    fsUnrm(witness)
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('payload')
+    expect(fs.existsSync(sidecar)).toBe(false)
+    expect(capture.sha256).toBeNull()
+  })
 })

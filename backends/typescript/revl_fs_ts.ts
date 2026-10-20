@@ -1412,13 +1412,20 @@ function refuseDriftedIdentity(
  * recorded, or do nothing when the capture carries none (issue #2666). Peer of
  * py `_refuse_drifted_digest`.
  *
- * A capture with no `sha256` is a record written before the key existed (a
+ * A capture with no `sha256` key is a record written before the key existed (a
  * durable record replayed by `revl recover`) and keeps the stat-only behaviour,
  * exactly as `refuseDriftedIdentity` does for a witness that carries no capture
  * at all. When the key IS present, a mismatch, an unreadable file, or a value
- * that is not a bare lowercase hex digest is `EIDENTITY`: the point of the key
- * is to catch the same-tick rewrite the stat fields cannot see, so falling back
- * to stat-only would admit the very file it exists to refuse.
+ * that is not a bare lowercase hex string (a non-string shape included) is
+ * `EIDENTITY`: the point of the key is to catch the same-tick rewrite the stat
+ * fields cannot see, so falling back to stat-only would admit the very file it
+ * exists to refuse.
+ *
+ * A present `null` is the exception: it is treated as no digest and installs
+ * stat-only. That is a stated parity gap with py, whose shared
+ * `_refuse_drifted_identity` refuses a present-null `sha256` as `EIDENTITY`
+ * before `_refuse_drifted_digest` runs, while this side has no such shape check
+ * and falls through here. Refusing it is left to a separate parity change.
  *
  * Named separately, like `refuseDriftedIdentity`, so the pre-rename and
  * post-rename passes of `rawInstallParkedSidecar` state the same comparison
