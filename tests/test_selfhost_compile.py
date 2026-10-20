@@ -873,6 +873,15 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `ctx.provide("greeting", ..)` wiring. A non-generic control of the
         # same shape is byte-exact.
         "comp_provide_generic.rvl",
+        # issue #2558: the two follow-up documents over that same provide-method
+        # shape. Both are emitter-exact from the REFERENCE IR (the byte oracle
+        # in tests/test_selfhost_emit_rust.py holds them), and the native chain
+        # drops their whole provide method for the issue #2559 reason above.
+        # `comp_provide_generic_let.rvl` differs only in where the call result
+        # is typed: a `let` in an EFFECTFUL provide method, which is the shape
+        # the line-coverage gate's `_v3_infer_type` substitution branch needs.
+        "comp_provide_generic_add.rvl",
+        "comp_provide_generic_let.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
