@@ -24,10 +24,12 @@ whatever the trust mode, exactly as the swap door does.
 The two-sided shape of the swap test is kept here:
 
 - an export-area load reports the host code the inline load reports;
-- a load of operator files OUTSIDE the export area reports nothing. That
-  direction is the operator's own program, and reporting it would be a false
-  alarm. It is also the direction the tempting simplification (stop passing
-  `host_bodies=authored`) gets wrong.
+- a load of operator files OUTSIDE the export area reports nothing while host
+  code is UNTRUSTED, the mode in which that ownership is true. Under
+  `--author-trust trusted` the same file is agent text for the disclosure gate
+  (issue #2672), and `tests/test_load_ticket_bodies_2675.py` pins that direction
+  against the swap ticket. The direction the tempting simplification (stop
+  passing `host_bodies=authored`) gets wrong is the untrusted one.
 
 Two more tests drive the shared `_compile` guard over the transport, through
 the two verbs that dispatch through it: `revl_check` and `revl_admit`. `plan`
