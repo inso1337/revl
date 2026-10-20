@@ -1923,7 +1923,6 @@ _CALL_SITE_RULES = {
 # In one document the native gate does not type a record literal against a
 # generic record parameter; it refuses by name instead of emitting.
 _CALL_SITE_NAMED_IN_ONE_DOC = {
-    "generic_param": "TYPE|`store.put` argument `r`",
     "record_deep_field": "TYPE|`store.put` argument `r`: a record literal nested",
 }
 
@@ -2084,6 +2083,56 @@ def test_native_driver_admits_types_carried_through_an_import(
     with pytest.raises(RevlError):
         compile_files([str(doc)])
     assert got.startswith("REFUSED|"), got[:200]
+
+
+# Issue #2374, third case: a record literal for a generic carried record
+# (`store.put({ v: 1 })` against `Cell[Int]`) was refused with T1 through an
+# import, and by name in one document, where the reference admits it. The
+# record's shape is instantiated from its type arguments first.
+_GENERIC_CARRIED_LIB = (
+    "pub type Cell[T] = { v: T }\n"
+    "pub service Store { fn put(r: Cell[Int]) -> Str }\n")
+
+_GENERIC_CARRIED = {
+    "literal": "= store.put({ v: 1 })",
+    "literal_in_let": "{\n      let s = store.put({ v: 1 })\n      return s\n    }",
+    "wrong_field": '= store.put({ v: "x" })',
+}
+
+_GENERIC_CARRIED_TIERS = {"literal_in_let": ("py", "ts", "rust")}
+
+
+def _write_generic_carried(tmp_path, body, through_import):
+    service = _GENERIC_CARRIED_LIB
+    prefix = ""
+    if through_import:
+        (tmp_path / "lib.rvl").write_text(service, encoding="utf-8")
+        prefix = 'use "./lib.rvl" { Store }\n\n'
+        service = ""
+    doc = tmp_path / "doc.rvl"
+    doc.write_text(prefix + service + _CALL_SITE_COMPONENT % body, encoding="utf-8")
+    return doc
+
+
+@pytest.mark.parametrize("through_import", [False, True], ids=["one_document", "import"])
+@pytest.mark.parametrize("case", sorted(_GENERIC_CARRIED))
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_native_driver_types_a_generic_carried_record_literal(
+        compile_rvl, reference_emit, tmp_path, through_import, case, tier):
+    """Issue #2374: the generic record literal is typed against the record's
+    instantiated shape, one document and through an import, so the native chain
+    emits the reference's bytes where it admits and the reference's T1 message
+    where the field type is wrong."""
+    if case in _GENERIC_CARRIED_TIERS and tier not in _GENERIC_CARRIED_TIERS[case]:
+        pytest.skip("the go and java emitters do not cover a `let` in a provide body")
+    doc = _write_generic_carried(tmp_path, _GENERIC_CARRIED[case], through_import)
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), tier, str(doc))
+    if case == "wrong_field":
+        want = _reference_message(lambda: compile_files([str(doc)]))
+        assert want != ""
+        assert got == "REFUSED|T1|" + want, got[:200]
+        return
+    assert got == reference_emit[tier](compile_files([str(doc)])), got[:200]
 
 
 def test_six_way_composition_co_compiles(compile_rvl):

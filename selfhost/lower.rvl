@@ -7109,21 +7109,32 @@ fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
   let pt = tk_solid(taint_strip(decl.ps[i].ty), env)
   let inf = tk_infer(args[i], env)
   let raw = taint_strip(decl.ps[i].ty)
+  // Issue #2374: a record literal for a generic record parameter is held to
+  // the record's shape with its type arguments substituted (`Cell[Int]` against
+  // `type Cell[T] = { v: T }` is `{v: Int}`), which is the pairing the
+  // reference's `compatible` resolves. When the shape or a nested substitution
+  // cannot be built here the literal is still refused by name (issue #2362).
+  var cmp_pt = pt
   if (inf.v == "" && tk_is_struct(inf.ty) && tk_generic_record(raw, env)) {
-    return tagged("TYPE", "`".concat(root).concat(".").concat(meth)
-      .concat("` argument `").concat(decl.ps[i].name)
-      .concat("`: a record literal for the generic record `").concat(raw)
-      .concat("` is not typed by the native gate (issue #2362)"))
+    let gs = grec_shape(raw, env)
+    let ge = gs == "" ? "" : grec_expand(gs, env, 0)
+    if (ge == "") {
+      return tagged("TYPE", "`".concat(root).concat(".").concat(meth)
+        .concat("` argument `").concat(decl.ps[i].name)
+        .concat("`: a record literal for the generic record `").concat(raw)
+        .concat("` is not typed by the native gate (issue #2362)"))
+    }
+    cmp_pt = ge
   }
-  if (inf.v == "" && pt != "" && ct_too_deep(pt, inf.ty, env)) {
+  if (inf.v == "" && cmp_pt != "" && ct_too_deep(cmp_pt, inf.ty, env)) {
     return tagged("TYPE", "`".concat(root).concat(".").concat(meth)
       .concat("` argument `").concat(decl.ps[i].name)
       .concat("`: a record literal nested deeper than 5 levels is not typed by ")
       .concat("the native gate (issue #2362)"))
   }
   if (inf.v == "" && pt != "" && inf.ty != ""
-      && (ct_struct_to_variant(pt, inf.ty, env)
-          || !tk_compatible(ct_record_shape(pt, inf.ty, env), inf.ty))) {
+      && (ct_struct_to_variant(cmp_pt, inf.ty, env)
+          || !tk_compatible(ct_record_shape(cmp_pt, inf.ty, env), inf.ty))) {
     return tagged("T1", "`".concat(root).concat(".").concat(meth)
       .concat("` argument `").concat(decl.ps[i].name).concat("` expects `")
       .concat(tk_render(pt)).concat("`, got `")
