@@ -19,11 +19,11 @@ The trust boundary is the other half. An agent-authored successor may not
 inherit the running operator template's live instance state, whatever the
 migration policy: a default (generational) swap refuses with
 STATE_UNDISCLOSED and gen N keeps serving. Authorship is what the compile
-reports about the text's origin — inline source, in-memory modules, an edited
-buffer, or a file in an export area — never the authoring-trust config, so a
-trusted host-code author is still the agent. Only a template the successor
-CHANGES trips the gate; one it re-declares unchanged keeps migrating, and an
-operator swap still migrates.
+reports about the text's origin: inline source, in-memory modules, an edited
+buffer, a file in an export area, and, under trusted host code, a files-only
+candidate outside one too (the vouched-for host bodies can rewrite it). Only a
+template the successor CHANGES trips the gate; one it re-declares unchanged
+keeps migrating, and an operator swap still migrates.
 
 The composition and the swap are the legitimate template path of item 334,
 driven through the MCP verb the issue names.
@@ -559,6 +559,50 @@ def test_a_files_only_operator_swap_reaching_no_export_text_still_migrates(
     assert swapped["swapped"] is True
     assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
     assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 2
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_trusted_author_files_only_swap_of_a_rewritten_dependency_refuses(
+        tmp_path, _fresh_server_session):
+    """Under trusted host code a files-only candidate is the agent's text too:
+    the operator vouched for host bodies that can rewrite any file the agent
+    can reach. The operator loads the stateful fixture from a jailed file and
+    seeds a live instance; the agent then rewrites the `use`-reached helper
+    OUTSIDE every export area and re-admits the held files with an empty
+    `revl_swap {}`. Before the predicate read `AUTHORING.host_code`, authorship
+    was export-area membership only, so this compiled unprofiled and read as
+    the operator's own: the gate was skipped and the successor migrated gen N
+    onto the changed helper. It must refuse with STATE_UNDISCLOSED and keep gen
+    N serving. The untrusted control is
+    `test_a_files_only_operator_swap_reaching_no_export_text_still_migrates`
+    above, unchanged: the same rewritten helper with host code untrusted still
+    migrates."""
+    server = _fresh_server_session
+    helper = tmp_path / "helper.rvl"
+    helper.write_text(_template_module(1), encoding="utf-8")
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_operator_using_template_module("helper.rvl"),
+                             encoding="utf-8")
+    server.set_authoring_trust(host_code=True, roots=[str(tmp_path)])
+    assert server.AUTHORING.profile() is None
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    assert _call("revl_call", {"key": "admin", "method": "seed",
+                               "args": ["alice", "42"]})["ok"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+
+    # the trusted host body's write: a non-export dependency changes on disk
+    helper.write_text(_template_module(2), encoding="utf-8")
+
+    swapped = _call("revl_swap", {})
+
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert swapped.get("swapped") is not True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
     assert _call("revl_call", {"key": "admin", "method": "read",
                                "args": ["alice"]})["result"] == "42"
 
