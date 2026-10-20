@@ -291,3 +291,75 @@ def test_a_broken_other_entry_does_not_leave_this_publish_half_written(
 
     assert not (reg / "components" / "second").exists()
     assert (reg / "index.json").read_text(encoding="utf-8") == before
+
+
+# ------------------------------- publishing OVER a broken target repairs it
+
+def test_publishing_over_a_target_with_a_broken_meta_json_repairs_it(
+        reg, tmp_path):
+    """The entry being replaced is not evidence about the index this publish
+    will build: its `component.rvl` and `meta.json` are exactly what the write
+    overwrites, and publishing over an entry is how an operator repairs one
+    whose stored files have gone bad.
+
+    BEFORE the fix the dry run compiled every entry as it lay on disk, so the
+    target's malformed `meta.json` raised `_entry_meta` and the publish refused
+    with "the index cannot be regenerated" before writing anything. The broken
+    entry could not be repaired by publishing over it.
+    """
+    working = tmp_path / "working"
+    working.mkdir()
+    entry = working / "component.rvl"
+    entry.write_text(EXPORTED, encoding="utf-8")
+
+    registry.publish_release(reg, "greeter", EXPORTED, version="1.0.0",
+                             source_path=entry, description="greets",
+                             tags=["greet"])
+    meta = reg / "components" / "greeter" / "meta.json"
+    meta.write_text("{ this is not a meta document\n", encoding="utf-8")
+    with pytest.raises(RevlError):
+        registry.build_index(reg, write=False)   # the target is broken
+
+    record = registry.publish_release(
+        reg, "greeter", EXPORTED, version="2.0.0", source_path=entry,
+        description="greets, again", tags=["greet"])
+
+    assert record["version"] == "2.0.0"
+    row = json.loads((reg / "index.json").read_text(
+        encoding="utf-8"))["components"]["greeter"]
+    assert row["version"] == "2.0.0"
+    assert row["description"] == "greets, again"
+    assert registry.verify(reg) == []
+
+
+def test_publishing_over_a_target_that_no_longer_compiles_repairs_it(
+        reg, tmp_path):
+    """The same for the target's stored `component.rvl`: the bytes the dry run
+    compiled are replaced by this publish, so they cannot be a reason to refuse
+    it. The bump check cannot be taken against a source that does not compile,
+    so this publishes under `opaque`, which records that instead of refusing.
+
+    BEFORE the fix the dry run refused with "the index cannot be regenerated"
+    on the target's own broken source, before any write.
+    """
+    working = tmp_path / "working"
+    working.mkdir()
+    entry = working / "component.rvl"
+    entry.write_text(EXPORTED, encoding="utf-8")
+
+    registry.publish_release(reg, "greeter", EXPORTED, version="1.0.0",
+                             scheme="opaque", source_path=entry)
+    stored = reg / "components" / "greeter" / "component.rvl"
+    stored.write_text("component Broken {\n", encoding="utf-8")
+    with pytest.raises(RevlError):
+        registry.build_index(reg, write=False)   # the target is broken
+
+    record = registry.publish_release(reg, "greeter", EXPORTED, version="2.0.0",
+                                      scheme="opaque", source_path=entry)
+
+    assert record["version"] == "2.0.0"
+    assert stored.read_text(encoding="utf-8") == EXPORTED
+    row = json.loads((reg / "index.json").read_text(
+        encoding="utf-8"))["components"]["greeter"]
+    assert row["version"] == "2.0.0"
+    assert registry.verify(reg) == []

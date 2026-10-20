@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -800,7 +801,8 @@ def _write_knowledge(entry_dir: Path, records: list) -> None:
             json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
+def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
+                exclude: Iterable[str] = ()) -> dict:
     """Regenerate ``index.json`` (and each component's ``manifest.json``) from
     the component sources. This is the CI regenerator — never hand-edit the
     index; run this and commit its output (docs/registry.md §1).
@@ -814,10 +816,19 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
     `version` file, `releases` from the `releases/` directory, and
     `description`/`tags` from `meta.json`. Nothing is patched into a row after
     this function returns — that is what keeps `verify` meaningful.
+
+    ``exclude`` names entries to leave out of the pass. The only caller that
+    passes it is `publish_release`'s dry run, which excludes the entry it is
+    about to replace because that entry's current bytes are not the bytes the
+    build after the write will read (issue #2563). It exempts nothing else:
+    `verify` regenerates with no exclusion, so an excluded row still has to be
+    reproduced by the committed index.
     """
+    excluded = set(exclude)
     comps = _components_dir(registry_dir)
     rows: dict = {}
-    for entry_dir in sorted(p for p in comps.iterdir() if p.is_dir()):
+    for entry_dir in sorted(p for p in comps.iterdir()
+                            if p.is_dir() and p.name not in excluded):
         name = entry_dir.name
         source_path = entry_dir / "component.rvl"
         source = _read(source_path)
@@ -1391,6 +1402,9 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
 
     `release_facts` also compiles the source as the entry will store it, so a
     source the index cannot be rebuilt from is refused before the first write.
+    The pre-write dry run leaves out the entry being replaced, whose current
+    bytes are about to be overwritten, so publishing over an already broken
+    entry repairs it instead of being refused because of it.
 
     Everything it records lands in a file under `components/<name>/`, and the
     regeneration is the LAST thing it does, so `verify` is empty on the registry
@@ -1407,22 +1421,35 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
             f"registry: refusing to publish \"{name}\" — "
             + "; ".join(facts["refusals"]))
 
+    entry_dir = _components_dir(registry_dir) / name
+
     # The index must also be buildable from the entries ALREADY on disk, not
     # only from the one about to be written: regenerating over a registry whose
     # other entries no longer compile would raise after this publish had written
     # its own, which is the same half-written state. A dry run compiles only;
     # it writes no manifest and no index (issue #2563).
+    #
+    # The entry being published is EXCLUDED. Its current component.rvl and
+    # meta.json are precisely what the write below overwrites, so compiling
+    # them would refuse to repair an entry that is already broken, which is how
+    # an operator repairs one (a malformed meta.json, a component.rvl that no
+    # longer compiles). The build after the write reads the new bytes instead.
+    # The new source was compiled as the entry will hold it by `release_facts`;
+    # the meta that will survive the write is checked here, because it is the
+    # one thing the dry run would read from disk and this publish does not
+    # always rewrite it.
+    if description is None and tags is None:
+        _entry_meta(entry_dir)
     if _components_dir(registry_dir).is_dir():
         try:
-            build_index(registry_dir, write=False)
+            build_index(registry_dir, write=False, exclude=(name,))
         except RevlError as error:
             raise RevlError(
                 str(Path(registry_dir)), 0,
                 f"registry: refusing to publish \"{name}\" — the index cannot be "
-                f"regenerated from the components already on disk:\n{error}"
+                f"regenerated from the other components already on disk:\n{error}"
             ) from None
 
-    entry_dir = _components_dir(registry_dir) / name
     declared = facts["declaredVersion"]
     previous = facts["previousVersion"]
     prior_source = _read(entry_dir / "component.rvl") if facts["isUpdate"] else ""
