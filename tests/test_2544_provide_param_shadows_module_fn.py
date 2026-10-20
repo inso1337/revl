@@ -18,20 +18,29 @@ The owner ruling applied here:
     blanket lowering refusal. `typecheck.refuse_call_on_non_function` sits
     just after the `FN_HEAD` arm in `infer_ast`'s `ExprCall` and inside
     `infer_ir`'s `fn` arm, so it fires only when the type environment holds
-    a binder of that name that is definitely not a function. The arrow
-    spelling returns at the `FN_HEAD` arm above the AST guard, and in the IR
-    `call`/`name` arm the guard sits inside the non-`FN_HEAD` branch, so the
-    arrow bypasses it while a `Fn[...]` binder is exempted inside it by
-    `is_function_type` (the IR `fn` guard admits both spellings inside
-    itself). An unknown (⊥) binder stays lenient.
+    a binder of that name that is definitely not a function AND a module
+    `fn`/extern or case of that name actually exists: with no such callable
+    there is no fall-through whose binding could be dropped, so that call is
+    left to the ordinary checks. The arrow spelling returns at the
+    `FN_HEAD` arm above the AST guard, and in the IR `call`/`name` arm the
+    guard sits inside the non-`FN_HEAD` branch, so the arrow bypasses it
+    while a `Fn[...]` binder is exempted inside it by `is_function_type`
+    (the IR `fn` guard admits both spellings inside itself). An `Any` or
+    `Value` binder (erased dynamic, may hold a function), a `Never` binder
+    (the uninhabited bottom, whose call is vacuous) and an unknown (⊥) binder
+    stay lenient.
 
 The guard is keyed on the TYPE ENVIRONMENT, not on an enumeration of binder
 forms: every typed binder (`let`, `for`, arrow parameter, match-arm payload,
 provide-method parameter, an effect/approval `let`) is recorded there, so a
-form added to the grammar later is covered without a second edit. The one
-binder that is NOT typed is the `every … in` item of a plain iteration, so
-that form stays enumerated in the lowering refusal list and fails closed
-instead of being silently admitted.
+form added to the grammar later is covered without a second edit. Two binder
+forms can have NO type for that environment to judge: the `every … in` item
+of a plain iteration, and a component `let <x> = effect <acquire>` whose
+acquisition types to nothing (a host `Map.new()`, whose family the type layer
+does not carry). Both stay enumerated in the lowering refusal list
+(`_binder_names`), so a same-named module callable is refused there instead
+of silently taking the call; with no such callable there is no fall-through,
+and the call lowers on the binder itself (pinned below).
 
 The pre-existing lowering refusal (`_refuse_callable_shadowing`, item 445)
 still owns the other binder forms; the controls below pin that the carve-out
@@ -162,9 +171,10 @@ def test_an_open_typed_parameter_called_stays_admitted():
 def test_a_function_valued_parameter_named_like_a_module_fn_is_admitted():
     """The #1823 shape, restored: a module `fn f` in scope, a provide-method
     parameter `f` of function type, and a call on it. The owner ruling admits
-    this shape, and the reference and the self-host lower it identically (the
-    byte-for-byte half is pinned in tests/test_selfhost_lower_ir.py). The
-    module fn stays in scope, so the control is not the module fn's absence."""
+    this shape AND requires the parameter to be the callee: the lowered call is
+    a `call` on the parameter's `name` node, not the module `fn` node. The
+    byte-for-byte half is pinned in tests/test_selfhost_lower_ir.py. The module
+    fn stays in scope, so the control is not the module fn's absence."""
     ir = compile_source(
         "fn f(x: Int) -> Int { return x }\n"
         "service M { fn go(f: (Int) -> Int, n: Int) -> Int }\n"
@@ -176,17 +186,23 @@ def test_a_function_valued_parameter_named_like_a_module_fn_is_admitted():
     assert [fn["name"] for fn in ir["functions"]] == ["f"]
     method = ir["components"][0]["body"][0]["methods"][0]
     assert method["params"] == ["f", "n"]
-    assert method["body"]
+    # the parameter is the callee; the module fn of the same name is not
+    assert method["body"] == [{
+        "step": "return",
+        "expr": {"kind": "call", "callee": {"kind": "name", "id": "f"},
+                 "args": [{"kind": "name", "id": "n"}]},
+    }]
 
 
 def test_the_fn_spelling_of_a_function_type_is_admitted_too():
-    """The same carve-out for the `Fn[...]` spelling. `Fn[Int, Int]` compiles
-    on origin/main (the wasm tier's fixtures use it, and taint.py already
-    treats the `Fn` head as a function type), and the first cut of the #2544
-    guard refused it: it compared the parsed head with `->` only. Both
-    spellings name a callable value, so neither may be judged a fall-through
-    to a same-named module callable. This is the minimal regression that the
-    wasm module's `test_v3_escaping_arrow_still_rejected` compiles."""
+    """The same carve-out for the `Fn[...]` spelling, with the same callee
+    assertion. `Fn[Int, Int]` compiles on origin/main (the wasm tier's fixtures
+    use it, and taint.py already treats the `Fn` head as a function type), and
+    the first cut of the #2544 guard refused it: it compared the parsed head
+    with `->` only. Both spellings name a callable value, so neither may be
+    judged a fall-through to a same-named module callable. This is the minimal
+    regression that the wasm module's `test_v3_escaping_arrow_still_rejected`
+    compiles."""
     ir = compile_source(
         "fn apply(f: Fn[Int, Int], x: Int) -> Int { return f(x) }\n",
         "t.rvl",
@@ -203,7 +219,11 @@ def test_the_fn_spelling_of_a_function_type_is_admitted_too():
     )
     method = ir["components"][0]["body"][0]["methods"][0]
     assert method["params"] == ["f", "n"]
-    assert method["body"]
+    assert method["body"] == [{
+        "step": "return",
+        "expr": {"kind": "call", "callee": {"kind": "name", "id": "f"},
+                 "args": [{"kind": "name", "id": "n"}]},
+    }]
 
 
 # -------------------------- the binder forms the carve-out must NOT widen to
@@ -395,3 +415,73 @@ def test_a_sibling_methods_call_does_not_make_a_parameter_ambiguous():
         "t.rvl",
     )
     assert ir is not None
+
+
+# --------------------- the rule's two limits: callable existence and Never
+
+def test_a_call_on_a_non_function_binder_with_no_same_name_callee_is_admitted():
+    """The guard's first limit: it names a fall-through, so it must not fire
+    when there is nothing to fall through TO. `s: Str` called as `s("x")` has
+    no same-named module `fn`/extern/case in this program, so no binding is
+    dropped and the #2544 refusal would be false. The call is left to the
+    ordinary checks and lowers on the binder (`var` in a fn body). Before the
+    limit this program was refused with the module-fall-through message."""
+    ir = compile_source('fn f(s: Str) -> Str { return s("x") }', "t.rvl")
+    assert ir["functions"][0]["body"] == [{
+        "step": "return",
+        "expr": {"kind": "call", "callee": {"kind": "var", "name": "s"},
+                 "args": [{"kind": "lit", "value": "x"}]},
+    }]
+
+
+def test_a_never_binder_call_is_vacuous_even_beside_a_same_name_fn():
+    """The guard's second limit. `Never` is the uninhabited bottom: nothing
+    inhabits the binder, so `nv(1)` is vacuous, not a fall-through to the
+    same-named module `fn nv`. This program is the sharpest form -- the module
+    fn IS in scope, so the callable-existence check alone would still refuse it
+    -- and it was refused before `Never` joined the open callable heads. A
+    provide-method parameter is used because the item-445 lowering scan (which
+    is keyed on the NAME alone) does not reach method parameters."""
+    ir = compile_source(
+        "fn nv(x: Int) -> Int { return x }\n"
+        "service M { fn go(nv: Never, n: Int) -> Int }\n"
+        "component C provides m: M {\n"
+        "  provide m { fn go(nv, n) = nv(1) }\n"
+        "}\n",
+        "t.rvl",
+    )
+    method = ir["components"][0]["body"][0]["methods"][0]
+    assert method["body"] == [{
+        "step": "return",
+        "expr": {"kind": "call", "callee": {"kind": "name", "id": "nv"},
+                 "args": [{"kind": "lit", "value": 1}]},
+    }]
+
+
+# ------------------------- the second untyped binder form, named explicitly
+
+def test_an_untyped_effect_let_binder_is_the_callee_with_no_module_fn():
+    """The second binder form the type environment cannot judge, named here so
+    the guard's docstring claim is true: a component
+    `let Tag = effect Map.new()` records NO type (`Map.new()` is a host node
+    the type layer does not carry), so `Tag("x")` is not judged by the #2544
+    guard. With no same-named module callable there is no fall-through, and the
+    call lowers on the binder's `name` node -- what the user wrote is what runs.
+    The refusal half is
+    `test_a_component_body_binding_still_pairs_with_a_call_in_a_method`: when a
+    module `fn` of that name IS in scope, the lowering scan refuses the pair."""
+    ir = compile_source(
+        "service S { fn go(n: Int) -> Str }\n"
+        "component C provides s: S {\n"
+        "  let Tag = effect Map.new() undo Tag.drop()\n"
+        '  provide s { fn go(n) = Tag("x") }\n'
+        "}\n",
+        "t.rvl",
+    )
+    step = ir["components"][0]["body"][1]
+    assert step["step"] == "provide"
+    assert step["methods"][0]["body"] == [{
+        "step": "return",
+        "expr": {"kind": "call", "callee": {"kind": "name", "id": "Tag"},
+                 "args": [{"kind": "lit", "value": "x"}]},
+    }]

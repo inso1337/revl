@@ -24332,6 +24332,30 @@ fn scope_has(sc: List[Bind], n: Str) -> Bool {
   return false
 }
 
+// The declared type of the INNERMOST binding of `n` ("" when it has none).
+// `scope_has` is the membership test (a lexical binder may be untyped) and
+// `bind_lookup` is the header-row read (where "" means absent); this is the
+// type read a scope binder needs.
+fn scope_ty(sc: List[Bind], n: Str) -> Str {
+  var i = sc.length() - 1
+  while (i >= 0) {
+    if (sc[i].name == n) { return sc[i].ty }
+    i -= 1
+  }
+  return ""
+}
+
+// Is this declared type a callable VALUE the binder can be called as? The
+// arrows `(Int) -> Int` and `Fn[Int, Int]`, plus the heads the reference's
+// #2544 guard leaves open: `Any`/`Value` (erased dynamic types that can hold a
+// function) and `Never` (the uninhabited bottom, whose call is vacuous).
+// Mirrors `is_function_type` + `_OPEN_CALLABLE_HEADS` in src/revl/typecheck.py.
+fn is_callable_value_ty(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  let h = ty_parse(ty).head
+  return h == "->" || h == "Fn" || h == "Any" || h == "Value" || h == "Never"
+}
+
 fn concat_binds(a: List[Bind], b: List[Bind]) -> List[Bind] {
   var out = a
   var i = 0
@@ -25841,8 +25865,17 @@ fn cir_nullary_case(n: Str, cx: CCtx) -> Bool {
 // generic tail's `call` on a `name` node (issue #1823). A scoped name that
 // spells a built-in constructor is the value, not the constructor, in a
 // component position as in a `fn` body (issue #2490).
+//
+// A CALLABLE-VALUED binder is the callee even when a module `fn`/extern shares
+// its name: that is issue #1823's owner ruling on #2544, and the reference now
+// applies it in `_component_scope_value_is_callee` (src/revl/lower.py). Before
+// it, `fn go(f, n) = f(n)` with a module `fn f` lowered to the module fn and
+// dropped the parameter. A binder whose type the producer does not hold keeps
+// the old answer (the module callable), exactly as the reference does.
 fn cir_calls_a_value(nm: Str, sc: List[Bind], cx: CCtx) -> Bool {
-  return scope_has(sc, nm) && bind_lookup(cx.fns, nm, 0) == ""
+  if (!scope_has(sc, nm)) { return false }
+  if (is_callable_value_ty(scope_ty(sc, nm))) { return true }
+  return bind_lookup(cx.fns, nm, 0) == ""
 }
 
 // `f(a)` where `f` is a scoped value: the reference's generic call tail,

@@ -58,6 +58,8 @@ from .typecheck import (
     _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
+    _OPEN_CALLABLE_HEADS,
+    is_function_type,
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
@@ -8202,11 +8204,17 @@ def _binder_names(node, out: list) -> None:
                 out.append((pattern.rest, pattern.line))
     elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt,
                            StreamIterStmt)):
-        # `every <x> in <sub>` binds its item for the body (item 130): the
-        # item's type can be absent (a plain iteration carries no contract),
-        # so the type environment cannot decide it the way it decides a typed
-        # provide-method parameter (#2544). Enumerated here so the form fails
-        # closed instead of silently calling a module `fn` of the same name.
+        # Two binder forms can have NO type for the type environment to judge
+        # (#2544): the `every <x> in <sub>` item (item 130: a plain iteration
+        # carries no contract), which StreamIterStmt binds; and a component
+        # `let <x> = effect <acquire>` whose acquisition types to nothing
+        # (`Map.new()` is a host node the type layer does not carry), which is
+        # the LetEffect arm. Both are enumerated here so a call on one is
+        # refused, rather than silently reaching a same-named module `fn`,
+        # whenever such a callable is in scope. With no same-named callable
+        # there is no fall-through to refuse; the call lowers as a call on the
+        # binder's `name` node (pinned in
+        # tests/test_2544_provide_param_shadows_module_fn.py).
         if isinstance(node.bind, str):
             out.append((node.bind, node.line))
     elif isinstance(node, ExprArrow):
@@ -9861,6 +9869,34 @@ def _check_arrow_return_annotation(arrow, body: dict, env: Env,
              env.services, filename, arrow.line, ARROW_BODY_WHERE)
 
 
+def _component_scope_value_is_callee(name: str, env: Env,
+                                     scope: dict[str, str]) -> bool:
+    """True if the scope binds `name` to a value that is the callee of a bare
+    call, so a same-named module callable must not take the call.
+
+    Issue #1823's owner ruling on #2544: a function-valued parameter
+    (`(Int) -> Int`, `Fn[Int, Int]`) is the callee, not a same-named module
+    `fn`. The typecheck layer admits such a call as a call on the value, so
+    the lowering must lower it that way or the parameter is silently dropped.
+    `Any`/`Value` (erased dynamic types that can hold a function) and `Never`
+    (the uninhabited bottom, whose call is vacuous) are callable for the same
+    reason the typecheck guard leaves their calls open. A scoped built-in
+    constructor is the value, not the constructor (issue #2490). A binder
+    whose type the environment does not hold stays with the module callable:
+    only a type that says "callable value" moves the call off it.
+
+    The type environment is keyed by the scope's safe id (`env.params`), so
+    read `name` through `scope` first, falling back to the surface spelling.
+    """
+    if name in _BUILTIN_CONSTRUCTORS:
+        return True
+    safe = scope.get(name, name)
+    ty = env.type_env.get(safe)
+    if ty is None and safe != name:
+        ty = env.type_env.get(name)
+    return is_function_type(ty) or parse_type(ty)[0] in _OPEN_CALLABLE_HEADS
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -10250,11 +10286,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
             # `callables` holds the constructors too, so a scoped one must not
-            # fall through to a `fn` node here. A scoped name that spells a
-            # module fn still resolves to the module fn (a `fn` body refuses
-            # that shadowing; the self-host lowers it the same way), which is
-            # why this arm is not `name not in scope`.
-            if name in callables and not (name in scope and name in _BUILTIN_CONSTRUCTORS):
+            # fall through to a `fn` node here. A scoped name whose type is a
+            # callable VALUE is the callee (issue #1823: a function-valued
+            # parameter is what `f(n)` calls, not a same-named module `fn`;
+            # the owner ruling on #2544 requires the binder to win). A scoped
+            # name of any other type still resolves to the module fn -- a
+            # `fn` body refuses that shadowing at item 445, and the typecheck
+            # guard refuses the provide-parameter form -- which is why this
+            # arm is not `name not in scope`.
+            if name in callables and not (
+                    name in scope
+                    and _component_scope_value_is_callee(name, env, scope)):
                 # item 187: fill omitted trailing arguments with their default
                 # expressions before async coercion, so the module-fn call the
                 # emitters see is fully supplied (no per-tier default handling).
