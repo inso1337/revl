@@ -20,6 +20,12 @@ The test asserts the export-area ticket against the inline one for the same
 candidate rather than against a hardcoded list: the inline door is the control
 that already reported this field before the fix, so equality pins the export-area
 door to it without restating what the bodies are.
+
+A files-only candidate OUTSIDE every export area is the operator's own only
+while host code is untrusted. Under trusted host code issue #2672 makes it
+agent text for the disclosure gate, because the vouched-for host bodies can
+rewrite any file the agent can reach; the swap ticket follows that gate, and
+the tests below pin both trust modes.
 """
 
 import importlib.util
@@ -129,6 +135,18 @@ def _swapped_ticket(transport, tmp_path, candidate: dict) -> dict:
     return result["ticket"]
 
 
+def _clear_held_swap() -> None:
+    """Clear the session the way the established repair fixture does
+    (test_untrusted_repair_realm_2520.py) rather than assuming an unload alone
+    is enough: a held swap installs nothing, but it may leave pending state
+    behind, and the next load has to start from the same position as the first
+    or the two tickets are not comparable."""
+    server.SESSION.unload()
+    server.SESSION.proposals = {}
+    server.SESSION.pending_draft = None
+    server.SESSION.draft = None
+
+
 @needs_cordis
 def test_an_export_area_swap_reports_the_host_code_the_inline_one_does(
         transport, tmp_path):
@@ -158,10 +176,7 @@ def test_an_export_area_swap_reports_the_host_code_the_inline_one_does(
     # unload alone is enough: a held swap installs nothing, but it may leave
     # pending state behind, and the second load has to start from the same
     # position as the first or the two tickets are not comparable.
-    server.SESSION.unload()
-    server.SESSION.proposals = {}
-    server.SESSION.pending_draft = None
-    server.SESSION.draft = None
+    _clear_held_swap()
     through_file = _swapped_ticket(transport, tmp_path,
                                    {"files": [str(exported)]})
 
@@ -172,30 +187,58 @@ def test_an_export_area_swap_reports_the_host_code_the_inline_one_does(
 
 
 @needs_cordis
-def test_a_swap_of_operator_files_outside_the_export_area_reports_nothing(
+def test_a_trusted_files_only_swap_outside_the_export_area_reports_the_authors_host_code(
         transport, tmp_path):
-    """The other direction, which the fix must not break.
+    """The same rule through the other trust mode (issue #2672).
 
-    A candidate that is entirely jailed `files` OUTSIDE the export area is the
-    operator's own, and its host bodies are the operator's. Reporting them as
-    unreviewed agent code would raise a false alarm on the operator's own
-    program.
+    A files-only candidate outside every export area is the operator's own only
+    while host code is untrusted. Under `--author-trust trusted` the operator
+    has vouched for host bodies that can rewrite any file the agent can reach,
+    so the disclosure gate treats the candidate as agent text. The approval
+    ticket must not understate what a yes admits: it names the same host code
+    the inline door names for the same candidate.
 
-    This control exists because the two ways to get it wrong fail in opposite
-    directions, and only one of them is caught by the test above. Passing
-    `host_bodies=None` instead of widening the condition would make the approval
-    path compute the bodies itself with no transport test at all, and every
-    operator load carrying host bodies would then raise a ticket. Pinning this
-    case is what stops that simplification from looking correct.
+    Before #2672 the candidate compiled unprofiled and read as the operator's
+    own, so this ticket named nothing while the gate would have skipped.
     """
+    inline = _swapped_ticket(transport, tmp_path, {"source": _CANDIDATE})
+    assert inline.get("unreviewedHostCode"), inline
+
     from revl.export_area import in_export_area
 
     operator_file = tmp_path / "operator.rvl"
     operator_file.write_text(_CANDIDATE, encoding="utf-8")
-    assert not in_export_area(str(operator_file))  # really outside the export area
+    assert not in_export_area(str(operator_file))
+
+    _clear_held_swap()
+    through_file = _swapped_ticket(transport, tmp_path,
+                                   {"files": [str(operator_file)]})
+    assert through_file.get("unreviewedHostCode") == \
+        inline["unreviewedHostCode"], through_file
+    assert through_file.get("unreviewedHostCodeWarning") == \
+        inline.get("unreviewedHostCodeWarning"), through_file
+
+
+@needs_cordis
+def test_an_untrusted_files_only_swap_outside_the_export_area_reports_nothing(
+        transport, tmp_path):
+    """The operator's own file outside every export area while host code is
+    UNTRUSTED, the shape in which that ownership is true (issue #2672).
+
+    The compile reports no transport origin, so the file is the operator's
+    jailed text and its host bodies are the operator's; reporting them as
+    unreviewed agent code would raise a false alarm on their own program. The
+    trusted direction is the test above, where the same file is agent text.
+    """
+    from revl.export_area import in_export_area
+
+    server.set_authoring_trust(host_code=False)
+    operator_file = tmp_path / "operator.rvl"
+    operator_file.write_text(_CANDIDATE, encoding="utf-8")
+    assert not in_export_area(str(operator_file))
 
     ticket = _swapped_ticket(transport, tmp_path,
                              {"files": [str(operator_file)]})
     assert not ticket.get("unreviewedHostCode"), (
-        "an operator's own file is being reported as unreviewed agent host "
-        f"code, which is a false alarm on their own program: {ticket}")
+        "an operator's own untrusted file is being reported as unreviewed "
+        f"agent host code, which is a false alarm on their own program: {ticket}")

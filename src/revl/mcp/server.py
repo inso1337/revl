@@ -916,7 +916,8 @@ def _compile(source: str | None, files: list[str] | None,
 
 def _authored_host_bodies(ir: dict, source: str | None,
                           modules: dict | None, *,
-                          export_area: bool = False) -> list:
+                          export_area: bool = False,
+                          compile_authored: bool = False) -> list:
     """The agent-authored host bodies `ir` carries: empty unless the candidate
     is the author's text under an open authoring trust.
 
@@ -927,8 +928,17 @@ def _authored_host_bodies(ir: dict, source: str | None,
     question about a profile, unlike the realm-removal check, which needs one to
     have been applied to have something to compare against. Issue #2628: a swap
     sent only as such a file reported no unreviewed host code, so the operator
-    approved a crossing without being told what the composition carried."""
-    authored = source is not None or bool(modules) or export_area
+    approved a crossing without being told what the composition carried.
+
+    `compile_authored` says the compile that produced `ir` reported the text as
+    authored (`report["authored"]`). Under trusted host code that includes a
+    files-only candidate outside every export area (issue #2672), because the
+    vouched-for host bodies can rewrite it on disk. The swap passes it so the
+    approval ticket names what the disclosure gate already treats as the
+    agent's text; leaving the ticket empty there would let a yes admit a
+    composition whose authorship the gate itself does not trust."""
+    authored = (source is not None or bool(modules) or export_area
+                or compile_authored)
     return (_host_bodies(ir) if authored and AUTHORING.host_code
             else [])
 
@@ -1572,8 +1582,10 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # profile was applied, which needs the gate further down. Sharing the call
     # keeps the two answers about the same files.
     export_texts = _exported_candidate(files, compile_report)
-    authored = _authored_host_bodies(full, source, modules,
-                                     export_area=export_texts is not None)
+    authored = _authored_host_bodies(
+        full, source, modules,
+        export_area=export_texts is not None,
+        compile_authored=bool(compile_report.get("authored")))
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
     # realm by leaving its clause out. A swap of jailed `files` is exempt
@@ -1591,9 +1603,16 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # (#2585).
     # issue #2600: only text that actually compiled under the profile is
     # compared. With `--author-trust trusted` the profile is none, so an
-    # export-area file compiles exactly as it did before #2524, it stays the
-    # operator's own, and a swap of it keeps the #2487 exemption. Deciding by
-    # path alone would refuse that operator a swap this door admitted before.
+    # export-area file compiles exactly as it did before #2524 and a swap of it
+    # keeps the #2487 exemption; deciding by path alone would refuse that
+    # operator a swap this door admitted before. That exemption is now known to
+    # be narrower than the authorship rule: issue #2672 makes the same file the
+    # agent's text for the disclosure gate, because the vouched-for host bodies
+    # can rewrite it on disk. Skipping the realm comparison here is therefore
+    # the wrong answer for a trusted export-area file. The skip is retained
+    # only because #2600's exemption is a separate decision: a trusted swap
+    # that drops a realm clause is a known gap in this check, not evidence that
+    # the file is the operator's own.
     exported = (export_texts
                 if AUTHORING.profile() is not None else None)
     if source is not None or modules or exported is not None:
