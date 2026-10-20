@@ -260,8 +260,8 @@ guarantee about the host.
       "attempts": {"count": 1, "ceiling": 3, "provenance": "revl-controlled"},
       "produced": [{"seq": 9, "capability": "fs", "key": "Report.write"}],
       "verifiedBy": ["G9"],
-      "schemaDigest": {"digest": "sha256:...", "provenance": "revl-controlled"},
-      "grammarDigest": {"digest": "sha256:...", "provenance": "revl-controlled"},
+      "schemaDigest": {"digest": "e3b0c4...", "provenance": "revl-controlled"},
+      "grammarDigest": {"digest": "9f86d0...", "provenance": "revl-controlled"},
       "residence": {"value": "on_device", "provenance": "revl-controlled"},
       "promptDigest": {"salted": "hmac-sha256:...", "bytesBucket": "256-1k",
                        "provenance": "revl-side-args"}
@@ -347,8 +347,8 @@ wrong was the hop itself.
     "attempts": 1, "attemptCeiling": 3,       // revl-controlled (257 retry N+1)
     "producedSeq": [9],                       // fiber-token-gated; omitted if ambiguous
     "verifiedBy": ["G9"],                     // revl-derived from the emission's guarantee
-    "schemaDigest":  {"digest": "sha256:...", "provenance": "revl-controlled"},  // 2694
-    "grammarDigest": {"digest": "sha256:...", "provenance": "revl-controlled"},  // 2694
+    "schemaDigest":  {"digest": "e3b0c4...", "provenance": "revl-controlled"},  // 2694
+    "grammarDigest": {"digest": "9f86d0...", "provenance": "revl-controlled"},  // 2694
     "residence":     {"value": "on_device",   "provenance": "revl-controlled"},  // 2694
     "promptDigest": {"salted": "hmac-sha256:...", "bytesBucket": "256-1k"}  // conditional; §4
   }

@@ -1628,6 +1628,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "transition carries the cause chain behind it, "
                           "queryable with `revl why <c> --trace FILE` "
                           "(docs/why-runtime.md)")
+    run.add_argument("--attestation", default=None, metavar="PATH",
+                     help="record this composition's admission attestation in "
+                          "the trace: the attestation must bind THIS composition "
+                          "(its composition_hash must equal the run's), and its "
+                          "composition hash, key id and ruleset digest are "
+                          "written on the trace header and copied to every OTel "
+                          "span (issue #2730). The signature is not checked here; "
+                          "a consumer that wants proof runs `revl attest --verify`")
     run.add_argument("--withdraw", default=None, metavar="COMPONENT",
                      help="one-shot: boot, withdraw this live component while "
                           "recording the causal cascade, then diff the actual "

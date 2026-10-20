@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hmac
 import itertools
 import json
 import os
@@ -1149,7 +1150,7 @@ class _Driver:
                  root_dirs: list | None = None, secrets: dict | None = None,
                  secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
-                 ambient_check=None):
+                 ambient_check=None, run_header: dict | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1253,6 +1254,10 @@ class _Driver:
         self.trace_path = trace_path
         self.withdraw = withdraw
         self.tracing = trace_path is not None or withdraw is not None
+        # issue #2730 slice 1: the attested-run header (composition hash, key id,
+        # ruleset digest), recorded on the FIRST trace event only. Empty for a
+        # run with no attestation, so no event carries the key at all.
+        self._run_header = dict(run_header or {})
         self._events: list[dict] = []
         self._seq = 0
         # while non-None, `_on_fiber` records the transitions it observes into
@@ -1348,12 +1353,21 @@ class _Driver:
 
     # -- causal trace ------------------------------------------------------
 
+    def _stamp_header(self, record: dict) -> dict:
+        """Issue #2730 slice 1: the attested-run header rides the FIRST recorded
+        event only, so a reader finds it once and a later event cannot claim a
+        different admission. No header configured -> the record is unchanged
+        (no key), which is the unattested run."""
+        if self._seq == 0 and getattr(self, "_run_header", None):
+            record["run"] = dict(self._run_header)
+        return record
+
     def _record(self, event: str, component: str, transition: str,
                 cause: dict) -> None:
         # ts (v2): a monotonic reading, meaningful for durations within the run.
-        self._events.append(why_runtime.make_event(
+        self._events.append(self._stamp_header(why_runtime.make_event(
             self._seq, self.generation, event, component, transition, cause,
-            ts=time.monotonic()))
+            ts=time.monotonic())))
         self._seq += 1
 
     def _record_emit(self, component: str, capability: str, key: str,
@@ -1367,9 +1381,9 @@ class _Driver:
         :meth:`_model_crossing_payload`. A non-model crossing passes neither, so
         its record is byte-identical to a pre-121 v2 emit — the same additive
         discipline `make_emit_event` already documents."""
-        self._events.append(why_runtime.make_emit_event(
+        self._events.append(self._stamp_header(why_runtime.make_emit_event(
             self._seq, self.generation, component, capability, key, cause,
-            ts=time.monotonic(), llm=llm, activation_id=activation_id))
+            ts=time.monotonic(), llm=llm, activation_id=activation_id)))
         self._seq += 1
 
     def _model_crossing_payload(self, *, args=None, arg_origins=None,
@@ -2782,6 +2796,55 @@ def _is_model_refusal(exc: BaseException) -> bool:
                             ProvisionRefused, ProviderError))
 
 
+def _load_run_attestation(path, ir: dict) -> dict:
+    """Issue #2730 slice 1: the trace header an `--attestation` file stands for.
+
+    The document must be an admitted item-127 attestation, and its
+    `composition_hash` must be the canonical hash of the IR about to boot: an
+    attestation for a DIFFERENT composition would make the trace claim an
+    admission that never covered this run, so it is refused before anything
+    loads. The check is a consistency check, not proof — the signature is not
+    verified here because a run holds no attestation key. A consumer that wants
+    proof runs `revl attest --verify`.
+
+    The header is built by :func:`revl.why_runtime.run_header`, which omits a
+    value the document does not carry (an older attestation with no checker
+    identity records no ruleset digest rather than a placeholder)."""
+    from . import attest as _attest  # noqa: PLC0415 - lazy
+
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RevlError(str(path), 0, f"cannot read the attestation: {exc}")
+    if not isinstance(document, dict):
+        raise RevlError(str(path), 0,
+                        "the attestation is not a JSON object")
+    if document.get("kind") != _attest.ATTEST_KIND:
+        raise RevlError(
+            str(path), 0,
+            f"not a revl attestation: kind is {document.get('kind')!r}, "
+            f"expected {_attest.ATTEST_KIND!r}")
+    if document.get("verdict") != _attest.VERDICT_ADMITTED:
+        raise RevlError(
+            str(path), 0,
+            f"the attestation is not an admission: verdict is "
+            f"{document.get('verdict')!r}")
+    bound = document.get("composition_hash")
+    computed = _attest.canonical_hash(ir)
+    if not isinstance(bound, str) or not hmac.compare_digest(bound, computed):
+        raise RevlError(
+            str(path), 0,
+            "the attestation is for a different composition: it binds "
+            f"{str(bound)[:12]}..., and this run's IR hashes to "
+            f"{computed[:12]}... . An attestation is evidence about the "
+            "artifact it ran over, so it cannot label another one.")
+    checker = document.get("checker")
+    checker = checker if isinstance(checker, dict) else {}
+    return why_runtime.run_header(composition_hash=computed,
+                                  attestation_key_id=document.get("key_id"),
+                                  ruleset_digest=checker.get("ruleset"))
+
+
 def run_command(args, hold_once: bool = False) -> int:
     if getattr(args, "allow_unsynced_wal", False):
         if (not getattr(args, "wal", None) or getattr(args, "placement", None)
@@ -2845,6 +2908,25 @@ def run_command(args, hold_once: bool = False) -> int:
         refuse_admission(ir)
     except RevlError as exc:
         return _fail(str(exc), lifecycle.ADMISSION)
+    # issue #2730 slice 1: an attestation supplied for the record must bind THIS
+    # composition, checked before a runtime is imported or anything loads. The
+    # header it yields is written on the trace's first event and every OTel
+    # span; a run without one records no header at all.
+    run_header = None
+    attestation_path = getattr(args, "attestation", None)
+    if attestation_path:
+        if backend != "py":
+            return _fail(
+                f"--attestation records the trace header on the py tier only; "
+                f"--backend {backend} has no causal trace to carry it",
+                lifecycle.CONFIG)
+        try:
+            run_header = _load_run_attestation(attestation_path, ir)
+        except RevlError as exc:
+            return _fail(str(exc), lifecycle.ADMISSION)
+        if not (getattr(args, "trace", None) or getattr(args, "withdraw", None)):
+            print("note: --attestation writes the run header only to a causal "
+                  "trace; add --trace FILE to record it", file=sys.stderr)
     try:
         config = _load_config(getattr(args, "config", None))
         env = _load_env(getattr(args, "env", None))
@@ -3002,7 +3084,8 @@ def run_command(args, hold_once: bool = False) -> int:
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
                          ambient=ambient,
-                         ambient_check=_model_host_check(args, model_hosts))
+                         ambient_check=_model_host_check(args, model_hosts),
+                         run_header=run_header)
     except UnsettledWalError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
