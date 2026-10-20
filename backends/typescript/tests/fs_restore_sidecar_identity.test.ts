@@ -258,6 +258,33 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     expect(fs.readFileSync(sidecar, 'utf-8')).toBe('zz')
   })
 
+  it('refuses a forged recorded digest on an honest sidecar', () => {
+    // The record is forged, the file is not: the sidecar still holds the bytes
+    // the snapshot wrote, and only the recorded sha256 is changed to another
+    // well-formed digest. A compare path that trusted the record, or that
+    // treated a well-formed digest as unverifiable, would install the honest
+    // bytes and report a clean reversal. The forged value is 64 lowercase hex,
+    // so it takes the mismatch branch rather than the malformed-record one.
+    const { witness, target, sidecar } = written()
+    const recorded = witness.capture
+    if (recorded === null || recorded === undefined) {
+      throw new Error('the witness carries no capture to forge')
+    }
+    const forged = { ...recorded, sha256: '0'.repeat(64) }
+    expect(forged.sha256).not.toBe(recorded.sha256)
+    expect(recorded.sha256).toBe(sha256('v1'))
+
+    const refusal = refusalOf(() => fsRestore({ ...witness, capture: forged }))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('sha256')
+    // a well-formed forged digest must take the mismatch branch, not the
+    // malformed-record branch
+    expect(refusal.message).toContain('sha256 differ')
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
+  })
+
   it('refuses a rewrite between the pre-rename read and the rename', () => {
     // The post-install pass exists for the window between the first read and
     // the rename, which is by name. A writer can rewrite the sidecar in place

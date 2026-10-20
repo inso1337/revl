@@ -312,6 +312,37 @@ def test_a_capture_recorded_before_the_digest_still_restores(root, frame):
     assert not os.path.exists(sidecar)
 
 
+def test_a_forged_recorded_digest_on_an_honest_sidecar_is_refused(root, frame):
+    """The record is forged, the file is not: the sidecar still holds the bytes
+    the snapshot wrote, and only the recorded sha256 is changed to another
+    well-formed digest. A compare path that trusted the record, or that treated
+    a well-formed digest as unverifiable, would install the honest bytes and
+    report a clean reversal; the refusal here proves the recorded value is
+    actually compared with the bytes read through the sidecar fd. The forged
+    value is 64 lowercase hex, so it takes the mismatch branch rather than the
+    malformed-record one."""
+    witness, target, sidecar = _written(root, frame)
+    forged = dict(witness["capture"])
+    forged[ws.SIDECAR_DIGEST_FIELD] = "0" * 64
+    assert forged[ws.SIDECAR_DIGEST_FIELD] != \
+        witness["capture"][ws.SIDECAR_DIGEST_FIELD]
+    assert hashlib.sha256(Path(sidecar).read_bytes()).hexdigest() == \
+        witness["capture"][ws.SIDECAR_DIGEST_FIELD]
+
+    with pytest.raises(fs.FsOpError) as ei:
+        fs._witnessed_restore({**witness, "capture": forged})
+
+    assert ei.value.code == "EIDENTITY"
+    assert ws.SIDECAR_DIGEST_FIELD in ei.value.message, \
+        "the refusal must name the digest that did not match"
+    assert "sha256 differ" in ei.value.message, \
+        "a well-formed forged digest must take the mismatch branch, not the malformed-record one"
+    assert open(target, encoding="utf-8").read() == "v2", \
+        "a forged record must not install the honest sidecar"
+    assert open(sidecar, encoding="utf-8").read() == "v1", \
+        "the refused sidecar was consumed"
+
+
 # ===========================================================================
 # The recorded digest must BE a digest. A present null, number, list or
 # malformed string used to fall through to stat-only, so a corrupt capture
@@ -434,6 +465,37 @@ def test_a_rewrite_between_the_check_and_the_rename_is_refused(root, frame,
     assert ei.value.code == "EIDENTITY"
     assert ws.SIDECAR_DIGEST_FIELD in ei.value.message, \
         "the stat tuple was pinned, so only the installed digest can have refused"
+
+
+def test_a_repermission_between_the_digest_check_and_the_rename_is_refused(
+        root, frame, monkeypatch):
+    """The digest cannot see a mode change: re-permissioning the sidecar leaves
+    every byte, size and inode field equal. The window is forced inside the
+    rename, after the pre-rename pass has read and compared the digest, so the
+    installed result is the only pass that can see it. `INSTALLED_CAPTURE_FIELDS`
+    keeps `mode` precisely so the digest does not replace the permission
+    control, and the refusal must name the field that drifted rather than the
+    digest. `ctime_ns` also drifts, and is dropped on that pass because the
+    rename bumps it; the mode is the actionable field here."""
+    witness, target, sidecar = _written(root, frame)
+    real_replace = ws.replace_confined
+
+    def chmod_then_replace(src_real, dst_real):
+        current = stat.S_IMODE(os.stat(src_real).st_mode)
+        os.chmod(src_real, 0o600 if current != 0o600 else 0o640)
+        real_replace(src_real, dst_real)
+
+    monkeypatch.setattr(ws, "replace_confined", chmod_then_replace)
+
+    with pytest.raises(fs.FsOpError) as ei:
+        fs._witnessed_restore(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "restored target" in ei.value.message, \
+        "only the installed-result pass can see a mode change made inside the rename"
+    assert "mode" in ei.value.message, \
+        "the digest cannot see a re-permission, so the refusal must name mode"
+    assert ws.SIDECAR_DIGEST_FIELD not in ei.value.message, \
+        "the bytes were honest; only the mode differed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(root, frame):
