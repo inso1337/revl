@@ -69,7 +69,7 @@ REASON = (
 # that drops calls is visible. The two zeros are exact. The text-with-encoding
 # floor is the sweep's own result, so converting a pinned text call to binary
 # or deleting it is a deliberate inventory change, not a silent one.
-MIN_FILES = 1564
+MIN_FILES = 1566
 MIN_BUILTIN_OPEN = 232
 MIN_BUILTIN_TEXT_ENC = 200
 MIN_BUILTIN_BINARY = 32
