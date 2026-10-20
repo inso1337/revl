@@ -117,13 +117,6 @@ REJECTIONS = {
     # method). A body that both BINDS such a name and CALLS it is refused; a
     # binding that merely shares the name is not.
     "shadowed_module_fn_call.rvl": "`helper` is bound here and called in this body",
-    # issue #2544: the PARAMETER form of the same shadowing, in a provide
-    # method. A provide-method parameter was the one binder
-    # `_refuse_callable_shadowing` did not enumerate, so `tag("x")` here
-    # lowered to a call of the module `fn tag` and the parameter was dropped
-    # without a word. Same refusal, same message, as the `let` form.
-    "shadowed_module_fn_call_provide_param.rvl":
-        "`tag` is bound here and called in this body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-
     # extern.md §3); declare the service operation `async fn` to admit it.
