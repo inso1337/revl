@@ -294,7 +294,7 @@ def test_permuting_the_stack_changes_nothing(tmp_path):
     with pytest.raises(RevlError) as first:
         resolve_file(str(doc), str(tmp_path))
 
-    doc.write_text(doc.read_text().replace(
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
         '  stack "layers/pg.rvl"\n  stack "layers/corp.rvl"\n',
         '  stack "layers/corp.rvl"\n  stack "layers/pg.rvl"\n'))
     with pytest.raises(RevlError) as second:
@@ -417,7 +417,7 @@ site layer Ops for Demo {
 
 def test_two_site_layers_are_refused(tmp_path):
     doc = _project(tmp_path)
-    doc.write_text(doc.read_text().replace(
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
         "  row @cache", '  site "layers/a.rvl"\n  site "layers/b.rvl"\n  row @cache'))
     with pytest.raises(RevlError) as caught:
         resolve_file(str(doc), str(tmp_path))
@@ -548,7 +548,7 @@ def test_a_layer_beside_the_composition_refuses(tmp_path):
     """A layer in the base document would be silently unapplied, and 426 §2.4
     has no silent no-ops."""
     doc = _project(tmp_path)
-    doc.write_text(doc.read_text() + "\nlayer Stray for Demo { remove @cache }\n")
+    doc.write_text(doc.read_text(encoding="utf-8") + "\nlayer Stray for Demo { remove @cache }\n")
     with pytest.raises(RevlError) as caught:
         resolve_file(str(doc), str(tmp_path))
     assert "and also layer `Stray`" in str(caught.value)
@@ -688,7 +688,7 @@ site layer Ops for Demo {
 }
 """)
     # add a base placement the site layer then overrides
-    base_text = (tmp_path / "base.rvl").read_text().replace(
+    base_text = (tmp_path / "base.rvl").read_text(encoding="utf-8").replace(
         "  row @cache from \"cache.rvl\" provides cache\n",
         "  row @cache from \"cache.rvl\" provides cache\n"
         "  place @db on process \"shared\" backend rust\n")

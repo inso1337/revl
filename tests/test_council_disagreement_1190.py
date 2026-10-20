@@ -410,7 +410,7 @@ def test_the_council_checker_imports_none_of_item_471s_machinery():
     """
     import ast
 
-    source = (ROOT / "src" / "revl" / "model_council.py").read_text()
+    source = (ROOT / "src" / "revl" / "model_council.py").read_text(encoding="utf-8")
     imported = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):

@@ -78,7 +78,7 @@ def test_the_category_follows_the_parser_not_a_table():
     """Let a function body also read `hole` as a statement head: the hole is
     then reachable outside any expression, so no category narrower than a
     whole program holds every hole, and the derivation says so."""
-    source = (ROOT / "src" / "revl" / "parser.py").read_text()
+    source = (ROOT / "src" / "revl" / "parser.py").read_text(encoding="utf-8")
     head = "    def _fn_stmt(self):\n        tok = self.peek()\n"
     assert head in source
     edited = source.replace(

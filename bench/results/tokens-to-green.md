@@ -17,13 +17,9 @@ first-pass rate does.
 ---
 
 ## tokens-to-green — output tokens spent per admitted component
-compiler: `f959e5e`  ·  reproduce: `python3 bench/tokens.py`
+compiler: `bc3ae802`  ·  reproduce: `python3 bench/tokens.py`
 
-The token every optimization must move: output tokens the model emitted across
-ALL attempts, up to and including the admitted one (retries included — a refused
-draft still cost its tokens). `est.` is a deterministic BPE-proxy over the
-committed generation files; **as-run $** is the real billed cost from the corpus.
-Green is recomputed against the current checker.
+The token every optimization must move: output tokens the model emitted across ALL attempts, up to and including the admitted one (retries included — a refused draft still cost its tokens). `est.` is a deterministic BPE-proxy over the committed generation files; **as-run $** is the real billed cost from the corpus. Green is recomputed against the current checker.
 
 | run | variant | admitted | mean est. tokens-to-green | median | total est. | as-run $ |
 |---|---|---|---:|---:|---:|---:|
@@ -35,9 +31,15 @@ Green is recomputed against the current checker.
 | baseline-deepseek-v4-pro | v2host | 23/30 | 170 | 129 | 3908 | $0.0558 |
 
 ### headline
-Across **136** admitted components in
-typed-deepseek-v4-pro+baseline-deepseek-v4-pro: **mean 149 est. output
-tokens-to-green** (median 130, total 20302), real as-run cost $0.2917.
+Across **136** admitted components in typed-deepseek-v4-pro+baseline-deepseek-v4-pro: **mean 149 est. output tokens-to-green** (median 130, total 20302), real as-run cost $0.2917.
+
+### model turns and tokens_in by invocation
+
+Each row keeps one benchmark invocation's model-turn count beside its input tokens. `tokens_in / turn` is supplementary; the raw pair shows both the spend and how many turns produced it.
+
+| run / spec / variant | attempt | turn_count | tokens_in | tokens_in / turn |
+|---|---:|---:|---:|---:|
+_No committed attempt records `turn_count` or `tokens_in`; historical usage is not inferred._
 
 ### costliest admitted cells (est. output tokens-to-green)
 
@@ -52,14 +54,10 @@ tokens-to-green** (median 130, total 20302), real as-run cost $0.2917.
 
 ### real vs needs-a-funded-run
 
-- **real now:** the generation artefacts (every `attempt-N.rvl`) and the as-run
-  dollar cost are committed and exact.
-- **proxy now:** `est. tokens` is a deterministic BPE-shaped estimate over those
-  artefacts — the model's own output-token count was never recorded for these
-  corpora.
-- **needs a funded run:** no committed cell carries a recorded `output_tokens`
-  yet. `run.py` now captures cline's `output_tokens` per attempt, so the next
-  paid run replaces the proxy with the exact figure with no code change here.
+- **real now:** the generation artefacts (every `attempt-N.rvl`) and the as-run dollar cost are committed and exact.
+- **proxy now:** `est. tokens` is a deterministic BPE-shaped estimate over those artefacts — the model's own output-token count was never recorded for these corpora.
+- **future invocation evidence:** `run.py` stores `turn_count` beside `tokens_in` per model invocation when available. Old runs and providers without these fields remain unavailable rather than becoming zero.
+- **needs a funded run:** no committed cell carries a recorded `output_tokens` yet. `run.py` now captures cline's `output_tokens` per attempt, so the next paid run replaces the proxy with the exact figure with no code change here.
 
 ---
 
@@ -69,10 +67,11 @@ tokens-to-green** (median 130, total 20302), real as-run cost $0.2917.
   bullets. A compound MCP verb, a terser wire-form, or `revl_edit` structured
   patches each claims to cut tokens; this metric is what says by how much, on
   the same corpus, before and after. No trick ships on taste.
-- The **generation-side** figure above is only the *output* half of the token
-  economy. The larger, unmeasured half is the **protocol-side** spend — the
-  tokens an agent burns re-sending source and running chatty verb sequences
-  through the MCP surface. That is what the companion audit ranks:
+- The committed generation-side figure measures output tokens. New runs also
+  record `turn_count` beside `tokens_in`; the committed corpus predates those
+  fields, as the table above states. The larger protocol-side spend — tokens an
+  agent burns re-sending source and running chatty verb sequences through the
+  MCP surface — is ranked in the companion audit:
   [`token-surface-audit.md`](token-surface-audit.md).
 - Where the paying tricks eventually land is the "How you're measured" contract
   in `docs/guide-ai-agents.md`; this metric is the scale they are weighed on.

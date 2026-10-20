@@ -147,7 +147,7 @@ def test_real_survey_bootstraps_outside_checkout(survey, tmp_path):
         "tests/fixtures/emit_rust_corpus/reserved_names.rvl", "--json", str(output),
     ], cwd=tmp_path, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
-    data = json.loads(output.read_text())
+    data = json.loads(output.read_text(encoding="utf-8"))
     assert len(data["results"]) == 2
     assert all(r["status"] == "byte_agreement" for r in data["results"])
     assert data["documents"] == ["tests/fixtures/emit_rust_corpus/reserved_names.rvl"]

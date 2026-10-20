@@ -1038,9 +1038,11 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
         dies on a G2 provision conflict, so the target set came back
         undecidable and the swap sailed past both the operator gate and an
         enforced lease on the component it was replacing.
-      * the operator's sanctioned `providers` — merged UNDER the agent's own
-        `modules` exactly as `server.compile_under_authoring` merges them, so a
-        composition that resolves for the handler resolves here too.
+      * the operator's sanctioned `providers`, composed beside the agent's own
+        `modules` exactly as `server.compile_under_authoring` composes them,
+        with the same refusal of a module at a provider's file (issue #2763),
+        so a composition that resolves for the handler resolves here too and
+        one the handler refuses derives nothing.
 
     Deliberately UNPROFILED: this derives *which components an action touches*,
     and it neither lowers a host body nor boots anything. The authoring trust is
@@ -1050,12 +1052,18 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
     from ..compiler import compile_files, compile_source  # noqa: PLC0415 — see docstring
     from ..errors import RevlError as _RevlError  # noqa: PLC0415
 
-    from .server import AUTHORING  # noqa: PLC0415 — cycle
+    from .server import (AUTHORING,  # noqa: PLC0415  (cycle)
+                         _refuse_provider_displacement)
 
-    merged = dict(AUTHORING.providers or {})
-    for path, text in (arguments.get("modules") or {}).items():
-        merged.setdefault(path, text)
+    providers = dict(AUTHORING.providers or {})
+    modules = arguments.get("modules") or {}
     try:
+        # issue #2763: the same refusal as the handler's own compile, so a
+        # module at a provider's file derives no target set (fail closed)
+        # instead of standing in for the provider here.
+        _refuse_provider_displacement(modules, providers)
+        merged = dict(providers)
+        merged.update(modules)
         if arguments.get("source") is not None:
             return compile_source(arguments["source"], "<candidate>.rvl",
                                   manifest=manifest, replacing=replacing,

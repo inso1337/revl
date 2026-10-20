@@ -58,7 +58,7 @@ component RoguePlanner provides plan: RoguePlan {
 def _bootstrap_entry() -> list[Path]:
     """truc's own components, in the order the committed manifest names them —
     the `[assembly]` of truc-as-a-truc-project, anchored to this checkout."""
-    manifest = tomllib.loads((BOOTSTRAP / "truc.toml").read_text())
+    manifest = tomllib.loads((BOOTSTRAP / "truc.toml").read_text(encoding="utf-8"))
     return [(TRUC / rel).resolve() for rel in manifest["assembly"]["entry"]]
 
 
@@ -102,7 +102,7 @@ def test_truc_assembles_truc_and_matches_the_committed_composition():
     assert verdict["admitted"] == [str(p) for p in _bootstrap_entry()]
 
     got = _normalize(verdict["manifest"])
-    expected = json.loads(GOLDEN.read_text())
+    expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
     assert got == expected, (
         "truc's self-assembly drifted from bootstrap/assembly.golden.json.\n"
         "If this change to truc's composition is intended, regenerate the "
@@ -125,7 +125,7 @@ def test_whole_composition_admits_as_one_stage0_boot():
     entry = _bootstrap_entry()
     ir = compile_files([str(p) for p in entry])   # raises RevlError on refusal
     got = _normalize(ir["manifest"])
-    assert got == json.loads(GOLDEN.read_text())
+    assert got == json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 
 def test_the_brain_is_pure_the_authority_is_the_rim():
@@ -133,7 +133,7 @@ def test_the_brain_is_pure_the_authority_is_the_rim():
     shown on truc itself: the Planner (truc's resolver brain) injects nothing
     and provides only `plan` — it holds no boundary authority — while the rim
     components carry every emission. Pinned via the committed composition."""
-    golden = json.loads(GOLDEN.read_text())
+    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
     by_name = {c["name"]: c for c in golden["components"]}
     planner = by_name["Planner"]
     assert planner["inject"] == [] and planner["provides"] == ["plan"]
@@ -218,8 +218,8 @@ def test_truc_assemble_cli_on_truc_itself_matches_golden(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     assert "admitted through the gate" in r.stdout
 
-    got = _normalize(json.loads((proj / "build" / "assembly.json").read_text()))
-    assert got == json.loads(GOLDEN.read_text())
+    got = _normalize(json.loads((proj / "build" / "assembly.json").read_text(encoding="utf-8")))
+    assert got == json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 
 @pytestmark_runtime
@@ -261,7 +261,7 @@ def package(tmp_path, monkeypatch):
 
 
 def _read_lock(package: Path) -> dict:
-    return json.loads((package / "truc.lock").read_text())
+    return json.loads((package / "truc.lock").read_text(encoding="utf-8"))
 
 
 def _write_lock(package: Path, doc: dict) -> None:
@@ -275,7 +275,7 @@ def test_the_committed_lock_is_current():
     rather than silently shipping an unpinned boot."""
     from revl.truc._launcher import lock_document
 
-    assert json.loads(LOCK.read_text()) == lock_document(), (
+    assert json.loads(LOCK.read_text(encoding="utf-8")) == lock_document(), (
         "src/revl/truc/truc.lock drifted from truc's components.\n"
         "If this change to truc's components is intended, regenerate the lock "
         "(`python -P -m revl.truc._relock`; the `-P` is the PYTHONSAFEPATH "

@@ -477,7 +477,7 @@ _DEMO_DIR = ROOT / "demo" / "legacy_enterprise"
                            "this tree; the assertion applies once it lands")
 def test_the_flagship_demo_no_longer_asserts_the_measured_gap() -> None:
     stale = [p.name for p in sorted(_DEMO_DIR.glob("*.py"))
-             if "MEASURED GAP" in p.read_text()]
+             if "MEASURED GAP" in p.read_text(encoding="utf-8")]
     assert not stale, (
         f"{stale}: item 525's demo still labels the screen-taint gap MEASURED, "
         "but item 521 slice 2 closed it - a screen read with no qualifier now "

@@ -146,8 +146,11 @@ class AuthoringTrust:
                     declares it with `--grant` or it is not enforced. A set —
                     even empty — turns it on.
     `providers`   — `{path: source}` of OPERATOR-sanctioned host-code modules,
-                    merged under the agent's own `modules` so an untrusted turn
-                    can COMPOSE host-backed services without authoring them.
+                    keyed by absolute path (`set_authoring_trust` normalises
+                    the path the operator typed), composed beside the agent's
+                    own `modules` so an untrusted turn can COMPOSE host-backed
+                    services without authoring them. An agent module that
+                    resolves to a provider's file is refused (issue #2763).
                     This is `Gate.propose`'s granted-providers map, same shape,
                     same rule: reaching their externs directly is still refused
                     by `check_no_host_extern_reach`; only their SERVICES compose.
@@ -213,6 +216,13 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
         if roots is not None:
             fields["roots"] = tuple(os.path.realpath(os.path.abspath(r))
                                     for r in roots)
+    if fields.get("providers") is not None:
+        # issue #2763: normalised ONCE, here, to the absolute path the compile
+        # keys its in-memory modules by. `--provider` stores the path as the
+        # operator typed it, relative to the cwd it was read against, so the
+        # absolute path is the one the compile keys that same text by.
+        fields["providers"] = {os.path.abspath(path): text
+                               for path, text in fields["providers"].items()}
     AUTHORING = replace(AUTHORING, **fields)
     return AUTHORING
 
@@ -813,16 +823,63 @@ def _ride_exported(texts: dict, authored: dict, assets: dict,
     authored.update(texts)
 
 
+def _provider_files(providers: dict) -> dict[str, str]:
+    """`{realpath: registered path}` of the operator's providers, the form a
+    caller-supplied path is compared in everywhere else (`_within_roots`)."""
+    return {os.path.realpath(os.path.abspath(path)): path
+            for path in providers}
+
+
+def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
+    """Issue #2763: refuse a candidate whose in-memory module names a file the
+    operator registered as a `--provider`, under any spelling of that path.
+
+    A `--provider` module is the operator's own host code, composed under the
+    path the operator registered. Before, the merge compared the agent's keys
+    with the providers' as typed, while the compile read a map keyed by
+    absolute path: an agent module sent as the provider's absolute path, or as
+    `./` plus the registered path, was a different key and the same file, and
+    the agent's text compiled in the provider's place. A refusal, not a silent
+    drop: the reason names the module as the caller sent it and the provider
+    it collided with, a path inside the roots the jail refusal already shows,
+    and nothing is compiled."""
+    taken = _provider_files(providers)
+    for key in modules:
+        registered = taken.get(os.path.realpath(os.path.abspath(key)))
+        if registered is None:
+            continue
+        raise RevlError(
+            key, 1,
+            f"admission refused: module `{key}` names the operator-sanctioned "
+            f"provider `{registered}`; an agent-supplied module may not take "
+            f"a granted provider's place",
+            hint="a `--provider` module is the operator's own host code and "
+                 "is composed under the path the operator registered; it "
+                 "cannot be replaced from the transport under any spelling "
+                 "of that path. Send your module under a path of its own and "
+                 "compose the provider's service through `use` of the "
+                 "registered path, or ask the operator to change the provider",
+            category="admission")
+
+
 def _compile_candidate(source, files, manifest, modules, replacing, profile,
                        report) -> dict:
     """One pass of `compile_under_authoring`: the decision compile and, with
     operator-sanctioned providers, the composition compile."""
     providers = dict(AUTHORING.providers or {})
-    # operator-sanctioned modules ride UNDER the agent's own `modules`: an
-    # agent-supplied entry can never displace a provider the operator granted.
+    # Issue #2763: an agent-supplied module may not take a provider's place.
+    # Providers are keyed by absolute path (`set_authoring_trust`), and the
+    # compile below reads a map keyed the same way, so the comparison that
+    # guards the merge has to be made in that form too: a module sent as the
+    # provider's absolute path, a `./` spelling of it, or a symlink to the
+    # file is the same file. Resolved with `realpath`, the path jail's rule.
+    # The outcome is a refusal, not a silent drop of either text: the agent
+    # learns which provider it collided with and sends its module elsewhere.
+    if modules:
+        _refuse_provider_displacement(modules, providers)
     merged = dict(providers)
     if modules:
-        merged.update({k: v for k, v in modules.items() if k not in merged})
+        merged.update(modules)
 
     # every in-memory module, keyed the way `compile_files` resolves a `use`:
     # by absolute path. The agent's own modules ride here in BOTH compiles of
@@ -913,38 +970,57 @@ def _compile(source: str | None, files: list[str] | None,
                                  report=compile_report)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = _authored_host_bodies(
-        ir, source, modules,
-        export_area=_exported_candidate(files, compile_report) is not None)
+        ir, source, modules, files=files, report=compile_report)
     return ir
 
 
 def _authored_host_bodies(ir: dict, source: str | None,
                           modules: dict | None, *,
-                          export_area: bool = False,
-                          compile_authored: bool = False) -> list:
-    """The agent-authored host bodies `ir` carries: empty unless the candidate
-    is the author's text under an open authoring trust.
+                          files: list[str] | None = None,
+                          report: dict,
+                          include_trusted_files: bool = False) -> list:
+    """The host bodies declared by candidate-authored sources in `ir`.
 
-    `export_area` says the candidate carries a file inside an export directory.
-    Such a file is the author's by its path and always has been: `revl_export`
-    writes source only under `<root>/.revl/export/`, and `export_area.py` reads
-    that as authorship without consulting the trust at all. So this is not a
-    question about a profile, unlike the realm-removal check, which needs one to
-    have been applied to have something to compare against. Issue #2628: a swap
-    sent only as such a file reported no unreviewed host code, so the operator
-    approved a crossing without being told what the composition carried.
+    The merged composition also includes operator-sanctioned provider modules.
+    The compile report keeps each host-body extern attached to its source so a
+    provider body is not presented on the approval ticket as the candidate's.
+    """
+    if not AUTHORING.host_code:
+        return []
 
-    `compile_authored` says the compile that produced `ir` reported the text as
-    authored (`report["authored"]`). Under trusted host code that includes a
-    files-only candidate outside every export area (issue #2672), because the
-    vouched-for host bodies can rewrite it on disk. The swap passes it so the
-    approval ticket names what the disclosure gate already treats as the
-    agent's text; leaving the ticket empty there would let a yes admit a
-    composition whose authorship the gate itself does not trust."""
-    authored = (source is not None or bool(modules) or export_area
-                or compile_authored)
-    return (_host_bodies(ir) if authored and AUTHORING.host_code
-            else [])
+    candidate_sources = set()
+    if source is not None:
+        candidate_sources.add(os.path.abspath("<candidate>.rvl"))
+    candidate_sources.update(os.path.abspath(path) for path in (modules or {}))
+    # Files only count as candidate-authored when the compile treated them as
+    # agent text. Ordinary operator files can also be passed through `files`;
+    # the export area is the path-based authorship boundary for those sources.
+    named_export, reached_export = _export_area_parts(files, report)
+    candidate_sources.update(os.path.abspath(path) for path in named_export)
+    candidate_sources.update(os.path.abspath(path) for path in reached_export)
+    # In trusted host-code mode a files-only compile outside the export area
+    # is still treated as carrying host code for admission and disclosure
+    # (#2672). There is no transport source or export path to attribute
+    # narrowly, so use the source map returned by that exact compile.
+    if (include_trusted_files and report.get("authored")
+            and source is None and not modules
+            and not candidate_sources):
+        candidate_sources.update(report.get("host_extern_sources", {}))
+    if not candidate_sources:
+        return []
+    provider_sources = {
+        os.path.abspath(path) for path in (AUTHORING.providers or {})
+    }
+    candidate_sources.difference_update(provider_sources)
+
+    authored_externs = {
+        name
+        for path, names in report.get("host_extern_sources", {}).items()
+        if path in candidate_sources
+        for name in names
+    }
+    return [body for body in _host_bodies(ir)
+            if body.get("extern") in authored_externs]
 
 
 def _summary(ir: dict) -> dict:
@@ -1359,7 +1435,8 @@ def _tool_load(arguments: dict, compiled=None) -> dict:
     return _canonical.attach(
         _boot(ir, source, modules, arguments.get("config"),
               _load_records(arguments.get("record")), origin,
-              files=files, compile_report=compile_report), completed)
+              files=files,
+              compile_report=compile_report), completed)
 
 
 def _load_records(requested) -> bool:
@@ -1400,22 +1477,13 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         next=_remedy.load_next())
 
 
-def _boot(ir: dict, source, modules, config, record: bool, origin: dict, *,
-          files: list[str] | None = None,
-          compile_report: dict | None = None) -> dict:
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
+          *, files: list[str] | None = None,
+          compile_report: dict) -> dict:
     """Boot a compiled composition: `Session.load`, then record what it
-    authored. Shared by `revl_load` and a draft that has no holes left.
-
-    `files` and `compile_report` are the load caller's candidate, so a load
-    naming an export-area file reports the host code it carries exactly as a
-    swap does (issue #2641). `_exported_candidate` reads the named files and
-    the ones the compile reached by `use`. A draft boots through the same
-    function without them, which keeps its behaviour: a filled draft carries
-    its edited buffer in `modules`, so its bodies are reported as authored
-    before this value can matter."""
+    authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(
-        ir, source, modules,
-        export_area=_exported_candidate(files, compile_report or {}) is not None)
+        ir, source, modules, files=files, report=compile_report)
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
@@ -1439,8 +1507,9 @@ def _boot_draft(vs: dict, config, record, verify=None) -> dict:
     refusal = _leases.check(SESSION, "load", candidate)
     if refusal is not None:
         return _draft.still_a_draft(_refused_by_lease(refusal))
+    compile_report: dict = {}
     try:
-        ir = _edit.compile_virtual(vs)
+        ir = _edit.compile_virtual(vs, report=compile_report)
     except RevlError as error:
         return _draft.still_a_draft(report(error))
     refused = verify(candidate) if verify is not None else None
@@ -1448,7 +1517,8 @@ def _boot_draft(vs: dict, config, record, verify=None) -> dict:
         return _draft.still_a_draft(refused)
     modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
     booted = _boot(ir, vs.get("source"), modules, config, _load_records(record),
-                   _edit._origin_from(vs))
+                   _edit._origin_from(vs), files=vs.get("files"),
+                   compile_report=compile_report)
     if not booted.get("ok"):
         return _draft.still_a_draft(booted)
     return {**booted, "draft": False, "booted": True, "loaded": True}
@@ -1593,16 +1663,16 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # issue #1779: and what this compile READ rides with it, so the swapped-in
     # generation anchors records to the files it actually compiled
     origin = _origin(stored, _dependency_buffers(compile_report))
+    authored = _authored_host_bodies(full, source, modules,
+                                     files=files,
+                                     report=compile_report,
+                                     include_trusted_files=True)
     # issue #2628: read once, asked two different questions below. The ticket
     # asks whether the author wrote this text, which for a file inside an
     # export directory is yes by its path. The realm check asks whether a
     # profile was applied, which needs the gate further down. Sharing the call
     # keeps the two answers about the same files.
     export_texts = _exported_candidate(files, compile_report)
-    authored = _authored_host_bodies(
-        full, source, modules,
-        export_area=export_texts is not None,
-        compile_authored=bool(compile_report.get("authored")))
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
     # realm by leaving its clause out. A swap of jailed `files` is exempt

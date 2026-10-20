@@ -321,7 +321,7 @@ def _run_recorded(ir: dict, wal: Path) -> tuple[int, str, str]:
             del os.environ["REVL_WAL"]
         else:
             os.environ["REVL_WAL"] = previous
-    return rc, buffer.getvalue(), (wal.read_text() if wal.exists() else "")
+    return rc, buffer.getvalue(), (wal.read_text(encoding="utf-8") if wal.exists() else "")
 
 
 @pytest.mark.parametrize("shape", sorted(_SHAPES))

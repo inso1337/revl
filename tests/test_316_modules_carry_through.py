@@ -189,18 +189,21 @@ def test_a_jailed_file_may_use_an_in_memory_module(tmp_path):
 
 
 def test_an_agent_module_cannot_displace_a_provider():
-    """The merge order is providers FIRST. An agent-supplied entry at a
-    provider's path is ignored, in both compiles."""
+    """An agent-supplied entry at a provider's path is refused, naming the
+    provider (issue #2763; it used to be dropped silently, and only under the
+    registered spelling). `tests/test_mcp_provider_displacement_2763.py` holds
+    the other spellings of the same file."""
     _set_trust(providers=PROVIDERS)
     hijack = {"prov.rvl": DECLS + "component OpsProvider provides tool: Tool {\n"
                                   '  provide tool { fn describe() = "mine" }\n'
                                   "}\n"}
-    ir = server.compile_under_authoring(
-        DECLS + "component T provides tool: Tool {\n"
-                '  provide tool { fn describe() = "t" }\n}\n',
-        None, modules=hijack)
-    by_name = {c["name"]: c for c in ir["manifest"]["components"]}
-    assert by_name["OpsProvider"]["provides"] == ["ops"], by_name
+    with pytest.raises(RevlError) as refused:
+        server.compile_under_authoring(
+            DECLS + "component T provides tool: Tool {\n"
+                    '  provide tool { fn describe() = "t" }\n}\n',
+            None, modules=hijack)
+    assert "provider" in refused.value.message
+    assert "prov.rvl" in refused.value.message
 
 
 # =========================================================================== #

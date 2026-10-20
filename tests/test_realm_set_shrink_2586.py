@@ -113,9 +113,9 @@ def _assert_shrink_refused(result: dict, path, component: str,
     assert str(refusal.get("file")).endswith(path.name), refusal
     if not pointed:  # the edit moves lines, so the original line is no guide
         return
-    header = next(h for h in path.read_text().splitlines()
+    header = next(h for h in path.read_text(encoding="utf-8").splitlines()
                   if h.startswith(f"component {component} "))
-    assert refusal.get("line") == _line_of(path.read_text(), header), refusal
+    assert refusal.get("line") == _line_of(path.read_text(encoding="utf-8"), header), refusal
 
 
 @needs_cordis

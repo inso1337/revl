@@ -760,36 +760,39 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
     A refused compile records nothing — the exception leaves `vs` untouched.
 
     `report` (issue #1779's out-parameter, as `compile_under_authoring` takes
-    it) lets a caller read what the compile read, and `report["authored"]` says
-    whether the compiled text arrived over the transport (#2423). A working set
-    with inline `source` is such text; a files-only set is decided by
-    `compile_under_authoring` from the files it named and reached."""
+    it) lets callers read what the compile read. It also reports whether the
+    compiled text arrived over the transport (#2423), and which source paths
+    declared host bodies so approval tickets can attribute them (#2631).
+    `_swap_server_side` uses it to identify `use`-reached export files, and
+    `_boot_draft` passes it to the ticket builder."""
     from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
 
-    report = {} if report is None else report
+    compile_report: dict = {}
     if vs.get("source") is not None:
         document = compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
                                   replacing=replacing, modules=vs.get("modules") or None,
-                                  profile=AUTHORING.profile(), report=report)
-        report["authored"] = True
+                                  profile=AUTHORING.profile(), report=compile_report)
+        compile_report["authored"] = True
     elif vs.get("files"):
         from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
         document = compile_under_authoring(None, list(vs["files"]),
                                            manifest=manifest,
                                            modules=file_modules(vs) or None,
-                                           replacing=replacing, report=report)
+                                           replacing=replacing, report=compile_report)
     else:
         raise EditError("the working source set has no source to compile")
     from .server import _dependency_buffers  # noqa: PLC0415 — cycle
 
-    dependencies = _dependency_buffers(report)
+    dependencies = _dependency_buffers(compile_report)
     if dependencies:
         vs[ORIGIN_DEPENDENCIES] = dependencies
-    elif vs.get("source") is not None or report.get("dependencies") is not None:
+    elif vs.get("source") is not None or compile_report.get("dependencies") is not None:
         # a compile that read no dependency file leaves none behind, so a
         # `use`-reached truc that stops being reached stops being a buffer
         vs[ORIGIN_DEPENDENCIES] = {}
+    if report is not None:
+        report.update(compile_report)
     return document
 
 

@@ -110,7 +110,7 @@ def test_an_edit_to_the_retention_sink_set_moves_the_ruleset_digest(tmp_path, mo
     after_dir = _scratch_ruleset(tmp_path, "after")
 
     retention_copy = after_dir / "retention.py"
-    lines = retention_copy.read_text().splitlines(keepends=True)
+    lines = retention_copy.read_text(encoding="utf-8").splitlines(keepends=True)
     kept = [line for line in lines if not line.strip().startswith('"wal",')]
     assert len(kept) == len(lines) - 1, "the sink set moved; re-anchor this edit"
     retention_copy.write_text("".join(kept))
@@ -199,7 +199,7 @@ def test_the_digest_is_an_identity_of_the_ruleset_and_not_of_its_neighbours(tmp_
     before = _digest_of(monkeypatch, directory)[0]
 
     shutil.copyfile(here / "policy.py", directory / "policy.py")
-    (directory / "policy.py").write_text((directory / "policy.py").read_text() + "\n")
+    (directory / "policy.py").write_text((directory / "policy.py").read_text(encoding="utf-8") + "\n")
 
     after = _digest_of(monkeypatch, directory)[0]
     assert before == after

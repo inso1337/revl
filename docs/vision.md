@@ -99,7 +99,8 @@ transport-safety verdict is (`tests/test_distribute.py`).
   (`verified`, DESIGN.md §6).
 - **The extern boundary is trusted, not verified** - but it is *enumerable*
   (G8, `revl audit`): revl cannot check foreign code, only force every escape
-  hatch to be declared and auditable.
+  hatch to be declared and auditable. A host's other tools need their own
+  classification; see [the substrate-boundary rule](substrate-boundary.md).
 - **The calculus's metatheorems transfer by construction, they are not
   re-proved here.** The research claim is a *surface language whose every
   well-typed program satisfies the calculus's hypotheses* (DESIGN.md §5), not

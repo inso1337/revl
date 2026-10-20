@@ -149,7 +149,7 @@ def census() -> list[tuple]:
     sites = []
     for path in sorted(MCP.glob("*.py")):
         walker = _Sites(path.name)
-        walker.visit(ast.parse(path.read_text()))
+        walker.visit(ast.parse(path.read_text(encoding="utf-8")))
         sites += walker.sites
     return sites
 

@@ -59,7 +59,7 @@ def test_counts_file_matches_the_bench(tmp_path):
     )
     assert run.returncode == 0, run.stderr[-2000:]
     printed = run.stdout.splitlines()
-    committed = (BENCH / "results" / "counts.txt").read_text().splitlines()
+    committed = (BENCH / "results" / "counts.txt").read_text(encoding="utf-8").splitlines()
     assert printed, "the bench printed nothing"
     assert printed[1:] == committed[1:], (
         "bench/codegen/typescript/results/counts.txt is stale: regenerate it "

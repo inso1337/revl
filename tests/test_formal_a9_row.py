@@ -350,17 +350,17 @@ def test_the_coverage_ratchet_bites_without_each_witness(harness, verdicts):
 def test_the_oracle_decides_the_row_with_the_model_a9b():
     """The verdict row is the L2 file's own `a9B` over blocks AND routes,
     bridged by `a9RowB_iff`, and that bridge is under the axioms gate."""
-    src = ORACLE.read_text()
+    src = ORACLE.read_text(encoding="utf-8")
     assert re.search(r"def a9RowB .*:=\s*\n\s*RevL\.A9\.a9B ⟨c, blocks, routed⟩", src)
     assert "#print axioms RevLOracle.a9RowB_iff" in src
-    assert "RevLOracle.a9RowB_iff" in GATE.read_text()
+    assert "RevLOracle.a9RowB_iff" in GATE.read_text(encoding="utf-8")
 
 
 def test_the_l2_file_states_both_directions_and_the_caveats():
     """Two directions matching `_lower_provide` and `_lower_component`'s two
     refusals, the double install beside them, and the two things the model
     does not claim written down."""
-    src = LEAN.read_text()
+    src = LEAN.read_text(encoding="utf-8")
     assert re.search(r"def BlocksDeclared .*:= ∀ k ∈ i\.blocks, k ∈ i\.comp\.provides", src)
     assert re.search(r"def DeclaredInstalled .*:=\s*\n\s*∀ k ∈ i\.comp\.provides, "
                      r"k ∈ i\.blocks ∨ k ∈ i\.routed", src)

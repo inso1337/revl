@@ -328,7 +328,7 @@ def adapter_census_bypass(baseline_path=None) -> Derivation:
                for head, (impls, _) in engines.items()}
     baseline = json.loads(
         (Path(baseline_path) if baseline_path
-         else ROOT / CENSUS_BASELINE).read_text())
+         else ROOT / CENSUS_BASELINE).read_text(encoding="utf-8"))
     tasks: list[Task] = []
     for bucket, cases in sorted(baseline.get("buckets", {}).items()):
         head = bucket.split("/")[0]

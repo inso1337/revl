@@ -94,7 +94,7 @@ LINE = {"child_role_reach": 24, "grandchild_role_reach": 18,
 
 
 def _src(stem: str) -> str:
-    return (CORPUS / f"{stem}.rvl").read_text()
+    return (CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
 
 
 def _refusal(stem: str) -> RevlError:

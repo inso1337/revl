@@ -126,7 +126,7 @@ def test_untrusted_deletion_of_the_requirers_clause_is_refused_by_name(loaded):
     # it points at the requirer, in the edited file
     assert str(refusal.get("file")).endswith(loaded.name), refusal
     assert refusal.get("line") == _line_of(
-        loaded.read_text(), "component TenantAApp requires kv: Kv {"), refusal
+        loaded.read_text(encoding="utf-8"), "component TenantAApp requires kv: Kv {"), refusal
     committed = _call("revl_change", {"commit": True})
     assert not committed.get("swapped"), committed
     assert _realms("TenantAApp") == {"kv": "tenant_a"}

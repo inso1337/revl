@@ -62,7 +62,7 @@ def test_the_key_changes_when_lower_rvl_changes(tmp_path):
     shutil.copyfile(ROOT / "selfhost" / "lower.rvl", copy)
     before = cache_key(copy)
     assert cache_key(copy) == before
-    copy.write_text(copy.read_text() + "\n")
+    copy.write_text(copy.read_text(encoding="utf-8") + "\n")
     assert cache_key(copy) != before
 
 
@@ -74,7 +74,7 @@ def test_the_key_moves_with_every_input(tmp_path, fresh, edit):
     root, inputs = _tree(tmp_path)
     before = cache_key(root, inputs)
     if edit == "the document":
-        root.write_text(root.read_text() + "\n")
+        root.write_text(root.read_text(encoding="utf-8") + "\n")
     elif edit == "a relative import":
         (root.parent / "dep.rvl").write_text('use "./deep.rvl" { h }\nfn f() -> Int { 5 }\n')
     elif edit == "an import of an import":
@@ -180,7 +180,7 @@ def test_a_new_key_replaces_the_old_file(tmp_path, fresh):
     calls = []
     compiled_ir(root, _counting_compile(calls), inputs)
     [old] = cache.iterdir()
-    root.write_text(root.read_text() + "\n")
+    root.write_text(root.read_text(encoding="utf-8") + "\n")
     compiled_ir(root, _counting_compile(calls), inputs)
     [new] = cache.iterdir()
     assert new != old and new.suffix == ".pickle"
@@ -230,7 +230,7 @@ def test_a_compiler_edit_mid_session_never_reaches_the_disk(tmp_path, fresh):
     (inputs.package_dir / "compiler.py").write_text("X = 'edited'\n")
     assert cache_key(root, inputs) == pinned  # the code that runs, not the disk
     assert fresh.package_drifted(inputs.package_dir)
-    root.write_text(root.read_text() + "\n")  # a miss after the edit
+    root.write_text(root.read_text(encoding="utf-8") + "\n")  # a miss after the edit
     compiled_ir(root, _counting_compile(calls), inputs)
     assert len(calls) == 2
     assert list(cache.iterdir()) == [first]  # nothing written, nothing pruned

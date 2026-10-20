@@ -803,7 +803,7 @@ def test_shipped_pool_execute_body_compiles_as_a_unit_method(path):
     # unnoticed (issue #2123). Declare the method `-> Unit`, the natural
     # spelling for "run this statement, I want no result", and the shipped body
     # must still compile.
-    src = (ROOT / path).read_text()
+    src = (ROOT / path).read_text(encoding="utf-8")
     assert "fn execute(sql) = pool.execute(sql)" in src
     unit = src.replace("fn execute(sql: Str) -> Int",
                        "fn execute(sql: Str) -> Unit")

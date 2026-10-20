@@ -18,7 +18,7 @@ def _wal_with_seqless_tail(path):
     timeline.record_emission("bus", "send", ("x",), "Bus", ("<f>", 0))
     wal.append_timeline(timeline)
     wal.close()
-    lines = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    lines = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
     effect = next(r for r in lines if r.get("record") == "effect")
     effect.pop("seq", None)
     lines.append({"record": "emission-complete"})

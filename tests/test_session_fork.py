@@ -238,7 +238,7 @@ def _golden_timeline() -> replay.Timeline:
 
 def test_compensate_false_report_matches_the_golden():
     golden = json.loads((_BACKEND / "golden"
-                         / "fork_report_compensate_false.json").read_text())
+                         / "fork_report_compensate_false.json").read_text(encoding="utf-8"))
     report = _run(_golden_timeline().step_back(-1, compensate=False))
     assert report == golden
 

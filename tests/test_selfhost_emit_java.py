@@ -643,7 +643,7 @@ def test_an_extern_with_a_java_body_emits_no_refusal(emitted, reference, tmp_pat
     path = tmp_path / "with_java_body.rvl"
     path.write_text((
         (ROOT / "tests" / "fixtures" / "emit_java_refusals"
-         / "extern_no_java_body.rvl").read_text().replace(
+         / "extern_no_java_body.rvl").read_text(encoding="utf-8").replace(
             " = @py { return name } = @ts { return name; } = @rs { name } = @go { return name }",
             " = @py { return name } = @java { return name; }")
     ))
@@ -694,7 +694,7 @@ JAVA_REFUSED_BEFORE_A_FAULT_TEST = [
                          ids=[r.split("/")[1] for r, _, _ in JAVA_REFUSED_BEFORE_A_FAULT_TEST])
 def test_a_refusal_before_a_fault_test_keeps_the_reference_order(
         emitted, reference, tmp_path, rel, refusal, first):
-    src = (ROOT / "tests" / "fixtures" / rel).read_text()
+    src = (ROOT / "tests" / "fixtures" / rel).read_text(encoding="utf-8")
     path = tmp_path / "with_fault_test.rvl"
     path.write_text(src + "\n" + FAULT_TEST_SRC)
     ir = compile_files([str(path)])
@@ -714,7 +714,7 @@ def test_a_refusal_before_a_fault_test_keeps_the_reference_order(
 # _refuse_required_stream fires from component rendering.
 NO_JAVA_BODY_AND_REQUIRED_STREAM = (ROOT / "tests" / "fixtures"
                                     / "emit_java_refusals"
-                                    / "extern_no_java_body.rvl").read_text() + """
+                                    / "extern_no_java_body.rvl").read_text(encoding="utf-8") + """
 
 event Tap(key: tap_id) { tap_id: Str }
 service Sink { emission fn deliver(id: Str) }

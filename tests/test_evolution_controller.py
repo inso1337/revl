@@ -613,7 +613,7 @@ def test_the_cli_exit_status_distinguishes_the_three_decisions(
         out = tmp_path / f"verdict-{index}.json"
         src.write_text(json.dumps(record))
         assert ec.main(["--proposal", str(src), "--json", str(out)]) == status
-        assert json.loads(out.read_text())["decision"] == decision
+        assert json.loads(out.read_text(encoding="utf-8"))["decision"] == decision
 
 
 def test_an_unreadable_proposal_refuses(tmp_path):
@@ -630,7 +630,7 @@ def test_the_verdict_json_shows_that_measurements_were_not_read(
     out = tmp_path / "v.json"
     src.write_text(json.dumps(widened_record(clean_tree)))
     assert ec.main(["--proposal", str(src), "--json", str(out)]) == ec.REFUSE
-    verdict = json.loads(out.read_text())
+    verdict = json.loads(out.read_text(encoding="utf-8"))
     assert verdict["measurements_read"] is False
     assert verdict["code"] == "AUTHORITY_WIDENED"
     assert verdict["refusing_stage"] == "authority"

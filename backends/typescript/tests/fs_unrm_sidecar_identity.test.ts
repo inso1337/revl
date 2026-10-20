@@ -28,9 +28,11 @@
 // timestamp tick; the digest does, because it does not depend on clock
 // resolution. The same-tick test pins the recorded stat tuple to the tampered
 // file's own tuple before the inverse runs, so only the digest can refuse and
-// the result does not depend on the clock. A capture with no `sha256` (an older
-// WAL) is compared stat-only and still restores, and a parked file that could
-// not be read at park time stays stat-only too.
+// the result does not depend on the clock. A capture with no `sha256` at all (an
+// older WAL) is compared stat-only and still restores, and a parked file that
+// could not be read at park time stays stat-only too. A capture that CARRIES
+// the key must carry a bare 64-lowercase-hex digest: a present `null`, number
+// or malformed string is refused `EIDENTITY`, not read as an absent key.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
@@ -256,6 +258,59 @@ describe('an untampered unrm is unchanged', () => {
 })
 
 // ===========================================================================
+// A capture that CARRIES the digest key must carry a bare 64-lowercase-hex
+// digest. A present `null` is NOT "no digest": reading it as absent was the
+// fail-open this pins, because a writer who can rewrite the record to null
+// would downgrade the parked-sidecar check to stat-only, which is the check
+// the key exists to keep off the clock. Only an ABSENT key is legacy. The
+// absent-key legacy control and the valid-digest control already live above
+// ("a capture with the digest key dropped still unrms" and the untampered
+// unrm).
+// ===========================================================================
+
+describe('a present recorded digest must be a bare 64-lowercase-hex string', () => {
+  it('refuses a present null digest and leaves the target untouched', () => {
+    const { witness, target, sidecar } = removed()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    ;(witness.capture as unknown as Record<string, unknown>).sha256 = null
+
+    const refused = refusalOf(() => fsUnrm(witness))
+    if (refused === null) {
+      throw new Error(
+        `the present-null digest was installed: ${fs.readFileSync(target, 'utf-8')}`)
+    }
+    expect(refused.code).toBe('EIDENTITY')
+    expect(refused.message).toContain('sha256')
+    expect(refused.message).toContain('malformed')
+
+    expect(fs.existsSync(target)).toBe(false)
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('payload')
+  })
+
+  it('refuses a recorded digest that is not 64 lowercase hex', () => {
+    const { witness, target, sidecar } = removed()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    ;(witness.capture as unknown as Record<string, unknown>).sha256 = 'z'.repeat(64)
+
+    const refused = refusalOf(() => fsUnrm(witness))
+    if (refused === null) {
+      throw new Error(
+        `the malformed digest was installed: ${fs.readFileSync(target, 'utf-8')}`)
+    }
+    expect(refused.code).toBe('EIDENTITY')
+    expect(refused.message).toContain('sha256')
+    expect(refused.message).toContain('malformed')
+
+    expect(fs.existsSync(target)).toBe(false)
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('payload')
+  })
+})
+
+// ===========================================================================
 // The tampered sidecars. Each of these installed the attacker's file before.
 // ===========================================================================
 
@@ -405,36 +460,22 @@ describe('a parked file whose bytes changed is refused', () => {
     expect(capture.sha256).toBe(sha256('payload'))
   })
 
-  it('refuses a recorded digest that is not lowercase hex', () => {
-    // A value the capture spelled as a digest but that is not one is a corrupt
-    // record, not a legacy one: `refuseDriftedDigest` refuses it `EIDENTITY`
-    // rather than fall through to stat-only and drop the one check that does
-    // not depend on the clock. Peer py case:
-    // `test_a_recorded_digest_that_is_not_lowercase_hex_is_refused`.
-    const { witness, target, sidecar } = removed()
-    if (witness.capture === null || witness.capture === undefined) {
-      throw new Error('the witness carries no capture')
-    }
-    witness.capture.sha256 = 'A'.repeat(64)  // hex, but not lowercase
+})
 
-    const refused = refusalOf(() => fsUnrm(witness))
-    if (refused === null) {
-      throw new Error('the malformed digest was accepted and installed')
-    }
-    expect(refused.code).toBe('EIDENTITY')
-    expect(refused.message).toContain('not a lowercase SHA-256 digest')
+// ===========================================================================
+// #2678 first pinned the present shape checks here, and they pinned the old
+// behaviour: a present `null` installed stat-only and read as "no digest".
+// #2776 closed that fail-open in `refuseMalformedDigest`, which both install
+// paths route every PRESENT value through, so these cases assert the refusal
+// instead. Only an ABSENT key is legacy; the boundary controls follow.
+// ===========================================================================
 
-    expect(fs.existsSync(target)).toBe(false)
-    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('payload')
-  })
-
-  it('treats a present null digest as no digest and installs stat-only', () => {
-    // The stated parity gap, not an endorsement: py's shared
-    // `_refuse_drifted_identity` refuses a present-null `sha256` as
-    // `EIDENTITY`, while the ts side has no such shape check and
-    // `refuseDriftedDigest` returns on null. This pins the current ts
-    // behaviour so the divergence is explicit; refusing it belongs to a
-    // separate parity change.
+describe('a present but malformed recorded digest is refused', () => {
+  it('refuses a present null digest with the target untouched and the sidecar intact', () => {
+    // Peer py case: `test_a_present_null_recorded_digest_is_refused`. Reading
+    // the null as absent let a writer who can rewrite the record downgrade the
+    // sidecar check to stat-only, which is the check the key exists to keep
+    // off the clock.
     const { witness, target, sidecar } = removed()
     if (witness.capture === null || witness.capture === undefined) {
       throw new Error('the witness carries no capture')
@@ -442,10 +483,79 @@ describe('a parked file whose bytes changed is refused', () => {
     const capture = witness.capture as { sha256?: string | null }
     capture.sha256 = null
 
+    const refused = refusalOf(() => fsUnrm(witness))
+    if (refused === null) {
+      throw new Error(
+        `the present-null digest was installed: ${fs.readFileSync(target, 'utf-8')}`)
+    }
+    expect(refused.code).toBe('EIDENTITY')
+    expect(refused.message).toContain(
+      'not 64 lowercase hex, so the capture is malformed')
+
+    expect(fs.existsSync(target)).toBe(false)
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('payload')
+    expect(capture.sha256).toBeNull()
+  })
+
+  it('refuses a 64 character uppercase digest', () => {
+    // Hex, but not lowercase: a shape check that only demanded "64 hex
+    // characters" would admit this, so it is the vector the lowercase half of
+    // the rule exists for. Same refusal code and message as any other present
+    // value that is not a bare lowercase digest, and the parked bytes are
+    // still there for a corrected replay.
+    const { witness, target, sidecar } = removed()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    witness.capture.sha256 = 'A'.repeat(64)
+
+    const refused = refusalOf(() => fsUnrm(witness))
+    if (refused === null) {
+      throw new Error(
+        `the uppercase digest was installed: ${fs.readFileSync(target, 'utf-8')}`)
+    }
+    expect(refused.code).toBe('EIDENTITY')
+    expect(refused.message).toContain(
+      'not 64 lowercase hex, so the capture is malformed')
+
+    expect(fs.existsSync(target)).toBe(false)
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('payload')
+  })
+})
+
+describe('the absent-key and valid-digest boundaries', () => {
+  it('installs a capture with no digest key stat-only', () => {
+    // The absent key is the legacy record, and the comparison it takes is
+    // stat-only. Dropping the key and rewriting the parked bytes in place with
+    // the same-tick tuple pinned proves that: a present key would refuse this
+    // rewrite, an absent one still replays.
+    const { witness, target, sidecar } = removed()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    delete witness.capture.sha256
+    expect(witness.capture.sha256).toBeUndefined()
+    const fd = fs.openSync(sidecar, 'r+')
+    fs.writeSync(fd, Buffer.from('POISON!'), 0, 7, 0)
+    fs.closeSync(fd)
+    asIfSameTick(witness, sidecar)
+
+    fsUnrm(witness)
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('POISON!')
+    expect(fs.existsSync(sidecar)).toBe(false)
+  })
+
+  it('still installs a valid digest', () => {
+    // The positive direction: a capture whose recorded digest matches the
+    // parked bytes installs, so the refusals above cannot be satisfied by an
+    // inverse that refuses every present key.
+    const { witness, target, sidecar } = removed()
+    expect(witness.capture?.sha256).toBe(sha256('payload'))
+
     fsUnrm(witness)
 
     expect(fs.readFileSync(target, 'utf-8')).toBe('payload')
     expect(fs.existsSync(sidecar)).toBe(false)
-    expect(capture.sha256).toBeNull()
   })
 })

@@ -244,7 +244,7 @@ _STAGED_BYPASSES = (
 def _staged_baseline(tmp_path, cases):
     import json
     live = json.loads((ROOT / "tools" / "gate_reference_census_baseline.json")
-                      .read_text())
+                      .read_text(encoding="utf-8"))
     staged = tmp_path / "baseline.json"
     staged.write_text(json.dumps(
         {**live, "buckets": {"false-admit/TYPE": list(cases)} if cases else {}}))

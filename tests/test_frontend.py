@@ -33,7 +33,7 @@ def test_user_cache_compiles_to_reference_ir():
     """The frontend must produce exactly the hand-lowered IR that both
     backends were built and tested against."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
-    reference = json.loads((EXAMPLES / "user_cache.ir.json").read_text())
+    reference = json.loads((EXAMPLES / "user_cache.ir.json").read_text(encoding="utf-8"))
     assert ir == reference
 
 
@@ -41,7 +41,7 @@ def test_end_to_end_python_golden():
     """source -> frontend IR -> cordis-py emitter == checked-in golden."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_py_emit", ROOT / "backends" / "python" / "emit.py")
-    golden = (ROOT / "backends" / "python" / "golden" / "user_cache.py").read_text()
+    golden = (ROOT / "backends" / "python" / "golden" / "user_cache.py").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -49,7 +49,7 @@ def test_end_to_end_typescript_golden():
     """source -> frontend IR -> cordis-ts emitter == checked-in golden."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_ts_emit", ROOT / "backends" / "typescript" / "emit.py")
-    golden = (ROOT / "backends" / "typescript" / "golden" / "user_cache.ts").read_text()
+    golden = (ROOT / "backends" / "typescript" / "golden" / "user_cache.ts").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -62,7 +62,7 @@ def test_end_to_end_rust_golden():
     regenerated on another)."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_rust_emit", ROOT / "backends" / "rust" / "emit.py")
-    golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text()
+    golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -70,7 +70,7 @@ def test_end_to_end_java_golden():
     """source -> frontend IR -> cordis4j emitter == checked-in golden."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_java_emit", ROOT / "backends" / "java" / "emit.py")
-    golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text()
+    golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -695,7 +695,7 @@ def test_a1_async_op_via_ternary_in_async_method_ok():
 def test_migrator_compiles_to_reference_ir():
     """await + compensate lowering matches the frozen v1 reference."""
     ir = compile_files([str(EXAMPLES / "migrator.rvl")])
-    reference = json.loads((EXAMPLES / "migrator.ir.json").read_text())
+    reference = json.loads((EXAMPLES / "migrator.ir.json").read_text(encoding="utf-8"))
     assert ir == reference
 
 
