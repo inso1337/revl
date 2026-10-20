@@ -27,6 +27,9 @@ is one the reference emits. Every tier has one: `emit_py_refusals/`,
 
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -108,7 +111,12 @@ def _entry(functions: dict, reasons: dict | None = None, budgets=None) -> dict:
 def _ledger(lines, monkeypatch, tmp_path, ledger: dict, raw: dict | None = None):
     """Write `ledger` in the on-disk layout under `tmp_path` and point the
     tool at it. `raw` maps `half/tier` to literal file text, for records the
-    in-memory shape cannot express."""
+    in-memory shape cannot express.
+
+    The baseline is the same on-disk ledger, read back lazily, so tests that
+    exercise the ratchet and the budget are not also exercising the git
+    baseline (issue #2651); the tests that do are at the end of this module.
+    """
     base = tmp_path / "ledger"
     lines.dump_ledger(ledger, base)
     for key, text in (raw or {}).items():
@@ -116,6 +124,13 @@ def _ledger(lines, monkeypatch, tmp_path, ledger: dict, raw: dict | None = None)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
     monkeypatch.setattr(lines, "LEDGER", base)
+
+    def same_baseline():
+        trusted = lines._load_ledger(base)
+        trusted["_problems"] = []
+        return "0" * 40, "the test ledger", trusted
+
+    monkeypatch.setattr(lines, "_baseline_ledger", same_baseline)
     return base
 
 
@@ -625,3 +640,280 @@ def test_two_new_functions_in_one_new_bucket_share_one_id(lines, monkeypatch,
     assert one == two and one in py["reasons"]
     assert py["reasons"][one] == lines.NEVER_ENTERED
     assert not any("not declared" in p for p in lines.check(survey))
+
+
+# --------------------------------------------------------------------------
+# issue #2651: the baseline ledger comes from git, not from the tree.
+#
+# The gate used to compare the measurement against the ledger in the tree under
+# test. A branch that edits that ledger changes the baseline it is judged
+# against: e071d18ec lowered selfhost/rust `callee_tparams` from 1 uncovered to
+# 0 and that tree measures 0 too, so the old check had nothing to compare the 0
+# with. The tests below build a scratch repository whose origin/main holds the
+# committed ledger and whose feature branch holds an edit to it, point the tool
+# at that repository, and hold the verdict and the printed provenance.
+
+
+def _git_env(tmp_path: Path) -> dict[str, str]:
+    """A git environment that cannot see the user's or a hook's repository."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    env.update({
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_AUTHOR_NAME": "baseline fixture",
+        "GIT_AUTHOR_EMAIL": "baseline-fixture@example.invalid",
+        "GIT_COMMITTER_NAME": "baseline fixture",
+        "GIT_COMMITTER_EMAIL": "baseline-fixture@example.invalid",
+    })
+    return env
+
+
+def _git_fixture(lines, monkeypatch, tmp_path, edit=None, baseline_edit=None):
+    """A scratch repo: origin/main has today's ledger, `feature` has `edit`'s.
+
+    `baseline_edit` changes the copied ledger before the baseline commit;
+    `edit` changes it on the feature branch. The tool's ROOT and LEDGER point
+    at the scratch repo, so `_baseline_ledger` reads the baseline through git
+    exactly as it does in CI while `_load_ledger` reads the branch's tree.
+    """
+    repo = tmp_path / "repo"
+    ledger = repo / "tests" / "fixtures" / "selfhost_uncovered_lines"
+    shutil.copytree(lines.LEDGER, ledger)
+    env = _git_env(tmp_path)
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", "-C", str(repo), *args], env=env,
+                              capture_output=True, text=True, check=True)
+        return done.stdout.strip()
+
+    if baseline_edit is not None:
+        baseline_edit(ledger)
+    git("init", "-q")
+    git("add", "-A")
+    git("commit", "-q", "-m", "baseline")
+    base = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", base)
+    git("checkout", "-q", "-b", "feature")
+    if edit is not None:
+        edit(ledger)
+    git("add", "-A")
+    git("commit", "-q", "--allow-empty", "-m", "branch")
+    monkeypatch.setattr(lines, "ROOT", repo)
+    monkeypatch.setattr(lines, "LEDGER", ledger)
+    return repo, base
+
+
+def _survey(lines, ledger: dict) -> dict:
+    """The two-half measurement map `check` reads, matching `ledger` exactly."""
+    return {half: {tier: {"functions": lines._flatten(
+                              ledger.get(half, {}).get(tier, {})),
+                          "sizes": {}}
+                   for tier in TIERS}
+            for half in ("reference", "selfhost")}
+
+
+def _run_check(lines, monkeypatch, survey: dict) -> int:
+    monkeypatch.setattr(lines, "measure",
+                        lambda frontend=False: survey["reference"])
+    monkeypatch.setattr(lines, "measure_selfhost", lambda: survey["selfhost"])
+    return lines.main(["--check"])
+
+
+def test_check_prints_the_baseline_provenance_and_matches_it(
+        lines, monkeypatch, tmp_path, capsys):
+    """The clean tree: the baseline is the merge base's ledger, and the branch
+    ledger matches it. `--check` says both before its verdict."""
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path)
+    survey = _survey(lines, lines._load_ledger())
+    assert _run_check(lines, monkeypatch, survey) == 0
+    out = capsys.readouterr().out
+    assert (f"BASELINE line-coverage ledger: merge base of origin/main and "
+            f"HEAD at {base}") in out
+    assert "IN-TREE line-coverage ledger: matches the baseline" in out
+
+
+def test_the_e071d18ec_replay_fails_against_origin_main(
+        lines, monkeypatch, tmp_path, capsys):
+    """The issue's measured case, replayed: the branch lowers `callee_tparams`
+    to 0/0 and the branch measure is 0 as well, so the tree and its ledger
+    agree. The old check was silent; the baseline says 1 and fails it, and the
+    message names the record, both counts, the measurement and the baseline."""
+    def lower(ledger):
+        path = ledger / "selfhost" / "rust.jsonl"
+        text = path.read_text()
+        assert '"callee_tparams", 1, 1]' in text
+        path.write_text(text.replace('"callee_tparams", 1, 1]',
+                                     '"callee_tparams", 0, 0]'))
+
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path, lower)
+    ledger = lines._load_ledger()
+    assert lines._flatten(ledger["selfhost"]["rust"])["callee_tparams"] == 0
+    survey = _survey(lines, ledger)  # e071d18ec's tree measures 0 too
+
+    problems = lines.check(survey)
+    found = [problem for problem in problems if "callee_tparams" in problem]
+    assert len(found) == 1, problems
+    message = found[0]
+    assert "lowers" in message and "baseline" in message
+    assert f"at {base}" in message
+    assert "baseline records 1 uncovered" in message
+    assert "in-tree ledger records 0" in message
+    assert "this tree measures 0" in message
+
+    # The tree's own ledger and the measurement agree, which is why the old
+    # check was silent: only the git baseline can see the change.
+    assert lines.check(survey, (base, "in-tree ledger", ledger)) == []
+
+    assert _run_check(lines, monkeypatch, survey) == 1
+    out = capsys.readouterr().out
+    assert (f"BASELINE line-coverage ledger: merge base of origin/main and "
+            f"HEAD at {base}") in out
+    assert ("IN-TREE line-coverage ledger: differs from the baseline in 1 "
+            "record(s) (1 lower, 0 higher)") in out
+    assert "callee_tparams" in out
+
+
+def test_a_record_above_the_baseline_is_reported_not_refused(
+        lines, monkeypatch, tmp_path, capsys):
+    """The other direction. A branch cut before a fall landed on origin/main
+    records the older, higher count; the baseline already records the fall, so
+    the branch has not redefined anything. A recorded rise also reads this way:
+    the measurement must equal it and the budget must be raised by hand, which
+    the check below already holds. Neither is the hiding direction."""
+    def raise_record(ledger):
+        path = ledger / "selfhost" / "rust.jsonl"
+        text = path.read_text()
+        assert '"callee_tparams", 1, 1]' in text
+        path.write_text(text.replace('"callee_tparams", 1, 1]',
+                                     '"callee_tparams", 2, 2]'))
+
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path, raise_record)
+    ledger = lines._load_ledger()
+    survey = _survey(lines, ledger)
+    assert lines.check(survey) == []
+    assert _run_check(lines, monkeypatch, survey) == 0
+    out = capsys.readouterr().out
+    assert ("IN-TREE line-coverage ledger: differs from the baseline in 1 "
+            "record(s) (0 lower, 1 higher)") in out
+
+
+def test_an_unresolvable_baseline_fails_loudly_and_never_falls_back(
+        lines, monkeypatch, tmp_path, capsys):
+    """CI may be a shallow checkout with no origin/main. The one answer the
+    gate must not give is "the tree's ledger is fine": that is the ledger a
+    branch can redefine. It fails, names the missing ref, and says it will not
+    fall back."""
+    _ledger(lines, monkeypatch, tmp_path,
+            {half: {tier: _entry({"f": ("a", 1)}) for tier in TIERS}
+             for half in ("reference", "selfhost")})
+    survey = _survey(lines, lines._load_ledger())
+    monkeypatch.setattr(lines, "_baseline_ledger", lambda: (
+        None, "origin/main does not resolve in this shallow checkout",
+        {}))
+
+    problems = lines.check(survey)
+    assert any("baseline could not be resolved" in problem
+               and "shallow checkout" in problem for problem in problems)
+    assert any("will not fall back to the in-tree ledger" in problem
+               for problem in problems)
+
+    assert _run_check(lines, monkeypatch, survey) == 1
+    out = capsys.readouterr().out
+    assert "BASELINE line-coverage ledger: UNRESOLVED" in out
+    assert "origin/main does not resolve" in out
+
+
+def _scratch_repo(tmp_path: Path, branch: str = "work"):
+    """An empty scratch repository with no origin/main ref and no ledger."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_env(tmp_path)
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", "-C", str(repo), *args], env=env,
+                              capture_output=True, text=True, check=True)
+        return done.stdout.strip()
+
+    git("init", "-q", "-b", branch)
+    (repo / "README").write_text("scratch\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "scratch")
+    return repo, env, git
+
+
+def test_baseline_provenance_really_needs_origin_main(
+        lines, monkeypatch, tmp_path):
+    """Against a real repository, not a monkeypatched `_baseline_ledger`.
+
+    The tool must resolve origin/main itself and must not fall back to the
+    tree, HEAD or a local `main`: this scratch repo has none of those refs, so
+    the only correct answer is `(None, ...)` and an unresolved ledger.
+    """
+    repo, env, git = _scratch_repo(tmp_path)
+    monkeypatch.setattr(lines, "ROOT", repo)
+    monkeypatch.setattr(lines, "LEDGER",
+                        repo / "tests" / "fixtures" / "selfhost_uncovered_lines")
+    assert lines.baseline_provenance()[0] is None
+    sha, provenance, ledger = lines._baseline_ledger()
+    assert sha is None
+    assert "origin/main does not resolve" in provenance
+    assert "reference" not in ledger and "selfhost" not in ledger
+
+
+def test_the_tip_is_used_when_there_is_no_merge_base(
+        lines, monkeypatch, tmp_path):
+    """A shallow checkout can have origin/main without the common history.
+    The tip is then a usable, trusted ledger and the provenance says which
+    one was used."""
+    repo = tmp_path / "repo"
+    ledger_rel = Path("tests") / "fixtures" / "selfhost_uncovered_lines"
+    ledger = repo / ledger_rel
+    shutil.copytree(lines.LEDGER, ledger)
+    env = _git_env(tmp_path)
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", "-C", str(repo), *args], env=env,
+                              capture_output=True, text=True, check=True)
+        return done.stdout.strip()
+
+    git("init", "-q", "-b", "work")
+    git("add", "-A")
+    git("commit", "-q", "-m", "work")
+    # An unrelated root, so `git merge-base origin/main HEAD` fails while the
+    # tip's tree still carries the ledger.
+    git("checkout", "-q", "--orphan", "other")
+    git("rm", "-q", "-rf", "--ignore-unmatch", ".")
+    shutil.copytree(lines.LEDGER, ledger)
+    git("add", "-A")
+    git("commit", "-q", "-m", "other root")
+    tip = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", tip)
+    git("checkout", "-q", "work")
+    monkeypatch.setattr(lines, "ROOT", repo)
+    monkeypatch.setattr(lines, "LEDGER", ledger)
+
+    sha, provenance, _ = lines._baseline_ledger()
+    assert sha == tip
+    assert provenance == ("origin/main tip (no merge base: shallow or "
+                          "unrelated history)")
+
+
+def test_a_missing_baseline_ledger_file_fails_closed(
+        lines, monkeypatch, tmp_path, capsys):
+    """An unreadable baseline tier is not zero records. If one of the twelve
+    files cannot be read at the baseline commit, a lowering in it would be
+    invisible; the check has to treat that as an unresolved baseline."""
+    def drop(ledger):
+        (ledger / "reference" / "py.jsonl").unlink()
+
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path,
+                              baseline_edit=drop)
+    survey = _survey(lines, lines._load_ledger())
+    problems = lines.check(survey)
+    assert any("baseline ledger cannot be read" in problem
+               and "reference/py.jsonl" in problem for problem in problems)
+    assert _run_check(lines, monkeypatch, survey) == 1
+    out = capsys.readouterr().out
+    assert "BASELINE line-coverage ledger: UNRESOLVED" in out
