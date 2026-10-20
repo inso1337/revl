@@ -108,7 +108,7 @@
 
 ["function", "issue-2545-type-parameter-residuals", "arg_expected", 3, 3]
 
-["function", "issue-2545-type-parameter-residuals", "callee_tparams", 0, 0]
+["function", "issue-2545-type-parameter-residuals", "callee_tparams", 1, 1]
 
 ["function", "issue-2545-type-parameter-residuals", "fn_type_params", 1, 1]
 
