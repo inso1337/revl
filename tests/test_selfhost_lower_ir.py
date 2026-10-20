@@ -661,7 +661,9 @@ def test_native_ir_preserves_idempotent_service_methods(lower_to_ir, modifiers):
 @pytest.mark.parametrize("service,method", [
     ("fn twice(f: (Int) -> Int, n: Int) -> Int", "fn twice(f, n) = f(f(n))"),
     ("fn apply(f: (Int) -> Int, n: Int) -> Int", "fn apply(f, n) = f(n)"),
-    # a module fn of the same name is the callee the reference reads first
+    # a module fn in scope must not capture a call on a parameter of a
+    # DIFFERENT name; a same-name module fn is refused (issue #2544), so that
+    # shape is pinned in test_2544_provide_param_shadows_module_fn.py
     ("fn go(f: (Int) -> Int, n: Int) -> Int", "fn go(f, n) = f(n)"),
 ])
 def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
@@ -671,7 +673,7 @@ def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
     drops the WHOLE component `body`, so the native chain emitted the component
     with no provision. The reference lowers the callee as an expression: a
     `call` on the parameter's `name` node."""
-    prelude = "fn f(x: Int) -> Int { return x } " if method.startswith("fn go") else ""
+    prelude = "fn scale(x: Int) -> Int { return x } " if method.startswith("fn go") else ""
     source = (f"{prelude}service M {{ {service} }} "
               f"component C provides m: M {{ provide m {{ {method} }} }}")
     native = json.loads(lower_to_ir(source))["components"][0]

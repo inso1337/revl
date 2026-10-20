@@ -20,7 +20,9 @@ The `fn` body stratum already refused this (`fn shadowed(helper: …)`); this
 file adds the provide-method half the acceptance list asks for, plus the two
 cases that pin the precision of the newly recognised binder: a parameter that
 merely SHARES a module fn's name is still admitted, and a provide method whose
-call names a DIFFERENT module fn still compiles.
+call names a DIFFERENT module fn still compiles. It also pins the #1823
+function-valued shape as refused: the decided rule has no type carve-out, so a
+same-name module fn and parameter are one rule whatever the parameter's type.
 """
 
 import sys
@@ -64,6 +66,25 @@ def test_the_fn_body_form_of_the_same_parameter_is_refused():
               return tag("x")
             }
             """,
+            "t.rvl",
+        )
+
+
+def test_a_function_valued_parameter_named_like_a_module_fn_is_refused():
+    """The decided rule has no type carve-out. This is the #1823 shape: a
+    module `fn f` in scope, a provide-method parameter `f` of function type,
+    and a call on it. `f(n)` reads as both the parameter and the module fn,
+    so it is the same ambiguity as the `tag: Str` case and is refused. The
+    two #1823 cases with NO same-name module fn still lower, in
+    tests/test_selfhost_lower_ir.py."""
+    with pytest.raises(RevlError,
+                       match="`f` is bound here and called in this body"):
+        compile_source(
+            "fn f(x: Int) -> Int { return x }\n"
+            "service M { fn go(f: (Int) -> Int, n: Int) -> Int }\n"
+            "component C provides m: M {\n"
+            "  provide m { fn go(f, n) = f(n) }\n"
+            "}\n",
             "t.rvl",
         )
 
