@@ -8174,7 +8174,7 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
 #     Str)` sits beside `fn name(row: Row)` and never calls it.
 # ---------------------------------------------------------------------------
 
-def _binder_names(node, out: list) -> None:
+def _binder_names(node, out: list, skip: tuple = ()) -> None:
     """Append every `(name, line)` this subtree BINDS.
 
     A parameter, a `let`/`var`, a destructure, a `for` bind, an arrow
@@ -8186,12 +8186,18 @@ def _binder_names(node, out: list) -> None:
     this scan did not see (issue #2544). Traversal is generic over the AST
     dataclasses so a binder form added to the grammar is covered without a
     second edit here; only the RECOGNITION is enumerated.
+
+    `skip` is for a body that is not one scope: a component's provide methods
+    are separate emitted functions, so the component-level walk skips their
+    subtrees and each method is checked on its own.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
-            _binder_names(item, out)
+            _binder_names(item, out, skip)
         return
     if not dataclasses.is_dataclass(node) or isinstance(node, type):
+        return
+    if skip and isinstance(node, skip):
         return
     if isinstance(node, (FnParam, LetStmt)):
         out.append((node.name, node.line))
@@ -8215,25 +8221,55 @@ def _binder_names(node, out: list) -> None:
             if len(arm) > 1 and isinstance(arm[1], str):
                 out.append((arm[1], node.line))
     for field in dataclasses.fields(node):
-        _binder_names(getattr(node, field.name, None), out)
+        _binder_names(getattr(node, field.name, None), out, skip)
 
 
-def _called_names(node, out: set) -> None:
+def _called_names(node, out: set, skip: tuple = ()) -> None:
     """Every name used in CALL position — the callee of `f(...)` where `f` is a
     bare name. A method call (`x.m()`), a module-alias call (`m.f()`) and an
     immediately applied arrow all name something other than a bare identifier,
     so none of them can be ambiguous.
+
+    `skip` is the same as in `_binder_names`: the component-level walk leaves
+    provide-method bodies to the per-method check.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
-            _called_names(item, out)
+            _called_names(item, out, skip)
         return
     if not dataclasses.is_dataclass(node) or isinstance(node, type):
+        return
+    if skip and isinstance(node, skip):
         return
     if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
         out.add(node.callee.name)
     for field in dataclasses.fields(node):
-        _called_names(getattr(node, field.name, None), out)
+        _called_names(getattr(node, field.name, None), out, skip)
+
+
+def _provide_methods(node) -> list:
+    """Every `ProvideMethod` under `node`, in source order.
+
+    A component is not one body: each provide method is emitted as its own
+    function, so its parameters are in scope only inside that method.
+    """
+    out: list = []
+
+    def walk(n) -> None:
+        if isinstance(n, (list, tuple)):
+            for item in n:
+                walk(item)
+            return
+        if not dataclasses.is_dataclass(n) or isinstance(n, type):
+            return
+        if isinstance(n, ProvideMethod):
+            out.append(n)
+            return
+        for field in dataclasses.fields(n):
+            walk(getattr(n, field.name, None))
+
+    walk(node)
+    return out
 
 
 def _refuse_callable_shadowing(program: Program, filename: str) -> None:
@@ -8254,16 +8290,16 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         return
     externs = {ext.name for ext in program.externs}
 
-    def check(decl, visible: set, decl_file: str) -> None:
+    def check(decl, visible: set, decl_file: str, skip: tuple = ()) -> None:
         if not visible:
             return
         called: set = set()
-        _called_names(decl, called)
+        _called_names(decl, called, skip)
         ambiguous = visible & called
         if not ambiguous:
             return
         binders: list = []
-        _binder_names(decl, binders)
+        _binder_names(decl, binders, skip)
         for name, line in binders:
             if name not in ambiguous:
                 continue
@@ -8296,7 +8332,19 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
     # set is that same one.
     for decl in (list(program.components) + list(program.tests)
                  + list(program.prop_tests)):
-        check(decl, declared, getattr(decl, "source", "") or filename)
+        decl_file = getattr(decl, "source", "") or filename
+        if not isinstance(decl, ComponentDecl):
+            check(decl, declared, decl_file)
+            continue
+        # A component is not one body: a provide method is emitted as its own
+        # function (backends/python/emit.py writes one `def` per method), so
+        # its parameter is in scope only there. Pair each method's binders with
+        # that method's calls, and leave the methods out of the component-level
+        # pairing so one method's parameter cannot be blamed for a sibling's
+        # call.
+        for method in _provide_methods(decl.body):
+            check(method, declared, decl_file)
+        check(decl, declared, decl_file, skip=(ProvideMethod,))
 
 
 def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:

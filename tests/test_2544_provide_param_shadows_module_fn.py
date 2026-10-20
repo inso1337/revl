@@ -10,19 +10,21 @@ CALLS it where a module `fn`/`extern` of that name is visible. It enumerates
 form that actually ships in every provide block did not.
 
 The consequence was silent, not merely inconsistent: with the parameter
-unseen, nothing refused the body, and `_lower_component_pure_expr`'s
+unseen by the scan, nothing refused the body, and `_lower_component_pure_expr`'s
 `callables` arm (which is deliberately not gated on `name not in scope`)
-lowered `tag("x")` to a call of the module `fn tag` while `env.bind_params`
-renamed the parameter to `tag_` beside it. The parameter was dropped without a
-word. The issue's own example is the reproducer below.
+lowered `tag("x")` to a call of the module `fn tag`, so the parameter's value
+was never read. The binding was still created, so this was a dropped value,
+not a dropped name. The issue's own example is the reproducer below.
 
 The `fn` body stratum already refused this (`fn shadowed(helper: …)`); this
-file adds the provide-method half the acceptance list asks for, plus the two
-cases that pin the precision of the newly recognised binder: a parameter that
-merely SHARES a module fn's name is still admitted, and a provide method whose
-call names a DIFFERENT module fn still compiles. It also pins the #1823
-function-valued shape as refused: the decided rule has no type carve-out, so a
-same-name module fn and parameter are one rule whatever the parameter's type.
+file adds the provide-method half the acceptance list asks for, plus the cases
+that pin the precision of the newly recognised binder: a parameter that merely
+SHARES a module fn's name is still admitted, a provide method whose call names
+a DIFFERENT module fn still compiles, a method call is not a call position, and
+a sibling method's call does not blame another method's parameter (a provide
+method is its own emitted body). It also pins the #1823 function-valued shape
+as refused: the decided rule has no type carve-out, so a same-name module fn
+and parameter are one rule whatever the parameter's type.
 """
 
 import sys
@@ -161,10 +163,10 @@ def test_a_method_call_through_the_parameter_is_not_a_call_position():
     assert ir is not None
 
 
-def test_two_methods_binding_sibling_names_each_refuse_only_their_own():
-    """The scan is per-declaration on the component's binder list, so a
-    second provide method binding a DIFFERENT module fn name is judged on its
-    own body, not on the first one's."""
+def test_a_sibling_method_binding_another_name_does_not_hide_the_refusal():
+    """Each provide method is checked as its own body, so the first method's
+    `tag` parameter called there is still refused when a sibling method binds
+    a different module fn name and never calls it."""
     source = (
         "fn clean(s: Str) -> Str { return s }\n"
         + _TAG + "service Cache {\n  fn f(tag: Str) -> Str\n"
@@ -179,3 +181,23 @@ def test_two_methods_binding_sibling_names_each_refuse_only_their_own():
     )
     with pytest.raises(RevlError, match=_REFUSED):
         compile_source(source, "t.rvl")
+
+
+def test_a_sibling_methods_call_does_not_make_a_parameter_ambiguous():
+    """A provide parameter binds only inside its own method. Here `f`'s
+    `tag` parameter is never called there, and the call in `g` names the
+    module fn, so nothing is ambiguous: the two methods are separate emitted
+    bodies, not one scope."""
+    ir = compile_source(
+        _TAG + "service Cache {\n  fn f(tag: Str) -> Str\n"
+        "  fn g(key: Str) -> Str\n}\n" + """
+        component C provides cache: Cache {
+          provide cache {
+            fn f(tag) = "x"
+            fn g(key) = tag(key)
+          }
+        }
+        """,
+        "t.rvl",
+    )
+    assert ir is not None
