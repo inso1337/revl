@@ -96,7 +96,7 @@ a quorum coordinator, and the Ed25519 upgrade to `attest.py`. The last one is a
 HARD prerequisite for a cross-trust-domain deploy (§2.4/§5-A1): a symmetric HMAC
 verifier is also a forger, so "signer untrusted" would be a fiction. The default
 attestation is HMAC, which is honest while signer and host are one trust domain
-(the single-host case) — and :func:`admit` REFUSES outright when a
+(the single-host case), and :func:`admit` REFUSES outright when a
 :class:`TrustStore` declares itself `cross_domain` under a symmetric algorithm,
 rather than pretending.
 """
@@ -3899,7 +3899,7 @@ TEARDOWN_PROMISE = {
         "complete over, and the conductor holds no inverse it could run. The "
         "only honest verdict is `unresolved`, naming the target for a human. "
         "That is why a machine target is opened only under a pinned host key "
-        "and its deploy verdict is `unresolved`, never `rolled-back` — a "
+        "and its deploy verdict is `unresolved`, never `rolled-back`; a "
         "deploy that cannot promise teardown must not be the thing that "
         "quietly discovers it."),
 }
