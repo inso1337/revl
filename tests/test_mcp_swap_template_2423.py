@@ -571,9 +571,9 @@ def test_a_trusted_author_files_only_swap_of_a_rewritten_dependency_refuses(
     can reach. The operator loads the stateful fixture from a jailed file and
     seeds a live instance; the agent then rewrites the `use`-reached helper
     OUTSIDE every export area and re-admits the held files with an empty
-    `revl_swap {}`. Before the predicate read `AUTHORING.host_code`, authorship
-    was export-area membership only, so this compiled unprofiled and read as
-    the operator's own: the gate was skipped and the successor migrated gen N
+    `revl_swap {}`. Before, the predicate read export-area membership only and
+    never `AUTHORING.host_code`, so this compiled unprofiled and read as the
+    operator's own: the gate was skipped and the successor migrated gen N
     onto the changed helper. It must refuse with STATE_UNDISCLOSED and keep gen
     N serving. The untrusted control is
     `test_a_files_only_operator_swap_reaching_no_export_text_still_migrates`
