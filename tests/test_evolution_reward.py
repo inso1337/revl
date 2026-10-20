@@ -110,7 +110,7 @@ def test_a_hook_environment_cannot_reach_another_repo(
     or write it. `bystander` stands in for that repository."""
     bystander = tmp_path / "bystander"
     _git(tmp_path, "init", "-q", str(bystander))
-    config_before = (bystander / ".git" / "config").read_text()
+    config_before = (bystander / ".git" / "config").read_text(encoding="utf-8")
     monkeypatch.setenv("GIT_DIR", str(bystander / ".git"))
     monkeypatch.setenv("GIT_INDEX_FILE", str(bystander / ".git" / "index"))
 
@@ -123,7 +123,7 @@ def test_a_hook_environment_cannot_reach_another_repo(
     _git(tree, "add", "-A")
     _git(tree, "commit", "-qm", "base")
 
-    assert (bystander / ".git" / "config").read_text() == config_before
+    assert (bystander / ".git" / "config").read_text(encoding="utf-8") == config_before
     assert not (bystander / ".git" / "index").exists()
     ok, out = reward.run_git(
         _candidate(reward, tree, base="HEAD"), ["log", "--format=%s", "-1"])
@@ -471,7 +471,7 @@ def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
     awarded. The decision taken in slice 3 is to re-point the component at the
     registers that DO record cross-tier divergence, so the scorer must no
     longer depend on that name in either direction."""
-    source = (ROOT / "tools" / "evolution_reward.py").read_text()
+    source = (ROOT / "tools" / "evolution_reward.py").read_text(encoding="utf-8")
     assert "gate_verdict_parity" in source, \
         "the decision not to build it is recorded in the module, not erased"
     assert reward.PROBES["conformance"] is reward.probe_conformance
@@ -685,10 +685,10 @@ def test_record_refuses_to_write_a_false_admission_and_check_still_fails(
     monkeypatch.setattr(census, "run", lambda *a, **k: (buckets, details))
 
     assert census.main(["--record"]) == 0
-    written = json.loads(baseline.read_text())["buckets"]
+    written = json.loads(baseline.read_text(encoding="utf-8"))["buckets"]
     assert "false-admission" not in written
     assert written["false-admit/T1"] == ["known.rvl"]
-    problems = census.compare(buckets, json.loads(baseline.read_text()))
+    problems = census.compare(buckets, json.loads(baseline.read_text(encoding="utf-8")))
     assert any("FALSE ADMISSION" in p for p in problems), problems
 
 
@@ -843,7 +843,7 @@ def test_the_cli_exits_nonzero_while_anything_is_unverified(
          "rationale": "all eight verified"}))
     out = tmp_path / "card.json"
     assert reward.main(["--candidate", str(record), "--json", str(out)]) == 1
-    card = json.loads(out.read_text())
+    card = json.loads(out.read_text(encoding="utf-8"))
     assert card["retained"] is False
     assert "compiles" in card["blockers"]
     assert "held-out" in card["blockers"]
@@ -1099,7 +1099,7 @@ def stub_cargo(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_CARGO_LOG", str(log))
 
     def calls():
-        return log.read_text().splitlines() if log.exists() else []
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     return (lambda mode: monkeypatch.setenv("STUB_CARGO_MODE", mode)), calls
 
 
@@ -1484,7 +1484,7 @@ def test_the_committed_block_parser_reads_the_real_one(reward):
     is held against the real artifact rather than against the fixture that
     mimics it."""
     ok, cells = reward._committed_matrix(
-        (ROOT / "docs" / "conformance.md").read_text())
+        (ROOT / "docs" / "conformance.md").read_text(encoding="utf-8"))
     assert ok, cells
     assert cells[("G1", "py")] == "proved"
     assert set(cells.values()) <= set(reward.CELL_STRENGTH)

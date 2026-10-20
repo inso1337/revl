@@ -205,7 +205,7 @@ def test_must2_covers_the_inverse_source_endpoint_not_only_the_target(
         assert ei.value.code == "EOUTSIDE"
 
     assert donor.exists(), "the inverse's SOURCE endpoint was renamed away"
-    assert donor.read_text() == "outside the root"
+    assert donor.read_text(encoding="utf-8") == "outside the root"
     assert not os.path.exists(inside_target)
 
 
@@ -316,7 +316,7 @@ def test_h1_persists_on_clean_commit(workspace):
                   _effect("rm", "stale.txt")])))
 
     # the activation applied both mutations
-    assert art.read_text() == "v2"
+    assert art.read_text(encoding="utf-8") == "v2"
     assert not stale.exists()
     frame = _sole_frame(session)
     assert len(frame._transactional) == 2      # write + rm registered
@@ -324,7 +324,7 @@ def test_h1_persists_on_clean_commit(workspace):
     session.unload()                            # clean unload == implicit commit
 
     # the mutations ARE the deliverable: they persist, inverses discharged
-    assert art.read_text() == "v2", "commit wrongly reverted the write"
+    assert art.read_text(encoding="utf-8") == "v2", "commit wrongly reverted the write"
     assert not stale.exists(), "commit wrongly restored the removed file"
     for entry in frame._transactional:
         assert entry.discharged is True and entry.replayed is False
@@ -344,8 +344,8 @@ def test_h1_reverts_residue_free_on_abort(workspace):
         "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # abort replayed both inverses: files back to their preimage
-    assert art.read_text() == "v1", "abort did not restore the write preimage"
-    assert stale.read_text() == "junk", "abort did not un-remove the file"
+    assert art.read_text(encoding="utf-8") == "v1", "abort did not restore the write preimage"
+    assert stale.read_text(encoding="utf-8") == "junk", "abort did not un-remove the file"
     # residue-free: the snapshot + parked file the mutations created are gone
     garbage = workspace / ws.GARBAGE_DIRNAME
     preimage = workspace / ws.PREIMAGE_DIRNAME

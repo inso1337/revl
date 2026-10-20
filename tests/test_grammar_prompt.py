@@ -26,7 +26,7 @@ PROMPT_FILE = ROOT / "docs" / "syntax-2.0.prompt.txt"
 def test_prompt_file_matches_the_shipped_constant():
     # the file is the reviewable artifact; the constant is what ships in the
     # wheel — they must never drift apart.
-    assert PROMPT_FILE.read_text() == PROMPT_GRAMMAR
+    assert PROMPT_FILE.read_text(encoding="utf-8") == PROMPT_GRAMMAR
 
 
 def test_prompt_grammar_fits_the_authoring_context_character_budget():

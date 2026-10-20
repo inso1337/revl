@@ -263,7 +263,7 @@ def _session(policy="auto"):
 def _reads(sink: str) -> int:
     if not os.path.exists(sink):
         return 0
-    return sum(1 for line in Path(sink).read_text().splitlines()
+    return sum(1 for line in Path(sink).read_text(encoding="utf-8").splitlines()
                if line.startswith("r:"))
 
 
@@ -686,7 +686,7 @@ def test_cache_pure_fn_memoizes_in_the_emitted_body(tmp_path):
     assert module.double(sink, 3) == 6
     assert module.double(sink, 3) == 6          # served from the table
     assert module.double(sink, 4) == 8
-    lines = Path(sink).read_text().splitlines()
+    lines = Path(sink).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2                      # one host call per distinct args
 
 
@@ -700,7 +700,7 @@ def test_a_first_class_reference_reaches_the_memo(tmp_path):
     sink = str(tmp_path / "fc.log")
     assert module.apply(module.double, sink, 5) == 10
     assert module.apply(module.double, sink, 5) == 10
-    assert len(Path(sink).read_text().splitlines()) == 1
+    assert len(Path(sink).read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_an_unmemoizable_argument_shape_falls_back_to_the_call(tmp_path):

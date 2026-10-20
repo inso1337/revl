@@ -86,7 +86,7 @@ _SELFHOST_DOCS = [
 def _functions(doc: str):
     if doc.startswith("selfhost/"):
         return compiled_ir(ROOT / doc).get("functions") or []
-    return compile_source((CORPUS_DIR / doc).read_text()).get("functions") or []
+    return compile_source((CORPUS_DIR / doc).read_text(encoding="utf-8")).get("functions") or []
 
 
 @pytest.mark.parametrize("doc", _FIXTURE_DOCS + _SELFHOST_DOCS)

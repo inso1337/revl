@@ -122,7 +122,7 @@ def score_corpus(run: str, cycles: int = DEFAULT_CYCLES,
                  attempt: int = 1) -> list[dict]:
     rows = []
     for spec, path in collect_raw_ts(run, attempt):
-        rec = probe_source(path.read_text(), cycles=cycles, name=f"{run}__{spec}")
+        rec = probe_source(path.read_text(encoding="utf-8"), cycles=cycles, name=f"{run}__{spec}")
         rows.append({"run": run, "spec": spec, "variant": RAW_TS_VARIANT,
                      "path": str(path.relative_to(ROOT)), **rec})
         flag = {"clean": "clean", "leaked": "LEAK", "error": "error"}[rec["status"]]

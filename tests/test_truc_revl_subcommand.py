@@ -65,7 +65,7 @@ def _new_project(tmp_path: Path, name: str = "app") -> Path:
 
 
 def _lock_names(proj: Path) -> list[str]:
-    lock = json.loads((proj / "truc.lock").read_text())
+    lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     return [r["name"] for r in lock["trucs"]]
 
 
@@ -83,14 +83,14 @@ def test_revl_truc_add_then_assemble_is_admitted_and_composed(tmp_path):
     assert _revl_truc(proj, "add", "pg_database").returncode == 0
 
     # vendored byte-identically and recorded, same as `truc add`
-    assert (proj / "trucs" / "user_cache" / "component.rvl").read_text() == \
-        (REGISTRY / "components" / "user_cache" / "component.rvl").read_text()
+    assert (proj / "trucs" / "user_cache" / "component.rvl").read_text(encoding="utf-8") == \
+        (REGISTRY / "components" / "user_cache" / "component.rvl").read_text(encoding="utf-8")
     assert set(_lock_names(proj)) == {"user_cache", "pg_database"}
 
     r = _revl_truc(proj, "assemble")
     assert r.returncode == 0, r.stderr
     assert "assembled" in r.stdout
-    assembly = json.loads((proj / "build" / "assembly.json").read_text())
+    assembly = json.loads((proj / "build" / "assembly.json").read_text(encoding="utf-8"))
     assert "UserCache" in json.dumps(assembly) and "PgDatabase" in json.dumps(assembly)
 
 
@@ -109,8 +109,8 @@ def test_revl_truc_add_matches_standalone_truc_add(tmp_path):
     assert a.returncode == b.returncode == 0, (a.stderr, b.stderr)
     assert a.stdout == b.stdout
     assert _lock_names(proj_a) == _lock_names(proj_b) == ["user_cache"]
-    assert (proj_a / "trucs" / "user_cache" / "component.rvl").read_text() == \
-        (proj_b / "trucs" / "user_cache" / "component.rvl").read_text()
+    assert (proj_a / "trucs" / "user_cache" / "component.rvl").read_text(encoding="utf-8") == \
+        (proj_b / "trucs" / "user_cache" / "component.rvl").read_text(encoding="utf-8")
 
 
 # ----------------------------------------------- the passthrough forwards G2 too

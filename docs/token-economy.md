@@ -1,6 +1,7 @@
 # The token economy — make revl the cheapest language for an agent to write
 
-**Status:** metric + one compound verb implemented (roadmap item 50).
+**Status:** output metric + one compound verb implemented (roadmap item 50); the
+benchmark now records provider-reported input tokens beside model turns.
 - **Metric:** `bench/tokens.py`, committed snapshot `bench/results/tokens-to-green.md`,
   pinned by `tests/test_tokens_to_green.py`.
 - **Compound verb:** `revl_ship` in `src/revl/mcp/ship.py`, registered in
@@ -16,18 +17,38 @@ saving is a demonstrated delta and not a story.
 
 ## 1. The metric — tokens-to-green
 
-Iterations-to-green (`bench/run.py`) counts *turns* to a compiling component; it
-does not count *spend*. A two-iteration component whose attempts are twice as
-long as another's costs the same in turns and twice as much in tokens.
-**Tokens-to-green** (`bench/tokens.py`) is that missing number: the output
-tokens a model emits over its committed attempts to get **one component
-admitted**, scored with a deterministic BPE-shaped proxy (`count_tokens`) and,
-where a paid run recorded exact usage, the recorded figure verbatim.
+`run.py` counts compiler-feedback attempts to a compiling component. One such
+attempt starts a model invocation, and that invocation may contain multiple
+model turns while the agent uses tools. These are separate counts. The run
+records `turn_count` and provider-reported `tokens_in` for every invocation and
+keeps the pair together in the run summary. **Tokens-to-green** (`bench/tokens.py`)
+is the output-side measure: the output tokens a model emits over its committed
+attempts to get **one component admitted**, scored with a deterministic
+BPE-shaped proxy (`count_tokens`) and, where a run recorded exact usage, the
+recorded figure verbatim.
 
 Committed snapshot (`bench/results/tokens-to-green.md`): across **136** admitted
 components, **mean 149 est. output tokens-to-green** (median 130). The costliest
 cells are ranked in that file so optimization has a target. Every later
 optimization on this item has to move *this* number before it ships.
+
+### Input-side cost and model turns
+
+The committed corpora predate input-token and model-turn recording, so the
+report leaves those values unavailable for those runs. New benchmark
+invocations store the two fields together: `turn_count` (model-loop turns) and
+`tokens_in` (provider-reported input tokens), plus the derived input tokens per
+turn. The raw pair remains visible so a low average cannot hide how many turns
+the invocation took. Providers that do not report input usage also remain
+unavailable; the report never substitutes zero or a proxy. Run-summary means
+use only admitted cells that recorded both fields, so the two means share one
+denominator. A local adapter call makes one request and therefore records a
+structural `turn_count` of 1; it does not report an agent tool-loop count.
+
+The discussion in [issue #2612](https://github.com/inso1337/revl/issues/2612)
+motivated the instrumentation, but it does not link a committed raw run
+artifact. This document does not carry forward an unverified per-turn baseline
+or reduction claim.
 
 There are two halves to the spend, and the metric names both:
 

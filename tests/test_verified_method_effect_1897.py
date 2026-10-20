@@ -206,9 +206,9 @@ def test_the_corpus_is_the_refusals_and_the_witnessed_admission():
 @pytest.mark.parametrize("stem", sorted(REFUSED))
 def test_the_reference_refuses_the_corpus_document(stem):
     with pytest.raises(RevlError) as excinfo:
-        compile_source((CORPUS / f"{stem}.rvl").read_text(), f"{stem}.rvl")
+        compile_source((CORPUS / f"{stem}.rvl").read_text(encoding="utf-8"), f"{stem}.rvl")
     assert (excinfo.value.line, excinfo.value.message) == REFUSED[stem]
 
 
 def test_the_reference_admits_the_witnessed_corpus_document():
-    assert compile_source((CORPUS / "ok_witnessed.rvl").read_text(), "ok.rvl")
+    assert compile_source((CORPUS / "ok_witnessed.rvl").read_text(encoding="utf-8"), "ok.rvl")

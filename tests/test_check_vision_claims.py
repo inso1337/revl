@@ -359,3 +359,22 @@ def test_the_cli_reports_and_exits_zero_on_the_real_document():
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "claims checked over 4 rules" in proc.stdout
+
+
+def test_the_cli_reports_zero_claims_and_scope_for_an_empty_document(
+    tmp_path, monkeypatch, capsys
+):
+    doc = tmp_path / "empty.md"
+    doc.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        claims.Tree, "from_git",
+        classmethod(lambda cls, root: cls(Path(root), [])),
+    )
+
+    assert gate.main([
+        "--doc", str(doc), "--root", str(tmp_path), "--check",
+    ]) == 0
+
+    output = capsys.readouterr().out
+    assert "empty.md: 0 claims checked over 4 rules" in output
+    assert "It did not run them" in output

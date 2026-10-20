@@ -54,7 +54,7 @@ import javac_gate  # noqa: E402
 from revl import compile_source  # noqa: E402
 
 PLACEMENT = BACKEND / "placement"
-SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text()
+SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text(encoding="utf-8")
 
 # Long enough that an exact match means something, and not a substring of
 # anything else the run prints.
@@ -122,14 +122,14 @@ def test_the_wal_descriptor_reads_through_the_registry_under_record():
     argument is scrubbed before it is written. Emitted only in secret mode, on
     the witnessed composition the crash-recovery proof records."""
     fixture = BACKEND / "scenarios" / "crashproof" / "crashproof.ir.json"
-    ir = json.loads(fixture.read_text())
+    ir = json.loads(fixture.read_text(encoding="utf-8"))
     ir["components"][0]["config"] = [
         {"name": "api_key", "type": "Str", "default": "k", "secret": True}]
     code = javac_gate.compile_check(_emitter().emit(ir, record=True), "record + secret")
     assert "revlWalStr(revlRedactText(args[i]))" in code
     assert "revlMarkSecret(this.api_key);" in code
     plain = javac_gate.compile_check(
-        _emitter().emit(json.loads(fixture.read_text()), record=True), "record control")
+        _emitter().emit(json.loads(fixture.read_text(encoding="utf-8")), record=True), "record control")
     assert "revlWalStr(args[i])" in plain
     assert "revlRedactText" not in plain
 
@@ -267,7 +267,7 @@ def _run_seam(classpath: "str | Path", provider_config: dict, *,
     return "".join(lines)
 
 
-RUNNER_SOURCE = (PLACEMENT / "PlacementRunner.java").read_text()
+RUNNER_SOURCE = (PLACEMENT / "PlacementRunner.java").read_text(encoding="utf-8")
 
 SECRET_CONFIG = {"url": PUBLIC_URL, "api_key": CANARY}
 
@@ -797,7 +797,7 @@ def _escape(text: str) -> str:
 # its own canary, so the scalar leaf and the recursion are separable.
 # ---------------------------------------------------------------------------
 
-BYTES_SCENARIO = (BACKEND / "scenarios" / "secret_registry_bytes.rvl").read_text()
+BYTES_SCENARIO = (BACKEND / "scenarios" / "secret_registry_bytes.rvl").read_text(encoding="utf-8")
 BYTES_CANARY = "SEKRIT-JAVA-BYTES-CANARY-421-F6"
 ROW_CANARY = "SEKRIT-JAVA-ROW-CANARY-421-F6"
 
@@ -923,7 +923,7 @@ def test_with_the_container_walk_stripped_the_leaf_leaks(tmp_path):
 # covered by the same branch.
 # ---------------------------------------------------------------------------
 
-SHAPES_SCENARIO = (BACKEND / "scenarios" / "secret_registry_shapes.rvl").read_text()
+SHAPES_SCENARIO = (BACKEND / "scenarios" / "secret_registry_shapes.rvl").read_text(encoding="utf-8")
 REC_CANARY = "SEKRIT-JAVA-REC-CANARY-421-F6"
 VAR_CANARY = "SEKRIT-JAVA-VAR-CANARY-421-F6"
 NEST_CANARY = "SEKRIT-JAVA-NEST-CANARY-421-F6"

@@ -134,7 +134,7 @@ def test_publishing_exported_text_is_refused(reg, tmp_path):
     exported = _exported_file(tmp_path)
 
     with pytest.raises(RevlError) as caught:
-        _publish(reg, "greeter", exported.read_text(), version="1.0.0",
+        _publish(reg, "greeter", exported.read_text(encoding="utf-8"), version="1.0.0",
                  source_path=exported)
 
     message = str(caught.value)
@@ -142,7 +142,7 @@ def test_publishing_exported_text_is_refused(reg, tmp_path):
     assert PROFILED in message
     # refused before anything is written: no entry, still the empty index.
     assert not (reg / "components" / "greeter").exists()
-    assert (reg / "index.json").read_text().count("greeter") == 0
+    assert (reg / "index.json").read_text(encoding="utf-8").count("greeter") == 0
 
 
 def test_the_same_bytes_from_outside_the_export_area_publish(reg, tmp_path):
@@ -160,11 +160,11 @@ def test_the_same_bytes_from_outside_the_export_area_publish(reg, tmp_path):
     own.parent.mkdir(parents=True)
     own.write_text(EXPORTED, encoding="utf-8")
 
-    record = _publish(reg, "greeter", own.read_text(), version="1.0.0",
+    record = _publish(reg, "greeter", own.read_text(encoding="utf-8"), version="1.0.0",
                       source_path=own)
 
     assert record["version"] == "1.0.0"
-    assert (reg / "components" / "greeter" / "component.rvl").read_text() == EXPORTED
+    assert (reg / "components" / "greeter" / "component.rvl").read_text(encoding="utf-8") == EXPORTED
     assert registry.verify(reg) == []
 
 
@@ -174,11 +174,11 @@ def test_the_same_bytes_from_an_exported_file_are_refused_through_facts(reg, tmp
     path from drifting apart, the way
     `test_release_facts_flags_a_traversal_name_as_a_refusal` does for #538."""
     exported = _exported_file(tmp_path)
-    facts = (registry.release_facts(reg, "greeter", exported.read_text(), "1.0.0",
+    facts = (registry.release_facts(reg, "greeter", exported.read_text(encoding="utf-8"), "1.0.0",
                                     source_path=exported)
              if _takes_source_path()
              else registry.release_facts(reg, "greeter",
-                                         exported.read_text(), "1.0.0"))
+                                         exported.read_text(encoding="utf-8"), "1.0.0"))
 
     assert facts["refusals"]
     assert any(PROFILED in refusal for refusal in facts["refusals"])
@@ -222,7 +222,7 @@ def test_a_real_origin_does_not_change_the_release_bytes(reg, tmp_path):
 
     assert with_origin["sourceSha256"] == without_origin["sourceSha256"]
     assert with_origin["manifestSha256"] == without_origin["manifestSha256"]
-    assert (reg / "components" / "greeter" / "manifest.json").read_text() == \
-        (plain / "components" / "greeter" / "manifest.json").read_text()
+    assert (reg / "components" / "greeter" / "manifest.json").read_text(encoding="utf-8") == \
+        (plain / "components" / "greeter" / "manifest.json").read_text(encoding="utf-8")
     assert registry.verify(reg) == []
     assert registry.verify(plain) == []

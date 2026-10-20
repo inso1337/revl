@@ -37,7 +37,7 @@ from revl.synthesize import HOST_SHIMS, synthesize_provider  # noqa: E402
 
 # The shipped `Server` binding module, used verbatim so the test tracks the real
 # stdlib contract rather than a private copy of it.
-SERVER_RVL = (ROOT / "stdlib" / "server.rvl").read_text()
+SERVER_RVL = (ROOT / "stdlib" / "server.rvl").read_text(encoding="utf-8")
 
 # A consumer written with no idea that its provider is the host runtime. Not one
 # word of this changes between a host provider and a real revl one — the wiring
@@ -114,7 +114,7 @@ composition Notes {
 }
 """)
     with pytest.raises(RevlError) as excinfo:
-        Parser((tmp_path / "base.rvl").read_text(), "base.rvl").parse()
+        Parser((tmp_path / "base.rvl").read_text(encoding="utf-8"), "base.rvl").parse()
     assert "duplicate row label `@server`" in str(excinfo.value)
 
 

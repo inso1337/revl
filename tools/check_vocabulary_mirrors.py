@@ -1178,6 +1178,17 @@ def self_test() -> int:
     return 0
 
 
+def _print_check_summary(sites: list[Site], claims: list[Claim],
+                         near_miss_count: int, problem_count: int) -> None:
+    print("scan summary: "
+          f"{len(sites)} vocabulary sites, {len(classes(sites))} mirror "
+          f"classes, {len(claims)} claim(s), "
+          f"{near_miss_count} near miss(es), "
+          f"{problem_count} problem(s)")
+    print("Scope: statically scans Python declarations and recorded mirror "
+          "claims; it does not prove runtime behavior or semantic equivalence.")
+
+
 # --------------------------------------------------------------- entry point
 
 def main(argv: list[str] | None = None) -> int:
@@ -1222,8 +1233,9 @@ def main(argv: list[str] | None = None) -> int:
     claim_entries, claim_err = load_claim_ledger(LEDGER)
 
     if args.check:
+        observed_near_misses = near_misses(sites, claims)
         problems = check(sites, entries, err)
-        problems += check_claims(claims, near_misses(sites, claims),
+        problems += check_claims(claims, observed_near_misses,
                                  claim_entries, claim_err, sites)
         if problems:
             print(f"{len(problems)} problem(s) -- issue #1285, closed "
@@ -1232,11 +1244,11 @@ def main(argv: list[str] | None = None) -> int:
             for problem in problems:
                 print("  " + problem.replace("\n", "\n  "))
                 print()
+            _print_check_summary(sites, claims, len(observed_near_misses),
+                                 len(problems))
             return 1
-        print(f"{len(sites)} vocabulary sites, "
-              f"{len(classes(sites))} mirror classes, all recorded and in "
-              f"step; {len(claims)} claims, "
-              f"{len(near_misses(sites, claims))} recorded near miss(es)")
+        _print_check_summary(sites, claims, len(observed_near_misses),
+                             len(problems))
         return 0
 
     print(report(sites, entries, claims, claim_entries))

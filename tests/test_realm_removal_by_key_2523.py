@@ -133,7 +133,7 @@ def _assert_refused_by_name(result: dict, path, provider: str, was: str,
     # on the line that component starts on (the renamed line of the original)
     assert str(refusal.get("file")).endswith(path.name), refusal
     original = f"component {was} provides kv: Kv {{"
-    line = path.read_text().splitlines().index(original) + 1
+    line = path.read_text(encoding="utf-8").splitlines().index(original) + 1
     assert refusal.get("line") == line, refusal
 
 

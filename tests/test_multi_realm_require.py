@@ -254,7 +254,7 @@ def test_every_tier_router_scenario_compiles_to_the_sanctioned_shape():
     scenarios = sorted(ROOT.glob("backends/*/scenarios/router.rvl"))
     assert len(scenarios) >= 4, scenarios
     for path in scenarios:
-        ir = compile_source(path.read_text(), str(path))
+        ir = compile_source(path.read_text(encoding="utf-8"), str(path))
         routed = [c for c in ir["components"] if c.get("routes")]
         assert len(routed) == 1, path
         router = routed[0]
@@ -279,7 +279,7 @@ def test_wasm_emitter_provides_the_routed_key_through_the_route():
     CI behind the cordis-wasm pin gate — hence this runtime-free guard, which
     runs wherever the frontend does and fails on the pre-fix emitter."""
     scenario = ROOT / "backends" / "wasm" / "scenarios" / "router.rvl"
-    ir = compile_source(scenario.read_text(), str(scenario))
+    ir = compile_source(scenario.read_text(encoding="utf-8"), str(scenario))
     router = next(c for c in ir["components"] if c.get("routes"))
     key = next(iter(router["routes"]))
     methods = sorted(ir["services"][router["requires"][key]]["methods"])

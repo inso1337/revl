@@ -91,7 +91,7 @@ MESSAGE = {
 
 
 def _src(stem: str) -> str:
-    return (CORPUS / f"{stem}.rvl").read_text()
+    return (CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
 
 
 def _refusal(stem: str) -> RevlError:

@@ -39,7 +39,7 @@ def test_golden_file_regenerates_identically(reference_ir):
 
 
 def test_emit_is_deterministic(reference_ir):
-    assert emit.emit(reference_ir) == emit.emit(json.loads(reference_ir_path().read_text()))
+    assert emit.emit(reference_ir) == emit.emit(json.loads(reference_ir_path().read_text(encoding="utf-8")))
 
 
 def test_rejects_wrong_ir_version(reference_ir):

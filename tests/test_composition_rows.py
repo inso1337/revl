@@ -613,7 +613,7 @@ def test_the_formatter_keeps_a_row_label_tight(tmp_path):
     doc = _project(tmp_path, BASE)
     before = resolve_file(str(doc), str(tmp_path)).to_ir()
 
-    formatted = format_source(doc.read_text(), str(doc))
+    formatted = format_source(doc.read_text(encoding="utf-8"), str(doc))
     assert "@db" in formatted and "@ db" not in formatted
     doc.write_text(formatted)
     assert resolve_file(str(doc), str(tmp_path)).to_ir() == before

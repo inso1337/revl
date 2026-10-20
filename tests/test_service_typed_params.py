@@ -46,7 +46,7 @@ ADMITTED = ("ok_param_approved", "ok_param_upper_bound", "ok_param_non_emission"
 
 
 def _src(stem: str) -> str:
-    return (CORPUS / f"{stem}.rvl").read_text()
+    return (CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
 
 
 def test_the_corpus_is_the_refusals_and_the_admissions():

@@ -396,7 +396,7 @@ def test_consume_before_fire_wal_ordering(sink, tmp_path):
     # so no cut position exists where the token is valid while the emission is
     # out — a cut BEFORE the emission leaves consumed-but-unfired (owed).
     records = [__import__("json").loads(line)
-               for line in Path(wal_path).read_text().splitlines()]
+               for line in Path(wal_path).read_text(encoding="utf-8").splitlines()]
     consumed = [i for i, r in enumerate(records)
                 if r.get("record") == "approval-consumed"
                 and r.get("requestId") == rid]

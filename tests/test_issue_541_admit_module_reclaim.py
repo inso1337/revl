@@ -209,7 +209,7 @@ def test_additive_admits_keep_identical_verdicts_and_reclaim_on_unload(tmp_path)
         # so the turn's own key is provided and callable every time.
         assert f"turn{i}" in verdict.keys
         verdict.handle.call(f"turn{i}", "run", [sink])
-        assert Path(sink).read_text().splitlines() == [f"announce:from-{i}"]
+        assert Path(sink).read_text(encoding="utf-8").splitlines() == [f"announce:from-{i}"]
         verdicts.append((verdict.admitted, tuple(verdict.keys)))
 
     # every admit reached the same verdict shape (admitted + its own key).
