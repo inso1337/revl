@@ -245,12 +245,13 @@ def _carried(kind: str, tmp_path: Path) -> dict:
     return {"source": SOURCE}
 
 
-def _assert_the_cascade_next(refusal: dict, sent: dict) -> dict:
+def _assert_the_cascade_next(refusal: dict, sent: dict, *, cold=True) -> dict:
     """`next` prefers the ready cascade call, then offers an unready edit."""
     options = refusal["next"]
     assert isinstance(options, list) and len(options) == 2, options
     nxt, replacement = options
-    carried = {k: v for k, v in sent.items() if k != "commit"}
+    carried = {k: v for k, v in sent.items()
+               if k != "commit" and (cold or k not in ("source", "files"))}
     assert nxt == remedy.call("revl_change", {
         **carried, "withdraw": {"component": "MemStore", "cascade": True}}), nxt
     assert "commit" not in nxt["arguments"]
@@ -258,22 +259,22 @@ def _assert_the_cascade_next(refusal: dict, sent: dict) -> dict:
     assert nxt["tool"] in {tool["name"] for tool in server_mod._ADVERTISED}
     dependents = [entry["component"] for entry in refusal["plan"]["cascade"]]
     replacement_context = {
-        key: sent[key] for key in
-        ("files", "source", "modules", "config", "record", "gauntlet")
-        if key in sent
+        key: sent[key] for key in change_mod.CHANGE_CONTEXT
+        if key in sent and (cold or key not in ("source", "files"))
     }
     assert replacement == remedy.call(
         "revl_change",
         {**replacement_context,
          "edit": {"edits": [{"symbol": name} for name in dependents]}},
         ready=False,
-        needs=("a `replacement` declaration for each dependent in `edit.edits`: "
+        needs=("a `replacement` declaration for each dependent in `edit.edits` "
+               "that no longer requires any provision lost in this withdrawal: "
                + ", ".join(f"`{name}`" for name in dependents)),
     )
     assert "commit" not in replacement["arguments"]
     assert "withdraw" not in replacement["arguments"]
     # the prose is rendered from the same data, so the two cannot disagree
-    assert refusal["diagnostics"][0]["message"].endswith(remedy.describe(nxt))
+    assert refusal["diagnostics"][0]["message"].endswith(remedy.describe(options))
     assert "cascade: true" in refusal["hint"]
     assert "second `next` option" in refusal["hint"]
     return nxt
@@ -304,12 +305,14 @@ def test_a_cold_stranding_withdrawal_names_the_cascade_call(kind, clean_session)
 
 
 @needs_runtime
-def test_a_warm_stranding_withdrawal_names_the_cascade_call():
+@pytest.mark.parametrize("kind", [None, "files", "source"])
+def test_a_warm_stranding_withdrawal_names_the_cascade_call(kind, clean_session):
     assert _call("revl_load", {"source": SOURCE})["ok"] is True
-    sent = {"withdraw": "MemStore"}
+    sent = {"withdraw": "MemStore", **(_carried(kind, clean_session)
+                                          if kind else {})}
     refusal = _call("revl_change", sent)
     assert refusal["ok"] is False and "loaded" not in refusal, refusal
-    nxt = _assert_the_cascade_next(refusal, sent)
+    nxt = _assert_the_cascade_next(refusal, sent, cold=False)
     _replay_then_commit(nxt)
 
 
@@ -322,7 +325,7 @@ def test_a_refused_commit_names_a_next_that_does_not_commit():
     refusal = _call("revl_change", sent)
     assert refusal["ok"] is False and refusal["committed"] is False
     nxt = _assert_the_cascade_next(refusal, sent)
-    assert "leaves out `commit`" in refusal["hint"]
+    assert "Neither `next` option carries `commit`" in refusal["hint"]
     planned = _call(nxt["tool"], nxt["arguments"])
     assert planned["ok"] is True and planned["committed"] is False, planned
     assert [e["component"] for e in planned["plan"]["cascade"]] == ["ApiImpl"]
@@ -342,7 +345,7 @@ def test_cascade_refusal_lists_each_dependent_for_replacement():
         {"component": "StoreAudit", "reason": "loses store"},
     ]}
 
-    refusal = change_mod.cascade_refusal(sent, plan)
+    refusal = change_mod.cascade_refusal(sent, plan, cold=True)
 
     cascade, replacement = refusal["next"]
     assert cascade["ready"] is True
@@ -356,8 +359,68 @@ def test_cascade_refusal_lists_each_dependent_for_replacement():
             {"symbol": "ApiImpl"}, {"symbol": "StoreAudit"},
         ]}},
         ready=False,
-        needs=("a `replacement` declaration for each dependent in `edit.edits`: "
+        needs=("a `replacement` declaration for each dependent in `edit.edits` "
+               "that no longer requires any provision lost in this withdrawal: "
                "`ApiImpl`, `StoreAudit`"),
     )
     assert replacement["ready"] is False
     assert "commit" not in replacement["arguments"]
+
+
+def test_cascade_refusal_does_not_offer_read_only_dependents_for_replacement():
+    sent = {"withdraw": "MemStore", "source": SOURCE}
+    plan = {"cascade": [{"component": "ApiImpl", "reason": "loses store"}]}
+    dependency = (
+        "component ApiImpl provides api: Api {\n"
+        '  provide api { fn read() = "independent" }\n'
+        "}\n")
+    read_only = change_mod.read_only_components({
+        "dependencies": {"trucs/store/component.rvl": dependency}})
+    assert read_only == {"ApiImpl": "trucs/store/component.rvl"}
+
+    refusal = change_mod.cascade_refusal(
+        sent, plan, cold=True, read_only=read_only)
+
+    assert len(refusal["next"]) == 1
+    assert refusal["next"][0]["ready"] is True
+    assert "second `next` option" not in refusal["hint"]
+    assert "`ApiImpl` is in read-only buffer `trucs/store/component.rvl`" \
+        in refusal["hint"]
+
+
+@needs_runtime
+def test_the_replacement_option_can_remove_the_lost_key_before_withdrawal():
+    assert _call("revl_load", {"source": SOURCE})["ok"] is True
+
+    refusal = _call("revl_change", {"withdraw": "MemStore"})
+    assert refusal["ok"] is False, refusal
+    cascade, replacement = refusal["next"]
+    assert cascade["ready"] is True
+    assert replacement["ready"] is False
+    assert "`replacement` declaration" in replacement["needs"]
+    assert "no longer requires any provision lost in this withdrawal" \
+        in replacement["needs"]
+    assert replacement["needs"] in refusal["diagnostics"][0]["message"]
+    assert "no longer requires a provision lost in this withdrawal" in refusal["hint"]
+    assert "commit that replacement change first, then retry the withdrawal" \
+        in refusal["hint"]
+
+    replacement_source = (
+        "component ApiImpl provides api: Api {\n"
+        '  provide api { fn read() = "independent" }\n'
+        "}\n")
+    edit_args = dict(replacement["arguments"])
+    edit_args["edit"] = {"edits": [{
+        "symbol": "ApiImpl", "replacement": replacement_source,
+    }]}
+    proposed = _call("revl_change", edit_args)
+    assert proposed["ok"] is True and proposed["committed"] is False, proposed
+
+    committed = _call("revl_change", {"commit": True})
+    assert committed["ok"] is True and committed["committed"] is True, committed
+
+    withdrawn = _call("revl_change", {
+        "withdraw": "MemStore", "commit": True,
+    })
+    assert withdrawn["ok"] is True and withdrawn["committed"] is True, withdrawn
+    assert _components() == {"ApiImpl", "FixedClock"}

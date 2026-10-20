@@ -2086,8 +2086,18 @@ def _tool_change(arguments: dict) -> dict:
                 if arguments.get("gauntlet") is True else None)
     # a cold refusal is answered before `_tool_edit`'s load gate on purpose:
     # nothing is loaded by it, so there is nothing for that gate to decide
-    refused = (_change.cascade_refusal(arguments, plan, cold=cold)
-               if intent == "withdraw" else None)
+    refused = None
+    if intent == "withdraw":
+        if cold and isinstance(compiled, tuple):
+            source, files, modules = _candidate_of(arguments)
+            vs = {"source": source, "files": files, "modules": modules,
+                  "files_content": compiled[2] or {},
+                  "dependencies": _dependency_buffers(compiled[1])}
+        else:
+            vs = _change_working_set()
+        readonly = _change.read_only_components(vs)
+        refused = _change.cascade_refusal(arguments, plan, cold=cold,
+                                          read_only=readonly)
     result = _proposal.annotate(
         SESSION, refused or _tool_edit(edit_arguments, verify=verifier,
                                        caller="revl_change", compiled=compiled),

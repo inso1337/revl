@@ -989,15 +989,19 @@ calls for one change, five of them `revl_check` polls):
    cascade, and a withdrawal that would strand a dependent is refused before
    anything is loaded, with `loaded: false` and the same plan and hint. The
    refusal also carries `next` (issue #2536) as a preference-ordered list. The
-   first entry is the same `revl_change` call with `cascade: true`, ready and
-   pre-filled from the arguments it refused (the carried
-   `files`/`source`/`modules`). The second is an unready `revl_change` edit
-   template with one `symbol` per stranded dependent; the caller supplies each
-   dependent's replacement declaration. Neither entry carries `commit`, even
-   when the refused call did: the cascade withdraws more than the caller named,
-   so sending the first entry as-is only returns the cascade plan
-   (`committed: false`), and committing it is a separate call the caller
-   chooses;
+   first entry is the same `revl_change` call with `cascade: true`, ready to
+   send as-is. It retains `source`/`files` only for a cold call; a warm call
+   uses the composition already held by the session. When every stranded
+   dependent is editable, the second entry is an unready `revl_change` edit
+   template with one `symbol` per dependent. The caller supplies a replacement
+   declaration for each one and must ensure each replacement no longer
+   requires any provision lost in the withdrawal. Send and commit that
+   replacement change first, then retry the withdrawal. If a dependent is in a
+   read-only `use` buffer, the replacement option is omitted and the hint names
+   the buffer that must be updated before reloading. No `next` option carries
+   `commit`, even when the refused call did: sending the first entry returns
+   the cascade plan (`committed: false`), and committing a change is a separate
+   call the caller chooses;
 3. **apply** the change to a working copy of the server-side source, so
    nothing about the running composition has changed yet;
 4. **verify**: admission against the running composition, the lease and
