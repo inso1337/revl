@@ -48,8 +48,8 @@ Verdicts (in ``report["quarantine"]["verdict"]``):
   * ``timeout``     — admissible, but a substrate probe **did not return** and
                       was killed by the runtime. The wall-clock backstop behind
                       ``trapped``: a guest that loops forever spends its fuel
-                      budget and traps (see ``PROBE_FUEL``), so reaching this
-                      verdict means the guest outran the runtime itself.
+                      budget and traps (see ``ComponentLimits``), so reaching
+                      this verdict means the guest outran the runtime itself.
                       Contained — the host was never touched — but the candidate
                       is neither proved nor disproved. Not eligible.
   * ``rejected``    — admission refused; the candidate never reached the
@@ -62,6 +62,10 @@ Verdicts (in ``report["quarantine"]["verdict"]``):
                       absent, so the substrate battery could not run. The flow
                       logic (gauntlet grade, canonical lowering) still ran; only
                       the physical run is skipped, with a reason.
+  * ``refused``     — the candidate is not confined (issue #2729): its produced
+                      component carries an import it never declared, or the
+                      bound policy asks for wasm confinement without stating
+                      limits. Refused BEFORE it ran; the host was never touched.
 
 Isolation. Nothing here mutates the live composition. The gauntlet already runs
 its host battery in a throwaway :class:`~revl.mcp.session.Session`; the substrate
@@ -93,6 +97,12 @@ import subprocess
 import tempfile
 
 from ..errors import RevlError
+from ..wasm_confinement import (
+    ConfinementError,
+    component_targets,
+    declared_capabilities,
+    limits_from_policy,
+)
 from . import gauntlet as _gauntlet
 
 # ---------------------------------------------------------------------------
@@ -112,19 +122,18 @@ QUARANTINE_BYPASS_VERB = "quarantine-bypass"
 # literal `wasmtime run --invoke f("...")` parses (canonical.run_component_str).
 _BATTERY: tuple[str, ...] = ("", "a", "revl", "x" * 64)
 
-# The fuel budget for one probe, in wasm instructions. Fuel bounds a guest by
-# *work* rather than by elapsed time, so a candidate whose boundary function
-# never returns (an unbounded `while`) traps deterministically in about a tenth
-# of a second instead of holding the wasmtime process until the 120 s
-# wall-clock timeout fires. That distinction is the whole point: a trap is an
-# `EmitError` this battery already grades, while a wall-clock timeout surfaces
-# as `subprocess.TimeoutExpired`, which is not a verdict at all.
-#
-# The budget sits three orders of magnitude above what a `Str`-surface boundary
-# function costs on this battery — a trivial `Str -> Str` template measures
-# under 1e5 — so it caps a runaway guest without narrowing what a real
-# candidate may compute.
-PROBE_FUEL = 1_000_000_000
+# The ceiling each probe runs under comes from the bound policy, or from
+# `wasm_confinement.DEFAULT_COMPONENT_LIMITS` when it names none (issue #2729).
+# Fuel bounds a guest by *work* rather than by elapsed time, so a candidate
+# whose boundary function never returns (an unbounded `while`) traps
+# deterministically in about a tenth of a second instead of holding the
+# wasmtime process until the wall-clock ceiling fires. That distinction is the
+# whole point: a trap is an `EmitError` this battery already grades, while a
+# wall-clock timeout surfaces as `subprocess.TimeoutExpired`, which is not a
+# verdict at all. The default fuel sits three orders of magnitude above what a
+# `Str`-surface boundary function costs on this battery — a trivial `Str -> Str`
+# template measures under 1e5 — so it caps a runaway guest without narrowing
+# what a real candidate may compute.
 
 
 # --------------------------------------------------------------- canonical tier
@@ -202,9 +211,16 @@ def _unavailable(reason: str, *, functions=None) -> dict:
     }
 
 
-def _run_substrate(canonical, ir: dict, service: str) -> dict:
+def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
     """Compile the candidate to a standard component and run the lifecycle +
     fault battery on the substrate — the physical confinement proof.
+
+    ``policy`` is the session's boundary policy (issue #2729): the limits the
+    candidate runs under come from it, and a policy that declares
+    ``wasm components confined`` without stating the ceilings raises
+    :class:`ConfinementError` before anything is built or run. With no policy
+    the conservative default confinement still applies, so a generated
+    component is never executed unbounded.
 
     Every Str-surface boundary function is booted under wasmtime's component
     model and invoked across the probe battery. A probe that **returns** is a
@@ -212,12 +228,19 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
     trap (the candidate could not escape its linear memory) and recorded — never
     re-raised. The section's ``status`` is ``passed`` when every probe returned,
     ``trapped`` when any probe trapped (including a guest that spent its whole
-    fuel budget, see ``PROBE_FUEL``), ``timeout`` when a probe outran the
+    fuel budget, see ``ComponentLimits``), ``timeout`` when a probe outran the
     runtime's own wall-clock budget and was killed, ``deferred`` when the
     candidate has no canonical-ABI-emittable boundary function to present (every
     boundary signature carries a still-un-lowerable type — Float/Map/resource/
     function-value), and ``unavailable`` when the toolchain is absent."""
     EmitError = canonical.EmitError
+
+    # 0. Confinement first (issue #2729): the policy's ceilings, or the
+    #    conservative defaults when it names none. A `wasm components confined`
+    #    policy without limits raises here, before a component is built.
+    limits = limits_from_policy(policy)
+    declared = declared_capabilities(ir, service)
+    targets = component_targets(ir)
 
     # 1. Lower to the canonical ABI. No Str-surface function => the aggregate
     #    follow-on; deferred honestly, not forced through a boundary that cannot
@@ -288,21 +311,34 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
                     skipped += 1
                 else:
                     try:
-                        result = canonical.run_component_str(component, func, arg,
-                                                             fuel=PROBE_FUEL)
+                        result = canonical.run_component_str(
+                            component, func, arg, limits=limits,
+                            declared=declared, declared_targets=targets)
                         probe["outcome"] = "returned"
                         probe["result"] = result
                         returned += 1
                     except EmitError as error:
-                        # the physical confinement: wasmtime caught a trap and
-                        # exited non-zero. The host was never touched — this is a
-                        # contained trap, recorded, never re-raised. A guest that
-                        # spends its whole fuel budget lands here too ("all fuel
-                        # consumed by WebAssembly"): a runaway candidate is a
-                        # trap, not a special case.
-                        probe["outcome"] = "trapped"
-                        probe["trap"] = _trap_detail(str(error))
-                        trapped += 1
+                        # A WALL-CLOCK trap is a timeout, not a work trap: the
+                        # guest did not return within the elapsed-time ceiling,
+                        # which is exactly the `timeout` verdict (and the budget
+                        # is then paid once, not once per probe). Everything
+                        # else is the physical confinement working: wasmtime
+                        # caught a trap, the host was never touched, recorded and
+                        # never re-raised. A guest that spends its whole fuel
+                        # budget lands here too ("all fuel consumed by
+                        # WebAssembly"): a runaway candidate is a trap, not a
+                        # special case.
+                        if getattr(error, "reason", None) == "wall":
+                            probe["outcome"] = "timeout"
+                            probe["timeout"] = (
+                                "did not return within the probe's wall-clock "
+                                "ceiling and was stopped by the runtime — the "
+                                "host was never touched")
+                            timed_out += 1
+                        else:
+                            probe["outcome"] = "trapped"
+                            probe["trap"] = _trap_detail(str(error))
+                            trapped += 1
                     except subprocess.TimeoutExpired:
                         # The wall-clock backstop for whatever fuel does not
                         # cover. The guest did not return, so this is not a pass
@@ -487,10 +523,21 @@ def run(session, arguments: dict, *,
     else:
         # compile the candidate standalone for lowering — the same IR the
         # gauntlet booted in its scratch session (candidate summary carries it).
+        policy = getattr(session, "sandbox", None)
         try:
             ir = _standalone_ir(arguments, over_the_transport)
             service = _service_name(ir, arguments)
-            substrate = _run_substrate(canonical, ir, service)
+            substrate = _run_substrate(canonical, ir, service, policy=policy)
+        except ConfinementError as error:
+            # issue #2729: the candidate is not confined — its produced import
+            # section carries something it never declared, or the policy asks
+            # for confinement without stating limits. A refusal, not a grade.
+            substrate = {
+                "kind": "confined", "status": "refused", "ran": False,
+                "reason": error.message,
+                "counts": {"probes": 0, "returned": 0, "trapped": 0,
+                           "timeout": 0, "skipped": 0},
+            }
         except RevlError as error:
             # admissible against the live composition but not a whole
             # composition on its own — the same honest split the gauntlet makes.
@@ -504,6 +551,7 @@ def run(session, arguments: dict, *,
         "timeout": "timeout",
         "deferred": "deferred",
         "unavailable": "unavailable",
+        "refused": "refused",
     }.get(substrate.get("status"), "unavailable")
 
     report = {
@@ -560,6 +608,10 @@ def _verdict_note(verdict: str) -> str:
         "unavailable": "the candidate was graded and lowered, but the substrate "
                        "battery could not run here (see substrate.reason). The "
                        "flow logic ran; only the physical sandbox run is skipped.",
+        "refused": "the candidate is UNCONFINED: its produced component carries "
+                   "an import it did not declare, or the policy asks for wasm "
+                   "confinement without stating limits. Refused before it ran; "
+                   "the host was never touched.",
     }.get(verdict, "quarantine reported a verdict.")
 
 

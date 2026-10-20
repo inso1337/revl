@@ -3367,8 +3367,8 @@ def _tool_quarantine(arguments: dict) -> dict:
     standard wasm component and run its lifecycle + fault battery in wasmtime's
     component-model sandbox — where an escape is a trap, not an incident. Returns
     a report whose `verdict` is passed | trapped | timeout | rejected | deferred
-    | unavailable, plus the policy admission decision. The live composition is
-    never touched (docs/quarantine-tier.md)."""
+    | unavailable | refused, plus the policy admission decision. The live
+    composition is never touched (docs/quarantine-tier.md)."""
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — quarantine proves "
                               "a candidate component in the sandbox")
@@ -5267,8 +5267,12 @@ TOOLS = [
                        "eligible), `rejected` (admission refused; never reached "
                        "the substrate), `deferred` (no Str-surface function — "
                        "records/lists across the boundary are the aggregate "
-                       "follow-on) or `unavailable` (wasm-tools/wasmtime absent; "
-                       "the grade + lowering still ran). It also reports the "
+                       "follow-on), `unavailable` (wasm-tools/wasmtime absent; "
+                       "the grade + lowering still ran) or `refused` (the "
+                       "candidate is not confined: an undeclared import in its "
+                       "produced bytes, or a policy that asks for wasm "
+                       "confinement without limits; nothing ran). It also "
+                       "reports the "
                        "policy admission decision (`admission`): where a bound "
                        "policy declares `quarantine required` (item 33), a "
                        "candidate is admissible only after it passes — unless the "
