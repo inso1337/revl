@@ -20,11 +20,12 @@ class _FakeRunner:
     """Stands in for `subprocess.run`, recording the argv of both calls."""
 
     def __init__(self, *, version="v24.1.0", probe_code=0,
-                 probe_stdout="42", error=None):
+                 probe_stdout="42", error=None, probe_error=None):
         self.version = version
         self.probe_code = probe_code
         self.probe_stdout = probe_stdout
         self.error = error
+        self.probe_error = probe_error
         self.calls = []
         self.probe_path = None
         self.probe_source = None
@@ -35,6 +36,8 @@ class _FakeRunner:
             raise self.error
         if argv[1] == "--version":
             return subprocess.CompletedProcess(argv, 0, f"{self.version}\n", "")
+        if self.probe_error is not None:
+            raise self.probe_error
         self.probe_path = Path(argv[1])
         self.probe_source = self.probe_path.read_text(encoding="utf-8")
         return subprocess.CompletedProcess(
@@ -74,11 +77,25 @@ def test_a_zero_exit_with_the_wrong_value_is_not_capability():
     assert "v24.1.0" in reason
 
 
-def test_a_node_that_cannot_be_executed_keeps_the_absent_reason():
+def test_a_node_that_cannot_be_executed_is_named_by_path_not_reported_absent():
     reason = node_ts_skip_reason(
         _ABSENT, node="/fake/node",
         runner=_FakeRunner(error=FileNotFoundError("/fake/node")))
-    assert reason == f"{_ABSENT}, but could not be probed"
+    assert reason is not None
+    assert "/fake/node" in reason
+    assert "could not be probed" in reason
+    assert "type stripping" in reason
+    assert _ABSENT not in reason
+
+
+def test_a_probe_that_times_out_keeps_the_version_already_read():
+    reason = node_ts_skip_reason(
+        _ABSENT, node="/fake/node",
+        runner=_FakeRunner(probe_error=subprocess.TimeoutExpired(["node"], 30)))
+    assert reason is not None
+    assert "v24.1.0" in reason
+    assert "could not be probed" in reason
+    assert _ABSENT not in reason
 
 
 def test_a_wrapper_that_exits_nonzero_is_judged_incapable(tmp_path):
