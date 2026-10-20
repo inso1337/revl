@@ -53,11 +53,19 @@ belongs.
    edit inside a `<!-- docgen:KEY -->` region, which the next generation
    overwrites.
 
-   A red on the emitted goldens means a checked-in golden differs from a fresh
-   generation: run `python3 tools/regen_goldens.py python typescript rust java
-   wasm`, review the diff and commit it, and never bend the emitter back to
-   the old bytes. A red on the census records means the committed artifact is
-   stale: run `python3 tools/census_artifact.py --write` and commit the
+   A red on the emitted goldens can be drift, a producer that failed to run, a
+   missing tool under `--strict`, or a target the run could not decide (its
+   declarations were refused); the helper says such a red is "not a drift
+   report". Only drift is fixed by regenerating. Run
+   `python3 tools/regen_goldens.py python typescript rust java wasm`, review
+   the diff and commit it, and never bend the emitter back to the old bytes.
+   For the other causes, fix the producer or the machine. A red on the census
+   records does not by itself mean the committed artifact is stale: the helper
+   hedges, "If the committed records are stale", and the check also fails on
+   unusable input (records that do not describe this checkout), a record that
+   was hand-edited or merged by hand, a missing or extra case file, or a
+   corpus, checker or baseline that moved under the records. When it is
+   staleness, run `python3 tools/census_artifact.py --write` and commit the
    records. The census half is skipped when the branch diff moves no input of
    the artifact: `git diff --name-only origin/main` piped into
    `python3 tools/census_artifact.py --moved-inputs` reports nothing moved, so
