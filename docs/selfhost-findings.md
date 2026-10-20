@@ -1796,6 +1796,8 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `method_control_flow.rvl`
 - `generic_fn.rvl`
 - `comp_provide_generic.rvl`
+- `comp_provide_generic_add.rvl`
+- `comp_provide_generic_let.rvl`
 
 `wasm`:
 
