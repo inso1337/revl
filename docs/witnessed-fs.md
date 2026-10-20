@@ -443,7 +443,7 @@ swap it for another inode, or hardlink it out. The inverse then renamed the
 result over the target and the abort reported a clean, residue-free reversal.
 
 `snapshot_preimage` now captures the sidecar's own identity and the witness
-carries it, so the canonical inverse can check it. Three facts, on the way in
+carries it, so the canonical inverse can check it. Four facts, on the way in
 and again on the installed result:
 
 * the sidecar is a regular file (`EOUTSIDE` otherwise),
@@ -451,15 +451,30 @@ and again on the installed result:
   `open_confined_write` applies to its target),
 * `(dev, ino)` and the captured `mode`/`size`/`mtime_ns`/`ctime_ns` are
   unchanged since capture (`EIDENTITY`). `(dev, ino)` is what a same-bytes
-  replacement cannot forge; `ctime_ns` is what makes an in-place rewrite visible
-  without re-reading the bytes, and unlike `mtime_ns` an unprivileged writer
-  cannot set it back with `utimes`.
+  replacement cannot forge; `ctime_ns` catches an in-place rewrite once the
+  inode timestamp clock has ticked, and unlike `mtime_ns` an unprivileged writer
+  cannot set it back with `utimes`. It does not catch one that lands inside the
+  same tick (#2647),
+* the sha256 of the sidecar's bytes still matches the digest recorded at
+  snapshot (`EIDENTITY`). The digest does not depend on clock resolution, so it
+  is what catches a same-size in-place rewrite inside one tick. It is read
+  through the same fd the stat came from, on the way in and again on the
+  installed result. A recorded digest that is not exactly 64 lowercase hex
+  characters, and a sidecar whose bytes this process cannot read, are refused
+  as `EIDENTITY` rather than degrading to the stat-only comparison.
+
+The stat comparison runs on the fstat BEFORE the digest read, so a sidecar that
+already differs on inode or size is refused without reading it: a replacement
+can be huge or sparse, and the refusal should not do whatever work the replacer
+chose.
 
 The second pass is there because the rename is by name: re-checking the
 installed result is what closes the window between the first check and the
 syscall, the same way `confirm_landed` re-establishes the forward write's
 identity afterwards rather than trusting its pre-syscall check. It drops
-`ctime_ns`, which the rename itself legitimately bumps.
+`ctime_ns`, which the rename itself legitimately bumps, and it compares the
+digest again because the window it exists for is exactly a rewrite between the
+first read and the rename.
 
 This is not an opt-in profile and adds no vocabulary. It lives in the canonical
 `restore`, so every caller gets it, and a refusal simply raises, which the
@@ -472,10 +487,11 @@ capture, a durable record written before this key existed, keeps the two
 caller-independent checks and still restores; refusing every such replay would
 strand a recoverable WAL.
 
-Both tiers carry it (`install_captured_sidecar` in
+Both tiers carry the stat check (`install_captured_sidecar` in
 `backends/python/revl_fs_workspace.py`, `installCapturedSidecar` in
-`backends/typescript/revl_fs_ts.ts`, each a listed `syscall-time` entry point).
-`tests/test_fs_restore_sidecar_identity_1016.py` and
+`backends/typescript/revl_fs_ts.ts`, each a listed `syscall-time` entry point);
+the digest comparison is the Python host's, and #2652 tracks it for the
+TypeScript host. `tests/test_fs_restore_sidecar_identity_1016.py` and
 `backends/typescript/tests/fs_restore_sidecar_identity.test.ts` pin the tampered,
 swapped, re-linked and non-regular sidecars, the post-install re-check, and the
 untampered control that must stay silent.

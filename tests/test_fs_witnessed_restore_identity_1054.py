@@ -285,6 +285,63 @@ def test_a_capture_recorded_before_the_digest_still_restores(root, frame):
 
 
 # ===========================================================================
+# The recorded digest must BE a digest. A present null, number, list or
+# malformed string used to fall through to stat-only, so a corrupt capture
+# degraded the one check that does not depend on the clock into no check at all.
+# ===========================================================================
+
+@pytest.mark.parametrize("recorded", [
+    None,
+    7,
+    ["a" * 64],
+    True,
+    "abc",                                    # too short
+    "z" * 64,                                 # not hex
+    "A" * 64,                                 # uppercase, not lowercase hex
+], ids=["null", "number", "list", "bool", "short", "non-hex", "uppercase"])
+def test_a_present_invalid_recorded_digest_is_refused(root, frame, recorded):
+    """A capture that says it recorded a digest and then carries something that
+    is not one is a corrupt record, not a legacy one. Treating it as absent
+    would silently drop the only same-tick check, so it is refused as
+    `EIDENTITY` rather than compared stat-only."""
+    witness, target, sidecar = _written(root, frame)
+    witness["capture"][ws.SIDECAR_DIGEST_FIELD] = recorded
+
+    with pytest.raises(fs.FsOpError) as ei:
+        fs._witnessed_restore(witness)
+
+    assert ei.value.code == "EIDENTITY"
+    assert ws.SIDECAR_DIGEST_FIELD in ei.value.message
+    assert "not 64 lowercase hex" in ei.value.message, \
+        "the refusal must name the malformed record, not a digest mismatch"
+    assert open(target).read() == "v2", \
+        "an invalid recorded digest must not degrade to an install"
+    assert open(sidecar).read() == "v1", "the refused sidecar was consumed"
+
+
+def test_an_unreadable_sidecar_is_refused_as_an_identity_failure(root, frame):
+    """A sidecar whose bytes this process cannot read cannot be shown to be the
+    captured one. On main the `EACCES` escaped `_checked_stat` as a raw
+    `OSError`, which the guard totality wrapper tagged `EACCES` rather than the
+    `EIDENTITY` residue the inverse contract names."""
+    witness, target, sidecar = _written(root, frame)
+    os.chmod(sidecar, 0o200)
+    try:
+        if os.access(sidecar, os.R_OK):
+            pytest.skip("cannot revoke read permission (running as root)")
+        with pytest.raises(fs.FsOpError) as ei:
+            fs._witnessed_restore(witness)
+        assert ei.value.code == "EIDENTITY"
+        assert "preimage sidecar" in ei.value.message
+        assert "could not be read" in ei.value.message
+        assert open(target).read() == "v2", \
+            "an unreadable sidecar must not be installed"
+    finally:
+        os.chmod(sidecar, 0o600)
+    assert open(sidecar).read() == "v1", "the refused sidecar was consumed"
+
+
+# ===========================================================================
 # The four substitutions. Each one FAILS on main — the sidecar is renamed over
 # the target and the reversal reports success — and is refused here.
 # ===========================================================================
@@ -398,6 +455,31 @@ def test_a_sidecar_replaced_by_a_directory_is_refused(root, frame):
     assert ei.value.code == "EOUTSIDE"
     assert open(target).read() == "v2"
     assert stat.S_ISDIR(os.stat(sidecar).st_mode)
+
+
+def test_a_stat_drift_is_refused_before_the_sidecar_bytes_are_read(root, frame,
+                                                                  monkeypatch):
+    """A replacement can be enormous or sparse, so a sidecar that already
+    differs on the fstat must be refused before its bytes are read. The digest
+    read used to happen first, which let whoever replaced the sidecar choose the
+    work the refusal does. The sparse file here would read for ages; the fstat
+    mismatch names it first."""
+    witness, target, sidecar = _written(root, frame)
+    os.unlink(sidecar)
+    with open(sidecar, "wb") as fh:
+        fh.truncate(1 << 40)                   # sparse: allocates no data blocks
+
+    def _must_not_read(fd):
+        raise AssertionError(
+            "read the replacement sidecar before the fstat mismatch refused")
+
+    monkeypatch.setattr(ws, "_sha256_of_fd", _must_not_read)
+
+    with pytest.raises(fs.FsOpError) as ei:
+        fs._witnessed_restore(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "ino" in ei.value.message or "size" in ei.value.message
+    assert open(target).read() == "v2"
 
 
 def test_the_installed_result_is_rechecked_after_the_rename(root, frame, monkeypatch):
