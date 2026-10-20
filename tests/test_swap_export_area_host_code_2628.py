@@ -57,8 +57,10 @@ _BASE = (_DECLS + "component ToolV1 provides tool: Tool {\n"
          '  provide tool { fn describe() = "v1" }\n'
          "}\n")
 
-# the successor: its ACTIVATION reaches the operator's class-(c) emission, which
-# is what holds the swap on an approval ticket at all.
+# the successor: its ACTIVATION reaches the operator's class-(c) emission, and it
+# carries an immediate `candidate_note` emission of its own, so what holds the
+# swap on an approval ticket is over-determined rather than the operator's
+# emission alone.
 #
 # It carries a host body of its OWN (`candidate_note`), and that is deliberate
 # rather than incidental: the operator's `notify` is in the merged IR too, so a
@@ -141,6 +143,11 @@ def test_an_export_area_swap_reports_the_host_code_the_inline_one_does(
     assert inline.get("unreviewedHostCode"), (
         "the inline control reports no unreviewed host code, so this candidate "
         f"does not exercise the field at all: {inline}")
+    # The field being non-empty is not enough: an attribution that keeps only the
+    # OPERATOR's `notify` and drops the author's body would satisfy the equality
+    # below while crediting the operator's code to the author. The body the author
+    # really wrote has to be named, in both doors.
+    assert "candidate_note" in {e["extern"] for e in inline["unreviewedHostCode"]}, inline
 
     exported = _exported(tmp_path, _CANDIDATE)
     from revl.export_area import in_export_area
