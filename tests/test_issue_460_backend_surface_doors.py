@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import types
@@ -51,6 +50,7 @@ from revl.compiler import compile_files, compile_source
 from revl.errors import RevlError
 
 from _backend_import import backend_emitter  # noqa: E402
+from _node_capability import node_ts_skip_reason  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND_PY = _ROOT / "backends" / "python"
@@ -59,9 +59,10 @@ if str(_BACKEND_PY) not in sys.path:
     sys.path.insert(0, str(_BACKEND_PY))
 import revl_fs_workspace as ws  # noqa: E402
 
-_HAS_NODE = shutil.which("node") is not None
+_NODE_TS_REASON = node_ts_skip_reason(
+    "node is required to run the emitted ts consumer")
 _needs_node = pytest.mark.skipif(
-    not _HAS_NODE, reason="node is required to run the emitted ts consumer")
+    _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
 
 
 # The user-origin component, mirroring the harness's reach: the shell verdict
