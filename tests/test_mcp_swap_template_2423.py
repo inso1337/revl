@@ -193,6 +193,25 @@ def _reached_helper_source(leading_comment: bool = False) -> str:
     )
 
 
+def _spawn_config_source(line_value: int) -> str:
+    """The stateful operator fixture with one config-bearing spawn site:
+    `Worker` declares config fields named `line` and `kind`, and `Supervisor`
+    spawns it with values. The names are layout or IR tags ON PURPOSE: the spawn
+    `config` map is keyed by the author's config-field names, so it is code, and
+    a successor that changes only this value is still a changed holder. `kind`
+    is the harder half: a key-presence node test would read the map as an IR
+    node and drop the sibling `line`."""
+    return _stateful_instance_source(1).replace(
+        "component Worker provides store: Store {\n",
+        "component Worker provides store: Store {\n"
+        "  config { line: Int, kind: Int }\n",
+    ).replace(
+        "  let w = effect spawn Worker undo w.dispose()\n",
+        "  let w = effect spawn Worker with { kind: 1, "
+        f"line: {line_value} }} undo w.dispose()\n",
+    )
+
+
 def _call(tool: str, arguments: dict) -> dict:
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": tool, "arguments": arguments}})
@@ -788,6 +807,39 @@ def test_a_leading_comment_above_a_reached_helper_still_migrates(
     assert swapped["ok"] is True, swapped
     assert swapped["swapped"] is True
     assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_changed_spawn_config_is_still_a_changed_holder(
+        tmp_path, _fresh_server_session):
+    """A spawn `config` map is keyed by the AUTHOR's config-field names, so a
+    field spelled like a layout key or an IR tag is code. The operator loads a
+    fixture whose `Worker` declares `line` and `kind` config fields and whose
+    `Supervisor` spawns it with `kind: 1, line: 1`, and seeds a live instance;
+    the successor changes only `line` to `2`. `Worker` stays byte-identical, so
+    this is a changed holder. Before the layout drop was narrowed it dropped
+    the bare `line` key at every depth, the config map compared empty, and the
+    gate let the state migrate. A key-presence node test would do the same again
+    because the map carries `kind`; the node test must read the tag's TYPE. It
+    must refuse with STATE_UNDISCLOSED and keep gen N serving."""
+    server = _fresh_server_session
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_spawn_config_source(1), encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    assert _call("revl_call", {"key": "admin", "method": "seed",
+                               "args": ["alice", "42"]})["ok"] is True
+
+    swapped = _call("revl_swap", {"source": _spawn_config_source(2)})
+
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert swapped.get("swapped") is not True
     assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
     assert _call("revl_call", {"key": "admin", "method": "read",
                                "args": ["alice"]})["result"] == "42"

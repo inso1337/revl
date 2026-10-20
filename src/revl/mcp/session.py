@@ -9848,30 +9848,41 @@ def _base_manifest_hash_of(ir: dict | None) -> str | None:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-#: IR keys that spell WHERE a node sits, not what it does: the source position
-#: a comment or a blank line above it moves (`line`, and the span fields a
-#: future lowerer may add), or the file it was read from (`file`, `source`).
-#: `_component_signature` and `_template_code`'s reached entries drop them
-#: recursively. This is load-bearing for the #2423 follow-up: a spawn step
+#: IR keys the lowerer emits as layout: the `line` a comment or a blank line
+#: above a node moves, and the `file` a hole node was read from. They are
+#: dropped only where they are layout, on an IR node (a dict whose `step` or
+#: `kind` is the lowerer's string tag), plus the top-level `source` a component
+#: entry carries, which the signatures drop explicitly. They are NOT dropped by
+#: bare key name at any depth: a spawn `config` map is keyed by the AUTHOR's
+#: config-field names, so a field named `line` or `file` there is code, and
+#: dropping it would let a successor change the config a live instance is
+#: re-seated with and still compare equal. A config map can also carry a field
+#: named `kind` or `step`, so the node test reads the tag's TYPE, not the key. This is load-bearing for the #2423 follow-up: a spawn step
 #: carries a `line`, so a leading comment above the live nested template (or
 #: above a top-level helper the template reaches, whose `break` carries one)
 #: used to move `_template_code` and refuse a textually identical template with
 #: STATE_UNDISCLOSED.
-_LAYOUT_ONLY_IR_KEYS = frozenset({
-    "line", "col", "column", "end_line", "offset", "span", "file", "source",
-})
+_LAYOUT_ONLY_IR_KEYS = frozenset({"line", "file"})
 
 
 def _code_shape(value):
-    """`value` with every layout-only IR key dropped, recursively.
+    """`value` with the layout-only keys the lowerer emits dropped.
 
-    `source` is both the top-level component spelling and the hole node's file,
-    so dropping it here is what keeps a component's identity independent of the
-    path it was read from or staged at; `line` and the span fields keep it
-    independent of where a comment or a blank line puts it."""
+    A layout key is dropped only where it is layout: on an IR node (a dict
+    whose `step` or `kind` is the lowerer's string tag, such as a `break`, a
+    `spawn` or a hole), never on a `config` map keyed by author field names.
+    The tag must be a STRING: a config map can carry an author field named
+    `line`, `file`, `kind` or `step` (its value is a lowered expression dict,
+    not a tag), and a key-presence test would drop a sibling `line`/`file` there
+    again. `line` keeps a component's identity independent of where a comment
+    or a blank line puts it; `file` is the hole node's source path. A component
+    entry's top-level `source` is dropped by the signatures that know it is the
+    entry, not a config map."""
     if isinstance(value, dict):
+        node = (isinstance(value.get("step"), str)
+                or isinstance(value.get("kind"), str))
         return {k: _code_shape(v) for k, v in value.items()
-                if k not in _LAYOUT_ONLY_IR_KEYS}
+                if not (node and k in _LAYOUT_ONLY_IR_KEYS)}
     if isinstance(value, list):
         return [_code_shape(v) for v in value]
     return value
@@ -9892,15 +9903,18 @@ def _component_signature(comp: dict) -> str:
     `source` (the file the component was declared in) is excluded: it is the
     spelling of a path, not of the component, and it moves for reasons that are
     not changes of code (a composition re-compiled from a different directory,
-    `propose`'s `candidate.rvl` staging name). The same holds for every other
-    layout-only field (`_LAYOUT_ONLY_IR_KEYS`), recursively: a `line` is where
-    the node sits in the file, and a component whose only move is a comment or
-    a blank line above it is still the same code. Everything that IS the
+    `propose`'s `candidate.rvl` staging name). The lowerer's layout-only fields
+    (`_LAYOUT_ONLY_IR_KEYS`, dropped only on the IR nodes that carry them) are
+    excluded too: a `line` is where the node sits in the file, and a component
+    whose only move is a comment or a blank line above it is still the same
+    code. A `config` map is keyed by the AUTHOR's field names, so a field named
+    `line` or `file` there is code and is kept. Everything that IS the
     component — its `body`, the keys it `provides`, what it `requires`, its
     `config` declaration — is in, canonicalized the way every other digest here
     is."""
     import json  # noqa: PLC0415 — stdlib
-    payload = json.dumps(_code_shape(comp), sort_keys=True,
+    entry = {k: v for k, v in comp.items() if k != "source"}
+    payload = json.dumps(_code_shape(entry), sort_keys=True,
                          separators=(",", ":"), default=_plain)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -10022,12 +10036,16 @@ def _template_code(ir: dict, name: str):
             frontier.extend(providers.get(key, ()))
     code = {c: _component_signature(components[c])
             for c in seen if c in components}
-    # The reached entries get the SAME recursive layout drop as the component
-    # signature: a helper's body carries a `line` on a `break` (and the span
-    # fields a future lowerer may add), so a comment above a reached top-level
-    # fn would otherwise move this template's identity while every component's
-    # text stayed identical, and refuse a migration that changes no code.
-    entries = {n: _code_shape(_plain(entry)) for n, entry in reached.items()}
+    # The reached entries get the SAME layout drop as the component signature:
+    # a helper's body carries a `line` on a `break`, so a comment above a
+    # reached top-level fn would otherwise move this template's identity while
+    # every component's text stayed identical, and refuse a migration that
+    # changes no code. The entry's own `source`, when it has one, is excluded
+    # like the component's, and nothing else is: a helper's `config` maps keep
+    # their author-keyed fields.
+    entries = {n: _code_shape({k: v for k, v in _plain(entry).items()
+                               if k != "source"})
+               for n, entry in reached.items()}
     return (code, entries)
 
 
