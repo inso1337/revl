@@ -14285,7 +14285,29 @@ fn tk_index(target: Expr, idx: Expr, env: List[Bind]) -> TInf {
   return tk_ok(infer_index(tgt.ty))
 }
 
+// Issue #2448: the payload rule at a variant case constructor (the reference's
+// `ExprCall` arm, `typecheck.py:2371-2376`; ported as `case_call_ty` in
+// `selfhost/checker.rvl`). It answers only where both sides are known and the
+// name really is a case of a declared ORED variant: `Some`/`None` belong to
+// `Opt` and keep their builtin parametric result, and a name the body rebinds
+// reads as that binding first, exactly as `infer_ctor` and the bare-read arm
+// do. A payload mismatch is the reference's message, tag and all.
+fn tk_case_payload(c: CallN, env: List[Bind], argTys: List[Str]) -> TInf {
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return tk_ok("") }
+  if (tenv_get(env, n) != "") { return tk_ok("") }
+  let adt = tagged_case_adt(env, n)
+  if (adt == "") { return tk_ok("") }
+  let pl = tenv_get(env, "payload ".concat(n))
+  if (pl == "" || argTys.length() == 0 || argTys[0] == "") { return tk_ok("") }
+  if (!tk_compat_env(pl, argTys[0], env)) {
+    return tk_mismatch("`".concat(n).concat("(...)` payload"), pl, argTys[0])
+  }
+  return tk_ok("")
+}
+
 // A call: every argument is walked for the refusals inside it. Argument-vs-
+
 // signature checking is T2b's slice, so the call's own type comes from the
 // annotation engine.
 fn tk_call(c: CallN, env: List[Bind]) -> TInf {
@@ -14316,6 +14338,16 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }
+  // Issue #2448: a variant CASE CONSTRUCTOR call checks its payload against the
+  // case's declared type (`typecheck.infer_ast`'s ExprCall arm; the counterpart
+  // is `selfhost/checker.rvl`'s `case_call_ty`). This walk resolved a case name
+  // as "unchecked" and never compared the payload, so `Box("x")` for
+  // `type Shape = Dot | Box(Int)` was ADMITTED and emitted on every tier — a
+  // silent admit, not a spelling difference. Nothing is said where either side
+  // is unknown or a body-rebound name shadows the constructor, which is the
+  // reference's own gradual silence.
+  let cpl = tk_case_payload(c, env, a.tys)
+  if (cpl.v != "") { return cpl }
   // docs/design/457 T2b: a bare-name callee against the signature table, and a
   // method callee against the host stub surface / `_BUILTIN_SIG`. Both MISS
   // rather than guess where the premise they need is not proven, and the

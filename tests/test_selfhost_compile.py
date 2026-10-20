@@ -3515,6 +3515,26 @@ def test_a_well_typed_var_or_if_is_admitted_on_both_sides(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2448: the reference refuses a variant case call whose payload has the
+# wrong type, and the native gate ADMITTED it on every tier — a silent admit of
+# an ill-typed program, not a difference in spelling. `selfhost/checker.rvl`
+# already refuses it, but the driver's gate is `lower.rvl`'s `tk_call`, which
+# resolved a case constructor as "unchecked" and never compared the payload.
+# The assertion is the reference's own verdict, message and tag.
+_WRONG_TYPED_PAYLOAD = (
+    "type Shape = Dot | Box(Int)\n\n"
+    'fn mk() -> Shape { return Box("x") }\n'
+)
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_a_wrong_typed_variant_payload_is_refused(compile_rvl, tier):
+    message = _reference_refusal(_WRONG_TYPED_PAYLOAD)
+    assert message == "`Box(...)` payload expects `Int`, got `Str`"
+    got = compile_rvl["compile_to_at"](_WRONG_TYPED_PAYLOAD, tier, "payload.rvl")
+    assert got == "REFUSED|T1|" + message
+
+
 # Issue #2447: the reference refuses a variant case call with the wrong number
 # of payload arguments. The documents are the reference's own table,
 # tests/test_case_call_arity.py; `selfhost/*.rvl` does not count the arguments
