@@ -8,7 +8,7 @@ sit. That was the right call for reproducibility and it quietly disarmed issue
 #2546's export rule on this path: `export_area.CliRule` decides authorship from
 the name the text is compiled under, and that label is a name no file answers
 to. Text an agent exported into `.revl/export/` therefore published with the
-operator's own trust, whatever it declares (issue #2563, slice 1 of 4).
+operator's own trust, whatever it declares (issue #2563, first slice).
 
 These pin the publish half of that:
 
@@ -21,7 +21,7 @@ These pin the publish half of that:
 
 The last two are not decoration: without them the first would be satisfied by
 a source that never compiles at all, which is exactly the unreachable
-assertion two lanes shipped tonight.
+assertion that has cost earlier changes dear.
 
 No cordis runtime: `publish_release` is the frontend compiler plus
 `registry.build_index`, so the CI frontend job enforces these.
@@ -56,14 +56,19 @@ PROFILED = "untrusted-author profile forbids"
 _EXPORT_PARTS = (".revl", "export")
 
 
-@pytest.fixture()
-def reg(tmp_path):
-    """An empty registry, the shape `truc ship` creates."""
-    root = tmp_path / "registry"
-    (root / "components").mkdir(parents=True)
+def _empty_registry(root):
+    """An empty registry at `root`: no entries, the empty index."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "components").mkdir(parents=True, exist_ok=True)
     (root / "index.json").write_text(
         '{\n  "components": {},\n  "indexVersion": "0"\n}\n', encoding="utf-8")
     return root
+
+
+@pytest.fixture()
+def reg(tmp_path):
+    """An empty registry, the shape `truc ship` creates."""
+    return _empty_registry(tmp_path / "registry")
 
 
 def _takes_source_path() -> bool:
@@ -178,8 +183,8 @@ def test_the_same_bytes_from_an_exported_file_are_refused_through_facts(reg, tmp
 
 
 def test_in_memory_text_from_no_file_still_publishes(reg):
-    """The control for the missing-origin axis, and the guard against this lane
-    having inverted the default by accident. Slices 2-4 will meet callers that
+    """The control for the missing-origin axis, and the guard against this change
+    having inverted the default by accident. Later slices will meet callers that
     hold registry text from no file at all (an MCP repair candidate, a
     complaint); none is then the honest answer, and it must not be read as an
     accusation — the compile keeps item 49's virtual label and no profile, so
@@ -193,3 +198,29 @@ def test_in_memory_text_from_no_file_still_publishes(reg):
 
     assert record["version"] == "1.0.0"
     assert registry.verify(reg) == []
+
+
+def test_a_real_origin_does_not_change_the_release_bytes(reg, tmp_path):
+    """Naming where the bytes came from must not change what the release IS.
+
+    `attest.path_normalized_ir` reduces each component's `source` and `file` to
+    their basename before hashing, and both spellings involved here end in
+    `component.rvl`, so a publish that names a real operator file and one that
+    keeps the virtual label must record the same source and manifest hashes.
+    This pins that claim instead of leaving it argued in prose.
+    """
+    own = tmp_path / "src" / "component.rvl"
+    own.parent.mkdir()
+    own.write_text(EXPORTED, encoding="utf-8")
+
+    with_origin = _publish(reg, "greeter", EXPORTED, version="1.0.0",
+                           source_path=own)
+    plain = _empty_registry(tmp_path / "registry-no-origin")
+    without_origin = _publish(plain, "greeter", EXPORTED, version="1.0.0")
+
+    assert with_origin["sourceSha256"] == without_origin["sourceSha256"]
+    assert with_origin["manifestSha256"] == without_origin["manifestSha256"]
+    assert (reg / "components" / "greeter" / "manifest.json").read_text() == \
+        (plain / "components" / "greeter" / "manifest.json").read_text()
+    assert registry.verify(reg) == []
+    assert registry.verify(plain) == []

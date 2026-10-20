@@ -1019,7 +1019,8 @@ def released_versions(entry_dir: str | os.PathLike) -> list[str]:
     return sorted(names, key=lambda v: (_semver(v) is None, _semver(v) or (), v))
 
 
-def _compile_source(name: str, source: str, source_path=None) -> dict:
+def _compile_source(name: str, source: str,
+                    source_path: str | os.PathLike | None = None) -> dict:
     """Compile an in-memory component source under a stable virtual path, so the
     IR (and therefore the manifest and the bump) does not depend on where the
     publisher's working copy happens to live.
@@ -1099,8 +1100,10 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
 
     `source_path` (issue #2563) is the real file `source` was read from, when
     there is one, and is what the export rule decides the source's authorship
-    by. A caller that holds text from no file — a registry complaint the issue
-    is about — passes none, and the compile then fails closed.
+    by. Passing none keeps the previous behaviour: the text is compiled under a
+    virtual label that names no file, without a profile. Making that default
+    refuse is the central rule's slice; this one makes the real file usable
+    here.
     """
     entry_dir = _components_dir(registry_dir) / name
     declared = (declared_version or "").strip()
@@ -1335,9 +1338,9 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
 
     `source_path` (issue #2563) is the file `source` was read from, when there
     is one, forwarded to `release_facts` so the export rule decides authorship
-    by where the bytes came from. A caller holding text from no file passes
-    none, and the compile then fails CLOSED under the authoring profile rather
-    than silently compiling as the operator's own.
+    by where the bytes came from. A caller holding text from no file still
+    passes none and publishes as it did before, under the virtual label; the
+    fail-closed default for that case is the central rule's slice.
 
     Everything it records lands in a file under `components/<name>/`, and the
     regeneration is the LAST thing it does, so `verify` is empty on the registry
