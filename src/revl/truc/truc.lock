@@ -28,7 +28,7 @@
     },
     {
       "path": "components/shipper.rvl",
-      "sha256": "687ded7d63099488e6ec3bbb3fe70bf0c645a1de2156da8d903497085b5d061b"
+      "sha256": "e3f2e5b958e00e15117c14e9c0537dcb957d81805e25510ddfff552cfb0c314b"
     },
     {
       "path": "components/cli.rvl",
@@ -38,7 +38,7 @@
   "imports": [
     {
       "path": "externs.rvl",
-      "sha256": "05dc178e5f19355fb267e9c574fe0122c8c95ed26d3b2a2637fb0209eb5ab09f"
+      "sha256": "3f66592326dd82dcfe9449c852ff87ffad0a04d46e74e17ac1fc5f33695c3e58"
     }
   ]
 }

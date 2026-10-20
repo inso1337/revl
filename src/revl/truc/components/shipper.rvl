@@ -99,6 +99,14 @@ fn ship_source(ctxJson: Str) -> Str {
   return c.source
 }
 
+// The project entry's real resolved file (`""` for text with no file behind
+// it), so the cold gauntlet compiles the entry by its path, not a label
+// (issue #2563).
+fn ship_path(ctxJson: Str) -> Str {
+  let c: ShipCtx = json_parse(ctxJson)
+  return c.sourcePath
+}
+
 // The single candidate the gate admits cold. Its path is the project entry's
 // real resolved file, not a virtual label, so the export rule decides the
 // entry's authorship here too (issue #2563); text with no file behind it gets
@@ -267,7 +275,7 @@ component Shipper provides ship: Shipper {
       let ordered = ship_ordered(ctx)
       let audit = emit host_admit_all(ordered, "", false)
       let source = ship_source(ctx)
-      let fresh = emit host_gauntlet(source)
+      let fresh = emit host_gauntlet(source, ship_path(ctx))
       let release = emit host_release_facts(projectDir, name)
       let r = ship_report(ctx, name, audit, fresh, release)
       emit host_publish(ship_plan_of(r))

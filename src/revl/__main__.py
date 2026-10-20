@@ -237,16 +237,22 @@ def _run_policy(args) -> int:
                 print(f"error: no registry entry named {args.candidate!r}",
                       file=sys.stderr)
                 return 2
-            ir = compile_source(entry.source, "component.rvl")
+            # issue #2563: name the entry's REAL `component.rvl`, the file it
+            # was read from. A label here (`component.rvl`) answers no file,
+            # so the export rule sees nothing and an entry whose source lives
+            # in an export directory evaluated with the operator's trust.
+            ir = compile_source(entry.source, entry.source_path)
             audit = audit_report(ir)
             name = next(iter(audit.get("boundary") or {}), args.candidate)
             evidence[name] = entry.evidence_bundle or reg.EvidenceBundle()
             origins[name] = "registry"
             evidence_ir[name] = reg._normalize_ir_for_attest(
-                compile_source(entry.source, "component.rvl"))
+                compile_source(entry.source, entry.source_path))
             if recompute:
                 recompute_ir[name] = ir
-                gauntlet_args = {"source": entry.source}
+                # the cold gauntlet compiles the same file, by the same real
+                # path, so it cannot be the one compile that still sees a label
+                gauntlet_args = {"files": [entry.source_path]}
         else:
             if not args.files:
                 print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
