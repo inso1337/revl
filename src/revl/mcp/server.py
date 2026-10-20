@@ -3778,9 +3778,36 @@ def _tool_check(arguments: dict) -> dict:
             draft=True)
     if explicit or not _carries_candidate(arguments):
         return _note_session_check_disk(_check_held(arguments))
-    sent, _stored, canon = _canonical.prepare(arguments)
+    # issue #2194: compile once, then let the canonicaliser's IR-equivalence
+    # gate reuse that document instead of compiling the same text again.
+    sent, completed = _canonical.complete_arguments(arguments)
+    checked, ir = _check_as_sent(sent)
+    canon = _canonical.report_after(sent, completed,
+                                   ir if _gate_can_reuse(arguments) else None)
     return _note_held_file_differs(
-        arguments, _canonical.attach(_check_as_sent(sent), canon))
+        arguments, _canonical.attach(checked, canon))
+
+
+def _gate_can_reuse(arguments: dict) -> bool:
+    """Whether `_check_as_sent`'s compile of `arguments` is the compile the
+    canonicaliser's gate would make for itself (issue #2194).
+
+    It is for an inline `source` with no `modules`: the check compiles
+    `compile_source(source, "<candidate>.rvl", profile=AUTHORING.profile())`
+    and the gate otherwise compiles the same text with no profile. The
+    profile's fields refuse or are IR-neutral (none of them rewrites the
+    returned document; `realm_bindings` is the field that does change
+    lowering, and it is excluded below), so when the check compiled there is
+    a document and it is the one the gate would compare against.
+    `tests/test_mcp_check_compile_cost_2194.py` pins that equality for an
+    emission program that compiles under both. `modules` enter the check's
+    compile but not the gate's, and `providers` and realm bindings enter the
+    check compile as well, so any of them means the gate must make its own
+    compile."""
+    return (arguments.get("source") is not None
+            and not arguments.get("modules")
+            and not AUTHORING.providers
+            and not AUTHORING.realm_bindings)
 
 
 _CHECK_FILE_DIFFERS_NOTE = ("the file on disk differs from the session's "
@@ -3894,7 +3921,7 @@ def _check_held(arguments: dict) -> dict:
             "was not loaded from `source` or `files`, so there is nothing to "
             "recompile",
             category="session")
-    result = _check_as_sent(candidate, held=vs)
+    result, _ir = _check_as_sent(candidate, held=vs)
     result["checked"] = "session"
     return result
 
@@ -3962,8 +3989,14 @@ _HELD_DOC = (" `source`/`files` are optional when the session holds a "
              "answers `queried: \"session\"`.")
 
 
-def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
-    """Compile a candidate as sent. `held` is the session's working set a
+def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
+    """Compile a candidate as sent, and return `(payload, ir)`.
+
+    `ir` is the document that compile produced (`None` when it refused), which
+    a caller that goes on to canonicalise hands to the IR-equivalence gate so
+    it does not compile the same text again (issue #2194).
+
+    `held` is the session's working set a
     held-session check compiled instead (issue #2117), used only to describe
     the candidate: the arguments carry the equivalent `source`/`files`/`modules`
     the compile reads, while `held` carries the edited buffers the argument
@@ -3976,7 +4009,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
-        return _with_candidate_knowledge(refused, arguments, refused, held)
+        return _with_candidate_knowledge(refused, arguments, refused, held), None
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -3996,7 +4029,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
     if blocked:
         # flagged, not handed out: holes this author can never fill
         result["unfillable"] = blocked
-    return _with_candidate_knowledge(result, arguments, None, held)
+    return _with_candidate_knowledge(result, arguments, None, held), ir
 
 
 def _with_candidate_knowledge(payload: dict, arguments: dict, refused,
