@@ -28,6 +28,7 @@ from fnmatch import fnmatchcase
 from .. import cap_order
 from .. import intent as _intent
 from .._paths import backends_root, python_backend_emitter, venv_python
+from ..gate import _ir_referenced_names
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -516,8 +517,9 @@ class _SwapPlan:
     # issue #1751: the components gen N was ALREADY running PENDING (an unmet
     # requirement, e.g. an ambient host service this host does not supply)
     pre_pending: frozenset = frozenset()
-    # issue #2510: the successor is agent-authored (`migrate="declared"`, or
-    # the MCP session serving an untrusted author), so a hand-off from a frame
+    # issue #2510: the successor is agent-authored (what the compile reported
+    # about its origins: `migrate="declared"`, or text that arrived over the
+    # transport whatever the authoring-trust config), so a hand-off from a frame
     # that spans realms starts cold (`_restore_provider_state`)
     agent_authored: bool = False
 
@@ -1804,9 +1806,11 @@ class Session:
           AND §5-type-compatible on BOTH sides (the item-53 accept-vs-export gate,
           run here because propose's standalone compile never threaded the running
           manifest). The undeclared/untyped item-10 instance channel is NOT
-          crossed: a live instance the successor would inherit refuses BEFORE
-          teardown with STATE_UNDISCLOSED, gen N untouched, rather than being
-          silently migrated by candidate-written template name + host class alone.
+          crossed: a live instance whose template the successor CHANGES refuses
+          BEFORE teardown with STATE_UNDISCLOSED, gen N untouched, rather than
+          being silently migrated by candidate-written template name + host class
+          alone. A template the successor re-declares with the same code is the
+          operator's own and is not a crossing (#2423 follow-up).
           The same gate runs for ANY `agent_authored` successor, whatever
           `migrate` says (issue #2423); `declared` is how `Gate.propose` selects
           it.
@@ -2066,12 +2070,19 @@ class Session:
         * The item-10 live-INSTANCE channel (F2/F3). It correlates old↔new
           purely by candidate-written template NAME and host CLASS, with no
           declared §5 type contract at any door — so an agent successor that
-          re-declares a template with live instances would inherit the running
+          CHANGES a template with live instances would inherit the running
           operator instance's state (an ungranted resource's product crossing by
           name into a `granted=[]` candidate). There is no way to DISCLOSE such a
-          crossing, so a live instance whose template the successor re-declares
+          crossing, so a live instance whose template the successor changes
           refuses here rather than migrating. Quiesce it, or use a trusted
-          operator swap.
+          operator swap. A template the successor re-declares with the SAME code
+          (#2423 follow-up) is not a crossing: the state is re-seated on the
+          operator's own text, so an unrelated edit still lands. "Same code"
+          covers the whole observable surface, not just the template's own
+          entry: a successor that keeps the template byte-identical but CHANGES
+          a component that spawns it (and so holds a handle to the migrated
+          instances) can read the operator's state through that handle, so the
+          holders are part of the identity and that case refuses too.
         * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
           (a `handoff` on both the predecessor and the successor), but propose's
           decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
@@ -2087,19 +2098,32 @@ class Session:
         runtime = self._driver.runtime
         old_templates = (old_ir.get("manifest") or {}).get("templates") or []
         new_templates = set((new_ir.get("manifest") or {}).get("templates") or [])
+        old_codes = {name: _template_code(old_ir, name) for name in old_templates}
         for name in old_templates:
-            if name in new_templates and runtime.live_instances(name):
-                raise SessionError(
-                    f"propose refused: template {name!r} has live instance state "
-                    f"and the successor re-declares it. The item-10 instance "
-                    f"channel correlates old and new by template name and host "
-                    f"class alone — both candidate-written, with no declared §5 "
-                    f"type contract — so an agent-authored successor cannot "
-                    f"inherit a running instance's operator state across the "
-                    f"trust boundary. Quiesce the instances (or use a trusted "
-                    f"operator swap) before self-extending. Nothing was swapped; "
-                    f"gen N is intact and still serving.",
-                    code="STATE_UNDISCLOSED")
+            if name not in new_templates or not runtime.live_instances(name):
+                continue
+            # only a template the successor CHANGES crosses the boundary. One
+            # it re-declares unchanged, with the helpers and providers it calls
+            # and the components that spawn it (its holders) unchanged too, is
+            # the operator's own code, so the live instance's state lands on
+            # the same text it ran on and the edit (unrelated to the template)
+            # is allowed to land (#2423 follow-up). A changed HOLDER is a
+            # crossing even when the template itself is byte-identical: the
+            # holder's new method reads the re-seated state through its spawn
+            # handle.
+            old_code = old_codes[name]
+            if old_code is not None and old_code == _template_code(new_ir, name):
+                continue
+            raise SessionError(
+                f"template {name!r} has live instance state and the successor "
+                f"changes it. The item-10 instance channel correlates old and "
+                f"new by template name and host class alone — both candidate-"
+                f"written, with no declared §5 type contract — so an agent-"
+                f"authored successor cannot inherit a running instance's "
+                f"operator state across the trust boundary. Quiesce the "
+                f"instances (or use a trusted operator swap) before swapping. "
+                f"Nothing was swapped; gen N is intact and still serving.",
+                code="STATE_UNDISCLOSED")
         running = self._declared_handoffs(old_ir)
         accepts = self._declared_handoffs(new_ir)
         for key, exported in running.items():
@@ -2108,13 +2132,13 @@ class Session:
                 continue  # the successor opts out of this key — starts cold
             if not compatible(accepted, exported):
                 raise SessionError(
-                    f"propose refused: the successor's `handoff` on {key!r} "
-                    f"accepts `{accepted}`, but the running provider exports "
+                    f"the successor's `handoff` on {key!r} accepts "
+                    f"`{accepted}`, but the running provider exports "
                     f"`{exported}` — the declared hand-off types are not §5-"
                     f"compatible, so operator state cannot cross onto the "
-                    f"agent-authored successor (the item-53 accept-vs-export gate "
-                    f"propose's standalone compile never ran). Nothing was "
-                    f"swapped; gen N is intact.",
+                    f"agent-authored successor (the item-53 accept-vs-export "
+                    f"gate never ran on the standalone decision compile). "
+                    f"Nothing was swapped; gen N is intact.",
                     code="STATE_UNDISCLOSED")
 
     @staticmethod
@@ -9824,6 +9848,46 @@ def _base_manifest_hash_of(ir: dict | None) -> str | None:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+#: IR keys the lowerer emits as layout: the `line` a comment or a blank line
+#: above a node moves, and the `file` a hole node was read from. They are
+#: dropped only where they are layout, on an IR node (a dict whose `step` or
+#: `kind` is the lowerer's string tag), plus the top-level `source` a component
+#: entry carries, which the signatures drop explicitly. They are NOT dropped by
+#: bare key name at any depth: a spawn `config` map is keyed by the AUTHOR's
+#: config-field names, so a field named `line` or `file` there is code, and
+#: dropping it would let a successor change the config a live instance is
+#: re-seated with and still compare equal. A config map can also carry a field
+#: named `kind` or `step`, so the node test reads the tag's TYPE, not the key. This is load-bearing for the #2423 follow-up: a spawn step
+#: carries a `line`, so a leading comment above the live nested template (or
+#: above a top-level helper the template reaches, whose `break` carries one)
+#: used to move `_template_code` and refuse a textually identical template with
+#: STATE_UNDISCLOSED.
+_LAYOUT_ONLY_IR_KEYS = frozenset({"line", "file"})
+
+
+def _code_shape(value):
+    """`value` with the layout-only keys the lowerer emits dropped.
+
+    A layout key is dropped only where it is layout: on an IR node (a dict
+    whose `step` or `kind` is the lowerer's string tag, such as a `break`, a
+    `spawn` or a hole), never on a `config` map keyed by author field names.
+    The tag must be a STRING: a config map can carry an author field named
+    `line`, `file`, `kind` or `step` (its value is a lowered expression dict,
+    not a tag), and a key-presence test would drop a sibling `line`/`file` there
+    again. `line` keeps a component's identity independent of where a comment
+    or a blank line puts it; `file` is the hole node's source path. A component
+    entry's top-level `source` is dropped by the signatures that know it is the
+    entry, not a config map."""
+    if isinstance(value, dict):
+        node = (isinstance(value.get("step"), str)
+                or isinstance(value.get("kind"), str))
+        return {k: _code_shape(v) for k, v in value.items()
+                if not (node and k in _LAYOUT_ONLY_IR_KEYS)}
+    if isinstance(value, list):
+        return [_code_shape(v) for v in value]
+    return value
+
+
 def _component_signature(comp: dict) -> str:
     """The content digest of ONE component's IR entry — its CODE IDENTITY, as
     opposed to its name (roadmap item 334).
@@ -9839,13 +9903,150 @@ def _component_signature(comp: dict) -> str:
     `source` (the file the component was declared in) is excluded: it is the
     spelling of a path, not of the component, and it moves for reasons that are
     not changes of code (a composition re-compiled from a different directory,
-    `propose`'s `candidate.rvl` staging name). Everything that IS the component
-    — its `body`, the keys it `provides`, what it `requires`, its `config`
-    declaration — is in, canonicalized the way every other digest here is."""
+    `propose`'s `candidate.rvl` staging name). The lowerer's layout-only fields
+    (`_LAYOUT_ONLY_IR_KEYS`, dropped only on the IR nodes that carry them) are
+    excluded too: a `line` is where the node sits in the file, and a component
+    whose only move is a comment or a blank line above it is still the same
+    code. A `config` map is keyed by the AUTHOR's field names, so a field named
+    `line` or `file` there is code and is kept. Everything that IS the
+    component — its `body`, the keys it `provides`, what it `requires`, its
+    `config` declaration — is in, canonicalized the way every other digest here
+    is."""
     import json  # noqa: PLC0415 — stdlib
-    payload = json.dumps({k: v for k, v in comp.items() if k != "source"},
-                         sort_keys=True, separators=(",", ":"), default=_plain)
+    entry = {k: v for k, v in comp.items() if k != "source"}
+    payload = json.dumps(_code_shape(entry), sort_keys=True,
+                         separators=(",", ":"), default=_plain)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _reached_code_names(node, acc: set) -> set:
+    """Every top-level function or extern name an IR subtree calls or refers
+    to, accumulated into `acc`. The walk is the admission gate's
+    `_ir_referenced_names`, the one definition of the lowered IR's naming rule:
+    a call or emission is a `fn` node, a bare reference the lowerer resolved to
+    a module fn or an extern is a `var` node, and both name it in `name`. A
+    local binding and a field or method label name neither. Delegating rather
+    than re-spelling the kinds here is what keeps this template-code walk and
+    the gate's fail-closed reach check from drifting apart."""
+    _ir_referenced_names(node, acc)
+    return acc
+
+
+def _spawn_holders(ir: dict, name: str) -> set:
+    """Every component that (transitively) HOLDS a spawn handle to `name`: the
+    reverse of the instance graph (`docs/design-v2-instances.md`).
+
+    A `spawn C` in a component's body — activation step or `provide` method
+    alike — takes a handle whose reads reach C's live instance. So the code
+    that can OBSERVE a live instance's state is not only C: it is also every
+    component that spawns C, and every component that spawns those. A
+    successor that leaves C byte-identical but rewrites its spawner's method to
+    read through the migrated handle still crosses the trust boundary
+    (#2423 follow-up review), so those holders are part of C's identity.
+
+    Returns the holder names, excluding `name` itself; empty when nothing
+    spawns it."""
+    parents: dict = {}
+
+    def walk(node, holder: str) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "spawn" and isinstance(
+                    node.get("component"), str):
+                parents.setdefault(node["component"], set()).add(holder)
+            for value in node.values():
+                walk(value, holder)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, holder)
+
+    for comp in ir.get("components") or []:
+        holder = comp.get("name")
+        if holder:
+            walk(comp.get("body") or [], holder)
+    holders: set = set()
+    frontier = [name]
+    while frontier:
+        for parent in parents.get(frontier.pop(), ()):
+            if parent != name and parent not in holders:
+                holders.add(parent)
+                frontier.append(parent)
+    return holders
+
+
+def _template_code(ir: dict, name: str):
+    """The code identity of a template (#2423 follow-up): its component entry,
+    every top-level function and extern it calls or refers to, the components
+    that provide the services it (transitively) requires, AND the components
+    that (transitively) spawn it and so hold a handle to its live instances.
+
+    `_component_signature` alone names code that lives in the component. A
+    template whose body calls a helper from a `use`-reached module keeps the
+    same component entry when that module changes (the helper is a top-level
+    `functions` entry); and a template whose body calls a required service keeps
+    its entry while the provider it calls changes. Both move the code a live
+    instance's state is re-seated onto and can observe, so both are part of the
+    template's identity here. A component the template does not reach is not.
+
+    The reverse spawn edges are the other half (`_spawn_holders`). The
+    item-10 live-instance channel correlates old and new by the template's
+    NAME, and generational capture re-seats the operator's state onto the
+    successor's instances; the successor's HOLDER then reads that state through
+    its own spawn handle. A supervisor rewritten to expose the migrated state
+    while `Worker` stays byte-identical is therefore a change of the code the
+    state is re-seated under, and refuses here rather than migrating.
+
+    Every side is normalized by `_code_shape` before comparison: the component
+    signature already was, and so are the reached entries, so a helper whose
+    only move is a comment or a blank line above it is still the same code.
+
+    Returns `(component signatures, reached code)`, or `None` when the
+    composition declares no such component."""
+    components = {c["name"]: c for c in ir.get("components") or []
+                  if c.get("name")}
+    if name not in components:
+        return None
+    functions = {f.get("name"): f for f in ir.get("functions") or []}
+    externs = {e.get("name"): e for e in ir.get("externs") or []}
+    providers: dict = {}
+    for comp in components.values():
+        for key in comp.get("provides") or ():
+            providers.setdefault(key, []).append(comp["name"])
+    reached: dict = {}
+    seen: set = set()
+    frontier = sorted(_spawn_holders(ir, name) | {name})
+    while frontier:
+        cname = frontier.pop()
+        if cname in seen:
+            continue
+        seen.add(cname)
+        comp = components.get(cname)
+        if comp is None:
+            continue
+        pending = [n for n in _reached_code_names(comp, set())
+                   if n in functions or n in externs]
+        while pending:
+            fname = pending.pop()
+            if fname in reached:
+                continue
+            reached[fname] = functions.get(fname) or externs.get(fname)
+            for more in _reached_code_names(reached[fname], set()):
+                if (more in functions or more in externs) and more not in reached:
+                    pending.append(more)
+        for key in comp.get("requires") or ():
+            frontier.extend(providers.get(key, ()))
+    code = {c: _component_signature(components[c])
+            for c in seen if c in components}
+    # The reached entries get the SAME layout drop as the component signature:
+    # a helper's body carries a `line` on a `break`, so a comment above a
+    # reached top-level fn would otherwise move this template's identity while
+    # every component's text stayed identical, and refuse a migration that
+    # changes no code. The entry's own `source`, when it has one, is excluded
+    # like the component's, and nothing else is: a helper's `config` maps keep
+    # their author-keyed fields.
+    entries = {n: _code_shape({k: v for k, v in _plain(entry).items()
+                               if k != "source"})
+               for n, entry in reached.items()}
+    return (code, entries)
 
 
 def _class_map_digest_of(class_map) -> str | None:

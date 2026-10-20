@@ -461,20 +461,66 @@ def test_control_untrusted_single_realm_successor_still_migrates(
 
 
 @needs_runtime
-def test_control_operator_multi_realm_successor_still_migrates(
+def test_control_untrusted_operator_multi_realm_successor_still_migrates(
         tmp_path, monkeypatch):
+    """The operator form that stays legal after issue #2672: the successor is
+    written to a jailed file outside every export area and host code is
+    UNTRUSTED, so the compile reports no transport origin and the multi-realm
+    frame's hand-off still migrates warm. The trusted direction is the
+    inverted control below: the same file is agent text there."""
+    from revl.export_area import in_export_area
+
+    _untrusted_bound()
+    _operator_file(tmp_path, monkeypatch,
+                   MIXED_REST + TENANT_A_APP
+                   + _mixed(isolated=True, board_reads="open"))
+    _map_at("Mixed", 0).insert(*SECRET)
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(
+        MIXED_REST + TENANT_A_APP
+        + _mixed(isolated=True, board_reads="open").replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    assert not in_export_area(str(successor))
+    changed = _call("revl_swap", {"files": [str(successor)],
+                                  "replacing": ["Mixed"]})
+    assert changed["ok"] is True and changed.get("swapped") is True, \
+        [d.get("message") for d in changed.get("diagnostics") or []]
+    assert _map_at("Mixed", 0).data[SECRET[0]] == SECRET[1]
+    assert changed["handoff"]["board"]["migrated"] is True
+
+
+@needs_runtime
+def test_control_trusted_files_only_successor_of_a_multi_realm_frame_starts_cold(
+        tmp_path, monkeypatch):
+    """The inverted control for the trusted-mode rule (issue #2672): the same
+    jailed file outside every export area, now under trusted host code. The
+    operator vouched for host bodies that can rewrite any file the agent can
+    reach, so the candidate is agent text and the multi-realm frame does not
+    hand its state to it. This frame declares `handoff board` and has no live
+    instance state, so the agent-authored direction is the cold start rather
+    than a STATE_UNDISCLOSED refusal; the seeded tenant_a secret does not ride
+    onto the successor. Before the predicate change the candidate compiled
+    unprofiled and migrated warm."""
+    from revl.export_area import in_export_area
     from revl.mcp import server as server_mod
 
     server_mod.set_authoring_trust(host_code=True)
-    monkeypatch.chdir(tmp_path)
-    loaded = _call("revl_load", {"source": MIXED_REST + TENANT_A_APP
-                                 + _mixed(isolated=True, board_reads="open")})
-    assert loaded["ok"] is True, loaded
+    _operator_file(tmp_path, monkeypatch,
+                   MIXED_REST + TENANT_A_APP
+                   + _mixed(isolated=True, board_reads="open"))
     _map_at("Mixed", 0).insert(*SECRET)
-    changed = _call("revl_change", {"commit": True, "replace": {
-        "component": "Mixed",
-        "source": _mixed(isolated=True, board_reads="open").replace(
-            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)")}})
-    _committed(changed)
-    assert _map_at("Mixed", 0).data[SECRET[0]] == SECRET[1]
-    assert changed["handoff"]["board"]["migrated"] is True
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(
+        MIXED_REST + TENANT_A_APP
+        + _mixed(isolated=True, board_reads="open").replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    assert not in_export_area(str(successor))
+    changed = _call("revl_swap", {"files": [str(successor)],
+                                  "replacing": ["Mixed"]})
+    assert changed["ok"] is True and changed.get("swapped") is True, \
+        [d.get("message") for d in changed.get("diagnostics") or []]
+    assert _map_at("Mixed", 0).data.get(SECRET[0]) is None
+    entry = changed["handoff"]["board"]
+    assert entry["migrated"] is False and entry["reason"] == "multi-realm"

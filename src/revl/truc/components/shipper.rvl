@@ -47,6 +47,9 @@ use "../externs.rvl" {
 
 type ShipCtx = {
   source: Str,
+  // the resolved absolute file `source` was read from. The registry compiles
+  // the text by this path so the export rule decides its authorship (#2563).
+  sourcePath: Str,
   description: Str,
   tags: List[Str],
   registryName: Str,
@@ -78,6 +81,7 @@ type PublishPlan = {
   registryPath: Str,
   name: Str,
   source: Str,
+  sourcePath: Str,
   description: Str,
   tags: List[Str],
   stampDossier: Bool,
@@ -95,13 +99,16 @@ fn ship_source(ctxJson: Str) -> Str {
   return c.source
 }
 
-// The single candidate the gate admits cold (a virtual path — the source is
-// in memory, not on disk under the registry yet). ok here == "it compiles",
-// the (a) half of the official policy and the whole of the "audit" policy.
+// The single candidate the gate admits cold. Its path is the project entry's
+// real resolved file, not a virtual label, so the export rule decides the
+// entry's authorship here too (issue #2563); text with no file behind it gets
+// the empty path and the release check refuses it later. ok here == "it
+// compiles", the (a) half of the official policy and the whole of the "audit"
+// policy.
 fn ship_ordered(ctxJson: Str) -> Str {
   let c: ShipCtx = json_parse(ctxJson)
   var out: List[ShipCand] = []
-  out = out.push({ path: "/__truc_ship__/component.rvl", source: c.source, name: "" })
+  out = out.push({ path: c.sourcePath, source: c.source, name: "" })
   let fixed = out
   return json_stringify(fixed)
 }
@@ -189,6 +196,7 @@ fn ship_report(ctxJson: Str, name: Str, auditJson: Str, freshJson: Str, releaseJ
     registryPath: c.registryPath,
     name: name,
     source: c.source,
+    sourcePath: c.sourcePath,
     description: c.description,
     tags: c.tags,
     stampDossier: stampFinal,

@@ -760,9 +760,10 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
     A refused compile records nothing — the exception leaves `vs` untouched.
 
     `report` (issue #1779's out-parameter, as `compile_under_authoring` takes
-    it) lets a caller read what the compile read: `_swap_server_side` asks it
-    which `use`-reached files sit inside an export area, since those are the
-    agent's text even when no listed file is (#2423)."""
+    it) lets a caller read what the compile read, and `report["authored"]` says
+    whether the compiled text arrived over the transport (#2423). A working set
+    with inline `source` is such text; a files-only set is decided by
+    `compile_under_authoring` from the files it named and reached."""
     from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
 
     report = {} if report is None else report
@@ -770,6 +771,7 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
         document = compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
                                   replacing=replacing, modules=vs.get("modules") or None,
                                   profile=AUTHORING.profile(), report=report)
+        report["authored"] = True
     elif vs.get("files"):
         from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
@@ -933,9 +935,13 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     # result (a draft compiles; admission is what refuses it) and catches any
     # parse/type error independent of the running composition. A failure here
     # is a refusal: nothing was admitted, and the server-side source is left at
-    # its last good state.
+    # its last good state. The compile's report decides authorship for the
+    # commit swap below: a patch is transport text whatever the trust config
+    # says, so an edit under `--author-trust trusted` still cannot re-seat live
+    # operator instance state without the disclosure gate (#2423).
+    compile_report: dict = {}
     try:
-        ir = compile_virtual(vs)
+        ir = compile_virtual(vs, report=compile_report)
     except RevlError as error:
         rejected = report(error)
         rejected["edited"] = False
@@ -1046,9 +1052,8 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                 "note": "proposed and verified: admission and every gate passed "
                         "against the running composition, which is unchanged. "
                         "Commit it, or discard it"}
-    from .server import AUTHORING  # noqa: PLC0415 - lazy, avoids an import cycle
     state = session.swap(ir, origin=_origin_from(vs),
-                         agent_authored=AUTHORING.profile() is not None)
+                         agent_authored=bool(compile_report.get("authored")))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
