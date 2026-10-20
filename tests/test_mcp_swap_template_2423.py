@@ -274,3 +274,154 @@ def test_a_non_template_unknown_component_refuses_instead_of_zeroing():
     assert raised.value.component == "Ghost"
     assert raised.value.answer["ok"] is False
     assert "unknown component" in str(raised.value)
+
+
+def _template_module(version: int) -> str:
+    """The version-bearing half as a `use`-reached module: its text is the text
+    the compile reads for it, so editing it changes the successor without
+    touching a listed file."""
+    return f"pub fn template_version() -> Int {{ return {version} }}\n"
+
+
+def _operator_using_template_module(module: str) -> str:
+    """The stateful template composition, with `Worker`'s version read from the
+    module at `module`. The only listed file is the operator's own, outside
+    every export area."""
+    return """
+use "__MODULE__" { template_version }
+
+service Store {
+  fn get(k: Str) -> Opt[Str]
+  fn put(k: Str, v: Str)
+  fn version() -> Int
+}
+service Admin {
+  fn seed(k: Str, v: Str)
+  fn read(k: Str) -> Opt[Str]
+  fn ver() -> Int
+}
+component Worker provides store: Store {
+  let m = effect Map.new() undo m.drop()
+  provide store {
+    fn get(k) = m.get(k)
+    fn put(k, v) { effect m.insert(k, v) undo m.remove(k) }
+    fn version() = template_version()
+  }
+}
+component Supervisor provides admin: Admin {
+  let w = effect spawn Worker undo w.dispose()
+  provide admin {
+    fn seed(k, v) = w.store.put(k, v)
+    fn read(k) = w.store.get(k)
+    fn ver() = w.store.version()
+  }
+}
+""".replace("__MODULE__", module)
+
+
+@needs_runtime
+def test_a_files_candidate_reaching_a_changed_export_file_refuses_state(
+        tmp_path, _fresh_server_session):
+    """B5: a files-only candidate outside every export area that `use`-reaches
+    a file inside one still carries the agent's text there, so the server-side
+    swap must run the disclosure gate. Before, authorship looked only at the
+    files the working set lists, so the reached file's changed text was
+    installed, live instance state migrated (`migrated: true`) and the
+    successor read alice=42 without the gate ever running."""
+    server = _fresh_server_session
+    exported = tmp_path / ".revl" / "export" / "extra.rvl"
+    exported.parent.mkdir(parents=True, exist_ok=True)
+    exported.write_text(_template_module(1), encoding="utf-8")
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(
+        _operator_using_template_module(".revl/export/extra.rvl"),
+        encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    assert _call("revl_call", {"key": "admin", "method": "seed",
+                               "args": ["alice", "42"]})["ok"] is True
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+    # The agent's text changes in the export area, not in any listed file.
+    exported.write_text(_template_module(2), encoding="utf-8")
+
+    swapped = _call("revl_swap", {})
+
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert swapped.get("swapped") is not True
+    assert swapped["diagnostics"][0]["category"] != "internal"
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_files_only_operator_swap_reaching_no_export_text_still_migrates(
+        tmp_path, _fresh_server_session):
+    """The boundary the B5 fix must not move: a files-only working set whose
+    compile reaches a module OUTSIDE every export area carries no agent text, so
+    the server-side swap keeps generational migration and the gate does not run,
+    even when that reached module's disk text changed."""
+    server = _fresh_server_session
+    helper = tmp_path / "helper.rvl"
+    helper.write_text(_template_module(1), encoding="utf-8")
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_operator_using_template_module("helper.rvl"),
+                             encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    helper.write_text(_template_module(2), encoding="utf-8")
+
+    swapped = _call("revl_swap", {})
+
+    assert swapped["ok"] is True, swapped
+    assert swapped["swapped"] is True
+    assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 2
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_trusted_author_reaching_an_export_file_still_migrates(
+        tmp_path, _fresh_server_session):
+    """Export-area text is the agent's by its path, but only a profile turns it
+    into author text (`_swap_inline`'s trusted control, #2600/2628). Under a
+    trusted host-code author no profile is applied, so the same reached-export
+    shape is an operator swap: it migrates and installs the changed text."""
+    server = _fresh_server_session
+    server.set_authoring_trust(host_code=True, roots=[str(tmp_path)])
+    assert server.AUTHORING.profile() is None
+
+    exported = tmp_path / ".revl" / "export" / "extra.rvl"
+    exported.parent.mkdir(parents=True, exist_ok=True)
+    exported.write_text(_template_module(1), encoding="utf-8")
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(
+        _operator_using_template_module(".revl/export/extra.rvl"),
+        encoding="utf-8")
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    exported.write_text(_template_module(2), encoding="utf-8")
+
+    swapped = _call("revl_swap", {})
+
+    assert swapped["ok"] is True, swapped
+    assert swapped["swapped"] is True
+    assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 2
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"

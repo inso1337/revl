@@ -1594,13 +1594,26 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                          before)
 
 
+def _export_area_parts(files: list[str] | None,
+                       compile_report: dict) -> tuple[list[str], dict[str, str]]:
+    """The export-area part of a `files` candidate: the files it names inside an
+    export directory, and the modules there its compile reached by `use`.
+    `compile_under_authoring` compiled both under the profile as the agent's
+    text (#2524), and its report carries the reached ones as dependencies.
+    Whether a file counts is decided by its path, as the compile decided it
+    (issue #2600)."""
+    named = [p for p in files or () if _export_jail.in_export_area(p)]
+    reached = {p: t for p, t in
+               (compile_report.get("dependencies") or {}).items()
+               if _export_jail.in_export_area(p)}
+    return named, reached
+
+
 def _exported_candidate(files: list[str] | None,
                         compile_report: dict) -> dict | None:
     """The export-area part of a `files` candidate (issue #2600), or `None`
     when it has none: `{abspath: text}` of each file `files` names inside an
     export directory and of each module there the compile reached by `use`.
-    `compile_under_authoring` compiled both under the profile as the agent's
-    text (#2524), and its report carries the reached ones as dependencies.
     Whether a file counts is decided by its path, as the compile decided it;
     a named file is read back only for the refusal's line, so one that no
     longer reads still counts, with no text.
@@ -1609,10 +1622,7 @@ def _exported_candidate(files: list[str] | None,
     also carry the operator files the same compile read from disk (its
     `disk_reads`, keyed by abspath like the rest), beneath the export-area
     ones: a refusal of a component in an operator file names its line."""
-    named = [p for p in files or () if _export_jail.in_export_area(p)]
-    reached = {p: t for p, t in
-               (compile_report.get("dependencies") or {}).items()
-               if _export_jail.in_export_area(p)}
+    named, reached = _export_area_parts(files, compile_report)
     if not named and not reached:
         return None
     texts = {**(compile_report.get("disk_reads") or {}),
@@ -1808,8 +1818,9 @@ def _swap_server_side(replacing: tuple) -> dict:
         rejected["swapped"] = False
         rejected["note"] = "the running composition is untouched"
         return rejected
+    compile_report: dict = {}
     try:
-        full = _edit.compile_virtual(vs)
+        full = _edit.compile_virtual(vs, report=compile_report)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -1818,9 +1829,12 @@ def _swap_server_side(replacing: tuple) -> dict:
                             "composition on its own")
         return rejected
     running = SESSION.ir
-    # issue #2487: only text that arrived over the transport (inline source or
-    # an edited buffer) compiled under the profile; unedited jailed files are
-    # the operator's own and may legitimately differ from what is running
+    # issue #2487: the realm comparison follows component text. Unedited jailed
+    # files are the operator's own and may legitimately differ from what is
+    # running; inline source or an edited buffer is text that arrived over the
+    # transport. A `use`-reached export-area module also compiles under the
+    # profile (#2600), but a `use`-imported module contributes no components, so
+    # it cannot move a placement; it decides authorship below.
     edited = _edit.file_modules(vs)
     if vs.get("source") is not None or edited:
         refused = _realm_removal_refused(running, full, _edit._candidate_texts(vs))
@@ -1830,10 +1844,16 @@ def _swap_server_side(replacing: tuple) -> dict:
     # issue #2423: the same authorship rule as `_swap_inline`; an unedited
     # files-only working set outside every export area is the operator's own,
     # while inline source, an edited buffer, or an export-area file is the
-    # agent's text.
+    # agent's text. The export-area part is read the way `_exported_candidate`
+    # reads it: a file the working set LISTS inside one, and a module the full
+    # compile reached there by `use`. The second is the one the paths alone
+    # cannot see, and it carries the agent's changed text (#2600), so leaving
+    # it out let a files-only candidate install authored text and migrate live
+    # state without the disclosure gate.
+    named_export, reached_export = _export_area_parts(vs.get("files"),
+                                                      compile_report)
     agent_text = (vs.get("source") is not None or bool(edited)
-                  or any(_export_jail.in_export_area(p)
-                         for p in vs.get("files") or ()))
+                  or bool(named_export or reached_export))
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs),
                              agent_authored=(AUTHORING.profile() is not None
