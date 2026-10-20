@@ -89,11 +89,10 @@ The positioning sentence the project itself uses is "Cordis has revertible effec
 - Semantic inverse correctness is not decided: "The checker proves an inverse is present and well-shaped (G4)" and no more (`docs/vision.md:95-99`).
 - The extern boundary is trusted, not verified, though enumerable (`docs/vision.md:100-102`). Host body reversal "is still the declaration's assertion" (`docs/rejections.md:228`).
 - G7 (derived LIFO teardown) is "by lowering" and exercised by runtime scenarios; the only checker-side lever is totality of `verified fn` (`docs/rejections.md:530-538`). The "derived, hence correct" claim therefore rests on the lowering and runtime, not on a checker rule.
-- The metatheorems "transfer by construction, they are not re-proved here" (`docs/vision.md:103-110`). The Lean layer covers part of the admission judgment; G1 and G6 are partial, and T1-T3 have no theorem (`formal/STATUS.md`).
+- The metatheorems "transfer by construction, they are not re-proved here" (`docs/vision.md:103-110`). The Lean layer covers part of the admission judgment; G1 is `partial`, G2 to G9 are `full` at the granularity `formal/STATUS.md` states per row, and T1-T3 have no theorem.
 - Several origin labels in `docs/guarantees.md` are "unconfirmed", so the Cordis-inherited split is not fully sourced.
 - The corpus is the authors' own; no third-party study exists yet, so the paper cannot say the rules are low-burden.
 - The first-class dispatch case is conservatively read as `*` (unnameable boundary), which can over-refuse.
-- The status file (G6 row) says G6 is "full at head granularity", while `docs/vision.md:109` says G1 and G6 are "partial".
 
 ## Fact-check
 
