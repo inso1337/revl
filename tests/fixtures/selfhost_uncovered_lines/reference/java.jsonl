@@ -56,7 +56,7 @@
 
 ["reason", "backends-java-emit-py-declares-secret-item-421", "backends/java/emit.py::_declares_secret: item 421 F6: scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`. No java corpus document declares a secret, so the scan's positive branches never run; selfhost/emit_java.rvl has no secret-redaction port (item-429(d)), so a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap."]
 
-["function", "backends-java-emit-py-declares-secret-item-421", "_declares_secret", 7, 7]
+["function", "backends-java-emit-py-declares-secret-item-421", "_declares_secret", 4, 4]
 
 ["reason", "backends-java-emit-py-dedup-colour-erased-poly", "backends/java/emit.py::_dedup_colour_erased_poly_externs._rewrite: Recursive callee-name rewriting runs only after an erased polymorphic extern collision is found; extern emission is explicitly deferred."]
 
@@ -144,7 +144,7 @@
 
 ["reason", "backends-java-emit-py-emit-v3-externs-extern", "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Plus, issue #2345: the record-mode statements that journal an emission (an `extern emission fn` wrapper, a service emission or compensation site, or the WAL sink they need), which run only under `emit(ir, record=True)`; the oracle drives the default `emit(ir)` and the self-host port carries no WAL sink."]
 
-["function", "backends-java-emit-py-emit-v3-externs-extern", "_emit_v3_externs", 35, 35]
+["function", "backends-java-emit-py-emit-v3-externs-extern", "_emit_v3_externs", 26, 26]
 
 ["reason", "backends-java-emit-py-emit-v3-lifecycle-tests", "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred. Issue #2009 adds one statement: the generated lifecycle harness arms the provider's `RevlJournal` before each bracketed host-Map write and closes it at the frame's disposer."]
 
@@ -152,7 +152,7 @@
 
 ["reason", "backends-java-emit-py-emit-v3-remaining-assembly", "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458 adds one more: the `_uses_int_arith` call that pulls in the revlDivFloor/revlDivEuclid/revlMod block, on the same helper-demand boundary as the checked-division one beside it."]
 
-["function", "backends-java-emit-py-emit-v3-remaining-assembly", "_emit_v3", 16, 16]
+["function", "backends-java-emit-py-emit-v3-remaining-assembly", "_emit_v3", 15, 15]
 
 ["reason", "backends-java-emit-py-emit-v3-secret-members", "backends/java/emit.py::_emit_v3_secret_members: item 421 F6, declared-shape half: the `revlSecretMembers()` method every generated record class and variant case declares, so the registry's walk can reach a declared shape's LEAVES by path. The walk cannot see these classes reflectively (`instanceof Record` is false for them), so the shape hands its members over instead. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d))."]
 

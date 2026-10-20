@@ -174,13 +174,13 @@ def test_published_component_carries_the_evidence_bundle(tmp_path):
                   registry.EVIDENCE_ATTESTATION):
         assert os.path.exists(os.path.join(ev, facet)), facet
     # the committed attestation is the producer's real output and verifies.
-    att = json.loads(open(os.path.join(ev, registry.EVIDENCE_ATTESTATION)).read())
+    att = json.loads(open(os.path.join(ev, registry.EVIDENCE_ATTESTATION), encoding="utf-8").read())
     ir = registry._normalize_ir_for_attest(
         compile_files([os.path.join(comps, "db_x", "component.rvl")]))
     ok, _ = attest.verify_attestation(att, KEY, ir)
     assert ok
     # provenance is assembled from the reproducible index/interchange facts.
-    prov = json.loads(open(os.path.join(ev, registry.EVIDENCE_PROVENANCE)).read())
+    prov = json.loads(open(os.path.join(ev, registry.EVIDENCE_PROVENANCE), encoding="utf-8").read())
     assert prov["sourceSha256"] and prov["publisher"] == "revl-ci"
 
 

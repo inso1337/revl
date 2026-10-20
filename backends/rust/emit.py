@@ -6735,6 +6735,21 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
                                    node.get("expected"))
         ret = ctx.fn_returns.get(cn)
         return (_v3_subst(ret, generic[1]) if generic is not None else ret) == "Str"
+    # issue #2558: the component dialect spells a module callable
+    # `{"kind": "fn", "name", "args"}` rather than a `call` node, so a `+` over
+    # two generic calls in a provide method (`id("hi ") + id(who)`) fell past
+    # every arm here: the renderer then emitted the arithmetic `(a + b)`, which
+    # `cargo` rejects with E0308 because `String + String` does not exist. The
+    # `fn` arm is the same question the `call` arm asks, with the callee named
+    # directly instead of through a `callee` sub-node. `_v3_infer_type` already
+    # has a `fn` arm, but it answers the DECLARED return there (`T`, unbound),
+    # so the substitution has to happen here too.
+    if kind == "fn":
+        fn = node.get("name")
+        generic = _v3_generic_call(fn, node.get("args") or [], ctx,
+                                   node.get("expected"))
+        ret = ctx.fn_returns.get(fn)
+        return (_v3_subst(ret, generic[1]) if generic is not None else ret) == "Str"
     if kind == "field":
         target_ty = _v3_infer_type(node.get("target"), ctx)
         if not isinstance(target_ty, str):
@@ -7049,7 +7064,17 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
         if kind == "adt":
             return ctx.case_adt.get(node.get("case"))
         if kind == "fn":
-            return ctx.fn_returns.get(node.get("name"))
+            # issue #2558: the component dialect's call to a module callable.
+            # Its type parameters are bound from the arguments exactly as the
+            # `call` arm below does (issue #2495), so `id(who)` inside a provide
+            # method answers the instantiation `Str`, not the declared `T`.
+            fn = node.get("name")
+            generic = _v3_generic_call(fn, node.get("args") or [], ctx,
+                                       node.get("expected"))
+            if generic is not None:
+                return _v3_subst(ctx.fn_returns.get(fn), generic[1])
+            if fn in ctx.fn_returns:
+                return ctx.fn_returns.get(fn)
         if kind == "call" and "callee" in node:
             callee = node.get("callee") or {}
             if callee.get("kind") == "var":
