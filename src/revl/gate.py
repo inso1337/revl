@@ -1084,11 +1084,14 @@ class Gate:
         try:
             # `migrate="declared"`: the item-334 trust-boundary disclosure policy.
             # gen N's live OPERATOR state crosses onto this AGENT-authored
-            # successor ONLY through a `handoff` declared and §5-typed on both
-            # sides; the undeclared/untyped item-10 instance channel refuses
-            # before teardown (STATE_UNDISCLOSED) rather than migrating operator
-            # state by candidate-written name. A plain `swap`'s "generational"
-            # default (operator->operator) would carry it silently.
+            # successor only through a channel the gate admits: a `handoff`
+            # declared and §5-typed on both sides, or a live template the
+            # successor re-declares with the SAME code (the #2423 carve-out),
+            # whose instance state is re-seated on the operator's own text
+            # (issue #2673). A live template the successor CHANGES refuses before
+            # teardown (STATE_UNDISCLOSED) rather than migrating operator state by
+            # candidate-written name alone. A plain `swap`'s "generational"
+            # default (operator->operator) would carry both without that check.
             state = self._invoke_with_approval(
                 partial(self._session.swap, ir, migrate="declared",
                         agent_authored=True))
@@ -1137,11 +1140,11 @@ class Gate:
         # live source means the report and the health gate cannot disagree.
         keys = tuple(state.get("providedKeys") or ())
         # item 334 (live-instance/provider-state migration across a proposed
-        # swap): surface what the generational swap carried across as a first-
-        # class field, so the loop reads the reconciliation without digging into
-        # `state`. `Session.swap` reconciles two live layers the static swap
-        # never saw — spawned template instances (`state["migration"]`, item 10)
-        # and a provider that declared a `handoff` (`state["handoff"]`, item 53)
+        # swap): surface what the swap carried across as a first-class field, so
+        # the loop reads the reconciliation without digging into `state`.
+        # `Session.swap` reconciles two live layers the static swap never saw —
+        # spawned template instances (`state["migration"]`, item 10) and a
+        # provider that declared a `handoff` (`state["handoff"]`, item 53)
         # — capturing each before teardown and re-seating it onto the successor.
         # `None` for a stateless swap (nothing spawned, no hand-off), the
         # byte-identical case that needs no reconciliation.
