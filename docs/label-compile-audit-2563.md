@@ -73,10 +73,13 @@ caller on this path holds a file.
 
 ## The 14 label-only sites that remain
 
-Every one is classified. None hands author-reachable export text to the
-compiler without a decision: the embedder API makes the caller the operator,
-the MCP sites pass a profile or are documented derivations, and the generated
-text sites have no file of origin.
+Every one is classified. The embedder API makes the caller the operator; the
+MCP sites either pass a profile already or are documented derivation/preview
+compiles that admit and run nothing; the generated text sites have no file of
+origin. The one label site whose text can be author-reachable today is
+`plan.py:67`: the `revl_plan` preview hands it the agent's inline source, and
+nothing there is admitted or booted. Profiling that label by default is the
+central rule's slice, which is why it is not changed here.
 
 | site | function | names | verdict | why |
 |---|---|---|---|---|
