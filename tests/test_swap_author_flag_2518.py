@@ -226,10 +226,9 @@ def test_control_operator_file_swap_hands_off_warm(tmp_path):
     """The operator form that stays legal after the trusted-mode rule below:
     the successor is written to a jailed file outside every export area and
     host code is UNTRUSTED, so the compile reports no transport origin and the
-    file is the operator's own text. The hand-off migrates warm. Trust mode
-    alone does not make a candidate sent over the transport the operator's: an
-    inline successor is agent text even here (#2423 follow-up), which the
-    refusals above pin."""
+    file is the operator's own text. The hand-off migrates warm. The trusted
+    direction is the inverted control below; transport text stays agent text
+    under either trust, which tests/test_mcp_swap_template_2423.py pins."""
     _untrusted()
     _operator_file(tmp_path)
     successor = tmp_path / "successor.rvl"
