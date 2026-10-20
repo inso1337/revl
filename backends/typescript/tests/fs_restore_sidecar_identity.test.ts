@@ -18,12 +18,51 @@
 // Both directions are pinned: a sidecar that cannot be shown to be the captured
 // one throws (which the teardown loop records as restore-residue) and is never
 // installed, and an untampered restore stays exactly as quiet as before.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+//
+// Issue #2652 added a content comparison on both install passes: the sha256 of
+// the sidecar's bytes, recorded at snapshot time and re-read through the same fd
+// the stat came from. The seven stat fields alone do not see a same-size
+// in-place rewrite that lands inside one inode timestamp tick; the digest does,
+// because it does not depend on clock resolution. The same-tick test pins the
+// recorded stat tuple to the tampered file's own tuple before the inverse runs,
+// so only the digest can refuse and the result does not depend on the clock. A
+// capture with no `sha256` (an older WAL) is compared stat-only and still
+// restores.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { FsOpError, fsRestore, fsWrite } from '../revl_fs_ts.ts'
 import type { WriteWitness } from '../revl_fs_ts.ts'
+
+// The second install pass can only be forced through the rename, and a digest
+// that cannot be re-read can only be forced through the read, so this file
+// wraps those two `node:fs` calls. Both hooks are empty unless a test sets one,
+// and the wrappers delegate to the real calls otherwise.
+const hooks = vi.hoisted(() => ({
+  beforeRename: undefined as (() => void) | undefined,
+  failRead: undefined as (() => never) | undefined,
+}))
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    renameSync: (src: fs.PathLike, dst: fs.PathLike): void => {
+      const hook = hooks.beforeRename
+      hooks.beforeRename = undefined
+      if (hook !== undefined) hook()
+      actual.renameSync(src, dst)
+    },
+    readSync: ((...args: Parameters<typeof actual.readSync>) => {
+      const fail = hooks.failRead
+      hooks.failRead = undefined
+      if (fail !== undefined) fail()
+      return actual.readSync(...args)
+    }) as typeof actual.readSync,
+  }
+})
 
 let base: string
 let ws: string
@@ -39,6 +78,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // a hook a test set but did not consume (a test that fails early) must not
+  // leak into the next one.
+  hooks.beforeRename = undefined
+  hooks.failRead = undefined
   if (saved === undefined) delete process.env.REVL_FS_WORKSPACE
   else process.env.REVL_FS_WORKSPACE = saved
   fs.rmSync(base, { recursive: true, force: true })
@@ -53,14 +96,49 @@ function written(): { witness: WriteWitness; target: string; sidecar: string } {
   return { witness, target: path.join(ws, 'artifact.txt'), sidecar: witness.preimage }
 }
 
-function codeOf(fn: () => void): string {
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+/** Pin the witness's recorded stat fields to `sidecar`'s CURRENT tuple.
+ *
+ * This is the same-tick case of issue #2652, forced rather than raced: after a
+ * same-size in-place rewrite inside one inode timestamp tick, every captured
+ * stat field equals the tampered file's own tuple. Overwriting the recorded
+ * fields with that tuple therefore removes the stat comparison from the test
+ * without removing the tamper, so anything that still refuses can only be the
+ * content digest. On a filesystem whose clock did tick this leaves a test that
+ * passes for one reason instead of a test that flips with the tick. */
+function asIfSameTick(witness: WriteWitness, sidecar: string): void {
+  const capture = witness.capture
+  if (capture === null || capture === undefined) {
+    throw new Error('the witness carries no capture to pin')
+  }
+  const st = fs.statSync(sidecar, { bigint: true })
+  const current: Record<string, string> = {
+    dev: String(st.dev),
+    ino: String(st.ino),
+    mode: String(st.mode),
+    nlink: String(st.nlink),
+    size: String(st.size),
+    mtimeNs: String(st.mtimeNs),
+    ctimeNs: String(st.ctimeNs),
+  }
+  Object.assign(capture as unknown as Record<string, string>, current)
+}
+
+function refusalOf(fn: () => void): FsOpError {
   try {
     fn()
   } catch (e) {
     expect(e).toBeInstanceOf(FsOpError)
-    return (e as FsOpError).code
+    return e as FsOpError
   }
   throw new Error('the call was expected to refuse, and did not')
+}
+
+function codeOf(fn: () => void): string {
+  return refusalOf(fn).code
 }
 
 // ===========================================================================
@@ -94,6 +172,41 @@ describe('an untampered restore is unchanged', () => {
     expect(fs.existsSync(sidecar)).toBe(false)
   })
 
+  it('records the sidecar bytes digest alongside the stat fields', () => {
+    // The positive direction of the digest check: the capture binds the bytes
+    // that were on disk at snapshot time, and a restore nobody touched still
+    // installs them. Without this, the refusal below could be satisfied by an
+    // inverse that simply refuses every restore.
+    const { witness, target, sidecar } = written()
+    const recorded = witness.capture?.sha256
+    expect(recorded).toMatch(/^[0-9a-f]{64}$/)
+    expect(recorded).toBe(sha256(fs.readFileSync(sidecar, 'utf-8')))
+
+    fsRestore(witness)
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v1')
+    expect(fs.existsSync(sidecar)).toBe(false)
+  })
+
+  it('a capture recorded before the digest still restores', () => {
+    // A capture with the stat fields but no `sha256` predates the digest (an
+    // older install's WAL). It is compared stat-only and still restores:
+    // adding the key must not turn a recoverable WAL into a refusal.
+    const { witness, target, sidecar } = written()
+    const recorded = witness.capture
+    if (recorded === null || recorded === undefined) {
+      throw new Error('the witness carries no capture to strip the digest from')
+    }
+    const legacy = { ...recorded }
+    delete legacy.sha256
+    expect(legacy.sha256).toBeUndefined()
+
+    fsRestore({ ...witness, capture: legacy })
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v1')
+    expect(fs.existsSync(sidecar)).toBe(false)
+  })
+
   it('a created file is still deleted by its inverse', () => {
     const result = fsWrite('fresh.txt', 'hello')
     expect(result.kind).toBe('Ok')
@@ -108,9 +221,14 @@ describe('an untampered restore is unchanged', () => {
 // ===========================================================================
 
 describe('a sidecar that is not the captured snapshot is refused', () => {
-  it('refuses one rewritten in place', () => {
-    // Same inode, same length: `(dev, ino)` alone cannot see this, which is why
-    // the capture records the stamps too.
+  it('refuses one rewritten in place inside one timestamp tick', () => {
+    // Same inode, same length. `(dev, ino)` alone cannot see this, and on a
+    // filesystem whose inode clock is coarse neither can `size`/`mtimeNs`/
+    // `ctimeNs`: the rewrite lands in the same timestamp tick and every
+    // captured stat field stays equal (issue #2652). The recorded stat tuple is
+    // therefore pinned to the tampered file's own tuple before the inverse
+    // runs, so the tick is out of the test and the only comparison left that
+    // can refuse is the recorded sha256.
     const { witness, target, sidecar } = written()
     const before = fs.statSync(sidecar, { bigint: true })
     const fd = fs.openSync(sidecar, 'r+')
@@ -118,11 +236,61 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     fs.closeSync(fd)
     const after = fs.statSync(sidecar, { bigint: true })
     expect([after.dev, after.ino]).toEqual([before.dev, before.ino])
+    expect(after.size).toBe(before.size)
+    expect(witness.capture?.sha256).toBe(sha256('v1'))
+    asIfSameTick(witness, sidecar)
 
-    expect(codeOf(() => fsRestore(witness))).toBe('EIDENTITY')
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('sha256')
 
     expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
     expect(fs.readFileSync(sidecar, 'utf-8')).toBe('zz')
+  })
+
+  it('refuses a rewrite between the pre-rename read and the rename', () => {
+    // The post-install pass exists for the window between the first read and
+    // the rename, which is by name. A writer can rewrite the sidecar in place
+    // after its bytes were hashed; that is forced here inside the rename, so
+    // the pre-rename comparison sees the captured bytes and the installed
+    // result does not. The recorded tuple is pinned to the rewritten file's own
+    // tuple, so only the post-install digest can refuse.
+    const { witness, target, sidecar } = written()
+    hooks.beforeRename = () => {
+      const fd = fs.openSync(sidecar, 'r+')
+      fs.writeSync(fd, Buffer.from('zz'), 0, 2, 0)
+      fs.closeSync(fd)
+      asIfSameTick(witness, sidecar)
+    }
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('sha256')
+    expect(refusal.message).toContain('the restored target')
+    expect(hooks.beforeRename).toBeUndefined()
+    // the pre-rename pass saw the captured bytes, so the rename did install the
+    // tampered file; the post-install pass is what refused, and the residue is
+    // the target holding the tampered bytes rather than the sidecar slot.
+    expect(fs.readFileSync(target, 'utf-8')).toBe('zz')
+    expect(fs.existsSync(sidecar)).toBe(false)
+  })
+
+  it('refuses when the recorded digest cannot be re-read', () => {
+    // The digest is read through the same descriptor the stat comes from, so a
+    // recorded digest that cannot be read must refuse the restore rather than
+    // fall back to the stat comparison. Fail closed: the target is untouched
+    // and the sidecar is not consumed.
+    const { witness, target, sidecar } = written()
+    hooks.failRead = () => {
+      throw new Error('simulated read failure')
+    }
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('ERACE')
+    expect(refusal.message).toContain('content digest')
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
   })
 
   it('refuses one swapped for another inode', () => {

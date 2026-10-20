@@ -912,8 +912,13 @@ function rawWriteThrough(handle: WriteHandle, contents: string): void {
  * (issue #1016). `dev`/`ino` name the inode (what a same-bytes replacement
  * cannot forge), `nlink` is the hardlink control the forward path spells
  * `EMULTILINK`, `mode`/`size` the shape, and `mtimeNs`/`ctimeNs` the stamps.
- * `ctimeNs` is what makes an IN-PLACE rewrite visible without re-reading the
- * bytes, and unlike `mtimeNs` an unprivileged writer cannot set it back.
+ * A write to the snapshot bumps `ctimeNs`, and unlike `mtimeNs` an unprivileged
+ * writer cannot set it back with `utimes`, so it catches an IN-PLACE rewrite
+ * whenever the inode timestamp clock has ticked since the capture. It does NOT
+ * catch one that lands inside the same tick: on a filesystem whose inode clock
+ * is coarse relative to the tamper window all seven fields stay equal (issue
+ * #2652). That is why the snapshot capture also records the sidecar's content
+ * digest, which does not depend on clock resolution.
  *
  * Peer of py `SIDECAR_CAPTURE_FIELDS`, recorded as decimal STRINGS: node's only
  * nanosecond-resolution stat is the `bigint` one, and a bigint is not
@@ -926,17 +931,54 @@ export interface SidecarCapture {
   size: string
   mtimeNs: string
   ctimeNs: string
+  /** The sha256 of the sidecar's bytes, read through the same fd the fields
+   * above were fstat'd from (issue #2652), as bare lowercase hex. Not a member
+   * of `SIDECAR_CAPTURE_FIELDS`, which are stat fields every path compares the
+   * same way: the restore path reads the bytes through the fd it stat'd, so it
+   * compares this key on both install passes. A capture recorded before the key
+   * existed has none and stays stat-only, so an older WAL still restores; an
+   * `fsRm` capture carries none and stays stat-only too, because installing a
+   * parked file may be handed one that denies read (issue #2650). */
+  sha256?: string
 }
 
 /** The subset that survives the install. A rename bumps the inode's `ctime`, so
  * the post-install re-check compares everything BUT `ctimeNs`; comparing it
- * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`. */
+ * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`.
+ * The content digest IS compared on that pass as well: the window it exists for
+ * is exactly a rewrite between the first read and the rename. */
 const INSTALLED_CAPTURE_FIELDS = [
   'dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs'] as const
 const SIDECAR_CAPTURE_FIELDS = [...INSTALLED_CAPTURE_FIELDS, 'ctimeNs'] as const
 
+/** The capture key holding the sha256 of a sidecar's bytes; peer of py
+ * `SIDECAR_DIGEST_FIELD`. Written as 64 lowercase hex characters, the spelling
+ * `SHA256_HEX` already pins for the pinned-read surface. */
+const SIDECAR_DIGEST_FIELD = 'sha256' as const
+
+/** The sha256 of the bytes readable through `fd`, from byte 0 and with an
+ * explicit position so the fd's own offset does not matter. One full read; the
+ * callers either just wrote the whole file through this fd (`snapshotPreimage`)
+ * or just opened it on the sidecar they are about to check (the two install
+ * passes). The digest names the inode whose stat fields were taken, not a name
+ * that may have been swapped since. Peer of py `_sha256_of_fd`. */
+function sha256OfFd(fd: number): string {
+  const digest = createHash('sha256')
+  const buffer = Buffer.allocUnsafe(1 << 20)
+  let offset = 0
+  for (;;) {
+    const read = fs.readSync(fd, buffer, 0, buffer.length, offset)
+    if (read === 0) break
+    digest.update(buffer.subarray(0, read))
+    offset += read
+  }
+  return digest.digest('hex')
+}
+
 /** The captured identity of one sidecar inode. A READ of an already-taken stat,
- * so it reaches no syscall of its own. */
+ * so it reaches no syscall of its own. The content digest is added by the one
+ * caller that holds the sidecar's bytes open (`snapshotPreimage`), because that
+ * is the caller that just wrote them. */
 function captureOf(st: fs.BigIntStats): SidecarCapture {
   return {
     dev: String(st.dev),
@@ -957,7 +999,7 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     assertRealDirChain(directory)
     out = fs.openSync(
       dst,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL
       | O_NOFOLLOW,
       0o600,
     )
@@ -978,8 +1020,12 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     // capture the snapshot's own identity LAST, after the copy and after the
     // mode/mtime restoration, so what is recorded is the sidecar as it is left
     // behind (issue #1016). Read from the fd that wrote it, never by reopening
-    // the name. The inverse re-checks the file it installs against this.
-    handle.capture = captureOf(fs.fstatSync(out, { bigint: true }))
+    // the name. The inverse re-checks the file it installs against this. The
+    // content digest is read through that SAME fd (issue #2652), so it names
+    // the inode the stat fields were taken from.
+    const capture = captureOf(fs.fstatSync(out, { bigint: true }))
+    capture[SIDECAR_DIGEST_FIELD] = sha256OfFd(out)
+    handle.capture = capture
   } catch (e) {
     if (out >= 0) fs.closeSync(out)
     const message = (e as { message?: string })?.message ?? String(e)
@@ -1043,13 +1089,25 @@ function rawReplaceConfined(srcReal: string, dstReal: string): void {
  * another inode, or hardlink it out, and the inverse would install the result
  * and report a clean reversal.
  *
- * Three checks, on the way in and again on the installed result: a regular file
+ * Checks on the way in and again on the installed result: a regular file
  * (`EOUTSIDE`), one link (`EMULTILINK`, the control the forward
- * `openConfinedWrite` applies to its target), and an unchanged captured
- * identity (`EIDENTITY`). The second pass is what closes the window between the
- * first check and the rename, which is by NAME, exactly as `confirmLanded`
- * re-establishes the forward write rather than trusting its pre-syscall check;
- * it drops `ctimeNs`, which the rename legitimately bumps.
+ * `openConfinedWrite` applies to its target), an unchanged captured identity
+ * (`EIDENTITY`), and an unchanged content digest (`EIDENTITY`, issue #2652).
+ * The second pass is what closes the window between the first check and the
+ * rename, which is by NAME, exactly as `confirmLanded` re-establishes the
+ * forward write rather than trusting its pre-syscall check; it drops `ctimeNs`,
+ * which the rename legitimately bumps, but compares the digest again: the
+ * window that pass exists for is exactly a rewrite between the first read and
+ * the rename, so the installed bytes are read and hashed once more.
+ *
+ * The stat stamps alone are not enough. A same-size rewrite inside a single
+ * inode timestamp tick leaves all seven fields equal, so on a coarse clock the
+ * sidecar could be rewritten and installed while every stat comparison passed
+ * (issue #2652, the ts peer of #2647). The digest does not depend on clock
+ * resolution, and the bytes are read through the same fd the stat came from.
+ * A capture with no `sha256` (a durable record written before the digest
+ * existed) is compared stat-only and still restores, so an older WAL is not
+ * stranded.
  *
  * A refusal THROWS, which the teardown loop records as `restore-residue` — the
  * outcome item 243 rule 6 already defines for an inverse that cannot complete.
@@ -1062,7 +1120,8 @@ function rawInstallCapturedSidecar(
   srcReal: string, dstReal: string,
   capture: SidecarCapture | null | undefined,
 ): void {
-  const observe = (real: string, what: string): SidecarCapture => {
+  const observe = (real: string, what: string):
+    { capture: SidecarCapture; digest: string | null } => {
     const [parent] = splitLeaf(real)
     try {
       assertRealDirChain(parent)
@@ -1087,33 +1146,60 @@ function rawInstallCapturedSidecar(
         real,
       )
     }
-    let st: fs.BigIntStats
     try {
-      st = fs.fstatSync(fd, { bigint: true })
+      const st = fs.fstatSync(fd, { bigint: true })
+      if (!st.isFile()) {
+        throw new FsOpError(
+          'EOUTSIDE', `the ${what} must be a regular file`, real)
+      }
+      if (st.nlink !== 1n) {
+        throw new FsOpError(
+          'EMULTILINK',
+          `the ${what} is linked from a second name (${st.nlink} links), so `
+          + 'installing it would hand a live alias to whoever holds the other '
+          + 'name',
+          real,
+        )
+      }
+      // read the bytes through the SAME fd the stat came from, after the type
+      // and link-count refusals, and only when the capture records a digest.
+      // A legacy capture (or none at all) is stat-only by contract, so it pays
+      // no read and cannot be newly refused by one; a recorded digest that
+      // cannot be re-read fails closed rather than downgrading the comparison
+      // (issue #2652).
+      const expected = capture?.[SIDECAR_DIGEST_FIELD]
+      let digest: string | null = null
+      if (typeof expected === 'string') {
+        try {
+          digest = sha256OfFd(fd)
+        } catch {
+          throw new FsOpError(
+            'ERACE',
+            `the ${what} could not be re-read to check the content digest `
+            + 'recorded at snapshot time, so the reversal cannot be shown to '
+            + 'install what was captured',
+            real,
+          )
+        }
+      }
+      return { capture: captureOf(st), digest }
     } finally {
       fs.closeSync(fd)
     }
-    if (!st.isFile()) {
-      throw new FsOpError(
-        'EOUTSIDE', `the ${what} must be a regular file`, real)
-    }
-    if (st.nlink !== 1n) {
-      throw new FsOpError(
-        'EMULTILINK',
-        `the ${what} is linked from a second name (${st.nlink} links), so `
-        + 'installing it would hand a live alias to whoever holds the other '
-        + 'name',
-        real,
-      )
-    }
-    return captureOf(st)
   }
   const refuse = (observed: SidecarCapture,
     fields: readonly (keyof SidecarCapture)[],
-    real: string, sentence: string): void => {
+    real: string, sentence: string, digest?: string | null): void => {
     if (capture === null || capture === undefined) return
     const drifted = fields.filter((f) => capture[f] !== undefined
       && capture[f] !== observed[f])
+    // compared only when BOTH sides carry it: a legacy capture has no digest
+    // and a parked-file capture passes none, so both stay stat-only.
+    const expected = capture[SIDECAR_DIGEST_FIELD]
+    if (digest !== null && digest !== undefined
+      && typeof expected === 'string' && digest !== expected) {
+      drifted.push(SIDECAR_DIGEST_FIELD)
+    }
     if (drifted.length > 0) {
       throw new FsOpError(
         'EIDENTITY',
@@ -1123,11 +1209,13 @@ function rawInstallCapturedSidecar(
       )
     }
   }
-  refuse(observe(srcReal, 'preimage sidecar'), SIDECAR_CAPTURE_FIELDS, srcReal,
-    'the preimage sidecar changed since it was captured')
+  const before = observe(srcReal, 'preimage sidecar')
+  refuse(before.capture, SIDECAR_CAPTURE_FIELDS, srcReal,
+    'the preimage sidecar changed since it was captured', before.digest)
   replaceConfined(srcReal, dstReal)
-  refuse(observe(dstReal, 'restored target'), INSTALLED_CAPTURE_FIELDS, dstReal,
-    'the restored target is not the captured preimage')
+  const after = observe(dstReal, 'restored target')
+  refuse(after.capture, INSTALLED_CAPTURE_FIELDS, dstReal,
+    'the restored target is not the captured preimage', after.digest)
 }
 
 /** `lstat` of `real` with the parent chain checked, refusing a symlink. The
@@ -1266,15 +1354,22 @@ function rawParkCapturedSidecar(
  * with something that is not a file. The inverse then renamed the result over
  * the target and the abort reported a clean, residue-free reversal.
  *
- * The same three refusals as the preimage side, with the same codes: `EOUTSIDE`
- * for a symlink or a different file type, `EMULTILINK` for a link added since
- * the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/`mtimeNs`/
- * `ctimeNs`. The one difference is where the type and link-count expectations
- * come from: the preimage sidecar is a file this module created, so they are
- * constants there; the garbage sidecar is the caller's own file, so they are
- * facts `parkCapturedSidecar` recorded and are compared against the record.
- * That is the difference between refusing a substitution and refusing an honest
- * `fsRm` of a directory or of an already-hardlinked file.
+ * The same three stat refusals as the preimage side, with the same codes:
+ * `EOUTSIDE` for a symlink or a different file type, `EMULTILINK` for a link
+ * added since the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/
+ * `mtimeNs`/`ctimeNs`. `ctimeNs` makes an in-place rewrite visible as soon as
+ * the inode timestamp clock has ticked, and unlike `mtimeNs` an unprivileged
+ * writer cannot set it back with `utimes`; it does not catch one that lands in
+ * the same tick (issue #2652), and this side reads no bytes: a parked file may
+ * deny read by design, so its capture carries no content digest and stays
+ * stat-only. The digest was added to the `fsRestore` path only, where the
+ * sidecar is a copy this module created and can always read. The one difference
+ * is where the type and link-count expectations come from: the preimage sidecar
+ * is a file this module created, so they are constants there; the garbage
+ * sidecar is the caller's own file, so they are facts `parkCapturedSidecar`
+ * recorded and are compared against the record. That is the difference between
+ * refusing a substitution and refusing an honest `fsRm` of a directory or of an
+ * already-hardlinked file.
  *
  * The check runs again on the INSTALLED result, because the rename is by name,
  * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops
