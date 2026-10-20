@@ -13,7 +13,7 @@ use "planner.rvl" { Plan }
 
 pub service Assembler {
   emission[fetch, gate, index, ws] fn add(name: Str, trustHostCode: Bool) -> Int
-  emission[gate, ws] fn rm(name: Str) -> Int
+  emission[gate, ws] fn rm(name: Str, trustHostCode: Bool) -> Int
   emission[gate, ws] fn assemble(trustHostCode: Bool) -> Int
   emission[gate, ws] fn assemble_check(trustHostCode: Bool) -> Int
   emission[ws] fn apply(trustHostCode: Bool) -> Int
@@ -71,13 +71,15 @@ component Assembler
     // a service something still needs) is refused with the unmet requirement
     // named, and commit_rm gets "" so nothing on disk is touched. Only a clean
     // remainder un-vendors trucs/<name>/ and drops it from truc.toml/truc.lock.
-    fn rm(name) {
+    // The remainder is admitted like `assemble`: a row's host body admits only
+    // by its lock record or by `thc`, this command only (issue #2561).
+    fn rm(name, thc) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.rm_spec(m, name)
       let g = emit ws.read_sources(".", spec)
       let ordered = plan.ordered_sources(g)
-      let v = emit gate.admit_all(ordered, lock, false)
+      let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.rm_report(m, name, v)
       emit ws.commit_rm(".", plan.report_commit(r))
       emit ws.print(plan.report_msg(r))
@@ -124,7 +126,7 @@ component Assembler
     }
 
     fn unknown(cmd) {
-      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME [--trust-host-code] | rm NAME | assemble [--check] [--trust-host-code] | apply [--trust-host-code] | stack check>`)
+      emit ws.print(`truc: unknown command "${cmd}"; usage: truc <add NAME [--trust-host-code] | rm NAME [--trust-host-code] | assemble [--check] [--trust-host-code] | apply [--trust-host-code] | stack check>`)
       return 2
     }
   }

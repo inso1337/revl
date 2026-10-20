@@ -1807,6 +1807,9 @@ class Session:
           crossed: a live instance the successor would inherit refuses BEFORE
           teardown with STATE_UNDISCLOSED, gen N untouched, rather than being
           silently migrated by candidate-written template name + host class alone.
+          The same gate runs for ANY `agent_authored` successor, whatever
+          `migrate` says (issue #2423); `declared` is how `Gate.propose` selects
+          it.
 
         Composition-level (static) state is unaffected either way; this only
         reconciles the dynamic instance layer the static swap never saw.
@@ -1858,15 +1861,21 @@ class Session:
         # running composition untouched.
         self._check_cache_applicability(ir, new_map)
         old_ir = self.ir
-        # item 334 disclosure gate (`migrate="declared"`, the propose path): an
-        # AGENT-authored successor crosses the trust boundary, so gen N's live
-        # OPERATOR state must not carry onto it through any channel that is not
-        # explicitly declared AND §5-typed on both sides. The item-53 accept-vs-
-        # export type gate is manifest-threaded (compiler.py `handoffs` ambient)
-        # and never runs on propose's STANDALONE decision compile, so run the
-        # disclosure gate HERE, before any teardown — a refusal leaves gen N
-        # untouched (STATE_UNDISCLOSED), never silently carried. Fail-closed.
-        if migrate == "declared":
+        # item 334 disclosure gate: an AGENT-authored successor crosses the
+        # trust boundary, so gen N's live OPERATOR state must not carry onto it
+        # through any channel that is not explicitly declared AND §5-typed on
+        # both sides. The item-53 accept-vs-export type gate is manifest-
+        # threaded (compiler.py `handoffs` ambient) and never runs on propose's
+        # STANDALONE decision compile, so run the disclosure gate HERE, before
+        # any teardown — a refusal leaves gen N untouched (STATE_UNDISCLOSED),
+        # never silently carried. Fail-closed.
+        # issue #2423: this is a property of the AUTHOR, not of the migration
+        # label. A swap through the authoring door defaults to generational
+        # migration, so gating only `declared` let an agent-authored successor
+        # inherit live operator instance state by default. Run the gate for
+        # every agent-authored successor; an operator swap (agent_authored
+        # False) keeps generational migration.
+        if migrate == "declared" or agent_authored:
             self._enforce_declared_disclosure(old_ir, ir)
         # issue #1446: render the successor while the running generation is still
         # up. The emitter's refusal is raised here, so a document the py tier

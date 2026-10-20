@@ -92,6 +92,21 @@ python3 tools/build_gate_wasm.py --check || fail=1
 echo "== docs drift =="
 python3 tools/docgen.py --check || fail=1
 
+# issue #2645: the two generated-artifact drifts that dominated failed PR runs
+# were only ever reported by CI. Both checks already exist, and the helper
+# prints the exact fix command on failure:
+#     census  python3 tools/census_artifact.py --write
+#     goldens python3 tools/regen_goldens.py python typescript rust java wasm
+# The census re-run is skipped when census_artifact.py --moved-inputs says the
+# diff moved no input, so a branch that touches neither artifact pays only a
+# comparison. The two gate crates keep their own checks above; the emitted
+# goldens here are the tiers those checks do not cover.
+echo "== emitted goldens =="
+python3 tools/pre_pr_artifacts.py goldens || fail=1
+
+echo "== census artifact =="
+python3 tools/pre_pr_artifacts.py census || fail=1
+
 # The site wheel is deliberately NOT checked here. It vendors the whole of
 # src/revl, so a per-push gate reddened CI on every source change to a bundled
 # module (an outage class, not a defect). It is a deploy artifact checked at

@@ -40,10 +40,10 @@ KNOWN_SILENT = {
     # issue #2486: the go port's `import_directive` does not refuse a
     # `//revl:import` line the reference refuses (it re-quotes it instead)
     "go": _IMPORT_DIRECTIVE_REFUSALS,
-    # issue #2492: the java reference refuses an extern with no @java body by
-    # name; the java port has no marker for it and emits the module anyway.
-    # These are the only refusal documents with a bodiless extern on java.
-    "java": _IMPORT_DIRECTIVE_REFUSALS,
+    # issue #2492 used to list the same documents for java, because the java
+    # port had no marker for an extern with no @java body and emitted the module
+    # anyway. The port now names it (`<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:...>>`),
+    # so java marks every refusal document and has no known-silent ones left.
 }
 
 

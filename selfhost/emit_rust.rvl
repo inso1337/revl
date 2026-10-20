@@ -840,6 +840,20 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
     let cn = value_str(value_field(callee, "name"))
     return v3_subst(map_get(ctx.fr, cn), v3_generic_call(cn, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))) == "Str"
   }
+  // issue #2558: the component dialect spells a module callable as a `fn` node
+  // (`{"kind": "fn", "name", "args"}`), not a `call`, so a `+` over two generic
+  // calls in a provide method (`id("hi ") + id(who)`) fell past every arm here
+  // and rendered as the arithmetic `(a + b)`: `String + String` does not exist
+  // in rust, so cargo answered E0308. The `fn` arm asks the same question the
+  // `call` arm asks, with the callee named directly instead of nested; the
+  // substitution has to happen here too, because `v3_infer_type`'s `fn` arm
+  // answers the DECLARED return (`T`, unbound) on its own.
+  if (k == "fn") {
+    let fnm = value_str(value_field(node, "name"))
+    let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
+    let ret = nb.keys().length() > 0 ? v3_subst(map_get(ctx.fr, fnm), nb) : map_get(ctx.fr, fnm)
+    return ret == "Str"
+  }
   if (k == "field") {
     let target_ty = v3_infer_type(value_field(node, "target"), ctx)
     if (target_ty == "") { return false }
@@ -861,7 +875,17 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     if (value_kind(lv) == "int") { return "Int" }
   }
   if (k == "adt") { return map_get(ctx.ca, value_str(value_field(node, "case"))) }
-  if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
+  // issue #2558: the component dialect's call to a module callable. Its type
+  // parameters are bound from the arguments exactly as the `call` arm does
+  // (issue #2495), so `id(who)` inside a provide method answers the
+  // instantiation `Str`, not the declared `T`.
+  if (k == "fn") {
+    let fnm = value_str(value_field(node, "name"))
+    let declared = map_get(ctx.fr, fnm)
+    let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
+    if (nb.keys().length() > 0) { return v3_subst(declared, nb) }
+    if (ctx.fr.has(fnm)) { return declared }
+  }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
     let callee = value_field(node, "callee")
     if (node_kind(callee) == "var") {
@@ -4783,14 +4807,22 @@ fn binds(comp: Any) -> List[Str] {
 // whose load-bearing half is the host-Map bind markers — what tells the
 // renderer a `get`/`remove` key is borrowed. Those are seeded here explicitly
 // rather than left to the order the reference happens to run in.
-fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, Str]) -> Ctx {
-  var c = plain_ctx(tables, fr)
+fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, Str], functions: List[Any]) -> Ctx {
+  var c = plain_ctx(tables, fr, functions)
   for (b of map_values.keys()) { c = set_vt(c, b, `Map[${map_get(map_values, b)}]`) }
   return c
 }
 
-fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
-  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: Map.empty(), tp: [], dz: Map.empty(), cr: "" }
+// issue #2583: `fp` carries each module fn's declared parameter types, and it
+// is what `callee_tparams`, `v3_generic_call` and `return_only_tparams` read.
+// An empty map made those see no parameter types at all, so a call fell back
+// to the single-uppercase-letter heuristic: an explicit multi-letter type name
+// like `none()` was missed, a return-only call in an argument slot got no
+// expected type, and a turbofish came out with the wrong arity (rustc E0107).
+// The reference builds this from the `functions` list for every context that
+// renders expressions (emit.py `_V3Ctx.fn_param_types`), so it is threaded in.
+fn plain_ctx(tables: TypeTables, fr: Map[Str, Str], functions: List[Any]) -> Ctx {
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: fn_params_map(functions), tp: [], dz: Map.empty(), cr: "" }
 }
 
 // `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
@@ -5568,7 +5600,7 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
 // applies to method names; the simple path names them raw (mirrors the two
 // reference sites exactly). `effectful` gives the effectful body renderer +
 // the `self.ctx` field capture.
-fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool, map_values: Map[Str, Str]) -> List[Str] {
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool, map_values: Map[Str, Str], functions: List[Any]) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
@@ -5593,7 +5625,10 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: Map.empty(), tp: [], dz: Map.empty(), cr: "" }
+    // issue #2583: a provide-method body renders calls too, so it carries the
+    // same declared parameter types the reference gives every expression
+    // context (emit.py `_V3Ctx.fn_param_types`); see `plain_ctx`.
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: fn_params_map(functions), tp: [], dz: Map.empty(), cr: "" }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -6196,18 +6231,18 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let cty = config_ty(comp)
   let functions = value_list(value_field(ir, "functions"))
-  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr, functions), tables.tn)
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr))},`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values, functions))
     out = out.push("}")
     out = out.push("")
   }
@@ -6239,7 +6274,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb, ab))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values, functions), map_values, 3, tb, sb, ab))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
       ab = ab.concat(step_let_binds([step]))
@@ -6276,19 +6311,19 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   // field (issue 1153).
   let has_eff = component_has_effectful_methods(comp)
   let functions = value_list(value_field(ir, "functions"))
-  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr, functions), tables.tn)
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr))},`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
     out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values, functions))
     out = out.push("}")
     out = out.push("")
   }
@@ -6322,7 +6357,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb, ab))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values, functions), map_values, 3, tb, sb, ab))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
       ab = ab.concat(step_let_binds([step]))

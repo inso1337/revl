@@ -322,6 +322,23 @@ def entry_read(registry: str, name: str) -> str:
 
 # -- filesystem (emission[fs]; scope = the project dir) ---------------------
 
+def _refuse_url_registries(registries: dict) -> None:
+    """Refuse a `[registries]` entry that names a `url` (issue #2556).
+
+    A registry is a local directory named by `path`. A `url` used to be handed
+    on as if it were that path, so truc read whatever sat at that string, which
+    is not the source the operator wrote. Fetching a registry from a url is not
+    shipped, so the entry is refused by name before any path is built or read.
+    Both readers of `[registries]` call this: `toml_manifest` and the target
+    registry `truc ship` publishes to."""
+    for rname, entry in registries.items():
+        if isinstance(entry, dict) and "url" in entry:
+            raise TrucNameRefusal(
+                f"registry {rname!r} in truc.toml names url {entry['url']!r}, "
+                "and fetching a registry from a url is not shipped (a registry "
+                "is a local directory named by `path`); it was not read")
+
+
 def toml_manifest(project_dir: str) -> str:
     """`truc.toml` parsed (host owns TOML — there is no revl TOML parser) and
     flattened to the JSON shape the pure planner reads: the registry paths
@@ -332,13 +349,12 @@ def toml_manifest(project_dir: str) -> str:
     data = tomllib.loads(p.read_text(encoding="utf-8"))
     assembly = data.get("assembly") or {}
     registries = data.get("registries") or {}
+    _refuse_url_registries(registries)
     resolved: dict[str, str] = {}
     for rname, r in registries.items():
         path = (r or {}).get("path")
-        if path:
-            resolved[rname] = os.path.abspath(os.path.join(project_dir, path))
-        else:
-            resolved[rname] = (r or {}).get("url", "")
+        resolved[rname] = (os.path.abspath(os.path.join(project_dir, path))
+                           if path else "")
     trucs = [
         {"name": tname, "registry": (t or {}).get("registry", "local")}
         for tname, t in (data.get("trucs") or {}).items()
@@ -1289,6 +1305,7 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
     assembly = data.get("assembly") or {}
     ship = data.get("ship") or {}
     registries = data.get("registries") or {}
+    _refuse_url_registries(registries)
 
     # the component being shipped is the project's own entry, verbatim.
     entry = assembly.get("entry") or []
@@ -1305,7 +1322,7 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
     reg = registries.get(reg_name) or {}
     reg_path = reg.get("path")
     reg_abs = (os.path.abspath(os.path.join(project_dir, reg_path))
-               if reg_path else reg.get("url", ""))
+               if reg_path else "")
     return ship, source, reg_name, reg_abs
 
 

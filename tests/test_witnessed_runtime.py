@@ -203,7 +203,7 @@ def test_witnessed_reverts_on_abort(target):
         "error": {"type": "RuntimeError", "message": "boom"}}]
 
     assert os.path.exists(target), "abort did not replay the inverse — mutation stuck"
-    assert open(target).read() == "the deliverable"
+    assert open(target, encoding="utf-8").read() == "the deliverable"
     # residue-free: the backup the mutation created was cleaned up by the revert
     assert not os.path.exists(bak), "abort left rollback residue (A8 violation)"
 
@@ -228,7 +228,7 @@ def test_acquire_bracket_reverts_on_clean_unload(target):
     # two entry kinds are distinct at runtime.
     assert os.path.exists(target), "acquire bracket failed to revert on clean unload"
     assert not os.path.exists(bak)
-    assert open(target).read() == "the deliverable"
+    assert open(target, encoding="utf-8").read() == "the deliverable"
 
 
 # ---------------------------------------------------------------------------
