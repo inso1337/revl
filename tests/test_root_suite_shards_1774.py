@@ -309,14 +309,22 @@ def test_a_refresh_overwrites_measured_files_and_drops_removed_ones():
 
 
 def test_a_weights_refresh_is_not_a_full_run():
-    """A refreshed weights file changes shard balance only, so the affected
-    selection for it (and for the tool that writes it) is this file alone."""
+    """A refreshed weights file changes shard balance only, so the JSON's
+    selection is this file alone; the writer's is this file plus the read_text
+    encoding guard, because the writer is a `.py` (issue #2639's main-health
+    finding). Neither escalates to FULL."""
     sys.path.insert(0, str(ROOT / "tools"))
     import affected_tests  # noqa: PLC0415
-    for changed in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
+    guard = "tests/test_read_text_encoding_guard.py"
+    want = {
+        "tests/shard_weights.json": {"tests/test_root_suite_shards_1774.py"},
+        "tools/refresh_shard_weights.py": {
+            "tests/test_root_suite_shards_1774.py", guard},
+    }
+    for changed, expected in want.items():
         sel = affected_tests.select([changed], ROOT)
         assert not sel["full"], sel["reason"]
-        assert sel["pytest"] == ["tests/test_root_suite_shards_1774.py"], sel
+        assert set(sel["pytest"]) == expected, sel
     assert affected_tests.select(["tests/_shard.py"], ROOT)["full"]
 
 

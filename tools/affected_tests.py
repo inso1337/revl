@@ -72,6 +72,15 @@ BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
 GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs",
              "vocabulary", "census")
 
+# The bare-`read_text` encoding guard (issue #2639, main-health finding). The
+# test AST-walks every `.py` in the tree and reports a `.read_text` call with no
+# `encoding`, so what it guards is a CALL and not a symbol: the file that gains
+# one is not imported by the test, and no mapping table can name it. PR #2655
+# landed the guard, and 76d80f879 then added four bare sites under `bench/` and
+# `tests/` on main, where no narrow selection ran it. Every `.py` diff therefore
+# selects it (see `select`); a docs-only diff does not pay for the tree walk.
+READ_TEXT_GUARD_TEST = "tests/test_read_text_encoding_guard.py"
+
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
 # computes the wider lazy-inclusive graph that also fails safe to FULL; this tuple
@@ -1406,6 +1415,24 @@ def select(changed, root) -> dict:
     # exists to keep cheap.
     reasons: list[str] = []
 
+    # --- a `.py` diff can add a bare read_text site (main-health, #2639) --- #
+    # `READ_TEXT_GUARD_TEST` AST-walks every `.py` in the tree, so the path set
+    # it can fire for is every `.py` path a diff can touch: the finding is a
+    # CALL, not a symbol any rule below names. This is deliberately an
+    # additive pre-loop check rather than a dispatch arm, because nearly every
+    # arm below ends in `continue` and a `.py` change routinely takes one of
+    # them (`bench/`, `tools/`, a modified test). Before this line those arms
+    # selected only their own tests, so the guard that covers all of them did not
+    # run: 76d80f879 added four bare sites that way on main. A non-`.py` diff
+    # cannot add a call site, so the docs-only fast path does not pay for the
+    # whole-tree scan (the guard's tree test measures ~3.8s of a 15-110s
+    # affected run on this tree).
+    if any(f.endswith(".py") for f in changed):
+        pytest_nodes.add(READ_TEXT_GUARD_TEST)
+        reasons.append(
+            "a .py change can add a bare read_text site "
+            "(read_text encoding guard)")
+
     for f in changed:
         # --- the self-evolution progress counters (issue #1224) ------------ #
         # `tools/evolution_progress.py` reads its counters out of artifacts
@@ -2031,7 +2058,10 @@ def _test_add_delete_override(changed, added, deleted, root):
       * it imports a `revl.<mod>` the diff touched; or
       * it names a backend tier or stdlib module the diff touched.
     A diff that adds ONLY test files is narrow by definition: nothing else
-    changed, so nothing but the new tests can newly fail.
+    changed, so only the new tests' bodies (and the whole-tree guard, since an
+    added test is a new `.py`) can newly fail. The bare-`read_text` guard rides
+    along either way: its body is exactly where a new call site can appear (two
+    of 76d80f879's four sites were in added test files).
     """
     root = Path(root)
     changed = [_norm(f) for f in changed]
@@ -2052,8 +2082,9 @@ def _test_add_delete_override(changed, added, deleted, root):
         return {
             "full": False,
             "reason": ("only new test file(s) added: "
-                       + " ".join(new_tests) + " -> targeted"),
-            "pytest": new_tests,
+                       + " ".join(new_tests)
+                       + " (+ read_text encoding guard) -> targeted"),
+            "pytest": sorted(set(new_tests) | {READ_TEXT_GUARD_TEST}),
             "backends": [],
             "gates": ["ruff"],
         }
@@ -2090,11 +2121,16 @@ def _test_add_delete_override(changed, added, deleted, root):
             continue
         return _full(f"added test file {f} maps to no touched module -> full")
 
+    reason = base["reason"] + "; + added test file(s) " + " ".join(new_tests)
+    if READ_TEXT_GUARD_TEST not in base["pytest"]:
+        # `rest` has no `.py`, so `select(rest)` did not carry the guard; the
+        # added test's own body can still introduce a bare call site.
+        reason += " (+ read_text encoding guard)"
     return {
         "full": False,
-        "reason": base["reason"] + "; + added test file(s) "
-                  + " ".join(new_tests),
-        "pytest": sorted(set(base["pytest"]) | set(new_tests)),
+        "reason": reason,
+        "pytest": sorted(set(base["pytest"]) | set(new_tests)
+                         | {READ_TEXT_GUARD_TEST}),
         "backends": base["backends"],
         "gates": base["gates"],
     }

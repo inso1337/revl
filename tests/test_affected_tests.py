@@ -146,10 +146,12 @@ def test_deleted_test_file_is_still_full():
 
 
 def test_added_test_file_alone_is_not_full():
-    # Nothing else changed, so nothing but the new test can newly fail.
+    # Nothing else changed, so nothing but the new test (and the whole-tree
+    # read_text guard, since an added test is a new `.py`) can newly fail.
     r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
     assert r is not None and r["full"] is False
-    assert r["pytest"] == ["tests/test_newthing.py"]
+    assert set(r["pytest"]) == {
+        "tests/test_newthing.py", "tests/test_read_text_encoding_guard.py"}
     assert r["backends"] == []
 
 
@@ -433,11 +435,16 @@ def test_modified_test_file_selects_its_importers():
         )
 
 
-def test_modified_test_file_without_importers_is_only_itself():
-    """A leaf test nothing imports still selects just itself (no over-selection).
-    A synthetic name is used so the assertion does not rot when tests are added."""
+def test_modified_test_file_without_importers_selects_only_itself_and_the_guard():
+    """A leaf test nothing imports still selects just itself and the whole-tree
+    read_text guard (a modified `.py` can add a bare site); no other test is
+    dragged in. A synthetic name is used so the assertion does not rot when
+    tests are added."""
     r = sel("tests/test__no_importer_sentinel__.py")
-    assert r["pytest"] == ["tests/test__no_importer_sentinel__.py"]
+    assert set(r["pytest"]) == {
+        "tests/test__no_importer_sentinel__.py",
+        "tests/test_read_text_encoding_guard.py",
+    }
 
 
 def test_test_importers_ignores_prefix_siblings():
@@ -617,6 +624,110 @@ def test_every_selection_carries_the_vocabulary_gate():
         "the FULL gate does not carry the vocabulary-mirror gate, which is the "
         "hole that let issue #1332's four classes past a FULL pre-merge run."
     )
+
+
+# --- a `.py` change can add a bare read_text site (main-health, #2639) ----- #
+def _guard_scan_module():
+    """The real guard test, loaded so its own walker answers these pins."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_read_text_guard_for_map",
+        ROOT / "tests" / "test_read_text_encoding_guard.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_python_change_selects_the_read_text_encoding_guard():
+    """`tests/test_read_text_encoding_guard.py` walks every `.py` in the tree and
+    reports a `.read_text` call with no `encoding`. Its own PR #2655 landed it,
+    and 76d80f879 then added four bare sites under `bench/` and `tests/` on
+    main: the diff took the bench-harness and modified-test arms of the
+    selector, each of which ends in `continue`, so the guard never ran and the
+    sites reached main. These are the exact paths that regressed."""
+    for f in ("bench/tokens.py", "tests/test_bench_run_usage.py",
+              "tests/test_tokens_to_green.py"):
+        r = sel(f)
+        assert r["full"] is False, f"{f} escalated to FULL: {r['reason']}"
+        assert "tests/test_read_text_encoding_guard.py" in r["pytest"], (
+            f"{f} does not select the read_text encoding guard. It walks every "
+            ".py in the tree, so a change here can add a bare call site that "
+            "nothing else in the selection reports.")
+
+
+def test_every_tree_the_read_text_guard_scans_selects_it():
+    """The rule is `f.endswith(".py")`, not the three paths 76d80f879 touched.
+    One scanned `.py` per top-level tree is taken from the guard's OWN walker
+    (`source_files`), so a tree the guard starts reading joins this pin with no
+    edit here, and the rule cannot silently narrow to the known files. A tree
+    whose every scanned file is FULL is covered by `tests/`, but the pin takes
+    the first NARROW selection per tree, because "FULL runs it anyway" is the
+    vacuity this test exists to rule out for the `tests/` tree that regressed."""
+    guard = _guard_scan_module()
+    trees = {}
+    for p in guard.source_files(ROOT):
+        rel = p.relative_to(ROOT).as_posix()
+        trees.setdefault(rel.split("/")[0], []).append(rel)
+    assert len(trees) >= 8, (
+        f"the guard's scan surface shrank to {sorted(trees)}; the walker or its "
+        "SKIP_DIRS moved")
+    checked = []
+    for tree, rels in sorted(trees.items()):
+        for rel in rels:
+            r = sel(rel)
+            if r["full"]:
+                continue  # FULL collects tests/, the guard included
+            assert "tests/test_read_text_encoding_guard.py" in r["pytest"], (
+                f"{rel} is a scanned `.py`, but a change to it does not select "
+                "the read_text guard")
+            checked.append(rel)
+            break
+    assert checked, "no scanned top-level tree produced a targeted selection"
+    assert any(rel.startswith("tests/") for rel in checked), (
+        "the tests/ tree, where 76d80f879's four sites landed, was only ever "
+        "covered by FULL; the pin must show a narrow tests/ selection carries "
+        "the guard")
+
+
+def test_a_docs_only_change_does_not_select_the_read_text_encoding_guard():
+    """The cost half. A non-`.py` diff cannot add a `.read_text` call, so it must
+    not pay for the guard's whole-tree scan; the docs-only selection is the fast
+    path that exists to stay cheap (its exact bound is pinned in
+    tests/test_root_suite_coverage_is_unconditional.py)."""
+    for f in ("README.md", "docs/process.md", "docs/v2.0-roadmap.md"):
+        r = sel(f)
+        assert r["full"] is False, f"{f} escalated to FULL: {r['reason']}"
+        assert "tests/test_read_text_encoding_guard.py" not in r["pytest"], (
+            f"{f} is not a .py diff but selects the read_text guard; the guard "
+            "scans the whole tree and a docs-only diff is the fast path.")
+
+
+def test_an_added_test_file_selects_the_read_text_encoding_guard():
+    """The add-only path of issue #162 answers before `select()` runs, so it
+    carries the guard itself. Two of 76d80f879's four sites were in added test
+    files; a new test's body is exactly where a new call site appears."""
+    r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
+    assert r is not None and r["full"] is False
+    assert "tests/test_read_text_encoding_guard.py" in r["pytest"], r
+    # The merged path too, where the rest of the diff is a non-`.py` change and
+    # `select(rest)` therefore has no reason to add the guard.
+    r = _override(["stdlib/json.rvl", "tests/test_json_newthing.py"],
+                  added={"tests/test_json_newthing.py"})
+    assert r is not None and r["full"] is False, r
+    assert "tests/test_json_newthing.py" in r["pytest"], r
+    assert "tests/test_read_text_encoding_guard.py" in r["pytest"], r
+
+
+def test_the_read_text_guard_mapping_names_the_walking_test():
+    """The rule names one hard-coded node. If the guard moves or is renamed the
+    selection would name an uncollectable path and the guard would be quiet
+    again, so the constant and the walker's own surface are pinned together."""
+    assert at.READ_TEXT_GUARD_TEST == "tests/test_read_text_encoding_guard.py"
+    assert (ROOT / at.READ_TEXT_GUARD_TEST).is_file()
+    guard = _guard_scan_module()
+    scanned = list(guard.source_files(ROOT))
+    assert scanned and all(p.suffix == ".py" for p in scanned), (
+        "the guard no longer scans only `.py` files, so the selector's "
+        "`endswith('.py')` predicate is no longer its surface")
 
 
 def test_a_vendored_python_backend_module_selects_the_wheel_gate_narrowly():
