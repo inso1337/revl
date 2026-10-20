@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolves docs/vision.md's claims about the tree against the tree.
+"""Resolves the tree claims in docs/vision.md and docs/substrate-boundary.md.
 
 `docs/vision.md` is the document the roadmap's own header cites as its
 rationale (`**Why:** docs/vision.md`), and until this tool existed no tool read
@@ -112,6 +112,10 @@ import check_roadmap_claims as claims  # noqa: E402
 import docgen  # noqa: E402
 
 DEFAULT_DOC = ROOT / "docs" / "vision.md"
+DEFAULT_DOC_RELS = (
+    str(DEFAULT_DOC.relative_to(ROOT)),
+    "docs/substrate-boundary.md",
+)
 RULES = ("command", "link", "path", "tier")
 
 # The block `tools/docgen.py` owns in this document. Named here as well so the
@@ -525,7 +529,8 @@ def self_test(root: Path) -> int:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--doc", type=Path, default=DEFAULT_DOC)
+    parser.add_argument("--doc", type=Path,
+                        help="check one document instead of the default documents")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--rule", action="append", choices=RULES, dest="rules")
     parser.add_argument("--check", action="store_true",
@@ -541,27 +546,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rules = args.rules or list(RULES)
     tree = claims.Tree.from_git(args.root)
-    doc_rel = str(args.doc.resolve().relative_to(args.root.resolve()))
-    source = args.doc.read_text(encoding="utf-8")
-    denominator, findings = run(source, tree, rules, doc_rel)
+    docs = [args.doc] if args.doc is not None else [
+        args.root / rel for rel in DEFAULT_DOC_RELS
+    ]
+    all_findings = []
+    for doc in docs:
+        doc_rel = str(doc.resolve().relative_to(args.root.resolve()))
+        source = doc.read_text(encoding="utf-8")
+        denominator, findings = run(source, tree, rules, doc_rel)
+        all_findings.extend(findings)
 
-    print("%s: %d claims checked over %d rules"
-          % (doc_rel, sum(denominator.values()), len(rules)))
-    for rule in rules:
-        stale = sum(1 for c, _ in findings if c.rule == rule)
-        print("  %-7s %3d claims, %d stale" % (rule, denominator[rule], stale))
+        print("%s: %d claims checked over %d rules"
+              % (doc_rel, sum(denominator.values()), len(rules)))
+        for rule in rules:
+            stale = sum(1 for c, _ in findings if c.rule == rule)
+            print("  %-7s %3d claims, %d stale" % (rule, denominator[rule], stale))
 
-    if not args.quiet:
-        for claim, verdict in findings:
-            print("\n%s:%d  [%s]\n  %s\n  %s"
-                  % (doc_rel, claim.line, claim.rule, claim.text.strip(), verdict))
+        if not args.quiet:
+            for claim, verdict in findings:
+                print("\n%s:%d  [%s]\n  %s\n  %s"
+                      % (doc_rel, claim.line, claim.rule, claim.text.strip(), verdict))
 
     print("\nThis gate RESOLVED the commands. It did not run them: the suites "
           "they name are the per-backend CI jobs, which are required checks.")
-    if findings and not args.check:
+    if all_findings and not args.check:
         print("Advisory run: %d finding(s), exit 0. Use --check for the CI mode."
-              % len(findings))
-    return 1 if (args.check and findings) else 0
+              % len(all_findings))
+    return 1 if (args.check and all_findings) else 0
 
 
 if __name__ == "__main__":
