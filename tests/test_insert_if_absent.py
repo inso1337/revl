@@ -280,6 +280,99 @@ def test_concurrency_exactly_one_true_on_the_reference_runtime():
     m.drop()
 
 
+# The ATOMICITY GUARD (issue #2731). Design 397 claims the py verb is atomic
+# "by construction under the reference runtime's run-to-completion model": a
+# property of how the runtime schedules work, not of a lock. Nothing failed if
+# a later change made the method `async`, added an `await`/`yield` between the
+# check and the insert, or ran the executor with preemption, so these two tests
+# pin the assumption: one structural, one behavioural.
+def _runtime_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "revl_py_runtime_iia_guard", ROOT / "backends" / "python" / "runtime.py")
+    runtime = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = runtime
+    spec.loader.exec_module(runtime)
+    return runtime
+
+
+def test_insert_if_absent_carries_no_suspension_point():
+    """The method is not a coroutine, generator or async generator, and its
+    code object carries none of the flags those compile to. A source scan would
+    read the word "await" out of the method's own comment, so the code object is
+    what is checked: it is the only place a suspension point can hide."""
+    import inspect
+
+    runtime = _runtime_module()
+    method = runtime.Map.insert_if_absent
+
+    assert not inspect.iscoroutinefunction(method), (
+        "Map.insert_if_absent became a coroutine: an await between the check and "
+        "the insert would let two callers on one key both see it absent, and "
+        "design 397's per-tier atomicity claim dies with it")
+    assert not inspect.isgeneratorfunction(method), (
+        "Map.insert_if_absent became a generator: a yield between the check and "
+        "the insert is a suspension point (design 397)")
+    assert not inspect.isasyncgenfunction(method), (
+        "Map.insert_if_absent became an async generator: a yield between the "
+        "check and the insert is a suspension point (design 397)")
+    flags = method.__code__.co_flags
+    assert not flags & (inspect.CO_COROUTINE | inspect.CO_GENERATOR
+                        | inspect.CO_ASYNC_GENERATOR), (
+        "Map.insert_if_absent's code object carries a coroutine/generator flag, "
+        "so the method is not the one synchronous step design 397 relies on")
+
+
+def test_a_scheduled_caller_cannot_win_between_the_check_and_the_insert():
+    """The behavioural peer of the structural check. The map's dictionary is
+    wrapped so its membership test puts a competing caller of the same key on
+    the event loop's ready queue: the yield point a suspension between the check
+    and the insert would expose. On the run-to-completion runtime the whole
+    method finishes before that callback can run, so exactly one caller gets
+    `true` and the winner's value survives. If the method gained an `await`
+    there, the callback would run inside the gap and both callers would win."""
+    import asyncio
+
+    runtime = _runtime_module()
+
+    class SchedulesOnMembership(dict):
+        hook = None
+
+        def __contains__(self, key):
+            hook, self.hook = self.hook, None
+            found = super().__contains__(key)
+            if hook is not None:
+                hook()
+            return found
+
+    async def main() -> tuple[list, object]:
+        m = runtime.Map.new()
+        data = SchedulesOnMembership(m.data)
+        m.data = data
+        results: list = []
+        loop = asyncio.get_running_loop()
+
+        def second() -> None:
+            results.append(m.insert_if_absent("k", "second"))
+
+        data.hook = lambda: loop.call_soon(second)
+        results.append(m.insert_if_absent("k", "first"))
+        # let the callback the membership test scheduled run
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        winner = m.get("k")
+        m.drop()
+        return results, winner
+
+    results, winner = asyncio.run(main())
+    assert results == [True, False], (
+        f"expected exactly one winner, got {results!r}; a suspension point "
+        "between the membership test and the insert let the scheduled caller "
+        "in (design 397)")
+    assert winner == "first", "the losing caller overwrote the winner's value"
+
+
 def test_concurrency_atomic_mechanism_is_present_per_parallel_tier():
     """The parallel tiers (go/rust/java) must make the test+insert one atomic
     step — a lock spanning both (go/rust) or ConcurrentHashMap.putIfAbsent
