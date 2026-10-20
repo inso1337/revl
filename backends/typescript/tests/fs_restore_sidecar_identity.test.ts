@@ -431,6 +431,42 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     expect(codeOf(() => fsRestore(witness))).toBe('EOUTSIDE')
     expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
   })
+
+  it('refuses one re-permissioned after the capture', (ctx) => {
+    // The fifth #2652 B1 tamper id (issue #2770): a chmod after the capture
+    // leaves the bytes, inode, size, type and link count alone, so the stat
+    // comparison is the only one that can refuse it and `mode` is the field it
+    // must name (chmod also bumps ctime); the recorded digest still matches. The drift is refused on the
+    // PRE-INSTALL pass, before the target is touched: the forward mutation is
+    // kept and the sidecar is not consumed.
+    //
+    // The mode is derived from the sidecar's own rather than fixed at 0o644:
+    // the sidecar is fchmod'ed to the target's mode at snapshot time, so that
+    // literal would be a no-op under the file's creation mode. Skipped only
+    // when the chmod cannot move a permission bit (Windows carries the
+    // read-only attribute alone).
+    const { witness, target, sidecar } = written()
+    const before = fs.statSync(sidecar, { bigint: true })
+    fs.chmodSync(sidecar, Number(before.mode & 0o7777n) ^ 0o040)
+    const after = fs.statSync(sidecar, { bigint: true })
+    if ((after.mode & 0o7777n) === (before.mode & 0o7777n)) {
+      ctx.skip()
+      return
+    }
+    expect(after.size).toBe(before.size)
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
+    // The bytes are honest, so the digest comparison has nothing to say. A
+    // restore that dropped the stat comparison would install the sidecar; a
+    // comparison without `mode` could not name why it refused.
+    expect(witness.capture?.sha256).toBe(sha256('v1'))
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('mode')
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.existsSync(sidecar)).toBe(true)
+  })
 })
 
 // ===========================================================================
