@@ -4054,8 +4054,20 @@ def _tool_plan(arguments: dict) -> dict:
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
+    # issue #2641 follow-up: a plan admits nothing, so it raises no approval
+    # ticket and has no `unreviewedHostCode` to get wrong. The attribution is
+    # made by the approval ticket a load or swap raises, when the gate raises
+    # one. Say so in the answer rather than leave the absence to be read as
+    # "no host code": the emission surface below, when computed, still names
+    # the host code the composition would reach, but not who wrote it.
     payload = {**result, "against": against,
-               "note": "nothing was admitted, swapped or written — this is a plan"}
+               "note": ("nothing was admitted, swapped or written — this is a "
+                        "plan. It raises no approval ticket, so it does not "
+                        "report `unreviewedHostCode`; that attribution is on "
+                        "the approval ticket a load or swap raises, when the "
+                        "approval gate raises one. When the plan computes an "
+                        "emission surface, it names the host code the "
+                        "composition would reach, but not who wrote it")}
     warnings = _leases.advise_plan(SESSION, arguments)
     if warnings:
         payload["leaseWarnings"] = warnings
