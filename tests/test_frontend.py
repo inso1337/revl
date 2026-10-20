@@ -276,6 +276,11 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # a provider declared read-only (`emission[fs.read]`) whose body writes:
+    # the cap is present, the promise is broken. Issue #2691's first demo leg.
+    "g4_emission_widens_declared_capability.rvl":
+        "`Store.load` is declared `emission[fs.read]`, but this implementation "
+        "emits through `fs.write`",
 
     # item 378: the third rule under G4, and the only one that judges a
     # DECLARED TYPE rather than a crossing. A config value is injected as
