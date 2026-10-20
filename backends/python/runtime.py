@@ -1493,9 +1493,21 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
     REVL-CONTROLLED (the one cross-checkable number, §3.2). `model` is a
     length-capped opaque string, never parsed or trusted (§4 attack 4a).
     `produced_seq`/`prompt_digest` are attached only when present (both
-    honest-degrade to absent)."""
+    honest-degrade to absent).
+
+    Issue #2527: the host-reported STRING fields (`model`, `cost.currency`) are
+    funnelled through `confidential.redact_text` before they can reach the trace
+    or the WAL's model-decision record, the same exact-value scrub the console
+    trace applies at `_record`. A host body that echoed a registered
+    `Secret[T]` value into one of them would otherwise put it in the trace. The
+    match is exact against values a declared `Secret[T]` marking registered, so
+    a run with no secret is byte-identical. Redaction happens BEFORE the length
+    cap, so a secret straddling the cap cannot survive as a truncated prefix."""
+    model_text = str(model) if model is not None else None
+    if model_text is not None:
+        model_text = confidential.redact_text(model_text)[:model_id_cap]
     payload: dict = {
-        "model": (str(model)[:model_id_cap] if model is not None else None),
+        "model": model_text,
         "modelProvenance": "host-reported",
         "tokensIn": tokens_in,
         "tokensOut": tokens_out,
@@ -1508,8 +1520,11 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
         "verifiedBy": list(verified_by) if verified_by is not None else [],
     }
     if cost is not None:
+        currency = cost.get("currency")
+        if isinstance(currency, str):
+            currency = confidential.redact_text(currency)
         payload["cost"] = {"amount": cost.get("amount"),
-                           "currency": cost.get("currency"),
+                           "currency": currency,
                            "provenance": "host-reported"}
     if produced_seq:
         payload["producedSeq"] = list(produced_seq)
