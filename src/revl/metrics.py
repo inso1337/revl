@@ -28,10 +28,10 @@ gate.
 
 ### Schema v1 graceful degradation (detected by data, not by `v`)
 
-The trace schema is v2 (docs/why-runtime.md); the fields these metrics need
+The trace schema is v3 (docs/why-runtime.md); the fields these metrics need
 (`ts` on every event, `code` on a FAILED cause, the `emit` event kind) all
-arrived additively. A v1 trace, or a v2 trace an older recorder wrote without
-them, simply *lacks* the input:
+arrived additively through v2. A v1 trace, or a v2 trace an older recorder wrote
+without them, simply *lacks* the input:
 
 * **duration** needs `ts`. When load/withdraw lifecycles are present but none
   carry `ts`, the metric is reported as ``{"unavailable": …}`` — detected by the

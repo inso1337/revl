@@ -1484,6 +1484,7 @@ def revl_prompt_digest(args, arg_origins, taint_engaged: bool) -> "Optional[dict
 def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
                    attempts, attempt_ceiling, verified_by,
                    produced_seq=None, prompt_digest=None,
+                   schema_digest=None, grammar_digest=None, residence=None,
                    model_id_cap: int = 256) -> dict:
     """Assemble the `llm` payload for a model completion crossing (§2.2), with
     every field's provenance fixed and not host-negotiable.
@@ -1494,6 +1495,12 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
     length-capped opaque string, never parsed or trusted (§4 attack 4a).
     `produced_seq`/`prompt_digest` are attached only when present (both
     honest-degrade to absent).
+
+    Issue #2694: `schema_digest`/`grammar_digest`/`residence` identify the
+    contract and placement of the crossing, and each is attached only when the
+    caller resolved it from the compiled IR (they are not host-negotiable, so
+    every one is `revl-controlled`). An absent value stays absent: a crossing
+    with no grammar or no declared model role does not get a placeholder.
 
     Issue #2527: the host-reported STRING fields (`model`, `cost.currency`) are
     funnelled through `confidential.redact_text` before they can reach the trace
@@ -1530,6 +1537,15 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
         payload["producedSeq"] = list(produced_seq)
     if prompt_digest is not None:
         payload["promptDigest"] = prompt_digest
+    if schema_digest is not None:
+        payload["schemaDigest"] = {"digest": schema_digest,
+                                   "provenance": "revl-controlled"}
+    if grammar_digest is not None:
+        payload["grammarDigest"] = {"digest": grammar_digest,
+                                    "provenance": "revl-controlled"}
+    if residence is not None:
+        payload["residence"] = {"value": residence,
+                                "provenance": "revl-controlled"}
     return payload
 
 

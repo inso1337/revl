@@ -1374,7 +1374,8 @@ class _Driver:
 
     def _model_crossing_payload(self, *, args=None, arg_origins=None,
                                 taint_engaged: bool = False,
-                                verified_by=None, crossing=None) -> dict | None:
+                                verified_by=None, crossing=None,
+                                contract=None) -> dict | None:
         """Item 121: assemble the `llm` payload for a model-completion crossing,
         or ``None`` when this crossing is not one.
 
@@ -1411,7 +1412,14 @@ class _Driver:
         emission it produced, and that emission has not been recorded yet at this
         point — its trace seq does not exist. The edge is back-patched by
         :meth:`_link_produced` once the emission it names crosses (item 121
-        Slice 2); a hop nothing derives from keeps the field absent."""
+        Slice 2); a hop nothing derives from keeps the field absent.
+
+        `contract` (issue #2694) carries the crossing's `schemaDigest`,
+        `grammarDigest` and `residence`, resolved from the driver's IR by
+        :meth:`_crossing_contract`. It is a plain dict because a crossing may
+        have any subset of them: an unvalidated crossing has no schema or
+        grammar, and a crossing with no declared `model.<role>` token has no
+        residence. An absent key stays absent in the payload, never empty."""
         take = getattr(self.runtime, "revl_take_model_call", None)
         if take is None:
             obs = None
@@ -1425,10 +1433,97 @@ class _Driver:
         if args is not None:
             digest = self.runtime.revl_prompt_digest(
                 args, arg_origins, taint_engaged)
+        contract = contract or {}
         return self.runtime.revl_model_hop(
             model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
             latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
-            verified_by=verified_by or [], prompt_digest=digest)
+            verified_by=verified_by or [], prompt_digest=digest,
+            schema_digest=contract.get("schemaDigest"),
+            grammar_digest=contract.get("grammarDigest"),
+            residence=contract.get("residence"))
+
+    def _crossing_contract(self, component: str, service: str | None,
+                           method: str | None) -> dict:
+        """Issue #2694: the contract and placement facts the compiled IR
+        already carries for one crossing.
+
+        Returns a dict holding any of ``schemaDigest``, ``grammarDigest`` and
+        ``residence``; every one is a function of the IR, never of the host
+        return, which is why the record tags all three `revl-controlled`.
+
+        * A service crossing is ``ir.services[service].methods[method]``; a
+          direct host-extern crossing (no receiver, so ``service`` is None) is
+          the ``ir.externs`` entry named ``method``.
+        * `schemaDigest` is :func:`decode_grammar.schema_digest` over the
+          operation's ``response_schema``. Item 257 binds the schema into the
+          IR; the digest is derived from that value, not from a second
+          derivation of the surface type.
+        * `grammarDigest` is the ``digest`` item 513 pinned beside the grammar
+          text, copied verbatim.
+        * `residence` is read off the ``manifest.model_reach`` row whose
+          ``crossing`` (a `model.<role>` capability token) names the role this
+          operation's ``capabilities`` carry, for the component recording the
+          crossing. No role, no row, or no manifest leaves it absent.
+
+        Anything unreadable (no IR, an unknown operation, an older document
+        without one of the keys) yields no field rather than a guess, so a
+        reader can tell "not recorded" from "recorded as empty"."""
+        ir = getattr(self, "ir", None)
+        if not isinstance(ir, dict):
+            return {}
+        spec = None
+        if service:
+            methods = (ir.get("services") or {}).get(service)
+            spec = (methods or {}).get("methods", {}).get(method)
+        else:
+            spec = next((entry for entry in ir.get("externs") or []
+                         if entry.get("name") == method), None)
+        if not isinstance(spec, dict):
+            return {}
+        contract: dict = {}
+        schema = spec.get("response_schema")
+        if isinstance(schema, dict):
+            from .decode_grammar import schema_digest  # noqa: PLC0415
+            contract["schemaDigest"] = schema_digest(schema)
+        grammar = spec.get("response_grammar")
+        if isinstance(grammar, dict) and grammar.get("digest"):
+            contract["grammarDigest"] = grammar["digest"]
+        residence = self._crossing_residence(ir, component, spec)
+        if residence is not None:
+            contract["residence"] = residence
+        return contract
+
+    @staticmethod
+    def _crossing_residence(ir: dict, component: str,
+                            spec: dict) -> str | None:
+        """The declared residence of the model role this operation names, or
+        None when it names none (issue #2694).
+
+        A crossing placed on a role carries a ``model.<role>`` capability
+        token; `_check_model_attenuation` records that placement as a
+        ``manifest.model_reach`` row for the component, with the role's
+        declared residence on it. The token is the join key: an operation with
+        no ``model.`` token, or a component with no matching row, has no
+        declared placement to report."""
+        capabilities = spec.get("capabilities") or []
+        rows = (ir.get("manifest") or {}).get("model_reach") or []
+        for capability in capabilities:
+            if not isinstance(capability, str) \
+                    or not capability.startswith("model."):
+                continue
+            role = capability.split(".", 1)[1]
+            matching = [row for row in rows
+                        if row.get("component") == component
+                        and row.get("role") == role
+                        and isinstance(row.get("residence"), str)]
+            # a crossing row names the token exactly; prefer it over a
+            # component-level attenuation row for the same role
+            exact = [row for row in matching
+                     if row.get("crossing") == capability]
+            chosen = (exact or matching)
+            if chosen:
+                return chosen[-1]["residence"]
+        return None
 
     @staticmethod
     def _link_produced(crossing: dict, hop_event: dict | None,
@@ -2414,11 +2509,20 @@ class _Driver:
                     # is suppressed.
                     arg_origins, taint_engaged = self._crossing_taint(
                         timeline.component)
+                    # issue #2694: the contract the completion was held to
+                    # (schema digest, grammar digest, declared residence) is
+                    # read off the compiled IR for THIS crossing, so the trace
+                    # records which output contract the answer was validated
+                    # against rather than only that it validated.
+                    contract = self._crossing_contract(
+                        timeline.component, detail.get("service"),
+                        detail.get("method"))
                     llm = self._model_crossing_payload(
                         args=detail.get("args"),
                         arg_origins=arg_origins,
                         taint_engaged=taint_engaged,
-                        crossing=(timeline.component, step.get("index")))
+                        crossing=(timeline.component, step.get("index")),
+                        contract=contract)
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",

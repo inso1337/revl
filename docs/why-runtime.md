@@ -109,6 +109,33 @@ A reader treats each new field as optional — a v1 event (no `ts`, no `code`, n
   unaffected. The OTel export maps it to a plain span (unset status) carrying
   the capability/key as attributes.
 
+### Schema v3 (additive; a v1 or v2 event still parses and behaves identically)
+
+`SCHEMA_VERSION` is **3** (issue #2694). Every field v1 and v2 defined is
+unchanged; v3 only *adds*. A reader treats each new field as optional, and a
+v1/v2 event is still a valid, fully-handled record.
+
+* **the model crossing's contract** (issue #2694) — an `emit` that carries an
+  `llm` payload (a model completion, `docs/design/121-revl-trace.md`) may also
+  carry the contract the completion was held to and the role's declared
+  placement:
+
+  ```json
+  "llm": {
+    "...": "...",
+    "schemaDigest":  {"digest": "sha256:...", "provenance": "revl-controlled"},
+    "grammarDigest": {"digest": "sha256:...", "provenance": "revl-controlled"},
+    "residence":     {"value": "on_device",   "provenance": "revl-controlled"}
+  }
+  ```
+
+  `schemaDigest` identifies the response schema item 257 derived and bound in
+  the crossing's IR; `grammarDigest` is the digest item 513 pinned over the
+  decoding grammar; `residence` is the declared device placement of the `model
+  role` the crossing names. All three are compile-time facts, so they are
+  `revl-controlled`. A crossing with no grammar (an unvalidated emission) or no
+  declared role **omits** the field rather than writing an empty value.
+
 Only **settled** transitions are recorded — a fiber coming to rest in `ACTIVE`,
 `DISPOSED`, `PENDING`, or `FAILED`. An in-flight `LOADING`/`UNLOADING` waypoint
 collapses into the single move the trace shows (`ACTIVE -> PENDING`), so the

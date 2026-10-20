@@ -40,7 +40,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+# v3 adds the model crossing's contract fields (`schemaDigest`,
+# `grammarDigest`, `residence`; issue #2694). Additive: a v1 or v2 event still
+# parses and every reader treats the new keys as optional.
+SCHEMA_VERSION = 3
 
 # event kinds (the `event` field)
 LOAD = "load"          # a component came up (… -> ACTIVE)
