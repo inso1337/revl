@@ -2461,9 +2461,10 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             # issue #2544: a binder whose type is NOT a function cannot be the
             # callee, so this call names the same-named module `fn`/`extern`/
             # case and silently drops the binding. Refuse it by type. The
-            # #1823 carve-out is above: a function-typed local is the callee
-            # and never reaches this guard, whichever spelling declared it
-            # (`(Int) -> Int` or `Fn[Int, Int]`, see `is_function_type`).
+            # #1823 carve-out above covers only the arrow spelling: it returns
+            # at the `FN_HEAD` arm. A `Fn[...]` local reaches this guard and is
+            # exempted here by `is_function_type` (both spellings are function
+            # types, see `_FUNCTION_TYPE_HEADS`).
             # `Any`/`Value` are erased dynamic types that may hold a function,
             # and a still-unknown binder is ⊥, so neither is "definitely not
             # a function".

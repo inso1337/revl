@@ -16,10 +16,13 @@ The owner ruling applied here:
     to that shape, not a repeal of the item-445 refusal for other binders;
   * the `Str`-shadowing case is refused on the TYPECHECK side, not by a
     blanket lowering refusal. `typecheck.refuse_call_on_non_function` sits
-    after the function-type arm in `infer_ast`'s `ExprCall` and in
-    `infer_ir`'s `fn` arm, so it fires only when the type environment holds
-    a binder of that name that is definitely not a function. A function-typed
-    binder never reaches it, and an unknown (⊥) binder stays lenient.
+    after the function-type arm in `infer_ast`'s `ExprCall` and in the IR
+    `call`/`name` arm, and inside `infer_ir`'s `fn` arm, so it fires only
+    when the type environment holds a binder of that name that is definitely
+    not a function. The arrow spelling returns at the `FN_HEAD` arms above
+    the first two; a `Fn[...]` binder reaches the guard and passes
+    `is_function_type` (the IR `fn` guard admits both spellings inside
+    itself). An unknown (⊥) binder stays lenient.
 
 The guard is keyed on the TYPE ENVIRONMENT, not on an enumeration of binder
 forms: every typed binder (`let`, `for`, arrow parameter, match-arm payload,
