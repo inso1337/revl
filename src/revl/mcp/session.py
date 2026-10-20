@@ -3294,9 +3294,21 @@ class Session:
         # execute: the undo IS an admitted swap through the same gate. `swap`
         # enforces the sandbox and appends the resulting generation to the
         # history, so an undo can itself be undone (git-revert of a git-revert).
-        state = self.swap(
-            target_ir, origin=_origin_from(target["snapshot"]["sources"]),
-            migrate="respawn", agent_authored=False)
+        origin = _origin_from(target["snapshot"]["sources"])
+        # The portable snapshot intentionally contains source inputs only, but
+        # this in-process history entry also retains the exact disclosure
+        # provenance from the generation's admitting compile.
+        target_origin = target.get("origin") or {}
+        if "_revl_authored_host_bodies" in target_origin:
+            origin["_revl_authored_host_bodies"] = list(
+                target_origin["_revl_authored_host_bodies"] or [])
+        try:
+            state = self.swap(target_ir, origin=origin,
+                              migrate="respawn", agent_authored=False)
+        except ApprovalRequired as error:
+            error.host_bodies = list(
+                origin.get("_revl_authored_host_bodies") or [])
+            raise
         return {
             "undone": True,
             "toGeneration": target["generation"],
@@ -3546,7 +3558,8 @@ class Session:
 
         return _snapshot(self)
 
-    def restore(self, snap: dict, profile=None) -> dict:
+    def restore(self, snap: dict, profile=None,
+                report: dict | None = None) -> dict:
         """Re-admit a snapshot into this (empty) session by replaying
         admission — compile through the gate, then boot. A component the
         current checker rejects fails loudly and loads nothing. `profile` is
@@ -3554,7 +3567,7 @@ class Session:
         operator's own snapshot)."""
         from .persist import restore as _restore  # noqa: PLC0415 — lazy
 
-        return _restore(self, snap, profile=profile)
+        return _restore(self, snap, profile=profile, report=report)
 
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the

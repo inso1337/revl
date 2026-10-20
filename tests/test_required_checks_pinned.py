@@ -221,7 +221,7 @@ NOT_REQUIRED_CHECKS = {
     # `.[test]`, no runtime) and `frontend-cordis` only runs off pull requests.
     # Advisory by DESIGN: the review asked for a PR-only path without touching
     # branch protection, and on every other event `frontend-cordis` runs the
-    # same five suites with the same pinned runtime. It also cannot report on
+    # same suites with the same pinned runtime. It also cannot report on
     # a merge_group candidate (`if:` names `github.event_name ==
     # 'pull_request'`), so it could not be a required context as written.
     "swap-template-cordis": "issue #2672 review PR path for the swap/authoring suites; advisory by design, and frontend-cordis covers the same suites on every other event",

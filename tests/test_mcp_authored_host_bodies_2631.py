@@ -71,7 +71,7 @@ def test_candidate_host_body_metadata_excludes_operator_provider_bodies():
 
 def test_file_candidate_host_body_ticket_uses_compiled_source_paths(
         monkeypatch, tmp_path):
-    """The load ticket includes the exported file, not operator files."""
+    """Trusted mixed file candidates include all non-provider host bodies."""
     export_dir = tmp_path / ".revl" / "export"
     export_dir.mkdir(parents=True)
     candidate_file = export_dir / "candidate-export-2631.rvl"
@@ -114,7 +114,11 @@ def test_file_candidate_host_body_ticket_uses_compiled_source_paths(
 
     assert result["approvalRequired"] is True
     ticket_bodies = result["ticket"]["unreviewedHostCode"]
-    assert {entry["extern"] for entry in ticket_bodies} == {"candidate_file"}
+    ticket_names = {entry["extern"] for entry in ticket_bodies}
+    assert ticket_names == {
+        "candidate_file", "operator_file",
+    }
+    assert "operator_helper" not in ticket_names
     assert "not a bound on what the bodies do" in \
         result["ticket"]["unreviewedHostCodeWarning"]
 

@@ -641,6 +641,18 @@ def _authoring_refusal(arguments: dict) -> dict | None:
 # a yes lets run.
 _AUTHORED_HOST_BODIES: list = []
 _LIVE_HOST_BODIES: list = []
+_ORIGIN_AUTHORED_HOST_BODIES = "_revl_authored_host_bodies"
+
+
+def _with_authored_host_bodies(origin: dict, bodies: list | None) -> dict:
+    """Keep disclosure provenance with an admitted generation's origin.
+
+    Persistence deliberately serializes only admission inputs; this private
+    in-memory member lets rollback and generation history retain the exact
+    authorship set without adding it to portable snapshots.
+    """
+    origin[_ORIGIN_AUTHORED_HOST_BODIES] = list(bodies or [])
+    return origin
 
 
 def _host_bodies(ir: dict) -> list:
@@ -921,7 +933,8 @@ def _authored_host_bodies(ir: dict, source: str | None,
                           modules: dict | None, *,
                           files: list[str] | None = None,
                           report: dict,
-                          include_trusted_files: bool = False) -> list:
+                          include_trusted_files: bool = False,
+                          source_name: str = "<candidate>.rvl") -> list:
     """The host bodies declared by candidate-authored sources in `ir`.
 
     The merged composition also includes operator-sanctioned provider modules.
@@ -933,7 +946,7 @@ def _authored_host_bodies(ir: dict, source: str | None,
 
     candidate_sources = set()
     if source is not None:
-        candidate_sources.add(os.path.abspath("<candidate>.rvl"))
+        candidate_sources.add(os.path.abspath(source_name))
     candidate_sources.update(os.path.abspath(path) for path in (modules or {}))
     # Files only count as candidate-authored when the compile treated them as
     # agent text. Ordinary operator files can also be passed through `files`;
@@ -946,8 +959,7 @@ def _authored_host_bodies(ir: dict, source: str | None,
     # (#2672). There is no transport source or export path to attribute
     # narrowly, so use the source map returned by that exact compile.
     if (include_trusted_files and report.get("authored")
-            and source is None and not modules
-            and not candidate_sources):
+            and source is None and not modules):
         candidate_sources.update(report.get("host_extern_sources", {}))
     if not candidate_sources:
         return []
@@ -1294,17 +1306,16 @@ def _k_counts(entries: list) -> dict:
 
 
 def _remember_live_host_bodies() -> None:
-    """Re-read the host bodies the LIVE composition carries, so a later
-    class-(c) ticket can name them. Called after every completed tool call, so
-    load / swap / edit / restore / undo / rollback / unload are all covered by
-    one line rather than five that could drift apart. Empty under a closed
-    authoring trust: the profile refused every agent-authored host body, so the
-    only bodies that can be live came from the operator's own jailed files and
-    there is nothing to warn about."""
+    """Refresh the authored-body set for the LIVE composition.
+
+    Called after every completed tool call, so load / swap / edit / restore /
+    undo / rollback / unload share one update point. The origin carries the
+    provenance computed by the compile that admitted the generation; walking
+    the merged IR here would mislabel operator provider bodies as agent code.
+    """
     global _LIVE_HOST_BODIES
-    ir = getattr(SESSION, "ir", None)
-    _LIVE_HOST_BODIES = (_host_bodies(ir)
-                         if ir and AUTHORING.host_code else [])
+    origin = getattr(SESSION, "origin", None) or {}
+    _LIVE_HOST_BODIES = list(origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
 
 
 def _tool_load(arguments: dict, compiled=None) -> dict:
@@ -1426,7 +1437,9 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
     """Boot a compiled composition: `Session.load`, then record what it
     authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(
-        ir, source, modules, files=files, report=compile_report)
+        ir, source, modules, files=files, report=compile_report,
+        include_trusted_files=True)
+    _with_authored_host_bodies(origin, authored)
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
@@ -1610,6 +1623,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                                      files=files,
                                      report=compile_report,
                                      include_trusted_files=True)
+    _with_authored_host_bodies(origin, authored)
     # issue #2628: read once, asked two different questions below. The ticket
     # asks whether the author wrote this text, which for a file inside an
     # export directory is yes by its path. The realm check asks whether a
@@ -1937,9 +1951,16 @@ def _swap_server_side(replacing: tuple) -> dict:
     # operator's own while host code is untrusted, and under `--author-trust
     # trusted` it is the agent's too (issue #2672). So a trusted host-code
     # author's text still runs the disclosure gate.
+    authored = _authored_host_bodies(
+        full, vs.get("source"), edited if vs.get("files") else vs.get("modules"),
+        files=vs.get("files"),
+        report=compile_report, include_trusted_files=True)
+    origin = _with_authored_host_bodies(_edit._origin_from(vs), authored)
     try:
-        state = SESSION.swap(full, origin=_edit._origin_from(vs),
+        state = SESSION.swap(full, origin=origin,
                              agent_authored=bool(compile_report.get("authored")))
+    except ApprovalRequired as exc:
+        return _approval_required(exc, host_bodies=authored)
     except SessionError as error:
         return _session_error(error, **_refusal_code(error))
     return {"ok": True, "admitted": True, "swapped": True,
@@ -2820,6 +2841,10 @@ def _edit_loaded_result(arguments: dict, verify, commit: bool) -> dict:
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback(profile=AUTHORING.profile())}
+    except ApprovalRequired as error:
+        previous = SESSION.previous_origin or {}
+        return _approval_required(
+            error, host_bodies=previous.get(_ORIGIN_AUTHORED_HOST_BODIES, []))
     except SessionError as error:
         # a rollback refused after its teardown restarted the running
         # generation cold, and says which state that dropped (issue #2424)
@@ -2853,6 +2878,9 @@ def _tool_undo(arguments: dict) -> dict:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
         result = SESSION.undo(arguments.get("to"), profile=AUTHORING.profile())
+    except ApprovalRequired as error:
+        return _approval_required(
+            error, host_bodies=getattr(error, "host_bodies", []))
     except SessionError as error:
         return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
@@ -2956,6 +2984,9 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     if not fork_hash:
         return _session_error("provide `hash` — the fork hash revl_fork returned, "
                               "binding exactly the rewound span and residue")
+    parent_origin = getattr(SESSION, "origin", None) or {}
+    authored_host_bodies = list(
+        parent_origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
     try:
         result = SESSION.fork_confirm(fork_hash)
     except SessionError as error:
@@ -2967,6 +2998,20 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     # every subsequent verb drives the branch, and never serialize the live object
     branch = result.pop("branchSession", None)
     if branch is not None:
+        # Session.fork_confirm restores a portable snapshot, which deliberately
+        # omits this in-memory disclosure metadata. The fork is still the same
+        # admitted generation, so carry its provenance onto the branch and its
+        # retained generation record. `Session.apply` records its resulting IR
+        # with this origin, allowing later call/act tickets to keep naming the
+        # authored bodies after a plan-artifact apply.
+        branch_origin = getattr(branch, "origin", None)
+        if isinstance(branch_origin, dict):
+            _with_authored_host_bodies(branch_origin, authored_host_bodies)
+        for entry in getattr(branch, "_history", ()):
+            generation_origin = entry.get("origin")
+            if isinstance(generation_origin, dict):
+                _with_authored_host_bodies(generation_origin,
+                                           authored_host_bodies)
         SESSION = branch
     return {"ok": True, **result}
 
@@ -2990,9 +3035,15 @@ def _approval_required(exc: ApprovalRequired,
     COPY, after the hash the outstanding-ticket table is keyed by), so
     approve/consume is byte-identical.
 
-    `host_bodies` is the candidate's own, from a verb that has not recorded
-    them: `revl_load` and `revl_swap`, which record them only once the load or
-    swap succeeds (issues #1444, #1446)."""
+    `host_bodies` is the candidate's own. Load and swap pass it directly,
+    because they record it only after success (issues #1444, #1446); edit
+    attaches it to the exception for this shared handler to recover."""
+    if host_bodies is None:
+        # Some callers (notably `revl_edit`) cannot shape the approval result
+        # at the point where the candidate is known. They attach the exact
+        # candidate provenance to the exception so the shared handler can
+        # disclose it without falling back to the currently running bodies.
+        host_bodies = getattr(exc, "host_bodies", None)
     ticket = exc.ticket
     fields = _ticket_host_code(exc, host_bodies)
     if fields:
@@ -3020,11 +3071,12 @@ def _ticket_host_code(exc: ApprovalRequired, host_bodies: list | None) -> dict:
     host code, as before."""
     candidate = exc.candidate
     if candidate is None:
-        bodies = (host_bodies if host_bodies is not None
-                  else _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES)
+        bodies = (host_bodies if host_bodies is not None else _LIVE_HOST_BODIES)
         return _host_code_fields(bodies) if bodies else {}
-    bodies = (host_bodies if host_bodies is not None
-              else _host_bodies(candidate) if AUTHORING.host_code else [])
+    # A merged candidate IR also includes operator providers. If the caller did
+    # not carry the compile's provenance report, omit the disclosure instead of
+    # claiming every host body was candidate-authored.
+    bodies = host_bodies or []
     if not bodies:
         return {}
     fields = _host_code_fields(bodies)
@@ -3466,8 +3518,20 @@ def _tool_restore(arguments: dict) -> dict:
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()
+    sources = snap.get("sources") if isinstance(snap, dict) else {}
+    sources = sources or {}
+    compile_report: dict = {"authored": True}
     try:
-        return {"ok": True, **SESSION.restore(snap, profile=profile)}
+        result = SESSION.restore(snap, profile=profile, report=compile_report)
+    except ApprovalRequired as error:
+        from .persist import admitted_name  # noqa: PLC0415
+
+        authored = _authored_host_bodies(
+            error.candidate or {}, sources.get("source"),
+            sources.get("modules"), files=sources.get("files"),
+            report=compile_report, include_trusted_files=True,
+            source_name=admitted_name(snap))
+        return _approval_required(error, host_bodies=authored)
     except RestoreError as error:
         if profile is not None and error.revl_error is not None:
             return _restore_authoring_refusal(error.revl_error)
@@ -3486,6 +3550,20 @@ def _tool_restore(arguments: dict) -> dict:
         return payload
     except SessionError as error:
         return _session_error(error)
+    from .persist import admitted_name  # noqa: PLC0415
+
+    authored = _authored_host_bodies(
+        SESSION.ir or {}, sources.get("source"), sources.get("modules"),
+        files=sources.get("files"), report=compile_report,
+        include_trusted_files=True, source_name=admitted_name(snap))
+    if not isinstance(SESSION.origin, dict):
+        SESSION.origin = {}
+    _with_authored_host_bodies(SESSION.origin, authored)
+    if SESSION._history:
+        SESSION._history[-1]["origin"] = SESSION.origin
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
+    return {"ok": True, **result}
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
