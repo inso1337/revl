@@ -33,8 +33,10 @@ The failure direction is the point, and both halves are pinned here:
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -125,6 +127,11 @@ def _removed(mod, workspace, name: str = "doomed.txt"):
 def test_an_untampered_unrm_still_succeeds_silently(workspace):
     mod = _fs_module()
     witness, target, sidecar = _removed(mod, workspace)
+    digest = witness["capture"]["sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), \
+        "park records the digest as bare lowercase hex"
+    assert digest == hashlib.sha256(b"payload").hexdigest(), \
+        "the digest is the hash of the parked bytes"
 
     mod.unrm(witness)                          # no raise, no diagnostics
 
@@ -165,11 +172,35 @@ def test_an_honest_rm_of_a_directory_still_reverses(workspace):
 
     witness, target, sidecar = _removed(mod, workspace, "tree")
     assert os.path.isdir(sidecar)
+    assert "sha256" not in witness["capture"], \
+        "a directory has no read-through digest, so the capture stays stat-only"
 
     mod.unrm(witness)
 
     assert os.path.isdir(target)
     assert open(os.path.join(target, "leaf")).read() == "inside"
+
+
+def test_an_honest_rm_of_a_write_only_file_still_reverses(workspace):
+    """The other capture limitation: `_parked_stat` deliberately never opens the
+    parked inode, because `rm` accepts a file whose mode denies read. Such a
+    file cannot be digested at park, so the capture stays stat-only and the
+    reversal proceeds on the stat check alone, exactly as before (issue #2650).
+    """
+    mod = _fs_module()
+    os.chmod(str(workspace / "doomed.txt"), 0o200)
+    if os.access(str(workspace / "doomed.txt"), os.R_OK):
+        pytest.skip("cannot revoke read permission (running as root)")
+    witness, target, sidecar = _removed(mod, workspace)
+    assert "sha256" not in witness["capture"], \
+        "a write-only file cannot be read at park, so the capture is stat-only"
+    assert os.stat(sidecar).st_mode & 0o777 == 0o200
+
+    mod.unrm(witness)
+
+    assert os.stat(target).st_mode & 0o777 == 0o200
+    os.chmod(target, 0o600)
+    assert open(target).read() == "payload"
 
 
 def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
@@ -213,6 +244,38 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
 
     assert not os.path.exists(target), \
         "the tampered sidecar was installed back over the original path anyway"
+    assert open(sidecar).read() == "POISON!", "the refused sidecar was consumed"
+
+
+def test_a_same_tick_in_place_rewrite_is_refused(workspace):
+    """The collision the seven stat fields cannot see (issue #2650).
+
+    The parked file is rewritten in place at the same length, so `dev`, `ino`,
+    `mode`, `nlink` and `size` are unchanged, and the witness capture's stat
+    keys are overwritten from the POST-rewrite stat, so `mtime_ns`/`ctime_ns`
+    cannot drift either. That is what a filesystem whose inode clock has not
+    ticked between the park and the rewrite shows this check. Only the recorded
+    bytes still tell the two files apart, so only the digest refuses it. Before
+    the digest existed this test installs `POISON!` over the original path."""
+    mod = _fs_module()
+    witness, target, sidecar = _removed(mod, workspace)
+    capture = witness["capture"]
+
+    with open(sidecar, "r+b") as fh:
+        fh.write(b"POISON!")                   # same inode, same length
+    post = os.stat(sidecar)
+    for field, value in ws._capture_of(post).items():
+        capture[field] = value                  # same tick: every stat key agrees
+    assert capture["size"] == 7
+
+    with pytest.raises(ws.FsOpError) as ei:
+        mod.unrm(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "sha256" in ei.value.message, \
+        "the refusal must name the content check, not a stat field"
+
+    assert not os.path.exists(target), \
+        "the rewritten sidecar was installed back over the original path anyway"
     assert open(sidecar).read() == "POISON!", "the refused sidecar was consumed"
 
 
@@ -310,6 +373,80 @@ def test_the_installed_result_is_rechecked_after_the_rename(workspace, monkeypat
         mod.unrm(witness)
     assert ei.value.code == "EIDENTITY"
     assert "unremoved target" in ei.value.message
+
+
+def test_a_capture_whose_digest_cannot_be_reread_is_refused(workspace):
+    """A digest was recorded, so the parked file was readable at park. If it is
+    not readable at install, the content check cannot run; falling back to
+    stat-only would let exactly the rewrite it exists for pass, so the reversal
+    fails closed instead (issue #2650)."""
+    mod = _fs_module()
+    witness, target, sidecar = _removed(mod, workspace)
+    assert len(witness["capture"]["sha256"]) == 64
+    os.chmod(sidecar, 0o200)                   # readable at park, not at install
+    if os.access(sidecar, os.R_OK):
+        pytest.skip("cannot revoke read permission (running as root)")
+    # the chmod's own stat drift is not the point, the unreadability is
+    for field, value in ws._capture_of(os.stat(sidecar)).items():
+        witness["capture"][field] = value
+
+    with pytest.raises(ws.FsOpError) as ei:
+        mod.unrm(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "sha256" in ei.value.message, \
+        "the refusal must say the recorded digest could not be re-read"
+    assert "could not be re-read" in ei.value.message
+    assert not os.path.exists(target)
+    assert os.path.exists(sidecar)
+
+
+def test_a_capture_with_the_digest_key_dropped_still_reverses(workspace):
+    """The legacy replay path. A capture written before the digest key existed
+    carries the seven stat fields and nothing else, and an install that predates
+    the key ignores it. Dropping the key here pins both directions: the capture
+    stays stat-only and still restores (issue #2650)."""
+    mod = _fs_module()
+    witness, target, sidecar = _removed(mod, workspace)
+    witness["capture"].pop("sha256")
+    assert "sha256" not in witness["capture"]
+
+    mod.unrm(witness)
+
+    assert open(target).read() == "payload"
+    assert not os.path.exists(sidecar)
+
+
+def test_the_installed_digest_is_rechecked_after_the_rename(workspace, monkeypatch):
+    """The digest is compared on BOTH passes (issue #2650). A writer that wins
+    the window between the pre-rename check and the rename has its file
+    installed under a check that passed on the parked one. The post-install
+    pass re-reads the installed bytes, and the stat keys are overwritten here
+    too, so the digest is the only thing left that can refuse it."""
+    mod = _fs_module()
+    witness, target, sidecar = _removed(mod, workspace)
+    capture = witness["capture"]
+    real_replace = ws.replace_confined
+    swapped = {"done": False}
+
+    def _lose_the_window(src_real: str, dst_real: str) -> None:
+        real_replace(src_real, dst_real)
+        if swapped["done"]:
+            return
+        swapped["done"] = True
+        with open(dst_real, "r+b") as fh:
+            fh.write(b"POISON!")
+        for field, value in ws._capture_of(os.stat(dst_real)).items():
+            capture[field] = value
+
+    monkeypatch.setattr(ws, "replace_confined", _lose_the_window)
+
+    with pytest.raises(ws.FsOpError) as ei:
+        mod.unrm(witness)
+    assert swapped["done"], "the window was never forced"
+    assert ei.value.code == "EIDENTITY"
+    assert "unremoved target" in ei.value.message
+    assert open(target).read() == "POISON!", \
+        "the post-rename refusal leaves the drifted file at the target as residue"
 
 
 # ===========================================================================
