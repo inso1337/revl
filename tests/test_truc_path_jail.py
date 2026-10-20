@@ -63,7 +63,7 @@ def _new_project(tmp_path: Path, registry: Path = REGISTRY,
 
 def _parses(proj: Path) -> bool:
     try:
-        tomllib.loads((proj / "truc.toml").read_text())
+        tomllib.loads((proj / "truc.toml").read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError:
         return False
     return True
@@ -88,7 +88,7 @@ def test_rm_of_a_traversal_name_is_refused_and_deletes_nothing(tmp_path):
 
     assert r.returncode == 1, r.stdout + r.stderr
     assert "refused" in r.stderr and "victim-dir" in r.stderr
-    assert (victim / "KEEPME.txt").read_text() == "KEEPME\n"
+    assert (victim / "KEEPME.txt").read_text(encoding="utf-8") == "KEEPME\n"
     assert sorted(p.name for p in (proj / "trucs").iterdir()) == []
     assert _parses(proj)
 
@@ -105,7 +105,7 @@ def _escaping_registry(tmp_path: Path) -> Path:
     """
     reg = tmp_path / "reg" / "registry"
     (reg / "components").mkdir(parents=True)
-    index = json.loads((REGISTRY / "index.json").read_text())
+    index = json.loads((REGISTRY / "index.json").read_text(encoding="utf-8"))
     index["components"] = {"../../escaped": dict(index["components"][ENTRY])}
     (reg / "index.json").write_text(json.dumps(index, indent=2))
     escaped = tmp_path / "reg" / "escaped"
@@ -130,7 +130,7 @@ def test_add_of_a_name_that_vendors_outside_the_project_is_refused(tmp_path):
     # At HEAD this line did not parse: the bare key write left the project
     # unreadable, so `truc rm` could not have cleaned it up either.
     assert _parses(proj)
-    assert "../../escaped" not in (proj / "truc.toml").read_text()
+    assert "../../escaped" not in (proj / "truc.toml").read_text(encoding="utf-8")
 
 
 def test_add_refuses_a_trucs_directory_that_is_a_symlink(tmp_path):
@@ -172,10 +172,10 @@ def test_add_refuses_a_symlinked_component_and_leaves_the_target_alone(tmp_path)
 
     assert r.returncode == 1, r.stdout + r.stderr
     assert "refused" in r.stderr and "symlink" in r.stderr
-    assert victim.read_text() == "ORIGINAL-VICTIM\n"
+    assert victim.read_text(encoding="utf-8") == "ORIGINAL-VICTIM\n"
     assert not (proj / "truc.lock").exists(), "the lock was written anyway"
     assert f'{ENTRY} = {{ registry = "local" }}' not in \
-        (proj / "truc.toml").read_text()
+        (proj / "truc.toml").read_text(encoding="utf-8")
     assert _parses(proj)
 
 
@@ -212,7 +212,7 @@ def test_add_refuses_a_name_that_is_a_regular_file(tmp_path):
 
     assert r.returncode == 1, r.stdout + r.stderr
     assert "refused" in r.stderr and "not a directory" in r.stderr
-    assert squatter.read_text() == "not a directory\n"
+    assert squatter.read_text(encoding="utf-8") == "not a directory\n"
     assert not (proj / "truc.lock").exists()
     assert _parses(proj)
 
@@ -229,11 +229,11 @@ def test_a_plain_add_then_rm_still_round_trips(tmp_path):
     assert r.returncode == 0, r.stderr or r.stdout
     assert (proj / "trucs" / ENTRY / "component.rvl").exists()
     assert f'{ENTRY} = {{ registry = "local" }}' in \
-        (proj / "truc.toml").read_text()
+        (proj / "truc.toml").read_text(encoding="utf-8")
     assert _parses(proj)
 
     r = _truc(proj, "rm", ENTRY)
     assert r.returncode == 0, r.stderr or r.stdout
     assert not (proj / "trucs" / ENTRY).exists()
-    assert ENTRY not in (proj / "truc.toml").read_text()
+    assert ENTRY not in (proj / "truc.toml").read_text(encoding="utf-8")
     assert _parses(proj)

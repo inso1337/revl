@@ -29,7 +29,7 @@ _TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then re
 
 
 def _ir(name: str = "user_cache") -> dict:
-    return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text())
+    return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text(encoding="utf-8"))
 
 
 def test_user_cache_emits_rust_structure():

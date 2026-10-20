@@ -146,7 +146,7 @@ def _build_fresh(out_dir: Path) -> Path:
 
 
 # --- claim 1: the deploy builds it ----------------------------------------- #
-def _check_deploy_builds_the_wheel() -> list[str]:
+def _check_deploy_builds_the_wheel() -> tuple[list[str], int]:
     """`pages.yml` must run a builder before it uploads `site/`.
 
     Read as text, in order: a builder step that came AFTER the upload would
@@ -155,13 +155,14 @@ def _check_deploy_builds_the_wheel() -> list[str]:
     """
     path = ROOT / PAGES_WORKFLOW
     if not path.is_file():
-        return [f"{PAGES_WORKFLOW} is gone; nothing publishes site/ any more."]
+        return ([f"{PAGES_WORKFLOW} is gone; nothing publishes site/ any more."],
+                0)
     text = path.read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
     upload_at = next((i for i, ln in enumerate(lines) if UPLOAD_ACTION in ln), None)
     if upload_at is None:
-        return [f"{PAGES_WORKFLOW} no longer uses {UPLOAD_ACTION}; "
-                "re-derive this check against whatever publishes site/."]
+        return ([f"{PAGES_WORKFLOW} no longer uses {UPLOAD_ACTION}; "
+                 "re-derive this check against whatever publishes site/."], 1)
     build_at = next(
         (i for i, ln in enumerate(lines) if any(b in ln for b in BUILDERS)), None
     )
@@ -171,29 +172,32 @@ def _check_deploy_builds_the_wheel() -> list[str]:
             f"(no step runs any of {', '.join(BUILDERS)}).",
             "    The wheel is not committed, so the published playground would "
             "404 on it.",
-        ]
+        ], 1
     if build_at > upload_at:
         return [
             f"{PAGES_WORKFLOW} builds the wheel AFTER {UPLOAD_ACTION}, so the "
             "upload carries the state of the checkout, not of the build.",
-        ]
-    return []
+        ], 1
+    return [], 1
 
 
 # --- claim 2: the pages fetch the name the builder writes ------------------ #
-def _check_consumers_name_the_built_wheel(built_name: str) -> list[str]:
+def _check_consumers_name_the_built_wheel(
+        built_name: str) -> tuple[list[str], int]:
     """Every page that loads the wheel must name the file a fresh build writes.
 
     `pyproject.toml` supplies the version that names the wheel; the pages
     hardcode it. A bump moves the artifact and leaves the fetch behind.
     """
     problems: list[str] = []
+    found = 0
     for rel in CONSUMERS:
         path = ROOT / rel
         if not path.is_file():
             problems.append(f"{rel} is gone; re-derive this check against the "
                             "page that now loads the wheel.")
             continue
+        found += 1
         refs = set(WHEEL_REF_RE.findall(path.read_text(encoding="utf-8")))
         if not refs:
             problems.append(f"{rel} no longer fetches a revl wheel at all.")
@@ -204,7 +208,7 @@ def _check_consumers_name_the_built_wheel(built_name: str) -> list[str]:
                 f"{rel} fetches vendor/{', vendor/'.join(wrong)} but a fresh "
                 f"build writes {built_name} (pyproject.toml's version names it)."
             )
-    return problems
+    return problems, found
 
 
 # --- claim 3: the build vendors what the commit tracks --------------------- #
@@ -244,14 +248,19 @@ def _tracked_members() -> dict[str, None] | None:
     return out or None
 
 
-def _check_members(wheel: Path) -> list[str]:
+def _check_members(wheel: Path) -> tuple[list[str], int, int, bool]:
     expected = _tracked_members()
-    if expected is None:
-        return ["    (skipped: git could not list the vendored trees)"]
     with zipfile.ZipFile(wheel) as zf:
         got = {n for n in zf.namelist() if not n.startswith("revl-")}
         dist_info = {n for n in zf.namelist() if n.startswith("revl-")}
     problems: list[str] = []
+    if expected is None:
+        problems.append("    (skipped: git could not list the vendored trees)")
+        if not dist_info:
+            problems.append("    the build has no .dist-info; micropip cannot "
+                            "install it.")
+        return problems, 0, len(got), False
+
     missing = sorted(set(expected) - got)
     extra = sorted(got - set(expected))
     if missing:
@@ -265,7 +274,25 @@ def _check_members(wheel: Path) -> list[str]:
     if not dist_info:
         problems.append("    the build has no .dist-info; micropip cannot "
                         "install it.")
-    return problems
+    return problems, len(expected), len(got), True
+
+
+def _print_check_summary(workflows_found: int, consumers_found: int,
+                         tracked_modules: int, wheel_modules: int,
+                         inventory_complete: bool,
+                         problem_count: int) -> None:
+    inventory = str(tracked_modules)
+    if not inventory_complete:
+        inventory += " (incomplete)"
+    print("site wheel inputs: "
+          f"pages workflow {workflows_found}/1; "
+          f"declared page consumers {consumers_found}/{len(CONSUMERS)}; "
+          f"tracked source modules compared {inventory}; "
+          f"wheel source modules {wheel_modules}; "
+          f"{problem_count} problem(s)")
+    print("Scope: checks the Pages build workflow, wheel names and package "
+          "members; it does not execute the published playground or verify "
+          "Pyodide behavior in a browser.")
 
 
 def main() -> int:
@@ -289,15 +316,22 @@ def main() -> int:
 
     problems: list[str] = []
 
-    problems += _check_deploy_builds_the_wheel()
+    deploy_problems, workflows_found = _check_deploy_builds_the_wheel()
+    problems += deploy_problems
 
     # Build under ROOT: build_wheel prints its output path relative to ROOT, so
     # a scratch dir outside the tree would make that print raise.
     tmp = Path(tempfile.mkdtemp(prefix=".wheelcheck-", dir=ROOT))
     try:
         fresh = _build_fresh(tmp)
-        problems += _check_consumers_name_the_built_wheel(fresh.name)
-        problems += _check_members(fresh)
+        consumer_problems, consumers_found = (
+            _check_consumers_name_the_built_wheel(fresh.name)
+        )
+        problems += consumer_problems
+        member_problems, tracked_modules, wheel_modules, inventory_complete = (
+            _check_members(fresh)
+        )
+        problems += member_problems
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -307,8 +341,12 @@ def main() -> int:
     if problems:
         for line in problems:
             print(f"::warning::{line}" if not line.startswith("  ") else line)
+        _print_check_summary(workflows_found, consumers_found, tracked_modules,
+                             wheel_modules, inventory_complete, len(problems))
         print("the site wheel's deploy contract is BROKEN (see above)")
         return 1
+    _print_check_summary(workflows_found, consumers_found, tracked_modules,
+                         wheel_modules, inventory_complete, len(problems))
     print("site wheel deploy contract OK: pages.yml builds it before upload, "
           "the pages fetch the name it writes, and it vendors what git tracks")
     return 0

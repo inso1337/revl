@@ -164,7 +164,7 @@ def test_apply_admits_a_pinned_composition_and_writes_the_assembly(tmp_path):
     _host.write_assembly(str(proj), report["sources"])
     assembly = proj / "build" / "assembly.json"
     assert assembly.exists()
-    assert "PgDb" in assembly.read_text()
+    assert "PgDb" in assembly.read_text(encoding="utf-8")
 
 
 def test_apply_refuses_an_unpinned_truc_and_leaves_build_untouched(tmp_path):
@@ -311,7 +311,7 @@ def test_cli_apply_admits_and_writes_the_assembly(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "applied" in result.stdout
     assembly = proj / "build" / "assembly.json"
-    assert assembly.exists() and "PgDb" in assembly.read_text()
+    assert assembly.exists() and "PgDb" in assembly.read_text(encoding="utf-8")
 
 
 @_cli

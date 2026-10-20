@@ -1962,7 +1962,7 @@ def _declared_emit_corpus() -> set[str]:
 def _recorded_emit_divergences() -> set[str]:
     """The documents the crate is KNOWN not to emit byte-identically, i.e. those
     outside the port's declared corpus. SHRINK ONLY — see the fixture."""
-    return set(json.loads(_EMIT_CORPUS_DIVERGENCES.read_text())["diverged"])
+    return set(json.loads(_EMIT_CORPUS_DIVERGENCES.read_text(encoding="utf-8"))["diverged"])
 
 
 def test_emit_ir_is_byte_identical_to_the_reference(consumer):

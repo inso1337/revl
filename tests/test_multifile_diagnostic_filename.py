@@ -137,7 +137,7 @@ def test_duplicate_top_level_fn_names_the_later_file(tmp_path, monkeypatch):
     assert str(second.resolve()) in error.message, error.message
     assert error.filename.endswith("second.rvl"), error.filename
     assert error.line == 4
-    assert len(first.read_text().splitlines()) < error.line
+    assert len(first.read_text(encoding="utf-8").splitlines()) < error.line
 
 
 def test_type_param_shadowing_names_the_declaring_file(tmp_path, monkeypatch):
@@ -165,7 +165,7 @@ def test_type_param_shadowing_names_the_declaring_file(tmp_path, monkeypatch):
         assert error.filename.endswith("second.rvl"), error.filename
         assert not error.filename.endswith("first.rvl"), error.filename
         assert error.line == 3
-        assert len(first.read_text().splitlines()) < error.line
+        assert len(first.read_text(encoding="utf-8").splitlines()) < error.line
 
         diag = report(error)["diagnostics"][0]
         assert diag["file"].endswith("second.rvl")
@@ -196,7 +196,7 @@ def test_default_param_purity_names_the_declaring_file(tmp_path, monkeypatch):
         assert error.filename.endswith("second.rvl"), error.filename
         assert not error.filename.endswith("first.rvl"), error.filename
         assert error.line == 3
-        assert len(first.read_text().splitlines()) < error.line
+        assert len(first.read_text(encoding="utf-8").splitlines()) < error.line
 
         diag = report(error)["diagnostics"][0]
         assert diag["file"].endswith("second.rvl")

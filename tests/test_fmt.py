@@ -32,7 +32,7 @@ EXAMPLES = sorted(glob.glob(str(ROOT / "examples" / "**" / "*.rvl"), recursive=T
 
 def test_formatter_is_idempotent_on_corpus():
     for path in EXAMPLES:
-        src = Path(path).read_text()
+        src = Path(path).read_text(encoding="utf-8")
         once = format_source(src, path)
         twice = format_source(once, path)
         assert once == twice, f"not idempotent: {path}"
@@ -43,7 +43,7 @@ def test_gate_admits_every_example():
     # newly admissible, or (for the intentionally-rejected files) token-stream
     # identical -- never refused.
     for path in EXAMPLES:
-        src = Path(path).read_text()
+        src = Path(path).read_text(encoding="utf-8")
         out = format_source(src, path)
         result = ir_equivalent(src, out, path)
         assert result.admitted, f"gate refused {path}: {result.reason}"
@@ -78,7 +78,7 @@ def test_messy_program_formats_to_canonical_with_identical_ir():
 
 
 def test_format_is_stable_second_run():
-    src = Path(EXAMPLES[0]).read_text()
+    src = Path(EXAMPLES[0]).read_text(encoding="utf-8")
     out = format_source(src)
     assert format_source(out) == out
 
@@ -205,11 +205,11 @@ def test_cli_formats_in_place(tmp_path):
         "  provide reg {\n    fn healthy()=true\n  }\n}\n"
     )
     assert main(["fmt", str(f)]) == 0
-    assert "fn healthy() = true" in f.read_text()
+    assert "fn healthy() = true" in f.read_text(encoding="utf-8")
     # Second run is a no-op (already canonical).
-    before = f.read_text()
+    before = f.read_text(encoding="utf-8")
     assert main(["fmt", str(f)]) == 0
-    assert f.read_text() == before
+    assert f.read_text(encoding="utf-8") == before
 
 
 def test_cli_check_flags_noncanonical(tmp_path):
@@ -219,9 +219,9 @@ def test_cli_check_flags_noncanonical(tmp_path):
         "component S provides reg: Registry {\n"
         "  provide reg {\n    fn healthy()=true\n  }\n}\n"
     )
-    original = f.read_text()
+    original = f.read_text(encoding="utf-8")
     assert main(["fmt", "--check", str(f)]) == 1
-    assert f.read_text() == original  # --check never writes
+    assert f.read_text(encoding="utf-8") == original  # --check never writes
 
 
 MIGRATE_PROGRAM = (
@@ -256,7 +256,7 @@ def test_cli_migrate_still_works_and_is_gated(tmp_path):
     # The original really does compile as a literal now (the premise above).
     compile_source(MIGRATE_PROGRAM, "cache.rvl")
     assert main(["fmt", "--migrate", str(f)]) == 0
-    text = f.read_text()
+    text = f.read_text(encoding="utf-8")
     assert "emit db.execute(`INSERT INTO cache_log VALUES (${key})`)" in text
     # Migrated output still compiles, now as an interpolating template.
     compile_source(text, "cache.rvl")
@@ -342,7 +342,7 @@ def test_use_bearing_file_round_trips_with_identical_ir(tmp_path):
 
     for body, label in DRIFTED_CONSTRUCTS:
         target = _module_pair(tmp_path, body)
-        original = target.read_text()
+        original = target.read_text(encoding="utf-8")
         # Messy input, so the formatter really does rewrite something.
         messy = original.replace("fn f(", "fn  f(").replace("{ return", "{   return")
         target.write_text(messy)
@@ -361,7 +361,7 @@ def test_gate_runs_the_ir_arm_for_a_use_bearing_file(tmp_path):
     # Not just "admitted": the proof must be the IR comparison. Before the fix
     # this file reached the vacuous token fall-back instead.
     target = _module_pair(tmp_path, 'fn f() -> Str { return """abc""" }')
-    messy = target.read_text().replace("fn f()", "fn  f( )")
+    messy = target.read_text(encoding="utf-8").replace("fn f()", "fn  f( )")
     formatted = format_source(messy, str(target))
     gate = ir_equivalent(messy, formatted, str(target))
     assert gate.admitted
@@ -417,12 +417,12 @@ def test_cli_refuses_rather_than_writing_a_corrupted_use_bearing_file(tmp_path):
     from revl.compiler import compile_files
 
     target = _module_pair(tmp_path, 'fn f() -> Str { return """abc""" }')
-    messy = target.read_text().replace("fn f()", "fn  f( )")
+    messy = target.read_text(encoding="utf-8").replace("fn f()", "fn  f( )")
     target.write_text(messy)
     path = os.path.abspath(str(target))
     before = _canonical_ir(compile_files([path], sources={path: messy}))
 
     assert main(["fmt", str(target)]) == 0
-    after_text = target.read_text()
+    after_text = target.read_text(encoding="utf-8")
     assert after_text != messy, "the formatter should have tidied this file"
     assert _canonical_ir(compile_files([path], sources={path: after_text})) == before

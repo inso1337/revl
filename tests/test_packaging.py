@@ -76,7 +76,7 @@ def test_backends_root_falls_back_to_packaged(tmp_path, monkeypatch):
 
 
 def _pyproject() -> dict:
-    return tomllib.loads((_REPO / "pyproject.toml").read_text())
+    return tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
 
 
 def test_pyproject_declares_console_script():

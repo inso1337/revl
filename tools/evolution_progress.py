@@ -328,7 +328,7 @@ class WorkingTreeView(TreeView):
     def read(self, path: str) -> str | None:
         target = self.tree / path
         try:
-            return target.read_text()
+            return target.read_text(encoding="utf-8")
         except OSError:
             return None
 
@@ -1181,7 +1181,7 @@ def main(argv=None) -> int:
 
     if args.generation is not None:
         try:
-            entries = json.loads(args.generation.read_text())
+            entries = json.loads(args.generation.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             print(f"evolution_progress: cannot read {args.generation}: {exc}",
                   file=sys.stderr)

@@ -359,6 +359,23 @@ def test_the_self_test_passes():
     assert _tool().self_test() == 0
 
 
+def test_a_vacuous_check_reports_zero_counts_and_scope(monkeypatch, capsys):
+    tool = _tool()
+    monkeypatch.setattr(tool, "scan", lambda: [])
+    monkeypatch.setattr(tool, "scan_claims", lambda sites: [])
+    monkeypatch.setattr(tool, "load_ledger", lambda path: ([], None))
+    monkeypatch.setattr(tool, "load_claim_ledger", lambda path: ([], None))
+
+    assert tool.main(["--check"]) == 1
+
+    output = capsys.readouterr().out
+    assert "0 vocabulary sites" in output
+    assert "0 mirror classes" in output
+    assert "0 claim(s)" in output
+    assert "0 near miss(es)" in output
+    assert "does not prove runtime behavior" in output
+
+
 def test_the_gate_is_stdlib_only_and_starts_no_subprocess():
     """CI's `lint` job installs no revl at all, and a tool that shells out can
     be handed a different checkout by the dev venv's editable meta-path finder,

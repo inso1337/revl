@@ -12,16 +12,20 @@ edits) can claim it pays, there has to be a number it moves.
 That number is **output tokens spent per admitted component** — every token the
 model emitted, across *all* attempts, up to and including the one that was
 admitted. Retries are not free; a refused draft still cost the tokens it took to
-write. This module computes it deterministically from the committed corpus,
+write. The report also keeps each invocation's model-turn count paired with
+its recorded input tokens, so a per-turn average cannot hide how many turns a
+run took. This module computes it deterministically from the committed corpus,
 exactly the way `rescore.py`/`demand.py` recompute their numbers — no model, no
 provider, no cost.
 
 ## What is real here, and what needs a funded run
 
 The committed `results.jsonl` records a real per-attempt **cost** (dollars cline
-was billed, from the provider's own usage) but it does *not* record the token
-counts behind that cost — `run.py` only kept `totalCost`. So this module reports
-two things, and is explicit about which is which:
+was billed, from the provider's own usage). Older rows do not carry exact input
+tokens or the Cline model-turn count. `run.py` now records `tokens_in` and
+`turn_count` per invocation when the runner reports them; this module keeps
+those pairs per attempt and never fills historical gaps with estimates. It
+also reports two output-spend measures, and is explicit about which is which:
 
   * **est. output tokens** — a DETERMINISTIC PROXY tokenised from the committed
     generation files (the exact source each attempt emitted, saved under
@@ -140,7 +144,7 @@ def _as_run_cost(run: str) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
     if not path.is_file():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -163,7 +167,7 @@ def _recorded_output_tokens(run: str) -> dict[tuple[str, str, int], int]:
     out: dict[tuple[str, str, int], int] = {}
     if not path.is_file():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -172,6 +176,40 @@ def _recorded_output_tokens(run: str) -> dict[tuple[str, str, int], int]:
         if tok is not None and not row.get("summary") and row.get("attempt"):
             out[(row["spec"], row["variant"], row["attempt"])] = tok
     return out
+
+
+def _recorded_attempt_metrics(run: str) -> dict[tuple[str, str, int], dict]:
+    """Read provider-reported input tokens and model turns per invocation.
+
+    Keyed by (spec, variant, attempt). Historical rows and providers without
+    usage stay absent/None; they are never treated as zero.
+    """
+    path = rescore.RESULTS / run / "results.jsonl"
+    out: dict[tuple[str, str, int], dict] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        attempt = row.get("attempt")
+        if (row.get("summary") or not isinstance(attempt, int)
+                or isinstance(attempt, bool)):
+            continue
+        metrics = {
+            "turn_count": _nonnegative_int(row.get("turn_count")),
+            "tokens_in": _nonnegative_int(row.get("tokens_in")),
+        }
+        if metrics["turn_count"] is not None or metrics["tokens_in"] is not None:
+            out[(row["spec"], row["variant"], attempt)] = metrics
+    return out
+
+
+def _nonnegative_int(value) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
 
 def compute_run(run: str, compiler_root: Path) -> list[dict]:
@@ -183,6 +221,7 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
     compile_source, RevlError, classify = _load_compiler(compiler_root)
     as_run = _as_run_cost(run)
     recorded = _recorded_output_tokens(run)
+    attempt_usage = _recorded_attempt_metrics(run)
 
     cells: list[dict] = []
     for spec_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
@@ -196,12 +235,19 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
             spent = 0          # output tokens across attempts, running total
             recorded_spent = 0  # same, from recorded tokens (0 until funded)
             have_recorded = True
+            attempt_metrics = []
             green_at = None
             for path in attempts:
                 n = int(re.search(r"attempt-(\d+)", path.name).group(1))
-                est = count_tokens(path.read_text())
+                est = count_tokens(path.read_text(encoding="utf-8"))
                 spent += est
                 key = (spec_dir.name, variant, n)
+                usage = attempt_usage.get(key, {})
+                attempt_metrics.append({
+                    "attempt": n,
+                    "turn_count": usage.get("turn_count"),
+                    "tokens_in": usage.get("tokens_in"),
+                })
                 if key in recorded:
                     recorded_spent += recorded[key]
                 else:
@@ -211,6 +257,20 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
                     green_at = n
                     break
             row = as_run.get((spec_dir.name, variant), {})
+            complete_turns = all(m["turn_count"] is not None
+                                 for m in attempt_metrics)
+            complete_tokens_in = all(m["tokens_in"] is not None
+                                     for m in attempt_metrics)
+            turn_count_to_green = (
+                sum(m["turn_count"] for m in attempt_metrics)
+                if green_at is not None and attempt_metrics and complete_turns
+                else None
+            )
+            tokens_in_to_green = (
+                sum(m["tokens_in"] for m in attempt_metrics)
+                if green_at is not None and attempt_metrics and complete_tokens_in
+                else None
+            )
             cells.append({
                 "run": run,
                 "spec": spec_dir.name,
@@ -220,6 +280,9 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
                 "attempts_to_green": green_at if green_at else len(attempts),
                 "est_tokens_to_green": spent,
                 "recorded_tokens_to_green": recorded_spent if have_recorded else None,
+                "attempt_metrics": attempt_metrics,
+                "recorded_turn_count_to_green": turn_count_to_green,
+                "recorded_tokens_in_to_green": tokens_in_to_green,
                 "as_run_green_at": row.get("as_run_green_at"),
                 "as_run_cost_total": row.get("as_run_cost_total"),
             })
@@ -242,6 +305,10 @@ def _median(xs: list[int]) -> float | None:
 
 def render(runs: list[str], all_cells: list[dict], sha: str) -> list[str]:
     any_recorded = any(c["recorded_tokens_to_green"] is not None for c in all_cells)
+    any_invocation_metrics = any(
+        metric["turn_count"] is not None or metric["tokens_in"] is not None
+        for cell in all_cells for metric in cell["attempt_metrics"]
+    )
     lines = [
         "## tokens-to-green — output tokens spent per admitted component",
         f"compiler: `{sha}`  ·  reproduce: `python3 bench/tokens.py`",
@@ -290,6 +357,32 @@ def render(runs: list[str], all_cells: list[dict], sha: str) -> list[str]:
     else:
         lines.append("_no admitted components in scope._")
 
+    lines += ["", "### model turns and tokens_in by invocation", "",
+              "Each row keeps one benchmark invocation's model-turn count beside "
+              "its input tokens. `tokens_in / turn` is supplementary; the raw "
+              "pair shows both the spend and how many turns produced it.", "",
+              "| run / spec / variant | attempt | turn_count | tokens_in | tokens_in / turn |",
+              "|---|---:|---:|---:|---:|"]
+    if any_invocation_metrics:
+        for cell in all_cells:
+            for metric in cell["attempt_metrics"]:
+                turns = metric["turn_count"]
+                tokens_in = metric["tokens_in"]
+                if turns is None and tokens_in is None:
+                    continue
+                per_turn = (f"{tokens_in / turns:.0f}"
+                            if tokens_in is not None and turns else "—")
+                lines.append(
+                    f"| `{cell['run']}/{cell['spec']}/{cell['variant']}` | "
+                    f"{metric['attempt']} | {turns if turns is not None else '—'} | "
+                    f"{tokens_in if tokens_in is not None else '—'} | {per_turn} |"
+                )
+    else:
+        lines.append(
+            "_No committed attempt records `turn_count` or `tokens_in`; "
+            "historical usage is not inferred._"
+        )
+
     # the most-expensive cells: where an optimization would pay the most.
     top = sorted(admitted, key=lambda c: -c["est_tokens_to_green"])[:8]
     if top:
@@ -310,6 +403,9 @@ def render(runs: list[str], all_cells: list[dict], sha: str) -> list[str]:
         "- **proxy now:** `est. tokens` is a deterministic BPE-shaped estimate "
         "over those artefacts — the model's own output-token count was never "
         "recorded for these corpora.",
+        "- **future invocation evidence:** `run.py` stores `turn_count` beside "
+        "`tokens_in` per model invocation when available. Old runs and providers "
+        "without these fields remain unavailable rather than becoming zero.",
     ]
     if any_recorded:
         lines.append(
@@ -341,6 +437,10 @@ def to_json(runs: list[str], all_cells: list[dict], sha: str) -> dict:
             "as_run_cost_total": sum(c["as_run_cost_total"] or 0 for c in admitted),
             "any_recorded_output_tokens": any(
                 c["recorded_tokens_to_green"] is not None for c in all_cells),
+            "any_recorded_turn_count": any(
+                c["recorded_turn_count_to_green"] is not None for c in all_cells),
+            "any_recorded_tokens_in": any(
+                c["recorded_tokens_in_to_green"] is not None for c in all_cells),
         },
         "cells": all_cells,
     }

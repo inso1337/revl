@@ -33,7 +33,7 @@ if str(BACKEND) not in sys.path:
 import javac_gate  # noqa: E402
 from revl import compile_source  # noqa: E402
 
-SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text()
+SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text(encoding="utf-8")
 
 
 def _emit(source: str) -> str:

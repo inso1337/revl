@@ -211,14 +211,14 @@ def test_h1_persists_on_clean_commit_from_imported_source(workspace):
     session = _session()
     session.load(_compile(_IMPORT_SRC))
 
-    assert art.read_text() == "v2"
+    assert art.read_text(encoding="utf-8") == "v2"
     assert not stale.exists()
     frame = _sole_frame(session)
     assert len(frame._transactional) == 2
 
     session.unload()  # clean unload == implicit commit
 
-    assert art.read_text() == "v2", "commit wrongly reverted the imported write"
+    assert art.read_text(encoding="utf-8") == "v2", "commit wrongly reverted the imported write"
     assert not stale.exists(), "commit wrongly restored the imported rm"
     for entry in frame._transactional:
         assert entry.discharged is True and entry.replayed is False
@@ -235,8 +235,8 @@ def test_h1_reverts_residue_free_on_abort_from_imported_source(workspace):
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
 
-    assert art.read_text() == "v1", "abort did not restore the imported write's preimage"
-    assert stale.read_text() == "junk", "abort did not un-remove the imported rm"
+    assert art.read_text(encoding="utf-8") == "v1", "abort did not restore the imported write's preimage"
+    assert stale.read_text(encoding="utf-8") == "junk", "abort did not un-remove the imported rm"
     garbage = workspace / ws.GARBAGE_DIRNAME
     preimage = workspace / ws.PREIMAGE_DIRNAME
     assert not any(garbage.iterdir()) if garbage.exists() else True

@@ -248,7 +248,7 @@ def test_the_census_verdict_path_never_reads_the_manifest():
     assert "provenance" not in census.report(buckets)
 
     import ast
-    tree = ast.parse((ROOT / "tools" / "gate_reference_census.py").read_text())
+    tree = ast.parse((ROOT / "tools" / "gate_reference_census.py").read_text(encoding="utf-8"))
     callers = {
         node.name: {c.func.id for c in ast.walk(node)
                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
@@ -371,7 +371,7 @@ def test_rewriting_the_manifest_carries_the_authorship_axis(tmp_path):
     prov = _manifest({"0": ["a.rvl"]}, {"c": 0}, human=["a.rvl"])
     out = tmp_path / "m.json"
     tool.write({"c": ["a.rvl"]}, prov, 0, path=out)
-    assert json.loads(out.read_text())["human_authored"] == ["a.rvl"]
+    assert json.loads(out.read_text(encoding="utf-8"))["human_authored"] == ["a.rvl"]
 
 
 def test_the_report_does_not_call_the_generation_axis_human():

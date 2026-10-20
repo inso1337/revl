@@ -50,7 +50,7 @@ def module_of(path: Path) -> str:
 
 def imports_of(path: Path) -> list[str]:
     out = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         m = IMPORT.match(line.strip())
         if m:
             out.append(m.group(1))

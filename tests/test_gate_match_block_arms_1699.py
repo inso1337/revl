@@ -50,7 +50,7 @@ def test_the_corpus_is_the_refusals_and_the_admissions():
 @pytest.mark.parametrize("stem", sorted(REFUSED))
 def test_the_reference_refuses_the_document(stem):
     with pytest.raises(RevlError) as excinfo:
-        compile_source((CORPUS / f"{stem}.rvl").read_text(), f"{stem}.rvl")
+        compile_source((CORPUS / f"{stem}.rvl").read_text(encoding="utf-8"), f"{stem}.rvl")
     code, message = REFUSED[stem]
     # a G1 is coded by `classify`, the census's own reading of a refusal
     assert classify(excinfo.value).get("code") == code
@@ -59,7 +59,7 @@ def test_the_reference_refuses_the_document(stem):
 
 @pytest.mark.parametrize("stem", ADMITTED)
 def test_the_reference_admits_the_document(stem):
-    assert compile_source((CORPUS / f"{stem}.rvl").read_text(), f"{stem}.rvl")
+    assert compile_source((CORPUS / f"{stem}.rvl").read_text(encoding="utf-8"), f"{stem}.rvl")
 
 
 # The rebind walk steps over an arm, but not over the statement that holds it:

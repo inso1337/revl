@@ -59,7 +59,7 @@ def _new_project(tmp_path: Path) -> Path:
 
 
 def _lock_names(proj: Path) -> list[str]:
-    lock = json.loads((proj / "truc.lock").read_text())
+    lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     return [r["name"] for r in lock["trucs"]]
 
 
@@ -78,8 +78,8 @@ def _hand_vendor(proj: Path, name: str) -> None:
     shutil.copytree(REGISTRY / "components" / name, proj / "trucs" / name)
     with (proj / "truc.toml").open("a", encoding="utf-8") as handle:
         handle.write(f'{name} = {{ registry = "local" }}\n')
-    index = json.loads((REGISTRY / "index.json").read_text())
-    lock = json.loads((proj / "truc.lock").read_text())
+    index = json.loads((REGISTRY / "index.json").read_text(encoding="utf-8"))
+    lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     lock["trucs"].append({
         "name": name, "registry": "local",
         "sourceHash": index["components"][name]["sourceHash"]})
@@ -99,16 +99,16 @@ def test_add_then_assemble_is_admitted_and_composed(tmp_path):
     assert r.returncode == 0, r.stderr
 
     # vendored byte-identically, pinned, recorded in truc.toml
-    assert (proj / "trucs" / "user_cache" / "component.rvl").read_text() == \
-        (REGISTRY / "components" / "user_cache" / "component.rvl").read_text()
+    assert (proj / "trucs" / "user_cache" / "component.rvl").read_text(encoding="utf-8") == \
+        (REGISTRY / "components" / "user_cache" / "component.rvl").read_text(encoding="utf-8")
     assert set(_lock_names(proj)) == {"user_cache", "pg_database"}
-    assert "user_cache = { registry = \"local\" }" in (proj / "truc.toml").read_text()
+    assert "user_cache = { registry = \"local\" }" in (proj / "truc.toml").read_text(encoding="utf-8")
 
     r = _truc(proj, "assemble")
     assert r.returncode == 0, r.stderr
     assert "assembled" in r.stdout
     # the assembled composition IR is written
-    assembly = json.loads((proj / "build" / "assembly.json").read_text())
+    assembly = json.loads((proj / "build" / "assembly.json").read_text(encoding="utf-8"))
     assert "user_cache".lower() or assembly  # non-empty document
     assert "UserCache" in json.dumps(assembly) and "PgDatabase" in json.dumps(assembly)
 
@@ -128,7 +128,7 @@ def test_add_second_provider_of_a_key_is_refused_g2(tmp_path):
     # admitted before it joins: a refused truc is never written
     assert not (proj / "trucs" / "mysql_database").exists()
     assert "mysql_database" not in _lock_names(proj)
-    assert "mysql_database" not in (proj / "truc.toml").read_text()
+    assert "mysql_database" not in (proj / "truc.toml").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------- G2 from `assemble`
@@ -157,7 +157,7 @@ def test_assemble_refuses_on_vendor_hash_drift(tmp_path):
     assert _truc(proj, "add", "pg_database").returncode == 0
 
     tampered = proj / "trucs" / "user_cache" / "component.rvl"
-    tampered.write_text(tampered.read_text() + "\n// tampered!\n")
+    tampered.write_text(tampered.read_text(encoding="utf-8") + "\n// tampered!\n")
 
     r = _truc(proj, "assemble")
     assert r.returncode == 1, r.stdout

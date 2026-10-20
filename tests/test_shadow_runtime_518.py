@@ -864,7 +864,7 @@ def test_the_world_builder_is_canarys_own():
     moves when that one moves."""
     assert srt.world_for.__wrapped__ is not None \
         if hasattr(srt.world_for, "__wrapped__") else True
-    tree = ast.parse(MODULE_PATH.read_text())
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
     calls = {node.func.attr for node in ast.walk(tree)
              if isinstance(node, ast.Call)
              and isinstance(node.func, ast.Attribute)}
@@ -876,7 +876,7 @@ def test_the_module_reads_no_metric():
     """No function here reads an SLO member, and the metrics producer's value
     goes straight into the `Observation`, which is where a metric is allowed
     to be."""
-    tree = ast.parse(MODULE_PATH.read_text())
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
             assert node.attr not in sp.SLO_MEMBERS + ("_slo",), node.attr

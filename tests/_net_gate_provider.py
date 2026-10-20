@@ -57,7 +57,7 @@ class _Ctx:
 
 
 async def _main() -> None:
-    cfg = json.loads(Path(sys.argv[1]).read_text())
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     tls = bridge.TlsConfig(cfg["cert"], cfg["key"], cfg["ca"],
                            identity=cfg["identity"],
                            server_hostname=cfg.get("server_hostname", cfg["host"]))

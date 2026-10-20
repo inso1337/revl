@@ -149,7 +149,7 @@ def reference_constructs(path: Path) -> dict[str, int]:
     the comparison: these emitters rebind `kind` per dispatcher, and a
     file-wide union would credit `_fn_stmt`'s `step=let` to `_expr`'s `kind`.
     """
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     # name -> [(line, field-or-None)]. A binding from something that is NOT a
     # discriminant read records None, which INVALIDATES the name from that line
     # on. Without that, a `for index, (kind, value) in ...` unpacking shadows an
@@ -260,7 +260,7 @@ def selfhost_constructs(path: Path) -> set[str]:
     inline `value_str(value_field(n, "f")) == "v"` form. As on the reference
     side a bound name resolves to the NEAREST binding above the comparison.
     """
-    src = path.read_text()
+    src = path.read_text(encoding="utf-8")
     helpers = {m.group(1): m.group(2) for m in _HELPER.finditer(src)}
     binds: dict[str, list[tuple[int, str]]] = {}
 
@@ -305,7 +305,7 @@ def corpus_documents(tier: str) -> list[Path]:
     document the oracle never runs, so it proves nothing and must not be
     credited with coverage here either.
     """
-    test = (ROOT / "tests" / f"test_selfhost_emit_{tier}.py").read_text()
+    test = (ROOT / "tests" / f"test_selfhost_emit_{tier}.py").read_text(encoding="utf-8")
     block = re.search(r"^CORPUS\s*=\s*\[(.*?)^\]", test, re.S | re.M)
     if block is None:  # pragma: no cover - shape change in an oracle
         raise SystemExit(f"cannot find a CORPUS list in test_selfhost_emit_{tier}.py")
@@ -361,7 +361,7 @@ def survey() -> dict[str, dict[str, object]]:
 def _ledger() -> dict:
     """The recorded blind spots, minus the `_`-prefixed prose keys JSON has no
     comment syntax for."""
-    raw = json.loads(LEDGER.read_text())
+    raw = json.loads(LEDGER.read_text(encoding="utf-8"))
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
@@ -488,7 +488,7 @@ def _regroup(existing: dict, present: set[str], default: str) -> dict:
 
 
 def write_ledger(data: dict) -> None:
-    ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
+    ledger = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else {}
     for tier, found in data.items():
         entry = ledger.setdefault(tier, {})
         entry["blind"] = _regroup(

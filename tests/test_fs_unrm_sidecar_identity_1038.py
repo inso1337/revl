@@ -526,5 +526,5 @@ def test_an_untampered_abort_reports_no_residue_at_all(workspace):
 
     frame = _sole_frame(session)
     assert frame.compensation_residue == []
-    assert (workspace / "doomed.txt").read_text() == "payload"
+    assert (workspace / "doomed.txt").read_text(encoding="utf-8") == "payload"
     assert not any((workspace / ws.GARBAGE_DIRNAME).iterdir())

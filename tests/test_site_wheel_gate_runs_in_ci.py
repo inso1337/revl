@@ -37,15 +37,19 @@ can be claimed from inside the workflows themselves:
 Static, like `tests/test_ts_typecheck_gate_runs_in_ci.py` and
 `tests/test_java_javac_gate_runs_in_ci.py`: it reads the workflows as text, so
 it needs no toolchain and no PyYAML (not a declared dependency) and rides the
-`frontend` job's plain `pytest tests/ -q`. It does NOT build a wheel, so it
-costs a PR nothing and cannot itself become a per-PR wheel gate.
+`frontend` job's plain `pytest tests/ -q`. The `main()` test patches
+`_build_fresh`, so this file does NOT build a wheel; it costs a PR nothing and
+cannot itself become a per-PR wheel gate.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
+import zipfile
 from pathlib import Path
+
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -54,6 +58,73 @@ PAGES = WORKFLOWS / "pages.yml"
 CI = WORKFLOWS / "ci.yml"
 TOOL = "tools/check_site_wheel.py"
 VENDORS = ("playground", "site")
+
+
+def test_a_misdirected_check_reports_zero_inputs_and_scope(tmp_path, monkeypatch,
+                                                          capsys):
+    checker = load_by_path("check_site_wheel", ROOT / TOOL)
+    wheel = tmp_path / "empty.whl"
+    with zipfile.ZipFile(wheel, "w"):
+        pass
+
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(checker, "_build_fresh", lambda out_dir: wheel)
+    monkeypatch.setattr(checker, "_tracked_members", lambda: None)
+    monkeypatch.setattr(checker.sys, "argv", [str(ROOT / TOOL)])
+
+    assert checker.main() == 1
+
+    output = capsys.readouterr().out
+    assert "pages workflow 0/1" in output
+    assert "page consumers 0/2" in output
+    assert "tracked source modules compared 0 (incomplete)" in output
+    assert "wheel source modules 0" in output
+    assert "5 problem(s)" in output
+    assert "does not execute the published playground" in output
+    assert output.rstrip().endswith(
+        "the site wheel's deploy contract is BROKEN (see above)")
+
+
+def test_the_summary_reports_ordinary_inventory_counts(tmp_path, monkeypatch,
+                                                       capsys):
+    checker = load_by_path("check_site_wheel", ROOT / TOOL)
+    pages = tmp_path / checker.PAGES_WORKFLOW
+    pages.parent.mkdir(parents=True)
+    pages.write_text(
+        "steps:\n"
+        "  - run: tools/check_site_wheel.py --write\n"
+        "  - uses: actions/upload-pages-artifact@v4\n",
+        encoding="utf-8",
+    )
+    for rel in checker.CONSUMERS:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('"vendor/revl-1.2.3.whl"', encoding="utf-8")
+    wheel = tmp_path / "revl-1.2.3.whl"
+    with zipfile.ZipFile(wheel, "w") as zf:
+        zf.writestr("revl/__init__.py", "")
+        zf.writestr("revl/mcp/__init__.py", "")
+        zf.writestr("revl-1.2.3.dist-info/METADATA", "")
+
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(checker, "_build_fresh", lambda out_dir: wheel)
+    monkeypatch.setattr(checker, "_tracked_members", lambda: {
+        "revl/__init__.py": None,
+        "revl/mcp/__init__.py": None,
+    })
+    monkeypatch.setattr(checker.sys, "argv", [str(ROOT / TOOL)])
+
+    assert checker.main() == 0
+
+    output = capsys.readouterr().out
+    assert "pages workflow 1/1" in output
+    assert "declared page consumers 2/2" in output
+    assert "tracked source modules compared 2" in output
+    assert "wheel source modules 2" in output
+    assert "0 problem(s)" in output
+    assert output.rstrip().endswith(
+        "site wheel deploy contract OK: pages.yml builds it before upload, "
+        "the pages fetch the name it writes, and it vendors what git tracks")
 
 
 def _text(path: Path) -> str:

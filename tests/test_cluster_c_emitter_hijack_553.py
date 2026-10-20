@@ -446,7 +446,7 @@ _JAVA_INJECTED_TYPE_HOST_ROOTS = ["Pool", "Job"]
 # declaration. So the base is the real accessor scenario plus the `lifecycle
 # test` that holds the emission on the live path.
 _ACCESSOR_LIFECYCLE = (
-    (ROOT / "backends" / "go" / "scenarios" / "accessor.rvl").read_text()
+    (ROOT / "backends" / "go" / "scenarios" / "accessor.rvl").read_text(encoding="utf-8")
     + """
 lifecycle test "accessor" {
   load App

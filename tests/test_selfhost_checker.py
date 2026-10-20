@@ -754,7 +754,7 @@ component C requires a: A, b: B provides r: R {
 """),
     ("an inline arrow argument that emits in its body",
      (ROOT / "tests" / "fixtures" /
-      "g4_emit_arrow_argument_inline.rvl").read_text()),
+      "g4_emit_arrow_argument_inline.rvl").read_text(encoding="utf-8")),
     # ---- the declaration-owned approval floor: what is admitted (item 246) --
     # A covering `with` edge, by exact token, by a `*` or `?` glob, and by a
     # dotted-ident token; and an extern without the floor.
@@ -819,7 +819,7 @@ component R provides till: Till {
 """),
     ("a witnessed extern in a provide method's effect position",
      (ROOT / "backends" / "go" / "scenarios" /
-      "provide_method_witnessed.rvl").read_text()),
+      "provide_method_witnessed.rvl").read_text(encoding="utf-8")),
     ("a service crossing scoped to the floor, covered", _AP_HEAD + """
 service Pay { emission[charge] fn go() -> Int }
 component B requires pay: Pay provides ops: Ops {
@@ -836,7 +836,7 @@ EXAMPLES = ROOT / "examples" / "rejections"
 
 
 def _fixture(name: str) -> str:
-    return (EXAMPLES / name).read_text()
+    return (EXAMPLES / name).read_text(encoding="utf-8")
 
 
 REJECTED_PROGRAMS = [
@@ -2117,7 +2117,7 @@ TYPE_LAYER_EXPRESSIONS = [
 def test_type_layer_fixture_expressions_agree(verdict_env, case):
     from revl.compiler import compile_source
     path, prog, env, expr, expected, where = case
-    source = (ROOT / path).read_text()
+    source = (ROOT / path).read_text(encoding="utf-8")
     try:
         compile_source(source, "diff.rvl")
         pytest.fail(f"{path}: the reference no longer refuses this fixture")

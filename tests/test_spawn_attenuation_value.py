@@ -56,7 +56,7 @@ def test_the_corpus_is_one_refusal_and_one_control_per_spelling():
 
 @pytest.mark.parametrize("spelling", SPELLINGS)
 def test_a_child_crossing_outside_its_parent_is_refused(spelling):
-    src = (CORPUS / f"g4_{spelling}.rvl").read_text()
+    src = (CORPUS / f"g4_{spelling}.rvl").read_text(encoding="utf-8")
     with pytest.raises(RevlError) as excinfo:
         compile_source(src, f"g4_{spelling}.rvl")
     assert excinfo.value.message == REFUSAL[spelling]
@@ -65,7 +65,7 @@ def test_a_child_crossing_outside_its_parent_is_refused(spelling):
 
 @pytest.mark.parametrize("spelling", SPELLINGS)
 def test_the_same_child_under_a_parent_that_holds_it_is_admitted(spelling):
-    src = (CORPUS / f"ok_{spelling}.rvl").read_text()
+    src = (CORPUS / f"ok_{spelling}.rvl").read_text(encoding="utf-8")
     compile_source(src, f"ok_{spelling}.rvl")
 
 

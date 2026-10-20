@@ -85,7 +85,7 @@ def test_add_refuses_a_registry_file_that_links_outside(world, fname):
     assert fname in message and "registry" in message
     assert not _vendored(proj), "part of the entry was vendored"
     assert not (proj / "truc.lock").exists()
-    assert secret.read_text() == OUTSIDE_TEXT
+    assert secret.read_text(encoding="utf-8") == OUTSIDE_TEXT
 
 
 def test_add_refuses_a_dangling_registry_file_link(world):
@@ -145,7 +145,7 @@ def test_add_refuses_a_lock_that_links_outside(world):
 
     _refused_add(proj, "truc.lock")
 
-    assert target.read_text() == OUTSIDE_JSON
+    assert target.read_text(encoding="utf-8") == OUTSIDE_JSON
     assert not _vendored(proj), "vendored before the lock was refused"
 
 
@@ -165,11 +165,11 @@ def test_add_refuses_a_truc_toml_that_links_outside(world):
     target = outside / "victim.toml"
     shutil.move(proj / "truc.toml", target)
     (proj / "truc.toml").symlink_to(target)
-    before = target.read_text()
+    before = target.read_text(encoding="utf-8")
 
     _refused_add(proj, "truc.toml")
 
-    assert target.read_text() == before
+    assert target.read_text(encoding="utf-8") == before
     assert not _vendored(proj)
     assert not (proj / "truc.lock").exists()
 
@@ -181,13 +181,13 @@ def test_rm_refuses_a_lock_that_links_outside(world):
     target = outside / "victim.lock"
     shutil.move(lock, target)
     lock.symlink_to(target)
-    before = target.read_text()
+    before = target.read_text(encoding="utf-8")
 
     with pytest.raises(_host.TrucNameRefusal) as raised:
         _host.commit_rm(str(proj), RM_PLAN)
 
     assert "truc.lock" in str(raised.value)
-    assert target.read_text() == before
+    assert target.read_text(encoding="utf-8") == before
     assert _vendored(proj), "un-vendored before the lock was refused"
 
 
@@ -198,13 +198,13 @@ def test_rm_refuses_a_truc_toml_that_links_outside(world):
     target = outside / "victim.toml"
     shutil.move(toml, target)
     toml.symlink_to(target)
-    before = target.read_text()
+    before = target.read_text(encoding="utf-8")
 
     with pytest.raises(_host.TrucNameRefusal) as raised:
         _host.commit_rm(str(proj), RM_PLAN)
 
     assert "truc.toml" in str(raised.value)
-    assert target.read_text() == before
+    assert target.read_text(encoding="utf-8") == before
     assert _vendored(proj)
 
 
@@ -261,19 +261,19 @@ def test_a_normal_add_assembly_and_rm_still_work(world):
     for fname in ("component.rvl", "manifest.json", "dossier.json"):
         assert (vendored / fname).read_bytes() == \
             (reg / "components" / ENTRY / fname).read_bytes()
-    lock = json.loads((proj / "truc.lock").read_text())
+    lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     assert [row["name"] for row in lock["trucs"]] == [ENTRY]
     assert f'{ENTRY} = {{ registry = "local" }}' in \
-        (proj / "truc.toml").read_text()
+        (proj / "truc.toml").read_text(encoding="utf-8")
     assert not (proj / "truc.lock").is_symlink()
     assert [p.name for p in proj.iterdir() if p.name.startswith(".")] == [], \
         "the lock's temp file was left behind"
 
     assert _host.write_assembly(str(proj), MANIFEST) == "written"
-    assert json.loads((proj / "build" / "assembly.json").read_text()) == \
+    assert json.loads((proj / "build" / "assembly.json").read_text(encoding="utf-8")) == \
         json.loads(MANIFEST)
     assert _host.write_assembly(str(proj), MANIFEST) == "written"  # overwrite
 
     assert _host.commit_rm(str(proj), RM_PLAN) == "removed"
     assert not _vendored(proj)
-    assert json.loads((proj / "truc.lock").read_text())["trucs"] == []
+    assert json.loads((proj / "truc.lock").read_text(encoding="utf-8"))["trucs"] == []

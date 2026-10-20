@@ -177,7 +177,7 @@ class _Clock:
 
 
 def _lines(sink: str) -> list:
-    return Path(sink).read_text().splitlines() if os.path.exists(sink) else []
+    return Path(sink).read_text(encoding="utf-8").splitlines() if os.path.exists(sink) else []
 
 
 def _open_wal(session, tmp_path):
@@ -191,7 +191,7 @@ def _wal_records(session):
     wal_path = session.recorder.wal.path
     session.unload()
     return [json.loads(line)
-            for line in Path(wal_path).read_text().splitlines()]
+            for line in Path(wal_path).read_text(encoding="utf-8").splitlines()]
 
 
 @pytest.fixture

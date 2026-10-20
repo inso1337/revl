@@ -54,7 +54,7 @@ def test_category_defaults_to_program():
     payload = _result({"format": "lark"})["structuredContent"]
     assert payload["category"] == "program"
     assert payload["grammar"] == sg.render("lark", "program")
-    assert payload["grammar"] == (ROOT / "grammar" / "revl.lark").read_text()
+    assert payload["grammar"] == (ROOT / "grammar" / "revl.lark").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("arguments, needle", [

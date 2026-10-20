@@ -185,7 +185,7 @@ def test_cli_writes_the_file_and_reports_obligations(tmp_path):
                   "--provides", "analysis", "--capabilities", "filesystem.read",
                   "--out", str(out))
     assert result.returncode == 0
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert "emission[filesystem]" in text
     assert "hole[Str]" in text
     # the open holes are reported on stderr, like a `revl compile` draft

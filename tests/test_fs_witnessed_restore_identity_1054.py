@@ -119,7 +119,7 @@ def _written(root, frame, name="artifact.txt", before="v1", after="v2"):
     fs.write_witnessed(name, after)
     witness = frame._transactional[-1].witness
     sidecar = witness["preimage"]
-    assert target.read_text() == after
+    assert target.read_text(encoding="utf-8") == after
     assert os.path.dirname(sidecar) == str(root / ws.PREIMAGE_DIRNAME)
     assert open(sidecar, encoding="utf-8").read() == before
     return witness, str(target), sidecar
