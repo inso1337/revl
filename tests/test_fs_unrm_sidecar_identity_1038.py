@@ -231,7 +231,9 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     length is unchanged. `(dev, ino)` alone cannot see this. The capture records
     `ctime_ns` too, which catches the rewrite once the inode timestamp clock has
     ticked; a rewrite that lands inside one tick leaves every stat field equal
-    (issue #2647), and the parked path reads no bytes, so it stays stat-only."""
+    (issue #2647), so the capture also carries the sha256 of the parked bytes,
+    recorded at park for a readable regular file, and install compares it on
+    both passes."""
     mod = _fs_module()
     witness, target, sidecar = _removed(mod, workspace)
     before = os.stat(sidecar)
