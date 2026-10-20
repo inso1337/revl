@@ -55,6 +55,16 @@ enough to fault; a `DISPOSED` fiber was taken down deliberately. `run.py`'s
 `_SETTLED_DOWN = ("DISPOSED", "PENDING", "FAILED")` names the settled-terminal set
 a liveness observer keys on.
 
+A `FAILED` fiber does not by itself decide the `load` step's verdict, because the
+tiers differ on a host error. An error a `fail` step raises fails the `load` on
+every tier, naming the component and the error (issue #2378). A HOST error raised
+by the activation body, such as a missing import or a refused `open`, fails the
+`load` on the go tier (the rust, java and ts runners surface it too). On the
+python tier the `load` settles, the error is recorded on the fiber, and it is
+reported at the next call. Python keeps that behaviour deliberately: the #1895
+and #1859 tests load a component whose body raises on purpose and assert what it
+left behind (issue #2452).
+
 ### Paused: a state the session is in, not a fiber state
 
 A composition that declares an `slo { ... }` block (roadmap item 473) can be
