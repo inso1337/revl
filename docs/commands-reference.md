@@ -2185,6 +2185,11 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   neither declare nor reach an `extern`/host block. `trusted` lets it author
   host code, and stamps every class-(c) ticket with the unreviewed host bodies
   a yes would also run.
+- `--attempt-limit N` - the attempt budget for the check/admit loop (issue
+  #2690, N at least 1): a refusal from `revl_check` or `revl_admit` carries
+  `attempt` and, when this is set, `attemptsRemaining`. Omit for no limit, in
+  which case no `attemptsRemaining` is reported. Advisory only: the budget
+  never changes admission.
 - `--grant SERVICE` - a service name an admitted turn may reach (repeatable).
   Naming any turns on the item-329 reach allowlist; omit them all and reach is
   not bounded by this flag.

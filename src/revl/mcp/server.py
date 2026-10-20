@@ -6659,6 +6659,40 @@ def _instructions() -> str:
 # unchanged; `structuredContent` keeps the payload's own order.
 _ACTIONABLE = ("ok", "note", "disk", "next", "hint")
 
+# issue #2690: the two verdict verbs of the authoring loop. Their refusals say
+# how many attempts this unit of work has spent, so a caller driving a retry
+# loop can tell a first refusal from a tenth.
+_ATTEMPT_VERBS = frozenset({"revl_check", "revl_admit"})
+
+
+def _attempt_fields(name: str, payload: dict) -> dict:
+    """`payload` with `attempt` (and `attemptsRemaining` when the operator
+    configured a limit) on a `revl_check`/`revl_admit` refusal, unchanged
+    otherwise (issue #2690).
+
+    The count is per unit of work: the loaded composition at its current
+    generation, so a fresh load or a new generation (a swap, rollback or undo)
+    is a new unit. An accepted call resets it. It is advisory only: admission
+    never reads it, so reaching or passing the budget changes nothing but what
+    the caller is told."""
+    if name not in _ATTEMPT_VERBS or not isinstance(payload, dict):
+        return payload
+    axes = getattr(SESSION, "_loop_axes", None)
+    if axes is None:            # a stand-in session (tests) keeps its shape
+        return payload
+    refused = payload.get("ok") is False or payload.get("admitted") is False
+    axes.record_attempt(
+        (SESSION.loaded, getattr(SESSION, "_load_epoch", 0),
+         getattr(SESSION, "_generation", 0)), refused)
+    if not refused:
+        return payload
+    fields = {"attempt": axes.attempt}
+    limit = getattr(SESSION, "attempt_limit", None)
+    if limit is not None:
+        fields["attemptsRemaining"] = max(0, limit - axes.attempt)
+    return {**payload, **fields}
+
+
 
 def _actionable_first(payload):
     """`payload` with `_ACTIONABLE` keys first, in that order, then the rest in
@@ -6710,6 +6744,7 @@ def handle(message: dict) -> dict | None:
         # session holds now; issue #1694: a refusal of the same call as the
         # refusal just before it says so instead of repeating byte for byte
         state = _ambient.footer(SESSION)
+        payload = _attempt_fields(name, payload)
         payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
         payload = _ambient.stamp(payload, state)
         result = {
@@ -6755,7 +6790,10 @@ def _hatch_call(arguments: dict) -> dict:
             next=_remedy.call(_disclosure.DISCOVERY, {}))
     # the inner call is a call: `args` is checked against the named verb's
     # own schema, exactly as a direct call's arguments are (issue #2532)
-    return _unknown_arguments(verb, args) or _call_tool(verb, args)
+    payload = _unknown_arguments(verb, args) or _call_tool(verb, args)
+    # issue #2690: the hatch is documented as indistinguishable from a direct
+    # call, so its check/admit refusals carry the attempt fields too
+    return _attempt_fields(verb, payload)
 
 
 def _unknown_arguments(name: str, arguments: dict) -> dict | None:

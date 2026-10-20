@@ -1,0 +1,212 @@
+"""Issue #2690: refusals carry an attempt count and the remaining budget.
+
+`revl_check` and `revl_admit` are the loop's verdict verbs, and a caller
+driving a retry loop could not tell a first refusal from a tenth: nothing on
+the refusal said how many attempts this unit of work had already spent, or how
+many the operator allowed. Every refusal from those two verbs now carries
+`attempt` (1-based, on the loaded composition, reset by a fresh load or an
+accepted call) and `attemptsRemaining` (only when the session was served with
+`--attempt-limit`, absent otherwise and never a made-up number). The count is
+advisory: reaching the limit changes nothing about admission, only what the
+caller is told. The aggregate rides on `revl_state`'s `loopAxes` report with
+the other session measures.
+"""
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl.mcp import repeat  # noqa: E402
+from revl.mcp.loop_axes import LoopAxes  # noqa: E402
+from revl.mcp.server import SESSION, handle  # noqa: E402
+
+needs_cordis = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="booting a composition needs the cordis-py runtime; install it with "
+           "`sh backends/python/setup.sh` and run under its venv")
+
+GOOD = "component Ok {\n}\n"
+BAD = "component Broken {\n"
+
+
+def _call(tool: str, arguments: dict) -> dict:
+    response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": tool, "arguments": arguments}})
+    return response["result"]["structuredContent"]
+
+
+@pytest.fixture(autouse=True)
+def _fresh():
+    """A fresh attempt counter and no configured limit, per test."""
+    old_axes = SESSION._loop_axes
+    old_limit = getattr(SESSION, "attempt_limit", None)
+    old_generation = SESSION._generation
+    SESSION._loop_axes = LoopAxes()
+    SESSION.attempt_limit = None
+    repeat.forget()
+    try:
+        yield
+    finally:
+        if SESSION.loaded:
+            SESSION.unload()
+        SESSION._loop_axes = old_axes
+        SESSION.attempt_limit = old_limit
+        SESSION._generation = old_generation
+        repeat.forget()
+
+
+# ------------------------------------------------------------------ the count
+
+
+def test_three_consecutive_check_refusals_count_up():
+    payloads = [_call("revl_check", {"source": BAD}) for _ in range(3)]
+    assert [p["attempt"] for p in payloads] == [1, 2, 3]
+    assert all(p["ok"] is False for p in payloads)
+    # no limit was configured, so no budget is invented
+    assert all("attemptsRemaining" not in p for p in payloads)
+
+
+def test_a_configured_limit_reports_the_remaining_budget():
+    SESSION.attempt_limit = 3
+    payloads = [_call("revl_check", {"source": BAD}) for _ in range(3)]
+    assert [p["attemptsRemaining"] for p in payloads] == [2, 1, 0]
+
+
+def test_past_the_limit_the_budget_stays_zero_and_admission_is_unchanged():
+    SESSION.attempt_limit = 1
+    first = _call("revl_check", {"source": BAD})
+    second = _call("revl_check", {"source": BAD})
+    assert (first["attempt"], first["attemptsRemaining"]) == (1, 0)
+    assert (second["attempt"], second["attemptsRemaining"]) == (2, 0)
+    # advisory only: the over-budget call is refused for its own reason,
+    # with its diagnostics intact, not for having spent the budget
+    assert second["ok"] is False and second["diagnostics"]
+    assert not any("budget" in d.get("message", "")
+                   for d in second["diagnostics"])
+
+
+def test_an_accepted_call_resets_the_count():
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    assert _call("revl_check", {"source": GOOD})["ok"] is True
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+
+
+def test_admit_refusals_carry_the_count_and_budget():
+    SESSION.attempt_limit = 2
+    first = _call("revl_admit", {"source": BAD, "manifest": {}})
+    second = _call("revl_admit", {"source": BAD, "manifest": {}})
+    assert (first["attempt"], first["attemptsRemaining"]) == (1, 1)
+    assert (second["attempt"], second["attemptsRemaining"]) == (2, 0)
+    assert first["admitted"] is False and second["admitted"] is False
+
+
+def test_check_and_admit_share_one_counter():
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_admit", {"source": BAD, "manifest": {}})["attempt"] == 2
+    assert _call("revl_check", {"source": BAD})["attempt"] == 3
+
+
+def test_a_refusal_through_the_verbs_hatch_carries_the_count_too():
+    first = _call("revl_verbs", {"name": "revl_check",
+                                 "args": {"source": BAD}})
+    second = _call("revl_verbs", {"name": "revl_check",
+                                  "args": {"source": BAD}})
+    assert (first["attempt"], second["attempt"]) == (1, 2)
+    assert "attemptsRemaining" not in first
+
+
+def test_a_new_generation_starts_a_new_unit():
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    # a swap, rollback or undo moves the generation without a load
+    SESSION._generation += 1
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+
+
+def test_a_refused_load_does_not_start_a_new_unit():
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    refused = _call("revl_load", {"source": BAD})
+    assert refused["ok"] is False
+    assert _call("revl_check", {"source": BAD})["attempt"] == 2
+
+
+def test_a_limit_below_one_is_a_usage_error():
+    from revl.cli.parser import build_parser  # noqa: PLC0415
+
+    for value in ("0", "-2"):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["mcp", "serve", "--attempt-limit", value])
+
+
+@needs_cordis
+def test_a_fresh_load_starts_a_new_unit_of_work():
+    assert _call("revl_load", {"source": GOOD})["ok"]
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    assert _call("revl_unload", {})["ok"]
+    assert _call("revl_load", {"source": GOOD})["ok"]
+    # generation starts at 1 again, but this is a new unit: the count restarts
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+
+
+# ------------------------------------------- the success paths are untouched
+
+
+def test_a_successful_check_is_byte_identical_and_carries_no_attempt_fields():
+    first = _call("revl_check", {"source": GOOD})
+    second = _call("revl_check", {"source": GOOD})
+    assert first["ok"] is True and second["ok"] is True
+    assert "attempt" not in first and "attemptsRemaining" not in first
+    assert first == second
+
+
+def test_a_successful_admit_carries_no_attempt_fields():
+    out = _call("revl_admit", {"source": GOOD, "manifest": {}})
+    assert out["ok"] is True and out["admitted"] is True
+    assert "attempt" not in out and "attemptsRemaining" not in out
+
+
+# ------------------------------------------------------ the loop-axes report
+
+
+def test_the_loop_axes_report_carries_the_attempt_and_budget():
+    SESSION.attempt_limit = 3
+    _call("revl_check", {"source": BAD})
+    _call("revl_check", {"source": BAD})
+    axes = _call("revl_state", {})["loopAxes"]
+    assert axes["attempt"] == 2
+    assert axes["attemptsRemaining"] == 1
+
+
+def test_the_loop_axes_report_omits_the_budget_without_a_limit():
+    _call("revl_check", {"source": BAD})
+    axes = _call("revl_state", {})["loopAxes"]
+    assert axes["attempt"] == 1
+    assert "attemptsRemaining" not in axes
+
+
+# ------------------------------------------------------- the session setting
+
+
+def test_the_serve_flag_binds_the_session_limit():
+    from revl.cli.interop import _bind_session_authority  # noqa: PLC0415
+    from revl.cli.parser import build_parser  # noqa: PLC0415
+
+    args = build_parser().parse_args(["mcp", "serve", "--attempt-limit", "2"])
+    assert _bind_session_authority(args) is None
+    assert SESSION.attempt_limit == 2
+    default = build_parser().parse_args(["mcp", "serve"])
+    assert default.attempt_limit is None
+
+
+def test_the_limit_does_not_change_what_a_call_does():
+    SESSION.attempt_limit = 1
+    refused = _call("revl_check", {"source": BAD})
+    accepted = _call("revl_check", {"source": GOOD})
+    assert refused["ok"] is False and refused["diagnostics"]
+    assert accepted["ok"] is True and accepted["selfCheck"]

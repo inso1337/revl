@@ -21,6 +21,21 @@ BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
 REPLAY_MODES = ("exact", "tool-only", "model-substitute", "counterfactual")
 
 
+def _attempt_limit(text: str) -> int:
+    """A positive attempt budget for `--attempt-limit` (issue #2690). Zero or
+    a negative value would only ever report `attemptsRemaining: 0`, so it is
+    refused as the usage error it is rather than read as a budget."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of attempts, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            "the attempt limit must be at least 1 (omit the flag for no limit)")
+    return value
+
+
 def _add_exposure_arguments(sub) -> None:
     """The listener options every revl HTTP server shares (issue #1463,
     `revl.mcp.http_guard`): TLS, and the Host and Origin allowlists."""
@@ -1143,6 +1158,15 @@ def build_parser() -> argparse.ArgumentParser:
                                 "`trusted` lets it author host code, and stamps "
                                 "every class-(c) ticket with the unreviewed host "
                                 "bodies a yes would also run")
+    mcp_serve.add_argument("--attempt-limit", type=_attempt_limit, default=None,
+                           metavar="N",
+                           help="the attempt budget for the check/admit loop "
+                                "(issue #2690): a refusal from revl_check or "
+                                "revl_admit carries `attempt` and, when this "
+                                "is set, `attemptsRemaining`. Omit for no "
+                                "limit, in which case no `attemptsRemaining` "
+                                "is reported. Advisory only: the budget never "
+                                "changes admission")
     mcp_serve.add_argument("--provider", action="append", default=[],
                            metavar="MODULE.rvl",
                            help="an OPERATOR-sanctioned host-code module the "

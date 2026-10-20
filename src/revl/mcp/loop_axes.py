@@ -41,6 +41,10 @@ The definitions (docs/harness-gate-guide.md carries the same text):
     Unresolved compensation records `revl_abort` left (the `compensationResidue`
     it returns) over the aborts. A failed swap that reboots its predecessor is
     not an abort here.
+
+Issue #2690 adds `attempt` and, when the operator configured a budget,
+`attemptsRemaining`: the refusals of the current unit of work, reported beside
+the six axes rather than as one of them, because it has no denominator.
 """
 
 from __future__ import annotations
@@ -144,6 +148,12 @@ class LoopAxes:
         self.refused_at_run = 0
         self.aborts = 0
         self.abort_residue = 0
+        # issue #2690: refused verdicts on the current unit of work, so a
+        # caller driving the check/admit loop can tell a first refusal from a
+        # tenth. `_attempt_unit` is what the count belongs to (the session's
+        # load epoch, moved by a fresh load).
+        self.attempt = 0
+        self._attempt_unit = None
 
     # -- producers --------------------------------------------------------
 
@@ -166,6 +176,19 @@ class LoopAxes:
     def record_abort(self, residue: list) -> None:
         self.aborts += 1
         self.abort_residue += len(residue or [])
+
+    def record_attempt(self, unit, refused: bool) -> None:
+        """One verdict from `revl_check`/`revl_admit` on the unit of work
+        `unit` (issue #2690). A refusal spends an attempt; an accepted call
+        resets the count, and so does a fresh load, because its epoch is a
+        different unit. Advisory only: admission never reads it."""
+        if unit != self._attempt_unit:
+            self._attempt_unit = unit
+            self.attempt = 0
+        if refused:
+            self.attempt += 1
+        else:
+            self.attempt = 0
 
     def record_tool(self, name: str, arguments: dict, payload: dict,
                     touched: list[str] | None) -> None:
@@ -191,14 +214,14 @@ class LoopAxes:
 
     # -- the report -------------------------------------------------------
 
-    def document(self, live_owner=None) -> dict:
+    def document(self, live_owner=None, attempt_limit=None) -> dict:
         crossed = sum(self.boundary.values())
         prompts = self.closed_prompts
         sessions = self.closed_sessions
         if live_owner is not None:
             prompts += sum((live_owner.prompts or {}).values())
             sessions += 1
-        return {
+        report = {
             "reversibilityRate": _axis(self.boundary["a"], crossed),
             "autoApprovedWithProof": _axis(self.boundary["a"] + self.boundary["b"],
                                            crossed),
@@ -208,4 +231,11 @@ class LoopAxes:
                 self.refused_before, self.refused_before + self.refused_at_run),
             "residueAfterAbort": _axis(self.abort_residue, self.aborts),
             "boundaryCalls": {**self.boundary, "unclassified": self.unclassified},
+            # issue #2690: the aggregate attempt count rides here with the
+            # other session measures. `attemptsRemaining` is absent unless the
+            # operator configured a limit, never a made-up number.
+            "attempt": self.attempt,
         }
+        if attempt_limit is not None:
+            report["attemptsRemaining"] = max(0, attempt_limit - self.attempt)
+        return report

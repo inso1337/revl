@@ -836,6 +836,15 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #2690: the operator-configured attempt budget for the
+        # check/admit loop (`revl mcp serve --attempt-limit N`). None = no
+        # limit, so refusals carry no `attemptsRemaining` at all. Advisory:
+        # the counter never changes admission.
+        self.attempt_limit = None
+        # issue #2690: moved by every fresh load, so the attempt count is per
+        # unit of work and a reload starts it again even when the generation
+        # number restarts at 1.
+        self._load_epoch = 0
         # issue #1708: the receipts `act` records, one per proposed action, in
         # order. The commit manifest lists them; teardown drops them
         self._actions: list = []
@@ -1324,6 +1333,9 @@ class Session:
         _reflect_bridge.bind(self)
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
+        # issue #2690: a fresh load is a fresh unit of work, so the attempt
+        # count restarts even though the generation number does not.
+        self._load_epoch += 1
         self._history = []
         # item 473: a fresh driver has recorded nothing and a fresh session has
         # sealed nothing, so the producer starts at the origin of both
@@ -9798,8 +9810,10 @@ class Session:
 
     def loop_axes(self) -> dict:
         """The agent-loop axes of issue #1738 (`revl.mcp.loop_axes`), each a
-        numerator, a denominator and their ratio, cumulative for the session."""
-        return self._loop_axes.document(self._owner)
+        numerator, a denominator and their ratio, cumulative for the session.
+        Issue #2690 adds the current unit's attempt count and, only when the
+        operator configured one, the remaining budget."""
+        return self._loop_axes.document(self._owner, self.attempt_limit)
 
     def record_tool_call(self, name: str, arguments: dict, payload: dict,
                          ir_before: dict | None) -> None:

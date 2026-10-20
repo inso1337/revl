@@ -371,6 +371,13 @@ are cumulative for the whole MCP session: an unload, a commit or an abort does
 not reset them. Each is `{numerator, denominator, value}`, where `value` is the
 ratio rounded to four places, or null while the denominator is 0.
 
+Beside them, since issue #2690, the same report carries `attempt` and, when the
+server was served with `--attempt-limit`, `attemptsRemaining`: the refusals
+`revl_check` and `revl_admit` have spent on the current unit of work (the
+loaded composition at its current generation). They are not axes and have no
+denominator; both reset on a fresh load, a new generation or an accepted
+check/admit, and `attemptsRemaining` is absent without a configured limit.
+
 | axis | numerator | denominator |
 |---|---|---|
 | `reversibilityRate` | executed boundary calls witnessed with a registered inverse, class (a) | executed boundary calls, classes (a), (b) and (c) |
