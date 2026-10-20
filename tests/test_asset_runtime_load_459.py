@@ -69,6 +69,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -94,9 +95,42 @@ _GUARD_SRC = _BACKEND_PY / "revl_fs_workspace.py"
 _TEMPLATE = "<h1>{{html:title}}</h1>\n"
 _TEMPLATE_SHA = hashlib.sha256(_TEMPLATE.encode("utf-8")).hexdigest()
 
-_HAS_NODE = shutil.which("node") is not None
+
+def _node_ts_skip_reason() -> "str | None":
+    """The reason the PATH's node cannot run the emitted ts thunks, or None.
+
+    Presence is not capability: a node older than the type-stripping release
+    answers `which node` and then dies on the first `.ts` file with
+    ERR_UNKNOWN_FILE_EXTENSION, which reads as a portability failure on this
+    platform rather than a toolchain version. Probe the capability on a real
+    `.ts` file (the `-e` inline form never strips) and name the version found,
+    so the skip says what to install.
+    """
+    node = shutil.which("node")
+    if node is None:
+        return "node is required to run the emitted ts ref thunks"
+    try:
+        version = subprocess.run(
+            [node, "--version"], capture_output=True, text=True,
+            timeout=30).stdout.strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "probe.ts"
+            probe.write_text("const n: number = 41\nconsole.log(n + 1)\n",
+                             encoding="utf-8")
+            run = subprocess.run(
+                [node, str(probe)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ("node is required to run the emitted ts ref thunks, "
+                "but could not be probed")
+    if run.returncode == 0 and run.stdout.strip() == "42":
+        return None
+    return (f"node {version or 'unknown'} found, needs one that runs .ts "
+            f"directly (type stripping is on by default from 22.18 and 23.6)")
+
+
+_NODE_TS_REASON = _node_ts_skip_reason()
 _needs_node = pytest.mark.skipif(
-    not _HAS_NODE, reason="node is required to run the emitted ts ref thunks")
+    _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
 
 
 # ===========================================================================
