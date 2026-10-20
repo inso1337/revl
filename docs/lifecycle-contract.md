@@ -59,8 +59,10 @@ A `FAILED` fiber does not by itself decide the `load` step's verdict, because th
 tiers differ on a host error. An error a `fail` step raises fails the `load` on
 every tier, naming the component and the error (issue #2378). A HOST error
 raised by the activation body, for example by a host function that raises, fails
-the `load` on the go and rust tiers in their emitted code, neither of which
-has an execution test for it. The java path is established only against the
+the `load` on the go and rust tiers in their emitted code. Go's host-error
+`load` does have an execution test: `tests/test_go_lifecycle_residue_2505.py`
+loads a component whose activation panics and asserts the `load` reports it.
+Rust is the tier without one. The java path is established only against the
 in-repo cordis4j stub, and the ts emitter's load awaits the fiber, but no test
 or installed runner executes a failing load. On the python tier the `load`
 settles, the error is recorded on the fiber, and it is reported at the next
