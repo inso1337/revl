@@ -241,6 +241,15 @@ SELFHOST_ALWAYS = (
     "tests/test_no_embedded_frontend_document_1120.py",
 )
 
+# The text-mode `open()` encoding guard (issue #2648) walks every `.py` in the
+# tree and fails on a new unpinned text-mode `open()` or `Path.open()`. The file
+# that adds one is usually connected to nothing else the diff selects: a test
+# adding `open(target)` names no compiler module, no tier and no stdlib file, so
+# no path rule can find it. Any `.py` change selects it, because a diff that
+# cannot touch Python cannot add the call. A documentation-only diff keeps its
+# exact cost bound and does not pay for the walk.
+OPEN_ENCODING_GUARD = "tests/test_open_encoding_guard.py"
+
 # Which self-host emitter port mirrors a backend tier's REFERENCE emitter:
 # `backends/<package>/emit.py` is what `selfhost/emit_<stem>.rvl` is held
 # byte-identical to by the oracle tests. Keyed by the tier directory name, so
@@ -1384,6 +1393,10 @@ def select(changed, root) -> dict:
     ci_inputs = ci_backend_corpus_inputs(root)
 
     pytest_nodes: set[str] = set()
+    # A whole-tree read has no path set to select on, so every `.py` change
+    # carries it; a non-Python diff cannot add the call. See the constant.
+    if any(f.endswith(".py") for f in changed):
+        pytest_nodes.add(OPEN_ENCODING_GUARD)
     backends: set[str] = set()
     # `ruff` because lint is cheap. `vocabulary`
     # (`tools/check_vocabulary_mirrors.py`) because it has NO path set to

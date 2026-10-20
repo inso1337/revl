@@ -200,7 +200,7 @@ def test_an_honest_rm_of_a_write_only_file_still_reverses(workspace):
 
     assert os.stat(target).st_mode & 0o777 == 0o200
     os.chmod(target, 0o600)
-    assert open(target).read() == "payload"
+    assert open(target, encoding="utf-8").read() == "payload"
 
 
 def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
@@ -278,7 +278,7 @@ def test_a_same_tick_in_place_rewrite_is_refused(workspace):
 
     assert not os.path.exists(target), \
         "the rewritten sidecar was installed back over the original path anyway"
-    assert open(sidecar).read() == "POISON!", "the refused sidecar was consumed"
+    assert open(sidecar, encoding="utf-8").read() == "POISON!", "the refused sidecar was consumed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
@@ -414,7 +414,7 @@ def test_a_capture_with_the_digest_key_dropped_still_reverses(workspace):
 
     mod.unrm(witness)
 
-    assert open(target).read() == "payload"
+    assert open(target, encoding="utf-8").read() == "payload"
     assert not os.path.exists(sidecar)
 
 
@@ -447,7 +447,7 @@ def test_the_installed_digest_is_rechecked_after_the_rename(workspace, monkeypat
     assert swapped["done"], "the window was never forced"
     assert ei.value.code == "EIDENTITY"
     assert "unremoved target" in ei.value.message
-    assert open(target).read() == "POISON!", \
+    assert open(target, encoding="utf-8").read() == "POISON!", \
         "the post-rename refusal leaves the drifted file at the target as residue"
 
 
