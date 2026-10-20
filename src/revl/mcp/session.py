@@ -2077,7 +2077,12 @@ class Session:
           refuses here rather than migrating. Quiesce it, or use a trusted
           operator swap. A template the successor re-declares with the SAME code
           (#2423 follow-up) is not a crossing: the state is re-seated on the
-          operator's own text, so an unrelated edit still lands.
+          operator's own text, so an unrelated edit still lands. "Same code"
+          covers the whole observable surface, not just the template's own
+          entry: a successor that keeps the template byte-identical but CHANGES
+          a component that spawns it (and so holds a handle to the migrated
+          instances) can read the operator's state through that handle, so the
+          holders are part of the identity and that case refuses too.
         * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
           (a `handoff` on both the predecessor and the successor), but propose's
           decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
@@ -2099,9 +2104,13 @@ class Session:
                 continue
             # only a template the successor CHANGES crosses the boundary. One
             # it re-declares unchanged, with the helpers and providers it calls
-            # unchanged too, is the operator's own code, so the live instance's
-            # state lands on the same text it ran on and the edit (unrelated to
-            # the template) is allowed to land (#2423 follow-up).
+            # and the components that spawn it (its holders) unchanged too, is
+            # the operator's own code, so the live instance's state lands on
+            # the same text it ran on and the edit (unrelated to the template)
+            # is allowed to land (#2423 follow-up). A changed HOLDER is a
+            # crossing even when the template itself is byte-identical: the
+            # holder's new method reads the re-seated state through its spawn
+            # handle.
             old_code = old_codes[name]
             if old_code is not None and old_code == _template_code(new_ir, name):
                 continue
@@ -9839,6 +9848,33 @@ def _base_manifest_hash_of(ir: dict | None) -> str | None:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+#: IR keys that spell WHERE a node sits, not what it does: the source position
+#: a comment or a blank line above it moves (`line`, and the span fields a
+#: future lowerer may add), or the file it was read from (`file`, `source`).
+#: `_component_signature` drops them recursively. This is load-bearing for the
+#: #2423 follow-up: a spawn step carries a `line`, so a leading comment above
+#: the live nested template used to move `_template_code` and refuse a
+#: textually identical template with STATE_UNDISCLOSED.
+_LAYOUT_ONLY_IR_KEYS = frozenset({
+    "line", "col", "column", "end_line", "offset", "span", "file", "source",
+})
+
+
+def _code_shape(value):
+    """`value` with every layout-only IR key dropped, recursively.
+
+    `source` is both the top-level component spelling and the hole node's file,
+    so dropping it here is what keeps a component's identity independent of the
+    path it was read from or staged at; `line` and the span fields keep it
+    independent of where a comment or a blank line puts it."""
+    if isinstance(value, dict):
+        return {k: _code_shape(v) for k, v in value.items()
+                if k not in _LAYOUT_ONLY_IR_KEYS}
+    if isinstance(value, list):
+        return [_code_shape(v) for v in value]
+    return value
+
+
 def _component_signature(comp: dict) -> str:
     """The content digest of ONE component's IR entry — its CODE IDENTITY, as
     opposed to its name (roadmap item 334).
@@ -9854,12 +9890,16 @@ def _component_signature(comp: dict) -> str:
     `source` (the file the component was declared in) is excluded: it is the
     spelling of a path, not of the component, and it moves for reasons that are
     not changes of code (a composition re-compiled from a different directory,
-    `propose`'s `candidate.rvl` staging name). Everything that IS the component
-    — its `body`, the keys it `provides`, what it `requires`, its `config`
-    declaration — is in, canonicalized the way every other digest here is."""
+    `propose`'s `candidate.rvl` staging name). The same holds for every other
+    layout-only field (`_LAYOUT_ONLY_IR_KEYS`), recursively: a `line` is where
+    the node sits in the file, and a component whose only move is a comment or
+    a blank line above it is still the same code. Everything that IS the
+    component — its `body`, the keys it `provides`, what it `requires`, its
+    `config` declaration — is in, canonicalized the way every other digest here
+    is."""
     import json  # noqa: PLC0415 — stdlib
-    payload = json.dumps({k: v for k, v in comp.items() if k != "source"},
-                         sort_keys=True, separators=(",", ":"), default=_plain)
+    payload = json.dumps(_code_shape(comp), sort_keys=True,
+                         separators=(",", ":"), default=_plain)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -9876,10 +9916,52 @@ def _reached_code_names(node, acc: set) -> set:
     return acc
 
 
+def _spawn_holders(ir: dict, name: str) -> set:
+    """Every component that (transitively) HOLDS a spawn handle to `name`: the
+    reverse of the instance graph (`docs/design-v2-instances.md`).
+
+    A `spawn C` in a component's body — activation step or `provide` method
+    alike — takes a handle whose reads reach C's live instance. So the code
+    that can OBSERVE a live instance's state is not only C: it is also every
+    component that spawns C, and every component that spawns those. A
+    successor that leaves C byte-identical but rewrites its spawner's method to
+    read through the migrated handle still crosses the trust boundary
+    (#2423 follow-up review), so those holders are part of C's identity.
+
+    Returns the holder names, excluding `name` itself; empty when nothing
+    spawns it."""
+    parents: dict = {}
+
+    def walk(node, holder: str) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "spawn" and isinstance(
+                    node.get("component"), str):
+                parents.setdefault(node["component"], set()).add(holder)
+            for value in node.values():
+                walk(value, holder)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, holder)
+
+    for comp in ir.get("components") or []:
+        holder = comp.get("name")
+        if holder:
+            walk(comp.get("body") or [], holder)
+    holders: set = set()
+    frontier = [name]
+    while frontier:
+        for parent in parents.get(frontier.pop(), ()):
+            if parent != name and parent not in holders:
+                holders.add(parent)
+                frontier.append(parent)
+    return holders
+
+
 def _template_code(ir: dict, name: str):
     """The code identity of a template (#2423 follow-up): its component entry,
-    every top-level function and extern it calls or refers to, and the
-    components that provide the services it (transitively) requires.
+    every top-level function and extern it calls or refers to, the components
+    that provide the services it (transitively) requires, AND the components
+    that (transitively) spawn it and so hold a handle to its live instances.
 
     `_component_signature` alone names code that lives in the component. A
     template whose body calls a helper from a `use`-reached module keeps the
@@ -9888,6 +9970,14 @@ def _template_code(ir: dict, name: str):
     its entry while the provider it calls changes. Both move the code a live
     instance's state is re-seated onto and can observe, so both are part of the
     template's identity here. A component the template does not reach is not.
+
+    The reverse spawn edges are the other half (`_spawn_holders`). The
+    item-10 live-instance channel correlates old and new by the template's
+    NAME, and generational capture re-seats the operator's state onto the
+    successor's instances; the successor's HOLDER then reads that state through
+    its own spawn handle. A supervisor rewritten to expose the migrated state
+    while `Worker` stays byte-identical is therefore a change of the code the
+    state is re-seated under, and refuses here rather than migrating.
 
     Returns `(component signatures, reached code)`, or `None` when the
     composition declares no such component."""
@@ -9903,7 +9993,7 @@ def _template_code(ir: dict, name: str):
             providers.setdefault(key, []).append(comp["name"])
     reached: dict = {}
     seen: set = set()
-    frontier = [name]
+    frontier = sorted(_spawn_holders(ir, name) | {name})
     while frontier:
         cname = frontier.pop()
         if cname in seen:

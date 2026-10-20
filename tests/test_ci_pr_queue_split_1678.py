@@ -11,7 +11,9 @@ Since issue #1817 two more jobs are conditional on a pull request: the six
 `backend-*` jobs skip when `changes` reports `backends == 'false'` (no changed
 path is one a backend job can observe), which the drain accepts as SKIPPED, and
 `root-suite-affected` runs on pull requests only, because `frontend` runs the
-whole root suite on every other event.
+whole root suite on every other event. Issue #2672's review adds
+`swap-template-cordis`, PR-only and advisory: `frontend-cordis` runs the same
+swap and authoring suites with the cordis runtime on every other event.
 
 This file evaluates each job's `if:` and `needs:` per event and pins that split.
 A job's `if:` is evaluated for real, not pattern-matched: the conditions in
@@ -42,8 +44,11 @@ BACKENDS = frozenset({
 })
 REQUIRED = frozenset({"lint"}) | BACKENDS
 # A job that runs on pull requests only, and the job that covers it on every
-# other event (issue #1817).
-PR_ONLY = {"root-suite-affected": "frontend"}
+# other event (issue #1817; #2672's review adds a second PR-only job).
+PR_ONLY = {
+    "root-suite-affected": "frontend",
+    "swap-template-cordis": "frontend-cordis",
+}
 NON_PR_EVENTS = ("merge_group", "push", "schedule", "workflow_dispatch",
                  "workflow_call")
 
@@ -74,6 +79,9 @@ def _evaluate(cond, event: str, frontend: str, backends: str = "true") -> bool:
     values = {"github.event_name": event,
               "needs.changes.outputs.frontend": frontend,
               "needs.changes.outputs.backends": backends,
+              # #2672's review adds the swap/authoring selector; the job skips
+              # only on its exact 'false' answer, so a code PR is 'true'.
+              "needs.changes.outputs.swap": "true",
               "needs.lint.result": "success"}
     out: list[str] = []
     pos = 0
