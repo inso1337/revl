@@ -165,7 +165,9 @@ def test_an_export_area_swap_reports_the_host_code_the_inline_one_does(
     # OPERATOR's `notify` and drops the author's body would satisfy the equality
     # below while crediting the operator's code to the author. The body the author
     # really wrote has to be named, in both doors.
-    assert "candidate_note" in {e["extern"] for e in inline["unreviewedHostCode"]}, inline
+    inline_externs = {entry["extern"] for entry in inline["unreviewedHostCode"]}
+    assert "candidate_note" in inline_externs, inline
+    assert "notify" not in inline_externs, inline
 
     exported = _exported(tmp_path, _CANDIDATE)
     from revl.export_area import in_export_area
@@ -179,6 +181,10 @@ def test_an_export_area_swap_reports_the_host_code_the_inline_one_does(
     _clear_held_swap()
     through_file = _swapped_ticket(transport, tmp_path,
                                    {"files": [str(exported)]})
+    exported_externs = {
+        entry["extern"] for entry in through_file["unreviewedHostCode"]
+    }
+    assert "notify" not in exported_externs, through_file
 
     assert through_file.get("unreviewedHostCode") == \
         inline["unreviewedHostCode"], through_file

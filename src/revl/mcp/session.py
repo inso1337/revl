@@ -522,6 +522,9 @@ class _SwapPlan:
     # transport whatever the authoring-trust config), so a hand-off from a frame
     # that spans realms starts cold (`_restore_provider_state`)
     agent_authored: bool = False
+    # the `migrate` label that captured `pre`, named in the migration report so
+    # a declared swap does not report itself as generational (issue #2673)
+    policy: str = "generational"
 
 
 def _container_copy(value):
@@ -1810,7 +1813,10 @@ class Session:
           BEFORE teardown with STATE_UNDISCLOSED, gen N untouched, rather than
           being silently migrated by candidate-written template name + host class
           alone. A template the successor re-declares with the same code is the
-          operator's own and is not a crossing (#2423 follow-up).
+          operator's own and is not a crossing (#2423 follow-up); its live
+          instance state is captured and re-seated exactly as under
+          ``"generational"`` (issue #2673), so the admitted edit does not leave
+          the instance cold.
           The same gate runs for ANY `agent_authored` successor, whatever
           `migrate` says (issue #2423); `declared` is how `Gate.propose` selects
           it.
@@ -1889,13 +1895,19 @@ class Session:
         source = self._render_or_refuse(driver, ir)
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
-        # non-instance swap is byte-identical to before. The item-10 instance
-        # channel has no declared type contract at any door, so it is NOT crossed
-        # under `declared` (the disclosure gate above already refused a live
-        # instance the agent successor would inherit); only `generational`
-        # (operator->operator) reconciles it.
+        # non-instance swap is byte-identical to before. `declared` captures
+        # too: the disclosure gate above has already refused every live template
+        # the successor CHANGES, so what is still live here is a template the
+        # successor re-declares with the same code (#2423) or drops outright.
+        # The gate admits the former precisely because the state is re-seated on
+        # the operator's own text, and the state-compat check in
+        # `_reconcile_instances` refuses the latter rather than dropping it.
+        # Without this capture a re-declared template passed the gate and then
+        # came up cold, dropping the operator's state (issue #2673). `respawn`
+        # stays cold-start (F4): rollback and undo route through it, and
+        # capturing there would launder the rolled-back generation's writes.
         pre = (self._capture_instances(old_ir, ir)
-               if migrate == "generational" else {})
+               if migrate != "respawn" else {})
         # item 53: capture each stateful *provider's* live state (its
         # effect-created world) before teardown too, so a component that
         # declared a `handoff` starts its successor warm. Admission (or, under
@@ -1921,7 +1933,7 @@ class Session:
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
                          agent_authored=(migrate == "declared" or agent_authored),
-                         pre_pending=pre_pending)
+                         pre_pending=pre_pending, policy=migrate)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -2000,7 +2012,7 @@ class Session:
         handoff = None
         if pre:
             try:
-                migration = self._reconcile_instances(pre)
+                migration = self._reconcile_instances(pre, policy=plan.policy)
             except driver.runtime.StateIncompatible as exc:
                 # atomicity (Q4): unwind the whole swap and re-seat the original
                 # instance state, so a rejected migration leaves nothing changed
@@ -2077,7 +2089,9 @@ class Session:
           refuses here rather than migrating. Quiesce it, or use a trusted
           operator swap. A template the successor re-declares with the SAME code
           (#2423 follow-up) is not a crossing: the state is re-seated on the
-          operator's own text, so an unrelated edit still lands. "Same code"
+          operator's own text, so an unrelated edit still lands. The capture and
+          re-seat are the generational ones, and they run under `declared` too
+          (issue #2673). "Same code"
           covers the whole observable surface, not just the template's own
           entry: a successor that keeps the template byte-identical but CHANGES
           a component that spawns it (and so holds a handle to the migrated
@@ -2179,7 +2193,8 @@ class Session:
             }
         return pre
 
-    def _reconcile_instances(self, pre: dict) -> dict:
+    def _reconcile_instances(self, pre: dict,
+                             policy: str = "generational") -> dict:
         """Gate then migrate (Q2/Q3). Two passes so the whole cohort is checked
         before any of it is written — a single incompatible instance rejects the
         migration with nothing applied (Q4)."""
@@ -2200,7 +2215,7 @@ class Session:
             for handle, cap in pairs:
                 handle.check_state(cap)  # gate only, no mutation
             plan[name] = pairs
-        report = {"policy": "generational", "templates": {}}
+        report = {"policy": policy, "templates": {}}
         for name, pairs in plan.items():
             for handle, cap in pairs:
                 handle.restore_state(cap)
