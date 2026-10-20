@@ -80,7 +80,9 @@ def test_a_module_at_the_providers_file_is_refused(tmp_path, spelling):
 
 def test_the_refusal_compiles_nothing_with_the_agents_text(tmp_path):
     """The refusal is the only outcome: no composition exists in which the
-    agent's `OpsProvider` provides `tool`."""
+    agent's `OpsProvider` stands in for the provider. The refusal comes before
+    any compile, so the report check below documents that rather than adding a
+    case over the absolute-path test."""
     report: dict = {}
     with pytest.raises(RevlError):
         server.compile_under_authoring(

@@ -219,8 +219,8 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
     if fields.get("providers") is not None:
         # issue #2763: normalised ONCE, here, to the absolute path the compile
         # keys its in-memory modules by. `--provider` stores the path as the
-        # operator typed it, and the operator's cwd is the base it was read
-        # against, so `abspath` names the same file `open` did.
+        # operator typed it, relative to the cwd it was read against, so the
+        # absolute path is the one the compile keys that same text by.
         fields["providers"] = {os.path.abspath(path): text
                                for path, text in fields["providers"].items()}
     AUTHORING = replace(AUTHORING, **fields)

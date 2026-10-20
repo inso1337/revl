@@ -1038,7 +1038,7 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
         dies on a G2 provision conflict, so the target set came back
         undecidable and the swap sailed past both the operator gate and an
         enforced lease on the component it was replacing.
-      * the operator's sanctioned `providers` — composed beside the agent's own
+      * the operator's sanctioned `providers`, composed beside the agent's own
         `modules` exactly as `server.compile_under_authoring` composes them,
         with the same refusal of a module at a provider's file (issue #2763),
         so a composition that resolves for the handler resolves here too and
@@ -1052,7 +1052,7 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
     from ..compiler import compile_files, compile_source  # noqa: PLC0415 — see docstring
     from ..errors import RevlError as _RevlError  # noqa: PLC0415
 
-    from .server import (AUTHORING,  # noqa: PLC0415 — cycle
+    from .server import (AUTHORING,  # noqa: PLC0415  (cycle)
                          _refuse_provider_displacement)
 
     providers = dict(AUTHORING.providers or {})
