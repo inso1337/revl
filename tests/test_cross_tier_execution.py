@@ -204,6 +204,37 @@ test "NaN is unequal under !="          { assert fdiv(0.0, 0.0) != fdiv(0.0, 0.0
 test "negative zero equals zero"        { assert feq(scale(0.0, 0.0 - 1.0), 0.0) }
 """,
 
+    # Issue #2715: `==` between an `Int` and a `Float` is one language rule,
+    # and every tier must answer it the same way. The checker widens either
+    # side (compatible("Float", "Int")), but the widening used to be marked
+    # only on call arguments, `let` values and returns — never on an equality
+    # operand — so TypeScript compared `3n === 3`, which is FALSE, and go did
+    # not build at all (mismatched int64 and float64). python absorbed it.
+    # Both operand orders and three Int positions (a parameter, a record field
+    # and a list element) are probed, so a fix that only marks a bare `lit`
+    # does not pass.
+    "Int and Float equality agree": """
+pub fn eq_lit(x: Int) -> Bool { return x == 3.0 }
+pub fn ne_lit(x: Int) -> Bool { return x != 3.0 }
+pub fn eq_flip(x: Int) -> Bool { return 3.0 == x }
+pub fn ne_flip(x: Int) -> Bool { return 3.0 != x }
+pub fn eq_var(x: Int, y: Float) -> Bool { return x == y }
+type Row = { i: Int, f: Float }
+pub fn field_eq(r: Row) -> Bool { return r.i == 3.0 }
+pub fn field_ne(r: Row) -> Bool { return r.f != 3 }
+pub fn list_elem(xs: List[Int]) -> Bool { return xs[2] == 3.0 }
+
+test "Int equals Float"               { assert eq_lit(3) }
+test "Int not equal to a Float"       { assert !ne_lit(3) }
+test "the Float may be on the left"   { assert eq_flip(3) }
+test "and unequal from the left too"  { assert !ne_flip(3) }
+test "an Int variable widens"         { assert eq_var(3, 3.0) }
+test "a different value stays unequal" { assert !eq_lit(2) }
+test "a record field widens"          { assert field_eq({ i: 3, f: 3.0 }) }
+test "a Float field against an Int"   { assert !field_ne({ i: 3, f: 3.0 }) }
+test "a list element widens"          { assert list_elem([1, 2, 3]) }
+""",
+
     # The C1 contract (docs/collections.md, docs/stdlib-2.0.md §Map): keys()
     # yields ascending canonical Str order — a pure function of the key set,
     # never of insertion history (go/rust randomize by design; the fixture
@@ -711,6 +742,46 @@ def test_widening_is_marked_in_the_ir():
     assert find_widened(ir) is not None, (
         "an Int literal flowing into a Float parameter must carry the "
         '`"widen": "Float"` marker (docs/arithmetic.md)')
+
+
+def test_int_float_equality_marks_the_int_operand_in_the_ir():
+    """Issue #2715: the widening is on the OPERAND, in both orders, and only
+    when one side is a Float. Int against Int must stay unmarked, or the tiers
+    that keep BigInt and number apart would convert a sound comparison."""
+    ir = compile_source(
+        'pub fn eq(x: Int) -> Bool { return x == 3.0 }\n'
+        'pub fn eq_flip(x: Int) -> Bool { return 3.0 == x }\n'
+        'pub fn eq_int(x: Int) -> Bool { return x == 3 }\n',
+        "eq_widen.rvl")
+
+    def bins(node, found=None):
+        found = [] if found is None else found
+        if isinstance(node, dict):
+            if node.get("kind") == "bin" and node.get("op") == "==":
+                found.append(node)
+            for value in node.values():
+                bins(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                bins(value, found)
+        return found
+
+    marked = {}
+    for fn in ir["functions"]:
+        node = bins(fn)
+        if not node:
+            continue
+        operands = node[0]
+        marked[fn["name"]] = (
+            operands["left"].get("widen"),
+            operands["right"].get("widen"),
+        )
+    assert marked["eq"] == ("Float", None), (
+        "`x == 3.0` must widen the Int LEFT operand")
+    assert marked["eq_flip"] == (None, "Float"), (
+        "`3.0 == x` must widen the Int RIGHT operand")
+    assert marked["eq_int"] == (None, None), (
+        "Int against Int is already sound and must not be marked")
 
 
 @pytest.mark.parametrize("backend, conversion", [
