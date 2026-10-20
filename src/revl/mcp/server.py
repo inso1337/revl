@@ -658,6 +658,36 @@ def _host_bodies(ir: dict) -> list:
     return sorted(out, key=lambda e: str(e["extern"]))
 
 
+def _transport_authored(source: str | None, files: list[str] | None,
+                        modules: dict | None, report: dict) -> bool:
+    """Whether the document one `compile_under_authoring` compile returned
+    carries text that arrived over the transport (issue #2423 follow-up).
+
+    Read off the compile's own origins, and for the last case off the
+    authoring-trust config: `--author-trust trusted` says the operator vouches
+    for the agent's HOST CODE. Inline `source` and in-memory `modules` are text
+    the agent sent, and an edited buffer rides in `modules`
+    (`edit.file_modules` hands it over that way). A file inside an export
+    directory is the agent's by its path alone, whether `files` names it or a
+    `use` reached it, because `revl_export` is the only writer there (#2524);
+    the compile report names both (the paths the call listed and the modules it
+    read from disk). A files-only candidate outside every export area is the
+    operator's own jailed text, compiled unprofiled as at load, and is not
+    authored while host code is untrusted. Under `--author-trust trusted` it
+    is authored (issue #2672): the operator vouched for host bodies that can
+    rewrite any file the agent can reach, so an empty files-only swap must not
+    re-admit that file with the disclosure gate skipped.
+    """
+    if source is not None or modules:
+        return True
+    paths = set(files or ())
+    paths.update(report.get("disk_reads") or {})
+    paths.update(report.get("dependencies") or {})
+    if any(_export_jail.in_export_area(path) for path in paths):
+        return True
+    return AUTHORING.host_code
+
+
 def compile_under_authoring(source: str | None, files: list[str] | None,
                             manifest: dict | None = None,
                             modules: dict | None = None,
@@ -731,7 +761,12 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     `report` (issue #1779) is the caller-supplied out-parameter `compile_files`
     and `compile_source` take: the user-origin modules this compile read from
     the disk, mapped to the text it compiled for each. It is filled on the
-    compile whose document is returned and never enters that document.
+    compile whose document is returned and never enters that document. It also
+    reports `report["authored"]`: whether that document carries text that
+    arrived over the transport, read off the compile's origins (and, for a
+    files-only candidate, off `AUTHORING.host_code`; `_transport_authored`).
+    Callers that decide whether a successor is agent-authored read that key,
+    not `AUTHORING.profile()`.
     """
     base = AUTHORING.profile() if over_the_transport else None
     inline = source is not None or bool(modules)
@@ -762,6 +797,9 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         if riding:
             report["dependencies"] = {**(report.get("dependencies") or {}),
                                       **riding}
+        report["authored"] = (over_the_transport
+                              and _transport_authored(source, files, modules,
+                                                      report))
     return document
 
 
@@ -869,16 +907,21 @@ def _compile(source: str | None, files: list[str] | None,
     `modules` is POSITIONAL and has no default: a verb passes the whole
     candidate, `*_candidate_of(arguments)`, or it does not compile. The
     keyword-with-default it used to be is how three verbs dropped it."""
+    compile_report: dict = {}
     ir = compile_under_authoring(source, files, manifest=manifest,
-                                 modules=modules, replacing=replacing)
+                                 modules=modules, replacing=replacing,
+                                 report=compile_report)
     global _AUTHORED_HOST_BODIES
-    _AUTHORED_HOST_BODIES = _authored_host_bodies(ir, source, modules)
+    _AUTHORED_HOST_BODIES = _authored_host_bodies(
+        ir, source, modules,
+        export_area=_exported_candidate(files, compile_report) is not None)
     return ir
 
 
 def _authored_host_bodies(ir: dict, source: str | None,
                           modules: dict | None, *,
-                          export_area: bool = False) -> list:
+                          export_area: bool = False,
+                          compile_authored: bool = False) -> list:
     """The agent-authored host bodies `ir` carries: empty unless the candidate
     is the author's text under an open authoring trust.
 
@@ -889,8 +932,17 @@ def _authored_host_bodies(ir: dict, source: str | None,
     question about a profile, unlike the realm-removal check, which needs one to
     have been applied to have something to compare against. Issue #2628: a swap
     sent only as such a file reported no unreviewed host code, so the operator
-    approved a crossing without being told what the composition carried."""
-    authored = source is not None or bool(modules) or export_area
+    approved a crossing without being told what the composition carried.
+
+    `compile_authored` says the compile that produced `ir` reported the text as
+    authored (`report["authored"]`). Under trusted host code that includes a
+    files-only candidate outside every export area (issue #2672), because the
+    vouched-for host bodies can rewrite it on disk. The swap passes it so the
+    approval ticket names what the disclosure gate already treats as the
+    agent's text; leaving the ticket empty there would let a yes admit a
+    composition whose authorship the gate itself does not trust."""
+    authored = (source is not None or bool(modules) or export_area
+                or compile_authored)
     return (_host_bodies(ir) if authored and AUTHORING.host_code
             else [])
 
@@ -948,6 +1000,14 @@ def _fix_field(fix: str | None) -> dict:
     is omitted rather than set to null, so a reader can tell a refusal that has
     a remedy from one that has none."""
     return {} if fix is None else {"fix": fix}
+
+
+def _refusal_code(error: BaseException) -> dict:
+    """The machine-readable classification a refusal carries, when it has one
+    (`SessionError.code`, e.g. STATE_UNDISCLOSED), as an extra field for
+    `_session_error`."""
+    code = getattr(error, "code", None)
+    return {"code": code} if code else {}
 
 
 def _session_error(message: str | BaseException, category: str = "session",
@@ -1298,7 +1358,8 @@ def _tool_load(arguments: dict, compiled=None) -> dict:
             return _refused_by_lease(refusal)
     return _canonical.attach(
         _boot(ir, source, modules, arguments.get("config"),
-              _load_records(arguments.get("record")), origin), completed)
+              _load_records(arguments.get("record")), origin,
+              files=files, compile_report=compile_report), completed)
 
 
 def _load_records(requested) -> bool:
@@ -1339,10 +1400,22 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         next=_remedy.load_next())
 
 
-def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict, *,
+          files: list[str] | None = None,
+          compile_report: dict | None = None) -> dict:
     """Boot a compiled composition: `Session.load`, then record what it
-    authored. Shared by `revl_load` and a draft that has no holes left."""
-    authored = _authored_host_bodies(ir, source, modules)
+    authored. Shared by `revl_load` and a draft that has no holes left.
+
+    `files` and `compile_report` are the load caller's candidate, so a load
+    naming an export-area file reports the host code it carries exactly as a
+    swap does (issue #2641). `_exported_candidate` reads the named files and
+    the ones the compile reached by `use`. A draft boots through the same
+    function without them, which keeps its behaviour: a filled draft carries
+    its edited buffer in `modules`, so its bodies are reported as authored
+    before this value can matter."""
+    authored = _authored_host_bodies(
+        ir, source, modules,
+        export_area=_exported_candidate(files, compile_report or {}) is not None)
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
@@ -1526,8 +1599,10 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # profile was applied, which needs the gate further down. Sharing the call
     # keeps the two answers about the same files.
     export_texts = _exported_candidate(files, compile_report)
-    authored = _authored_host_bodies(full, source, modules,
-                                     export_area=export_texts is not None)
+    authored = _authored_host_bodies(
+        full, source, modules,
+        export_area=export_texts is not None,
+        compile_authored=bool(compile_report.get("authored")))
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
     # realm by leaving its clause out. A swap of jailed `files` is exempt
@@ -1545,9 +1620,16 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # (#2585).
     # issue #2600: only text that actually compiled under the profile is
     # compared. With `--author-trust trusted` the profile is none, so an
-    # export-area file compiles exactly as it did before #2524, it stays the
-    # operator's own, and a swap of it keeps the #2487 exemption. Deciding by
-    # path alone would refuse that operator a swap this door admitted before.
+    # export-area file compiles exactly as it did before #2524 and a swap of it
+    # keeps the #2487 exemption; deciding by path alone would refuse that
+    # operator a swap this door admitted before. That exemption is now known to
+    # be narrower than the authorship rule: issue #2672 makes the same file the
+    # agent's text for the disclosure gate, because the vouched-for host bodies
+    # can rewrite it on disk. Skipping the realm comparison here is therefore
+    # the wrong answer for a trusted export-area file. The skip is retained
+    # only because #2600's exemption is a separate decision: a trusted swap
+    # that drops a realm clause is a known gap in this check, not evidence that
+    # the file is the operator's own.
     exported = (export_texts
                 if AUTHORING.profile() is not None else None)
     if source is not None or modules or exported is not None:
@@ -1560,11 +1642,22 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # issue #1704: the same preflight revl_edit carries, read off the
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
+    # issue #2423: authorship decides whether the item-334 disclosure gate runs.
+    # The compile that produced `full` reports it (its `report["authored"]`),
+    # read off the text's origins: inline source and modules arrived over the
+    # transport, and an export-area file is the agent's by its path. A
+    # files-only candidate outside every export area is the operator's own
+    # jailed text, and keeps generational migration as any operator swap does,
+    # while host code is untrusted. Under `--author-trust trusted` it is the
+    # agent's too (issue #2672): the vouched-for host bodies can rewrite such a
+    # file on disk. A trusted host-code author is still the agent, and its text
+    # may not re-seat live operator instance state without the disclosure gate.
+    agent_authored = bool(compile_report.get("authored"))
     try:
         state = SESSION.swap(full, origin=origin,
-                             agent_authored=AUTHORING.profile() is not None)
+                             agent_authored=agent_authored)
     except SessionError as error:
-        return _session_error(error)
+        return _session_error(error, **_refusal_code(error))
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
@@ -1577,13 +1670,26 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                          before)
 
 
+def _export_area_parts(files: list[str] | None,
+                       compile_report: dict) -> tuple[list[str], dict[str, str]]:
+    """The export-area part of a `files` candidate: the files it names inside an
+    export directory, and the modules there its compile reached by `use`.
+    `compile_under_authoring` compiled both under the profile as the agent's
+    text (#2524), and its report carries the reached ones as dependencies.
+    Whether a file counts is decided by its path, as the compile decided it
+    (issue #2600)."""
+    named = [p for p in files or () if _export_jail.in_export_area(p)]
+    reached = {p: t for p, t in
+               (compile_report.get("dependencies") or {}).items()
+               if _export_jail.in_export_area(p)}
+    return named, reached
+
+
 def _exported_candidate(files: list[str] | None,
                         compile_report: dict) -> dict | None:
     """The export-area part of a `files` candidate (issue #2600), or `None`
     when it has none: `{abspath: text}` of each file `files` names inside an
     export directory and of each module there the compile reached by `use`.
-    `compile_under_authoring` compiled both under the profile as the agent's
-    text (#2524), and its report carries the reached ones as dependencies.
     Whether a file counts is decided by its path, as the compile decided it;
     a named file is read back only for the refusal's line, so one that no
     longer reads still counts, with no text.
@@ -1592,10 +1698,7 @@ def _exported_candidate(files: list[str] | None,
     also carry the operator files the same compile read from disk (its
     `disk_reads`, keyed by abspath like the rest), beneath the export-area
     ones: a refusal of a component in an operator file names its line."""
-    named = [p for p in files or () if _export_jail.in_export_area(p)]
-    reached = {p: t for p, t in
-               (compile_report.get("dependencies") or {}).items()
-               if _export_jail.in_export_area(p)}
+    named, reached = _export_area_parts(files, compile_report)
     if not named and not reached:
         return None
     texts = {**(compile_report.get("disk_reads") or {}),
@@ -1791,8 +1894,9 @@ def _swap_server_side(replacing: tuple) -> dict:
         rejected["swapped"] = False
         rejected["note"] = "the running composition is untouched"
         return rejected
+    compile_report: dict = {}
     try:
-        full = _edit.compile_virtual(vs)
+        full = _edit.compile_virtual(vs, report=compile_report)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -1801,19 +1905,30 @@ def _swap_server_side(replacing: tuple) -> dict:
                             "composition on its own")
         return rejected
     running = SESSION.ir
-    # issue #2487: only text that arrived over the transport (inline source or
-    # an edited buffer) compiled under the profile; unedited jailed files are
-    # the operator's own and may legitimately differ from what is running
-    if vs.get("source") is not None or _edit.file_modules(vs):
+    # issue #2487: the realm comparison follows component text. Unedited jailed
+    # files are the operator's own and may legitimately differ from what is
+    # running; inline source or an edited buffer is text that arrived over the
+    # transport. A `use`-reached export-area module also compiles under the
+    # profile (#2600), but a `use`-imported module contributes no components, so
+    # it cannot move a placement; it decides authorship below.
+    edited = _edit.file_modules(vs)
+    if vs.get("source") is not None or edited:
         refused = _realm_removal_refused(running, full, _edit._candidate_texts(vs))
         if refused is not None:
             return refused
     radius = _authoring_loop.blast_radius(running, full)  # issue #1704
+    # issue #2423: the same authorship rule as `_swap_inline`, read off the
+    # compile that produced `full`. Inline source, an edited buffer, and a file
+    # the compile named or reached inside an export area are the agent's text;
+    # an unedited files-only working set outside every export area is the
+    # operator's own while host code is untrusted, and under `--author-trust
+    # trusted` it is the agent's too (issue #2672). So a trusted host-code
+    # author's text still runs the disclosure gate.
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs),
-                             agent_authored=AUTHORING.profile() is not None)
+                             agent_authored=bool(compile_report.get("authored")))
     except SessionError as error:
-        return _session_error(error)
+        return _session_error(error, **_refusal_code(error))
     return {"ok": True, "admitted": True, "swapped": True,
             "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
             **_effect_classes.report(full, running, against=True)}
@@ -2683,7 +2798,10 @@ def _edit_loaded_result(arguments: dict, verify, commit: bool) -> dict:
     except SessionError as error:
         if not SESSION.loaded:
             return _session_error(NothingLoaded(str(error)))
-        return _session_error(error)
+        # a swap refusal from the edit's commit carries its machine-readable
+        # classification (e.g. STATE_UNDISCLOSED) to the boundary, as the swap
+        # door's own refusal does (#2423 follow-up).
+        return _session_error(error, **_refusal_code(error))
 
 
 def _tool_rollback(_arguments: dict) -> dict:
@@ -6726,6 +6844,21 @@ def _run_handler(name: str, arguments: dict) -> dict:
         # not an error — shape the ticket two-step. Caught before the
         # generic handler so it never reads as an internal fault.
         return _approval_required(exc)
+    except _authoring_loop.BlastRadiusRefused as exc:
+        # issue #2423: the blast radius refused because the running IR and its
+        # linked manifest disagree about a component that is not a spawn
+        # template. That is a verdict on the composition, not a server fault:
+        # name the component, the withdrawal query's error and the names it
+        # does know, so the agent can act on it instead of reading "internal".
+        return _session_error(str(exc), category="blast-radius",
+                              outcome="refused", component=exc.component,
+                              withdrawalError=exc.answer.get("error"),
+                              known=exc.answer.get("known") or [])
+    except SessionError as error:
+        # A session refusal a handler did not shape for itself is still a
+        # result, not a server fault; carry its machine-readable code (e.g.
+        # STATE_UNDISCLOSED) so the caller can branch on it.
+        return _session_error(error, **_refusal_code(error))
     except Exception as exc:  # a tool failure is a result, not a transport error
         return _session_error(f"{type(exc).__name__}: {exc}", category="internal")
 

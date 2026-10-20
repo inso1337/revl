@@ -35,6 +35,7 @@ never against a real path.
 from __future__ import annotations
 
 import copy
+import errno
 import os
 import sys
 import threading
@@ -404,6 +405,37 @@ def test_a_lost_race_leaves_no_preimage_residue(workspace, monkeypatch):
     preimage_dir = workspace / ws.PREIMAGE_DIRNAME
     left = sorted(p.name for p in preimage_dir.iterdir()) if preimage_dir.is_dir() else []
     assert left == [], f"a refused write left preimage residue: {left}"
+
+
+def test_a_failed_snapshot_capture_leaves_no_preimage_residue(
+        workspace, monkeypatch):
+    """The sidecar is created before its capture is taken, so an `ESNAPSHOT`
+    refusal after that point must still leave nothing behind. On main the
+    handle learned the sidecar's path only after the capture succeeded, so a
+    capture failure (EIO, or an `EACCES` reopen after `fchmod` to a mode whose
+    owner read bit is denied) leaked a sidecar no inverse enumerates. The
+    portable copy path now captures through the fd it still holds, and the
+    handle records the name before the capture either way."""
+    monkeypatch.setattr(ws, "_clone_from_fd", lambda *a, **k: False)
+
+    def boom(*args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(ws, "_capture_sidecar", boom)
+    # The fixed copy path captures through the still-open fd instead of
+    # reopening by name; patched with raising=False so this test can also run
+    # against the tree before that helper exists.
+    monkeypatch.setattr(ws, "_capture_open_sidecar", boom, raising=False)
+
+    mod = _fs_module()
+    result = mod.write("artifact.txt", "PAYLOAD")
+
+    assert isinstance(result, mod.Err)
+    assert result.value["code"] == "ESNAPSHOT"
+    preimage_dir = workspace / ws.PREIMAGE_DIRNAME
+    left = sorted(p.name for p in preimage_dir.iterdir()) if preimage_dir.is_dir() else []
+    assert left == [], f"a failed snapshot left preimage residue: {left}"
+    assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v1"
 
 
 def test_a_lost_race_does_not_delete_the_competing_writers_file(

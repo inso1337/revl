@@ -330,10 +330,10 @@ def slice_section(session, component: str, predicate: str | None) -> dict:
 class RemediationStrategy:
     """How a proved candidate is put into the running system.
 
-    The loop calls `remediate(session, ir, origin)` and records whatever dict it
-    returns. Two strategies are anticipated; only the swap is built here,
-    deliberately (item 59's verified canary is being built in parallel and is
-    not a dependency of this loop):
+    The loop calls `remediate(session, ir, origin, authored=...)` and records
+    whatever dict it returns. Two strategies are anticipated; only the swap is
+    built here, deliberately (item 59's verified canary is being built in
+    parallel and is not a dependency of this loop):
 
       * `SwapRemediation` — the landed hot-swap (item 23). Atomic: a rejected
         migration rolls the whole thing back (session.swap's own contract).
@@ -341,12 +341,18 @@ class RemediationStrategy:
         candidate, watch it, then promote or abort (item 59). It implements the
         SAME interface, so when it lands it drops in as a constructor argument
         to `run_repair` with no change to the loop below.
+
+    `authored` is what the candidate's compile reported about its origins
+    (`report["authored"]`), not the authoring-trust config: a candidate that
+    arrived over the transport is the agent's text even under trusted host
+    code, so an edit it makes to a live template must run the item-334
+    disclosure gate (#2423 follow-up).
     """
 
     name = "abstract"
 
     def remediate(self, session, ir: dict, origin: dict | None, *,
-                  over_the_transport: bool) -> dict:
+                  over_the_transport: bool, authored: bool) -> dict:
         raise NotImplementedError
 
 
@@ -356,13 +362,14 @@ class SwapRemediation(RemediationStrategy):
     name = "swap"
 
     def remediate(self, session, ir: dict, origin: dict | None, *,
-                  over_the_transport: bool) -> dict:
-        # the candidate is the author's only when the repair came over the
-        # transport and the server compiles its agent untrusted; the CLI's
-        # repair is the operator's own (the trust `_realm_removal_refusal` uses)
-        from .server import AUTHORING  # noqa: PLC0415 - cycle
-        state = session.swap(ir, origin=origin, agent_authored=(
-            over_the_transport and AUTHORING.profile() is not None))
+                  over_the_transport: bool, authored: bool) -> dict:
+        # the candidate is the author's when the compile says its text arrived
+        # over the transport. The trust config is not consulted: under trusted
+        # host code the agent still wrote the candidate, and the disclosure
+        # gate must run (#2423 follow-up). `over_the_transport` stays on the
+        # strategy interface; the compile report already folded it in.
+        del over_the_transport
+        state = session.swap(ir, origin=origin, agent_authored=authored)
         return {"strategy": self.name, "applied": True, "swap": state}
 
 
@@ -494,12 +501,18 @@ def run_repair(session, arguments: dict,
     try:
         remediation = strategy.remediate(session, gate["candidate_ir"],
                                          origin=candidate_arg,
-                                         over_the_transport=over_the_transport)
+                                         over_the_transport=over_the_transport,
+                                         authored=gate["authored"])
     except Exception as exc:  # noqa: BLE001 — a swap failure is a graded result
         remediation = {"strategy": strategy.name, "applied": False,
                        "error": f"{type(exc).__name__}: {exc}",
                        "note": "the remediation raised; the session reports the "
                                "running composition's state (swap is atomic)"}
+        # a swap refusal keeps its machine-readable classification (e.g.
+        # STATE_UNDISCLOSED) so a repair dossier can be branched on (#2423
+        # follow-up).
+        if getattr(exc, "code", None):
+            remediation["code"] = exc.code
         remediation["canaryFollowOn"] = _canary_follow_on()
         return _assemble(STATUS_REJECTED, component, fault, sliced, eligibility,
                          candidate=candidate, verdicts=verdicts,
@@ -523,7 +536,8 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     """Run gauntlet (31) -> boundary policy (33) -> widening/may-touch (21) in
     order, short-circuiting at the first block. Returns `(verdicts, gate)` where
     `gate` carries `blocked`, `reason`, and — when everything passed — the
-    compiled candidate IR to swap."""
+    compiled candidate IR to swap, with `authored` (what that compile reported
+    about the candidate's origins)."""
     from . import gauntlet as _gauntlet  # noqa: PLC0415 — sibling, avoid a cycle
 
     verdicts: dict = {}
@@ -602,13 +616,15 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
         verdicts["widening"] = widen
         if widen["widened"] and policy.ack_on_widen:
             return verdicts, {"blocked": True, "reason": "widening",
-                              "candidate_ir": candidate_ir}
+                              "candidate_ir": candidate_ir,
+                              "authored": bool(compile_report.get("authored"))}
     else:
         verdicts["widening"] = {"evaluated": False,
                                 "reason": "nothing loaded — no running boundary to "
                                           "diff the candidate against"}
 
-    return verdicts, {"blocked": False, "reason": None, "candidate_ir": candidate_ir}
+    return verdicts, {"blocked": False, "reason": None, "candidate_ir": candidate_ir,
+                      "authored": bool(compile_report.get("authored"))}
 
 
 def _exported_part(candidate_arg: dict, compile_report: dict | None,

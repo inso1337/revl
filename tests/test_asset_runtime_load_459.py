@@ -132,6 +132,24 @@ _NODE_TS_REASON = _node_ts_skip_reason()
 _needs_node = pytest.mark.skipif(
     _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
 
+#: Issue #2637: the pinned workspace binds an `O_DIRECTORY`/`O_NOFOLLOW` root
+#: descriptor and reads through it, so `bind_workspace_root` refuses a host that
+#: cannot walk with directory fds with `ENOTSUP` (#1946). Windows is that host:
+#: `os.supports_dir_fd` is empty, a directory cannot be opened as a descriptor,
+#: and `os.pread` does not exist. Ten of the tests below exercise the pinned
+#: runtime and would report that `ENOTSUP` refusal as a failure; the two
+#: compile-time ones assert the digest of a template the fixture writes in text
+#: mode, which Windows rewrites to CRLF before the compiler hashes it. Both are
+#: platform limits rather than product failures, so the twelve skip instead of
+#: reporting red. The condition is asked of the guard itself
+#: (`pinned_workspace_supported`), never re-derived here, so the skip and the
+#: binder cannot disagree about what "supported" means.
+_HAS_PINNED = ws.pinned_workspace_supported()
+_needs_pinned = pytest.mark.skipif(
+    not _HAS_PINNED,
+    reason="pinned workspace needs directory-fd and no-follow filesystem "
+           "support, which this platform does not provide")
+
 
 # ===========================================================================
 # harness
@@ -241,6 +259,7 @@ def test_a_bare_string_does_not_typecheck_where_a_handle_belongs(tmp_path):
 # 2. the happy path, executed
 # ===========================================================================
 
+@_needs_pinned
 def test_a_running_program_reads_its_template_from_disk(tmp_path, monkeypatch):
     """The whole point of F6, run rather than described: the artifact carries a
     path and a digest, the bytes stay on disk, and the process gets the text."""
@@ -253,6 +272,7 @@ def test_a_running_program_reads_its_template_from_disk(tmp_path, monkeypatch):
         sys.modules.pop("revl_asset_f6_happy", None)
 
 
+@_needs_pinned
 def test_the_artifact_carries_the_digest_and_not_the_bytes(tmp_path):
     """A frontend asset is a file the composition ships, not a string literal
     the artifact carries. The emitted module must therefore contain the pin and
@@ -264,6 +284,7 @@ def test_the_artifact_carries_the_digest_and_not_the_bytes(tmp_path):
     assert "{{html:title}}" not in src
 
 
+@_needs_pinned
 def test_the_loaded_text_renders_through_the_stage_one_template_module(
         tmp_path, monkeypatch):
     """F6 closes the loop stage 1 named: `stdlib/template.rvl` takes the
@@ -316,6 +337,7 @@ def test_locate_answers_the_confinement_decision_without_the_content(
 # 3. the pin is ENFORCED by the runtime read
 # ===========================================================================
 
+@_needs_pinned
 def test_an_edited_file_is_refused_and_its_bytes_never_appear(
         tmp_path, monkeypatch):
     """The reconciliation between F1's compile-time pin and F6's runtime read.
@@ -373,6 +395,7 @@ def test_no_configured_root_is_a_refusal_not_a_fallback(tmp_path, monkeypatch):
         sys.modules.pop("revl_asset_f6_noroot", None)
 
 
+@_needs_pinned
 def test_a_symlinked_leaf_out_of_the_root_is_refused_even_when_it_matches(
         tmp_path, monkeypatch):
     """The load-bearing one. The link's target holds EXACTLY the pinned bytes,
@@ -399,6 +422,7 @@ def test_a_symlinked_leaf_out_of_the_root_is_refused_even_when_it_matches(
         sys.modules.pop("revl_asset_f6_symlink", None)
 
 
+@_needs_pinned
 def test_a_symlinked_directory_component_is_refused(tmp_path, monkeypatch):
     """realpath resolves EVERY component, not only the leaf, so a directory
     swapped for a link out of the tree is caught by the same check."""
@@ -417,6 +441,7 @@ def test_a_symlinked_directory_component_is_refused(tmp_path, monkeypatch):
         sys.modules.pop("revl_asset_f6_dirlink", None)
 
 
+@_needs_pinned
 def test_dot_dot_that_stays_inside_the_root_resolves(tmp_path, monkeypatch):
     """The other direction of the same rule, and the one a textual `..` ban
     would break. Containment of the REALPATH is the jail, so a path that walks
@@ -475,6 +500,7 @@ def test_the_runtime_guard_refuses_the_escapes_a_forged_handle_could_carry(
         assert exc.value.code == code, path
 
 
+@_needs_pinned
 def test_a_directory_is_not_a_template(tmp_path, monkeypatch):
     """A non-regular file is refused before a byte is read, so a directory
     cannot answer and a fifo cannot hang the reader."""
@@ -635,6 +661,7 @@ def _ts_corpus(root: Path) -> list[dict]:
     return json.loads(proc.stdout)
 
 
+@_needs_pinned
 def test_the_py_tier_answers_the_corpus_as_specified(tmp_path, monkeypatch):
     """The oracle the ts tier is diffed against, written out rather than
     derived, so a shared regression on both tiers cannot pass as agreement."""
@@ -655,6 +682,7 @@ def test_the_py_tier_answers_the_corpus_as_specified(tmp_path, monkeypatch):
         ("Err", "EINVAL")
 
 
+@_needs_pinned
 @_needs_node
 def test_the_ts_tier_answers_the_same_corpus(tmp_path, monkeypatch):
     """Executed agreement, not a claimed one: one corpus, one workspace on disk,
@@ -989,6 +1017,7 @@ def _run_checks(guard, root: Path) -> set[str]:
     return failed
 
 
+@_needs_pinned
 def test_the_shipped_guard_passes_every_check(mutation_workspace, monkeypatch):
     """The baseline that keeps the mutation proof from being vacuous: run the
     battery against the module as shipped and it must fail nothing. Without this
@@ -1016,6 +1045,7 @@ def test_every_mutation_is_caught(name, mutation_workspace, monkeypatch):
 # 8. non-vacuity controls (hold BEFORE and AFTER this change)
 # ===========================================================================
 
+@_needs_pinned
 def test_control_the_compile_time_asset_handle_is_unchanged(tmp_path):
     """Pre-existing F1 surface: `asset "<path>"` still resolves to the
     root-relative path and the real digest. If this ever fails, the harness is
@@ -1036,3 +1066,59 @@ def test_control_the_template_module_still_runs_on_every_tier(tmp_path):
     ir = compile_files([str(ROOT / "stdlib" / "template.rvl")])
     for backend in ("python", "typescript", "rust", "go", "java"):
         assert backend_emitter(backend).emit(ir)
+
+
+# ===========================================================================
+# 9. the platform gate itself (issue #2637)
+# ===========================================================================
+
+def test_the_pinned_gate_is_the_binders_condition_clause_by_clause(monkeypatch):
+    """`pinned_workspace_supported()` is `bind_workspace_root`'s ENTIRE gate, so
+    each missing clause must read as "not supported" here exactly as it does
+    there. The skip condition above is computed from the same call: if the two
+    ever drifted, the twelve tests would run on a host the binder refuses."""
+    assert _HAS_PINNED is ws.pinned_workspace_supported()
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "supports_dir_fd", set())
+        assert ws.pinned_workspace_supported() is False
+    with monkeypatch.context() as m:
+        m.setattr(ws, "_O_DIRECTORY", 0)
+        assert ws.pinned_workspace_supported() is False
+    with monkeypatch.context() as m:
+        m.setattr(ws, "_O_NOFOLLOW", 0)
+        assert ws.pinned_workspace_supported() is False
+    with monkeypatch.context() as m:
+        m.setattr(os, "supports_fd", set())
+        assert ws.pinned_workspace_supported() is False
+    if hasattr(os, "pread"):
+        with monkeypatch.context() as m:
+            m.delattr(os, "pread")
+            assert ws.pinned_workspace_supported() is False
+
+
+_AFFECTED_TESTS = (
+    "test_a_running_program_reads_its_template_from_disk",
+    "test_the_artifact_carries_the_digest_and_not_the_bytes",
+    "test_the_loaded_text_renders_through_the_stage_one_template_module",
+    "test_an_edited_file_is_refused_and_its_bytes_never_appear",
+    "test_a_symlinked_leaf_out_of_the_root_is_refused_even_when_it_matches",
+    "test_a_symlinked_directory_component_is_refused",
+    "test_dot_dot_that_stays_inside_the_root_resolves",
+    "test_a_directory_is_not_a_template",
+    "test_the_py_tier_answers_the_corpus_as_specified",
+    "test_the_ts_tier_answers_the_same_corpus",
+    "test_the_shipped_guard_passes_every_check",
+    "test_control_the_compile_time_asset_handle_is_unchanged",
+)
+
+
+def test_every_affected_test_carries_the_platform_gate():
+    """The twelve names in #2637 are the acceptance list. A refactor that drops
+    one decorator puts a red back on Windows; this names which one."""
+    for name in _AFFECTED_TESTS:
+        marks = [m for m in getattr(globals()[name], "pytestmark", [])
+                 if m.name == "skipif"]
+        assert marks, f"{name} lost its platform skip"
+        assert any("pinned workspace" in m.kwargs.get("reason", "")
+                   for m in marks), f"{name}'s skip does not name the capability"

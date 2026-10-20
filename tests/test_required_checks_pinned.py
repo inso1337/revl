@@ -66,7 +66,7 @@ observation of the server, not the intent, and no unit test can re-read it. So
 until that PATCH lands, `census-artifact` is intended-required and NOT enforced.
 
 NOTE on the partition counts: this partition marks 12 jobs intended-required
-(7 of them enforced) and 10 non-required, over the 22 jobs ci.yml defines. The
+(7 of them enforced) and 12 non-required, over the 24 jobs ci.yml defines. The
 two sides are reconciled at the branch-protection settings, which are out of
 tree; whichever is stale, this test at least makes the job-name side of the
 contract explicit and drift-proof. It reads ci.yml as text, so it needs no
@@ -216,6 +216,15 @@ NOT_REQUIRED_CHECKS = {
     # note as the two above: a context must exist on `main` before branch
     # protection can name it.
     "merged-prs-landed": "issue #1342 merged-PR landing audit; a repository-wide property, advisory so one bad merge does not block every other PR",
+    # Issue #2672's review: the PR path for the cordis-guarded swap and
+    # authoring suites, which `root-suite-affected` can only skip (it installs
+    # `.[test]`, no runtime) and `frontend-cordis` only runs off pull requests.
+    # Advisory by DESIGN: the review asked for a PR-only path without touching
+    # branch protection, and on every other event `frontend-cordis` runs the
+    # same five suites with the same pinned runtime. It also cannot report on
+    # a merge_group candidate (`if:` names `github.event_name ==
+    # 'pull_request'`), so it could not be a required context as written.
+    "swap-template-cordis": "issue #2672 review PR path for the swap/authoring suites; advisory by design, and frontend-cordis covers the same suites on every other event",
 }
 
 

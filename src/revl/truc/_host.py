@@ -1297,10 +1297,17 @@ def _registry_policy(registry_dir: str) -> str:
     return policy if policy in ("gauntlet", "audit", "none") else "audit"
 
 
-def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
-    """The `[ship]` table, the source being shipped, and the target registry
-    (name + absolute path). Shared by `ship_context` and `release_facts` so the
-    two can never disagree about WHICH registry or WHICH source is in play."""
+def _ship_target(project_dir: str) -> tuple[dict, str, str, str, str]:
+    """The `[ship]` table, the source being shipped, the REAL file it was read
+    from, and the target registry (name + absolute path). Shared by
+    `ship_context`, `release_facts` and `publish` so the three can never
+    disagree about WHICH registry or WHICH source is in play.
+
+    The source path is the resolved absolute file (`Path.resolve`, so a symlink
+    is judged by its target). The registry's export rule decides authorship by
+    a real file, so every publish of the entry carries this; an entry that names
+    no file comes back as `""` and the publish side refuses rather than
+    compiling without it (issue #2563)."""
     data = _ship_toml(project_dir)
     assembly = data.get("assembly") or {}
     ship = data.get("ship") or {}
@@ -1310,10 +1317,12 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
     # the component being shipped is the project's own entry, verbatim.
     entry = assembly.get("entry") or []
     source = ""
+    source_path = ""
     if entry:
         src_path = pathlib.Path(project_dir, entry[0])
-        if src_path.exists():
+        if src_path.is_file():
             source = src_path.read_text(encoding="utf-8")
+            source_path = str(src_path.resolve())
 
     # the target registry: [ship].registry, else the conventional "local", else
     # the first declared registry.
@@ -1323,7 +1332,7 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
     reg_path = reg.get("path")
     reg_abs = (os.path.abspath(os.path.join(project_dir, reg_path))
                if reg_path else "")
-    return ship, source, reg_name, reg_abs
+    return ship, source, source_path, reg_name, reg_abs
 
 
 def release_facts(project_dir: str, name: str) -> str:
@@ -1341,25 +1350,45 @@ def release_facts(project_dir: str, name: str) -> str:
     is), `version_scheme` (`semver`, the default, or `opaque` to publish
     date/build-id versions with the bump check recorded UNVERIFIED), and
     `publisher` (the label whose continuity an update must preserve).
+
+    The source is compiled from the entry's REAL resolved file, never the
+    virtual ship label, so the export rule decides its authorship (issue
+    #2563). An entry that names no file is refused here: there is no path to
+    judge, and compiling without one is what shipped exported text unprofiled.
     """
     from revl.registry import (  # noqa: PLC0415 — the registry owns this rule
         BUMP_UNVERIFIABLE, SCHEME_SEMVER)
     from revl.registry import release_facts as registry_release_facts
 
-    ship, source, _reg_name, reg_abs = _ship_target(project_dir)
+    ship, source, source_path, _reg_name, reg_abs = _ship_target(project_dir)
     version = str(ship.get("version", "") or "")
     scheme = str(ship.get("version_scheme", SCHEME_SEMVER) or SCHEME_SEMVER)
     publisher = str(ship.get("publisher", "") or "")
 
-    if not reg_abs or not os.path.isdir(reg_abs):
-        # no registry on disk yet: nothing is published, so nothing is being
-        # replaced. `publish` creates it, exactly as it did before.
+    if not source_path:
+        return json.dumps({
+            "ok": False,
+            "diagnostic": (
+                "the project's [assembly] entry does not name a file on disk, "
+                "so there is no source path the export rule can judge the text "
+                "by; truc ship refuses to publish text with no real origin"),
+            "version": version, "scheme": scheme, "publisher": publisher,
+            "previousVersion": "", "note": ""})
+
+    if not reg_abs:
+        # there is no target registry at all; the pure Shipper's plan cannot
+        # name one, so there is nothing for this verdict to add.
         return json.dumps({"ok": True, "diagnostic": "", "version": version,
                            "scheme": scheme, "publisher": publisher,
                            "previousVersion": "", "note": ""})
 
+    # A registry that does not exist on disk yet has nothing published and
+    # nothing to replace, but the source is still judged: `release_facts` does
+    # not write, and compiling it is exactly how the export refusal reaches a
+    # first publish (`publish` creates the directory afterwards).
     facts = registry_release_facts(reg_abs, name, source, version,
-                                   scheme=scheme, publisher=publisher)
+                                   scheme=scheme, publisher=publisher,
+                                   source_path=source_path)
     note = ""
     if not facts["isUpdate"] and not version:
         note = (" Published UNVERSIONED: nothing pins which release this is, and "
@@ -1387,8 +1416,12 @@ def ship_context(project_dir: str) -> str:
 
     Whether the NAME is free, and what may replace it if it is not, is not here:
     that is registry semantics and it arrives through `release_facts`.
+
+    `sourcePath` is the resolved absolute file the entry was read from. It
+    travels through the pure Shipper's context and plan into `publish`, so the
+    registry compiles the text by its real origin (issue #2563).
     """
-    ship, source, reg_name, reg_abs = _ship_target(project_dir)
+    ship, source, source_path, reg_name, reg_abs = _ship_target(project_dir)
 
     policy = _registry_policy(reg_abs) if reg_abs and os.path.isdir(reg_abs) else "audit"
 
@@ -1403,6 +1436,7 @@ def ship_context(project_dir: str) -> str:
     _remember_ship_knowledge(project_dir)
     return json.dumps({
         "source": source,
+        "sourcePath": source_path,
         "description": str(ship.get("description", "")),
         "tags": [str(t) for t in tags],
         "registryName": reg_name,
@@ -1487,16 +1521,34 @@ def publish(plan_json: str) -> str:
     The registry re-runs its own release checks here rather than trusting the
     plan, so the write path is not safe only because the Shipper looked first.
 
+    `plan["sourcePath"]` is the resolved absolute entry file `ship_context` read
+    the text from. A plan without it, or with a non-absolute one, is refused
+    before anything is written: publishing text with no real origin is the hole
+    issue #2563 closes, so the ship flow fails closed rather than compiling
+    unprofiled.
+
     An empty plan is a no-op: on any refusal the Shipper returns "", so the
     registry is untouched (all-or-nothing — the empty-guard, mirroring
     commit_add). This is the ONLY registry-mutating body in truc."""
     if not plan_json:
         return "skipped"
+    from revl.errors import RevlError  # noqa: PLC0415 — only on the refusal
     from revl.registry import publish_release  # noqa: PLC0415 — the write path
 
     plan = json.loads(plan_json)
     reg = plan["registryPath"]
-    pathlib.Path(reg, "components").mkdir(parents=True, exist_ok=True)
+    source_path = str(plan.get("sourcePath") or "")
+    if not source_path:
+        raise RevlError(
+            "<truc ship>", 0,
+            "truc: refusing to publish: the plan carries no source path for the "
+            "component, and text with no real origin cannot be judged by the "
+            "export rule; publish it from the project entry file")
+    if not os.path.isabs(source_path):
+        raise RevlError(
+            "<truc ship>", 0,
+            f"truc: refusing to publish: the plan's source path {source_path!r} "
+            "is not absolute, so it does not name the file the text came from")
     publish_release(
         reg, plan["name"], plan["source"],
         version=plan.get("version") or None,
@@ -1506,7 +1558,8 @@ def publish(plan_json: str) -> str:
         tags=plan.get("tags") or [],
         dossier_text=(plan["dossierText"] if plan.get("stampDossier")
                       and plan.get("dossierText") else None),
-        knowledge=_SHIP_KNOWLEDGE)
+        knowledge=_SHIP_KNOWLEDGE,
+        source_path=source_path)
     return "published"
 
 

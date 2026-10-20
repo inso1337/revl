@@ -28,7 +28,7 @@
     },
     {
       "path": "components/shipper.rvl",
-      "sha256": "31354400d005498e6dac4ff30b5664ee2a7f2fcb1f00a3914b20dd2b7fce64f4"
+      "sha256": "687ded7d63099488e6ec3bbb3fe70bf0c645a1de2156da8d903497085b5d061b"
     },
     {
       "path": "components/cli.rvl",

@@ -275,35 +275,88 @@ def _shape(value):
     return value
 
 
+#: The precision a template entry carries: not exact, because the static
+#: composition excludes it, and not an over-approximation either.
+TEMPLATE_PRECISION = "template"
+
+_TEMPLATE_NOTE = (
+    "a spawn template is excluded from the static composition; its provisions "
+    "come up per instance behind a spawn handle, so the linked ROOT graph has "
+    "no withdrawal answer for it")
+
+
+class BlastRadiusRefused(RuntimeError):
+    """A touched component's withdrawal answer is not a withdrawal, and the
+    component is not a spawn template. The radius cannot honestly answer, so it
+    refuses rather than reporting zero breaks that would read as an empty
+    cascade and could hide a real withdrawal set."""
+
+    def __init__(self, component: str, answer: dict) -> None:
+        self.component = component
+        self.answer = answer
+        super().__init__(
+            f"the blast radius cannot name the withdrawal of {component!r}: "
+            f"{answer.get('error') or 'the withdrawal query refused'}")
+
+
 def blast_radius(before: dict | None, after: dict) -> dict:
     """The `revl_query_withdraw` answer for every component a change touches,
     read off the RUNNING composition: what loses a provision while each one is
     replaced, in the order the runtime tears it down. A component the change
-    adds has no dependents yet, so it gets an empty cascade."""
+    adds has no dependents yet, so it gets an empty cascade. A spawn template
+    is not in the linked ROOT manifest, so its entry names the exclusion and
+    carries no ROOT cascade; any other component the withdrawal query does not
+    know refuses rather than reporting zeros."""
     from .. import query as Q  # noqa: PLC0415 - query imports the compiler
 
     touched = touched_components(before, after)
     running = {c["name"] for c in (before or {}).get("components") or []}
+    templates = set(((before or {}).get("manifest") or {}).get("templates") or [])
     radius = {}
+    template_answer = False
     for name in touched:
         if before is None or name not in running:
             radius[name] = {"added": True, "cascade": [], "withdrawalOrder": [],
                             "breaks": 0}
             continue
         answer = Q.withdrawal(before, name)
-        radius[name] = {k: answer[k] for k in
-                        ("cascade", "withdrawalOrder", "orphanedKeys", "breaks",
-                         "precision") if k in answer}
+        if answer.get("ok"):
+            radius[name] = {k: answer[k] for k in
+                            ("cascade", "withdrawalOrder", "orphanedKeys", "breaks",
+                             "precision") if k in answer}
+        elif name in templates:
+            # issue #2423: a spawned template is a component of the running IR
+            # but not of the linked ROOT manifest, so `withdrawal` correctly
+            # answers `unknown component`. Its provisions come up per instance,
+            # so nothing at ROOT loses one. Say that in the entry instead of
+            # letting it read as a real empty cascade.
+            radius[name] = {"template": True, "cascade": [],
+                            "withdrawalOrder": [], "orphanedKeys": [], "breaks": 0,
+                            "precision": TEMPLATE_PRECISION,
+                            "precisionNote": _TEMPLATE_NOTE}
+            template_answer = True
+        else:
+            # Not a template: the manifest and the running IR disagree. Do not
+            # turn that into a clean zero that hides a real withdrawal set.
+            raise BlastRadiusRefused(name, answer)
         if name not in {c["name"] for c in after.get("components") or []}:
             radius[name]["removed"] = True
+    note = ("exact, from the running composition's linked provider graph "
+            "(the revl_query_withdraw answer for each touched component)")
+    if template_answer:
+        note = ("the revl_query_withdraw answer for each touched component in "
+                "the linked provider graph. A spawn template is excluded from "
+                "the static composition, so its entry is not an exact "
+                "withdrawal answer: its provisions come up per instance behind "
+                "a spawn handle and nothing at ROOT loses one")
     return {
         "touched": touched,
         "components": radius,
         "breaks": sum(r["breaks"] for r in radius.values()),
-        "note": "exact, from the running composition's linked provider graph "
-                "(the revl_query_withdraw answer for each touched component)",
+        "note": note,
     }
 
 
-__all__ = ["INSTRUCTIONS", "LOOP", "CORE", "step_label", "self_check",
+__all__ = ["INSTRUCTIONS", "LOOP", "CORE", "TEMPLATE_PRECISION",
+           "BlastRadiusRefused", "step_label", "self_check",
            "touched_components", "blast_radius"]

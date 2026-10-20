@@ -172,6 +172,7 @@ jobs:
     outputs:
       frontend: ${{ steps.detect.outputs.frontend }}
       backends: ${{ steps.backends.outputs.backends }}
+      swap: ${{ steps.swap.outputs.swap }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -256,6 +257,40 @@ jobs:
             echo "frontend=true" >> "$GITHUB_OUTPUT"
             count=$(printf '%s\n' "$relevant" | sed '/^$/d' | wc -l | tr -d ' ')
             echo "PR touches ${count} path(s) off the allow-list: frontend=true (full matrix)"
+          fi
+      # Issue #2672 (review): whether a pull request runs the cordis-installed
+      # swap/authoring job below. Those suites are only real under the pinned
+      # cordis-py runtime, and a PR that changes none of the files they observe
+      # cannot have moved their answer, so the job stays off it. It fails OPEN,
+      # like `backends` above: the job skips only on the exact answer 'false',
+      # so a detection crash (this step continues on error and sets nothing)
+      # runs it rather than letting the coverage go quiet (#2642's lesson).
+      - id: swap
+        continue-on-error: true
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          # The files the five suites observe: the MCP session/swap and
+          # authoring modules, the runtime and compiler they drive, the suites
+          # themselves, and the script and workflow that provision and route
+          # them. A new dependency belongs here, with the suite that needs it.
+          SWAP_RE: '^(src/revl/(mcp/|admission\.py|runtime\.py|run\.py|compiler\.py|lower\.py|placement\.py)|tests/test_mcp_swap_template_2423\.py|tests/test_self_extending_334\.py|tests/test_mcp_authoring_loop_1704\.py|tests/test_swap_author_flag_2518\.py|tests/test_handoff_realm_2510\.py|tests/test_334_reviewed_name_substitution\.py|backends/python/setup\.sh|\.github/workflows/ci\.yml)'
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "swap=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): swap=true"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          changed=$(git diff --name-only "origin/${BASE_REF}" HEAD)
+          if printf '%s\n' "$changed" | grep -Eq "$SWAP_RE"; then
+            echo "swap=true" >> "$GITHUB_OUTPUT"
+            echo "PR touches a swap/authoring file: swap=true"
+          else
+            echo "swap=false" >> "$GITHUB_OUTPUT"
+            echo "PR touches no swap/authoring file: swap=false"
           fi
 
   # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
@@ -925,7 +960,10 @@ jobs:
   # exactly as it does in `frontend`. Since issue #1678 the cordis half of the
   # suite (`frontend-cordis`) and the 3.11 and 3.13 interpreters (`frontend`)
   # are not measured on a pull request at all; they run on the merge-queue
-  # candidate before it lands, and on push to main.
+  # candidate before it lands, and on push to main. The swap/authoring half is
+  # the exception (issue #2672 review): `swap-template-cordis` below runs those
+  # five suites on a pull request when one of the files they observe changes,
+  # so the swap and authoring tests are not PR-invisible.
   root-suite-affected:
     # Issue #1817: pull requests only. On every other event `frontend` runs the
     # whole root suite on 3.11, 3.12 and 3.13, and its 3.12 leg is this job's
@@ -1105,6 +1143,48 @@ jobs:
             --pytest-exit "$rc" \
             --selection "$SEL_PYTEST" \
             $allow_empty
+
+  # Issue #2672 (review): the PR path for the cordis-guarded swap/authoring
+  # suites. On a pull request `root-suite-affected` installs only `.[test]`, so
+  # every test behind `find_spec("cordis") is None` in these files skips there:
+  # 18 of the 19 in tests/test_mcp_swap_template_2423.py, all 26 in
+  # tests/test_self_extending_334.py, 7 of the 18 in
+  # tests/test_mcp_authoring_loop_1704.py, 8 of the 9 in
+  # tests/test_swap_author_flag_2518.py and 11 of the 13 in
+  # tests/test_handoff_realm_2510.py. `frontend-cordis` is what runs them
+  # with the runtime, and since issue #1678 it is off pull requests. This job is
+  # the dedicated PR-only path: the same `backends/python/setup.sh` and the same
+  # CORDIS_PY_PIN the merge-queue job uses, then the five suites under the
+  # #2642 receipt so an all-skipped run is red rather than green. It is
+  # ADVISORY: no required context is changed and branch protection is untouched.
+  # It runs only when `changes` reports that one of the files these suites
+  # observe moved (the `swap` output above), failing open.
+  swap-template-cordis:
+    needs: [changes]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.changes.outputs.swap != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
+      # the pinned fork and the editable revl install, exactly as
+      # `backend-python` and `frontend-cordis` provision them
+      - run: sh backends/python/setup.sh
+      - name: swap and authoring suites under the pinned runtime
+        env:
+          SUITES: "tests/test_mcp_swap_template_2423.py tests/test_self_extending_334.py tests/test_mcp_authoring_loop_1704.py tests/test_swap_author_flag_2518.py tests/test_handoff_realm_2510.py"
+        run: |
+          set -euo pipefail
+          log=$(mktemp)
+          rc=0
+          set +e
+          backends/python/.venv/bin/python -m pytest tests/test_mcp_swap_template_2423.py tests/test_self_extending_334.py tests/test_mcp_authoring_loop_1704.py tests/test_swap_author_flag_2518.py tests/test_handoff_realm_2510.py -q 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          python3 tools/affected_pytest_receipt.py --log "$log" --pytest-exit "$rc" --selection "$SUITES"
 
   # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
   # work absent from `main`, because each was merged into a base branch that

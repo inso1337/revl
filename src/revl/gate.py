@@ -656,7 +656,10 @@ def _ir_referenced_names(node, out: set) -> None:
     covers a `call` node's `callee` var and any bare reference). Over-approximates
     toward MORE references, never fewer, exactly `check_no_host_extern_reach`'s
     "any reference on a reachable path is a reach" stance — conservative and
-    sound for a fail-closed refusal."""
+    sound for a fail-closed refusal. It is also the one definition of the
+    naming rule: the MCP session's `_reached_code_names` delegates here for a
+    template's code identity, so the two cannot disagree about which names a
+    subtree reaches."""
     if isinstance(node, dict):
         if node.get("kind") in ("fn", "var") and isinstance(node.get("name"), str):
             out.add(node["name"])

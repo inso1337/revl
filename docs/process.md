@@ -31,14 +31,19 @@ belongs.
    ./tools/pre_pr.sh
    ```
 
-   Seven checks: ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
+   Eleven checks: ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
    is newer, so 3.12+ syntax passes locally and reds CI); the workflow
    permission gate (`tools/check_workflow_permissions.py`, self-test then
-   `--strict`); the roadmap marker gate; drift checks on both generated gate
-   crates, `crates/revl-gate` (`tools/build_gate_crate.py --check`) and
-   `crates/revl-gate-wasm` (`tools/build_gate_wasm.py --check`); and the
-   source-derived doc blocks (`tools/docgen.py --check`). It does not run any
-   suite.
+   `--strict`); the runtime seam check (`tools/check_runtime_seams.py`); the
+   closed-vocabulary mirror check (`tools/check_vocabulary_mirrors.py`); the
+   roadmap marker gate; drift checks on both generated gate crates,
+   `crates/revl-gate` (`tools/build_gate_crate.py --check`) and
+   `crates/revl-gate-wasm` (`tools/build_gate_wasm.py --check`); the
+   source-derived doc blocks (`tools/docgen.py --check`); the emitted goldens
+   (`tools/regen_goldens.py --check --strict python typescript rust java
+   wasm`, through `tools/pre_pr_artifacts.py`); and the committed census
+   records (`tools/census_artifact.py --check`, through the same helper). It
+   does not run any suite.
 
    A red on either gate-crate check is yours to fix before the PR, not the
    orchestrator's at merge: run the matching builder without `--check` and
@@ -47,6 +52,25 @@ belongs.
    coverage check names an undocumented subcommand or MCP verb; never a hand
    edit inside a `<!-- docgen:KEY -->` region, which the next generation
    overwrites.
+
+   A red on the emitted goldens can be drift, a producer that failed to run, a
+   missing tool under `--strict`, or a target the run could not decide (its
+   declarations were refused); the helper says such a red is "not a drift
+   report". Only drift is fixed by regenerating. Run
+   `python3 tools/regen_goldens.py python typescript rust java wasm`, review
+   the diff and commit it, and never bend the emitter back to the old bytes.
+   For the other causes, fix the producer or the machine. A red on the census
+   records does not by itself mean the committed artifact is stale: the helper
+   hedges, "If the committed records are stale", and the check also fails on
+   unusable input (records that do not describe this checkout), a record that
+   was hand-edited or merged by hand, a missing or extra case file, or a
+   corpus, checker or baseline that moved under the records. When it is
+   staleness, run `python3 tools/census_artifact.py --write` and commit the
+   records. The census half is skipped when the branch diff moves no input of
+   the artifact: `git diff --name-only origin/main` piped into
+   `python3 tools/census_artifact.py --moved-inputs` reports nothing moved, so
+   a branch that touches no census input pays only that comparison. When that
+   filter cannot decide, the check runs anyway.
 
 5. Open a PR that closes the issue:
 
