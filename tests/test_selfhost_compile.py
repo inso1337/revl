@@ -2086,6 +2086,34 @@ def test_native_driver_admits_types_carried_through_an_import(
     assert got.startswith("REFUSED|"), got[:200]
 
 
+# Issue #2450: a carried variant's NULLARY case built in a module function. The
+# document's own read has no `Dot` case, so the native producer lowered the name
+# as a variable and the py tier wrote `return Dot` — the class, not an instance.
+# The carried declarations are now spliced into the LOWERING text as well, so the
+# name lowers as the tagged `adt` the reference builds.
+_CARRIED_CASE_IN_FN = (
+    'use "./lib.rvl" { Store }\n\n'
+    "fn mk() -> Shape { return Dot }\n\n"
+    "service Front { fn go() -> Str }\n\n"
+    "component App requires store: Store provides front: Front {\n"
+    "  provide front {\n"
+    "    fn go() = store.draw(mk())\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_a_carried_nullary_case_is_constructed(
+        compile_rvl, reference_emit, tmp_path, tier):
+    (tmp_path / "lib.rvl").write_text(_CARRIED_LIB, encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text(_CARRIED_CASE_IN_FN, encoding="utf-8")
+    want = reference_emit[tier](compile_files([str(doc)]))
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), tier, str(doc))
+    assert got == want, got[:400]
+
+
 def test_six_way_composition_co_compiles(compile_rvl):
     """SEAM 2 is closed for ALL SIX TIERS (roadmap item 146, gap 2): lower.rvl plus
     emit_{py,ts,go,java,rust,wasm}.rvl ``use``d together in compile.rvl compile into

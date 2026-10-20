@@ -2566,12 +2566,23 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // renamed apart first, as the reference's privacy pass does.
   let alone = lower_to_ir_refs(source, rf_ref_rows(source, path))
   let named = ul_rename_apart(source, path, alone)
-  let lowered = carried.names.length() > 0 ? ul_with_carried_text(named, path).text : named
+  // Issue #2450: the carried declarations are not only an ADMISSION input. A
+  // document the gate admits on its own read can still BUILD a carried variant
+  // case (`fn mk() -> Shape { return Dot }`), and the reference's merged
+  // program lowers that name as an `adt` because the carried type is in its
+  // table. The document read alone has no such case, so the name lowered as a
+  // variable and the py tier wrote `return Dot` where the reference writes
+  // `return Dot()`. Splice the carried declarations into the lowering text too,
+  // always; `ul_link_types` then takes the names as already lowered (`pre`) and
+  // does not append them a second time.
+  let full = ul_with_carried_text(named, path)
+  let pre = carried.names.length() > 0 ? carried.names : full.names
+  let lowered = full.names.length() > 0 ? full.text : named
   let own = lowered == source ? alone : lower_to_ir_refs(lowered, rf_ref_rows(lowered, path))
   let linked = ul_link_externs(ul_link_uses(own, source, path), source, path)
   if (linked.refusal != "") { return "REFUSED|".concat(linked.refusal) }
   // Issue #2308: then the types every imported service carries.
-  let typed = ul_link_types(linked.ir, source, path, carried.names)
+  let typed = ul_link_types(linked.ir, source, path, pre)
   if (typed.refusal != "") { return "REFUSED|".concat(typed.refusal) }
   // Issue #2329: last, the document's calls to an imported service's
   // operations are typed against its declaration. A link refusal above wins,
