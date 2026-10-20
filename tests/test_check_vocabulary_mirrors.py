@@ -371,8 +371,8 @@ def test_a_vacuous_check_reports_zero_counts_and_scope(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "0 vocabulary sites" in output
     assert "0 mirror classes" in output
-    assert "0 claims" in output
-    assert "0 near misses" in output
+    assert "0 claim(s)" in output
+    assert "0 near miss(es)" in output
     assert "does not prove runtime behavior" in output
 
 

@@ -1182,7 +1182,8 @@ def _print_check_summary(sites: list[Site], claims: list[Claim],
                          near_miss_count: int, problem_count: int) -> None:
     print("scan summary: "
           f"{len(sites)} vocabulary sites, {len(classes(sites))} mirror "
-          f"classes, {len(claims)} claims, {near_miss_count} near misses, "
+          f"classes, {len(claims)} claim(s), "
+          f"{near_miss_count} near miss(es), "
           f"{problem_count} problem(s)")
     print("Scope: statically scans Python declarations and recorded mirror "
           "claims; it does not prove runtime behavior or semantic equivalence.")
@@ -1246,7 +1247,8 @@ def main(argv: list[str] | None = None) -> int:
             _print_check_summary(sites, claims, len(observed_near_misses),
                                  len(problems))
             return 1
-        _print_check_summary(sites, claims, len(observed_near_misses), 0)
+        _print_check_summary(sites, claims, len(observed_near_misses),
+                             len(problems))
         return 0
 
     print(report(sites, entries, claims, claim_entries))
