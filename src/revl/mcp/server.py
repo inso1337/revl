@@ -950,6 +950,14 @@ def _fix_field(fix: str | None) -> dict:
     return {} if fix is None else {"fix": fix}
 
 
+def _refusal_code(error: BaseException) -> dict:
+    """The machine-readable classification a refusal carries, when it has one
+    (`SessionError.code`, e.g. STATE_UNDISCLOSED), as an extra field for
+    `_session_error`."""
+    code = getattr(error, "code", None)
+    return {"code": code} if code else {}
+
+
 def _session_error(message: str | BaseException, category: str = "session",
                    fix: str | None = None, **extra) -> dict:
     """A session refusal. `message` is the prose, or the exception that
@@ -1560,11 +1568,20 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # issue #1704: the same preflight revl_edit carries, read off the
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
+    # issue #2423: authorship decides whether the item-334 disclosure gate runs.
+    # Inline source and modules arrived over the transport, and an export-area
+    # file is the agent's by its path (`compile_under_authoring` compiles both
+    # under the profile), so they are agent-authored. A files-only candidate
+    # outside every export area is the operator's own jailed text, compiled
+    # unprofiled, and keeps generational migration as any operator swap does.
+    agent_authored = (AUTHORING.profile() is not None
+                      and (source is not None or bool(modules)
+                           or export_texts is not None))
     try:
         state = SESSION.swap(full, origin=origin,
-                             agent_authored=AUTHORING.profile() is not None)
+                             agent_authored=agent_authored)
     except SessionError as error:
-        return _session_error(error)
+        return _session_error(error, **_refusal_code(error))
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
@@ -1804,16 +1821,25 @@ def _swap_server_side(replacing: tuple) -> dict:
     # issue #2487: only text that arrived over the transport (inline source or
     # an edited buffer) compiled under the profile; unedited jailed files are
     # the operator's own and may legitimately differ from what is running
-    if vs.get("source") is not None or _edit.file_modules(vs):
+    edited = _edit.file_modules(vs)
+    if vs.get("source") is not None or edited:
         refused = _realm_removal_refused(running, full, _edit._candidate_texts(vs))
         if refused is not None:
             return refused
     radius = _authoring_loop.blast_radius(running, full)  # issue #1704
+    # issue #2423: the same authorship rule as `_swap_inline`; an unedited
+    # files-only working set outside every export area is the operator's own,
+    # while inline source, an edited buffer, or an export-area file is the
+    # agent's text.
+    agent_text = (vs.get("source") is not None or bool(edited)
+                  or any(_export_jail.in_export_area(p)
+                         for p in vs.get("files") or ()))
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs),
-                             agent_authored=AUTHORING.profile() is not None)
+                             agent_authored=(AUTHORING.profile() is not None
+                                             and agent_text))
     except SessionError as error:
-        return _session_error(error)
+        return _session_error(error, **_refusal_code(error))
     return {"ok": True, "admitted": True, "swapped": True,
             "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
             **_effect_classes.report(full, running, against=True)}
@@ -6726,6 +6752,21 @@ def _run_handler(name: str, arguments: dict) -> dict:
         # not an error — shape the ticket two-step. Caught before the
         # generic handler so it never reads as an internal fault.
         return _approval_required(exc)
+    except _authoring_loop.BlastRadiusRefused as exc:
+        # issue #2423: the blast radius refused because the running IR and its
+        # linked manifest disagree about a component that is not a spawn
+        # template. That is a verdict on the composition, not a server fault:
+        # name the component, the withdrawal query's error and the names it
+        # does know, so the agent can act on it instead of reading "internal".
+        return _session_error(str(exc), category="blast-radius",
+                              outcome="refused", component=exc.component,
+                              withdrawalError=exc.answer.get("error"),
+                              known=exc.answer.get("known") or [])
+    except SessionError as error:
+        # A session refusal a handler did not shape for itself is still a
+        # result, not a server fault; carry its machine-readable code (e.g.
+        # STATE_UNDISCLOSED) so the caller can branch on it.
+        return _session_error(error, **_refusal_code(error))
     except Exception as exc:  # a tool failure is a result, not a transport error
         return _session_error(f"{type(exc).__name__}: {exc}", category="internal")
 
