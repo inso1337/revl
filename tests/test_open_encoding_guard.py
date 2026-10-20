@@ -14,37 +14,45 @@ THE RULE. Two calls are in scope:
   the same file, in text mode with no encoding.
 
 Text mode means the mode argument is absent or a string literal that does not
-contain `b`. An encoding is named when the call has an `encoding` keyword, or
-when it passes the encoding positionally: the fourth positional argument of the
-builtin `open(file, mode, buffering, encoding)`, the third of
-`Path.open(mode, buffering, encoding)`. Binary modes are counted separately and
-are not violations; a binary stream must keep returning bytes.
+contain `b`, read positionally or from the `mode` keyword. An encoding is named
+when the call has an `encoding` keyword, or when it passes the encoding
+positionally: the fourth positional argument of the builtin
+`open(file, mode, buffering, encoding)`, the third of
+`Path.open(mode, buffering, encoding)`. A literal `None` or `...` in either slot
+is the platform default written down, so it is not an encoding. Binary modes are
+counted separately and are not violations; a binary stream must keep returning
+bytes.
 
 AMBIGUOUS CALLS, NAMED RATHER THAN GUESSED.
 
 * A builtin `open` whose mode is not a string literal is treated as text, the
   conservative reading, and is reported.
+* `io.open` and `builtins.open` ARE the builtin, so they follow the same rule.
 * A call that passes `**kwargs` cannot be shown to name an encoding, so it is
   reported until the encoding is written out.
 * An attribute `.open` call is in scope only when the receiver is PROVEN to be
   a `pathlib.Path`, never by a file:line allowlist. Evidence, all from the same
   file: a parameter or return annotation naming `Path` or `pathlib.Path`,
-  `Path(...)`, `tmp_path / ...` (the pytest fixture), a same-file helper whose
-  annotation or return value is a Path, a path-typed local used as a call
-  argument, and tuple unpacking whose elements are path expressions. The 148
-  attribute `.open` calls in this tree whose receiver is not proven a Path are
-  different APIs: os.open 31, tarfile.open 6, replay.WriteAheadLog(...).open 74,
-  Pool.open 16, provisions.open 15, and wal, self, self._revl_provisions, log and
-  opener 6. None of them takes the `encoding` argument the way text-mode
-  `open` does; os.open takes flags and tarfile.open passes an encoding through
-  to TarFile.
+  `Path(...)` or `pathlib.Path(...)`, `tmp_path / ...` (the pytest fixture), a
+  same-file helper whose annotation or return value is a Path, a path-typed
+  local used as a call argument, tuple unpacking whose elements are path
+  expressions, an attribute target assigned a Path (`self.p = Path(...)`), and
+  an iteration variable over `glob()`, `iterdir()` or `rglob()` on a proven
+  Path. The 148 attribute `.open` calls in this tree whose receiver is not
+  proven a Path are different APIs: os.open 31, tarfile.open 6,
+  replay.WriteAheadLog(...).open 74, Pool.open 16, provisions.open 15, and wal,
+  self, self._revl_provisions, log and opener 6. None of them takes the
+  `encoding` argument the way text-mode `open` does; os.open takes flags and
+  tarfile.open passes an encoding through to TarFile. A `Path` attribute on
+  another class (`zipfile.Path`) is not proof.
 
 The inventory line the tree test asserts is a floor on the calls examined and an
 exact zero on the violations, so a receiver filter that silently drops calls
 cannot turn the test green. The seven text-mode `Path.open` sites in the agreed
-scope and the twelve builtin text-mode `open` sites that main added after the
-sweep are pinned at zero unpinned; the three binary `Path.open` calls are
-counted as binary and stay outside the scope.
+scope (eight name an encoding in this tree) and the twelve builtin text-mode
+`open` sites that main added after the sweep are pinned at zero unpinned; the
+three binary `Path.open` calls are counted as binary and stay outside the
+scope.
 """
 
 from __future__ import annotations
@@ -93,7 +101,8 @@ def _is_path_annotation(node) -> bool:
     if isinstance(node, ast.Name):
         return node.id == "Path"
     if isinstance(node, ast.Attribute):
-        return node.attr == "Path"
+        return node.attr == "Path" and isinstance(node.value, ast.Name) \
+            and node.value.id == "pathlib"
     if isinstance(node, ast.Constant):
         return isinstance(node.value, str) and node.value.strip("'\"") in (
             "Path", "pathlib.Path")
@@ -108,6 +117,27 @@ def _func_name(node: ast.Call):
     return node.func.id if isinstance(node.func, ast.Name) else None
 
 
+def _dotted(node):
+    """`self.p` for an attribute chain rooted at a name, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _is_builtin_open(function) -> bool:
+    """The builtin, including its `io.open` and `builtins.open` spellings."""
+    if isinstance(function, ast.Name):
+        return function.id == "open"
+    return (isinstance(function, ast.Attribute) and function.attr == "open"
+            and isinstance(function.value, ast.Name)
+            and function.value.id in {"io", "builtins"})
+
+
 def _mode(call: ast.Call, index: int):
     """(mode, is_literal). No mode argument is the literal default read."""
     if len(call.args) > index:
@@ -115,18 +145,30 @@ def _mode(call: ast.Call, index: int):
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             return arg.value, True
         return None, False
+    for keyword in call.keywords:
+        if keyword.arg == "mode":
+            if (isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)):
+                return keyword.value.value, True
+            return None, False
     return "r", True
+
+
+def _names_no_encoding(node) -> bool:
+    """A literal None or Ellipsis writes down the platform default."""
+    return isinstance(node, ast.Constant) and (
+        node.value is None or node.value is Ellipsis)
 
 
 def _encoding_state(call: ast.Call, positional_index: int):
     """True: named. False: absent. None: hidden behind **kwargs."""
     for keyword in call.keywords:
         if keyword.arg == "encoding":
-            return True
+            return not _names_no_encoding(keyword.value)
         if keyword.arg is None:
             return None
     if len(call.args) > positional_index:
-        return True
+        return not _names_no_encoding(call.args[positional_index])
     return False
 
 
@@ -148,6 +190,7 @@ class FileResolution:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.funcs[node.name] = node
         self.path_names = {"tmp_path"}
+        self.path_attrs = set()
         self.path_funcs = set()
         for name, function in self.funcs.items():
             for argument in (list(function.args.posonlyargs)
@@ -170,6 +213,9 @@ class FileResolution:
         if isinstance(node, ast.Name):
             return node.id in self.path_names
         if isinstance(node, ast.Attribute):
+            dotted = _dotted(node)
+            if dotted is not None and dotted in self.path_attrs:
+                return True
             return node.attr == "parent" and self._is_path(node.value)
         if isinstance(node, ast.Call):
             function = node.func
@@ -177,9 +223,13 @@ class FileResolution:
                 return function.id == "Path" or function.id in self.path_funcs
             if isinstance(function, ast.Attribute):
                 if function.attr == "Path":
-                    return True
+                    # Any class can have a `Path` attribute (`zipfile.Path`);
+                    # only `pathlib.Path` constructs a filesystem path.
+                    return (isinstance(function.value, ast.Name)
+                            and function.value.id == "pathlib")
                 if function.attr in {"resolve", "absolute", "expanduser",
-                                     "joinpath", "with_name", "with_suffix"}:
+                                     "joinpath", "with_name", "with_suffix",
+                                     "glob", "iterdir", "rglob"}:
                     return self._is_path(function.value)
             return False
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -195,8 +245,9 @@ class FileResolution:
         return {None} if self._is_path(expression) else set()
 
     @staticmethod
-    def _state(path_names, path_funcs, return_positions):
-        return (frozenset(path_names), frozenset(path_funcs),
+    def _state(path_names, path_attrs, path_funcs, return_positions):
+        return (frozenset(path_names), frozenset(path_attrs),
+                frozenset(path_funcs),
                 tuple(sorted((name, tuple(sorted(
                     (-1 if i is None else i) for i in positions)))
                     for name, positions in return_positions.items())))
@@ -205,9 +256,11 @@ class FileResolution:
         assignments = [n for n in ast.walk(self.tree)
                        if isinstance(n, (ast.Assign, ast.AnnAssign,
                                          ast.NamedExpr))]
+        loops = [n for n in ast.walk(self.tree)
+                 if isinstance(n, (ast.For, ast.AsyncFor))]
         for _ in range(50):
-            before = self._state(self.path_names, self.path_funcs,
-                                 self.return_positions)
+            before = self._state(self.path_names, self.path_attrs,
+                                 self.path_funcs, self.return_positions)
             for name, returns in self.returns.items():
                 for node in returns:
                     if node.value is not None:
@@ -217,26 +270,40 @@ class FileResolution:
                     self.path_funcs.add(name)
             for node in assignments:
                 self._assign(node)
+            for node in loops:
+                if self._is_path(node.iter):
+                    self._bind(node.target)
             for node in self.calls:
                 self._call_flow(node)
-            if before == self._state(self.path_names, self.path_funcs,
-                                     self.return_positions):
+            if before == self._state(self.path_names, self.path_attrs,
+                                     self.path_funcs, self.return_positions):
                 return
+
+    def _bind(self, target):
+        """Record a target proven to hold a Path: a name, `self.p`, or a tuple."""
+        if isinstance(target, ast.Name):
+            self.path_names.add(target.id)
+        elif isinstance(target, ast.Attribute):
+            dotted = _dotted(target)
+            if dotted is not None:
+                self.path_attrs.add(dotted)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._bind(element)
 
     def _assign(self, node):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         value = node.value
         if isinstance(node, ast.AnnAssign) and _is_path_annotation(node.annotation):
             for target in targets:
-                if isinstance(target, ast.Name):
-                    self.path_names.add(target.id)
+                self._bind(target)
         if value is None:
             return
         if (isinstance(value, ast.Tuple) and len(targets) == 1
                 and isinstance(targets[0], ast.Tuple)):
             for target, element in zip(targets[0].elts, value.elts):
-                if isinstance(target, ast.Name) and self._is_path(element):
-                    self.path_names.add(target.id)
+                if self._is_path(element):
+                    self._bind(target)
             return
         if targets and isinstance(targets[0], ast.Tuple):
             if isinstance(value, ast.Call):
@@ -245,14 +312,11 @@ class FileResolution:
                 for index in positions:
                     if index is None or index >= len(targets[0].elts):
                         continue
-                    target = targets[0].elts[index]
-                    if isinstance(target, ast.Name):
-                        self.path_names.add(target.id)
+                    self._bind(targets[0].elts[index])
             return
-        if (all(isinstance(target, ast.Name) for target in targets)
-                and self._is_path(value)):
+        if self._is_path(value):
             for target in targets:
-                self.path_names.add(target.id)
+                self._bind(target)
 
     def _call_flow(self, call: ast.Call):
         name = _func_name(call)
@@ -293,7 +357,7 @@ def scan(root: Path):
             if not isinstance(node, ast.Call):
                 continue
             function = node.func
-            if isinstance(function, ast.Name) and function.id == "open":
+            if _is_builtin_open(function):
                 inventory["builtin_open"] += 1
                 mode, is_literal = _mode(node, 1)
                 encoding = _encoding_state(node, 3)
@@ -334,7 +398,7 @@ def scan(root: Path):
 
 
 def test_the_tree_has_no_text_mode_open_without_an_encoding():
-    findings, inventory, attr_calls = scan(ROOT)
+    findings, inventory, _ = scan(ROOT)
     assert findings == [], "\n".join(findings)
     assert inventory["violations"] == 0
     assert inventory["builtin_text"] == 0
@@ -351,7 +415,6 @@ def test_the_tree_has_no_text_mode_open_without_an_encoding():
         f"only {inventory['builtin_binary']} binary builtin open() calls seen")
     assert inventory["attr_open"] >= MIN_ATTR_OPEN, (
         f"only {inventory['attr_open']} attribute .open() calls seen")
-    assert attr_calls == inventory["attr_open"]
     assert inventory["pathlib"] >= MIN_PATHLIB, (
         f"only {inventory['pathlib']} pathlib .open() calls seen")
     assert inventory["path_text_enc"] >= MIN_PATH_TEXT_ENC, (
@@ -422,12 +485,71 @@ def test_binary_modes_and_explicit_encodings_are_accepted(tmp_path):
            "    d = path.open('rb')\n"
            "    e = path.open('w', encoding='utf-8')\n"
            "    f = path.open('w', -1, 'utf-8')\n"
-           "    return a, b, c, d, e, f\n")
+           "    g = open(path, mode='rb')\n"
+           "    h = path.open(mode='rb')\n"
+           "    return a, b, c, d, e, f, g, h\n")
     findings, inventory, _ = scan(tmp_path)
     assert findings == [], findings
     assert inventory["builtin_text"] == 0 and inventory["path_text"] == 0
-    assert inventory["builtin_binary"] == 1 and inventory["path_binary"] == 1
+    assert inventory["builtin_binary"] == 2 and inventory["path_binary"] == 2
     assert inventory["builtin_text_enc"] == 2 and inventory["path_text_enc"] == 2
+
+
+def test_a_literal_none_encoding_is_not_an_encoding(tmp_path):
+    _write(tmp_path, "a.py",
+           "from pathlib import Path\n"
+           "\n"
+           "\n"
+           "def load(path: Path):\n"
+           "    a = open(path, 'r', encoding=None)\n"
+           "    b = open(path, 'r', None, None)\n"
+           "    c = path.open('r', encoding=None)\n"
+           "    return a, b, c\n")
+    findings, inventory, _ = scan(tmp_path)
+    assert len(findings) == 3, findings
+    assert sorted(f.split(':')[1] for f in findings) == ["5", "6", "7"], findings
+    assert inventory["builtin_text"] == 2 and inventory["path_text"] == 1
+
+
+def test_attribute_targets_and_glob_loops_are_in_scope(tmp_path):
+    _write(tmp_path, "a.py",
+           "from pathlib import Path\n"
+           "\n"
+           "\n"
+           "class Store:\n"
+           "    def load(self, tmp_path: Path):\n"
+           "        self.p = tmp_path / 'a'\n"
+           "        with self.p.open() as handle:\n"
+           "            return handle.read()\n"
+           "\n"
+           "\n"
+           "def each(tmp_path: Path):\n"
+           "    for entry in tmp_path.glob('*'):\n"
+           "        entry.open()\n"
+           "    for entry in tmp_path.iterdir():\n"
+           "        entry.open()\n")
+    findings, inventory, _ = scan(tmp_path)
+    assert len(findings) == 3, findings
+    assert sorted(f.split(':')[1] for f in findings) == ["13", "15", "7"], findings
+    assert inventory["path_text"] == 3
+
+
+def test_io_and_builtins_open_are_the_builtin(tmp_path):
+    _write(tmp_path, "a.py",
+           "import builtins\n"
+           "import io\n"
+           "import zipfile\n"
+           "\n"
+           "\n"
+           "def load(path, archive):\n"
+           "    a = io.open(path)\n"
+           "    b = builtins.open(path)\n"
+           "    c = zipfile.Path(archive, 'a').open()\n"
+           "    return a, b, c\n")
+    findings, inventory, _ = scan(tmp_path)
+    assert len(findings) == 2, findings
+    assert inventory["builtin_text"] == 2
+    assert inventory["pathlib"] == 0
 
 
 def test_other_attribute_open_apis_are_not_flagged(tmp_path):
