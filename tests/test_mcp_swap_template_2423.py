@@ -105,6 +105,74 @@ component Supervisor provides admin: Admin {{
 """
 
 
+def _changed_holder_source() -> str:
+    """The operator fixture with ONE change, and it is outside the template:
+    `Supervisor` — which spawns `Worker` and so holds a handle to its live
+    instance — gains an `Admin.probe` that reads the migrated instance state
+    through that handle. `Worker` stays byte for byte the same, so a gate that
+    checks only the template's own code lets the successor land and read the
+    operator's state."""
+    return _stateful_instance_source(1).replace(
+        "  fn ver() -> Int\n",
+        "  fn ver() -> Int\n  fn probe() -> Opt[Str]\n",
+    ).replace(
+        '    fn ver() = w.store.version()\n',
+        '    fn ver() = w.store.version()\n    fn probe() = w.store.get("alice")\n',
+    )
+
+
+def _looping_instance_source() -> str:
+    """The stateful operator fixture, with ONE source-position-carrying step
+    inside the live template itself: `Worker.version()` runs a `while` and
+    `break`s out of it (the shape `_stateful_instance_source` avoids, because
+    its methods are expression-stepped and carry no `line`). The `break` step
+    records the line it sits on, so a comment above `Worker` changes the
+    template's own IR positions while every component's text stays identical."""
+    return """
+service Store {
+  fn get(k: Str) -> Opt[Str]
+  fn put(k: Str, v: Str)
+  fn version() -> Int
+}
+service Admin {
+  fn seed(k: Str, v: Str)
+  fn read(k: Str) -> Opt[Str]
+  fn ver() -> Int
+}
+component Worker provides store: Store {
+  let m = effect Map.new() undo m.drop()
+  provide store {
+    fn get(k) = m.get(k)
+    fn put(k, v) { effect m.insert(k, v) undo m.remove(k) }
+    fn version() {
+      var i = 0
+      while (i < 1) { break }
+      return 1
+    }
+  }
+}
+component Supervisor provides admin: Admin {
+  let w = effect spawn Worker undo w.dispose()
+  provide admin {
+    fn seed(k, v) = w.store.put(k, v)
+    fn read(k) = w.store.get(k)
+    fn ver() = w.store.version()
+  }
+}
+"""
+
+
+def _leading_comment_source() -> str:
+    """The looping operator fixture with a comment and a blank line above the
+    live nested template. Every component's text is otherwise identical, and
+    only the source POSITIONS move: the `break` inside `Worker` and the
+    `spawn Worker` step itself."""
+    return _looping_instance_source().replace(
+        "component Worker",
+        "// the operator's live template\n\ncomponent Worker",
+    )
+
+
 def _call(tool: str, arguments: dict) -> dict:
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": tool, "arguments": arguments}})
@@ -600,6 +668,75 @@ def test_an_unrelated_edit_lands_with_the_live_template_untouched(
     assert _call("revl_call", {"key": "admin", "method": "read",
                                "args": ["alice"]})["result"] == "42"
     assert _call("revl_call", {"key": "ping", "method": "ping"})["result"] == 9
+
+
+@needs_runtime
+def test_a_changed_holder_of_a_live_template_refuses(
+        tmp_path, _fresh_server_session):
+    """The reverse spawn edge is identity too. The operator loads the stateful
+    composition from a jailed file and seeds a live instance; the successor
+    re-declares `Worker` byte for byte and rewrites only `Supervisor`, the
+    component that SPAWNS it, adding an `Admin.probe` that reads the migrated
+    operator state through the spawn handle. The item-10 instance channel
+    correlates by the template's name alone, so before the fix the gate skipped
+    (the template's own code was unchanged), the state migrated, and the
+    successor's holder read `alice` straight back out. A holder is part of the
+    code the instance state is re-seated under, so this refuses with gen N
+    serving, code and state intact."""
+    server = _fresh_server_session
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_stateful_instance_source(1), encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    assert _call("revl_call", {"key": "admin", "method": "seed",
+                               "args": ["alice", "42"]})["ok"] is True
+
+    swapped = _call("revl_swap", {"source": _changed_holder_source()})
+
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert swapped["diagnostics"][0]["category"] != "internal"
+    assert swapped.get("swapped") is not True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+    # the successor's new Admin surface never landed
+    probe = _call("revl_call", {"key": "admin", "method": "probe"})
+    assert probe.get("ok") is False, probe
+
+
+@needs_runtime
+def test_a_leading_comment_above_the_live_template_still_migrates(
+        tmp_path, _fresh_server_session):
+    """Layout is not code. The operator loads the looping stateful fixture from
+    a jailed file and seeds a live instance; the successor is that same text
+    with a comment and a blank line added above `Worker`. Every component is
+    otherwise byte for byte the same, so only the source POSITIONS move: the
+    `line` on the `break` inside `Worker` and on the `spawn Worker` step. The
+    gate must not read that as a changed template: the swap lands and
+    generational migration carries the operator's instance state. Before the
+    fix the line fields were in `_component_signature`/`_template_code`, so
+    this textually identical successor refused with STATE_UNDISCLOSED."""
+    server = _fresh_server_session
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_looping_instance_source(), encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    assert _call("revl_call", {"key": "admin", "method": "seed",
+                               "args": ["alice", "42"]})["ok"] is True
+
+    swapped = _call("revl_swap", {"source": _leading_comment_source()})
+
+    assert swapped["ok"] is True, swapped
+    assert swapped["swapped"] is True
+    assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
 
 
 @needs_runtime
