@@ -15,8 +15,9 @@ whole root suite on every other event. Issue #2672's review adds
 `swap-template-cordis`, PR-only and advisory: `frontend-cordis` runs the same
 swap and authoring suites with the cordis runtime on every other event. Issue
 #2642's option B adds `cordis-affected`, also PR-only and advisory: it runs the
-cordis half of the affected selection under the pinned runtime, and
-`frontend-cordis` covers the whole guarded suite on every other event.
+cordis half of a named affected selection under the pinned runtime (the FULL
+fallback is bounded out and says so), and `frontend-cordis` covers the whole
+guarded suite on every other event.
 
 This file evaluates each job's `if:` and `needs:` per event and pins that split.
 A job's `if:` is evaluated for real, not pattern-matched: the conditions in

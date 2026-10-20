@@ -109,15 +109,18 @@ _DYNAMIC_STEPS = {
     # it credits NO specific file. The one unresolved invocation it reports is
     # the `affected selection: pytest $nodes` progress line copied from
     # `root-suite-affected`: the standalone `pytest` token there is a log
-    # label, and the target is the selector's own `PYTEST` line. Listed so the
-    # "too dynamic to parse: list it explicitly" rule stays an exact account;
-    # tests/ coverage remains with the plain `pytest tests/ -q` steps.
+    # label, and the target is the selector's own `PYTEST` line. A FULL
+    # selection is bounded out and says so, so this job runs only a named
+    # selection. Listed so the "too dynamic to parse: list it explicitly" rule
+    # stays an exact account; tests/ coverage remains with the plain
+    # `pytest tests/ -q` steps.
     ("ci.yml", "cordis-affected"): (
         "the `echo \"affected selection: pytest $nodes\"` progress line is a "
-        "log label, not a second invocation; the job runs the selection "
-        "through tools/cordis_half.py, so the echoed target is unresolved to "
-        "this scan. This job credits no file: tests/ is covered by the plain "
-        "`pytest tests/ -q` steps in `frontend` and `frontend-cordis`."
+        "log label, not a second invocation; the job runs a named selection "
+        "through tools/cordis_half.py and bounds the FULL fallback out, so "
+        "the echoed target is unresolved to this scan. This job credits no "
+        "file: tests/ is covered by the plain `pytest tests/ -q` steps in "
+        "`frontend` and `frontend-cordis`."
     ),
 }
 

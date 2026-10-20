@@ -89,6 +89,7 @@ import ast
 import fnmatch
 import posixpath
 import re
+import shlex
 from pathlib import Path
 
 import os
@@ -386,16 +387,53 @@ def _ci_sets() -> set[str]:
 #: `$RUNNER_TEMP/x`, which is an option's value.
 _RUN_TIME_SELECTION = re.compile(r"\$\{?\w+\}?")
 
+#: `pytest` as a command word, for a line shlex cannot parse: not part of a
+#: filename (`affected_pytest_receipt`) or an option (`--pytest-exit`).
+_COMMAND_PYTEST = re.compile(r"(?<![\w-])(?:[\w./-]*/)?pytest(?=$|\s)")
+
+#: Tokens that end a pytest invocation's own argument list. Everything after
+#: one belongs to another command (`| tee "$log"`) or is a redirect, so it is
+#: not a test target. Without this a `$log` after a pipe reads as the run-time
+#: selection and hides the files the invocation actually named.
+_SHELL_SEPARATOR = frozenset({
+    "|", "||", ";", "&&", "&", ">", ">>", "<", "<<", "2>", "2>&1", "&>",
+})
+
+
+def _shell_tokens(line: str) -> list[str]:
+    """The shell words of one `run:` line, or its bare `pytest` arguments when
+    it does not parse (a continuation backslash, an unbalanced quote in
+    prose). The fallback still requires a command word, so a filename or an
+    option that happens to contain `pytest` is not read as a call."""
+    # a trailing `\` is a line continuation; this reads one line at a time, so
+    # it is removed before the quote-aware split rather than treated as an
+    # escaped newline.
+    cleaned = line.rstrip().removesuffix("\\").rstrip()
+    try:
+        return shlex.split(cleaned, comments=True, posix=True)
+    except ValueError:
+        found = _COMMAND_PYTEST.search(cleaned)
+        if found is None:
+            return []
+        return ["pytest", *cleaned[found.end():].split()]
+
 
 def _pytest_targets(run: str) -> list[str]:
     """Repo-relative paths a `run:` block hands to pytest.
 
     A step that runs pytest with no path at all collects the whole rootdir, so
     it covers everything; that is returned as a bare ".".
+
+    Only a real command word counts. A comment that names pytest, an option
+    such as `--pytest-exit`, and a tool whose filename contains it
+    (`tools/affected_pytest_receipt.py`) are prose or arguments, not
+    invocations. Reading either as a bare call reported "." and silently
+    satisfied every gated file at once, which is how issue #2642's job made
+    the runtime-coverage check unable to fail.
     """
     targets: list[str] = []
     for line in run.splitlines():
-        if "pytest" not in line:
+        if "pytest" not in line or line.lstrip().startswith("#"):
             continue
         prefix = ""
         # `cd backends/python && .venv/bin/pytest -q` runs in a subdirectory,
@@ -403,7 +441,18 @@ def _pytest_targets(run: str) -> list[str]:
         cd_match = re.search(r"cd\s+([\w./-]+)\s*&&", line)
         if cd_match:
             prefix = cd_match.group(1).rstrip("/") + "/"
-        args = line.split("pytest", 1)[1].split()
+        tokens = _shell_tokens(line)
+        at = next((i for i, token in enumerate(tokens)
+                   if posixpath.basename(token) == "pytest"), None)
+        if at is None:
+            continue
+        args = tokens[at + 1:]
+        # `|`, `&&`, a redirect and the like end the invocation's own
+        # arguments: `| tee "$log"` is not a target, and reading its `$log` as
+        # the run-time selection would hide the files the line named.
+        end = next((i for i, arg in enumerate(args) if arg in _SHELL_SEPARATOR),
+                   len(args))
+        args = args[:end]
         # `pytest $SEL_PYTEST`: the files are chosen at run time (the
         # affected-tests selector), so nothing here says which ones run. It
         # used to fall through to "no path at all" and be credited with the
@@ -1483,6 +1532,25 @@ def test_the_runtime_coverage_check_can_actually_fail():
     assert _pytest_targets(_command_lines(prose)) == []
     real = "backends/python/.venv/bin/python -m pytest tests/ -q"
     assert _pytest_targets(_command_lines(real)) == ["tests/"]
+    # a comment that names pytest, an option such as --pytest-exit, and a tool
+    # whose filename contains it are NOT invocations. Issue #2642's job comments
+    # on the exit status it reads back and calls affected_pytest_receipt.py, so
+    # reading either as a bare call reported "." for its steps and would have
+    # credited the job with every gated file at once.
+    assert _pytest_targets("# pytest are then all skipped") == []
+    assert _pytest_targets("python3 tools/affected_pytest_receipt.py \\") == []
+    assert _pytest_targets('  --pytest-exit "$rc" \\') == []
+    # and the parsing did not get weaker: a real bare call is still the
+    # catch-all it is meant to be.
+    assert _pytest_targets("python3 -m pytest -q") == ["."]
+    # a real invocation that ends in a pipeline is still credited: the `$log`
+    # after `| tee` is not the run-time selection, and reading it as one would
+    # drop the files the line names (the swap job's five suites).
+    piped = ('pytest tests/test_swap_a.py tests/test_swap_b.py -q '
+             '2>&1 | tee "$log"')
+    assert _pytest_targets(piped) == ["tests/test_swap_a.py",
+                                      "tests/test_swap_b.py"]
+    assert _pytest_targets("pytest $SEL_PYTEST -q || rc=$?") == []
     assert "." not in [t for _job, targets in _runtime_provisioning_jobs()
                        for t in targets]
     # and a job that collects everything but installs nothing is not a job at
