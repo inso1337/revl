@@ -2436,15 +2436,19 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             # / a `(Int) -> Int` parameter is the callee, not a same-named
             # top-level fn or ADT case
             local = tenv.get(name)
-            if parse_type(local)[0] == FN_HEAD:
+            head = parse_type(local)[0]
+            if head == FN_HEAD:
                 return call_function_value(expr, local, f"`{name}`", arg_types,
                                            tenv, types, filename, line)
             # issue #2544: a binder whose type is NOT a function cannot be the
             # callee, so this call names the same-named module `fn`/`extern`/
             # case and silently drops the binding. Refuse it by type. The
             # #1823 carve-out is above: a function-typed local is the callee
-            # and never reaches this guard.
-            if filename and local is not None:
+            # and never reaches this guard. `Any`/`Value` are erased dynamic
+            # types that may hold a function, and a still-unknown binder is
+            # ⊥, so neither is "definitely not a function".
+            if (filename and local is not None
+                    and head not in _OPEN_CALLABLE_HEADS):
                 refuse_call_on_non_function(name, local, filename, line)
             check_case_call_arity(expr, tenv, types, filename)
             case = (types.get(CASES_KEY) or {}).get(name)
@@ -2940,6 +2944,12 @@ def check_case_arity(name: str, case: dict, given: int, filename: str,
     )
 
 
+#: Erased dynamic types (`Any`, `Value`) can hold a function value, so a call
+#: on a binder of one of these types is not a call on a KNOWN non-function.
+#: Left to the ordinary checks, like a still-unknown binder (⊥).
+_OPEN_CALLABLE_HEADS = frozenset(("Any", "Value"))
+
+
 def refuse_call_on_non_function(name: str, local: str, filename: str,
                                 line: int) -> None:
     """Issue #2544: a call on a binder whose type is not a function.
@@ -2947,13 +2957,14 @@ def refuse_call_on_non_function(name: str, local: str, filename: str,
     `tag: Str` can never be the callee of `tag("x")`, so that call names the
     same-named module `fn`/`extern`/case instead and the binding is silently
     dropped. This guard is deliberately keyed on the TYPE ENVIRONMENT rather
-    than on a list of binder forms: every binder (`let`, `for`, arrow, match
-    arm, provide-method parameter, `every … in` bind) records itself with
-    `bind_local`/`bind_params`, so a form added later is covered without a
-    second edit and no form can be missed. A local of function type never
-    reaches here (the call is on the value, #1823), and a local of unknown
-    type (⊥) is left to the ordinary checks so an untyped callable stays
-    admitted.
+    than on a list of binder forms: the lowering that establishes a binder
+    (`let`, `for`, arrow, match arm, provide-method parameter, effect/approval
+    `let`) records its type there, so a typed form added later is covered
+    without a second edit. The one form whose item is untyped (`every … in`)
+    is enumerated by `_binder_names` in lower.py and fails closed there.
+    A local of function type never reaches here (the call is on the value,
+    #1823); `Any`/`Value` and a still-unknown binder (⊥) are left to the
+    ordinary checks so an open or untyped callable stays admitted.
     """
     rendered = render_type(local) or local
     raise RevlError(
@@ -3003,6 +3014,14 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
     fn_type = tenv.get(name)
     head, parts = parse_type(fn_type)
     if head != FN_HEAD:
+        # issue #2544, the case-constructor half: a call on a local lowers to
+        # this `call`/`name` shape, while a case call lowers to a `var`, so a
+        # non-function local here is the same dropped binding the AST guard
+        # refuses. `Any`/`Value` and a still-unknown binder stay admitted.
+        if (filename and fn_type is not None
+                and head not in _OPEN_CALLABLE_HEADS):
+            refuse_call_on_non_function(surface_name(name), fn_type, filename,
+                                        line)
         return None
     params, returns = parts[:-1], parts[-1]
     args = node.get("args") or []
@@ -3415,9 +3434,12 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         # callable, but if the type environment holds a binder of that name
         # that is NOT a function, the call was the same silent fall-through
         # `infer_ast` above refuses. A function-typed binder is the #1823
-        # carve-out and stays admitted; an unknown (⊥) binder stays lenient.
+        # carve-out and stays admitted; an open (`Any`/`Value`) or unknown
+        # (⊥) binder stays lenient.
         local = tenv.get(name)
-        if filename and local is not None and parse_type(local)[0] != FN_HEAD:
+        head = parse_type(local)[0]
+        if (filename and local is not None and head != FN_HEAD
+                and head not in _OPEN_CALLABLE_HEADS):
             refuse_call_on_non_function(name, local, filename, line)
         sig = (types.get(FNS_KEY) or {}).get(name)
         if sig is None:

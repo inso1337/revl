@@ -99,13 +99,58 @@ def test_the_fn_body_str_parameter_is_refused():
     """The other stratum #2544's acceptance names. A `fn` body's `Str`
     parameter named like a module fn and called was already refused by the
     item-445 lowering scan, which runs before body typing; the typecheck rule
-    would refuse the same shape if that scan did not (the `let` control below
-    reaches the type environment through the same rule)."""
+    refuses the same shape when the call reaches it (the provide-method and
+    case tests below)."""
     with pytest.raises(RevlError, match=_LOWER_REFUSED):
         compile_source(
             _TAG + "fn f(tag: Str) -> Str {\n  return tag(\"x\")\n}\n",
             "t.rvl",
         )
+
+
+def test_a_str_parameter_shadowing_a_called_case_is_refused():
+    """A case constructor is the third callable kind the guard names. In a
+    component a case call lowers to a `call`/`name` node, not the `fn` node,
+    so this pins the IR half of the rule as well as the AST half: the
+    parameter is a `Str` and cannot be `Mk("x")`, and the binding is not
+    silently dropped."""
+    source = "\n".join([
+        "type T = Mk(Str)",                         # 1
+        "service M {",                              # 2
+        "  fn go(Mk: Str) -> T",                    # 3
+        "}",                                        # 4
+        "component C provides m: M {",              # 5
+        "  provide m {",                            # 6
+        "    fn go(Mk) = Mk(\"x\")",                # 7
+        "  }",                                       # 8
+        "}",                                        # 9
+    ]) + "\n"
+    with pytest.raises(RevlError, match="`Mk` is bound here as `Str`") as exc:
+        compile_source(source, "t.rvl")
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 7)
+
+
+def test_a_case_call_with_no_shadowing_binding_is_admitted():
+    """The case path the guard must not widen into: a component method calling
+    an ordinary case constructor, with no local of that name."""
+    ir = compile_source(
+        "type T = Mk(Str)\n"
+        "service M { fn go(x: Str) -> T }\n"
+        "component C provides m: M {\n"
+        "  provide m { fn go(x) = Mk(x) }\n"
+        "}\n",
+        "t.rvl",
+    )
+    assert ir is not None
+
+
+def test_an_open_typed_parameter_called_stays_admitted():
+    """`Any`/`Value` are erased dynamic types, not known non-functions: a call
+    on one stays with the ordinary checks, as it did before #2544's rule."""
+    for head in ("Any", "Value"):
+        ir = compile_source(f"fn g(f: {head}) -> Any {{ return f(1) }}", "t.rvl")
+        assert ir is not None
 
 
 # ------------------------------------------- the carve-out: this one is LEGAL
