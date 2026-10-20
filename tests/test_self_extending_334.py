@@ -865,6 +865,44 @@ def test_propose_instance_refusal_does_not_depend_on_state_shape(gate_factory):
 
 
 @needs_cordis
+def test_session_swap_gates_agent_authored_state_at_the_default_migration():
+    """The session-level twin of the `propose` disclosure refusal: the gate is a
+    property of the successor's AUTHOR, not of the `declared` label. A direct
+    `Session.swap` with the default (generational) migration and
+    `agent_authored=True` refuses STATE_UNDISCLOSED before teardown, leaving
+    gen N's code and instance state serving. The same swap with
+    `agent_authored=False` (an operator swap) still migrates generational
+    state onto the successor."""
+    from revl.compiler import compile_source
+    from revl.mcp.session import Session, SessionError
+
+    session = Session()
+    try:
+        session.load(compile_source(_instances_source(1), "gen1.rvl"), record=True)
+        session.call("admin", "seed", ["alice", "42"])
+        assert session.call("admin", "read", ["alice"])["result"] == "42"
+
+        successor = compile_source(_instances_source(2), "gen2.rvl")
+        with pytest.raises(SessionError) as raised:
+            session.swap(copy.deepcopy(successor), agent_authored=True)
+        assert raised.value.code == "STATE_UNDISCLOSED", str(raised.value)
+        # refused BEFORE teardown: gen N's code and operator state still serve.
+        assert session.call("admin", "ver", [])["result"] == 1
+        assert session.call("admin", "read", ["alice"])["result"] == "42"
+
+        state = session.swap(copy.deepcopy(successor), agent_authored=False)
+        assert state["migration"] == {
+            "policy": "generational",
+            "templates": {"Worker": {"instances": 1, "migrated": True,
+                                     "resources": 1}},
+        }, state.get("migration")
+        assert session.call("admin", "ver", [])["result"] == 2  # successor code
+        assert session.call("admin", "read", ["alice"])["result"] == "42"
+    finally:
+        session.unload()
+
+
+@needs_cordis
 def test_provider_handoff_state_migrates_across_propose(gate_factory):
     """The provider-state half (item 53): a proposed swap of a provider that
     declared a `handoff` carries its live `Map` onto the successor — the

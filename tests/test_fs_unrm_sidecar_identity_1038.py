@@ -228,8 +228,10 @@ def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
 
 def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     """Rewritten IN PLACE, so the inode is the very one that was parked and the
-    length is unchanged. `(dev, ino)` alone cannot see this, which is why the
-    capture records the stamps as well."""
+    length is unchanged. `(dev, ino)` alone cannot see this. The capture records
+    `ctime_ns` too, which catches the rewrite once the inode timestamp clock has
+    ticked; a rewrite that lands inside one tick leaves every stat field equal
+    (issue #2647), and the parked path reads no bytes, so it stays stat-only."""
     mod = _fs_module()
     witness, target, sidecar = _removed(mod, workspace)
     before = os.stat(sidecar)

@@ -1699,12 +1699,26 @@ def _clone_from_fd(src_fd: int, dst_dirfd: int, dst_leaf: str) -> bool:
 #: already pins on the COMMIT path, rather than a second vocabulary: `dev`/`ino`
 #: name the inode (what a same-bytes replacement cannot forge), `nlink` is the
 #: hardlink control the forward path spells `EMULTILINK`, `mode`/`size` the
-#: shape, and `mtime_ns`/`ctime_ns` the modification stamps. `ctime_ns` is what
-#: makes an IN-PLACE rewrite visible without re-reading the bytes: a write to
-#: the snapshot bumps it, and unlike `mtime_ns` an unprivileged writer cannot
-#: set it back with `utimes`.
+#: shape, and `mtime_ns`/`ctime_ns` the modification stamps. A write to the
+#: snapshot bumps `ctime_ns`, and unlike `mtime_ns` an unprivileged writer
+#: cannot set it back with `utimes`, so it catches an IN-PLACE rewrite whenever
+#: the inode timestamp clock has ticked since the capture. It does NOT catch one
+#: that lands inside the same tick: on a filesystem whose inode clock is coarse
+#: relative to the tamper window all seven fields stay equal (issue #2647). That
+#: is why the snapshot capture also records the sidecar's content digest, which
+#: does not depend on clock resolution.
 SIDECAR_CAPTURE_FIELDS: tuple[str, ...] = (
     "dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
+
+#: The capture key holding the sha256 of the sidecar's bytes, read through the
+#: same fd the fields above were fstat'd from (issue #2647). Not a member of
+#: `SIDECAR_CAPTURE_FIELDS`, which are stat fields every path compares the same
+#: way: both checks of `install_captured_sidecar` read the bytes through the fd
+#: they stat'd, so both compare this key. A capture recorded before the key
+#: existed has no `sha256` and stays stat-only, so an older WAL still restores; a
+#: `park_captured_sidecar` capture carries none and stays stat-only too, because
+#: `install_parked_sidecar` may be handed a parked file that denies read.
+SIDECAR_DIGEST_FIELD = "sha256"
 
 #: The subset that survives the install itself. `replace_confined` is a rename,
 #: and a rename bumps the inode's `ctime`, so the post-install re-check compares
@@ -1714,21 +1728,55 @@ INSTALLED_CAPTURE_FIELDS: tuple[str, ...] = tuple(
 
 
 def _capture_of(st) -> dict:
-    """The captured identity of one sidecar inode, as WAL-serializable data."""
+    """The captured identity of one sidecar inode, as WAL-serializable data.
+
+    Stat only. The content digest the snapshot also records is added by
+    `_capture_open_sidecar`, the one helper that holds the sidecar's bytes
+    open."""
     return {"dev": st.st_dev, "ino": st.st_ino, "mode": st.st_mode,
             "nlink": st.st_nlink, "size": st.st_size,
             "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
 
 
+def _sha256_of_fd(fd: int) -> str:
+    """The sha256 of the bytes readable from `fd`, from its current offset.
+    One full read; the callers that use it just opened the fd, so that is the
+    whole file."""
+    digest = hashlib.sha256()
+    while chunk := os.read(fd, 1 << 20):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _capture_open_sidecar(fd: int) -> dict:
+    """`_capture_of` an already-open sidecar `fd`, plus the sha256 of its bytes
+    from offset 0 (issue #2647).
+
+    Shared by `_capture_sidecar` and the portable copy path in
+    `snapshot_preimage`, which still holds the `out` fd that wrote the sidecar.
+    Capturing through that fd matters: the copy has just been `fchmod`ed to the
+    TARGET's mode, so reopening it by name fails `EACCES` when that mode denies
+    the owner read bit even though the process could read the target through a
+    group bit or an ACL. Rewinding first makes the digest name the whole file,
+    not the zero bytes past the write offset."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    capture = _capture_of(os.fstat(fd))
+    capture[SIDECAR_DIGEST_FIELD] = _sha256_of_fd(fd)
+    return capture
+
+
 def _capture_sidecar(dirfd: int, leaf: str) -> dict:
-    """`_capture_of` the sidecar `leaf` inside the already-verified `dirfd`.
+    """`_capture_of` the sidecar `leaf` inside the already-verified `dirfd`,
+    plus the sha256 of its contents (issue #2647).
 
     Opened `O_NOFOLLOW` and fstat'd through the fd, never stat'd by name, for
     the same reason the forward path holds its target fd: a name re-walked at
-    the syscall is a name a competing writer can swap first."""
+    the syscall is a name a competing writer can swap first. The bytes are read
+    through that same fd, so the digest names the inode whose identity the stat
+    fields recorded, not a name that may have been swapped since."""
     fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dirfd)
     try:
-        return _capture_of(os.fstat(fd))
+        return _capture_open_sidecar(fd)
     finally:
         os.close(fd)
 
@@ -1748,16 +1796,30 @@ def snapshot_preimage(handle: WriteHandle) -> str:
     A snapshot that cannot be taken is an `ESNAPSHOT` refusal, never a raise: a
     write with no preimage is not reversible, so the honest outcome is to refuse
     before a byte is written rather than to let an `OSError` escape the body
-    (item 422 F6) or to write irreversibly. The sidecar is recorded on the
-    handle so `discard_write` can remove it when a LATER step refuses."""
+    (item 422 F6) or to write irreversibly. The sidecar's name is recorded on the
+    handle BEFORE the capture is attempted, so `discard_write` removes it when
+    this snapshot refuses after the file was created as well as when a LATER
+    step refuses; the capture itself goes through the fd that holds the bytes,
+    never a reopen after `fchmod` to the target's mode."""
     directory = preimage_dir()
     dst = fresh_sidecar(directory, "pre")
+    # Record the name before anything is created under it. A failure between
+    # the create and the capture (EIO, or an EACCES reopen in an older
+    # implementation) is an ESNAPSHOT, and without this the sidecar would be
+    # residue nothing enumerates. The name can exist before the file does;
+    # `remove_confined` treats a missing leaf as a no-op.
+    handle.preimage = dst
     dst_leaf = os.path.basename(dst)
     try:
         dirfd = _open_dirfd(directory)
         try:
             if not _clone_from_fd(handle.fd, dirfd, dst_leaf):
-                out = os.open(dst_leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                # O_RDWR, not O_WRONLY: `_capture_open_sidecar` below hashes the
+                # bytes through this same fd, and reading a write-only fd is
+                # EBADF (issue #2647). The leaf is created 0o600 and the access
+                # mode is fixed at open, so the later `fchmod` to the target's
+                # mode cannot revoke the read this open was granted.
+                out = os.open(dst_leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL,
                               0o600, dir_fd=dirfd)
                 try:
                     offset = 0
@@ -1770,13 +1832,20 @@ def snapshot_preimage(handle: WriteHandle) -> str:
                             chunk = chunk[os.write(out, chunk):]
                     os.fchmod(out, handle.mode)
                     os.utime(out, ns=(handle.atime_ns, handle.mtime_ns))
+                    # Capture the snapshot's own identity LAST, after the copy
+                    # and the mode/mtime restoration above, so what is recorded
+                    # is the sidecar as it is left behind (issue #1016). Read it
+                    # through the fd still open, not by reopening after the
+                    # `fchmod`: the target's mode may deny the owner read bit
+                    # while the process read the target through a group bit or
+                    # an ACL, and a reopen would refuse a snapshot the write
+                    # could take.
+                    capture = _capture_open_sidecar(out)
                 finally:
                     os.close(out)
-            # capture the snapshot's own identity LAST, after the copy and
-            # after the mode/mtime restoration above, so what is recorded is
-            # the sidecar as it is left behind (issue #1016). The inverse
-            # re-checks the file it is about to install against this.
-            handle.capture = _capture_sidecar(dirfd, dst_leaf)
+            else:
+                capture = _capture_sidecar(dirfd, dst_leaf)
+            handle.capture = capture
         finally:
             os.close(dirfd)
     except OSError as exc:
@@ -1788,7 +1857,6 @@ def snapshot_preimage(handle: WriteHandle) -> str:
             f"a path no other writer is racing",
             handle.real,
         ) from None
-    handle.preimage = dst
     return dst
 
 
@@ -1822,7 +1890,28 @@ def replace_confined(src_real: str, dst_real: str) -> None:
         os.close(src_dirfd)
 
 
-def _checked_stat(real: str, what: str):
+def _unreadable_identity(what: str, exc: OSError, real: str) -> FsOpError:
+    """The `EIDENTITY` refusal for a sidecar whose bytes this process cannot
+    read (issue #2647 review).
+
+    An `EACCES` or `EIO` from the open or the read used to escape `_checked_stat`
+    as a raw `OSError`, which the guard totality wrapper turned into an
+    `FsOpError` carrying the errno (`EACCES`) rather than the identity code the
+    inverse contract names. A file that cannot be read cannot be shown to be the
+    captured one, so it is drift: fail closed, as `restore-residue`."""
+    return FsOpError(
+        "EIDENTITY",
+        f"the {what} could not be read ({exc.strerror or exc}), so the "
+        "reversal cannot be shown to install what was captured; the reversal "
+        "was refused rather than install a file that is not the captured "
+        "preimage",
+        real)
+
+
+def _checked_stat(real: str, what: str, *, digest: bool = False,
+                  capture=None, fields: tuple[str, ...] = (),
+                  sentence: str = "",
+                  noun: str = "the captured preimage"):
     """`fstat` of `real` taken through its parent's directory fd on an
     `O_NOFOLLOW` open, refusing anything that is not a regular single-linked
     file.
@@ -1832,7 +1921,23 @@ def _checked_stat(real: str, what: str):
     (`finalize_committed_sidecar` answers `EOUTSIDE` for the same case), and a
     multiply-linked one is the hardlink control `open_confined_write` answers
     with `EMULTILINK` — an inode reachable by a second name is an inode another
-    writer keeps a handle on after the rename."""
+    writer keeps a handle on after the rename.
+
+    With `capture`, the captured identity is compared against `fields` as soon
+    as the fstat is taken and BEFORE any bytes are read, so a replacement that
+    already differs on inode, size or a stamp is refused without paying for the
+    read: a huge or sparse replacement would otherwise make the refuser do
+    whatever work the replacer chose. Only a sidecar that still matches on stat
+    is read for its digest, which is then compared as well.
+
+    With `digest`, the bytes are read through that SAME fd and their sha256 is
+    returned with the stat, as `(stat, hexdigest)`. That is the check that does
+    not depend on an inode timestamp tick: a same-size in-place rewrite inside
+    one tick leaves every stat field above equal (issue #2647), so the restore
+    path reads the contents as well. One full read, taken after the type,
+    link-count and stat-identity refusals and through the fd whose identity was
+    just verified. An open or read this process cannot complete (`EACCES`,
+    `EIO`) is `EIDENTITY`, not a raw `OSError`."""
     parent, leaf = _split(real)
     try:
         dirfd = _open_dirfd(parent)
@@ -1852,21 +1957,34 @@ def _checked_stat(real: str, what: str):
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                 raise ConfinementError(
                     "EOUTSIDE", f"the {what} may not be a symlink", real) from None
-            raise
+            raise _unreadable_identity(what, exc, real) from None
         try:
-            st = os.fstat(fd)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise ConfinementError(
+                        "EOUTSIDE", f"the {what} must be a regular file", real)
+                if st.st_nlink != 1:
+                    raise FsOpError(
+                        "EMULTILINK", f"the {what} is linked from a second name "
+                        f"({st.st_nlink} links), so installing it would hand a "
+                        "live alias to whoever holds the other name", real)
+                if capture is not None:
+                    _refuse_drifted_identity(
+                        st, capture, fields, real, sentence, noun=noun)
+                content_digest = _sha256_of_fd(fd) if digest else None
+                if capture is not None:
+                    _refuse_drifted_identity(
+                        st, capture, fields, real, sentence, noun=noun,
+                        digest=content_digest)
+            except OSError as exc:
+                raise _unreadable_identity(what, exc, real) from None
         finally:
             os.close(fd)
     finally:
         os.close(dirfd)
-    if not stat.S_ISREG(st.st_mode):
-        raise ConfinementError(
-            "EOUTSIDE", f"the {what} must be a regular file", real)
-    if st.st_nlink != 1:
-        raise FsOpError(
-            "EMULTILINK", f"the {what} is linked from a second name "
-            f"({st.st_nlink} links), so installing it would hand a live alias "
-            "to whoever holds the other name", real)
+    if digest:
+        return st, content_digest
     return st
 
 
@@ -1884,21 +2002,43 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
     could rewrite it, swap it for another inode, or hardlink it out, and the
     inverse would install the result and report a clean reversal.
 
-    Three checks, on the way in and again on the way out:
+    Checks on the way in and again on the way out:
 
     * the sidecar is a regular file (`EOUTSIDE` otherwise),
     * its link count is 1 (`EMULTILINK` otherwise, the same control the forward
       `open_confined_write` applies to its target),
     * its captured identity is unchanged (`EIDENTITY` otherwise) — `(dev, ino)`
-      catches a swap, `size`/`mtime_ns`/`ctime_ns` catch an in-place rewrite,
-      and `mode` catches a re-permissioning.
+      catches a swap, `mode` catches a re-permissioning, and `size`/`mtime_ns`/
+      `ctime_ns` catch an in-place rewrite as soon as the inode timestamp clock
+      has ticked,
+    * and the sha256 of its contents still matches the one recorded at
+      snapshot (`EIDENTITY` otherwise), compared on the way in and again on the
+      installed result. The stat stamps are not enough: a same-size rewrite
+      inside a single inode timestamp tick leaves all seven fields equal, so on
+      a coarse clock the sidecar could be rewritten and installed while every
+      stat comparison passed (issue #2647). The digest does not depend on clock
+      resolution, and the bytes are read through the same fd the stat came
+      from. A recorded digest that is not exactly 64 lowercase hex characters
+      is a corrupt capture, refused as `EIDENTITY` rather than silently
+      compared stat-only, and a sidecar whose bytes cannot be read (`EACCES`,
+      `EIO`) is `EIDENTITY` too, because an identity that cannot be checked is
+      drift.
+
+    The stat comparison runs on the fstat BEFORE the digest read, so a
+    replacement that already differs on inode or size is refused without
+    reading it: a sidecar can be made huge or sparse, and the refuser should
+    not do whatever work the replacer chose.
 
     The check runs again on the INSTALLED result, because the rename itself is
     by name: re-checking afterwards is what closes the window between the first
     check and the syscall, the same way `confirm_landed` re-establishes the
     forward write's identity rather than trusting the pre-syscall check. The
     post-install comparison drops `ctime_ns`, which the rename legitimately
-    bumps (`INSTALLED_CAPTURE_FIELDS`).
+    bumps (`INSTALLED_CAPTURE_FIELDS`), but compares the digest again: the
+    window that pass exists for is exactly a rewrite between the first read and
+    the rename, so the installed bytes are read and hashed once more. One extra
+    full read at snapshot, one on the way in and one on the installed result are
+    the whole cost.
 
     A refusal RAISES, so the teardown loop records it as `restore-residue`
     against the crossing it was reverting — the outcome item 243 rule 6 already
@@ -1909,31 +2049,58 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
     `capture` is the witness's recorded `snapshot_preimage` capture. A witness
     that carries none (a durable record written before this check existed) still
     gets the two caller-independent checks; there is nothing to compare it
-    against, and refusing every such replay would strand a recoverable WAL."""
-    before = _checked_stat(src_real, "preimage sidecar")
-    _refuse_drifted_identity(before, capture, SIDECAR_CAPTURE_FIELDS, src_real,
-                             "the preimage sidecar changed since it was captured")
+    against, and refusing every such replay would strand a recoverable WAL. A
+    capture recorded before the digest existed likewise has no `sha256` and is
+    compared stat-only, so an older WAL still restores."""
+    _checked_stat(
+        src_real, "preimage sidecar", digest=True, capture=capture,
+        fields=SIDECAR_CAPTURE_FIELDS,
+        sentence="the preimage sidecar changed since it was captured")
     replace_confined(src_real, dst_real)
-    after = _checked_stat(dst_real, "restored target")
-    _refuse_drifted_identity(after, capture, INSTALLED_CAPTURE_FIELDS, dst_real,
-                             "the restored target is not the captured preimage")
+    _checked_stat(
+        dst_real, "restored target", digest=True, capture=capture,
+        fields=INSTALLED_CAPTURE_FIELDS,
+        sentence="the restored target is not the captured preimage")
 
 
 def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
                              sentence: str,
-                             noun: str = "the captured preimage") -> None:
+                             noun: str = "the captured preimage",
+                             digest: str | None = None) -> None:
     """Compare `st` against a recorded `capture` over `fields`, or do nothing
     when the witness recorded none. Named separately so the two stages of
     `install_captured_sidecar` state the same comparison twice rather than
     inlining two subtly different ones, and shared with the `unrm` side
     (`install_parked_sidecar`, issue #1038) so both inverses compare one way.
     `noun` names what the file failed to be, which is the only thing that
-    differs between the preimage sidecar and the garbage one."""
+    differs between the preimage sidecar and the garbage one.
+
+    `digest` is the sha256 the caller read through the fd it stat'd, compared
+    against the capture's `sha256`. A capture that CARRIES the key must carry
+    exactly 64 lowercase hex characters: a present null, number, list or
+    malformed string is a corrupt record, refused as `EIDENTITY` rather than
+    silently degraded to stat-only, because that would drop the one check that
+    does not depend on the clock. A capture with no key at all is a legacy
+    record (or an `unrm` capture that never recorded one) and stays stat-only so
+    an older WAL still restores; the `unrm` call passes no digest and stays
+    stat-only, because a parked file may deny read."""
     if not isinstance(capture, dict) or not capture:
         return
     observed = _capture_of(st)
     drifted = sorted(f for f in fields
                      if f in capture and capture[f] != observed[f])
+    if SIDECAR_DIGEST_FIELD in capture:
+        expected_digest = capture[SIDECAR_DIGEST_FIELD]
+        if (not isinstance(expected_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None):
+            raise FsOpError(
+                "EIDENTITY",
+                f"{sentence} (the recorded {SIDECAR_DIGEST_FIELD} is not 64 "
+                "lowercase hex, so the capture is malformed); the reversal was "
+                f"refused rather than install a file that is not {noun}",
+                real)
+        if digest is not None and digest != expected_digest:
+            drifted = sorted(drifted + [SIDECAR_DIGEST_FIELD])
     if drifted:
         raise FsOpError(
             "EIDENTITY",
@@ -2174,13 +2341,17 @@ def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
     inverse then renamed the result over the target and the abort reported a
     clean, residue-free reversal.
 
-    The same three refusals as the preimage side, with the same codes:
+    The same three stat refusals as the preimage side, with the same codes:
     `EOUTSIDE` for a symlink or a different file type, `EMULTILINK` for a link
     added since the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/
     `mtime_ns`/`ctime_ns`. `(dev, ino)` is what a same-bytes replacement cannot
-    forge; `ctime_ns` is what makes an in-place rewrite visible without
-    re-reading the bytes, and unlike `mtime_ns` an unprivileged writer cannot
-    set it back with `utimes`.
+    forge; `ctime_ns` makes an in-place rewrite visible as soon as the inode
+    timestamp clock has ticked, and unlike `mtime_ns` an unprivileged writer
+    cannot set it back with `utimes`. It does not catch one that lands inside
+    the same tick (issue #2647), and this side reads no bytes: a parked file may
+    deny read by design, so its capture carries no content digest and stays
+    stat-only. The digest was added to the `restore` path only, where the
+    sidecar is a copy this module created and can always read.
 
     The stamps are not enough on a filesystem whose inode clock is coarse
     relative to the write (issue #2650): a same-length in-place rewrite can

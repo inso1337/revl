@@ -743,7 +743,7 @@ def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
 # ---------------------------------------------------------------- compile
 
 def compile_virtual(vs: dict, *, manifest: dict | None = None,
-                    replacing: tuple = ()) -> dict:
+                    replacing: tuple = (), report: dict | None = None) -> dict:
     """Compile a working source set through the same entry points a full swap
     uses, so the admission gate is literally identical.
 
@@ -757,10 +757,15 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
     dependency buffers (issue #1779), so the compile that decides is the
     compile whose bytes the caller ends up holding: `_boot_draft` and
     `_swap_server_side` both compile here and then take the origin from `vs`.
-    A refused compile records nothing — the exception leaves `vs` untouched."""
+    A refused compile records nothing — the exception leaves `vs` untouched.
+
+    `report` (issue #1779's out-parameter, as `compile_under_authoring` takes
+    it) lets a caller read what the compile read: `_swap_server_side` asks it
+    which `use`-reached files sit inside an export area, since those are the
+    agent's text even when no listed file is (#2423)."""
     from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
 
-    report: dict = {}
+    report = {} if report is None else report
     if vs.get("source") is not None:
         document = compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
                                   replacing=replacing, modules=vs.get("modules") or None,

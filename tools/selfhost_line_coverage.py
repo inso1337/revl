@@ -140,6 +140,26 @@ markers (the first copy of a record that appears twice wins), re-measures every
 count and rewrites the files clean. It never writes a budget, so `--check` then
 names any budget the merged counts disagree with.
 
+WHAT `--check` TRUSTS, AND WHY (issue #2651). The gate used to read its
+"before" counts only from the ledger in the tree under test, so a branch could
+lower a record and be judged against its own lower number; commit e071d18ec did
+exactly that to `selfhost/rust` `callee_tparams` (1 uncovered on origin/main,
+0 in the branch ledger, and the branch also measured 0, so nothing differed).
+`--check` now reads the baseline ledger from git, at the merge base of
+origin/main and HEAD (origin/main's tip when a shallow checkout has no merge
+base), prints that provenance and whether the in-tree ledger differs, and
+fails any in-tree record that is LOWER than the baseline. That direction is the
+one that hides a regression, and no measurement can catch it when the record
+and the tree agree, so it is refused outright: a recorded fall counts only when
+the baseline already records it. A record ABOVE the baseline (a stale branch,
+or a rise the branch recorded with a hand-raised budget) is still held to the
+measurement as before. A consequence, stated because it changes the workflow:
+an improvement can no longer record its own fall in the same pull request; the
+fall has to land on origin/main first, and the branch keeps it once it merges
+main. If origin/main does not resolve, the check fails and says so; it never
+falls back to the in-tree ledger. `--write` and `--functions` are unchanged
+and read the tree's ledger.
+
 Usage:
     python3 tools/selfhost_line_coverage.py            # the report
     python3 tools/selfhost_line_coverage.py --check    # the gate
@@ -154,7 +174,9 @@ import argparse
 import ast
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -588,17 +610,17 @@ def _tier_file(base: Path, half: str, tier: str) -> Path:
     return Path(base) / half / f"{tier}.jsonl"
 
 
-def _load_tier(path: Path) -> tuple[dict | None, list[str]]:
-    """One tier file, parsed. A record that is not one of the two shapes is a
-    problem rather than an exception, so the gate fails closed and names it."""
-    if not path.is_file():
-        return None, []
+def _parse_tier(text: str, label: str) -> tuple[dict | None, list[str]]:
+    """One tier file's text, parsed. `label` names the file in problems.
+    A record that is not one of the two shapes is a problem rather than an
+    exception, so the gate fails closed and names it."""
     entry: dict = {"reasons": {}, "functions": {}}
     problems: list[str] = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    stem = label[:-5] if label.endswith(".jsonl") else label
+    for lineno, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
-        where = f"{path.parent.name}/{path.name}:{lineno}"
+        where = f"{label}:{lineno}"
         if line.startswith(("<<<<<<<", "=======", ">>>>>>>", "|||||||")):
             problems.append(f"{where}: unresolved merge conflict marker")
             continue
@@ -621,7 +643,7 @@ def _load_tier(path: Path) -> tuple[dict | None, list[str]]:
             if name in entry["functions"]:
                 previous = entry["functions"][name]["reason"]
                 problems.append(
-                    f"{path.parent.name}/{path.stem}: `{name}` appears in "
+                    f"{stem}: `{name}` appears in "
                     f"multiple reasons ({previous}, {rid})")
                 continue
             entry["functions"][name] = {"uncovered": uncovered,
@@ -629,6 +651,13 @@ def _load_tier(path: Path) -> tuple[dict | None, list[str]]:
         else:
             problems.append(f"{where}: not a reason or function record")
     return entry, problems
+
+
+def _load_tier(path: Path) -> tuple[dict | None, list[str]]:
+    if not path.is_file():
+        return None, []
+    return _parse_tier(path.read_text(encoding="utf-8"),
+                       f"{path.parent.name}/{path.name}")
 
 
 def _load_ledger(base: Path | None = None) -> dict:
@@ -678,6 +707,205 @@ def _flatten(entry: dict) -> dict[str, int]:
         return {}
     return {name: f["uncovered"] for name, f in entry.get("functions", {}).items()
             if type(f.get("uncovered")) is int and f["uncovered"] >= 0}
+
+
+# ------------------------------------------------------ the baseline ledger
+#
+# WHY THE BASELINE COMES FROM GIT, NOT THE TREE (issue #2651). The measurement
+# is compared against the ledger recorded in the tree under test, so a branch
+# that edits a record changes the baseline it is judged against. Commit
+# e071d18ec lowered selfhost/rust `callee_tparams` from 1 uncovered to 0 in the
+# branch ledger, and that tree also measures 0, so a check reading only the tree
+# is silent: there is nothing to compare the 0 against. origin/main records 1,
+# and only a comparison with that record shows what the branch did. So the
+# baseline is the ledger at the merge base of origin/main and HEAD (or at
+# origin/main itself), read with `git show`, never from the working tree.
+#
+# A DIFFERENCE IS NOT AUTOMATICALLY A FAILURE. A branch cut before a fall landed
+# on the baseline records the older, HIGHER count; the baseline records the
+# lower one, and that fall's provenance IS the baseline. Judging it against the
+# branch's stale record would demand a `--write` that re-raises a count main has
+# already lowered. The baseline is trusted for that direction. The direction
+# that hides a regression is the other one: an in-tree record LOWER than the
+# baseline, which makes the ratchet's "before" smaller than the truth. That is
+# the branch redefining its own baseline, and it fails, whatever the tree
+# measures, because a recorded fall counts only when the baseline already
+# records it. Recording a new uncovered count (a rise) is still allowed: the
+# measurement has to equal it and the budget has to be raised by hand, which is
+# the #1419 mechanism and is visible in the diff. The cost of the rule is
+# deliberate: an improvement cannot record its fall in its own pull request,
+# because that is the exact shape e071d18ec had. The fall lands on origin/main
+# first, and the branch keeps it after merging main.
+#
+# WHEN THE BASELINE CANNOT BE RESOLVED, the check fails and says so. CI may run
+# a shallow checkout with no origin/main ref; the one thing it must not do is
+# fall back to the in-tree ledger (or to a local `main`, which can be stale),
+# because the in-tree ledger is exactly the ledger a branch can redefine. The
+# failure names the missing ref and the fetch that supplies it.
+
+
+def _git(*args: str) -> str | None:
+    """stdout of one git command in ROOT, or None when it fails (including a
+    missing path in `git show`). An empty file is "", which is not a failure.
+
+    The environment is scrubbed of every `GIT_*` variable: a pre-commit hook
+    exports `GIT_DIR` and `GIT_INDEX_FILE`, and a probe that inherits them reads
+    or writes the hook's repository instead of the one named with `-C` (the
+    shared-checkout incident fixed by #1485).
+    """
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    try:
+        done = subprocess.run(["git", "-C", str(ROOT), *args], env=env,
+                              capture_output=True, text=True, encoding="utf-8",
+                              check=False)
+    except OSError:
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def baseline_provenance() -> tuple[str | None, str]:
+    """`(sha, how)` of the trusted ledger baseline, or `(None, why not)`.
+
+    The merge base is preferred to origin/main's tip: it is the commit the
+    branch actually forked from, so a branch cut before a baseline change is not
+    judged against a ledger its code never saw. A shallow checkout can have
+    origin/main without its history, in which case the tip is still a usable,
+    trusted ledger and is used with a provenance that says so. A branch that has
+    not merged origin/main is then judged against the tip instead of its fork
+    point; that is the fail-closed choice when the fork point is unavailable.
+
+    origin/main is the only accepted baseline ref. A local `main` is deliberately
+    not a fallback: in a CI checkout it can be stale, and a stale baseline is a
+    different ledger from the one the branch will merge into. No origin/main
+    means the check fails and says so; fetch it.
+    """
+    tip = (_git("rev-parse", "--verify", "origin/main^{commit}") or "").strip()
+    if not tip:
+        return None, ("origin/main does not resolve in this checkout; a "
+                      "shallow clone without the base ref looks like this")
+    base = (_git("merge-base", "origin/main", "HEAD") or "").strip()
+    if base:
+        return base, "merge base of origin/main and HEAD"
+    return tip, "origin/main tip (no merge base: shallow or unrelated history)"
+
+
+def _baseline_ledger() -> tuple[str | None, str, dict]:
+    """`(sha, provenance, ledger)` for the trusted baseline, read from git.
+
+    Every one of the twelve ledger files has to be readable at the baseline
+    commit. One that is not is not silently counted as zero records: that would
+    make a lowering undetectable and let the check pass with "0 lower, N
+    higher". A partial or missing baseline is returned as unresolved, so `check`
+    fails loudly, exactly as it does when the ref itself is absent.
+    """
+    sha, provenance = baseline_provenance()
+    ledger: dict = {"_problems": []}
+    if sha is None:
+        return None, provenance, ledger
+    relative = LEDGER.relative_to(ROOT).as_posix()
+    missing: list[str] = []
+    for half in HALVES:
+        side = {}
+        for tier in TIERS:
+            name = f"{half}/{tier}.jsonl"
+            text = _git("show", f"{sha}:{relative}/{name}")
+            if text is None:
+                missing.append(name)
+                continue
+            entry, problems = _parse_tier(text, f"{sha[:12]}:{name}")
+            ledger["_problems"] += problems
+            if entry is not None:
+                side[tier] = entry
+        if side:
+            ledger[half] = side
+    if missing:
+        shown = ", ".join(missing[:4]) + (" ..." if len(missing) > 4 else "")
+        return (None,
+                f"{provenance} at {sha}, but the baseline ledger cannot be read "
+                f"there: {len(missing)} file(s) missing ({shown})", {})
+    return sha, provenance, ledger
+
+
+def _ledger_differences(branch: dict, baseline: dict) -> dict[str, int]:
+    """How the in-tree records differ from the baseline's, by direction.
+
+    An absent record means zero uncovered statements, so a record present with
+    a zero count and an absent one compare equal; e071d18ec's 0/0 record and
+    origin/main's 1/1 differ by the count, which is the number that matters.
+    """
+    lower = higher = 0
+    for half in HALVES:
+        branch_side = branch.get(half) if isinstance(branch.get(half), dict) else {}
+        base_side = baseline.get(half) if isinstance(baseline.get(half), dict) else {}
+        for tier in TIERS:
+            recorded = _flatten(branch_side.get(tier, {}))
+            trusted = _flatten(base_side.get(tier, {}))
+            for name in set(recorded) | set(trusted):
+                now, before = recorded.get(name, 0), trusted.get(name, 0)
+                if now < before:
+                    lower += 1
+                elif now > before:
+                    higher += 1
+    return {"lower": lower, "higher": higher, "total": lower + higher}
+
+
+def baseline_report(baseline: tuple[str | None, str, dict], ledger: dict) -> list[str]:
+    """The provenance and divergence lines `--check` prints before its verdict."""
+    sha, provenance, baseline_ledger = baseline
+    if sha is None:
+        return [f"BASELINE line-coverage ledger: UNRESOLVED ({provenance})",
+                "IN-TREE line-coverage ledger: not compared with a baseline"]
+    lines = [f"BASELINE line-coverage ledger: {provenance} at {sha}"]
+    differences = _ledger_differences(ledger, baseline_ledger)
+    if differences["total"] == 0:
+        lines.append("IN-TREE line-coverage ledger: matches the baseline")
+    else:
+        lines.append(
+            f"IN-TREE line-coverage ledger: differs from the baseline in "
+            f"{differences['total']} record(s) ({differences['lower']} lower, "
+            f"{differences['higher']} higher)")
+    return lines
+
+
+def _baseline_problems(ledger: dict, baseline: dict, data: dict,
+                       provenance: str, sha: str) -> list[str]:
+    """Fail every in-tree record that lowers the baseline it is judged against.
+
+    One direction only. An in-tree count ABOVE the baseline is either a stale
+    branch (the baseline already records the fall) or a rise the branch has
+    recorded, and the measured-vs-recorded check below already holds it to the
+    measurement and its budget. An in-tree count BELOW the baseline is the
+    branch making its own "before" smaller, which no measurement can detect
+    when the tree and the record agree: e071d18ec measures 0 and records 0.
+    """
+    problems: list[str] = []
+    for half in HALVES:
+        branch_side = ledger.get(half) if isinstance(ledger.get(half), dict) else {}
+        base_side = baseline.get(half) if isinstance(baseline.get(half), dict) else {}
+        for tier in TIERS:
+            recorded = _flatten(branch_side.get(tier, {}))
+            trusted = _flatten(base_side.get(tier, {}))
+            try:
+                measured = data[half][tier]["functions"]
+            except (KeyError, TypeError):
+                measured = {}
+            if not isinstance(measured, dict):
+                measured = {}
+            for name in sorted(set(recorded) | set(trusted)):
+                now, before = recorded.get(name, 0), trusted.get(name, 0)
+                if now >= before:
+                    continue
+                problems.append(
+                    f"{half}/{tier}: the in-tree ledger lowers `{name}` below "
+                    f"the line-coverage baseline ({provenance} at {sha}): the "
+                    f"baseline records {before} uncovered statement(s), the "
+                    f"in-tree ledger records {now}, and this tree measures "
+                    f"{measured.get(name, 0)}. A branch cannot lower the ledger "
+                    f"it is judged against: a recorded fall counts only when the "
+                    f"baseline already records it. Restore the baseline count, "
+                    f"or land the fall on origin/main and merge it here.")
+    return problems
 
 
 def _budget_problems(ledger: dict) -> list[str]:
@@ -800,12 +1028,34 @@ WHERE = {
 }
 
 
-def check(data: dict) -> list[str]:
+def check(data: dict,
+          baseline: tuple[str | None, str, dict] | None = None) -> list[str]:
+    """The gate's problems, measured against the baseline ledger and the tree's.
+
+    `baseline` is `_baseline_ledger()`'s triple; `main` resolves it once so the
+    printed provenance and the verdict cannot disagree. Issue #2651: the
+    in-tree ledger is what this branch records, the git baseline is what it is
+    judged against.
+    """
+    if baseline is None:
+        baseline = _baseline_ledger()
+    sha, provenance, base_ledger = baseline
     ledger = _load_ledger()
-    problems = _closure_problems(ledger)
+    problems: list[str] = []
+    if sha is None:
+        problems.append(
+            f"the line-coverage baseline could not be resolved: {provenance}. "
+            f"The gate will not fall back to the in-tree ledger, because that is "
+            f"the ledger a branch can redefine. Fetch origin/main and rerun.")
+    else:
+        problems += [f"baseline ledger: {problem}"
+                     for problem in base_ledger.get("_problems", [])]
+    problems += _closure_problems(ledger)
     problems += _budget_problems(ledger)
     if not isinstance(data, dict):
         return problems + ["survey data is not a map"]
+    if sha is not None:
+        problems += _baseline_problems(ledger, base_ledger, data, provenance, sha)
     for half in ("reference", "selfhost"):
         recorded_half = ledger.get(half, {})
         if not isinstance(recorded_half, dict):
@@ -865,7 +1115,11 @@ def check(data: dict) -> list[str]:
                         f"{half}/{tier}: `{name}` is down to {now} uncovered "
                         f"statement(s) from {before}. Good news, and the ratchet "
                         f"only holds if it is recorded: run "
-                        f"`python3 tools/selfhost_line_coverage.py --write`.")
+                        f"`python3 tools/selfhost_line_coverage.py --write`. "
+                        f"The fall also has to be recorded on origin/main: a "
+                        f"fall that exists only in this branch's ledger is "
+                        f"refused by the baseline check, because the baseline "
+                        f"is the ledger the branch is judged against.")
     return problems
 
 
@@ -1082,6 +1336,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     reporting = not (args.check or args.write)
+    baseline = None
+    if args.check:
+        # Issue #2651: the baseline is the ledger in git, and the branch's
+        # ledger is reported beside it before the verdict, so a FAIL can be read
+        # against the record the gate actually used.
+        baseline = _baseline_ledger()
+        for line in baseline_report(baseline, _load_ledger()):
+            print(line)
     data = {"reference": measure(frontend=reporting), "selfhost": measure_selfhost()}
     if args.write:
         write_ledger(data)
@@ -1091,7 +1353,7 @@ def main(argv: list[str] | None = None) -> int:
         print("no budget was touched; run --check.")
         return 0
     if args.check:
-        problems = check(data)
+        problems = check(data, baseline)
         for problem in problems:
             print(f"FAIL {problem}")
         if problems:

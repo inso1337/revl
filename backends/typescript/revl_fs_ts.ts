@@ -914,9 +914,11 @@ function rawWriteThrough(handle: WriteHandle, contents: string): void {
  * `EMULTILINK`, `mode`/`size` the shape, and `mtimeNs`/`ctimeNs` the stamps.
  * `ctimeNs` makes an IN-PLACE rewrite visible as soon as the inode timestamp
  * clock has ticked, and unlike `mtimeNs` an unprivileged writer cannot set it
- * back; it does NOT catch one that lands inside the same tick (issue #2666).
- * That is why a parked file this process can open read-only also records the
- * sha256 of its bytes, which does not depend on clock resolution.
+ * back with `utimes`. It does NOT catch one that lands inside the same tick:
+ * on a filesystem whose inode clock is coarse relative to the tamper window all
+ * seven fields stay equal (issues #2652, #2666). That is why a capture can also
+ * record the sha256 of the sidecar's bytes, which does not depend on clock
+ * resolution.
  *
  * Peer of py `SIDECAR_CAPTURE_FIELDS`, recorded as decimal STRINGS: node's only
  * nanosecond-resolution stat is the `bigint` one, and a bigint is not
@@ -929,43 +931,41 @@ export interface SidecarCapture {
   size: string
   mtimeNs: string
   ctimeNs: string
-  /** The sha256 of the sidecar's bytes as bare lowercase hex (issue #2666), or
-   * absent when the inode could not be read at capture time. Not a member of
-   * `SIDECAR_CAPTURE_FIELDS`: those are stat keys every path compares the same
-   * way, while this one is compared only when a capture carries it and the
-   * file can be re-read. A capture recorded before the key existed has none and
-   * stays stat-only, so an older WAL still replays. */
+  /** The sha256 of the sidecar's bytes as bare lowercase hex, read through the
+   * same fd the fields above were fstat'd from: by `snapshotPreimage` on the
+   * restore path (issue #2652) and by `parkCapturedSidecar` on the `fsUnrm`
+   * path when the parked inode is a regular file this process can open
+   * read-only (issue #2666). Not a member of `SIDECAR_CAPTURE_FIELDS`, which
+   * are stat fields every path compares the same way: both install paths
+   * compare this key on both passes when a capture carries it. A capture
+   * recorded before the key existed has none and stays stat-only, so an older
+   * WAL still replays; an `fsRm` capture carries none when the parked file is
+   * not a readable regular file and stays stat-only too (issue #2650). */
   sha256?: string
 }
 
 /** The subset that survives the install. A rename bumps the inode's `ctime`, so
  * the post-install re-check compares everything BUT `ctimeNs`; comparing it
- * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`. */
+ * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`.
+ * The content digest IS compared on that pass as well: the window it exists for
+ * is exactly a rewrite between the first read and the rename. */
 const INSTALLED_CAPTURE_FIELDS = [
   'dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs'] as const
 const SIDECAR_CAPTURE_FIELDS = [...INSTALLED_CAPTURE_FIELDS, 'ctimeNs'] as const
 
-/** The captured identity of one sidecar inode. A READ of an already-taken stat,
- * so it reaches no syscall of its own. The content digest is added by the one
- * caller that can open the parked inode read-only, because that is the caller
- * that can read the bytes. */
-function captureOf(st: fs.BigIntStats): SidecarCapture {
-  return {
-    dev: String(st.dev),
-    ino: String(st.ino),
-    mode: String(st.mode),
-    nlink: String(st.nlink),
-    size: String(st.size),
-    mtimeNs: String(st.mtimeNs),
-    ctimeNs: String(st.ctimeNs),
-  }
-}
+/** The capture key holding the sha256 of a sidecar's bytes; peer of py
+ * `SIDECAR_DIGEST_FIELD`. Written as 64 lowercase hex characters, the spelling
+ * `SHA256_HEX` already pins for the pinned-read surface. */
+const SIDECAR_DIGEST_FIELD = 'sha256' as const
 
 /** The sha256 of the bytes readable through `fd`, from byte 0 and with an
- * explicit position so the fd's own offset does not matter. The same read py
- * `_digest_held` and `_parked_digest` take from offset 0. The digest names the
- * inode whose stat fields were taken, not a name that may have been swapped
- * since. */
+ * explicit position so the fd's own offset does not matter. One full read; the
+ * callers either just wrote the whole file through this fd (`snapshotPreimage`),
+ * just opened it on the sidecar they are about to check (the two install
+ * passes), or opened the parked inode `O_NOFOLLOW` to re-read the bytes the
+ * capture recorded (`parkedDigest`). The digest names the inode whose stat
+ * fields were taken, not a name that may have been swapped since. Peer of py
+ * `_sha256_of_fd`. */
 function sha256OfFd(fd: number): string {
   const digest = createHash('sha256')
   const buffer = Buffer.allocUnsafe(1 << 20)
@@ -979,6 +979,23 @@ function sha256OfFd(fd: number): string {
   return digest.digest('hex')
 }
 
+/** The captured identity of one sidecar inode. A READ of an already-taken stat,
+ * so it reaches no syscall of its own. The content digest is added by the
+ * callers that hold the sidecar's bytes open: `snapshotPreimage`, which just
+ * wrote them, and `parkCapturedSidecar`, which can open the parked inode
+ * read-only. */
+function captureOf(st: fs.BigIntStats): SidecarCapture {
+  return {
+    dev: String(st.dev),
+    ino: String(st.ino),
+    mode: String(st.mode),
+    nlink: String(st.nlink),
+    size: String(st.size),
+    mtimeNs: String(st.mtimeNs),
+    ctimeNs: String(st.ctimeNs),
+  }
+}
+
 function rawSnapshotPreimage(handle: WriteHandle): string {
   const directory = preimageDir()
   const dst = freshSidecar(directory, 'pre')
@@ -987,7 +1004,7 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     assertRealDirChain(directory)
     out = fs.openSync(
       dst,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL
       | O_NOFOLLOW,
       0o600,
     )
@@ -1008,10 +1025,29 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     // capture the snapshot's own identity LAST, after the copy and after the
     // mode/mtime restoration, so what is recorded is the sidecar as it is left
     // behind (issue #1016). Read from the fd that wrote it, never by reopening
-    // the name. The inverse re-checks the file it installs against this.
-    handle.capture = captureOf(fs.fstatSync(out, { bigint: true }))
+    // the name. The inverse re-checks the file it installs against this. The
+    // content digest is read through that SAME fd (issue #2652), so it names
+    // the inode the stat fields were taken from.
+    const capture = captureOf(fs.fstatSync(out, { bigint: true }))
+    capture[SIDECAR_DIGEST_FIELD] = sha256OfFd(out)
+    handle.capture = capture
   } catch (e) {
-    if (out >= 0) fs.closeSync(out)
+    if (out >= 0) {
+      // The sidecar was created but never reached `handle.preimage`, so
+      // `discardWrite` (which removes what the handle records) cannot clean it
+      // up: an ESNAPSHOT, from a failed copy, fchmod/futimes, fstat or digest,
+      // would otherwise leave the old-content copy inside the workspace root
+      // for the rest of the session. Remove it while the fd still holds it, and
+      // only while the name still resolves to that inode, so a lost race never
+      // deletes a file this call did not create. Best effort: the snapshot
+      // refusal is the failure the caller must see, not this cleanup.
+      try {
+        if (leafIsFd(out, dst)) removeConfined(dst)
+      } catch {
+        // leave the sidecar rather than mask the ESNAPSHOT below
+      }
+      fs.closeSync(out)
+    }
     const message = (e as { message?: string })?.message ?? String(e)
     throw new FsOpError(
       'ESNAPSHOT',
@@ -1073,13 +1109,25 @@ function rawReplaceConfined(srcReal: string, dstReal: string): void {
  * another inode, or hardlink it out, and the inverse would install the result
  * and report a clean reversal.
  *
- * Three checks, on the way in and again on the installed result: a regular file
+ * Checks on the way in and again on the installed result: a regular file
  * (`EOUTSIDE`), one link (`EMULTILINK`, the control the forward
- * `openConfinedWrite` applies to its target), and an unchanged captured
- * identity (`EIDENTITY`). The second pass is what closes the window between the
- * first check and the rename, which is by NAME, exactly as `confirmLanded`
- * re-establishes the forward write rather than trusting its pre-syscall check;
- * it drops `ctimeNs`, which the rename legitimately bumps.
+ * `openConfinedWrite` applies to its target), an unchanged captured identity
+ * (`EIDENTITY`), and an unchanged content digest (`EIDENTITY`, issue #2652).
+ * The second pass is what closes the window between the first check and the
+ * rename, which is by NAME, exactly as `confirmLanded` re-establishes the
+ * forward write rather than trusting its pre-syscall check; it drops `ctimeNs`,
+ * which the rename legitimately bumps, but compares the digest again: the
+ * window that pass exists for is exactly a rewrite between the first read and
+ * the rename, so the installed bytes are read and hashed once more.
+ *
+ * The stat stamps alone are not enough. A same-size rewrite inside a single
+ * inode timestamp tick leaves all seven fields equal, so on a coarse clock the
+ * sidecar could be rewritten and installed while every stat comparison passed
+ * (issue #2652, the ts peer of #2647). The digest does not depend on clock
+ * resolution, and the bytes are read through the same fd the stat came from.
+ * A capture with no `sha256` (a durable record written before the digest
+ * existed) is compared stat-only and still restores, so an older WAL is not
+ * stranded.
  *
  * A refusal THROWS, which the teardown loop records as `restore-residue` — the
  * outcome item 243 rule 6 already defines for an inverse that cannot complete.
@@ -1092,7 +1140,8 @@ function rawInstallCapturedSidecar(
   srcReal: string, dstReal: string,
   capture: SidecarCapture | null | undefined,
 ): void {
-  const observe = (real: string, what: string): SidecarCapture => {
+  const observe = (real: string, what: string):
+    { capture: SidecarCapture; digest: string | null } => {
     const [parent] = splitLeaf(real)
     try {
       assertRealDirChain(parent)
@@ -1117,33 +1166,80 @@ function rawInstallCapturedSidecar(
         real,
       )
     }
-    let st: fs.BigIntStats
     try {
-      st = fs.fstatSync(fd, { bigint: true })
+      const st = fs.fstatSync(fd, { bigint: true })
+      if (!st.isFile()) {
+        throw new FsOpError(
+          'EOUTSIDE', `the ${what} must be a regular file`, real)
+      }
+      if (st.nlink !== 1n) {
+        throw new FsOpError(
+          'EMULTILINK',
+          `the ${what} is linked from a second name (${st.nlink} links), so `
+          + 'installing it would hand a live alias to whoever holds the other '
+          + 'name',
+          real,
+        )
+      }
+      // A capture always records `size` (`captureOf`), and this is the fstat of
+      // the same fd the digest read below would use, so a size that differs is
+      // already a refusal: the sidecar grew or shrank, and the reversal cannot
+      // install what was captured. Refuse it HERE, before the read, so a grown
+      // sidecar is not read in full on every restore attempt (issue #2652).
+      // `rename` preserves size, so the post-install pass can compare it too.
+      // A capture carrying no `size` stays stat-only, like one with no digest.
+      const expectedSize = capture?.size
+      if (typeof expectedSize === 'string'
+        && expectedSize !== String(st.size)) {
+        throw new FsOpError(
+          'EIDENTITY',
+          `the ${what} is not the captured preimage (size differs), so the `
+          + 'reversal was refused before reading it rather than install a file '
+          + 'that is not the captured preimage',
+          real,
+        )
+      }
+      // read the bytes through the SAME fd the stat came from, after the type
+      // and link-count refusals, and only when the capture records a digest.
+      // A legacy capture (or none at all) is stat-only by contract, so it pays
+      // no read and cannot be newly refused by one; a recorded digest that
+      // cannot be re-read fails closed rather than downgrading the comparison
+      // (issue #2652).
+      const expected = capture?.[SIDECAR_DIGEST_FIELD]
+      let digest: string | null = null
+      if (typeof expected === 'string') {
+        try {
+          digest = sha256OfFd(fd)
+        } catch {
+          throw new FsOpError(
+            'ERACE',
+            `the ${what} could not be re-read to check the content digest `
+            + 'recorded at snapshot time, so the reversal cannot be shown to '
+            + 'install what was captured',
+            real,
+          )
+        }
+      }
+      return { capture: captureOf(st), digest }
     } finally {
       fs.closeSync(fd)
     }
-    if (!st.isFile()) {
-      throw new FsOpError(
-        'EOUTSIDE', `the ${what} must be a regular file`, real)
-    }
-    if (st.nlink !== 1n) {
-      throw new FsOpError(
-        'EMULTILINK',
-        `the ${what} is linked from a second name (${st.nlink} links), so `
-        + 'installing it would hand a live alias to whoever holds the other '
-        + 'name',
-        real,
-      )
-    }
-    return captureOf(st)
   }
   const refuse = (observed: SidecarCapture,
     fields: readonly (keyof SidecarCapture)[],
-    real: string, sentence: string): void => {
+    real: string, sentence: string, digest?: string | null): void => {
     if (capture === null || capture === undefined) return
     const drifted = fields.filter((f) => capture[f] !== undefined
       && capture[f] !== observed[f])
+    // compared only when BOTH sides carry it: the digest is read only when the
+    // capture records one, so a legacy capture stays stat-only. This is the
+    // preimage path; the parked sidecar compares its digest in
+    // `rawInstallParkedSidecar`.
+    const expected = capture[SIDECAR_DIGEST_FIELD]
+    if (digest !== null && digest !== undefined
+      && typeof expected === 'string' && digest !== expected) {
+      drifted.push(SIDECAR_DIGEST_FIELD)
+    }
     if (drifted.length > 0) {
       throw new FsOpError(
         'EIDENTITY',
@@ -1153,11 +1249,13 @@ function rawInstallCapturedSidecar(
       )
     }
   }
-  refuse(observe(srcReal, 'preimage sidecar'), SIDECAR_CAPTURE_FIELDS, srcReal,
-    'the preimage sidecar changed since it was captured')
+  const before = observe(srcReal, 'preimage sidecar')
+  refuse(before.capture, SIDECAR_CAPTURE_FIELDS, srcReal,
+    'the preimage sidecar changed since it was captured', before.digest)
   replaceConfined(srcReal, dstReal)
-  refuse(observe(dstReal, 'restored target'), INSTALLED_CAPTURE_FIELDS, dstReal,
-    'the restored target is not the captured preimage')
+  const after = observe(dstReal, 'restored target')
+  refuse(after.capture, INSTALLED_CAPTURE_FIELDS, dstReal,
+    'the restored target is not the captured preimage', after.digest)
 }
 
 /** `lstat` of `real` with the parent chain checked, refusing a symlink. The
@@ -1415,14 +1513,17 @@ function rawParkCapturedSidecar(
  * an honest `fsRm` of a directory or of an already-hardlinked file.
  *
  * The stamps are not enough on a filesystem whose inode clock is coarse
- * relative to the write (issue #2666): a same-length in-place rewrite can leave
- * all seven fields identical. So when the capture carries the `sha256`
- * `parkCapturedSidecar` recorded, the parked bytes are hashed through an
- * `O_NOFOLLOW` descriptor and compared on BOTH passes, before and after the
+ * relative to the write (issues #2652, #2666): a same-length in-place rewrite
+ * can leave all seven fields identical. So when the capture carries the
+ * `sha256` `parkCapturedSidecar` recorded, the parked bytes are hashed through
+ * an `O_NOFOLLOW` descriptor and compared on BOTH passes, before and after the
  * rename, with `EIDENTITY` on a mismatch. A recorded digest that cannot be
  * re-read is the same refusal: the check never falls back to stat-only. A
- * capture with no `sha256` (a record written before the key existed) keeps the
- * stat-only behaviour, so a legacy WAL still replays.
+ * capture with no `sha256` (a record written before the key existed, or a
+ * parked inode that is not a readable regular file) keeps the stat-only
+ * behaviour, so a legacy WAL still replays and an honest `fsRm` of a
+ * directory, of an already-hardlinked file, or of a write-only file still
+ * installs.
  *
  * The check runs again on the INSTALLED result, because the rename is by name,
  * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops
