@@ -225,7 +225,7 @@ def _project(tmp_path: Path, registry: Path, assembly_extra: str = "") -> Path:
 
 
 def _lock_row(proj: Path, name: str) -> dict:
-    lock = json.loads((proj / "truc.lock").read_text())
+    lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     return next(r for r in lock["trucs"] if r["name"] == name)
 
 

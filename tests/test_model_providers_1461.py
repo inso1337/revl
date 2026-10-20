@@ -649,7 +649,7 @@ def test_the_credential_is_in_no_artifact_message_repr_or_log(tmp_path, fake,
     seen.append(json.dumps(ir))
     seen.append(json.dumps(ir.get("manifest")))
     # the configuration file names the variable, not the value
-    seen.append(cfg_path.read_text())
+    seen.append(cfg_path.read_text(encoding="utf-8"))
     hosts = bind_for_run(ir, [str(path)], str(cfg_path), environ=env)
     seen.append("\n".join(describe_hosts(hosts)))
     seen.append(repr(hosts) + repr(load_config(cfg_path)))
@@ -763,8 +763,8 @@ def test_run_serves_a_model_crossing_end_to_end_without_leaking_the_key(
     assert fake.requests[-1]["path"] == "/v1/messages"
     assert fake.requests[-1]["headers"]["x-api-key"] == SECRET
     assert fake.requests[-1]["body"]["messages"][0]["content"] == "is this spam"
-    assert trace.exists() and trace.read_text().strip()
-    for text in (done.stdout, done.stderr, trace.read_text()):
+    assert trace.exists() and trace.read_text(encoding="utf-8").strip()
+    for text in (done.stdout, done.stderr, trace.read_text(encoding="utf-8")):
         assert SECRET not in text
 
 
@@ -784,7 +784,7 @@ def test_bench_clients_send_through_the_adapter(fake):
     """No `bench/` tool that talks to a model endpoint builds its own urllib
     request any more, and the local runner's request is the adapter's."""
     for name in ("run.py", "model_pin.py", "decode_grammar_probe.py"):
-        text = (ROOT / "bench" / name).read_text()
+        text = (ROOT / "bench" / name).read_text(encoding="utf-8")
         assert "import urllib" not in text, name
         assert "urllib.request" not in text, name
     bench_run = _load_by_path("bench_run_1461", ROOT / "bench" / "run.py")

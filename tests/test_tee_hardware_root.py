@@ -59,7 +59,7 @@ from revl.tee_attestation import (  # noqa: E402
 )
 
 FIXTURES = ROOT / "tests" / "fixtures" / "tee"
-MANIFEST = json.loads((FIXTURES / "manifest.json").read_text())
+MANIFEST = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
 
 PEER_KEY = b"pool-shared-secret"
 PEER_ID = "peer-1"

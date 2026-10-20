@@ -75,7 +75,7 @@ def test_no_bypass_and_no_new_divergence(census, measured):
     """The gate must not admit what the reference refuses under a guarantee it
     claims, and must not diverge anywhere the baseline does not already say."""
     _, (buckets, details) = measured
-    baseline = json.loads(census.BASELINE.read_text())
+    baseline = json.loads(census.BASELINE.read_text(encoding="utf-8"))
     problems = census.compare(buckets, baseline)
     if problems:
         report = "\n".join(f"  {line}" for line in problems[:40])
@@ -103,7 +103,7 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 def test_every_line_mismatch_is_named_on_the_ledger(census, measured):
     cases, (buckets, _) = measured
     pairs = census.line_pairs(cases, buckets, census.SelfhostEngine())
-    ledger = json.loads(census.LINE_LEDGER.read_text())
+    ledger = json.loads(census.LINE_LEDGER.read_text(encoding="utf-8"))
     problems = census.compare_lines(pairs, ledger)
     assert not problems, "\n  ".join(
         ["the gate/reference line ledger moved:"] + problems[:40])
@@ -1003,7 +1003,7 @@ def test_the_frontier_mirror_matches_the_rust(census):
     python mirror of `crates/revl-gate/src/frontier.rs::scan`. Its TABLES are
     imported from the generator, so only the scanning can drift — held here
     against the cases `frontier.rs`'s own unit tests state."""
-    frontier = (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs").read_text()
+    frontier = (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs").read_text(encoding="utf-8")
     assert "fn strip_literals" in frontier, \
         "frontier.rs no longer has the scan this mirror was written against"
 

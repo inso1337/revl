@@ -105,7 +105,7 @@ def test_tampered_source_hash_is_an_exact_source_mismatch(registry):
     """Corrupting the recorded `sourceHash` makes exactly the source tier a
     MISMATCH, with the recorded and rebuilt hashes both surfaced."""
     index_path = registry / "index.json"
-    idx = json.loads(index_path.read_text())
+    idx = json.loads(index_path.read_text(encoding="utf-8"))
     idx["components"][COMPONENT]["sourceHash"] = "dead" * 16
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -125,7 +125,7 @@ def test_tampered_manifest_hash_is_an_exact_ir_mismatch(registry):
     MISMATCH, a source that hashes right but an IR that does not is precisely
     the gap reproduce closes."""
     index_path = registry / "index.json"
-    idx = json.loads(index_path.read_text())
+    idx = json.loads(index_path.read_text(encoding="utf-8"))
     idx["components"][COMPONENT]["manifestHash"] = "beef" * 16
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -142,7 +142,7 @@ def test_tampered_policy_surface_is_a_policy_mismatch(registry):
     """Corrupting the recorded emission count makes the policy-surface tier a
     MISMATCH (the G4 surface a consumer trusts a ship to have frozen)."""
     index_path = registry / "index.json"
-    idx = json.loads(index_path.read_text())
+    idx = json.loads(index_path.read_text(encoding="utf-8"))
     idx["components"][COMPONENT]["emissions"] = 999
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -284,7 +284,7 @@ def test_a_relabelled_release_is_caught_by_the_independent_pin(tmp_path, registr
     mint that copy."""
     from revl.registry import _sha256
 
-    source = (_entry(registry) / "component.rvl").read_text()
+    source = (_entry(registry) / "component.rvl").read_text(encoding="utf-8")
     project = tmp_path / "proj"
     (project / "trucs" / COMPONENT).mkdir(parents=True)
     (project / "trucs" / COMPONENT / "component.rvl").write_text(source)
@@ -346,7 +346,7 @@ def test_tampered_attestation_is_a_mismatch(registry, monkeypatch):
     attestation MISMATCH, a signature failure, exactly the item-127 contract."""
     monkeypatch.setenv(attest.KEY_ENV, "a-shared-secret")
     att_path = _attest_the_entry(registry, b"a-shared-secret")
-    doc = json.loads(att_path.read_text())
+    doc = json.loads(att_path.read_text(encoding="utf-8"))
     doc["verdict"] = "tampered"
     att_path.write_text(json.dumps(doc, indent=2))
 
@@ -440,7 +440,7 @@ def _project_with(tmp_path: Path, registry: Path, name: str,
 
     project = tmp_path / "app"
     (project / "trucs" / name).mkdir(parents=True)
-    source = (registry / "components" / name / "component.rvl").read_text()
+    source = (registry / "components" / name / "component.rvl").read_text(encoding="utf-8")
     (project / "trucs" / name / "component.rvl").write_text(source)
     pin = (hashlib.sha256(source.encode()).hexdigest()
            if source_hash is None else source_hash)
@@ -469,7 +469,7 @@ def test_a_substituted_dependency_is_caught_by_the_independent_pin(registry,
     # the adversary: swap the published source, then re-index over it so the
     # registry is perfectly self-consistent again.
     entry_source = _entry(registry) / "component.rvl"
-    entry_source.write_text(entry_source.read_text() + "\n// substituted\n")
+    entry_source.write_text(entry_source.read_text(encoding="utf-8") + "\n// substituted\n")
     R_registry.build_index(str(registry))
     assert R_registry.verify(str(registry)) == []   # the registry looks pristine
 
@@ -498,7 +498,7 @@ def test_a_substituted_dependency_with_no_pin_was_invisible(registry, tmp_path):
     (project / "truc.lock").unlink()          # no pin at all
 
     entry_source = _entry(registry) / "component.rvl"
-    entry_source.write_text(entry_source.read_text() + "\n// substituted\n")
+    entry_source.write_text(entry_source.read_text(encoding="utf-8") + "\n// substituted\n")
     R_registry.build_index(str(registry))
 
     report = R.reproduce(COMPONENT, project_dir=str(project),
@@ -619,7 +619,7 @@ def test_cli_json_reports_what_was_not_verified(registry, capsys):
 
 def test_cli_run_returns_one_on_mismatch(registry, capsys):
     index_path = registry / "index.json"
-    idx = json.loads(index_path.read_text())
+    idx = json.loads(index_path.read_text(encoding="utf-8"))
     idx["components"][COMPONENT]["sourceHash"] = "dead" * 16
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 

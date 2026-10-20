@@ -522,8 +522,8 @@ def test_the_two_checked_in_fixtures_are_the_same_one_word_apart():
     """The corpus pair, read off disk. `examples/model_council_binding.rvl`
     admits and its rejection twin does not, and the ONLY difference between the
     two programs is which role the proposer names."""
-    control = BINDING_CONTROL.read_text()
-    refused = BINDING_REFUSED.read_text()
+    control = BINDING_CONTROL.read_text(encoding="utf-8")
+    refused = BINDING_REFUSED.read_text(encoding="utf-8")
     assert compile_source(control, "binding.rvl")
     err = refusal(refused)
     assert err.code == PLACE_CODE
@@ -1089,7 +1089,7 @@ def test_the_answer_module_imports_none_of_item_471s_machinery():
     rule - and to a tighter set, because it needs only the error type."""
     import ast
 
-    source = (ROOT / "src" / "revl" / "model_answer.py").read_text()
+    source = (ROOT / "src" / "revl" / "model_answer.py").read_text(encoding="utf-8")
     imported = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):

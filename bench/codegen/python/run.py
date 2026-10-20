@@ -89,7 +89,7 @@ def _instrument_emitted(name: str, plain: types.ModuleType) -> types.ModuleType:
 
 
 def _instrument_handwritten() -> types.ModuleType:
-    return copycount.instrument((HERE / "handwritten.py").read_text(), "rc_hw")
+    return copycount.instrument((HERE / "handwritten.py").read_text(encoding="utf-8"), "rc_hw")
 
 
 def _load_handwritten() -> types.ModuleType:

@@ -718,12 +718,12 @@ def test_recording_reads_sees_an_open_and_leaves_no_state(artifact, tmp_path):
     target.write_text("x")
     with artifact.recording_reads() as outer:
         with artifact.recording_reads() as inner:
-            target.read_text()
+            target.read_text(encoding="utf-8")
         (tmp_path / "second.txt").write_text("y")
     assert str(target) in {str(Path(p)) for p in inner}
     assert str(target) not in {str(Path(p)) for p in outer}
     assert artifact._READS == before == []
-    target.read_text()
+    target.read_text(encoding="utf-8")
     assert artifact._READS == []
 
 
@@ -927,7 +927,7 @@ def test_the_committed_records_are_one_file_per_program_and_canonical(
             f"python3 tools/census_artifact.py --write")
     on_disk = {f"docs/census-artifact/{rel}" for rel in artifact.case_files()}
     assert on_disk == {rel for rel in texts if "/cases/" in rel}
-    lines = (artifact.RECORDS / artifact.PINS_RECORDS).read_text().split("\n")
+    lines = (artifact.RECORDS / artifact.PINS_RECORDS).read_text(encoding="utf-8").split("\n")
     assert all(line == "" for line in lines[1::2])
     assert all(line.startswith("[") for line in lines[0:-1:2])
     ids = [row[0] for row in records["cases"]]
@@ -942,7 +942,7 @@ def test_the_records_store_no_aggregate_and_no_digest(artifact, records,
     no identity, and no sha256 of a file the checkout already has."""
     import re  # noqa: PLC0415
     c = committed["census"]
-    stored = "".join((artifact.RECORDS / name).read_text()
+    stored = "".join((artifact.RECORDS / name).read_text(encoding="utf-8")
                      for name in (*artifact.RECORD_FILES,
                                   *artifact.case_files()))
     for derived in (c["run"], c["compiler_tree_digest"], c["checker_version"],
@@ -1167,7 +1167,7 @@ def test_the_committed_reproduction_is_one_canonical_record_per_version(artifact
         assert path.read_text(encoding="utf-8") == artifact.reproduction_text(
             recorded), f"{path.name} is not in canonical form; re-record it"
         assert recorded["programs"] == sorted(recorded["programs"])
-        assert "n" not in json.loads(path.read_text())
+        assert "n" not in json.loads(path.read_text(encoding="utf-8"))
     assert sorted(p.name for p in artifact.CRATE_REPRODUCTION.iterdir()
                   if p.suffix != ".json") == [artifact.REPRODUCTION_README]
 

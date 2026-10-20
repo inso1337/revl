@@ -76,7 +76,7 @@ def test_est_tokens_to_green_sums_attempts_up_to_green():
         attempts = tokens._attempts_in_order(variant_dir)
         # how many attempts feed the sum: up to green, or all of them if unsolved
         upto = c["green_at"] if c["admitted"] else len(attempts)
-        expected = sum(tokens.count_tokens(p.read_text()) for p in attempts[:upto])
+        expected = sum(tokens.count_tokens(p.read_text(encoding="utf-8")) for p in attempts[:upto])
         assert c["est_tokens_to_green"] == expected
         if upto > 1:
             checked_multi = True

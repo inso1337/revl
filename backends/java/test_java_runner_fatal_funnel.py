@@ -78,7 +78,7 @@ import javac_gate  # noqa: E402
 from revl import compile_source  # noqa: E402
 
 PLACEMENT = BACKEND / "placement"
-SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text()
+SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text(encoding="utf-8")
 RUNNERS = (PLACEMENT / "PlacementRunner.java", PLACEMENT / "RealPlacementRunner.java")
 
 # The canary is a class name ON PURPOSE. The uncaught failure this funnel covers

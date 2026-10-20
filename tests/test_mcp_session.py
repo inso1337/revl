@@ -790,7 +790,7 @@ def _unmarked(payload, verb):
 
 @pytest.mark.parametrize("verb,extra", _HELD_VERBS)
 def test_held_form_answers_like_the_explicit_form(monkeypatch, verb, extra):
-    text = _TENANTS.read_text()
+    text = _TENANTS.read_text(encoding="utf-8")
     _held(monkeypatch, _EditedFilesSession(str(_TENANTS), text))
 
     held = _call(verb, dict(extra))
@@ -857,7 +857,7 @@ def test_held_form_obeys_the_authoring_refusal(monkeypatch, verb, extra):
     """Held source is agent text, so under the default closed authoring
     profile a source that names a realm is refused, as `revl_check {}` refuses it.
     No patching: the real gate decides."""
-    _held(monkeypatch, _HeldSession(_TENANTS.read_text()))
+    _held(monkeypatch, _HeldSession(_TENANTS.read_text(encoding="utf-8")))
 
     payload = _call(verb, dict(extra))
 

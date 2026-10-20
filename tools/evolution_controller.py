@@ -965,7 +965,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        record = json.loads(args.proposal.read_text())
+        record = json.loads(args.proposal.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         print(f"evolution_controller: cannot read {args.proposal}: {exc}",
               file=sys.stderr)

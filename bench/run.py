@@ -102,18 +102,18 @@ RETRY_TEMPLATE = (
 
 def load_variant_prompt(variant: str) -> str:
     if variant == RAW_TS_VARIANT:
-        return (BENCH / "prompts" / "raw-ts.md").read_text()
+        return (BENCH / "prompts" / "raw-ts.md").read_text(encoding="utf-8")
     if variant == MCP_VARIANT:
-        return (BENCH / "prompts" / "mcp.md").read_text()
+        return (BENCH / "prompts" / "mcp.md").read_text(encoding="utf-8")
     if variant == "v1":
-        return (BENCH / "prompts" / "v1.md").read_text()
+        return (BENCH / "prompts" / "v1.md").read_text(encoding="utf-8")
     if variant == "v2":
-        return (BENCH / "prompts" / "v2.md").read_text()
+        return (BENCH / "prompts" / "v2.md").read_text(encoding="utf-8")
     if variant == "v2host":
         return (
-            (BENCH / "prompts" / "v2.md").read_text()
+            (BENCH / "prompts" / "v2.md").read_text(encoding="utf-8")
             + "\n\n"
-            + (BENCH / "prompts" / "v2host.md").read_text()
+            + (BENCH / "prompts" / "v2host.md").read_text(encoding="utf-8")
         )
     raise SystemExit(f"unknown variant {variant!r}")
 
@@ -447,7 +447,7 @@ def read_jsonl(path: Path) -> list:
     if not path.is_file():
         return []
     rows = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
@@ -506,7 +506,7 @@ def main():
         if not (COMPILER_ROOT / "src" / "revl").is_dir():
             raise SystemExit(f"no src/revl under {COMPILER_ROOT}")
 
-    all_specs = json.loads((BENCH / "specs.json").read_text())["specs"]
+    all_specs = json.loads((BENCH / "specs.json").read_text(encoding="utf-8"))["specs"]
     if args.specs == "all":
         specs = all_specs
     elif args.specs.isdigit():

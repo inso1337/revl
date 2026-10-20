@@ -91,7 +91,7 @@ def _crash(tmp_path: Path, source: str) -> Path:
 
 
 def _effects(wal: Path) -> dict:
-    return {r["label"]: r for r in map(json.loads, wal.read_text().splitlines())
+    return {r["label"]: r for r in map(json.loads, wal.read_text(encoding="utf-8").splitlines())
             if r.get("record") == "effect"}
 
 

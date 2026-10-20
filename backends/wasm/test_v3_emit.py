@@ -1020,7 +1020,7 @@ def test_component_boundary_carries_a_64_bit_int(tmp_path):
         "service S { fn f(x: Int) -> Int }\n"
         "component C provides s: S { provide s { fn f(x) = x - 1 } }"
     ))["C"], encoding="utf-8")
-    assert '(param $p_x i64) (result i64)' in wat.read_text()
+    assert '(param $p_x i64) (result i64)' in wat.read_text(encoding="utf-8")
     out = subprocess.run(
         ["wasmtime", "--invoke", "provide:s.f", str(wat), str(INT_MAX)],
         capture_output=True, text=True, timeout=60)

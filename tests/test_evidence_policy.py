@@ -477,7 +477,7 @@ def test_cli_recompute_end_to_end(tmp_path):
         with contextlib.redirect_stdout(handle):
             code = main(["policy", "evaluate", str(pol), str(prog),
                          "--json", "--recompute"])
-    report = _json.loads(out.read_text())
+    report = _json.loads(out.read_text(encoding="utf-8"))
     assert code == 0            # recomputed inverse round-trip passes
     assert report["recomputed"] is True
     clause = report["components"][0]["rules"][0]["clauses"][0]

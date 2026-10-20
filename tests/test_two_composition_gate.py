@@ -366,7 +366,7 @@ def test_provider_placement_boots_standalone(tmp_path, capfd):
     minted = _placement.generate_seam_certs(tmp_path / "pcerts", ["gate"])
     port = _free_port()
     conf = tomllib.loads(
-        (ROOT / "examples" / "placement" / "gate_provider_network.toml").read_text())
+        (ROOT / "examples" / "placement" / "gate_provider_network.toml").read_text(encoding="utf-8"))
     conf["processes"]["gate"]["address"]["port"] = port
     tls = conf["processes"]["gate"]["tls"]
     tls["cert"] = minted["gate"]["cert"]

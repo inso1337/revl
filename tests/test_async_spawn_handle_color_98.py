@@ -149,7 +149,7 @@ def test_exit_py_executes_with_no_coroutine_leak(tmp_path):
     # was never awaited") fails the run instead of printing a warning.
     for module in ("runtime.py", "confidential.py"):
         (tmp_path / module).write_text(
-            (ROOT / "backends" / "python" / module).read_text())
+            (ROOT / "backends" / "python" / module).read_text(encoding="utf-8"))
     (tmp_path / "app.py").write_text(
         _emit("python", compile_source(_EXIT, "exit.rvl")))
     (tmp_path / "driver.py").write_text(

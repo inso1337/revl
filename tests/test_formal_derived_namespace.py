@@ -98,7 +98,7 @@ def _strip_comments(src: str) -> str:
 
 @pytest.fixture(scope="module")
 def code() -> str:
-    return _strip_comments(LEAN.read_text())
+    return _strip_comments(LEAN.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
@@ -114,7 +114,7 @@ def decls(code: str) -> dict[str, str]:
 
 
 def _gated_names() -> list[str]:
-    return re.findall(r"RevL\.CapCeilings\.([A-Za-z0-9_']+)", GATE.read_text())
+    return re.findall(r"RevL\.CapCeilings\.([A-Za-z0-9_']+)", GATE.read_text(encoding="utf-8"))
 
 
 # ------------------------------------------------- what an element is named by
@@ -255,12 +255,12 @@ def test_the_split_witness_exists_and_is_gated(decls):
     registry."""
     name = "same_key_different_boundary_refused"
     assert name in decls
-    assert f"RevL.CapCeilings.{name}" in CHECK.read_text()
-    assert f"RevL.CapCeilings.{name}" in GATE.read_text()
-    rows = [r for r in REGISTRY.read_text().splitlines()
+    assert f"RevL.CapCeilings.{name}" in CHECK.read_text(encoding="utf-8")
+    assert f"RevL.CapCeilings.{name}" in GATE.read_text(encoding="utf-8")
+    rows = [r for r in REGISTRY.read_text(encoding="utf-8").splitlines()
             if r.startswith(f"RevL.CapCeilings.{name}\t")]
     assert len(rows) == 1
-    cited = [r for r in REGISTRY.read_text().splitlines()
+    cited = [r for r in REGISTRY.read_text(encoding="utf-8").splitlines()
              if f"RevL.CapCeilings.{name}" in r.split("\t")[2:3]
              or (len(r.split("\t")) > 2
                  and f"RevL.CapCeilings.{name}" in r.split("\t")[2].split(","))]
@@ -295,9 +295,9 @@ def test_the_undeclared_witness_is_registered_too(decls, name):
     the Lean file, in `CheckAxioms.lean`, in `run_gate.sh`'s argv and cited by
     a non-`concrete` row of the non-vacuity registry."""
     assert name in decls
-    assert f"RevL.CapCeilings.{name}" in CHECK.read_text()
-    assert f"RevL.CapCeilings.{name}" in GATE.read_text()
-    rows = REGISTRY.read_text().splitlines()
+    assert f"RevL.CapCeilings.{name}" in CHECK.read_text(encoding="utf-8")
+    assert f"RevL.CapCeilings.{name}" in GATE.read_text(encoding="utf-8")
+    rows = REGISTRY.read_text(encoding="utf-8").splitlines()
     assert len([r for r in rows if r.startswith(f"RevL.CapCeilings.{name}\t")]) == 1
     cited = [r for r in rows if len(r.split("\t")) > 2
              and f"RevL.CapCeilings.{name}" in r.split("\t")[2].split(",")]
@@ -330,7 +330,7 @@ def test_the_cited_reference_program_is_still_there(code):
     that no longer resolves is a model claiming a correspondence it cannot
     have."""
     for fixture in (FIXTURE, UNDECLARED_FIXTURE):
-        assert fixture in LEAN.read_text()
+        assert fixture in LEAN.read_text(encoding="utf-8")
         assert (ROOT / fixture).is_file()
 
 

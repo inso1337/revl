@@ -311,7 +311,7 @@ class Tree:
     def text(self, rel: str) -> str:
         if rel not in self._text:
             try:
-                self._text[rel] = (self.root / rel).read_text(errors="ignore")
+                self._text[rel] = (self.root / rel).read_text(errors="ignore", encoding="utf-8")
             except OSError:
                 self._text[rel] = ""
         return self._text[rel]
@@ -587,7 +587,7 @@ JUDGES = {
 def load_allowlist(path: Path) -> List[dict]:
     if not path.exists():
         return []
-    entries = json.loads(path.read_text())["entries"]
+    entries = json.loads(path.read_text(encoding="utf-8"))["entries"]
     for entry in entries:
         missing = {"rule", "claim", "reason"} - set(entry)
         if missing:
@@ -614,7 +614,7 @@ def load_ratchet(path: Path) -> List[dict]:
     """
     if not path.exists():
         return []
-    doc = json.loads(path.read_text())
+    doc = json.loads(path.read_text(encoding="utf-8"))
     entries = doc["entries"]
     for entry in entries:
         missing = set(RATCHET_FIELDS) - set(entry)

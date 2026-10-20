@@ -424,7 +424,7 @@ def survey(fetch: bool) -> dict:
         if not SURVEY.exists():
             raise SurveyError(f"no committed survey at {SURVEY.relative_to(ROOT)}; "
                               f"run with --fetch")
-        return json.loads(SURVEY.read_text())
+        return json.loads(SURVEY.read_text(encoding="utf-8"))
 
     rows = []
     tmp = Path(tempfile.mkdtemp(prefix="unload-survey-"))

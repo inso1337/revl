@@ -154,7 +154,7 @@ def _rel(path: Path) -> str:
 
 
 def load_hosts() -> dict:
-    return json.loads((BENCH / "hosts.json").read_text())
+    return json.loads((BENCH / "hosts.json").read_text(encoding="utf-8"))
 
 
 def load_unload_survey() -> dict:
@@ -168,7 +168,7 @@ def load_unload_survey() -> dict:
         return {"present": False,
                 "reason": f"no survey at {_rel(path)}; run "
                           "bench/framework_unload_survey.py --fetch --write"}
-    doc = json.loads(path.read_text())
+    doc = json.loads(path.read_text(encoding="utf-8"))
     doc["present"] = True
     doc["path"] = _rel(path)
     return doc
@@ -180,7 +180,7 @@ def load_pin(path: Path | None) -> dict:
         return {"present": False,
                 "reason": f"no pin at {_rel(target)}; "
                           "run bench/model_pin.py --write"}
-    pin = json.loads(target.read_text())
+    pin = json.loads(target.read_text(encoding="utf-8"))
     pin["present"] = True
     pin["path"] = _rel(target)
     return pin
@@ -293,7 +293,7 @@ def corpus_models(run: str) -> list:
     if not path.is_file():
         return []
     seen = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
@@ -412,7 +412,7 @@ def _unanswered_cells(run: str, attempt: int) -> set:
     out = set()
     if not path.is_file():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
@@ -436,7 +436,7 @@ def column_residue(run: str) -> dict:
     if not path.is_file():
         return {"status": NOT_RUN,
                 "blocked_on": f"no committed records at bench/results/{run}/results.jsonl"}
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     raw = [r for r in rows if r.get("variant") == "raw-ts"] or rows
     if not raw:
         return {"status": NOT_RUN, "blocked_on": f"bench/results/{run} holds no raw-ts cells"}
@@ -500,7 +500,7 @@ def _run_rows(run_dir: Path) -> list[dict]:
     if not path.is_file():
         return []
     rows = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             try:
                 rows.append(json.loads(line))
@@ -874,7 +874,7 @@ def column_injection_escape(run: str | None) -> dict:
                 "blocked_on": f"no committed run at bench/results/{run}/escape.json",
                 "nearest_existing": "tests/test_adversarial_gate.py (docs/threat-model.md)",
                 "note": "not filled with the nearest available number"}
-    doc = json.loads(path.read_text())
+    doc = json.loads(path.read_text(encoding="utf-8"))
     if not doc.get("reportable"):
         return {"status": NOT_RUN,
                 "blocked_on": (f"bench/results/{run} was produced by the "
@@ -922,7 +922,7 @@ def briefs_from_residue(residue: dict, run: str) -> list[dict]:
     if residue.get("status") != "measured":
         return []
     path = BENCH / "results" / run / "results.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     raw = [r for r in rows if r.get("variant") == "raw-ts"] or rows
     return [{
         "spec": f"{r.get('spec', '?')}/raw-ts",

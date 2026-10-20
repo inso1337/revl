@@ -92,7 +92,7 @@ def test_untrusted_deletion_of_a_realm_clause_is_refused_by_name(loaded):
     assert "tenant_a" in message, message
     assert any(d.get("code") == "G9" for d in proposed["diagnostics"])
     # the refusal points at the provider in the edited file, not at line 0
-    store_line = loaded.read_text().splitlines().index(
+    store_line = loaded.read_text(encoding="utf-8").splitlines().index(
         "component TenantAStore provides kv: Kv {") + 1
     refusal = next(d for d in proposed["diagnostics"] if REFUSAL in d["message"])
     assert refusal.get("line") == store_line, refusal
@@ -151,7 +151,7 @@ def test_a_renamed_provider_without_handoff_starts_cold(clean_session):
     straight into its store must not reach the successor. (`who` is
     TenantAApp's own seed, re-run against the new provider.)"""
     path = clean_session / "tenants.rvl"
-    text = (ROOT / "examples" / "tenants.rvl").read_text()
+    text = (ROOT / "examples" / "tenants.rvl").read_text(encoding="utf-8")
     path.write_text(text.replace(
         CLAUSE + "\n  let store",
         CLAUSE + "\n  handoff kv: Map[Str, Str]\n  let store", 1))
@@ -176,7 +176,7 @@ def test_a_renamed_provider_without_handoff_starts_cold(clean_session):
 def _tenant_a_without_clause() -> str:
     """`Kv`, TenantAStore and TenantAApp as text, both clauses left out: a
     `revl_swap` candidate that names no realm."""
-    src = (ROOT / "examples" / "tenants.rvl").read_text()
+    src = (ROOT / "examples" / "tenants.rvl").read_text(encoding="utf-8")
     cut = (src[src.index("service Kv"):src.index("component TenantBStore")]
            + src[src.index("component TenantAApp"):src.index("component TenantBApp")])
     return cut.replace(CLAUSE, "")
@@ -216,7 +216,7 @@ def test_trusted_swap_that_leaves_the_clause_out_is_admitted(loaded):
 def test_swap_of_jailed_files_alone_is_admitted(loaded):
     """Files from the jailed roots are the operator's own: a file the operator
     changed on disk to drop the clause swaps in, as before."""
-    loaded.write_text(loaded.read_text().replace(CLAUSE, ""))
+    loaded.write_text(loaded.read_text(encoding="utf-8").replace(CLAUSE, ""))
     swapped = _call("revl_swap", {"files": [str(loaded)],
                                   "replacing": ["TenantAStore", "TenantAApp"]})
     assert swapped.get("swapped") is True, swapped

@@ -61,7 +61,7 @@ import refusal_inventory  # noqa: E402
 
 @pytest.fixture(scope="module")
 def hosts() -> dict:
-    return json.loads((BENCH / "hosts.json").read_text())
+    return json.loads((BENCH / "hosts.json").read_text(encoding="utf-8"))
 
 
 def test_the_registry_names_three_hosts_and_the_refused_column_leads(hosts):
@@ -154,7 +154,7 @@ def test_the_residual_count_agrees_with_the_ledger_the_tests_gate():
 
 
 def _module_literal(path: Path, name: str) -> str:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in tree.body:
         targets = (node.targets if isinstance(node, ast.Assign)
                    else [node.target] if isinstance(node, ast.AnnAssign) else [])
@@ -424,7 +424,7 @@ def committed_survey() -> dict:
     path = BENCH / "results" / "framework-bench" / "unload-survey.json"
     if not path.is_file():
         pytest.skip("no committed unload survey")
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_the_survey_is_a_claim_checker_and_the_committed_one_is_clean(committed_survey):
@@ -661,7 +661,7 @@ def test_the_committed_pin_does_not_quietly_adopt_the_quoted_throughput():
     path = BENCH / "results" / "framework-bench" / "model-pin.json"
     if not path.is_file():
         pytest.skip("no committed pin")
-    pin = json.loads(path.read_text())
+    pin = json.loads(path.read_text(encoding="utf-8"))
     tp = pin.get("throughput") or {}
     if "generation_tps_mean" not in tp:
         pytest.skip("the committed pin carries no throughput measurement")
@@ -1000,7 +1000,7 @@ def test_no_committed_artifact_carries_an_absolute_path():
     out = BENCH / "results" / "framework-bench"
     offenders = []
     for path in sorted(out.glob("*.json")) + sorted(out.glob("*.md")):
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             for token in line.replace('"', " ").replace("`", " ").split():
                 if token.startswith("/") and "/" in token[1:]:
                     offenders.append(f"{path.name}:{lineno}: {token}")
@@ -1062,9 +1062,9 @@ def test_the_committed_snapshot_holds_no_number_a_fix_pull_request_moves():
     including its `compiler commit` line (`git rev-parse HEAD`), and any two
     of them conflicted. The snapshot now carries the command instead of the
     numbers, and names the scoring compiler by content."""
-    committed = json.loads(COMMITTED_REPORT.read_text())
+    committed = json.loads(COMMITTED_REPORT.read_text(encoding="utf-8"))
     assert framework_bench.snapshot_problems(committed) == []
-    text = (BENCH / "results" / "framework-bench" / "report.md").read_text()
+    text = (BENCH / "results" / "framework-bench" / "report.md").read_text(encoding="utf-8")
     assert "recomputed" in text and "bench/refusal_inventory.py" in text
     import re  # noqa: PLC0415
     assert not re.search(r"\b[0-9a-f]{40}\b", text), (
@@ -1164,7 +1164,7 @@ def test_no_bench_module_reaches_its_runner_through_a_bare_import():
     own source shows the bug."""
     offenders = []
     for path in sorted(BENCH.glob("*.py")):
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith(("import run", "from run import")):
                 offenders.append(f"{path.name}:{lineno}: {stripped}")
@@ -1200,8 +1200,8 @@ def test_the_framework_host_is_runnable_and_carries_its_harness(hosts):
 
 def test_the_sdk_version_the_registry_names_is_the_one_the_lock_pins(hosts):
     fw = next(h for h in hosts["hosts"] if h["id"] == "framework")
-    manifest = json.loads((_MCP_HOST / "package.json").read_text())
-    lock = json.loads((_MCP_HOST / "package-lock.json").read_text())
+    manifest = json.loads((_MCP_HOST / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((_MCP_HOST / "package-lock.json").read_text(encoding="utf-8"))
     assert manifest["dependencies"][fw["name"]] == fw["version"], (
         "an exact version, not a range: a range is not a pin")
     locked = lock["packages"][f"node_modules/{fw['name']}"]
@@ -1212,8 +1212,8 @@ def test_the_sdk_version_the_registry_names_is_the_one_the_lock_pins(hosts):
 def test_the_prompt_states_the_unload_the_probe_performs():
     """The model is told the unload protocol, and it is the one the probe runs.
     A prompt that described a different unload would measure the prompt."""
-    prompt = (BENCH / "prompts" / "mcp.md").read_text()
-    probe = (_MCP_HOST / "probe.mjs").read_text()
+    prompt = (BENCH / "prompts" / "mcp.md").read_text(encoding="utf-8")
+    probe = (_MCP_HOST / "probe.mjs").read_text(encoding="utf-8")
     assert "remove()" in prompt and "returned a function" in prompt
     assert "handle.remove()" in probe
     assert "typeof teardown === 'function'" in probe
@@ -1418,7 +1418,7 @@ def _runner_tree(tmp_path: Path) -> Path:
 
 
 def _rows(path: Path) -> list:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _run(monkeypatch, *argv: str):

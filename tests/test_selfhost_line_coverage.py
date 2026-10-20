@@ -482,7 +482,7 @@ def test_write_resolves_a_conflicted_file(lines, monkeypatch, tmp_path):
     lines.write_ledger({half: {tier: {"functions": {"f": 3}, "sizes": {"f": 3}}
                                for tier in TIERS}
                         for half in ("reference", "selfhost")})
-    text = (base / "reference" / "py.jsonl").read_text()
+    text = (base / "reference" / "py.jsonl").read_text(encoding="utf-8")
     assert "<<<<<<<" not in text and text.count('"function"') == 1
     assert lines._load_ledger(base)["reference"]["py"]["functions"]["f"] == {
         "uncovered": 3, "budget": 2, "reason": "a"}
@@ -527,7 +527,7 @@ def test_write_files_a_reason_text_under_its_id(lines, monkeypatch, tmp_path):
     assert go["functions"]["by_new_text_too"]["reason"] == minted
     assert sorted(go["reasons"].values()) == sorted([known, fresh])
     assert {n: f["budget"] for n, f in go["functions"].items()} == counts
-    text = (base / "reference" / "go.jsonl").read_text()
+    text = (base / "reference" / "go.jsonl").read_text(encoding="utf-8")
     assert text.count(fresh) == 1, "the new reason's text is recorded once"
     assert lines.check(survey) == []
 

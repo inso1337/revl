@@ -301,7 +301,7 @@ def test_the_report_states_its_honesty_bound(capsys):
 
 @needs_cordis
 def test_the_example_program_round_trips(capsys):
-    ir = compile_source((ROOT / "examples" / "verified_effect.rvl").read_text(), "ex.rvl")
+    ir = compile_source((ROOT / "examples" / "verified_effect.rvl").read_text(encoding="utf-8"), "ex.rvl")
     failures, dossier = fault_mod.run_roundtrip_units(ir, fault_mod.roundtrip_units(ir))
     assert failures == 0
     assert dossier["counts"]["effects"] == 1

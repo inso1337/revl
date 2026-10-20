@@ -140,7 +140,7 @@ def _as_run_cost(run: str) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
     if not path.is_file():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -163,7 +163,7 @@ def _recorded_output_tokens(run: str) -> dict[tuple[str, str, int], int]:
     out: dict[tuple[str, str, int], int] = {}
     if not path.is_file():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -199,7 +199,7 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
             green_at = None
             for path in attempts:
                 n = int(re.search(r"attempt-(\d+)", path.name).group(1))
-                est = count_tokens(path.read_text())
+                est = count_tokens(path.read_text(encoding="utf-8"))
                 spent += est
                 key = (spec_dir.name, variant, n)
                 if key in recorded:

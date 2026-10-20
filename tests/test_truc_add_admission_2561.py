@@ -104,7 +104,7 @@ def _imports(lock: dict) -> dict[str, str]:
 
 
 def test_the_lock_pins_externs_rvl():
-    lock = json.loads((TRUC / "truc.lock").read_text())
+    lock = json.loads((TRUC / "truc.lock").read_text(encoding="utf-8"))
     pins = _imports(lock)
     assert "externs.rvl" in pins, lock.get("imports")
     digest = hashlib.sha256((TRUC / "externs.rvl").read_bytes()).hexdigest()
@@ -120,12 +120,12 @@ def test_every_use_in_trucs_components_is_pinned():
     """Static, no compile: each `use "<target>"` in a component, resolved
     relative to the importing file as the compiler resolves it, names a
     path the lock pins as a root (`files`) or as an import (`imports`)."""
-    lock = json.loads((TRUC / "truc.lock").read_text())
+    lock = json.loads((TRUC / "truc.lock").read_text(encoding="utf-8"))
     pins = ({row["path"]: row["sha256"] for row in lock["files"]}
             | _imports(lock))
     unpinned = []
     for component in sorted((TRUC / "components").rglob("*.rvl")):
-        for target in _USE_DECL.findall(component.read_text()):
+        for target in _USE_DECL.findall(component.read_text(encoding="utf-8")):
             rel = pathlib.PurePath(os.path.relpath(
                 os.path.normpath(component.parent / target), TRUC)).as_posix()
             # A target the lock merely names is not pinned: the pin has to be
