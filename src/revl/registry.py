@@ -1674,7 +1674,12 @@ class Registry:
         entries: list[RegistryEntry] = []
         for name, row in sorted(rows.items()):
             entry_dir = comps / name
-            source_path = entry_dir / "component.rvl"
+            # the real file the entry is read from, stored ABSOLUTE: the
+            # export rule asks the disk by this name at every read-back
+            # (issue #2563), which may happen after the process changed
+            # directory, and a relative name would then answer the wrong
+            # file (or none) and the entry would compile unprofiled.
+            source_path = (entry_dir / "component.rvl").resolve()
             source = _read(source_path)
             manifest_path = entry_dir / "manifest.json"
             recorded_manifest_text = (_read(manifest_path)

@@ -73,28 +73,6 @@ def _literal_text(node: ast.expr | None) -> str | None:
     return None
 
 
-def _looks_like_real_path(node: ast.expr | None) -> bool:
-    """Whether the expression is built from a path, not a literal.
-
-    Deliberately conservative: a name, a call, an f-string with a path-like
-    body or a conditional all count as "not a literal" and therefore real.
-    The pass never claims a site is safe; it only refuses to call a computed
-    path a label."""
-    if node is None:
-        return False
-    if isinstance(node, ast.Constant):
-        return False
-    if isinstance(node, ast.JoinedStr):
-        return True
-    if isinstance(node, (ast.List, ast.Tuple)):
-        return any(_looks_like_real_path(item) for item in node.elts)
-    if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-        return True
-    if isinstance(node, ast.IfExp):
-        return _looks_like_real_path(node.body) or _looks_like_real_path(node.orelse)
-    return True
-
-
 def _classify_label(text: str) -> str:
     if text.startswith("<") and text.endswith(">"):
         return "label"

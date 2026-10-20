@@ -36,6 +36,7 @@ bodies.
 
 import inspect
 import json
+import os
 
 import pytest
 
@@ -191,6 +192,24 @@ def test_truc_ship_gauntlet_still_grades_an_entry_outside_the_export_area(
     own = _component_at(tmp_path, "src", "component.rvl")
     dossier = _ship_gauntlet(EXPORTED, own)
     assert dossier["verdict"] == "admissible", dossier
+
+
+def test_the_entry_path_is_absolute_so_a_chdir_cannot_hide_it(
+        tmp_path, monkeypatch):
+    """`from_dir` may be given a relative path (`--registry registry`). The
+    entry's stored path must be absolute: a read-back can happen after the
+    process changes directory, and a relative name would then answer no file
+    (or a different one), so the rule would let exported text compile with the
+    operator's trust."""
+    reg = _move_to_export(tmp_path, _published(tmp_path, in_export=False))
+    monkeypatch.chdir(tmp_path)
+    loaded = registry.Registry.from_dir(reg.relative_to(tmp_path))
+    entry = loaded.entries[0]
+    assert os.path.isabs(entry.source_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert registry._compiled_entry_ir(entry, {}) == {}
 
 
 # ------------------------------------------- the vendored knowledge signature

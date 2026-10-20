@@ -42,7 +42,7 @@ saw nothing and the text compiled as the operator's own.
 |---|---|---|
 | src/revl/__main__.py:244 | `_run_policy` | `revl policy evaluate --registry`: the audit IR |
 | src/revl/__main__.py:250 | `_run_policy` | `revl policy evaluate --registry`: the attestation IR |
-| src/revl/registry.py:1995 | `_compiled_entry_ir` | the adapter probe (`_compiled_entry_ir`) |
+| src/revl/registry.py:2000 | `_compiled_entry_ir` | the adapter probe (`_compiled_entry_ir`) |
 | src/revl/truc/_host.py:919 | `_knowledge_signed` | the vendored knowledge signature (`_knowledge_signed`) |
 | src/revl/truc/components/shipper.rvl:278 + src/revl/truc/externs.rvl:123 + src/revl/truc/_host.py:1508 | `Shipper.run` | the cold gauntlet now gets `{"files": [sourcePath]}` through `host_gauntlet(source, sourcePath)` |
 
@@ -63,7 +63,9 @@ later, as `ship_ordered` already documents.
 
 Tests: `tests/test_registry_entry_path_2563.py`, one per site class plus a
 control for each (the same bytes outside the export area still evaluate, probe,
-grade and verify). Red before: 4 failed, 4 passed. Green after: 8 passed.
+grade and verify), and a regression test for the stored path being absolute
+(a relative `--registry` plus a later chdir must not hide the export area).
+Red before: 5 failed, 4 passed. Green after: 9 passed.
 
 The in-memory case is unchanged and deliberate: `registry._compile_source`
 with no path still compiles under the virtual label
@@ -96,7 +98,7 @@ central rule's slice, which is why it is not changed here.
 | src/revl/mcp/server.py:851 | `_compile_once` | `'<candidate>.rvl'` | already correct | the one compiler door; `compile_under_authoring` decides the profile |
 | src/revl/plan.py:67 | `_compile` | `'<candidate>.rvl'` | out of scope | library dispatch; the MCP path that reaches it is the central rule's marker slice |
 | src/revl/pool_dispatch.py:398 | `_compile_artifact` | `['artifact.rvl']` | out of scope | digest-pinned artifact bytes, compiled only to classify; export origin unverified (issue list a) |
-| src/revl/registry.py:1814 | `_needs` | `'<need>.rvl'` | out of scope | consumer `need` declaration, shape query only |
+| src/revl/registry.py:1819 | `_needs` | `'<need>.rvl'` | out of scope | consumer `need` declaration, shape query only |
 
 ## Non-AST label sites
 
@@ -202,8 +204,8 @@ why a label cannot be export text there.
 | src/revl/registry.py:1513 | `publish_release` | `entry_dir / 'component.rvl'` | real | already correct | the entry's real `component.rvl` inside the registry |
 | src/revl/registry.py:1514 | `publish_release` | `source_path` | real | already correct | `_compile_source` is handed the real `source_path` |
 | src/revl/registry.py:1609 | `_verified_facts` | `[str(source_path)]` | real | already correct | real path argument |
-| src/revl/registry.py:1814 | `_needs` | `'<need>.rvl'` | label | out of scope | consumer `need` declaration, shape query only |
-| src/revl/registry.py:1995 | `_compiled_entry_ir` | `entry.source_path` | real | fixed here | the adapter probe (`_compiled_entry_ir`) |
+| src/revl/registry.py:1819 | `_needs` | `'<need>.rvl'` | label | out of scope | consumer `need` declaration, shape query only |
+| src/revl/registry.py:2000 | `_compiled_entry_ir` | `entry.source_path` | real | fixed here | the adapter probe (`_compiled_entry_ir`) |
 | src/revl/run.py:2556 | `_reload` | `files` | real | already correct | real path argument |
 | src/revl/run.py:2735 | `run_command` | `args.files` | real | already correct | real path argument |
 | src/revl/scaffold.py:368 | `scaffold_document` | `filename` | real | out of scope | generated scaffold skeleton |

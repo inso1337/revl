@@ -1492,6 +1492,7 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     file behind it (`ship_context` records the same empty path); the gauntlet
     then grades it as before and the publish refuses it later."""
     import concurrent.futures  # noqa: PLC0415
+    import contextvars  # noqa: PLC0415
 
     from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
     from revl.mcp.session import Session  # noqa: PLC0415
@@ -1509,8 +1510,14 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
                      else {"source": source})
         return gauntlet.run(Session(), candidate, over_the_transport=False)
 
+    # the compile happens on the worker thread, and a thread does not inherit
+    # the caller's context variables: `compiler._RULE` (the export rule for
+    # this command) would silently become the process default there. Carry
+    # the caller's context into the thread so the files form is judged by the
+    # same rule as every other compile `truc` runs.
+    caller_context = contextvars.copy_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        dossier = pool.submit(_grade).result()
+        dossier = pool.submit(caller_context.run, _grade).result()
     lifecycle = ((dossier.get("tested") or {}).get("lifecycle")) or {}
     admission = ((dossier.get("proved") or {}).get("admission")) or {}
     return json.dumps({
