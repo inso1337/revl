@@ -841,8 +841,8 @@ def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     `./` plus the registered path, was a different key and the same file, and
     the agent's text compiled in the provider's place. A refusal, not a silent
     drop: the reason names the module as the caller sent it and the provider
-    it collided with, both of which the caller can already see (the provider
-    path is on the approval ticket), and nothing is compiled."""
+    it collided with, a path inside the roots the jail refusal already shows,
+    and nothing is compiled."""
     taken = _provider_files(providers)
     for key in modules:
         registered = taken.get(os.path.realpath(os.path.abspath(key)))

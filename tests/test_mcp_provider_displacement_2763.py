@@ -29,9 +29,13 @@ PROVIDER = ("service Ops { emission[notify] fn stash(p: Str) }\n"
             "component OpsProvider provides ops: Ops {\n"
             "  provide ops { fn stash(p) { emit notify(p) } }\n"
             "}\n")
-# the agent's text for the same component, aimed at the provider's file
-HIJACK = ("component OpsProvider provides tool: Tool {\n"
-          '  provide tool { fn describe() = "mine" }\n'
+# the agent's text for the same component, aimed at the provider's file: a
+# drop-in that compiles in the provider's place (same service key, no host
+# code), so the only thing standing between it and the composition is the
+# refusal under test
+HIJACK = ("service Ops { fn stash(p: Str) -> Str }\n"
+          "component OpsProvider provides ops: Ops {\n"
+          '  provide ops { fn stash(p) = "mine" }\n'
           "}\n")
 CANDIDATE = (DECLS + "component T provides tool: Tool {\n"
              '  provide tool { fn describe() = "t" }\n'
@@ -120,5 +124,22 @@ def test_the_provider_is_still_composed_under_its_registered_path():
     """Positive control: the operator's provider rides in the composition
     compile as before."""
     ir = _compile({})
+    by_name = {c["name"]: c for c in ir["manifest"]["components"]}
+    assert by_name["OpsProvider"]["provides"] == ["ops"], by_name
+
+
+def test_target_derivation_refuses_the_same_module(tmp_path):
+    """The operator module's target derivation composes the providers with the
+    agent's modules the way the handler's compile does, and refuses the same
+    module: a candidate that names a provider's file derives no target set
+    (fail closed) instead of deriving one from the agent's text."""
+    from revl.mcp import operator
+
+    arguments = {"source": CANDIDATE,
+                 "modules": {str(tmp_path / "prov.rvl"): HIJACK}}
+    assert operator._compile_candidate(arguments) is None
+    # positive control: without the displacing module the derivation runs and
+    # the provider rides in it under its registered path
+    ir = operator._compile_candidate({"source": CANDIDATE, "modules": {}})
     by_name = {c["name"]: c for c in ir["manifest"]["components"]}
     assert by_name["OpsProvider"]["provides"] == ["ops"], by_name
