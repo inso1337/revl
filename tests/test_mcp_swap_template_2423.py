@@ -18,8 +18,12 @@ internal fault.
 The trust boundary is the other half. An agent-authored successor may not
 inherit the running operator template's live instance state, whatever the
 migration policy: a default (generational) swap refuses with
-STATE_UNDISCLOSED and gen N keeps serving. A trusted host-code swap and an
-operator swap still migrate.
+STATE_UNDISCLOSED and gen N keeps serving. Authorship is what the compile
+reports about the text's origin — inline source, in-memory modules, an edited
+buffer, or a file in an export area — never the authoring-trust config, so a
+trusted host-code author is still the agent. Only a template the successor
+CHANGES trips the gate; one it re-declares unchanged keeps migrating, and an
+operator swap still migrates.
 
 The composition and the swap are the legitimate template path of item 334,
 driven through the MCP verb the issue names.
@@ -231,11 +235,14 @@ def test_an_agent_swap_does_not_inherit_operator_instance_state(
 
 
 @needs_runtime
-def test_a_trusted_host_code_swap_still_migrates_live_instance_state(
+def test_a_trusted_host_code_agent_swap_refuses_to_inherit_state(
         _fresh_server_session):
-    """The same template swap from a trusted host-code author is an operator
-    swap: the disclosure gate does not run, generational migration carries the
-    seeded state onto the successor, and the successor's code is live."""
+    """`--author-trust trusted` is a statement about HOST CODE: the operator
+    vouches for the agent's externs. It does not make the agent the operator,
+    so inline source is still agent-authored text and a default swap must run
+    the item-334 disclosure gate. Before the fix authorship was read off
+    `AUTHORING.profile()`, which is none under this trust, so the gate was
+    skipped and the seeded operator state rode onto the successor."""
     server = _fresh_server_session
     server.set_authoring_trust(host_code=True)
     assert server.AUTHORING.profile() is None
@@ -249,10 +256,68 @@ def test_a_trusted_host_code_swap_still_migrates_live_instance_state(
 
     swapped = _call("revl_swap", {"source": _stateful_instance_source(2)})
 
-    assert swapped["ok"] is True, swapped
-    assert swapped["swapped"] is True
-    assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
-    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 2
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert swapped["diagnostics"][0]["category"] != "internal"
+    assert swapped.get("swapped") is not True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_trusted_host_code_repair_refuses_to_inherit_state(
+        _fresh_server_session):
+    """`revl_repair` swaps a candidate too, and its authorship was read off the
+    trust config as well. Under trusted host code a transport repair of the
+    live template migrated the seeded state with no gate; the compile report
+    says it is agent text, so the repair is rejected and gen N keeps serving."""
+    server = _fresh_server_session
+    server.set_authoring_trust(host_code=True)
+    assert server.AUTHORING.profile() is None
+
+    loaded = _call("revl_load", {"source": _stateful_instance_source(1)})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    repaired = _call("revl_repair", {
+        "component": "Worker",
+        "candidate": {"source": _stateful_instance_source(2)},
+        "selfRepairPolicy": {"eligible": [{"component": "*"}],
+                             "mayTouch": ["*"], "ackOnWiden": False}})
+
+    assert repaired["incident"]["status"] == "rejected", repaired["incident"]
+    assert repaired["remediation"]["applied"] is False
+    assert repaired["remediation"]["code"] == "STATE_UNDISCLOSED"
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_a_trusted_host_code_edit_refuses_to_inherit_state(
+        _fresh_server_session):
+    """The edit door is the same authoring door: a committed patch of the
+    running template is transport text whatever the trust says. It used to read
+    `AUTHORING.profile()` too, so under trusted host code a `revl_edit` commit
+    re-seated the live instance state with no gate."""
+    server = _fresh_server_session
+    server.set_authoring_trust(host_code=True)
+    assert server.AUTHORING.profile() is None
+
+    loaded = _call("revl_load", {"source": _stateful_instance_source(1)})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    edited = _call("revl_edit", {"edits": [
+        {"anchor": "fn version() = 1", "replacement": "fn version() = 2"}]})
+
+    assert edited["ok"] is False, edited
+    assert edited["code"] == "STATE_UNDISCLOSED"
+    assert edited.get("swapped") is not True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
     assert _call("revl_call", {"key": "admin", "method": "read",
                                "args": ["alice"]})["result"] == "42"
 
@@ -392,12 +457,13 @@ def test_a_files_only_operator_swap_reaching_no_export_text_still_migrates(
 
 
 @needs_runtime
-def test_a_trusted_author_reaching_an_export_file_still_migrates(
+def test_a_trusted_author_reaching_an_export_file_still_refuses_state(
         tmp_path, _fresh_server_session):
-    """Export-area text is the agent's by its path, but only a profile turns it
-    into author text (`_swap_inline`'s trusted control, #2600/2628). Under a
-    trusted host-code author no profile is applied, so the same reached-export
-    shape is an operator swap: it migrates and installs the changed text."""
+    """Export-area text is the agent's by its path, and the trust config does
+    not change that. `revl_export` is the only writer under `.revl/export/`, so
+    a changed module there is transport text even when no profile is applied.
+    The server-side swap must run the disclosure gate and refuse; before the
+    fix it treated the reached file as the operator's and migrated."""
     server = _fresh_server_session
     server.set_authoring_trust(host_code=True, roots=[str(tmp_path)])
     assert server.AUTHORING.profile() is None
@@ -419,9 +485,198 @@ def test_a_trusted_author_reaching_an_export_file_still_migrates(
 
     swapped = _call("revl_swap", {})
 
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert swapped.get("swapped") is not True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+def _stateful_instance_source_with_extra() -> str:
+    """`_stateful_instance_source(1)` plus an unrelated component. `Worker`,
+    `Supervisor` and `Admin` are byte for byte the same, so a successor built
+    from this text changes something other than the live template."""
+    return _stateful_instance_source(1) + """
+service Ping { fn ping() -> Int }
+component Echo provides ping: Ping {
+  provide ping { fn ping() = 9 }
+}
+"""
+
+
+def _provider_call_source(tag: int) -> str:
+    """A stateful template that calls a root provider: `Worker` keeps its live
+    `Map` and its `version()` reads the `Tag` provider, so changing only the
+    provider changes the code the instance's state is re-seated with, while
+    `Worker` itself stays byte for byte the same."""
+    return f"""
+service Tag {{ fn tag() -> Int }}
+service Store {{
+  fn get(k: Str) -> Opt[Str]
+  fn put(k: Str, v: Str)
+  fn version() -> Int
+}}
+service Admin {{
+  fn seed(k: Str, v: Str)
+  fn read(k: Str) -> Opt[Str]
+  fn ver() -> Int
+}}
+component Backend provides tag: Tag {{
+  provide tag {{ fn tag() = {tag} }}
+}}
+component Worker provides store: Store requires tag: Tag {{
+  let m = effect Map.new() undo m.drop()
+  provide store {{
+    fn get(k) = m.get(k)
+    fn put(k, v) {{ effect m.insert(k, v) undo m.remove(k) }}
+    fn version() = tag.tag()
+  }}
+}}
+component Supervisor provides admin: Admin {{
+  let w = effect spawn Worker undo w.dispose()
+  provide admin {{
+    fn seed(k, v) = w.store.put(k, v)
+    fn read(k) = w.store.get(k)
+    fn ver() = w.store.version()
+  }}
+}}
+"""
+
+
+@needs_runtime
+def test_a_provider_only_change_still_refuses_the_live_template(
+        _fresh_server_session):
+    """A template's own text can be byte-identical while the provider it calls
+    changes. The live state still lands on code that can observe it through
+    that call, so the template's identity includes the components that provide
+    the services it requires; checking only its own entry would migrate the
+    seeded state onto the changed provider."""
+    server = _fresh_server_session
+    server.set_authoring_trust(host_code=True)
+
+    loaded = _call("revl_load", {"source": _provider_call_source(1)})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+
+    swapped = _call("revl_swap", {"source": _provider_call_source(2)})
+
+    assert swapped["ok"] is False, swapped
+    assert swapped["code"] == "STATE_UNDISCLOSED"
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+
+@needs_runtime
+def test_an_unrelated_edit_lands_with_the_live_template_untouched(
+        tmp_path, _fresh_server_session):
+    """The operator loads the stateful template composition from a jailed file
+    outside every export area and seeds a live instance. The agent then swaps a
+    successor that adds an unrelated component and re-declares `Worker`
+    unchanged. The disclosure gate runs (inline source is agent text) but the
+    template is not touched, so the edit lands and generational migration still
+    carries the operator's instance state. Before the fix EVERY re-declared
+    live template was checked, so this unrelated edit was refused."""
+    server = _fresh_server_session
+    operator_file = tmp_path / "instances.rvl"
+    operator_file.write_text(_stateful_instance_source(1), encoding="utf-8")
+    server.set_authoring_trust(host_code=False, roots=[str(tmp_path)])
+
+    loaded = _call("revl_load", {"files": [str(operator_file)]})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    swapped = _call("revl_swap", {"source": _stateful_instance_source_with_extra()})
+
     assert swapped["ok"] is True, swapped
     assert swapped["swapped"] is True
     assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
-    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 2
+    assert "ping" in swapped["providedKeys"]
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
     assert _call("revl_call", {"key": "admin", "method": "read",
                                "args": ["alice"]})["result"] == "42"
+    assert _call("revl_call", {"key": "ping", "method": "ping"})["result"] == 9
+
+
+@needs_runtime
+def test_a_refused_trusted_author_swap_lands_after_the_instances_quiesce(
+        _fresh_server_session):
+    """The trusted-author refusal is about the live instance, not a permanent
+    hold on the successor: quiesce the instances it would have inherited and
+    the same agent-authored swap lands, cold."""
+    server = _fresh_server_session
+    server.set_authoring_trust(host_code=True)
+
+    loaded = _call("revl_load", {"source": _stateful_instance_source(1)})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    refused = _call("revl_swap", {"source": _stateful_instance_source(2)})
+    assert refused["ok"] is False, refused
+    assert refused["code"] == "STATE_UNDISCLOSED"
+
+    for instance in list(server.SESSION._driver.runtime.live_instances("Worker")):
+        pending = instance.dispose()
+        if pending is not None:
+            server.SESSION._run(pending)
+    assert server.SESSION._driver.runtime.live_instances("Worker") == []
+
+    swapped = _call("revl_swap", {"source": _stateful_instance_source(2)})
+
+    assert swapped["ok"] is True, swapped
+    assert swapped["swapped"] is True
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 2
+    # quiesced, so there is no instance state to inherit
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] is None
+
+
+@needs_runtime
+def test_a_rollback_and_an_undo_cold_start_with_no_migration(
+        _fresh_server_session):
+    """Rollback and undo restore the predecessor's CODE only: both are cold
+    starts for the instance layer, so migrated state does not ride back (F4).
+    The guard stays in place now that agent-authored swaps can land on an
+    untouched template with migration."""
+    server = _fresh_server_session
+    server.set_authoring_trust(host_code=True)
+
+    loaded = _call("revl_load", {"source": _stateful_instance_source(1)})
+    assert loaded["ok"] is True, loaded
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+
+    swapped = _call("revl_swap",
+                    {"source": _stateful_instance_source_with_extra()})
+    assert swapped["ok"] is True, swapped
+    assert swapped["migration"]["templates"]["Worker"]["migrated"] is True
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+    rolled = _call("revl_rollback", {})
+
+    assert rolled["ok"] is True, rolled
+    assert rolled.get("migration") is None
+    assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] is None
+
+    # `revl_undo` replays an earlier generation through the same respawn swap.
+    again = _call("revl_swap", {"source": _stateful_instance_source_with_extra()})
+    assert again["ok"] is True, again
+    _call("revl_call", {"key": "admin", "method": "seed",
+                        "args": ["alice", "42"]})
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] == "42"
+
+    undone = _call("revl_undo", {})
+
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert undone.get("migration") is None
+    assert _call("revl_call", {"key": "admin", "method": "read",
+                               "args": ["alice"]})["result"] is None

@@ -516,8 +516,9 @@ class _SwapPlan:
     # issue #1751: the components gen N was ALREADY running PENDING (an unmet
     # requirement, e.g. an ambient host service this host does not supply)
     pre_pending: frozenset = frozenset()
-    # issue #2510: the successor is agent-authored (`migrate="declared"`, or
-    # the MCP session serving an untrusted author), so a hand-off from a frame
+    # issue #2510: the successor is agent-authored (what the compile reported
+    # about its origins: `migrate="declared"`, or text that arrived over the
+    # transport whatever the authoring-trust config), so a hand-off from a frame
     # that spans realms starts cold (`_restore_provider_state`)
     agent_authored: bool = False
 
@@ -1804,9 +1805,11 @@ class Session:
           AND §5-type-compatible on BOTH sides (the item-53 accept-vs-export gate,
           run here because propose's standalone compile never threaded the running
           manifest). The undeclared/untyped item-10 instance channel is NOT
-          crossed: a live instance the successor would inherit refuses BEFORE
-          teardown with STATE_UNDISCLOSED, gen N untouched, rather than being
-          silently migrated by candidate-written template name + host class alone.
+          crossed: a live instance whose template the successor CHANGES refuses
+          BEFORE teardown with STATE_UNDISCLOSED, gen N untouched, rather than
+          being silently migrated by candidate-written template name + host class
+          alone. A template the successor re-declares with the same code is the
+          operator's own and is not a crossing (#2423 follow-up).
           The same gate runs for ANY `agent_authored` successor, whatever
           `migrate` says (issue #2423); `declared` is how `Gate.propose` selects
           it.
@@ -2066,12 +2069,14 @@ class Session:
         * The item-10 live-INSTANCE channel (F2/F3). It correlates old↔new
           purely by candidate-written template NAME and host CLASS, with no
           declared §5 type contract at any door — so an agent successor that
-          re-declares a template with live instances would inherit the running
+          CHANGES a template with live instances would inherit the running
           operator instance's state (an ungranted resource's product crossing by
           name into a `granted=[]` candidate). There is no way to DISCLOSE such a
-          crossing, so a live instance whose template the successor re-declares
+          crossing, so a live instance whose template the successor changes
           refuses here rather than migrating. Quiesce it, or use a trusted
-          operator swap.
+          operator swap. A template the successor re-declares with the SAME code
+          (#2423 follow-up) is not a crossing: the state is re-seated on the
+          operator's own text, so an unrelated edit still lands.
         * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
           (a `handoff` on both the predecessor and the successor), but propose's
           decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
@@ -2087,19 +2092,28 @@ class Session:
         runtime = self._driver.runtime
         old_templates = (old_ir.get("manifest") or {}).get("templates") or []
         new_templates = set((new_ir.get("manifest") or {}).get("templates") or [])
+        old_codes = {name: _template_code(old_ir, name) for name in old_templates}
         for name in old_templates:
-            if name in new_templates and runtime.live_instances(name):
-                raise SessionError(
-                    f"propose refused: template {name!r} has live instance state "
-                    f"and the successor re-declares it. The item-10 instance "
-                    f"channel correlates old and new by template name and host "
-                    f"class alone — both candidate-written, with no declared §5 "
-                    f"type contract — so an agent-authored successor cannot "
-                    f"inherit a running instance's operator state across the "
-                    f"trust boundary. Quiesce the instances (or use a trusted "
-                    f"operator swap) before self-extending. Nothing was swapped; "
-                    f"gen N is intact and still serving.",
-                    code="STATE_UNDISCLOSED")
+            if name not in new_templates or not runtime.live_instances(name):
+                continue
+            # only a template the successor CHANGES crosses the boundary. One
+            # it re-declares unchanged, with the helpers and providers it calls
+            # unchanged too, is the operator's own code, so the live instance's
+            # state lands on the same text it ran on and the edit (unrelated to
+            # the template) is allowed to land (#2423 follow-up).
+            old_code = old_codes[name]
+            if old_code is not None and old_code == _template_code(new_ir, name):
+                continue
+            raise SessionError(
+                f"template {name!r} has live instance state and the successor "
+                f"changes it. The item-10 instance channel correlates old and "
+                f"new by template name and host class alone — both candidate-"
+                f"written, with no declared §5 type contract — so an agent-"
+                f"authored successor cannot inherit a running instance's "
+                f"operator state across the trust boundary. Quiesce the "
+                f"instances (or use a trusted operator swap) before swapping. "
+                f"Nothing was swapped; gen N is intact and still serving.",
+                code="STATE_UNDISCLOSED")
         running = self._declared_handoffs(old_ir)
         accepts = self._declared_handoffs(new_ir)
         for key, exported in running.items():
@@ -2108,13 +2122,13 @@ class Session:
                 continue  # the successor opts out of this key — starts cold
             if not compatible(accepted, exported):
                 raise SessionError(
-                    f"propose refused: the successor's `handoff` on {key!r} "
-                    f"accepts `{accepted}`, but the running provider exports "
+                    f"the successor's `handoff` on {key!r} accepts "
+                    f"`{accepted}`, but the running provider exports "
                     f"`{exported}` — the declared hand-off types are not §5-"
                     f"compatible, so operator state cannot cross onto the "
-                    f"agent-authored successor (the item-53 accept-vs-export gate "
-                    f"propose's standalone compile never ran). Nothing was "
-                    f"swapped; gen N is intact.",
+                    f"agent-authored successor (the item-53 accept-vs-export "
+                    f"gate never ran on the standalone decision compile). "
+                    f"Nothing was swapped; gen N is intact.",
                     code="STATE_UNDISCLOSED")
 
     @staticmethod
@@ -9846,6 +9860,80 @@ def _component_signature(comp: dict) -> str:
     payload = json.dumps({k: v for k, v in comp.items() if k != "source"},
                          sort_keys=True, separators=(",", ":"), default=_plain)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _reached_code_names(node, acc: set) -> set:
+    """Every top-level function or extern name an IR subtree calls or refers
+    to. A call or emission is `{"kind": "fn", "name": ...}`; a bare reference
+    the lowerer resolved to a module fn or an extern is `{"kind": "var",
+    "name": ...}`. A local binding (`{"kind": "name", "id": ...}`) and a field
+    or method label never name one, so they are not counted: a tree that merely
+    spells a label like a helper must not look like it reaches that helper."""
+    if isinstance(node, dict):
+        if (node.get("kind") in ("fn", "var")
+                and isinstance(node.get("name"), str)):
+            acc.add(node["name"])
+        for value in node.values():
+            _reached_code_names(value, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _reached_code_names(value, acc)
+    return acc
+
+
+def _template_code(ir: dict, name: str):
+    """The code identity of a template (#2423 follow-up): its component entry,
+    every top-level function and extern it calls or refers to, and the
+    components that provide the services it (transitively) requires.
+
+    `_component_signature` alone names code that lives in the component. A
+    template whose body calls a helper from a `use`-reached module keeps the
+    same component entry when that module changes (the helper is a top-level
+    `functions` entry); and a template whose body calls a required service keeps
+    its entry while the provider it calls changes. Both move the code a live
+    instance's state is re-seated onto and can observe, so both are part of the
+    template's identity here. A component the template does not reach is not.
+
+    Returns `(component signatures, reached code)`, or `None` when the
+    composition declares no such component."""
+    components = {c["name"]: c for c in ir.get("components") or []
+                  if c.get("name")}
+    if name not in components:
+        return None
+    functions = {f.get("name"): f for f in ir.get("functions") or []}
+    externs = {e.get("name"): e for e in ir.get("externs") or []}
+    providers: dict = {}
+    for comp in components.values():
+        for key in comp.get("provides") or ():
+            providers.setdefault(key, []).append(comp["name"])
+    reached: dict = {}
+    seen: set = set()
+    frontier = [name]
+    while frontier:
+        cname = frontier.pop()
+        if cname in seen:
+            continue
+        seen.add(cname)
+        comp = components.get(cname)
+        if comp is None:
+            continue
+        pending = [n for n in _reached_code_names(comp, set())
+                   if n in functions or n in externs]
+        while pending:
+            fname = pending.pop()
+            if fname in reached:
+                continue
+            reached[fname] = functions.get(fname) or externs.get(fname)
+            for more in _reached_code_names(reached[fname], set()):
+                if (more in functions or more in externs) and more not in reached:
+                    pending.append(more)
+        for key in comp.get("requires") or ():
+            frontier.extend(providers.get(key, ()))
+    code = {c: _component_signature(components[c])
+            for c in seen if c in components}
+    entries = {n: {k: _plain(v) for k, v in entry.items() if k != "source"}
+               for n, entry in reached.items()}
+    return (code, entries)
 
 
 def _class_map_digest_of(class_map) -> str | None:

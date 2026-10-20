@@ -219,12 +219,20 @@ def test_untrusted_repair_of_a_multi_realm_frame_starts_cold(tmp_path, recorded)
 
 
 @needs_runtime
-def test_control_trusted_operator_swap_hands_off_warm(tmp_path):
+def test_control_operator_file_swap_hands_off_warm(tmp_path):
+    """The operator writes the successor to a jailed file outside every export
+    area, so the compile reports no transport origin and the hand-off migrates
+    warm. Trust mode alone does not make a candidate sent over the transport
+    the operator's: an inline successor is agent text even here (#2423
+    follow-up), which the refusals above pin."""
     server_mod.set_authoring_trust(host_code=True)
     _operator_file(tmp_path)
-    successor = _mixed("open", 'realm("tenant_a")').replace(
-        "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)")
-    swapped = _call("revl_swap", {"source": REST + successor,
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(
+        REST + _mixed("open", 'realm("tenant_a")').replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    swapped = _call("revl_swap", {"files": [str(successor)],
                                   "replacing": ["Mixed"]})
     assert swapped["ok"] is True, swapped
     assert _secret_store(server_mod.SESSION).data[SECRET[0]] == SECRET[1]

@@ -463,18 +463,26 @@ def test_control_untrusted_single_realm_successor_still_migrates(
 @needs_runtime
 def test_control_operator_multi_realm_successor_still_migrates(
         tmp_path, monkeypatch):
+    """The operator writes the successor to a jailed file outside every export
+    area, so the compile reports no transport origin and a multi-realm frame's
+    hand-off still migrates warm. A transport patch, even under trusted host
+    code, is agent text and starts cold (#2423 follow-up)."""
     from revl.mcp import server as server_mod
 
     server_mod.set_authoring_trust(host_code=True)
-    monkeypatch.chdir(tmp_path)
-    loaded = _call("revl_load", {"source": MIXED_REST + TENANT_A_APP
-                                 + _mixed(isolated=True, board_reads="open")})
-    assert loaded["ok"] is True, loaded
+    _operator_file(tmp_path, monkeypatch,
+                   MIXED_REST + TENANT_A_APP
+                   + _mixed(isolated=True, board_reads="open"))
     _map_at("Mixed", 0).insert(*SECRET)
-    changed = _call("revl_change", {"commit": True, "replace": {
-        "component": "Mixed",
-        "source": _mixed(isolated=True, board_reads="open").replace(
-            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)")}})
-    _committed(changed)
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(
+        MIXED_REST + TENANT_A_APP
+        + _mixed(isolated=True, board_reads="open").replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    changed = _call("revl_swap", {"files": [str(successor)],
+                                  "replacing": ["Mixed"]})
+    assert changed["ok"] is True and changed.get("swapped") is True, \
+        [d.get("message") for d in changed.get("diagnostics") or []]
     assert _map_at("Mixed", 0).data[SECRET[0]] == SECRET[1]
     assert changed["handoff"]["board"]["migrated"] is True
