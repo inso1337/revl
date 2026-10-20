@@ -167,8 +167,10 @@ def test_a_witness_that_carries_no_capture_still_restores(workspace):
 
 def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     """Rewritten IN PLACE, so the inode is the very one that was captured and
-    the length is unchanged. `(dev, ino)` alone cannot see this, which is why
-    the capture records the stamps as well."""
+    the length is unchanged. `(dev, ino)` alone cannot see this. The capture
+    records `ctime_ns` too, which catches the rewrite once the inode timestamp
+    clock has ticked, and the sidecar's content digest, which catches it inside
+    a single tick where every stat field stays equal (issue #2647)."""
     mod = _fs_module()
     witness, target, sidecar = _written(mod, workspace)
     before = os.stat(sidecar)

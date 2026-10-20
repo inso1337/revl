@@ -15,6 +15,15 @@ and the same three codes (`EOUTSIDE`, `EMULTILINK`, `EIDENTITY`), checked at
 syscall time and re-checked on the installed result with `ctime_ns` dropped
 because the rename bumps it.
 
+Issue #2647 added one more comparison, on both install stages: the sha256 of the
+sidecar's bytes, recorded at snapshot and re-read through the same fd the stat
+came from, before the rename and again on the installed result. The seven stat
+fields alone do not see a same-size in-place rewrite that lands inside one inode
+timestamp tick; the digest does, because it does not depend on clock resolution.
+The digest comparison is skipped when the capture carries none, so a witness
+recorded before the key existed (an older WAL replayed by `revl recover`) is
+compared stat-only and still restores.
+
 The constants are load-bearing and are pinned by probe here rather than assumed.
 #1038 found that copying #1016's "regular file" and "one link" assertions onto
 `unrm` would have over-refused honest reversals, because `rm` parks directories,
@@ -29,14 +38,21 @@ The failure direction is the point, and both halves are pinned:
 
 * a preimage that cannot be shown to be the captured one RAISES, which the
   teardown loop records as `restore-residue` through the existing merged-residue
-  Record schema — it is never installed over the target;
+  Record schema, and it is never installed over the target;
 * an untampered guarded restore stays exactly as quiet as it was, and a witness
-  that carries no capture still restores rather than stranding a recoverable
-  WAL (the non-vacuity controls, which pass before this change as well as after).
+  that carries no capture, or a capture recorded before the digest existed,
+  still restores rather than stranding a recoverable WAL (the non-vacuity
+  controls, which pass before this change as well as after).
+
+The same-tick test at the head of the substitution section forces the capture's
+stat fields to the post-tamper tuple before the inverse runs, so it does not
+depend on the filesystem's tick at all: on a clock that did tick, the stat
+comparison would refuse anyway; with the tuple pinned, only the digest can.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import sys
@@ -109,6 +125,21 @@ def _written(root, frame, name="artifact.txt", before="v1", after="v2"):
     return witness, str(target), sidecar
 
 
+def _as_if_same_tick(witness, path):
+    """Pin the witness's recorded stat fields to `path`'s CURRENT tuple.
+
+    This is the same-tick case of issue #2647, forced rather than raced: after a
+    same-size in-place rewrite inside one inode timestamp tick, every captured
+    stat field equals the tampered file's own tuple. Overwriting the recorded
+    fields with that tuple therefore removes the stat comparison from the test
+    without removing the tamper, so anything that still refuses can only be the
+    content digest. On a filesystem whose clock did tick this leaves a test that
+    passes for one reason instead of a test that flips with the tick."""
+    for field, value in ws._capture_of(os.stat(path)).items():
+        witness["capture"][field] = value
+    return witness
+
+
 # ===========================================================================
 # What the bound key is, and what the guarded surface actually admits. Both
 # pass on either tree; the second is what licenses the two constants.
@@ -121,6 +152,11 @@ def test_the_witness_binds_a_capture_the_inverse_can_read(root, frame):
     assert capture["ino"] == st.st_ino and capture["dev"] == st.st_dev
     assert set(ws.SIDECAR_CAPTURE_FIELDS) <= set(capture)
     assert "ctime_ns" not in ws.INSTALLED_CAPTURE_FIELDS
+    # issue #2647: the content digest is bound alongside the stat fields, and it
+    # is the digest of the bytes that were on disk, taken at snapshot time.
+    digest = capture[ws.SIDECAR_DIGEST_FIELD]
+    assert isinstance(digest, str) and len(digest) == 64
+    assert digest == hashlib.sha256(Path(sidecar).read_bytes()).hexdigest()
 
 
 def test_the_guarded_surface_admits_only_regular_single_linked_targets(root, frame):
@@ -216,6 +252,38 @@ def test_a_witness_that_carries_no_capture_still_restores(root, frame):
     assert not os.path.exists(sidecar)
 
 
+def test_a_legitimate_restore_still_succeeds_with_the_digest_recorded(root, frame):
+    """The positive direction of the digest check: a snapshot nobody touched
+    restores, so the comparison refuses substitutions rather than honest
+    reversals. Pinned as its own case because the digest is the one check that
+    reads the sidecar's bytes on every restore."""
+    witness, target, sidecar = _written(root, frame)
+    digest = witness["capture"][ws.SIDECAR_DIGEST_FIELD]
+    assert digest == hashlib.sha256(Path(sidecar).read_bytes()).hexdigest()
+
+    fs._witnessed_restore(witness)             # no raise, no diagnostics
+
+    assert open(target).read() == "v1"
+    assert not os.path.exists(sidecar)
+
+
+def test_a_capture_recorded_before_the_digest_still_restores(root, frame):
+    """A capture with the stat fields but no `sha256` predates the digest (an
+    older install's WAL, replayed by `revl recover`). It is compared stat-only
+    and still restores: adding the key must not turn a recoverable WAL into a
+    refusal."""
+    witness, target, sidecar = _written(root, frame)
+    legacy = dict(witness["capture"])
+    legacy.pop(ws.SIDECAR_DIGEST_FIELD, None)
+    assert "sha256" not in legacy
+    assert set(ws.SIDECAR_CAPTURE_FIELDS) <= set(legacy)
+
+    fs._witnessed_restore({**witness, "capture": legacy})
+
+    assert open(target).read() == "v1"
+    assert not os.path.exists(sidecar)
+
+
 # ===========================================================================
 # The four substitutions. Each one FAILS on main — the sidecar is renamed over
 # the target and the reversal reports success — and is refused here.
@@ -223,22 +291,64 @@ def test_a_witness_that_carries_no_capture_still_restores(root, frame):
 
 def test_a_tampered_sidecar_is_refused_rather_than_installed(root, frame):
     """Rewritten IN PLACE, so the inode is the very one that was captured and
-    the length is unchanged. `(dev, ino)` alone cannot see this, which is why
-    the capture records the stamps too."""
+    the length is unchanged. `(dev, ino)` alone cannot see this, and on a
+    filesystem whose inode clock is coarse neither can `size`/`mtime_ns`/
+    `ctime_ns`: the rewrite lands in the same timestamp tick and every captured
+    stat field stays equal (issue #2647). The recorded stat tuple is therefore
+    pinned to the tampered file's own tuple before the inverse runs, so the tick
+    is out of the test and the only comparison left that can refuse is the
+    recorded sha256. With the digest check removed the test fails to raise at
+    all, because the pinned stat tuple no longer differs."""
     witness, target, sidecar = _written(root, frame)
     before = os.stat(sidecar)
     with open(sidecar, "r+b") as fh:
         fh.write(b"zz")                        # same inode, same length
     after = os.stat(sidecar)
     assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+    assert before.st_size == after.st_size
+    assert witness["capture"][ws.SIDECAR_DIGEST_FIELD] == \
+        hashlib.sha256(b"v1").hexdigest()
+    _as_if_same_tick(witness, sidecar)
 
     with pytest.raises(fs.FsOpError) as ei:
         fs._witnessed_restore(witness)
     assert ei.value.code == "EIDENTITY"
+    assert ws.SIDECAR_DIGEST_FIELD in ei.value.message, \
+        "the stat tuple was pinned to the tampered file, so only the digest " \
+        "can have refused"
 
     assert open(target).read() == "v2", \
         "the tampered snapshot was installed over the target anyway"
     assert open(sidecar).read() == "zz", "the refused sidecar was consumed"
+
+
+def test_a_rewrite_between_the_check_and_the_rename_is_refused(root, frame,
+                                                               monkeypatch):
+    """The second install pass, on the installed result, compares the digest too.
+
+    The window the post-install pass exists for is between the pre-rename read
+    and the rename: a writer can rewrite the sidecar in place after its bytes
+    were hashed. That is forced by wrapping `replace_confined`, so the pre-rename
+    comparison sees the captured bytes and the installed result does not. The
+    recorded stat tuple is pinned to the rewritten file's own tuple, so the
+    same-tick case holds and the post-install digest is the only comparison that
+    can refuse."""
+    witness, target, sidecar = _written(root, frame)
+    real_replace = ws.replace_confined
+
+    def rewrite_then_replace(src_real, dst_real):
+        with open(src_real, "r+b") as fh:
+            fh.write(b"zz")                    # same inode, same length
+        _as_if_same_tick(witness, src_real)
+        real_replace(src_real, dst_real)
+
+    monkeypatch.setattr(ws, "replace_confined", rewrite_then_replace)
+
+    with pytest.raises(fs.FsOpError) as ei:
+        fs._witnessed_restore(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert ws.SIDECAR_DIGEST_FIELD in ei.value.message, \
+        "the stat tuple was pinned, so only the installed digest can have refused"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(root, frame):
