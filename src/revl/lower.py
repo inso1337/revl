@@ -8290,16 +8290,17 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         return
     externs = {ext.name for ext in program.externs}
 
-    def check(decl, visible: set, decl_file: str, skip: tuple = ()) -> None:
+    def check(decl, visible: set, decl_file: str, skip_binders: tuple = (),
+              skip_calls: tuple = ()) -> None:
         if not visible:
             return
         called: set = set()
-        _called_names(decl, called, skip)
+        _called_names(decl, called, skip_calls)
         ambiguous = visible & called
         if not ambiguous:
             return
         binders: list = []
-        _binder_names(decl, binders, skip)
+        _binder_names(decl, binders, skip_binders)
         for name, line in binders:
             if name not in ambiguous:
                 continue
@@ -8338,13 +8339,15 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
             continue
         # A component is not one body: a provide method is emitted as its own
         # function (backends/python/emit.py writes one `def` per method), so
-        # its parameter is in scope only there. Pair each method's binders with
-        # that method's calls, and leave the methods out of the component-level
-        # pairing so one method's parameter cannot be blamed for a sibling's
-        # call.
+        # its parameters are in scope only there. Pair each method's binders
+        # with that method's calls, and leave the method subtrees out of the
+        # component's BINDER list so one method's parameter cannot be blamed
+        # for a sibling's call. Their CALLS stay in the component-level set:
+        # a component body's `let` is captured by the methods' closures, so a
+        # bare call there still pairs with it.
         for method in _provide_methods(decl.body):
             check(method, declared, decl_file)
-        check(decl, declared, decl_file, skip=(ProvideMethod,))
+        check(decl, declared, decl_file, skip_binders=(ProvideMethod,))
 
 
 def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:

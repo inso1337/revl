@@ -108,6 +108,25 @@ def test_the_extern_half_names_the_module_extern():
         )
 
 
+def test_a_component_body_binding_still_pairs_with_a_call_in_a_method():
+    """A component body's `let` is captured by the provide methods' closures,
+    so a bare call inside a method still names both the local and the module
+    fn. The per-method split must not drop that pairing."""
+    with pytest.raises(RevlError,
+                       match="`helper` is bound here and called in this body"):
+        compile_source(
+            "fn helper(s: Str) -> Str { return s }\n"
+            "service Cache { fn f(key: Str) -> Str }\n"
+            "component C provides cache: Cache {\n"
+            "  let helper = effect Map.new() undo helper.drop()\n"
+            "  provide cache {\n"
+            "    fn f(key) = helper(key)\n"
+            "  }\n"
+            "}\n",
+            "t.rvl",
+        )
+
+
 # ------------------------------------------------ what must NOT be refused
 
 def test_a_provide_parameter_that_only_shares_a_fn_name_is_admitted():
