@@ -322,12 +322,29 @@ def dirfd_walk_supported() -> bool:
     window. `os.stat(..., follow_symlinks=False)` is included because the walk's
     leaf checks (`_leaf_is_handle`, `_bound_stat`) rely on it; `os.utime(fd=)`
     and `os.pread` are NOT, because only the pinned path uses those and
-    `bind_workspace_root` checks them itself."""
+    `pinned_workspace_supported` checks them."""
     return bool(
         _O_DIRECTORY
         and _O_NOFOLLOW
         and all(fn in os.supports_dir_fd for fn in _DIRFD_WALK_REQUIRED)
         and _STAT_FN in os.supports_follow_symlinks
+    )
+
+
+def pinned_workspace_supported() -> bool:
+    """True iff this host can host the PINNED workspace contract.
+
+    This is `bind_workspace_root`'s entire gate in one place, so a caller that
+    has to decide whether the pinned path can run at all asks exactly the
+    question the binder answers. A host can have the confined walk and still
+    lack the two calls only the pinned read uses: `utime(fd=)` and `pread`.
+    Windows lacks the walk (and, in CPython, `os.pread`), so it refuses at the
+    binder with `ENOTSUP`; a pinned-path test on that host must skip rather than
+    report the refusal as a failure."""
+    return bool(
+        dirfd_walk_supported()
+        and os.utime in os.supports_fd
+        and hasattr(os, "pread")
     )
 
 #: The supported host binding contract, also exported by `revl.fs_workspace`.
@@ -466,9 +483,7 @@ def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
             raise ConfinementError(
                 "EBOUND", "workspace binding must precede all filesystem use "
                 "and cannot be repeated", _sanitized(root_label))
-        if (not dirfd_walk_supported()
-                or os.utime not in os.supports_fd
-                or not hasattr(os, "pread")):
+        if not pinned_workspace_supported():
             raise ConfinementError(
                 "ENOTSUP", "pinned workspace requires directory-fd and "
                 "no-follow filesystem support", _sanitized(root_label))
