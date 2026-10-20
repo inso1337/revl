@@ -128,13 +128,13 @@ def test_an_untampered_unrm_still_succeeds_silently(workspace):
 
     mod.unrm(witness)                          # no raise, no diagnostics
 
-    assert open(target).read() == "payload", "the parked file was not put back"
+    assert open(target, encoding="utf-8").read() == "payload", "the parked file was not put back"
     assert not os.path.exists(sidecar), "the unrm left its sidecar behind"
     assert not any((workspace / ws.GARBAGE_DIRNAME).iterdir()), \
         "reversal is residue-free: the garbage directory is empty again"
 
     mod.unrm(witness)                          # still idempotent on replay
-    assert open(target).read() == "payload"
+    assert open(target, encoding="utf-8").read() == "payload"
 
 
 def test_a_witness_that_carries_no_capture_still_unrms(workspace):
@@ -149,7 +149,7 @@ def test_a_witness_that_carries_no_capture_still_unrms(workspace):
 
     mod.unrm(legacy)
 
-    assert open(target).read() == "payload"
+    assert open(target, encoding="utf-8").read() == "payload"
     assert not os.path.exists(sidecar)
 
 
@@ -169,7 +169,7 @@ def test_an_honest_rm_of_a_directory_still_reverses(workspace):
     mod.unrm(witness)
 
     assert os.path.isdir(target)
-    assert open(os.path.join(target, "leaf")).read() == "inside"
+    assert open(os.path.join(target, "leaf"), encoding="utf-8").read() == "inside"
 
 
 def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
@@ -187,7 +187,7 @@ def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
 
     mod.unrm(witness)
 
-    assert open(target).read() == "two names"
+    assert open(target, encoding="utf-8").read() == "two names"
 
 
 # ===========================================================================
@@ -213,7 +213,7 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
 
     assert not os.path.exists(target), \
         "the tampered sidecar was installed back over the original path anyway"
-    assert open(sidecar).read() == "POISON!", "the refused sidecar was consumed"
+    assert open(sidecar, encoding="utf-8").read() == "POISON!", "the refused sidecar was consumed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
@@ -224,7 +224,7 @@ def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
     decoy = workspace / "decoy"
     decoy.write_text("payload", encoding="utf-8")   # same BYTES as the parked
     os.replace(str(decoy), sidecar)
-    assert open(sidecar).read() == "payload"
+    assert open(sidecar, encoding="utf-8").read() == "payload"
 
     with pytest.raises(ws.FsOpError) as ei:
         mod.unrm(witness)

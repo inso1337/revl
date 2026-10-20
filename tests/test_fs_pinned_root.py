@@ -290,7 +290,7 @@ def _binding_cases(case, base, ws):
             ]
             file = root / "file"
             file.write_bytes(b"untouched")
-            with file.open() as handle:
+            with file.open(encoding="utf-8") as handle:
                 fst = os.fstat(handle.fileno())
                 invalid.append((dict(root_fd=handle.fileno(),
                                      expected_dev=fst.st_dev, expected_ino=fst.st_ino),
