@@ -138,8 +138,9 @@ def test_target_derivation_refuses_the_same_module(tmp_path):
     arguments = {"source": CANDIDATE,
                  "modules": {str(tmp_path / "prov.rvl"): HIJACK}}
     assert operator._compile_candidate(arguments) is None
-    # positive control: without the displacing module the derivation runs and
-    # the provider rides in it under its registered path
+    # positive control: without the displacing module the derivation runs
+    # (this site makes the providers available to `use`, it does not compose
+    # them as co-roots, so the candidate's own component is what it derives)
     ir = operator._compile_candidate({"source": CANDIDATE, "modules": {}})
     by_name = {c["name"]: c for c in ir["manifest"]["components"]}
-    assert by_name["OpsProvider"]["provides"] == ["ops"], by_name
+    assert by_name["T"]["provides"] == ["tool"], by_name
