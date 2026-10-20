@@ -4,6 +4,7 @@ Issue #2676 covers the source-changing handlers and live call/act tickets that
 were not covered by the initial load/swap regression tests.
 """
 
+import importlib.util
 import os
 import sys
 from types import SimpleNamespace
@@ -14,6 +15,11 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from revl.mcp import edit, repair, server  # noqa: E402
+
+needs_cordis = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="loading and applying a live composition needs cordis-py "
+           "(`sh backends/python/setup.sh`, run under backends/python/.venv)")
 
 
 _OPERATOR_PROVIDER = (
@@ -134,7 +140,7 @@ def test_server_side_swap_ticket_uses_the_compile_report(monkeypatch):
     assert _body_names(authored) == {"candidate_helper", "candidate_root"}
 
 
-def test_edit_refusal_carries_the_exact_candidate_bodies(monkeypatch):
+def test_edit_refusal_ticket_carries_the_exact_candidate_bodies(monkeypatch):
     from revl.mcp.approval import ApprovalRequired
 
     ir, modules, _report, _authored = _compiled_candidate()
@@ -163,10 +169,14 @@ def test_edit_refusal_carries_the_exact_candidate_bodies(monkeypatch):
     else:
         pytest.fail(f"edit did not reach the swap approval gate: {edit_result!r}")
 
-    assert _body_names(caught.host_bodies) == {
+    # The ticket, not the exception attribute, is what the caller receives:
+    # the shared handler recovers the candidate's bodies when the edit path
+    # attaches them to the exception.
+    ticket = server._approval_required(caught)["ticket"]
+    assert _body_names(ticket["unreviewedHostCode"]) == {
         "candidate_helper", "candidate_root",
     }
-    assert "operator_helper" not in _body_names(caught.host_bodies)
+    assert "operator_helper" not in _body_names(ticket["unreviewedHostCode"])
 
 
 def test_repair_gate_carries_the_candidate_bodies(monkeypatch):
@@ -218,8 +228,9 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
     assert _body_names(server.SESSION.origin[
         server._ORIGIN_AUTHORED_HOST_BODIES]) == expected
     assert server.SESSION._history[-1]["origin"] is server.SESSION.origin
-    assert server._ORIGIN_AUTHORED_HOST_BODIES not in \
-        server.SESSION._history[-1].get("snapshot", {}).get("sources", {})
+    from revl.mcp.persist import _materialize
+    assert server._ORIGIN_AUTHORED_HOST_BODIES not in _materialize(
+        server.SESSION._history[-1]["origin"])
 
 
 def test_restore_approval_ticket_uses_the_snapshot_compile_report(monkeypatch):
@@ -351,13 +362,6 @@ def test_fork_and_apply_keep_live_authored_host_bodies(monkeypatch):
     expected = {"candidate_helper", "candidate_root"}
     assert _body_names(branch.origin[server._ORIGIN_AUTHORED_HOST_BODIES]) == expected
 
-    # Session.apply records a non-readmittable generation with the existing
-    # origin. Exercise that history boundary without needing a runtime backend.
-    branch._generation = 2
-    branch._record_generation(readmittable=False)
-    assert _body_names(branch._history[-1]["origin"][
-        server._ORIGIN_AUTHORED_HOST_BODIES]) == expected
-
     def refused(*_args, **_kwargs):
         raise ApprovalRequired({"hash": "sha256:branch-call", "capabilities": []})
 
@@ -365,3 +369,89 @@ def test_fork_and_apply_keep_live_authored_host_bodies(monkeypatch):
     call_result = server._run_handler(
         "revl_call", {"key": "s", "method": "f", "args": ["x"]})
     assert _body_names(call_result["ticket"]["unreviewedHostCode"]) == expected
+
+
+def test_fork_confirm_ticket_uses_the_parent_generation_bodies(monkeypatch):
+    """A branch restore that refuses carries the parent's disclosed set, not
+    an empty candidate ticket (the fork path has no compile report of its own)."""
+    from revl.mcp.approval import ApprovalRequired
+    from revl.mcp.session import Session
+
+    ir, _modules, _report, authored = _compiled_candidate()
+    parent = Session()
+    parent.ir = ir
+    parent.origin = server._with_authored_host_bodies(
+        {"source": _CANDIDATE}, authored)
+
+    def fork_confirm(_hash):
+        error = ApprovalRequired({"hash": "sha256:fork-approval",
+                                  "capabilities": []})
+        error.candidate = ir
+        raise error
+
+    monkeypatch.setattr(parent, "fork_confirm", fork_confirm)
+    monkeypatch.setattr(server, "SESSION", parent)
+    result = server._run_handler("revl_fork_confirm", {"hash": "sha256:fork"})
+    assert result["approvalRequired"] is True, result
+    assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
+        "candidate_helper", "candidate_root",
+    }
+
+
+_APPLY_RUNNING = (
+    "service Ping { fn ping() -> Int }\n"
+    "component Pinger provides ping: Ping {\n"
+    "  provide ping { fn ping() = 1 }\n"
+    "}\n"
+)
+
+_APPLY_CANDIDATE = (
+    "service Ping { fn ping() -> Int }\n"
+    "extern emission[notify] fn applied_note(msg: Str) = @py { return }\n"
+    "component Pinger provides ping: Ping {\n"
+    '  emit applied_note("applied")\n'
+    "  provide ping { fn ping() = 2 }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_apply_records_the_resulting_provenance_as_the_live_generation():
+    """A plan-artifact apply records the post-apply bodies, not the pre-apply
+    origin, so a later call/act ticket names the body the apply installed."""
+    from revl import compile_source
+    from revl.apply import build_artifact
+    from revl.mcp.approval import ApprovalRequired
+    from revl.mcp.session import Session
+    from revl.plan import plan
+
+    running = compile_source(_APPLY_RUNNING)
+    artifact = build_artifact(
+        plan(source=_APPLY_CANDIDATE, manifest=running, include_ir=True),
+        running)
+    session = Session()
+    try:
+        session.load(running, origin={"source": _APPLY_RUNNING})
+        result = session.apply(artifact)
+        assert result["applied"] is True, result
+        assert set(result["resulting"]) == {"Pinger"}
+
+        server.SESSION = session
+        # The apply door replaces the provenance member with the resulting
+        # bodies; the admission inputs stay, so snapshot and edit still see
+        # what the session holds.
+        assert _body_names(session.origin[
+            server._ORIGIN_AUTHORED_HOST_BODIES]) == {"applied_note"}
+        assert session.origin["source"] == _APPLY_RUNNING
+
+        server._remember_live_host_bodies()
+        assert _body_names(server._LIVE_HOST_BODIES) == {"applied_note"}
+
+        ticket = server._approval_required(
+            ApprovalRequired({"hash": "sha256:apply", "capabilities": []}))
+        assert _body_names(ticket["ticket"]["unreviewedHostCode"]) == {
+            "applied_note",
+        }
+    finally:
+        if session.loaded:
+            session.unload()

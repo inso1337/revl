@@ -1315,7 +1315,18 @@ def _remember_live_host_bodies() -> None:
     """
     global _LIVE_HOST_BODIES
     origin = getattr(SESSION, "origin", None) or {}
-    _LIVE_HOST_BODIES = list(origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
+    if _ORIGIN_AUTHORED_HOST_BODIES in origin:
+        # Every MCP admission path tags its origin with the compile's report,
+        # including an empty set, so this member is authoritative when present.
+        _LIVE_HOST_BODIES = (list(origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
+                             if AUTHORING.host_code else [])
+        return
+    # A composition loaded without admission inputs (a direct `Session.load`,
+    # composed.py) has no report to attribute from. Keep the pre-#2676
+    # behaviour for that shape rather than going silent on its live tickets.
+    ir = getattr(SESSION, "ir", None)
+    _LIVE_HOST_BODIES = (_host_bodies(ir)
+                         if ir and AUTHORING.host_code else [])
 
 
 def _tool_load(arguments: dict, compiled=None) -> dict:
@@ -2989,6 +3000,12 @@ def _tool_fork_confirm(arguments: dict) -> dict:
         parent_origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
     try:
         result = SESSION.fork_confirm(fork_hash)
+    except ApprovalRequired as error:
+        # The branch restore is a new admission of the parent generation, so a
+        # class-(c) refusal there names the bodies the parent generation
+        # already disclosed (`Session.fork_confirm` carries no ticket bodies
+        # of its own).
+        return _approval_required(error, host_bodies=authored_host_bodies)
     except SessionError as error:
         return _session_error(error)
     if result.get("refused"):

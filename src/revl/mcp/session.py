@@ -391,6 +391,69 @@ class AdmitHandle:
 HISTORY_LIMIT = 64
 
 
+# The in-memory origin key carrying a generation's disclosure provenance: the
+# candidate-authored host-body entries the approval ticket names. It never
+# enters a portable snapshot (those hold admission inputs only), and the server
+# reads it back through the same spelling in `server._LIVE_HOST_BODIES`.
+AUTHORED_HOST_BODIES_KEY = "_revl_authored_host_bodies"
+
+
+def _applied_host_bodies(running_ir: dict | None,
+                         resulting_ir: dict | None) -> list:
+    """The host bodies an apply installed or changed.
+
+    A plan artifact carries a compiled composition, not the compile report the
+    authoring door uses, so attribution here is by comparison: an extern whose
+    body differs from the running generation's entry for the same name (or is
+    new) is a body this apply put in place. A body the apply left untouched is
+    not part of its disclosure.
+    """
+    before = {entry.get("name"): entry
+              for entry in (running_ir or {}).get("externs") or []}
+    applied = []
+    for extern in (resulting_ir or {}).get("externs") or []:
+        bodies = extern.get("bodies") or {}
+        if not bodies:
+            continue
+        prior = before.get(extern.get("name")) or {}
+        if (prior.get("bodies") or {}) == bodies:
+            continue
+        applied.append({"extern": extern.get("name"),
+                        "classification": extern.get("class"),
+                        "backends": sorted(bodies)})
+    return sorted(applied, key=lambda entry: str(entry.get("extern")))
+
+
+def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
+                               resulting_ir: dict | None) -> dict:
+    """The origin of an applied generation, with post-apply provenance.
+
+    The admission inputs stay on the origin so a snapshot or a later edit can
+    still see what the session holds; only the disclosure member is replaced.
+    It records the bodies the pre-apply generation already disclosed and the
+    resulting composition still holds (refreshed from the resulting IR, so a
+    changed classification does not stay stale), plus the bodies the apply
+    installed or changed. A plain apply has no candidate compile report to
+    attribute from, so the resulting IR is the only provenance available.
+    """
+    live = {entry.get("name"): entry
+            for entry in (resulting_ir or {}).get("externs") or []}
+    carried = []
+    for entry in ((origin or {}).get(AUTHORED_HOST_BODIES_KEY) or []):
+        current = live.get(entry.get("extern")) or {}
+        bodies = current.get("bodies") or {}
+        if not bodies:
+            continue
+        carried.append({"extern": entry.get("extern"),
+                        "classification": current.get("class"),
+                        "backends": sorted(bodies)})
+    merged = {entry.get("extern"): entry for entry in carried}
+    for entry in _applied_host_bodies(running_ir, resulting_ir):
+        merged[entry["extern"]] = entry
+    return {**(origin or {}), AUTHORED_HOST_BODIES_KEY: sorted(
+        merged.values(), key=lambda entry: str(entry.get("extern")))}
+
+
 # Issue #1444: the session fields a `load` that does not succeed leaves as they
 # are, instead of putting back. Everything else on the session is restored,
 # including fields that do not exist yet: see `_LoadCheckpoint`. A `swap` that
@@ -3299,15 +3362,15 @@ class Session:
         # this in-process history entry also retains the exact disclosure
         # provenance from the generation's admitting compile.
         target_origin = target.get("origin") or {}
-        if "_revl_authored_host_bodies" in target_origin:
-            origin["_revl_authored_host_bodies"] = list(
-                target_origin["_revl_authored_host_bodies"] or [])
+        if AUTHORED_HOST_BODIES_KEY in target_origin:
+            origin[AUTHORED_HOST_BODIES_KEY] = list(
+                target_origin[AUTHORED_HOST_BODIES_KEY] or [])
         try:
             state = self.swap(target_ir, origin=origin,
                               migrate="respawn", agent_authored=False)
         except ApprovalRequired as error:
             error.host_bodies = list(
-                origin.get("_revl_authored_host_bodies") or [])
+                origin.get(AUTHORED_HOST_BODIES_KEY) or [])
             raise
         return {
             "undone": True,
@@ -3532,6 +3595,13 @@ class Session:
             }
 
         self.previous = None  # a completed apply is not a swap to roll back to
+        # A completed apply is a new admitted generation, and its disclosure
+        # provenance is the RESULTING composition: the live call/act ticket
+        # reads `SESSION.origin`, so a body the apply installed or changed has
+        # to be visible there (#2676). The pre-apply origin describes sources
+        # that no longer run, so it is replaced rather than carried whole.
+        self.origin = _applied_generation_origin(
+            self.origin, running_ir, resulting_ir)
         # an apply is an admitted change, so it is a generation in the history
         # (item 65). It was executed from a plan *artifact* (an IR, not sources),
         # so it has no source origin to re-admit its result: the entry snapshots

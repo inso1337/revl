@@ -88,7 +88,7 @@ _DYNAMIC_STEPS = {
         "and tests/ is covered by the plain `pytest tests/ -q` steps anyway."
     ),
     # Issue #2672's review adds the PR path for the cordis-guarded swap and
-    # authoring suites. The six files ARE explicit on the invocation, but
+    # authoring suites. The nine files ARE explicit on the invocation, but
     # it ends `2>&1 | tee "$log"` so the receipt (#2642) can read the summary
     # back, and this scan is not a shell parser: `2>&1`, `|`, `tee` and
     # `$log` land among the target tokens, so the invocation reads as
@@ -101,6 +101,9 @@ _DYNAMIC_STEPS = {
         "tests/test_mcp_authoring_loop_1704.py "
         "tests/test_swap_author_flag_2518.py "
         "tests/test_handoff_realm_2510.py "
+        "tests/test_swap_transactional_1446.py "
+        "tests/test_load_export_area_host_code_2641.py "
+        "tests/test_mcp_authored_host_bodies_2676.py "
         "tests/test_load_ticket_bodies_2675.py -q 2>&1 | tee \"$log\"` so the "
         "#2642 receipt can read the summary back. The redirection tokens make "
         "the invocation unresolved to this scan (see the comment above)."
