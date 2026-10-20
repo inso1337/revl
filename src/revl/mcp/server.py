@@ -146,8 +146,11 @@ class AuthoringTrust:
                     declares it with `--grant` or it is not enforced. A set —
                     even empty — turns it on.
     `providers`   — `{path: source}` of OPERATOR-sanctioned host-code modules,
-                    merged under the agent's own `modules` so an untrusted turn
-                    can COMPOSE host-backed services without authoring them.
+                    keyed by absolute path (`set_authoring_trust` normalises
+                    the path the operator typed), composed beside the agent's
+                    own `modules` so an untrusted turn can COMPOSE host-backed
+                    services without authoring them. An agent module that
+                    resolves to a provider's file is refused (issue #2763).
                     This is `Gate.propose`'s granted-providers map, same shape,
                     same rule: reaching their externs directly is still refused
                     by `check_no_host_extern_reach`; only their SERVICES compose.
@@ -213,6 +216,13 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
         if roots is not None:
             fields["roots"] = tuple(os.path.realpath(os.path.abspath(r))
                                     for r in roots)
+    if fields.get("providers") is not None:
+        # issue #2763: normalised ONCE, here, to the absolute path the compile
+        # keys its in-memory modules by. `--provider` stores the path as the
+        # operator typed it, relative to the cwd it was read against, so the
+        # absolute path is the one the compile keys that same text by.
+        fields["providers"] = {os.path.abspath(path): text
+                               for path, text in fields["providers"].items()}
     AUTHORING = replace(AUTHORING, **fields)
     return AUTHORING
 
@@ -813,16 +823,63 @@ def _ride_exported(texts: dict, authored: dict, assets: dict,
     authored.update(texts)
 
 
+def _provider_files(providers: dict) -> dict[str, str]:
+    """`{realpath: registered path}` of the operator's providers, the form a
+    caller-supplied path is compared in everywhere else (`_within_roots`)."""
+    return {os.path.realpath(os.path.abspath(path)): path
+            for path in providers}
+
+
+def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
+    """Issue #2763: refuse a candidate whose in-memory module names a file the
+    operator registered as a `--provider`, under any spelling of that path.
+
+    A `--provider` module is the operator's own host code, composed under the
+    path the operator registered. Before, the merge compared the agent's keys
+    with the providers' as typed, while the compile read a map keyed by
+    absolute path: an agent module sent as the provider's absolute path, or as
+    `./` plus the registered path, was a different key and the same file, and
+    the agent's text compiled in the provider's place. A refusal, not a silent
+    drop: the reason names the module as the caller sent it and the provider
+    it collided with, a path inside the roots the jail refusal already shows,
+    and nothing is compiled."""
+    taken = _provider_files(providers)
+    for key in modules:
+        registered = taken.get(os.path.realpath(os.path.abspath(key)))
+        if registered is None:
+            continue
+        raise RevlError(
+            key, 1,
+            f"admission refused: module `{key}` names the operator-sanctioned "
+            f"provider `{registered}`; an agent-supplied module may not take "
+            f"a granted provider's place",
+            hint="a `--provider` module is the operator's own host code and "
+                 "is composed under the path the operator registered; it "
+                 "cannot be replaced from the transport under any spelling "
+                 "of that path. Send your module under a path of its own and "
+                 "compose the provider's service through `use` of the "
+                 "registered path, or ask the operator to change the provider",
+            category="admission")
+
+
 def _compile_candidate(source, files, manifest, modules, replacing, profile,
                        report) -> dict:
     """One pass of `compile_under_authoring`: the decision compile and, with
     operator-sanctioned providers, the composition compile."""
     providers = dict(AUTHORING.providers or {})
-    # operator-sanctioned modules ride UNDER the agent's own `modules`: an
-    # agent-supplied entry can never displace a provider the operator granted.
+    # Issue #2763: an agent-supplied module may not take a provider's place.
+    # Providers are keyed by absolute path (`set_authoring_trust`), and the
+    # compile below reads a map keyed the same way, so the comparison that
+    # guards the merge has to be made in that form too: a module sent as the
+    # provider's absolute path, a `./` spelling of it, or a symlink to the
+    # file is the same file. Resolved with `realpath`, the path jail's rule.
+    # The outcome is a refusal, not a silent drop of either text: the agent
+    # learns which provider it collided with and sends its module elsewhere.
+    if modules:
+        _refuse_provider_displacement(modules, providers)
     merged = dict(providers)
     if modules:
-        merged.update({k: v for k, v in modules.items() if k not in merged})
+        merged.update(modules)
 
     # every in-memory module, keyed the way `compile_files` resolves a `use`:
     # by absolute path. The agent's own modules ride here in BOTH compiles of

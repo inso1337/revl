@@ -11,9 +11,10 @@ it; the other is the SAME fixture with the one thing changed that should
 silence it, which pins the escape hatch as well: what an author has to do to
 satisfy the gate honestly rather than by deleting the sentence.
 
-The last tests run against the REAL docs/vision.md and the REAL tree, because
-every fixture here is synthetic and a collector whose regex stopped matching
-the live document would still pass all of the pairs above.
+The last tests run against the REAL docs/vision.md, the substrate-boundary
+policy page, and the REAL tree, because every fixture here is synthetic and a
+collector whose regex stopped matching a live document would still pass all
+of the pairs above.
 """
 from __future__ import annotations
 
@@ -336,6 +337,22 @@ def test_the_real_document_is_green(real):
     assert findings == [], findings
 
 
+def test_the_substrate_boundary_page_is_green_and_path_drift_is_caught(real):
+    doc_rel = "docs/substrate-boundary.md"
+    source = (ROOT / doc_rel).read_text(encoding="utf-8")
+    denominator, findings = gate.run(source, real, ["link", "path"], doc_rel)
+    assert denominator["link"] > 0
+    assert denominator["path"] > 0
+    assert findings == [], findings
+
+    broken = source.replace(
+        "`stdlib/fs.rvl`", "`docs/witnessed-fs-missing.md`", 1)
+    assert broken != source
+    _, findings = gate.run(broken, real, ["path"], doc_rel)
+    assert len(findings) == 1, findings
+    assert "docs/witnessed-fs-missing.md" in findings[0][1]
+
+
 def test_a_stale_command_planted_in_the_REAL_document_is_caught(real):
     source = (ROOT / "docs" / "vision.md").read_text(encoding="utf-8")
     broken = source.replace(
@@ -359,6 +376,8 @@ def test_the_cli_reports_and_exits_zero_on_the_real_document():
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "claims checked over 4 rules" in proc.stdout
+    assert "docs/vision.md:" in proc.stdout
+    assert "docs/substrate-boundary.md:" in proc.stdout
 
 
 def test_the_cli_reports_zero_claims_and_scope_for_an_empty_document(
