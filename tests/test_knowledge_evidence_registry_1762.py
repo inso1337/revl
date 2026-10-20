@@ -212,10 +212,14 @@ def test_truc_ship_carries_the_projects_knowledge(tmp_path):
     (project / ".revl" / "knowledge").mkdir(parents=True)
     (project / ".revl" / "knowledge" / "k_0123456789ab.json").write_text(
         json.dumps(_trap()))
+    (project / "src").mkdir()
+    entry = project / "src" / "component.rvl"
+    entry.write_text(GREETER)
     reg = _registry(tmp_path)
     _host._remember_ship_knowledge(str(project))
     assert _host.publish(json.dumps({
         "registryPath": str(reg), "name": "greeter", "source": GREETER,
+        "sourcePath": str(entry.resolve()),
         "description": "greets", "tags": ["greet"]})) == "published"
     shipped = reg / "components" / "greeter" / "knowledge"
     assert [p.name for p in shipped.iterdir()] == ["k_0123456789ab.json"]

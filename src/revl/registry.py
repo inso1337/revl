@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -800,7 +801,8 @@ def _write_knowledge(entry_dir: Path, records: list) -> None:
             json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
+def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
+                exclude: Iterable[str] = ()) -> dict:
     """Regenerate ``index.json`` (and each component's ``manifest.json``) from
     the component sources. This is the CI regenerator — never hand-edit the
     index; run this and commit its output (docs/registry.md §1).
@@ -814,10 +816,19 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
     `version` file, `releases` from the `releases/` directory, and
     `description`/`tags` from `meta.json`. Nothing is patched into a row after
     this function returns — that is what keeps `verify` meaningful.
+
+    ``exclude`` names entries to leave out of the pass. The only caller that
+    passes it is `publish_release`'s dry run, which excludes the entry it is
+    about to replace because that entry's current bytes are not the bytes the
+    build after the write will read (issue #2563). It exempts nothing else:
+    `verify` regenerates with no exclusion, so an excluded row still has to be
+    reproduced by the committed index.
     """
+    excluded = set(exclude)
     comps = _components_dir(registry_dir)
     rows: dict = {}
-    for entry_dir in sorted(p for p in comps.iterdir() if p.is_dir()):
+    for entry_dir in sorted(p for p in comps.iterdir()
+                            if p.is_dir() and p.name not in excluded):
         name = entry_dir.name
         source_path = entry_dir / "component.rvl"
         source = _read(source_path)
@@ -1033,12 +1044,43 @@ def _compile_source(name: str, source: str,
     the name is a label no file answers to, the rule sees nothing, and text an
     agent exported into `.revl/export/` publishes with the operator's trust.
 
+    A path that IS given is resolved to an absolute file first. A relative name
+    is resolved from the cwd, and a name with no file behind it is refused
+    rather than compiled as an operator's: the rule's question is about a real
+    file, and a name that answers none cannot be asked. Both used to fall
+    through to an unprofiled compile, which was the bypass.
+
     The name does not change what the release IS: both spellings end in
     `component.rvl`, so the path normalization `attest.canonical_hash` applies
     reduces them to the same document and the same composition hash.
     """
-    path = (str(source_path) if source_path
-            else f"/__revl_registry__/{name}/component.rvl")
+    if source_path is None:
+        path = f"/__revl_registry__/{name}/component.rvl"
+    else:
+        path = str(Path(source_path).resolve())
+        if not os.path.isfile(path):
+            raise RevlError(
+                "<registry>", 0,
+                f"registry: the source path {str(source_path)!r} does not name "
+                "a file; the export rule judges authorship by the real file the "
+                "text was read from, and a path with no file behind it cannot "
+                "be judged")
+    return compile_files([path], sources={path: source})
+
+
+def _compile_stored(entry_dir: Path, source: str) -> dict:
+    """Compile `source` as the entry will hold it: `components/<name>/
+    component.rvl`, with nothing beside it that the publisher's working copy
+    had.
+
+    This is the shape `build_index` compiles after a publish, and the only one
+    a consumer can reproduce. `use`, asset and body-file references resolve
+    from the entry's directory, so a source that only compiles next to its own
+    imports is refused BEFORE `component.rvl` is written rather than raising
+    from `build_index` after it (issue #2563). Nothing is read from `entry_dir`
+    here: the text rides in memory and only the imports it names are loaded.
+    """
+    path = str(entry_dir / "component.rvl")
     return compile_files([path], sources={path: source})
 
 
@@ -1156,6 +1198,22 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
         new_ir = _compile_source(name, source, source_path)
     except RevlError as error:
         refusals.append(f"{name} does not compile, so it cannot be published:\n{error}")
+        return facts
+
+    # ...and it must compile as the entry will HOLD it, not as the publisher's
+    # working copy has it. `build_index` compiles the stored `component.rvl`
+    # from `components/<name>/`, where `use`, asset and body-file references
+    # resolve against that entry and nothing else. A source that only compiles
+    # beside its own imports would be written and then fail the regeneration,
+    # leaving a half-written registry (issue #2563): refuse it here, while the
+    # registry is untouched.
+    try:
+        _compile_stored(_components_dir(registry_dir) / name, source)
+    except RevlError as error:
+        refusals.append(
+            f"{name} does not compile from the stored component.rvl, so the "
+            "registry index could not be built from it:\n"
+            f"{error}")
         return facts
 
     if not facts["isUpdate"]:
@@ -1342,6 +1400,12 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     passes none and publishes as it did before, under the virtual label; the
     fail-closed default for that case is the central rule's slice.
 
+    `release_facts` also compiles the source as the entry will store it, so a
+    source the index cannot be rebuilt from is refused before the first write.
+    The pre-write dry run leaves out the entry being replaced, whose current
+    bytes are about to be overwritten, so publishing over an already broken
+    entry repairs it instead of being refused because of it.
+
     Everything it records lands in a file under `components/<name>/`, and the
     regeneration is the LAST thing it does, so `verify` is empty on the registry
     it leaves behind.
@@ -1358,6 +1422,34 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
             + "; ".join(facts["refusals"]))
 
     entry_dir = _components_dir(registry_dir) / name
+
+    # The index must also be buildable from the entries ALREADY on disk, not
+    # only from the one about to be written: regenerating over a registry whose
+    # other entries no longer compile would raise after this publish had written
+    # its own, which is the same half-written state. A dry run compiles only;
+    # it writes no manifest and no index (issue #2563).
+    #
+    # The entry being published is EXCLUDED. Its current component.rvl and
+    # meta.json are precisely what the write below overwrites, so compiling
+    # them would refuse to repair an entry that is already broken, which is how
+    # an operator repairs one (a malformed meta.json, a component.rvl that no
+    # longer compiles). The build after the write reads the new bytes instead.
+    # The new source was compiled as the entry will hold it by `release_facts`;
+    # the meta that will survive the write is checked here, because it is the
+    # one thing the dry run would read from disk and this publish does not
+    # always rewrite it.
+    if description is None and tags is None:
+        _entry_meta(entry_dir)
+    if _components_dir(registry_dir).is_dir():
+        try:
+            build_index(registry_dir, write=False, exclude=(name,))
+        except RevlError as error:
+            raise RevlError(
+                str(Path(registry_dir)), 0,
+                f"registry: refusing to publish \"{name}\" — the index cannot be "
+                f"regenerated from the other components already on disk:\n{error}"
+            ) from None
+
     declared = facts["declaredVersion"]
     previous = facts["previousVersion"]
     prior_source = _read(entry_dir / "component.rvl") if facts["isUpdate"] else ""
