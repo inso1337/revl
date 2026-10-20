@@ -1,6 +1,6 @@
 {
   "lockVersion": 1,
-  "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -P -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate. (The `-P` is the PYTHONSAFEPATH safety bit; without it, `-m` puts the CWD at sys.path[0] and a sibling `truc.py` in a component's directory would shadow truc's own launcher; issue #317.)",
+  "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root: it is pinned under `imports`, checked the same way at boot and never compiled as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -P -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate. (The `-P` is the PYTHONSAFEPATH safety bit; without it, `-m` puts the CWD at sys.path[0] and a sibling `truc.py` in a component's directory would shadow truc's own launcher; issue #317.)",
   "files": [
     {
       "path": "components/registry_client.rvl",
@@ -24,7 +24,7 @@
     },
     {
       "path": "components/assembler.rvl",
-      "sha256": "9ac672bc76816e9a95c48a252084649c6950e76fecfdc3f03b59cb58b428fa73"
+      "sha256": "60dfc4640b290ef0962683b04817a37bf48eefca70f07d8ef9092ffb64c96601"
     },
     {
       "path": "components/shipper.rvl",
@@ -32,7 +32,13 @@
     },
     {
       "path": "components/cli.rvl",
-      "sha256": "070bd6fa426f51a842d3622da639cd0f481633b8e4e1beb1609469d99854edbd"
+      "sha256": "aed2ae21d4b7a4a5bc64311987a43a799d28a51a46649b7ba5d9310b3f776709"
+    }
+  ],
+  "imports": [
+    {
+      "path": "externs.rvl",
+      "sha256": "05dc178e5f19355fb267e9c574fe0122c8c95ed26d3b2a2637fb0209eb5ab09f"
     }
   ]
 }

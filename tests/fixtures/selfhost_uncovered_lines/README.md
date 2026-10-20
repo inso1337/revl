@@ -36,8 +36,14 @@ changes when the reason's text is edited.
 RATCHET, both directions. A count that RISES fails: logic arrived that no corpus
 document reaches. A count that FALLS also fails, asking you to record the
 improvement, which is what makes the number monotone instead of merely bounded.
+The baseline is the ledger on `origin/main`: the merge base with this branch
+when one exists, `origin/main`'s tip otherwise. A fall counts only when that
+baseline already records it, so a fall this branch finds has to land on
+`origin/main` first and be kept by merging main here.
 Regenerate the counts with `python3 tools/selfhost_line_coverage.py --write`,
-but only after reading what moved: the usual right fix is a corpus document.
+but only after reading what moved: `--write` re-measures the tree and rewrites
+the counts, it does not make a branch-local fall pass, and the usual right fix
+is a corpus document.
 
 THE BUDGET is the last field of a function record. `--write` does not write it,
 and the gate holds the function's count to it EXACTLY. So recording costs an

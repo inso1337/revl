@@ -866,13 +866,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
-        # The same generic `id` called from a provide method, where the
-        # divergence is a different one (issue #2559): the reference IR's `+`
-        # there carries no `operands` key at all, and the native chain drops
-        # the whole provide method (`fn greet(&self, ..)`) together with its
-        # `ctx.provide("greeting", ..)` wiring. A non-generic control of the
-        # same shape is byte-exact.
-        "comp_provide_generic.rvl",
+        # The same generic `id` called from a provide method was listed here
+        # until issue #2603. Its residual was not the operand annotation above
+        # but the two header readers failing to match `fn apply[T](` and so
+        # answering empty, which cost the callable its declared fn type.
+        # Both now read through `fn_params_i` and this document reproduces
+        # byte-exactly, so the ledger no longer carries it. A non-generic
+        # control of the same shape was already byte-exact.
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -2536,6 +2536,100 @@ def test_native_go_renames_a_predeclared_parameter_in_the_signature(
         [go, "test", str(module)], capture_output=True, text=True,
         env={**os.environ, "GO111MODULE": "off"}, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# -------------------------------------------------- issue #2603: generic fnty
+
+# The repro: ONE colour-polymorphic `loop` beside a GENERIC sibling `apply`, so
+# the document has a sync monomorph and `module_callable_fnty` is seeded at all.
+# Its table is built for a document with a sync monomorph ONLY (`plan.origins`),
+# so every other document cannot see this issue and no simpler program can.
+#
+# `loop` is copied from tests/test_async_arrow_polymorphism.py's repro, the
+# shape the reference already monomorphizes: async-coloured by its own async
+# callback slot, reaching no other async name. `caller` hands it an arrow that
+# reaches no async callable either, so `caller` stays SYNC and its call is
+# redirected to `loop_revl_sync` — which is what puts a row in `origins`. Here
+# the caller is a module `fn`, which is the item-387 site
+# (`_monomorphize_free_fn_calls` over module fns) both sides port.
+#
+# `apply[T](f: (Str) -> Str, v: T) -> T` is the GENERIC sibling. Its header is
+# `fn apply[T](`, which a `fn <nm>(` match cannot see, and it takes a callback,
+# which is exactly what the declared fn type is read for. `callback` hands it an
+# unannotated lambda, so the arrow's own text says nothing about its types: they
+# can only come from the row.
+_FNTY_GENERIC_SOURCE = (
+    "fn apply[T](f: (Str) -> Str, v: T) -> T { return v }\n"
+    "fn loop(c: (Str) -> Async[Str], x: Str) -> Str {\n"
+    "  let r = c(x)\n"
+    "  return r\n"
+    "}\n"
+    "fn callback(x: Str) -> Str { return apply(y => y, x) }\n"
+    "fn caller(x: Str) -> Str { return loop(y => \"s\", x) }\n"
+)
+
+# The same program with the sibling made NON-GENERIC. Reading with the grain of
+# the defect: `fn apply(` IS a `fn <nm>(` match, so this control already carried
+# the declared fn type before the fix and still carries it after. It is what
+# separates "the `[..]` step was what was missing" from "seeding a real type
+# where there was none moved some other row".
+_FNTY_MONO_SOURCE = _FNTY_GENERIC_SOURCE.replace(
+    "fn apply[T](f: (Str) -> Str, v: T) -> T", "fn apply(f: (Str) -> Str, v: Str) -> Str")
+
+
+def _fn_arrows(doc, name):
+    """The resolved signature of every arrow in one lowered IR document's `fn`
+    named `name`, as `(param_types, returns)` in document order — both absent,
+    together, when this issue withholds them.
+
+    Only this projection is compared, not the whole document: full byte
+    agreement would price every other residual these programs touch (see
+    LOWER_GAP_DOCS) and this slice is only about what the table seeds."""
+    fns = {f["name"]: f.get("body", []) for f in doc.get("functions", [])}
+    assert name in fns, sorted(fns)
+    return [(a.get("param_types"), a.get("returns"))
+            for a in _arrows(fns[name], [])]
+
+
+def test_a_generic_sibling_fn_type_reaches_the_body_environment(lower_to_ir):
+    """Issue #2603 at the table itself: a GENERIC module callable has a declared
+    fn type, and before the fix `module_callable_fnty` recorded `() -> ` for it.
+
+    `decl_params_of` / `decl_ret_of` matched a header only as `fn <nm>(`, so
+    `fn apply[T](` matched no declaration at all and BOTH readers answered
+    empty: no parameters, no return type. Zero parameters is not the
+    conservative "unknown" it looks like — `fn_param_types` then returns `[]`,
+    so the lambda is lowered against no expectation and carries neither
+    `param_types` nor `returns` out.
+    """
+    ir = json.loads(lower_to_ir(_FNTY_GENERIC_SOURCE))
+    # The PRECONDITION, asserted rather than assumed: the document really does
+    # have a sync monomorph. Without one the table is not seeded, the arrow
+    # below is unannotated for the ordinary reason, and this test could not
+    # tell that apart from the defect — so it must not be silent here.
+    assert "loop_revl_sync" in {f["name"] for f in ir.get("functions", [])}, \
+        "corpus bug: no sync monomorph, so module_callable_fnty is not seeded"
+    # the lambda `callback` hands to `apply` carries the signature `apply`
+    # declared - including the return its own body never spells
+    assert _fn_arrows(ir, "callback") == [(["Str"], "Str")]
+
+
+@pytest.mark.parametrize("case", ("generic", "mono"))
+def test_native_lower_of_a_callback_to_a_sibling_fn_agrees_with_the_reference(
+        lower_to_ir, case):
+    """Issue #2603 against ground truth: the lambdas of `callback`, resolved by
+    the NATIVE lowering and by the reference, agree.
+
+    `mono` is the control: `fn apply(` is a `fn <nm>(` match, so the row was
+    right there before the fix too and this assertion is REACHED on the base
+    commit — it passes there and must keep passing after. Only `generic` can
+    fail on the base, which is what makes the pair a measurement of this defect
+    rather than of whatever else these programs touch.
+    """
+    source = {"generic": _FNTY_GENERIC_SOURCE, "mono": _FNTY_MONO_SOURCE}[case]
+    got = json.loads(lower_to_ir(source))
+    want = compile_source(source, "fnty.rvl")
+    assert _fn_arrows(got, "callback") == _fn_arrows(want, "callback"), case
 
 
 def _arrows(node, acc):

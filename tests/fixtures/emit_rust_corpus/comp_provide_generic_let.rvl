@@ -1,0 +1,40 @@
+// issue #2558: the `fn` arm of `_v3_infer_type` asked about a GENERIC module
+// call from inside an EFFECTFUL provide method.
+//
+// issue #2558 taught both halves that the component dialect's call to a module
+// callable is a `{"kind": "fn", "name", "args"}` node, not the `call` node the
+// module-fn spine writes, and bound its type parameters in `_v3_is_str` and in
+// `_v3_infer_type`. The two documents next door reach the `_v3_is_str` arm: their
+// payload is a `+` over two such calls. Nothing reached `_v3_infer_type`'s arm,
+// and the line-coverage gate reported the substitution branch there as a
+// statement no corpus document executes.
+//
+// Which shape reaches it is a property of the RENDERER, not of the call. A `let`
+// in a PURE provide method is rendered by the pure-body path, which does not ask
+// `_v3_infer_type` about the bound value. A `let` in an EFFECTFUL provide method
+// goes through the step renderer's `_provide_let_type`, whose first question is
+// `_v3_infer_type(value)`: bind it to a GENERIC module call and the substitution
+// branch runs, in the reference and in the port, which carries the same arm.
+//
+// `put` below is the whole document: one generic function, one required service,
+// and one effectful provider whose `let` binds `id(k)`. The `effect ... undo`
+// bracket is what forces the step renderer; without it the method takes the pure
+// path and the branch stays unexecuted. This is the control the earlier shapes
+// lacked: adding a `let` to a plain-return provide method measured nothing.
+fn id[T](x: T) -> T { return x }
+
+service Cache {
+  fn put(k: Str, v: Str) -> Str
+}
+
+component Slots provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn put(k, v) {
+      let key = id(k)
+      effect store.insert(key, v) undo store.remove(key)
+      return key
+    }
+  }
+}

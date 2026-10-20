@@ -967,9 +967,19 @@ compile error, not a runtime surprise.
   stays PENDING (R2), and only becomes ACTIVE when a provider arrives.
   `load UserCache` before `load PgDatabase` is legal and does nothing until
   the database lands. A component whose activation RAISES is a different
-  failure, and the `load` step reports it as such: the component's name and
-  the error it raised, on every tier (issue #1895). The R2 wording is only for
-  a `requires` that is unmet.
+  failure, and what the `load` step reports depends on what raised. An error a
+  `fail` step raises fails the `load` step on every tier, naming the component
+  and the error (issue #2378). A HOST error raised by the activation body, for
+  example by a host function that raises, fails the `load` step on the go and
+  rust tiers in their emitted code. Go's host-error `load` does have an
+  execution test: `tests/test_go_lifecycle_residue_2505.py` loads a component
+  whose activation panics and asserts the `load` reports it. Rust is the tier
+  without one. The java path is established only against the in-repo cordis4j
+  stub, and the ts emitter's load awaits the fiber, but no test or installed
+  runner executes a failing load. On the python tier the `load` settles and the
+  error is reported at the next call. Python keeps that difference deliberately,
+  because the #1895 and #1859 tests load a component whose body raises on
+  purpose and assert what it left behind (issue #2452).
 - **`unload C`** disposes the instance, running its accumulated inverses
   newest-first (R1) and withdrawing its provisions (R5). Unloading a
   component that is not loaded is a compile error.

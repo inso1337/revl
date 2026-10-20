@@ -27,15 +27,28 @@ pytestmark = pytest.mark.skipif(
     reason="the change verbs boot a composition and need the cordis-py runtime: "
            "install it with `sh backends/python/setup.sh`")
 
-#: `TenantAApp` without its realm clause, which this profile forbids naming
+#: `TenantAApp` without its realm clause: TenantAApp is named by this module's
+#: staged withdraw, so it no longer has an admitted placement to lose. TenantBApp
+#: (below) survives, so it keeps its clause.
 A_APP = ('component TenantAApp requires kv: Kv {\n'
          '  intercept kv with { quota: 5, tags: ["tenant_a"] }\n'
          '  effect kv.set("who", "alice") undo kv.unset("who")\n'
          '}\n')
-B_APP = A_APP.replace("TenantAApp", "TenantBApp").replace("alice", "bob") \
-    .replace("tenant_a", "tenant_b")
+#: TenantBApp likewise, but keeping the clause through the placeholder the
+#: operator binds (issues #1728, #2585). TenantBApp survives this module's
+#: staged withdraw, so dropping its clause would move a surviving requirer out
+#: of `tenant_b` and is refused: the operator-bound placeholder names the same
+#: realm without the author naming it.
+B_APP = (A_APP.replace("TenantAApp", "TenantBApp").replace("alice", "bob")
+         .replace("tenant_a", "tenant_b")
+         .replace("requires kv: Kv {",
+                  'requires kv: Kv {\n  isolate kv in realm(?tenant_b)'))
+#: The clause above, on its own line.
+CLAUSE_B = '  isolate kv in realm(?tenant_b)\n'
 NOT_DECLARED = "no top-level declaration matches"
 REPLACING = ["TenantAStore", "TenantAApp"]
+#: The operator's bindings: each placeholder to the realm the example names.
+BINDINGS = (("tenant_b", "tenant_b"),)
 
 
 def _call(tool: str, arguments: dict) -> dict:
@@ -54,7 +67,8 @@ def clean_session(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     old = server_mod.AUTHORING
     session = server_mod.SESSION
-    server_mod.set_authoring_trust(roots=(str(tmp_path),))
+    server_mod.set_authoring_trust(roots=(str(tmp_path),),
+                                   realm_bindings=BINDINGS)
     yield tmp_path
     if session.loaded:
         session.unload()
@@ -131,9 +145,25 @@ def test_the_refusal_leaves_the_proposal_to_commit(staged):
 
 
 def test_a_survivor_still_resolves_in_the_proposal(staged):
+    """TenantBApp is not named by the withdraw, so it is still resolvable in
+    the proposal. It keeps its `tenant_b` placement through the operator-bound
+    placeholder, since an untrusted author may not name a realm and may not
+    strip the clause from a requirer that stays admitted (issue #2585)."""
     result = _replace("TenantBApp", B_APP)
     assert result["ok"] is True and result["speculative"] is True
     assert result["proposal"]["generation"] == 1
+
+
+def test_a_survivor_that_loses_its_realm_is_refused_in_the_proposal(staged):
+    """The same survivor with its clause stripped is refused (G9, issue
+    #2585): it would leave the realm the operator's realm-scoped rules select
+    it by. The refusal still carries the proposal, so this too is #2230's
+    shape, not the shared-realm edit the old `B_APP` claimed."""
+    result = _replace("TenantBApp", B_APP.replace(CLAUSE_B, ""))
+    assert result["ok"] is False
+    assert "cannot remove the realm placement of `TenantBApp`" in _message(result)
+    assert result["speculative"] is True
+    assert result["proposal"] == {"generation": 1, "replacing": REPLACING}
 
 
 def test_a_name_absent_everywhere_keeps_its_message(staged):

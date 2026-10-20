@@ -1,0 +1,40 @@
+// An extern declared with bodies for several tiers and none for java. The
+// frontend admits it. The java reference REFUSES it by name, from inside the
+// extern block:
+//
+//   extern `run_tool` has no @java body -- not portable to this backend
+//   (available: go, py, rs, ts)
+//
+// so this is not a byte-agreement case and it cannot live in the tier's CORPUS.
+// It lives here, where `tools/selfhost_line_coverage.py` can drive both halves
+// over it: this document is the only corpus input that reaches the refusal arm
+// of
+//
+//   backends/java/emit.py::_emit_v3_externs
+//
+// which the byte corpus structurally cannot reach, since every extern in it
+// carries an `@java` body.
+//
+// The port emits no extern block at all, so without a counterpart the two halves
+// disagree silently: the reference raises and the self-hosted emitter hands back
+// source with the extern simply missing. The port therefore names the extern
+// (`<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:run_tool>>`), the spelling the go, rust and
+// ts ports already use for their own missing body (issue #2492). The refusal's
+// text is asserted by
+// tests/test_selfhost_emit_java.py::test_an_extern_with_no_java_body_is_a_named_refusal.
+extern pure fn run_tool(name: Str) -> Str
+  = @py { return name } = @ts { return name; } = @rs { name } = @go { return name }
+
+fn tag() -> Str {
+  return "hi"
+}
+
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) = "hi"
+  }
+}
