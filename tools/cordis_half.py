@@ -140,6 +140,19 @@ def files_from_log(log: Path, root: Path) -> list[str]:
     return sorted(files)
 
 
+#: The token the fallback selection treats as "this file needs the runtime".
+#: It is a text match, not the AST gate scan tests/ owns, because a fresh CI
+#: runner has no test dependency to import; the structural invariant in
+#: `tests/test_env_gated_skips_run_somewhere.py` holds every runtime-gated file
+#: to this token, so `--select`'s `STATUS none` cannot hide a guarded file.
+RUNTIME_TOKEN = "cordis"
+
+
+def names_runtime(text: str) -> bool:
+    """Does this file's text make it part of the runtime half of the suite?"""
+    return RUNTIME_TOKEN in text
+
+
 def files_from_selection(selection: list[str], root: Path) -> list[str]:
     files = set()
     for node in selection:
@@ -147,7 +160,7 @@ def files_from_selection(selection: list[str], root: Path) -> list[str]:
         found = sorted(path.rglob("test_*.py")) if path.is_dir() else [path]
         for f in found:
             try:
-                if f.is_file() and "cordis" in f.read_text(encoding="utf-8"):
+                if f.is_file() and names_runtime(f.read_text(encoding="utf-8")):
                     files.add(str(f.relative_to(root)))
             except (OSError, UnicodeDecodeError, ValueError):
                 continue

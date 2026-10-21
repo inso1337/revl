@@ -14,7 +14,9 @@ on:
   # `conformance`, `formal`, `temporal-exit`, `sandbox-container`,
   # `sandbox-microvm`) carry `if: github.event_name != 'pull_request'` and run
   # here, on the queued candidate, which is the merged result that lands. On a
-  # PR the root suite is still collected by the ungated `root-suite-affected`.
+  # PR the root suite is still collected by the ungated `root-suite-affected`,
+  # and the cordis-guarded part of that selection is executed by the advisory
+  # `cordis-affected` below (issue #2642, option B).
   # Until the queue is enabled in branch protection, those heavy jobs run only
   # after a merge, on push to main.
   #
@@ -963,7 +965,11 @@ jobs:
   # candidate before it lands, and on push to main. The swap/authoring half is
   # the exception (issue #2672 review): `swap-template-cordis` below runs those
   # five suites on a pull request when one of the files they observe changes,
-  # so the swap and authoring tests are not PR-invisible.
+  # so the swap and authoring tests are not PR-invisible. Issue #2642's option B
+  # closes the same gap for the rest of the guarded half: `cordis-affected`
+  # below runs the selector's selection through tools/cordis_half.py under the
+  # pinned runtime on every pull request, so a guarded file that was only ever
+  # skipped here executes before the merge decision.
   root-suite-affected:
     # Issue #1817: pull requests only. On every other event `frontend` runs the
     # whole root suite on 3.11, 3.12 and 3.13, and its 3.12 leg is this job's
@@ -1185,6 +1191,202 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           python3 tools/affected_pytest_receipt.py --log "$log" --pytest-exit "$rc" --selection "$SUITES"
+
+  # Issue #2642, option B: the affected selection under the cordis-py runtime,
+  # on the pull request. `root-suite-affected` runs the same selection on an
+  # interpreter with no runtime, so a selected file guarded on `cordis` skips
+  # there and only the receipt makes that red; `frontend-cordis` runs the whole
+  # suite with the runtime but is off pull requests (issue #1678). This job
+  # reruns the selector, asks tools/cordis_half.py which selected files name
+  # cordis, installs the pinned fork ONLY when there is such a file, runs that
+  # half under the pinned interpreter and reads the run back with the #2642
+  # receipt, so a guarded selection executes before the merge decision rather
+  # than only in the merge queue.
+  #
+  # ADVISORY by design: it is not a branch-protection context and cannot be one
+  # as written (PR-only, so it never reports on a merge_group candidate);
+  # `frontend-cordis` covers the same guarded tests on every other event. The
+  # selection is always the selector's, never a hardcoded list;
+  # `tools/cordis_half.py`'s `STATUS none` is the allowed empty answer when no
+  # selected file names cordis, and the pin is not installed in that case. That
+  # negative answer is not assumed: the driver selects on a file naming cordis,
+  # and tests/test_env_gated_skips_run_somewhere.py holds every runtime-gated
+  # file in tests/ to that token, so `STATUS none` cannot hide one. The skip is
+  # a `::notice::` rather than a silent log line, and
+  # tests/test_ci_pr_cordis_affected_2642.py pins that branch.
+  #
+  # BOUNDED ON A FULL SELECTION: the selector falls back to the whole suite on
+  # a diff it cannot narrow (this workflow's own file is one). The first run of
+  # this job measured that half: 455 files, 50 minutes, and 116 failures plus 2
+  # errors, every one of them the go toolchain below rather than a cordis test.
+  # Running it would be a second `frontend-cordis` on every such PR, the cost
+  # issue #1678 moved off pull requests, so this job runs a NAMED selection
+  # only. On FULL it skips the install and the run and says so with a notice
+  # and a job-summary entry: `root-suite-affected` still runs that selection on
+  # THIS pull request with the pinned tiers and the #2642 receipt, and
+  # `frontend-cordis` runs the whole guarded suite on the merge queue. The skip
+  # is deliberate and visible, never a silent pass, and
+  # tests/test_ci_pr_cordis_affected_2642.py pins both halves.
+  #
+  # The go and java pins match `frontend-cordis`: a named selection can still
+  # contain cross-tier probes (`test_selfhost_emit_go.py` is in the half), and
+  # on the runner's preinstalled go, older than the toolchain `go.mod` pins,
+  # they try to download it and fail. That was all 116 of the failures above;
+  # without the pins this job would red a PR for its own missing toolchain.
+  cordis-affected:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    # Same rule as `frontend-cordis` (issue #2264): a job that installs go
+    # requires go on its pytest steps, so a lost toolchain there is red rather
+    # than a silent skip. tests/test_env_gated_skips_run_somewhere.py enforces
+    # the pairing.
+    env:
+      REVL_REQUIRE_TIERS: "go"
+    # A runaway guard, not a cost cap: the FULL selection is bounded out above,
+    # and a named selection can still be large (the design records up to 447
+    # files naming cordis). Measure before promoting; shard if it grows.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # The selector compares against the PR base, and a selected file may
+          # carry real-history tests, which FAIL on a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - id: select
+        name: affected selection
+        env:
+          # A branch name is attacker-controllable text, so it reaches the shell
+          # through env: and never as interpolated source, the same rule
+          # `root-suite-affected` and the `changes` job follow.
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # No `--depth` here: into a FULL clone it re-shallows the repository
+          # and the real-history tests read every older commit as unreachable
+          # (issue #1434).
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          # A base the selector cannot resolve yields an empty changed-set,
+          # which it turns into FULL itself, and an outright failure is caught
+          # here rather than read as "nothing to do": an empty node list that
+          # came out of a FAILED selection must never mean "run nothing".
+          if ! out=$(python3 tools/affected_tests.py --format machine --base "origin/${BASE_REF}"); then
+            out=$(printf 'FULL 1\nREASON the selector exited non-zero -> full\nPYTEST tests/')
+          fi
+          printf '%s\n' "$out"
+          nodes=$(printf '%s\n' "$out" | sed -n 's/^PYTEST //p')
+          if [ -z "$nodes" ]; then
+            # The selector's own FULL answer is `tests/`, so its empty answer
+            # degrades to precisely that, never to an empty run.
+            nodes="tests/"
+            echo "affected selection: empty node list -> tests/ (fail safe)"
+          else
+            echo "affected selection: pytest $nodes"
+          fi
+          echo "pytest=$nodes" >> "$GITHUB_OUTPUT"
+          # The selector's FULL marker, and the whole-suite target is the same
+          # bound whether the selector labelled it FULL or the empty-selection
+          # fail-safe above produced it. Published as one output so the steps
+          # below and the shape pin read the same answer.
+          full=$(printf '%s\n' "$out" | sed -n 's/^FULL //p' | head -n 1)
+          if [ "$nodes" = "tests/" ]; then
+            full=1
+          fi
+          echo "full=${full:-0}" >> "$GITHUB_OUTPUT"
+      - id: probe
+        name: the part of the selection that names cordis
+        env:
+          SEL_PYTEST: ${{ steps.select.outputs.pytest }}
+        run: |
+          set -euo pipefail
+          # cordis_half decides from the same selector output the run below
+          # uses. On a fresh runner no pinned venv exists yet, so a selection
+          # that needs the runtime answers STATUS missing (exit 10); one that
+          # names no cordis file answers STATUS none, and the pin, the setup and
+          # pytest are then all skipped. A FULL selection is bounded out after
+          # this probe, so `needed=1` alone does not promise an install.
+          rc=0
+          out=$(python3 tools/cordis_half.py --select "$SEL_PYTEST" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" = "0" ] && printf '%s\n' "$out" | grep -qx 'STATUS none'; then
+            echo "needed=0" >> "$GITHUB_OUTPUT"
+            # The negative answer is licensed, not assumed:
+            # test_env_gated_skips_run_somewhere.py holds every runtime-gated
+            # file in the root suite to the token this driver selects on, so
+            # `STATUS none` cannot hide one. The notice makes the skip visible
+            # in the checks UI, where a green job that skipped the guarded half
+            # in silence reads as a pass (issue #2642).
+            echo "::notice::no selected test file names cordis: pin, runtime and run skipped, licensed by the runtime-gated invariant in test_env_gated_skips_run_somewhere.py"
+          elif [ "$rc" = "10" ]; then
+            echo "needed=1" >> "$GITHUB_OUTPUT"
+            echo "the selection names cordis: the pin and the run follow unless the selector answered FULL"
+          else
+            echo "::error::the cordis-half probe ended $rc without STATUS none"
+            exit 1
+          fi
+      - name: a FULL selection is bounded out
+        if: ${{ steps.select.outputs.full == '1' }}
+        run: |
+          # Deliberate, visible skip. The whole suite is not this advisory
+          # job's to run (see the job comment); saying so in the annotation the
+          # checks UI shows and in the job summary is what keeps a green step
+          # from reading as "the guarded half ran and passed", issue #2642's
+          # exact failure. `root-suite-affected` runs this selection on the PR
+          # and `frontend-cordis` runs the guarded suite on the merge queue.
+          msg="bounded out: the affected selector answered FULL (the whole suite), which root-suite-affected runs on this pull request and frontend-cordis runs on the merge queue; this advisory job runs named selections only"
+          echo "::notice::${msg}"
+          {
+            echo "### cordis-affected: bounded out on a FULL selection"
+            echo ""
+            echo "The affected selector answered FULL, so its answer is the"
+            echo "whole suite and the guarded half is hundreds of files. This"
+            echo "advisory job runs named selections only."
+            echo ""
+            echo "That selection still runs in \`root-suite-affected\` on this"
+            echo "pull request, with the pinned tiers and the #2642 receipt,"
+            echo "and \`frontend-cordis\` runs the whole guarded suite on the"
+            echo "merge queue."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        if: ${{ steps.probe.outputs.needed == '1' && steps.select.outputs.full != '1' }}
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+        if: ${{ steps.probe.outputs.needed == '1' && steps.select.outputs.full != '1' }}
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
+        if: ${{ steps.probe.outputs.needed == '1' && steps.select.outputs.full != '1' }}
+      - name: install the pinned cordis-py fork
+        if: ${{ steps.probe.outputs.needed == '1' && steps.select.outputs.full != '1' }}
+        run: sh backends/python/setup.sh
+      - name: cordis half of the affected selection
+        if: ${{ steps.probe.outputs.needed == '1' && steps.select.outputs.full != '1' }}
+        env:
+          SEL_PYTEST: ${{ steps.select.outputs.pytest }}
+        run: |
+          set -euo pipefail
+          # The run is captured and read back: pytest exits 0 when every
+          # selected test skipped, which is the silent green issue #2642 is
+          # about. The receipt names the selection and the passed, failed,
+          # errors, skipped and not-run counts, and fails the step unless the
+          # selection executed. cordis_half maps pytest's "collected nothing"
+          # (5) to 1, so an empty run cannot pass either.
+          log=$(mktemp)
+          rc=0
+          set +e
+          python3 tools/cordis_half.py --select "$SEL_PYTEST" \
+            --python backends/python/.venv/bin/python 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          python3 tools/affected_pytest_receipt.py \
+            --log "$log" \
+            --pytest-exit "$rc" \
+            --selection "$SEL_PYTEST"
 
   # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
   # work absent from `main`, because each was merged into a base branch that

@@ -1725,14 +1725,17 @@ def _clone_from_fd(src_fd: int, dst_dirfd: int, dst_leaf: str) -> bool:
 SIDECAR_CAPTURE_FIELDS: tuple[str, ...] = (
     "dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
 
-#: The capture key holding the sha256 of the sidecar's bytes, read through the
-#: same fd the fields above were fstat'd from (issue #2647). Not a member of
-#: `SIDECAR_CAPTURE_FIELDS`, which are stat fields every path compares the same
-#: way: both checks of `install_captured_sidecar` read the bytes through the fd
-#: they stat'd, so both compare this key. A capture recorded before the key
-#: existed has no `sha256` and stays stat-only, so an older WAL still restores; a
-#: `park_captured_sidecar` capture carries none and stays stat-only too, because
-#: `install_parked_sidecar` may be handed a parked file that denies read.
+#: The capture key holding the sha256 of the sidecar's bytes (issue #2647).
+#: Not a member of `SIDECAR_CAPTURE_FIELDS`, which are stat fields every path
+#: compares the same way: `install_captured_sidecar` reads the bytes through
+#: the fd it stat'd, so both of its checks compare this key.
+#: `install_parked_sidecar` compares it through `_refuse_drifted_digest` on
+#: both of its passes. A capture recorded before the key existed has no
+#: `sha256` and stays stat-only, so an older WAL still restores.
+#: `park_captured_sidecar` records the key when the parked inode is a regular
+#: file it can open for reading; a parked directory or a file whose mode
+#: denies read carries none and stays stat-only, because `rm` honestly parks
+#: those.
 SIDECAR_DIGEST_FIELD = "sha256"
 
 #: The subset that survives the install itself. `replace_confined` is a rename,
@@ -2096,9 +2099,10 @@ def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
     malformed string is a corrupt record, refused as `EIDENTITY` rather than
     silently degraded to stat-only, because that would drop the one check that
     does not depend on the clock. A capture with no key at all is a legacy
-    record (or an `unrm` capture that never recorded one) and stays stat-only so
-    an older WAL still restores; the `unrm` call passes no digest and stays
-    stat-only, because a parked file may deny read."""
+    record (or an `unrm` capture of a directory or of a file whose mode denies
+    read) and stays stat-only so an older WAL still restores. The `unrm` call
+    passes no digest here; `_refuse_drifted_digest` compares the parked bytes
+    instead."""
     if not isinstance(capture, dict) or not capture:
         return
     observed = _capture_of(st)
@@ -2185,11 +2189,15 @@ def _parked_digest(real: str, what: str) -> str | None:
     not disturb the descriptor's offset.
 
     The two callers read `None` differently and deliberately. `park` records a
-    stat-only capture, because refusing an honest `rm` of a directory, of an
-    already-hardlinked file, or of a write-only file is over-refusal. `install`
-    fails closed, because a capture that RECORDED a digest says the file was
-    readable when it was parked, so not being able to re-read it now is drift,
-    never a reason to fall back to the stat fields a same-tick rewrite hides.
+    stat-only capture only when the parked inode is not a readable regular
+    file, because refusing an honest `rm` of a directory or of a write-only
+    file is over-refusal; a readable regular file is digested, and a second
+    link does not stop it being one, so a hardlinked parked file is digested
+    and compared too. `install` fails closed, because a capture that RECORDED
+    a digest says the file was readable when it was parked, so not being able
+    to re-read it now is drift, never a reason to fall back to the stat
+    fields a same-tick rewrite hides. A capture with no key at all is a
+    legacy record and keeps the stat-only comparison, so it still replays.
     """
     parent, leaf = _split(real)
     try:
@@ -2266,9 +2274,10 @@ def _refuse_drifted_digest(real: str, capture, what: str, sentence: str) -> None
     none (issue #2650).
 
     A capture with no `sha256` is a record written before the key existed (a
-    durable record replayed by `revl recover`), and it keeps the stat-only
-    behaviour, exactly as `install_captured_sidecar` keeps its stat comparison
-    for a witness that carries no capture at all. When the key IS present, a
+    durable record replayed by `revl recover`), or a parked directory or a file
+    that could not be read at park. Either keeps the stat-only behaviour,
+    exactly as `install_captured_sidecar` keeps its stat comparison for a
+    witness that carries no capture at all. When the key IS present, a
     mismatch, an unreadable file, or a value that is not a bare lowercase hex
     digest is `EIDENTITY`: the point of the key is to catch the same-tick
     rewrite the stat fields cannot see, so falling back to stat-only would
@@ -2363,20 +2372,21 @@ def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
     forge; `ctime_ns` makes an in-place rewrite visible as soon as the inode
     timestamp clock has ticked, and unlike `mtime_ns` an unprivileged writer
     cannot set it back with `utimes`. It does not catch one that lands inside
-    the same tick (issue #2647), and this side reads no bytes: a parked file may
-    deny read by design, so its capture carries no content digest and stays
-    stat-only. The digest was added to the `restore` path only, where the
-    sidecar is a copy this module created and can always read.
+    the same tick (issue #2647). `park_captured_sidecar` records a `sha256` for
+    a parked regular file it can open for reading, and the digest below is what
+    catches that case; a parked directory or a file whose mode denies read
+    carries none, because `rm` honestly parks those.
 
     The stamps are not enough on a filesystem whose inode clock is coarse
     relative to the write (issue #2650): a same-length in-place rewrite can
-    leave all seven fields identical. So when the capture carries the `sha256`
+    leave all seven fields identical. When the capture carries the `sha256`
     `park_captured_sidecar` recorded, the parked bytes are hashed through the
     already-walked directory fd and compared on BOTH passes, before and after
-    the rename, with `EIDENTITY` on a mismatch. A recorded digest that cannot
-    be re-read is the same refusal: the check never falls back to stat-only. A
-    capture with no `sha256` (a record written before the key existed) keeps
-    the stat-only behaviour, so a legacy WAL still replays.
+    the rename, with `EIDENTITY` on a mismatch. A recorded digest that is not
+    64 lowercase hex characters, and a recorded digest that cannot be re-read,
+    are the same refusal: the check never falls back to stat-only. A capture
+    with no `sha256` (a legacy record written before the key existed) keeps the
+    stat-only behaviour, so an older WAL still replays.
 
     The one difference from `install_captured_sidecar` is where the type and
     link-count expectations come from. The preimage sidecar is a file this
