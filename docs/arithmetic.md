@@ -370,9 +370,10 @@ a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
   host's resolved-config trace render values themselves — a bigint as its
   digits, with no `n` suffix, which is the text every other tier writes for
   the same number;
-- `revlEq` needed nothing: `===` is value equality between bigints and never
-  conflates one with a `number`, so an `Int` and a `Float` cannot compare
-  equal by accident.
+- `revlEq` does not bridge an `Int` and a `Float`: `===` is value equality
+  between bigints and never conflates one with a `number`, so a mixed equality
+  needs the explicit conversion below rather than an `===` that would be false
+  (`3n === 3`).
 
 ### `Int` widens into `Float`, and the IR now says where
 
@@ -410,6 +411,41 @@ arguments (generic signatures are instantiated first, so a `T` bound to
 `list` element has no declared `Float` position to coerce toward and stays as
 written. Pinned positively: a test asserts the marker is present in the IR,
 and one per tier pins the emitted conversion text.
+
+One site is not a declared `Float` position: an explicit mixed comparison,
+`x == 3.0` with `x: Int` (and the mirrored `3.0 == x`). The checker accepts it
+because `compatible` is one-way and symmetric, but until issue #2715 no
+conversion was marked on the operand, so the tiers disagreed: TypeScript
+compared `3n === 3` and answered **false**, and go did not build at all
+(`int64` against `float64`). The rule is the same numeric rule the
+declared-`Float` sites already follow — the `Int` operand widens to `Float`
+and the two compare by numeric value, with the inherent binary64 rounding
+above 2^53 — so the frontend marks that operand with the same
+`"widen": "Float"`, and Int/Int (`long`/`long`, `bigint`/`bigint`) stays the
+native exact comparison. The executing cross-tier probe covers a parameter, a
+record field and a list element, in both operand orders, for `==` and `!=`.
+
+The same mixed-width rule covers the OTHER adjacent pair, `Int32` and `Int`,
+which issue #2715 originally missed. `a: Int32 == 3` is `Int32` against an
+unannotated `Int` literal, so it hit exactly the same defect one rung down:
+TypeScript compared a `number` against a `bigint` (false), go compared `int32`
+against `int64` (no build), java boxed `Integer` against `Long`, and python
+absorbed it. The lossless step is `Int32 -> Int`, so the frontend marks the
+`Int32` operand with `"widen": "Int"` (`BigInt(a)`, `int64(a)`,
+`((long) (a))`, `(a as i64)`, `(i64.extend_i32_s a)`; python absorbs it as its
+one int type). Same-width `Int/Int` and `Int32/Int32` stay unmarked.
+
+Above 2^53 the `Int -> Float` comparison is exact only up to binary64's
+rounding, and that has a visible consequence: it is **not transitive**. With
+`9007199254740993` and `9007199254740992` as `Int`s and `9007199254740992.0` as
+the `Float` in the middle, `a == f` and `f == b` are both true while `a == b`
+is false, because the first comparison rounds `a` to 2^53. This is the price of
+the checker's one-way `compatible("Float", "Int")` rule and of comparing two
+numbers by numeric value; narrowing the widen to a "safe" range is not
+statically decidable, so the rule is kept and the behaviour is pinned. `NaN` is
+unequal to every `Int` and to itself, and `1` never equals `+Inf`; the
+executing cross-tier probe pins all three cases alongside the two operand
+orders, so a tier that papers over binary64 with a custom equality fails.
 
 ## Sized integers: `Int32`
 

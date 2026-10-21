@@ -19,15 +19,36 @@ same meaning across six runtimes". This harness turns that claim into evidence:
      divergence.
   4. COMPARE: a divergence is a tier that RAN (did not skip) and disagreed with
      the py reference — either it failed to build/emit the admitted program
-     (a compiles-implies-runs violation) or it computed a different value.
+     (a compiles-implies-runs violation), computed a different value, or did
+     not fault where the reference faulted (or faulted differently). Fault
+     KIND is compared for the two faults the generator can produce on demand:
+     an integer remainder by zero and an index past the end of a list. A tier
+     that returns a value where the reference faults is a divergence, and so
+     is one that faults with a different kind.
   5. SHRINK the divergence to a minimal program (delta-debug the declarations,
      then simplify the probe expression) that still diverges on the same tier.
+     A fault divergence is not shrunk: the generated fault probe is already
+     minimal (one call to a two-line helper), and the shrinker's oracle is a
+     reference VALUE, which a faulting reference does not have.
   6. EMIT the minimized divergence as a regression fixture under
      examples/regressions/ with a note: source, seed, the property, per-tier
      outputs, and whether it maps to a known open item (278 rust / 279 ts /
      280 go) or is NEW.
 
-This is a FIRST CUT: a bounded generator, a simple two-phase shrinker, and
+STRING COVERAGE. The string alphabet includes accented BMP letters, a
+combining-mark sequence and a non-BMP scalar, not only ASCII: the six runtimes
+count strings in UTF-16 code units, UTF-8 bytes or code points, and the base
+`Str` surface (`length`, `indexOf`, `slice`, `charAt`) must agree across all
+three. Whether a run exercised that alphabet is reported as a count, and the
+literal renderer accepts any printable scalar, so a non-ASCII reference value is
+asserted with a non-ASCII revl literal rather than discarded.
+
+WHAT THIS STILL DOES NOT COMPARE. Generation is pure functions only: emissions,
+traces and residue are outside what it compares (roadmap item 292's separate
+slice for components with emissions). Floats are rendered only when finite.
+A program the frontend rejects is discarded, never counted as a divergence.
+
+This is a BOUNDED harness: a bounded generator, a simple two-phase shrinker, and
 py-plus-whatever-runs execution, all deterministic under `--seed`. It is not a
 property-testing framework. Honesty over coverage: the report states which
 tiers it could execute and how many programs it actually ran.
@@ -92,9 +113,33 @@ if str(ROOT / "backends" / "python") not in sys.path:
 
 
 class ReferenceFault(Exception):
-    """The py reference could not produce a clean value for `probe` (a runtime
-    fault, or a value the literal renderer cannot represent). The program is
-    discarded, never counted as a divergence."""
+    """The py reference could not produce a clean value for `probe`.
+
+    `kind` separates the two cases the driver treats differently:
+
+    * a FAULT the language defines (`divzero`, `index`, `overflow`) — the
+      reference raised, so the other tiers are compared on how they FAIL, not
+      on a value they never computed;
+    * `None` — a value the literal renderer cannot represent (a non-finite
+      float, an unrepresentable Str). The program is discarded.
+    """
+
+    def __init__(self, message: str, kind: str | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def reference_fault_kind(error: BaseException) -> str | None:
+    """Map the reference's exception to the fault kind the tiers are compared
+    on. Only faults the language SPECIFIES have a kind; anything else is a
+    harness limitation (a value the renderer cannot spell) and is discarded."""
+    if isinstance(error, ZeroDivisionError):
+        return "divzero"
+    if isinstance(error, IndexError):
+        return "index"
+    if isinstance(error, OverflowError):
+        return "overflow"
+    return None
 
 
 def reference_value(source: str):
@@ -107,8 +152,9 @@ def reference_value(source: str):
     try:
         exec(compile(code, "<revl-fuzz-ref>", "exec"), module.__dict__)
         return module.probe()
-    except Exception as error:  # noqa: BLE001 — any reference fault -> discard
-        raise ReferenceFault(f"{type(error).__name__}: {error}") from error
+    except Exception as error:  # noqa: BLE001 — any reference fault -> discard/compare
+        raise ReferenceFault(f"{type(error).__name__}: {error}",
+                             kind=reference_fault_kind(error)) from error
     finally:
         sys.modules.pop("revl_fuzz_ref", None)
 
@@ -201,7 +247,34 @@ class Expr:
 # literal rendering — turn a py reference value into a typed revl literal
 # ==========================================================================
 
-_SAFE_STR = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+#: ASCII-only strings were the first cut's alphabet. The three units a runtime
+#: can count a string in (UTF-16 code units, UTF-8 bytes, code points) agree on
+#: every ASCII scalar, so an ASCII-only corpus could never reach the class of
+#: divergence the base `Str` surface is most likely to have. These atoms name
+#: each unit boundary explicitly:
+#:   - `é`/`ü`/`ñ`: one code point, two UTF-8 bytes, one UTF-16 unit;
+#:   - `e` + COMBINING ACUTE: two code points, three UTF-8 bytes, two UTF-16
+#:     units, one grapheme (so a normalising tier would change `length`);
+#:   - a non-BMP scalar: one code point, four UTF-8 bytes, TWO UTF-16 units.
+_NONASCII_STR_ATOMS = (
+    "é", "ü", "ñ", "ç", "ø", "ß",
+    "e\u0301", "a\u0308",
+    "\U0001F600", "\U0001D11E",
+    "café", "naïve", "😀x", "x😀",
+)
+
+
+def _is_printable_scalar(text: str) -> bool:
+    """Whether a reference `Str` value can be written as a revl string literal
+    without an escape this renderer does not model. Printable scalars are fine
+    (the source is UTF-8); a quote or backslash is escaped by the caller; a
+    control character (newline, tab, DEL, lone surrogate) is not."""
+    for ch in text:
+        if ch in ('"', "\\"):
+            continue
+        if not ch.isprintable() or 0xD800 <= ord(ch) <= 0xDFFF:
+            return False
+    return True
 
 
 def render_literal(t, value) -> str:
@@ -225,9 +298,10 @@ def render_literal(t, value) -> str:
     if t == "Bool":
         return "true" if value else "false"
     if t == "Str":
-        if not isinstance(value, str) or any(c not in _SAFE_STR for c in value):
+        if not isinstance(value, str) or not _is_printable_scalar(value):
             raise ReferenceFault(f"unsafe Str {value!r}")
-        return f'"{value}"'
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
     head = t[0]
     if head == "List":
         if not isinstance(value, list):
@@ -288,7 +362,14 @@ class Generator:
     def _str_lit(self) -> str:
         n = self.rng.randint(0, 4)
         alpha = "abcdefghijklmnopqrstuvwxyz"
-        return '"' + "".join(self.rng.choice(alpha) for _ in range(n)) + '"'
+        base = "".join(self.rng.choice(alpha) for _ in range(n))
+        # Half the literals carry a unit-boundary scalar: the string tiers can
+        # only disagree where the counting unit differs, and an ASCII-only
+        # alphabet made that class unreachable. The atom is appended so the
+        # ASCII prefix (if any) still exercises the ordinary path.
+        if self.rng.random() < 0.5:
+            base += self.rng.choice(_NONASCII_STR_ATOMS)
+        return '"' + base + '"'
 
     def _nonzero_int_lit(self) -> str:
         return str(self.rng.choice([1, 2, 3, 4, 5, 6, 7, 8, 9]))
@@ -502,6 +583,15 @@ class Generator:
         # the probe: a pub fn over a renderable type
         ret = self.pick_type()
         body = self.gen(ret, {}, depth=3)
+        # A bounded share of programs fault on purpose. Both faults go through
+        # a helper PARAMETER, never a literal: the checker refuses a statically
+        # known list index (#938) and Go constant-folds `1 % 0` into a COMPILE
+        # error, which would compare build behaviour rather than runtime fault
+        # kind.
+        fault = self._gen_fault()
+        if fault is not None:
+            ret, body, fault_helper = fault
+            helper_srcs.append(fault_helper)
         probe_src = (f"pub fn probe() -> {type_src(ret)} "
                      f"{{ return {body.render()} }}")
 
@@ -523,6 +613,35 @@ class Generator:
         src = (f"fn {name}({params_src}) -> {type_src(ret)} "
                f"{{ return {body.render()} }}")
         return sig, src
+
+    def _gen_fault(self):
+        """Maybe build a probe that faults at run time, for fault-kind
+        comparison: `a % b` called with `b = 0` (an integer remainder by zero,
+        which faults on every tier) or `xs[1]` on a list whose parameter hides
+        its length, called with one element. Returns `(ret, body, helper_src)`
+        or None. The helper parameters are load-bearing: a literal divisor is
+        folded by Go at compile time, and a literal index is refused by the
+        checker's static bound (issue #938), so either would compare the
+        frontend instead of the tiers' runtime fault."""
+        if self.rng.random() >= 0.12:
+            return None
+        if self.rng.random() < 0.5:
+            self.helpers.append(
+                FuncSig("fault_mod", [("a", "Int"), ("b", "Int")], "Int"))
+            src = "fn fault_mod(a: Int, b: Int) -> Int { return a % b }"
+            body = Expr("Int", "call",
+                        [Expr("Int", "lit", meta={"src": "1"}),
+                         Expr("Int", "lit", meta={"src": "0"})],
+                        {"fn": "fault_mod"})
+        else:
+            self.helpers.append(
+                FuncSig("fault_index", [("xs", ("List", "Int"))], "Int"))
+            src = "fn fault_index(xs: List[Int]) -> Int { return xs[1] }"
+            body = Expr("Int", "call",
+                        [Expr(("List", "Int"), "list",
+                              [Expr("Int", "lit", meta={"src": "0"})])],
+                        {"fn": "fault_index"})
+        return "Int", body, src
 
     def _gen_adt_helper(self, name, ctors) -> str:
         """A Bool->Int fn that builds one ADT value and matches all variants —
@@ -594,7 +713,7 @@ class Program:
 @dataclass
 class Divergence:
     tier: str
-    kind: str          # 'build' (compiles-implies-runs violation) or 'value'
+    kind: str          # 'build' (compiles-implies-runs), 'value', or 'fault'
     signature: str     # normalized root-cause fingerprint
     py_msg: str
     tier_msg: str
@@ -646,9 +765,9 @@ def assertion_source(program_src: str, ret, value) -> str | None:
 _BUILD_ERROR_SIGNS = (
     "build failed", "undefined:", "cannot use", "cannot find", "cannot resolve",
     "syntax error", "type mismatch", "mismatched types", "invalid input webassembly",
-    "does not compile", "error[e", "not a type", "no field", "expected i32",
-    "expected i64", "expected f64", "compile error", "javac failed", "cannot be",
-    "declared and not used", "is not lowerable",
+    "invalid operation", "does not compile", "error[e", "not a type", "no field",
+    "expected i32", "expected i64", "expected f64", "compile error", "javac failed",
+    "cannot be", "declared and not used", "is not lowerable",
 )
 
 
@@ -708,6 +827,84 @@ def check_tier(tier: str, source: str) -> tuple[str, str, str]:
     if outcome != "fail":
         return outcome, message, out          # 'pass' or 'skip'
     return classify(message, out), message, out  # 'refusal' / 'build' / 'value'
+
+
+# Fault KIND: two faults the generator can produce on demand, plus overflow,
+# which a generated expression can also reach. Each tier spells the same fault
+# in its host language, so the classifier reads the words the runtime uses:
+#   py:    `ZeroDivisionError: integer modulo by zero`, `IndexError: list ...`
+#   ts:    `RangeError: Division by zero`, `Error: revl: list index out ...`
+#   go:    `panic: runtime error: integer divide by zero`, `index out of range`
+#   java:  `ArithmeticException: / by zero`, `Index 1 out of bounds for length 1`
+#   rust:  `attempt to calculate the remainder with a divisor of zero`,
+#          `index out of bounds`
+#   wasm:  a trap (`integer divide by zero`, `out of bounds memory access`, or
+#          the ambiguous `unreachable`, which names no cause and is therefore
+#          not compared as a divergence)
+_FAULT_SIGNS = {
+    "divzero": ("modulo by zero", "division by zero", "divide by zero",
+                "div by zero", "divisor of zero", "/ by zero",
+                "integer divide by zero"),
+    "index": ("index out of range", "index out of bounds", "list index",
+              "out-of-bounds", "out of bounds", "array index out of bounds",
+              "indexoutofboundsexception", "out of bounds for length"),
+    "overflow": ("int overflow", "integer overflow", "attempt to add with overflow",
+                 "attempt to subtract with overflow",
+                 "attempt to multiply with overflow"),
+}
+
+#: A trap whose text names no cause. wasmtime reports some traps as
+#: `wasm trap: wasm 'unreachable' instruction executed`, which is the same
+#: string for a failed assertion, an explicit trap and a guarded fault. It is
+#: accepted as a fault (a tier that returned a VALUE where the reference
+#: faulted is still caught) but its KIND is not compared, because the message
+#: does not carry one.
+_AMBIGUOUS_TRAP = "unreachable"
+
+
+def classify_fault(message: str, stdout: str) -> str | None:
+    """The fault kind a tier's failed run names, or None when its output names
+    no fault (a build failure, a refusal, an environment problem). 'trap' is a
+    fault whose text is ambiguous (see `_AMBIGUOUS_TRAP`)."""
+    blob = (message + "\n" + stdout).lower()
+    for kind, signs in _FAULT_SIGNS.items():
+        if any(sign in blob for sign in signs):
+            return kind
+    if _AMBIGUOUS_TRAP in blob:
+        return "trap"
+    return None
+
+
+#: The test block appended to a faulting program: it calls the probe (the
+#: fault happens here on every conforming tier) and, on a tier that returns a
+#: value, compares it with itself so the run PASSES rather than failing on a
+#: missing literal. That pass is exactly the "returned a value where the
+#: reference faulted" divergence.
+_FAULT_TEST = '\ntest "cross_tier_fault" { assert probe() == probe() }\n'
+
+
+def check_fault(tier: str, source: str) -> tuple[str, str, str]:
+    """Run a faulting program on *tier* and return (outcome, message, stdout),
+    where outcome is the reference FAULT KIND on a conforming fault, or one of
+    'value' (it returned a value), 'skip', 'refusal' or 'unknown'."""
+    try:
+        ir = compile_source(source)
+    except RevlError:
+        return "skip", "fault program no longer admissible", ""
+    outcome, message, out = _run_tier(tier, ir)
+    if outcome == "pass":
+        return "value", message, out
+    if outcome == "skip":
+        return "skip", message, out
+    if message.startswith("emitter refused:"):
+        return "refusal", message, out
+    if classify(message, out) == "build":
+        # a toolchain rejection is a build divergence, even when its text
+        # happens to name the operator (`invalid operation: division by zero`
+        # is Go refusing a constant divisor, not Go faulting at run time)
+        return "unknown", message, out
+    kind = classify_fault(message, out)
+    return (kind, message, out) if kind is not None else ("unknown", message, out)
 
 
 def diverges_on(tier: str, source: str) -> tuple[str, str, str] | None:
@@ -865,6 +1062,10 @@ def emit_fixture(div: Divergence, seed: int, index: int) -> Path:
     happened = ("built and ran the admitted program but computed a DIFFERENT "
                 "value than the reference (a silent cross-tier value divergence)"
                 if div.kind == "value" else
+                "did not fail the way the reference failed: the reference "
+                "FAULTED and this tier either returned a value or faulted with "
+                "a different kind (a cross-tier fault divergence)"
+                if div.kind == "fault" else
                 "could not build/validate the code its own emitter produced for "
                 "the admitted program (a compiles-implies-runs violation)")
     note.write_text(
@@ -953,6 +1154,7 @@ def main(argv=None) -> int:
 
     rng = random.Random(args.seed)
     generated = admitted = ran = discarded_reject = discarded_ref = 0
+    fault_compared = nonascii = 0
     # dedup divergences by (tier, kind, first line of message) so the same bug
     # is recorded once, not once per random program that hits it.
     seen: dict[tuple[str, str, str], Divergence] = {}
@@ -978,11 +1180,57 @@ def main(argv=None) -> int:
             discarded_reject += 1
             continue
         admitted += 1
+        if any(ord(ch) > 127 for ch in src):
+            nonascii += 1
         # reference value
         try:
             value = reference_value(src)
-        except ReferenceFault:
-            discarded_ref += 1
+        except ReferenceFault as fault:
+            if fault.kind is None:
+                # an unrenderable value, not a fault: discard it honestly
+                discarded_ref += 1
+                continue
+            # the reference FAULTED. Compare how the other tiers fail rather
+            # than a value the reference never produced.
+            fault_compared += 1
+            fault_src = src + _FAULT_TEST
+            ref_kind, _ref_msg, _ref_out = check_fault(REFERENCE, fault_src)
+            if ref_kind != fault.kind:
+                # the assertion harness did not reproduce the reference's own
+                # fault (a harness bug, not a finding)
+                discarded_ref += 1
+                continue
+            for tier in others:
+                outcome, tmsg, tout = check_fault(tier, fault_src)
+                if outcome in (fault.kind, "skip", "trap"):
+                    # "trap": the tier faulted but its text names no cause
+                    # (wasm's `unreachable`), so the kind cannot be compared.
+                    # A tier that returns a VALUE is still caught below.
+                    continue
+                if outcome == "refusal":
+                    sig = tmsg.split(":", 2)[-1].strip()[:60]
+                    refusals[tier][sig] = refusals[tier].get(sig, 0) + 1
+                    continue
+                if outcome == "value":
+                    kind = "fault"
+                    sig = (f"returned a value where the reference faulted "
+                           f"({fault.kind})")
+                elif outcome == "unknown":
+                    kind = ("build" if classify(tmsg, tout) == "build"
+                            else "fault")
+                    sig = divergence_signature(tmsg, tout)
+                else:
+                    kind = "fault"
+                    sig = f"faulted with {outcome}, reference {fault.kind}"
+                key = (tier, kind, sig)
+                if key in seen:
+                    continue
+                say(f"  [divergence] program #{i}: {tier} disagrees on a fault "
+                    f"({kind}) — {sig}")
+                seen[key] = Divergence(
+                    tier=tier, kind=kind, signature=sig,
+                    py_msg=f"reference faulted ({fault.kind})",
+                    tier_msg=tmsg, tier_stdout=tout, source=fault_src)
             continue
         aug = assertion_source(src, prog.probe_ret, value)
         if aug is None:
@@ -1032,6 +1280,10 @@ def main(argv=None) -> int:
     say(f"discarded (rejected):  {discarded_reject}   (frontend refused — a language limit, not a divergence)")
     say(f"discarded (ref fault): {discarded_ref}   (py reference could not produce a clean value)")
     say(f"ran differential on:   {ran} program(s)  over tiers: {', '.join(others) or '(none)'}")
+    say(f"non-ASCII literals:    {nonascii} of {admitted} admitted program(s) "
+        f"used one (accent, combining mark or non-BMP scalar)")
+    say(f"fault comparison:      {fault_compared} program(s) where the reference "
+        f"faulted; tiers compared on fault kind")
     say(f"distinct divergences:  {len(seen)}")
 
     # honest per-tier capability-boundary summary (refusals are not divergences)
@@ -1044,7 +1296,7 @@ def main(argv=None) -> int:
                 say(f"      {n:4}x  {sig}")
 
     if not seen:
-        say("no cross-tier VALUE/BUILD divergence found in this batch.")
+        say("no cross-tier VALUE/BUILD/FAULT divergence found in this batch.")
     else:
         say("")
         say("DIVERGENCES (a tier that ran but disagreed with the reference):")

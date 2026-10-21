@@ -204,6 +204,55 @@ test "NaN is unequal under !="          { assert fdiv(0.0, 0.0) != fdiv(0.0, 0.0
 test "negative zero equals zero"        { assert feq(scale(0.0, 0.0 - 1.0), 0.0) }
 """,
 
+    # Issue #2715: `==` between an `Int` and a `Float` is one language rule,
+    # and every tier must answer it the same way. The checker widens either
+    # side (compatible("Float", "Int")), but the widening used to be marked
+    # only on call arguments, `let` values and returns — never on an equality
+    # operand — so TypeScript compared `3n === 3`, which is FALSE, and go did
+    # not build at all (mismatched int64 and float64). python absorbed it.
+    # Both operand orders and three Int positions (a parameter, a record field
+    # and a list element) are probed, so a fix that only marks a bare `lit`
+    # does not pass.
+    "Int and Float equality agree": """
+pub fn eq_lit(x: Int) -> Bool { return x == 3.0 }
+pub fn ne_lit(x: Int) -> Bool { return x != 3.0 }
+pub fn eq_flip(x: Int) -> Bool { return 3.0 == x }
+pub fn ne_flip(x: Int) -> Bool { return 3.0 != x }
+pub fn eq_var(x: Int, y: Float) -> Bool { return x == y }
+type Row = { i: Int, f: Float }
+pub fn field_eq(r: Row) -> Bool { return r.i == 3.0 }
+pub fn field_ne(r: Row) -> Bool { return r.f != 3 }
+pub fn list_elem(xs: List[Int]) -> Bool { return xs[2] == 3.0 }
+// The binary64 edge: above 2^53 the Int -> Float conversion rounds. These
+// arrive through FUNCTIONS, never as literal comparisons, so a tier cannot
+// constant-fold the answer in the frontend or in Go's untyped-constant world.
+pub fn fdiv(a: Float, b: Float) -> Float { return a / b }
+pub fn big_odd() -> Int { return 9007199254740993 }
+pub fn big_even() -> Int { return 9007199254740992 }
+pub fn big_float() -> Float { return 9007199254740992.0 }
+
+test "Int equals Float"               { assert eq_lit(3) }
+test "Int not equal to a Float"       { assert !ne_lit(3) }
+test "the Float may be on the left"   { assert eq_flip(3) }
+test "and unequal from the left too"  { assert !ne_flip(3) }
+test "an Int variable widens"         { assert eq_var(3, 3.0) }
+test "a different value stays unequal" { assert !eq_lit(2) }
+test "a record field widens"          { assert field_eq({ i: 3, f: 3.0 }) }
+test "a Float field against an Int"   { assert !field_ne({ i: 3, f: 3.0 }) }
+test "a list element widens"          { assert list_elem([1, 2, 3]) }
+// NaN and infinity: an Int widens to a finite double, so it is unequal to both.
+test "an Int never equals NaN"        { assert !(1 == fdiv(0.0, 0.0)) }
+test "an Int never equals +Inf"       { assert !(1 == fdiv(1.0, 0.0)) }
+// 2^53: the widen rounds `big_odd()` to 9007199254740992.0, so it equals the
+// Float and the even Int, while the two Ints stay unequal: equality through a
+// Float is NOT transitive above 2^53. Pinned, not endorsed (docs/arithmetic.md).
+test "above 2^53 the widen rounds" {
+  assert big_odd() == big_float()
+  assert big_float() == big_even()
+  assert big_odd() != big_even()
+}
+""",
+
     # The C1 contract (docs/collections.md, docs/stdlib-2.0.md §Map): keys()
     # yields ascending canonical Str order — a pure function of the key set,
     # never of insertion history (go/rust randomize by design; the fixture
@@ -713,6 +762,161 @@ def test_widening_is_marked_in_the_ir():
         '`"widen": "Float"` marker (docs/arithmetic.md)')
 
 
+def test_int_float_equality_marks_the_int_operand_in_the_ir():
+    """Issue #2715: the widening is on the OPERAND, in both orders, and only
+    when one side is a Float. Int against Int must stay unmarked, or the tiers
+    that keep BigInt and number apart would convert a sound comparison."""
+    ir = compile_source(
+        'pub fn eq(x: Int) -> Bool { return x == 3.0 }\n'
+        'pub fn eq_flip(x: Int) -> Bool { return 3.0 == x }\n'
+        'pub fn eq_int(x: Int) -> Bool { return x == 3 }\n',
+        "eq_widen.rvl")
+
+    def bins(node, found=None):
+        found = [] if found is None else found
+        if isinstance(node, dict):
+            if node.get("kind") == "bin" and node.get("op") == "==":
+                found.append(node)
+            for value in node.values():
+                bins(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                bins(value, found)
+        return found
+
+    marked = {}
+    for fn in ir["functions"]:
+        node = bins(fn)
+        if not node:
+            continue
+        operands = node[0]
+        marked[fn["name"]] = (
+            operands["left"].get("widen"),
+            operands["right"].get("widen"),
+        )
+    assert marked["eq"] == ("Float", None), (
+        "`x == 3.0` must widen the Int LEFT operand")
+    assert marked["eq_flip"] == (None, "Float"), (
+        "`3.0 == x` must widen the Int RIGHT operand")
+    assert marked["eq_int"] == (None, None), (
+        "Int against Int is already sound and must not be marked")
+
+
+def test_int32_int_equality_marks_the_narrow_operand_in_the_ir():
+    """Issue #2715, the rung below Float: `Int32 == Int` (including `Int32 ==
+    3`, an unannotated Int literal) has the same defect. The lossless step is
+    Int32 -> Int, so the Int32 operand carries `"widen": "Int"`; same-width
+    Int32/Int32 stays unmarked."""
+    ir = compile_source(
+        'pub fn eq_lit(a: Int32) -> Bool { return a == 3 }\n'
+        'pub fn eq_lit_flip(a: Int32) -> Bool { return 3 == a }\n'
+        'pub fn eq_var(a: Int32, b: Int) -> Bool { return a == b }\n'
+        'pub fn eq_rev(a: Int32, b: Int) -> Bool { return b == a }\n'
+        'pub fn eq_same(a: Int32, b: Int32) -> Bool { return a == b }\n',
+        "eq32_widen.rvl")
+
+    def bins(node, found=None):
+        found = [] if found is None else found
+        if isinstance(node, dict):
+            if node.get("kind") == "bin" and node.get("op") == "==":
+                found.append(node)
+            for value in node.values():
+                bins(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                bins(value, found)
+        return found
+
+    marked = {}
+    for fn in ir["functions"]:
+        node = bins(fn)
+        if not node:
+            continue
+        operands = node[0]
+        marked[fn["name"]] = (
+            operands["left"].get("widen"),
+            operands["right"].get("widen"),
+        )
+    assert marked["eq_lit"] == ("Int", None), (
+        "`a: Int32 == 3` must widen the Int32 LEFT operand")
+    assert marked["eq_lit_flip"] == (None, "Int"), (
+        "`3 == a` must widen the Int32 RIGHT operand")
+    assert marked["eq_var"] == ("Int", None), (
+        "`a: Int32 == b: Int` must widen the Int32 LEFT operand")
+    assert marked["eq_rev"] == (None, "Int"), (
+        "`b: Int == a: Int32` must widen the Int32 RIGHT operand")
+    assert marked["eq_same"] == (None, None), (
+        "Int32 against Int32 is already exact and must not be marked")
+
+
+INT32_EQUALITY = """
+pub fn eq_lit(a: Int32) -> Bool { return a == 3 }
+pub fn eq_var(a: Int32, b: Int) -> Bool { return a == b }
+"""
+
+
+@pytest.mark.parametrize("backend, conversion", [
+    ("typescript", "BigInt(a)"),
+    ("go", "int64(a)"),
+    ("java", "((long) (a))"),
+    ("rust", "(a as i64)"),
+    ("wasm", "i64.extend_i32_s"),
+])
+def test_every_tier_emits_the_int32_to_int_equality_conversion(
+        backend, conversion):
+    """The static half of the Int32/Int equality fix: each tier spells the
+    lossless widening on the equality operand. python absorbs it, like every
+    other Int32 -> Int site there, and is asserted separately."""
+    assert conversion in _emit_text(backend, INT32_EQUALITY), (
+        f"{backend} must emit the Int32 -> Int conversion on the marked "
+        "equality operand (docs/arithmetic.md)")
+
+
+def test_python_absorbs_the_int32_to_int_equality_conversion():
+    """python has one int type, so the marker renders nothing and the compare
+    stays the native exact one (docs/arithmetic.md)."""
+    emitted = _emit_text("python", INT32_EQUALITY)
+    assert "(a == 3)" in emitted
+    assert "(a == b)" in emitted
+    assert "int64" not in emitted and "BigInt" not in emitted
+
+
+# The same equality in the COMPONENT stratum, whose renderer is separate on
+# py/go/wasm. go's `_expr` and wasm's `_to_v3` used to drop the Int marker (one
+# only read Float, the other rebuilt the node without it), so the first cut of
+# this fix passed the module-fn test and still failed to build a provide method.
+COMPONENT_INT32_EQUALITY = """
+service S { fn eq32(a: Int32) -> Bool }
+component C provides s: S {
+  provide s { fn eq32(a) = a == 3 }
+}
+"""
+
+
+@pytest.mark.parametrize("backend, conversion", [
+    ("typescript", "BigInt(a)"),
+    ("go", "int64(a)"),
+    ("java", "((long) (a))"),
+    ("rust", "(a as i64)"),
+    ("wasm", "i64.extend_i32_s"),
+])
+def test_every_tier_emits_the_int32_to_int_equality_in_a_component(
+        backend, conversion):
+    """The component stratum has its own renderer on python, go and wasm (and
+    the python one absorbs Int32). The marker must survive that second path, or
+    a provide method compares an int32 with an int64 where the module `fn` is
+    widened (issue #2715)."""
+    assert conversion in _emit_text(backend, COMPONENT_INT32_EQUALITY), (
+        f"{backend} must emit the Int32 -> Int conversion on a marked "
+        "equality operand inside a component body (docs/arithmetic.md)")
+
+
+def test_python_component_absorbs_the_int32_to_int_equality():
+    emitted = _emit_text("python", COMPONENT_INT32_EQUALITY)
+    assert "(a == 3)" in emitted
+    assert "int64" not in emitted and "BigInt" not in emitted
+
+
 @pytest.mark.parametrize("backend, conversion", [
     ("python", "ident(float(3))"),
     ("typescript", "ident(Number(3n))"),
@@ -734,6 +938,24 @@ def test_every_tier_emits_the_conversion(backend, conversion):
     assert conversion in _emit(backend, source), (
         f"{backend} must emit the Int -> Float conversion at the marked "
         "coercion site (docs/arithmetic.md)")
+
+
+def test_python_component_body_widens_a_mixed_equality():
+    """The marker is set in BOTH lowering strata, so both python renderers
+    must read it. The component stratum has its own `_Emitter._expr`, and it
+    used to ignore `widen`, so a provide method answered the comparison
+    un-widened while the same expression in a module `fn` was widened: above
+    2^53 the two disagreed with each other and with ts/go/rust/java."""
+    source = """
+service S { fn eq(x: Int) -> Bool }
+component C provides s: S {
+  provide s { fn eq(x) { return x == 3.0 } }
+}
+"""
+    emitted = _emit("python", source)
+    assert "float(x) == 3.0" in emitted, (
+        "a provide method must widen the Int operand of a mixed equality, "
+        "exactly as a module fn does (issue #2715)")
 
 
 # ------------------------------------------------- pinned arithmetic divergences
