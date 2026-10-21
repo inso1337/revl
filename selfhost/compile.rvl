@@ -1836,13 +1836,12 @@ fn tc_str_value(obj: Str, key: Str) -> Str {
 }
 
 // `type <name> = { f: T, ... }` for a record entry of the native `types`
-// table, `type <name> = A | B(T)` for a variant one, or "" for a generic type
-// or any other kind, which is left out (the gate then reads the name as one
-// it cannot resolve, as before).
-// Issue #2374: a generic record's type parameters, `T` or `A, B`, from its
-// `"params": ["T"]` row; "" for a declaration with none. The reference keeps
-// the parameters in the declaration spelling (`type Cell[T] = { v: T }`), and
-// the native gate needs that text to instantiate the record's fields.
+// table, `type <name> = A | B(T)` for a variant one, or "" for a kind this
+// link does not carry (the gate then reads the name as one it cannot resolve,
+// as before). Issue #2374 adds the GENERIC RECORD spelling
+// (`type Cell[T] = { v: T }`) so the gate can instantiate its fields; a
+// generic variant keeps the previous "" and is only carried in the type table.
+// `tc_params_text` reads a `"params": ["T"]` row as `T` or `A, B`.
 fn tc_params_text(raw: Str) -> Str {
   let s = ul_trim(raw)
   if (s == "[]") { return "" }
@@ -1859,9 +1858,10 @@ fn tc_params_text(raw: Str) -> Str {
 }
 
 fn tc_type_text(name: Str, decl: Str) -> Str {
-  let params = tc_params_text(ul_key_value(decl, "params"))
-  if (params == "" && ul_trim(ul_key_value(decl, "params")) != "[]") { return "" }
   let kind = tc_str_value(decl, "kind")
+  let raw_params = ul_trim(ul_key_value(decl, "params"))
+  let params = tc_params_text(raw_params)
+  if (raw_params != "[]" && (params == "" || kind != "record")) { return "" }
   let head = "type ".concat(name)
     .concat(params == "" ? "" : "[".concat(params).concat("]"))
     .concat(" = ")

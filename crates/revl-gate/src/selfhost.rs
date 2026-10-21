@@ -7225,7 +7225,7 @@ fn reqs_map(comp: Value) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     let rq = value_field(comp.clone(), String::from("requires"));
     for k in value_keys(rq.clone()) {
-        m.insert(k.clone(), value_str(value_field(rq.clone(), k.clone())));
+        m.insert(key_binding(&k), value_str(value_field(rq.clone(), k.clone())));
     }
     return m;
 }
@@ -8338,7 +8338,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
                 ret = rust_type_t(r.clone(), tnames.clone());
             }
             let deser = bridge_ret_deser("_v", ret.clone());
-            out.push(format!("    fn {}(&self, {}) -> {} {{", mname(mn.clone()), plist.revl_join(", "), ret));
+            out.push(format!("    fn {}(&self, {}) -> {} {{", mangle(mname(mn.clone())), plist.revl_join(", "), ret));
             if (deser == "<<NONE>>") {
                 out.push(format!("        panic!(\"bridge proxy: unsupported return type for {}.{}\");", sname, mn));
             } else {
@@ -8372,7 +8372,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             if any_none {
                 out.push(format!("        \"{}\" => Err(\"{}.{} cannot be called across a seam: a parameter type has no wire form\".to_string()),", mn, sname, mn));
             } else {
-                out.push(format!("        \"{}\" => Ok({}),", mn, bridge_ret_ser(&(format!("svc.{}({})", mname(mn.clone()), extracts.revl_join(", "))), ret.clone())));
+                out.push(format!("        \"{}\" => Ok({}),", mn, bridge_ret_ser(&(format!("svc.{}({})", mangle(mname(mn.clone())), extracts.revl_join(", "))), ret.clone())));
             }
         }
         out.push(format!("        _ => Err(format!(\"method '{{method}}' is not exported for service {}\")),", sname));
@@ -11178,7 +11178,8 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         if (hoff.name != "") {
             return mk_refuse(provs.clone(), setup.clone(), iso.clone(), rts.clone(), tagged("HANDOFF", &handoff_twice_msg(cname)), ts.clone(), i);
         }
-        let hty = if atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), ":") { type_at(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow")).ty } else { String::from("") };
+        let hkl = qkey_len(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        let hty = if atk(&ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(hkl).expect("revl: Int overflow"), ":") { type_at(ts.clone(), ((i).checked_add(2i64).expect("revl: Int overflow")).checked_add(hkl).expect("revl: Int overflow")).ty } else { String::from("") };
         return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), Bind { name: key.clone(), ty: hty }, action);
     }
     if atw(&ts, i, "intercept") {
@@ -17323,14 +17324,15 @@ fn route_placeholder_at(ts: &[Token], j: i64) -> String {
 fn realm_placeholder_scan(ts: &[Token]) -> Verd {
     let mut i = 0i64;
     while (i < ts.revl_length()) {
-        if ((((((atw(ts, i, "isolate") && atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) && atw(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realm")) && atk(ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) && atk(ts, (i).checked_add(5i64).expect("revl: Int overflow"), "?")) && atk(ts, (i).checked_add(6i64).expect("revl: Int overflow"), "ident")) && atk(ts, (i).checked_add(7i64).expect("revl: Int overflow"), ")")) {
-            let msg = realm_placeholder_msg(&tkc(ts, (i).checked_add(6i64).expect("revl: Int overflow")).text, &tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
+        let kl = qkey_len(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        if ((((((atw(ts, i, "isolate") && atw(ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "in")) && atw(ts, ((i).checked_add(2i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "realm")) && atk(ts, ((i).checked_add(3i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "(")) && atk(ts, ((i).checked_add(4i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "?")) && atk(ts, ((i).checked_add(5i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "ident")) && atk(ts, ((i).checked_add(6i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), ")")) {
+            let msg = realm_placeholder_msg(&tkc(ts, ((i).checked_add(5i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow")).text, &qkey_text(ts, (i).checked_add(1i64).expect("revl: Int overflow")));
             return mk_verd(tagged("G2", &msg), tkc(ts, i).line);
         }
-        if (((atw(ts, i, "isolate") && atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) && ati(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realms")) && atk(ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) {
-            let name = route_placeholder_at(ts, (i).checked_add(5i64).expect("revl: Int overflow"));
+        if (((atw(ts, i, "isolate") && atw(ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "in")) && ati(ts, ((i).checked_add(2i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "realms")) && atk(ts, ((i).checked_add(3i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "(")) {
+            let name = route_placeholder_at(ts, ((i).checked_add(4i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"));
             if (name != "") {
-                let msg = realm_route_placeholder_msg(&name, &tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
+                let msg = realm_route_placeholder_msg(&name, &qkey_text(ts, (i).checked_add(1i64).expect("revl: Int overflow")));
                 return mk_verd(tagged("G2", &msg), tkc(ts, i).line);
             }
         }
@@ -17565,7 +17567,7 @@ fn verified_method_verd(ts: &[Token], cname: &str, wit: &[String]) -> Verd {
             let mut i = (spans)[(s) as usize].slo.clone();
             while (i < (spans)[(s) as usize].shi.clone()) {
                 if (((depth == 0i64) && atw(ts, i, "provide")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
-                    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+                    let mut j = ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(qkey_len(ts, (i).checked_add(1i64).expect("revl: Int overflow"))).expect("revl: Int overflow");
                     while ((j < (spans)[(s) as usize].shi.clone()) && (!atk(ts, j.clone(), "{"))) {
                         j = (j).checked_add(1i64).expect("revl: Int overflow");
                     }
@@ -19724,7 +19726,7 @@ fn tk_fn_ty_mismatch(expected: String, actual: String, env: &[Bind]) -> bool {
     }
     let mut i = 0i64;
     while (i < (ep.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) {
-        if (((((ep)[(i) as usize] != "") && ((ap)[(i) as usize] != "")) && (grec_mentioned(&(ep)[(i) as usize], env) || grec_mentioned(&(ap)[(i) as usize], env))) && (!tk_compat_env((ep)[(i) as usize].clone(), (ap)[(i) as usize].clone(), env))) {
+        if ((((((ep)[(i) as usize] != "") && ((ap)[(i) as usize] != "")) && (grec_mentioned(&(ep)[(i) as usize], env) || grec_mentioned(&(ap)[(i) as usize], env))) && (!tk_compat_env((ep)[(i) as usize].clone(), (ap)[(i) as usize].clone(), env))) && (!tk_compat_env((ap)[(i) as usize].clone(), (ep)[(i) as usize].clone(), env))) {
             return true;
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -23493,12 +23495,13 @@ fn model_action_names(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<String> {
     let mut depth = 0i64;
     let mut out: Vec<String> = vec![];
     while (i < hi) {
-        if (((depth == 0i64) && atw(&ts, i, "provide")) && atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{")) {
-            let e = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+        if (((depth == 0i64) && atw(&ts, i, "provide")) && atk(&ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(qkey_len(&ts, (i).checked_add(1i64).expect("revl: Int overflow"))).expect("revl: Int overflow"), "{")) {
+            let po = ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(qkey_len(&ts, (i).checked_add(1i64).expect("revl: Int overflow"))).expect("revl: Int overflow");
+            let e = close_brace(&ts, po.clone());
             if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 i = hi;
             } else {
-                out = model_fn_names_in(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"), out.clone());
+                out = model_fn_names_in(ts.clone(), (po).checked_add(1i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"), out.clone());
                 i = e;
             }
         } else {
@@ -29462,7 +29465,7 @@ fn effect_stmt_verd(ts: &[Token], cname: &str, wit: &[String]) -> Verd {
             let mut i = (spans)[(s) as usize].slo.clone();
             while (i < (spans)[(s) as usize].shi.clone()) {
                 if (((depth == 0i64) && atw(ts, i, "provide")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
-                    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+                    let mut j = ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(qkey_len(ts, (i).checked_add(1i64).expect("revl: Int overflow"))).expect("revl: Int overflow");
                     while ((j < (spans)[(s) as usize].shi.clone()) && (!atk(ts, j.clone(), "{"))) {
                         j = (j).checked_add(1i64).expect("revl: Int overflow");
                     }
@@ -29900,11 +29903,11 @@ fn comp_header_provs(ts: Vec<Token>, i: i64) -> Vec<Bind> {
         while (((((k < ts.revl_length()) && (!atk(&ts, k.clone(), "{"))) && (!atk(&ts, k.clone(), "eof"))) && (!atw(&ts, k.clone(), "requires"))) && (!atw(&ts, k.clone(), "provides"))) {
             let kl = qkey_len(&ts, k.clone());
             if ((atk(&ts, k.clone(), "ident") && atk(&ts, (k).checked_add(kl).expect("revl: Int overflow"), ":")) && atk(&ts, ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
-                let rt = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
+                let rt = type_at(ts.clone(), ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(1i64).expect("revl: Int overflow"));
                 if isProv {
-                    out.push(Bind { name: tkc(&ts, k.clone()).text, ty: if rt.ok { rt.ty } else { tkc(&ts, (k).checked_add(2i64).expect("revl: Int overflow")).text } });
+                    out.push(Bind { name: qkey_text(&ts, k.clone()), ty: if rt.ok { rt.ty } else { tkc(&ts, ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(1i64).expect("revl: Int overflow")).text } });
                 }
-                k = if rt.ok { rt.i } else { (k).checked_add(3i64).expect("revl: Int overflow") };
+                k = if rt.ok { rt.i } else { ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(2i64).expect("revl: Int overflow") };
             } else {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
             }

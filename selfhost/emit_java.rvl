@@ -2050,7 +2050,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
   if (kind == "call") {
     let target = value_field(node, "target")
     if (value_str(value_field(target, "kind")) == "req") {
-      let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(target, "name"))))
+      let sname = req_service_of(comp, value_str(value_field(target, "name")))
       if (sname != "") {
         let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(node, "method")))
         return value_str(value_field(decl, "returns"))
@@ -2060,7 +2060,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
     if (value_str(value_field(callee, "kind")) == "field") {
       let ct = value_field(callee, "target")
       if (value_str(value_field(ct, "kind")) == "req") {
-        let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(ct, "name"))))
+        let sname = req_service_of(comp, value_str(value_field(ct, "name")))
         if (sname != "") {
           let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(callee, "name")))
           return value_str(value_field(decl, "returns"))
@@ -3861,6 +3861,16 @@ fn host_key(key: Str) -> Str {
 fn key_binding(key: Str) -> Str {
   let parts = key.split("::")
   return parts[parts.length() - 1]
+}
+
+// The service a `req` node names: its BINDING in the component's raw-keyed
+// requirement table (issue #2394).
+fn req_service_of(comp: Any, name: Str) -> Str {
+  let rq = value_field(comp, "requires")
+  for (k of value_keys(rq)) {
+    if (k == name || key_binding(k) == name) { return value_str(value_field(rq, k)) }
+  }
+  return ""
 }
 
 // binding -> raw wiring key for a component's requirements.

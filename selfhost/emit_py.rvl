@@ -871,7 +871,7 @@ fn ir_needs_as_async(ir: Any) -> Bool {
   }
   found = found || uses_as_async(colour(value_field(ir, "tests"), doc_colour(ir, None, [], false), false, false))
   for (c of value_list(value_field(ir, "components"))) {
-    found = found || uses_as_async(colour(value_field(c, "body"), doc_colour(ir, value_field(c, "requires"), [], true), false, false))
+    found = found || uses_as_async(colour(value_field(c, "body"), doc_colour(ir, req_services(c), [], true), false, false))
   }
   return found
 }
@@ -4724,6 +4724,16 @@ fn key_binding(key: Str) -> Str {
   return parts[parts.length() - 1]
 }
 
+// binding -> service for a component's requirements, the table the
+// document-level scans that read the UNREWRITTEN body need (a `req` node names
+// its requirement by binding; issue #2394).
+fn req_services(comp: Any) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  let raw = value_field(comp, "requires")
+  for (k of value_keys(raw)) { out = out.set(key_binding(k), value_field(raw, k)) }
+  return out
+}
+
 // binding -> raw wiring key for a component's requirements.
 fn req_bindings(comp: Any) -> Map[Str, Str] {
   var out: Map[Str, Str] = Map.empty()
@@ -4893,7 +4903,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (value_keys(registry).length() > 0) { imports = imports.push("register_grammars as _revl_register_grammars") }
   var validates = false
   for (c of value_list(value_field(ir, "components"))) {
-    validates = validates || uses_validated(value_field(c, "body"), value_field(c, "requires"), value_field(ir, "services"))
+    validates = validates || uses_validated(value_field(c, "body"), req_services(c), value_field(ir, "services"))
   }
   if (validates) { imports = imports.push("validate_response as _revl_validate") }
   if (need_estop_gated) { imports = imports.push("estop_gated as _revl_estop_gated") }

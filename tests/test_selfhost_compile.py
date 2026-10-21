@@ -3581,6 +3581,15 @@ _ISSUE_2405_REMAINING_EXACT = {
         "  let c = { b | v = 2 }\n  return 1\n}\n"),
 }
 
+# The fn-typed `let` position is a T1 mismatch in the gate's vocabulary, like
+# the reference's own message for it; the record field and update refusals are
+# TYPE-tagged.
+_ISSUE_2405_REMAINING_T1 = {
+    "fn_type_let": (
+        "type Box[T] = { v: T }\nfn h(b: Box[Str]) -> Str { return b.v }\n"
+        "fn f() -> Int {\n  let g: (Box[Int]) -> Str = h\n  return 1\n}\n"),
+}
+
 _ISSUE_2405_REMAINING_NAMED = {
     "bare_generic_literal": (
         "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box = { v: 1 }\n"
@@ -3610,6 +3619,17 @@ def test_a_generic_record_mistype_draws_the_reference_refusal(
     assert want != ""
     got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
     assert got == "REFUSED|TYPE|" + want, got[:160]
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_T1))
+def test_a_function_type_let_mismatch_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text = _ISSUE_2405_REMAINING_T1[name]
+    want = _reference_refusal(text)
+    assert want != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + want, got[:160]
 
 
 @pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])

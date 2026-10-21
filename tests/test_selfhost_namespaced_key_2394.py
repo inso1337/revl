@@ -75,19 +75,44 @@ component B provides acme__greeter: Greeter {
 }
 """
 
+#: A `validated` emission reached through a namespaced requirement. Its whole
+#: module import list is scanned over the UNREWRITTEN body, so the requirement
+#: has to resolve by binding there too (review of #2394: the scan missed the
+#: `validate_response` import and emitted a call to an unimported name). py only:
+#: the rust and java references refuse a validated crossing by name.
+VALIDATED_NS = """service Model { emission validated fn complete(h: Str) -> Str }
+
+component Agent requires acme::model: Model {
+  emit model.complete("p")
+}
+"""
+
+#: A service method named `box` reaches the rust bridge proxy and dispatch as
+#: well as the trait and impl; every one of those spellings is `box_`.
+BOX_METHOD = """service S { fn box(n: Int) -> Int }
+service Front { fn go(n: Int) -> Int }
+
+component C provides s: S, front: Front {
+  provide s { fn box(n) = n }
+  provide front { fn go(n) = n }
+}
+"""
+
 #: The documents each tier's covered self-host slice can compare byte for byte.
 COVERED = {
     "py": (namespaced.ISSUE_REPRODUCER, namespaced.KEYWORD_PARTS,
-           namespaced.ROUTED_NAMESPACED, namespaced.WASM_PAIR, PROVIDE_ONLY),
-    "rust": (namespaced.WASM_PAIR, PROVIDE_ONLY),
-    "java": (PROVIDE_ONLY,),
+           namespaced.ROUTED_NAMESPACED, namespaced.WASM_PAIR, PROVIDE_ONLY,
+           VALIDATED_NS, BOX_METHOD),
+    "rust": (namespaced.WASM_PAIR, PROVIDE_ONLY, BOX_METHOD),
+    "java": (PROVIDE_ONLY, BOX_METHOD),
 }
 
 #: The sources whose namespaced keys reach the NATIVE chain (lower + emitter).
 NATIVE = {
-    "py": (namespaced.ISSUE_REPRODUCER, namespaced.ROUTED_NAMESPACED, PROVIDE_ONLY),
-    "rust": (namespaced.WASM_PAIR, PROVIDE_ONLY),
-    "java": (PROVIDE_ONLY,),
+    "py": (namespaced.ISSUE_REPRODUCER, namespaced.ROUTED_NAMESPACED, PROVIDE_ONLY,
+           BOX_METHOD),
+    "rust": (namespaced.WASM_PAIR, PROVIDE_ONLY, BOX_METHOD),
+    "java": (PROVIDE_ONLY, BOX_METHOD),
 }
 
 
@@ -144,7 +169,7 @@ def _source_ir(source: str):
 
 
 @pytest.mark.parametrize("tier", sorted(COVERED))
-@pytest.mark.parametrize("source", range(5), ids=lambda i: "doc%d" % i)
+@pytest.mark.parametrize("source", range(7), ids=lambda i: "doc%d" % i)
 def test_emitter_matches_the_reference_on_a_namespaced_source(
         emitted, reference, tier, source):
     """A namespaced component document emits the reference's bytes, with no
@@ -152,7 +177,7 @@ def test_emitter_matches_the_reference_on_a_namespaced_source(
     if source >= len(COVERED[tier]):
         pytest.skip("this tier's covered slice does not take the document")
     text = COVERED[tier][source]
-    ir = compile_files([str(_write(tmp_path_from(text)))]) if False else _source_ir(text)
+    ir = _source_ir(text)
     want = reference[tier].emit(ir)
     got = emitted[tier]["emit_%s_src" % tier](ir)
     assert not MARKERS.findall(got), MARKERS.findall(got)
@@ -167,12 +192,10 @@ def _write(text: str) -> Path:
     return path
 
 
-def tmp_path_from(text: str):  # pragma: no cover - helper kept out of fixtures
-    return _write(text)
 
 
 @pytest.mark.parametrize("tier", sorted(NATIVE))
-@pytest.mark.parametrize("source", range(3), ids=lambda i: "doc%d" % i)
+@pytest.mark.parametrize("source", range(4), ids=lambda i: "doc%d" % i)
 def test_native_chain_lowers_the_qualified_key_and_emits(
         native, reference, tier, source):
     """The native driver's IR carries the qualified key and the whole chain

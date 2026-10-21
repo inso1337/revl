@@ -5478,11 +5478,12 @@ fn provide_let_type(value: Any, ctx: Ctx, comp: Any, services: Any) -> Str {
   }
   return ""
 }
-// The `requires` map as Str->Str (key -> service name).
+// The `requires` map keyed by the BINDING a `req` node carries (issue #2394;
+// the raw wiring key is only the runtime string).
 fn reqs_map(comp: Any) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
   let rq = value_field(comp, "requires")
-  for (k of value_keys(rq)) { m = m.set(k, value_str(value_field(rq, k))) }
+  for (k of value_keys(rq)) { m = m.set(key_binding(k), value_str(value_field(rq, k))) }
   return m
 }
 
@@ -6709,7 +6710,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       let r = value_field(method, "returns")
       if (!value_is_null(r)) { ret = rust_type_t(r, tnames) }
       let deser = bridge_ret_deser("_v", ret)
-      out = out.push(`    fn ${mname(mn)}(&self, ${plist.join(", ")}) -> ${ret} {`)
+      out = out.push(`    fn ${mangle(mname(mn))}(&self, ${plist.join(", ")}) -> ${ret} {`)
       if (deser == "<<NONE>>") {
         out = out.push(`        panic!("bridge proxy: unsupported return type for ${sname}.${mn}");`)
       } else {
@@ -6740,7 +6741,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       if (any_none) {
         out = out.push(`        "${mn}" => Err("${sname}.${mn} cannot be called across a seam: a parameter type has no wire form".to_string()),`)
       } else {
-        out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mname(mn)}(${extracts.join(", ")})`, ret)}),`)
+        out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mangle(mname(mn))}(${extracts.join(", ")})`, ret)}),`)
       }
     }
     out = out.push(`        _ => Err(format!("method '{method}' is not exported for service ${sname}")),`)

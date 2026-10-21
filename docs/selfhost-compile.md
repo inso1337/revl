@@ -399,7 +399,8 @@ Still admitted silently, each listed on the issue:
 - gap 4: a wrong field nested inside a recursive generic record literal
   (`L[Str]` for `L[Int]`); the expansion stops at the recursion.
 - gap 6: a function value passed where its parameter types differ by a type
-  argument.
+  argument. The FN-TYPED `let` position is closed (the reference's message on
+  both sides); the call-argument position is not.
 - gap 7: a generic record applied with the wrong number of type arguments. No
   reproducer the reference refuses has been found yet.
 - gap 8: an `Opt[Box[Str]]` match binder used as `Box[Int]`; a block-arm `let`

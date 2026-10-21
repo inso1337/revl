@@ -3471,7 +3471,8 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     // annotation the reader cannot parse leaves `ty` empty, which is a program
     // the reference refuses at parse time and this gate is silent on, exactly
     // as it is silent on every other unparsable annotation.
-    let hty = atk(ts, i + 2, ":") ? type_at(ts, i + 3).ty : ""
+    let hkl = qkey_len(ts, i + 1)
+    let hty = atk(ts, i + 1 + hkl, ":") ? type_at(ts, i + 2 + hkl).ty : ""
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
                        setup, iso, rts, icept, { name: key, ty: hty }, action)
   }
@@ -11199,17 +11200,18 @@ fn route_placeholder_at(ts: List[Token], j: Int) -> Str {
 fn realm_placeholder_scan(ts: List[Token]) -> Verd {
   var i = 0
   while (i < ts.length()) {
-    if (atw(ts, i, "isolate") && atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
-        && atk(ts, i + 4, "(") && atk(ts, i + 5, "?") && atk(ts, i + 6, "ident")
-        && atk(ts, i + 7, ")")) {
-      let msg = realm_placeholder_msg(tkc(ts, i + 6).text, tkc(ts, i + 1).text)
+    let kl = qkey_len(ts, i + 1)
+    if (atw(ts, i, "isolate") && atw(ts, i + 1 + kl, "in") && atw(ts, i + 2 + kl, "realm")
+        && atk(ts, i + 3 + kl, "(") && atk(ts, i + 4 + kl, "?") && atk(ts, i + 5 + kl, "ident")
+        && atk(ts, i + 6 + kl, ")")) {
+      let msg = realm_placeholder_msg(tkc(ts, i + 5 + kl).text, qkey_text(ts, i + 1))
       return mk_verd(tagged("G2", msg), tkc(ts, i).line)
     }
-    if (atw(ts, i, "isolate") && atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")
-        && atk(ts, i + 4, "(")) {
-      let name = route_placeholder_at(ts, i + 5)
+    if (atw(ts, i, "isolate") && atw(ts, i + 1 + kl, "in") && ati(ts, i + 2 + kl, "realms")
+        && atk(ts, i + 3 + kl, "(")) {
+      let name = route_placeholder_at(ts, i + 4 + kl)
       if (name != "") {
-        let msg = realm_route_placeholder_msg(name, tkc(ts, i + 1).text)
+        let msg = realm_route_placeholder_msg(name, qkey_text(ts, i + 1))
         return mk_verd(tagged("G2", msg), tkc(ts, i).line)
       }
     }
@@ -11464,7 +11466,7 @@ fn verified_method_verd(ts: List[Token], cname: Str, wit: List[Str]) -> Verd {
       var i = spans[s].slo
       while (i < spans[s].shi) {
         if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 1, "ident")) {
-          var j = i + 2
+          var j = i + 1 + qkey_len(ts, i + 1)
           while (j < spans[s].shi && !atk(ts, j, "{")) { j += 1 }
           let e = close_brace(ts, j)
           if (e == 0 - 1) { return no_verd() }
@@ -14038,7 +14040,8 @@ fn tk_fn_ty_mismatch(expected: Str, actual: Str, env: List[Bind]) -> Bool {
   while (i < ep.length() - 1) {
     if (ep[i] != "" && ap[i] != ""
         && (grec_mentioned(ep[i], env) || grec_mentioned(ap[i], env))
-        && !tk_compat_env(ep[i], ap[i], env)) { return true }
+        && !tk_compat_env(ep[i], ap[i], env)
+        && !tk_compat_env(ap[i], ep[i], env)) { return true }
     i += 1
   }
   return false
@@ -18276,12 +18279,14 @@ fn model_action_names(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
   var depth = 0
   var out: List[Str] = []
   while (i < hi) {
-    if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 2, "{")) {
-      let e = close_brace(ts, i + 2)
+    if (depth == 0 && atw(ts, i, "provide")
+        && atk(ts, i + 1 + qkey_len(ts, i + 1), "{")) {
+      let po = i + 1 + qkey_len(ts, i + 1)
+      let e = close_brace(ts, po)
       if (e == 0 - 1) {
         i = hi
       } else {
-        out = model_fn_names_in(ts, i + 3, e - 1, out)
+        out = model_fn_names_in(ts, po + 1, e - 1, out)
         i = e
       }
     } else {
@@ -24727,7 +24732,7 @@ fn effect_stmt_verd(ts: List[Token], cname: Str, wit: List[Str]) -> Verd {
       var i = spans[s].slo
       while (i < spans[s].shi) {
         if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 1, "ident")) {
-          var j = i + 2
+          var j = i + 1 + qkey_len(ts, i + 1)
           while (j < spans[s].shi && !atk(ts, j, "{")) { j += 1 }
           let e = close_brace(ts, j)
           if (e == 0 - 1) { return no_verd() }
@@ -25228,12 +25233,12 @@ fn comp_header_provs(ts: List[Token], i: Int) -> List[Bind] {
       let kl = qkey_len(ts, k)
       if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
           && atk(ts, k + kl + 1, "ident")) {
-        let rt = type_at(ts, k + 2)
+        let rt = type_at(ts, k + kl + 1)
         if (isProv) {
-          out = out.push({ name: tkc(ts, k).text,
-                           ty: rt.ok ? rt.ty : tkc(ts, k + 2).text })
+          out = out.push({ name: qkey_text(ts, k),
+                           ty: rt.ok ? rt.ty : tkc(ts, k + kl + 1).text })
         }
-        k = rt.ok ? rt.i : k + 3
+        k = rt.ok ? rt.i : k + kl + 2
       } else { k += 1 }
     }
     j = k

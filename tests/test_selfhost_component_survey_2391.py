@@ -75,16 +75,17 @@ def test_no_component_document_diverges_silently(surveyed):
     the reference is either byte agreement, a reference refusal, or a NAMED
     port refusal, except the one on file."""
     report, counts = surveyed
-    silent = sorted(row["document"] for row in report["results"]
+    silent = sorted((row["document"], row["tier"]) for row in report["results"]
                     if row["status"] == "byte_divergence")
-    errors = sorted(row["document"] for row in report["results"]
+    errors = sorted((row["document"], row["tier"]) for row in report["results"]
                     if row["status"] == "port_error")
+    known = sorted((document, tier) for document in KNOWN_SILENT
+                   for tier in ("rust", "java"))
     assert len(report["results"]) >= 100, counts
     assert not errors, errors
-    assert silent == sorted(KNOWN_SILENT), (
+    assert silent == known, (
         "silent component divergences (document, tier): %r; counts %r"
-        % (sorted((row["document"], row["tier"]) for row in report["results"]
-                  if row["status"] == "byte_divergence"), counts))
+        % (silent, counts))
 
 
 def test_every_port_refusal_names_the_difference(surveyed):
