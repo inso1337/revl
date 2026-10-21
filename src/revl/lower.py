@@ -8251,16 +8251,18 @@ def _binder_names(node, out: list) -> None:
                 out.append((pattern.rest, pattern.line))
     elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt,
                            StreamIterStmt)):
-        # Two binder forms can have NO type for the type environment to judge
+        # One binder form can have NO type for the type environment to judge
         # (#2544): the `every <x> in <sub>` item (item 130: a plain iteration
-        # carries no contract), which StreamIterStmt binds; and a component
-        # `let <x> = effect <acquire>` whose acquisition types to nothing
-        # (`Map.new()` is a host node the type layer does not carry), which is
-        # the LetEffect arm. Both are enumerated here so a call on one is
-        # refused, rather than silently reaching a same-named module `fn`,
-        # whenever such a callable is in scope. With no same-named callable
-        # there is no fall-through to refuse; the call lowers as a call on the
-        # binder's `name` node (pinned in
+        # carries no contract), which StreamIterStmt binds. It is enumerated
+        # here so a call on one is refused, rather than silently reaching a
+        # same-named module `fn`, whenever such a callable is in scope. With no
+        # same-named callable there is no fall-through to refuse; the call
+        # lowers as a call on the binder's `name` node. The component
+        # `let <x> = effect <acquire>` arm is the paired form: its binder now
+        # carries the acquisition's family as its type (a host `Map` is
+        # `Map[Any, Any]`), so the typecheck guard judges a call on it, and the
+        # component scan here keeps refusing the module `fn`/extern pairing at
+        # this earlier site (pinned in
         # tests/test_2544_provide_param_shadows_module_fn.py).
         if isinstance(node.bind, str):
             out.append((node.bind, node.line))
@@ -13972,6 +13974,22 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # `host_locals`), so the type is resolved here where it is known.
             if acquired_type is None:
                 acquired_type = _host_result_type(acquire, env)
+            # issue #2544: a HOST acquisition (`Map.new()`, `Pool.open(..)`)
+            # yields a handle of its family, and the binding must carry that
+            # family as its type. An untyped binder is invisible to the call
+            # guard in typecheck.py, so a call on it (`Tag("x")`, `Tag` being
+            # the handle) was admitted without being judged even when the name
+            # also names a module callee. The host constructor form types the
+            # same value as its family; `Map`'s key and value types are the
+            # resource's own (a host local does not carry them), so the open
+            # `Map[Any, Any]` is its static type and stands where any
+            # `Map[K, V]` does.
+            if acquired_type is None and acquire.get("kind") == "host":
+                _acquired_family = str(acquire.get("fn") or "").partition(".")[0]
+                if _acquired_family in _HOST_FAMILIES:
+                    acquired_type = (f"{_acquired_family}[Any, Any]"
+                                     if _acquired_family == "Map"
+                                     else _acquired_family)
             # issue #1968: an effect-acquired binding whose type is a HOST
             # family is a handle even when the acquisition spelled no host call
             # (a typed hole, an extern's declared return). `Map` is the one

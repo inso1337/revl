@@ -33,14 +33,14 @@ The owner ruling applied here:
 The guard is keyed on the TYPE ENVIRONMENT, not on an enumeration of binder
 forms: every typed binder (`let`, `for`, arrow parameter, match-arm payload,
 provide-method parameter, an effect/approval `let`) is recorded there, so a
-form added to the grammar later is covered without a second edit. Two binder
-forms can have NO type for that environment to judge: the `every … in` item
-of a plain iteration, and a component `let <x> = effect <acquire>` whose
-acquisition types to nothing (a host `Map.new()`, whose family the type layer
-does not carry). Both stay enumerated in the lowering refusal list
-(`_binder_names`), so a same-named module callable is refused there instead
-of silently taking the call; with no such callable there is no fall-through,
-and the call lowers on the binder itself (pinned below).
+form added to the grammar later is covered without a second edit. An
+effect/approval `let` over a host acquisition records the acquisition's
+family, so a host Map handle is `Map[Any, Any]` and the guard judges a call
+on it. One binder form can have NO type for that environment to judge: the
+`every … in` item of a plain iteration. It stays enumerated in the lowering
+refusal list (`_binder_names`), so a same-named module callable is refused
+there instead of silently taking the call; with no such callable there is no
+fall-through, and the call lowers on the binder itself (pinned below).
 
 The pre-existing lowering refusal (`_refuse_callable_shadowing`, item 445)
 still owns the other binder forms; the controls below pin that the carve-out
@@ -610,15 +610,15 @@ def test_a_never_binder_call_is_vacuous_even_beside_a_same_name_fn():
     }]
 
 
-# ------------------------- the second untyped binder form, named explicitly
+# ---------------------- the effect-let binder, typed from its acquisition
 
-def test_an_untyped_effect_let_binder_is_the_callee_with_no_module_fn():
-    """The second binder form the type environment cannot judge, named here so
-    the guard's docstring claim is true: a component
-    `let Tag = effect Map.new()` records NO type (`Map.new()` is a host node
-    the type layer does not carry), so `Tag("x")` is not judged by the #2544
-    guard. With no same-named module callable there is no fall-through, and the
-    call lowers on the binder's `name` node -- what the user wrote is what runs.
+def test_an_effect_let_binder_is_the_callee_with_no_module_fn():
+    """A component `let Tag = effect Map.new()` binds a HOST handle, and the
+    type environment carries the acquisition's family as its type
+    (`Map[Any, Any]`: the key and value types are the resource's own, so the
+    open spelling stands where any `Map[K, V]` does). With no same-named module
+    callable there is no fall-through to refuse, so the call is admitted and
+    lowers on the binder's `name` node -- what the user wrote is what runs.
     The refusal half is
     `test_a_component_body_binding_still_pairs_with_a_call_in_a_method`: when a
     module `fn` of that name IS in scope, the lowering scan refuses the pair."""
@@ -637,3 +637,26 @@ def test_an_untyped_effect_let_binder_is_the_callee_with_no_module_fn():
         "expr": {"kind": "call", "callee": {"kind": "name", "id": "Tag"},
                  "args": [{"kind": "lit", "value": "x"}]},
     }]
+
+
+def test_an_effect_let_binder_called_beside_a_same_name_case_is_refused():
+    """The refusal the typed binder unlocks. The item-445 lowering scan refuses
+    a component `let` that pairs with a same-named module `fn`/extern, and it
+    does not look at ADT cases (`_binder_names` feeds `_declare`-keyed
+    visibility). With `Tag` also a case constructor, `Tag("x")` was admitted
+    without being judged before the handle carried a type; now the guard refuses
+    it by type, naming the `Map[Any, Any]` handle. Red before the binder was
+    typed: this program compiled."""
+    with pytest.raises(RevlError,
+                       match=r"bound here as `Map\[Any, Any\]`") as exc:
+        compile_source(
+            "type Tag = Tag(Str)\n"
+            "service S { fn go(n: Int) -> Str }\n"
+            "component C provides s: S {\n"
+            "  let Tag = effect Map.new() undo Tag.drop()\n"
+            '  provide s { fn go(n) = Tag("x") }\n'
+            "}\n",
+            "t.rvl",
+        )
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 5)

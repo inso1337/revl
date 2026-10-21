@@ -3030,15 +3030,21 @@ def refuse_call_on_non_function(name: str, local: str, filename: str,
     (whose message is about that module callable) would be false; the ordinary
     checks own that call.
 
-    Two binder forms have NO type in this environment, so the guard cannot
-    judge them and leaves them to the lowering's `_binder_names` scan instead:
-    the `every … in` item of a plain iteration, and a component
-    `let <x> = effect <acquire>` whose acquisition types to nothing (a host
-    `Map.new()`, whose family the type layer does not carry). A call on either
-    one is admitted here; with a same-named module callable the component scan
-    refuses it before lowering, and with none the call lowers as a call on the
-    binder's `name` node (pinned by
-    `test_2544_provide_param_shadows_module_fn.py`).
+    One binder form has NO type in this environment: the `every … in` item of a
+    plain iteration. The guard cannot judge it and leaves it to the lowering's
+    `_binder_names` scan instead: a call on it is admitted here, the component
+    scan refuses it when a same-named module callable exists, and with none the
+    call lowers as a call on the binder's `name` node.
+
+    A component `let <x> = effect <acquire>` used to be the second such form
+    because a host acquisition typed to nothing (`Map.new()`). It no longer is:
+    lowering records the acquisition's family as the binder's type (a host
+    `Map` is `Map[Any, Any]`, the key and value types being the resource's
+    own), so the guard judges it here. The item-445 scan still refuses the
+    module `fn`/extern pairing first, at its own site; the case fall-through
+    the scan does not see is refused here. A call on such a binder with no
+    same-named callable names no fall-through and is admitted, as pinned by
+    `test_2544_provide_param_shadows_module_fn.py`.
 
     A local of function type never reaches here (the call is on the value,
     #1823), in either spelling: `is_function_type` covers `(Int) -> Str` and
