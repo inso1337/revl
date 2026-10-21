@@ -6959,10 +6959,10 @@ def test_the_call_and_signature_layer_reaches_a_module_fn_body(admit):
         assert admit(src) == expected, src
 
 
-def test_a_defaulted_parameter_list_builds_no_signature_row(admit):
-    """A signature carrying a DEFAULT (item 187) never has its arity window
-    counted: a call omitting the default must not be refused short. Its row is
-    marked `sigd`, and `tk_named` answers the named refusal before the count.
+def test_a_defaulted_parameter_list_is_marked_sigd_so_its_arity_is_not_counted(admit):
+    """A signature carrying a DEFAULT (item 187) builds a `sigd` row and its
+    arity window is never counted: a call omitting the default must not be
+    refused short. `tk_named` answers the named refusal before the count.
 
     The gate still refuses this program (the reference admits it). Since issue
     #2397 the declaration parses, and the refusal is the named one for a call

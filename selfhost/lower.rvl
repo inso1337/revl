@@ -2793,22 +2793,93 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
 // defaulted `fn` other than a call passing all of its arguments is a named
 // refusal, wherever it sits (a component body or a test as much as a `fn`).
 // The signature-table check in `tk_named` answers the same for the calls it
-// reaches; this scan is the one that cannot be bypassed.
+// reaches; this scan covers the ones it does not.
+//
+// Issue #2461: the scan reads TOKENS, and the body of a backtick `${...}` is
+// one opaque lexer token, so a call written only inside a template is not seen
+// here. That case is still refused by name, through the `tk_named` check the
+// template's operand walk reaches — so the refusal holds, but this scan is not
+// what delivers it.
+//
+// A mention is skipped where the name RESOLVES to a binding rather than to the
+// fn: the declaration's own name, a member read (`r.f`), and any mention inside
+// a `fn` or `test` body that binds the name itself — a parameter, a lambda
+// parameter, a record-literal field (`f:`) or a `let` (issue #2461). The
+// reference resolves the nearest binding first and admits all of these; they
+// used to draw this refusal. The body scope tracks its own bindings only, so a
+// genuine use of the fn in another function still refuses.
+type DpScope = { end: Int, names: List[Str] }
+
+fn dp_in_scope(scopes: List[DpScope], name: Str) -> Bool {
+  for (s of scopes) {
+    if (contains(s.names, name)) { return true }
+  }
+  return false
+}
+
+// Add `name` to the innermost open scope, if any. The walk is linear, so a
+// binding is visible from the next token to the end of its body; a mention
+// BEFORE a later `let` of the same name is skipped too, which is the silent
+// direction (the reference would resolve it to the fn).
+fn dp_bind(scopes: List[DpScope], name: Str) -> List[DpScope] {
+  if (scopes.length() == 0) { return scopes }
+  let last = scopes[scopes.length() - 1]
+  var names = last.names
+  if (!contains(names, name)) { names = names.push(name) }
+  let grown = { end: last.end, names: names }
+  return scopes.slice(0, scopes.length() - 1).push(grown)
+}
+
+fn dp_drop_ended(scopes: List[DpScope], j: Int) -> List[DpScope] {
+  var out = scopes
+  while (out.length() > 0 && j > out[out.length() - 1].end) {
+    out = out.slice(0, out.length() - 1)
+  }
+  return out
+}
+
 fn dp_call_refusal(ts: List[Token]) -> Verd {
   let fs = dp_defaulted_fns(ts)
   if (fs.size() == 0) { return no_verd() }
+  var scopes: List[DpScope] = []
   var j = 0
   while (j < ts.length() && !atk(ts, j, "eof")) {
+    scopes = dp_drop_ended(scopes, j)
+    if (atw(ts, j, "fn")) {
+      let ps = fn_params_i(ts, j)
+      if (ps > 0) {
+        let brace = ret_at(ts, close_paren(ts, ps - 1))
+        if (atk(ts, brace, "{")) {
+          let bend = close_brace(ts, brace)
+          if (bend > 0) { scopes = scopes.push({ end: bend - 1, names: [] }) }
+        }
+      }
+    }
+    if (atw(ts, j, "test") && atk(ts, j + 2, "{")) {
+      let bend = close_brace(ts, j + 2)
+      if (bend > 0) { scopes = scopes.push({ end: bend - 1, names: [] }) }
+    }
     let t = tkc(ts, j)
     let decl = j > 0 && atw(ts, j - 1, "fn")
     let member = j > 0 && atk(ts, j - 1, ".")
-    if (t.kind == "ident" && fs.has(t.text) && !decl && !member) {
+    let binding = atk(ts, j + 1, ":")
+    if (t.kind == "ident" && fs.has(t.text) && !binding
+        && j > 0 && atw(ts, j - 1, "let")) {
+      scopes = dp_bind(scopes, t.text)
+    }
+    if (t.kind == "ident" && fs.has(t.text) && !decl && !member && !binding
+        && !dp_in_scope(scopes, t.text)) {
       let n = match fs.lookup(t.text) { Some(v) => v, None => 0 }
       if (!atk(ts, j + 1, "(") || dp_arg_count(ts, j + 2) != n) {
         return mk_verd(tagged("UNSUPPORTED", "a use of `".concat(t.text)
           .concat("` other than a call passing every argument, its defaulted ones")
           .concat(" included, is not supported by the self-host compiler")), t.line)
       }
+    }
+    // A `f:` binding shadows from the next token on (a parameter's annotation,
+    // a lambda parameter, a record-literal field).
+    if (binding && t.kind == "ident" && fs.has(t.text)) {
+      scopes = dp_bind(scopes, t.text)
     }
     j += 1
   }
@@ -2830,7 +2901,10 @@ fn dp_defaulted_fns(ts: List[Token]) -> Map[Str, Int] {
 }
 
 // The arguments of a call whose `(` sits just before `j`: commas at depth 0
-// plus one, or 0 for `()`; -1 when the list never closes.
+// plus one, or 0 for `()`; -1 when the list never closes. A trailing comma
+// (`f(1, 3,)`, which the parser reads as two arguments) leaves the last slot
+// empty, so the count is the commas alone in that case — `n + 1` would make the
+// call look like it passes one argument too many (issue #2461).
 fn dp_arg_count(ts: List[Token], j0: Int) -> Int {
   var j = j0
   var depth = 0
@@ -2839,7 +2913,7 @@ fn dp_arg_count(ts: List[Token], j0: Int) -> Int {
   while (j < ts.length() && !atk(ts, j, "eof")) {
     let up = atk(ts, j, "(") || atk(ts, j, "[") || atk(ts, j, "{")
     let down = atk(ts, j, ")") || atk(ts, j, "]") || atk(ts, j, "}")
-    if (down && depth == 0) { return any ? n + 1 : 0 }
+    if (down && depth == 0) { return any ? n + 1 : n }
     if (atk(ts, j, ",") && depth == 0) {
       n += 1
       any = false

@@ -3485,7 +3485,35 @@ _ISSUE_2397_UNSUPPORTED = {
                            "test \"t\" {\n  assert f(1) == 3\n}\n"),
     "fn_value": ("fn f(a: Int, b: Int = 2) -> Int { return a + b }\n"
                  "fn k() -> Int {\n  let g = f\n  return 1\n}\n"),
+    # Issue #2461: the token scan for uses of a defaulted fn cannot see the body
+    # of a backtick `${...}`, which is one opaque lexer token. The call is still
+    # refused by name, through `tk_named` on the template's operand walk; this
+    # case is what holds that path.
+    "template_omits_default": (
+        "fn f(a: Int, b: Int = 2) -> Int { return a + b }\n"
+        "fn k() -> Str { return `${f(1)}` }\n"),
 }
+
+# Issue #2461: names a defaulted fn shares with a BINDING (a parameter, a lambda
+# parameter, a record field, a field read) used to be refused as "a use of `f`
+# other than a call", and a trailing comma in a full call made its argument
+# count read as one too many. The reference admits all of them, so these are
+# byte-for-byte cases, not recorded refusals.
+_ISSUE_2397_COMPILED.update({
+    "parameter_named_f": ("fn f(x: Int = 1) -> Int { return x }\n"
+                          "fn g(f: Int) -> Int { return f }\n"),
+    "lambda_parameter_named_f": (
+        "fn f(x: Int = 1) -> Int { return x }\n"
+        "fn g() -> Int {\n  let h = (f: Int) => f\n  return h(1)\n}\n"),
+    "record_field_named_f": (
+        "fn f(x: Int = 1) -> Int { return x }\n"
+        "type P = { f: Int }\nfn g(p: P) -> Int { return p.f }\n"),
+    "record_literal_field_named_f": (
+        "fn f(x: Int = 1) -> Int { return x }\n"
+        "type P = { f: Int }\nfn g() -> Int {\n  let p = { f: 3 }\n  return p.f\n}\n"),
+    "trailing_comma_call": ("fn f(a: Int, b: Int = 2) -> Int { return a + b }\n"
+                            "fn k() -> Int { return f(1, 3,) }\n"),
+})
 
 
 @pytest.mark.parametrize("tier", ["py", "go", "rust"])
