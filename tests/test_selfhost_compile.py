@@ -2030,6 +2030,13 @@ _CARRIED_THROUGH_IMPORT = {
         "= store.put({ i: { a: 1 } })", "emit"),
     "own_type_and_carried_case": (
         "type In = { z: Str }\n\n", "= store.draw(Box(mk_n()))", "emit"),
+    # Issue #2449: a document case that REUSES a carried case's name. The
+    # reference's merged case table holds `Dot` twice, drops it as ambiguous,
+    # and the component body's bare `Dot` then resolves to no requirement, so
+    # the reference refuses G1. The document read alone knows only its own
+    # `Dot`, so the native gate used to admit it.
+    "own_case_shares_a_carried_name": (
+        "type Mine = Dot | Other\n\n", "= store.draw(Dot)", "refuse"),
     "own_public_type": ("pub type In = { z: Str }\n\n", "= store.put({ i: { a: 1 } })",
                         "refuse"),
     # The reference renames a private type in functions, types and test bodies,
@@ -2084,6 +2091,23 @@ def test_native_driver_admits_types_carried_through_an_import(
     with pytest.raises(RevlError):
         compile_files([str(doc)])
     assert got.startswith("REFUSED|"), got[:200]
+
+
+# Issue #2449: the exact refusal for a document case that shares a carried
+# case's name, pinned to the reference's tag and sentence (the generic table
+# above only says "refuse").
+def test_a_document_case_sharing_a_carried_name_is_refused(compile_rvl, tmp_path):
+    (tmp_path / "lib.rvl").write_text(_CARRIED_LIB, encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text(
+        'use "./lib.rvl" { Store }\n\n'
+        "type Mine = Dot | Other\n\n" + _CALL_SITE_COMPONENT % "= store.draw(Dot)",
+        encoding="utf-8")
+    with pytest.raises(RevlError) as refused:
+        compile_files([str(doc)])
+    assert "not a declared requirement of App" in refused.value.message
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got == "REFUSED|G1|" + refused.value.message
 
 
 # Issue #2450: a carried variant's NULLARY case built in a module function. The

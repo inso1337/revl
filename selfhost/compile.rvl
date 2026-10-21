@@ -2513,19 +2513,35 @@ fn ad_module_key(path: Str) -> Str {
 // document read alone yields when the document, with the carried
 // declarations appended, is admitted; any other verdict stands, through
 // `tc_import_first`.
+// Issue #2374. The admission of the document `source` whose own verdict is
+// `verdict`, once `full` (the document with every carried type declaration
+// spliced in) is known: the carried names its lowering takes as declaration
+// text, and the refusal ("" for none).
+//
+// `full.text` is the MERGED program the reference admits, and the reference
+// admits it in every case, not only when the document read alone draws G1:
+//   * a G1 refusal of the document read alone yields when the merged text is
+//     admitted (issue #2374: a carried case used in a component body);
+//   * an ADMITTED document stays admitted, UNLESS splicing a carried
+//     declaration changes a resolution the reference also sees differently
+//     (issue #2449: the document declares its own `Dot` and the carried type
+//     declares `Dot` too, so the reference's merged case table drops both as
+//     ambiguous and a bare `Dot` in a component body resolves to no
+//     requirement — G1). Adopting the merged verdict is what makes the native
+//     gate draw the reference's refusal.
+// Any other verdict stands, through `tc_import_first`.
 type TcCarriedAdmission = { names: List[Str], refusal: Str }
 
-fn tc_carried_admission(source: Str, path: Str, verdict: Str) -> TcCarriedAdmission {
+fn tc_carried_admission(source: Str, path: Str, verdict: Str,
+                        full: UlCarriedText) -> TcCarriedAdmission {
   var none: List[Str] = []
-  if (verdict == "") { return { names: none, refusal: "" } }
-  if ((path != "") && (verdict.slice(0, 3) == "G1|")) {
-    let named = ul_rename_apart(source, path, lower_to_ir_refs(source, rf_ref_rows(source, path)))
-    let full = ul_with_carried_text(named, path)
-    if (full.names.length() > 0) {
-      let again = admit_src(full.text)
-      if (again == "") { return { names: full.names, refusal: "" } }
-      return { names: none, refusal: tc_import_first(source, path, again) }
-    }
+  if ((path == "") || (full.names.length() == 0)) {
+    return { names: none, refusal: tc_import_first(source, path, verdict) }
+  }
+  let again = admit_src(full.text)
+  if ((verdict == "") || (verdict.slice(0, 3) == "G1|")) {
+    if (again == "") { return { names: full.names, refusal: "" } }
+    return { names: none, refusal: tc_import_first(source, path, again) }
   }
   return { names: none, refusal: tc_import_first(source, path, verdict) }
 }
@@ -2543,13 +2559,6 @@ fn tc_carried_admission(source: Str, path: Str, verdict: Str) -> TcCarriedAdmiss
 pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_src(source)
-  // Issue #2374: a variant case carried from an imported service's module
-  // (`store.put(Dot)`) is unknown to the document read alone, which refuses it
-  // as a requirement (G1). The reference resolves it through the carried
-  // type, so the document is admitted, and lowered, with the carried
-  // declarations in scope.
-  let carried = tc_carried_admission(source, path, verdict)
-  if (carried.refusal != "") { return "REFUSED|".concat(carried.refusal) }
   let unlexed = rl_lex_refusal(source)
   if (unlexed != "") { return "REFUSED|BAD|".concat(unlexed) }
   // Issue #2332: every used module reads whole, or nothing is linked.
@@ -2576,8 +2585,13 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // always; `ul_link_types` then takes the names as already lowered (`pre`) and
   // does not append them a second time.
   let full = ul_with_carried_text(named, path)
+  // Issue #2374 / #2449: and admit what the reference admits — the merged
+  // text with every carried declaration spliced in — so a document case that
+  // reuses a carried case's name draws the reference's ambiguity refusal.
+  let carried = tc_carried_admission(source, path, verdict, full)
+  if (carried.refusal != "") { return "REFUSED|".concat(carried.refusal) }
   let pre = carried.names.length() > 0 ? carried.names : full.names
-  let lowered = full.names.length() > 0 ? full.text : named
+  let lowered = carried.names.length() > 0 ? full.text : named
   let own = lowered == source ? alone : lower_to_ir_refs(lowered, rf_ref_rows(lowered, path))
   let linked = ul_link_externs(ul_link_uses(own, source, path), source, path)
   if (linked.refusal != "") { return "REFUSED|".concat(linked.refusal) }
