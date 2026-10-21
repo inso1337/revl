@@ -2544,12 +2544,6 @@ fn ad_module_key(path: Str) -> Str {
   return key == "" ? path : key
 }
 
-// Issue #2374. The admission of a document whose own verdict is `verdict`:
-// the names of the carried types its lowering takes as declaration text
-// (`ul_with_carried_text`), and the refusal ("" for none). A G1 refusal of the
-// document read alone yields when the document, with the carried
-// declarations appended, is admitted; any other verdict stands, through
-// `tc_import_first`.
 // Issue #2374. The admission of the document `source` whose own verdict is
 // `verdict`, once `full` (the document with every carried type declaration
 // spliced in) is known: the carried names its lowering takes as declaration
