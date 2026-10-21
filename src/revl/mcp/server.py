@@ -6681,7 +6681,7 @@ def _attempt_fields(name: str, payload: dict) -> dict:
     axes = getattr(SESSION, "_loop_axes", None)
     if axes is None:            # a stand-in session (tests) keeps its shape
         return payload
-    from .loop_axes import attempt_unit  # noqa: PLC0415 — cheap, no runtime
+    from .loop_axes import attempt_unit, attempts_remaining  # noqa: PLC0415
     refused = payload.get("ok") is False or payload.get("admitted") is False
     axes.record_attempt(attempt_unit(SESSION), refused)
     if not refused:
@@ -6689,7 +6689,7 @@ def _attempt_fields(name: str, payload: dict) -> dict:
     fields = {"attempt": axes.attempt}
     limit = getattr(SESSION, "attempt_limit", None)
     if limit is not None:
-        fields["attemptsRemaining"] = max(0, limit - axes.attempt)
+        fields["attemptsRemaining"] = attempts_remaining(limit, axes.attempt)
     return {**payload, **fields}
 
 

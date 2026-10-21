@@ -150,6 +150,13 @@ def attempt_unit(session) -> tuple:
             getattr(session, "_generation", 0))
 
 
+def attempts_remaining(limit: int, attempt: int) -> int:
+    """The operator's budget less the attempts spent, clamped at zero (issue
+    #2690). The refusal field and the report share this one definition, so
+    they cannot drift apart."""
+    return max(0, limit - attempt)
+
+
 class LoopAxes:
     """The session-cumulative counters behind the six axes."""
 
@@ -267,5 +274,6 @@ class LoopAxes:
             "attempt": attempt,
         }
         if attempt_limit is not None:
-            report["attemptsRemaining"] = max(0, attempt_limit - attempt)
+            report["attemptsRemaining"] = attempts_remaining(attempt_limit,
+                                                             attempt)
         return report

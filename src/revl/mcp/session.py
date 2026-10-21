@@ -4713,6 +4713,12 @@ class Session:
         # operator had withheld.
         branch.approval_record_values = self.approval_record_values
         branch.sandbox = self.sandbox
+        # issue #2690: the operator's attempt budget is serve configuration,
+        # and the branch replaces the parent as the live session, so carrying
+        # it keeps `attemptsRemaining` on the branch's refusals. The count
+        # itself starts fresh: the branch is a new session with its own loop
+        # axes, which is what a new unit of work means here.
+        branch.attempt_limit = self.attempt_limit
         # the rule-bound authority state rides with the rules it bounds. `branch`
         # is a fresh Session, so its budget and review dicts start empty and
         # `_install_auto_approve_rules` would read the inherited rules as a first

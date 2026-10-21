@@ -193,11 +193,12 @@ def test_a_limit_below_one_is_a_usage_error_about_the_bound(capsys):
 def test_a_fresh_load_epoch_restarts_the_report_in_ci():
     """The fresh-load reset, visible without the cordis runtime.
 
-    A successful `Session.load` increments `_load_epoch` once it has booted
+    A successful `Session.load` increments `_load_epoch` in its `_boot` body
     (`src/revl/mcp/session.py`), which is the move that makes a reload a new
     unit even though its generation restarts at 1. Booting needs cordis, so
     this drives that same move on the session and checks what the report does
-    with it; the cordis-gated test below drives the real load end to end.
+    with it; the cordis-gated test below drives the real load end to end, and
+    `test_session_load_owns_the_epoch_move` keeps this move honest.
     """
     SESSION.attempt_limit = 2
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
@@ -206,6 +207,32 @@ def test_a_fresh_load_epoch_restarts_the_report_in_ci():
     axes = _call("revl_state", {})["loopAxes"]
     assert (axes["attempt"], axes["attemptsRemaining"]) == (0, 2)
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
+
+
+def test_session_load_owns_the_epoch_move():
+    """Without this, the simulated move above could stay green while the load
+    path stopped bumping the epoch, and no real load would start a new unit.
+
+    The move lives in `Session._boot`, the body `Session.load` calls, so the
+    guard names both and fails if the increment moves somewhere else."""
+    import ast  # noqa: PLC0415 — test-only
+
+    tree = ast.parse((ROOT / "src/revl/mcp/session.py").read_text())
+    session = next(node for node in tree.body
+                   if isinstance(node, ast.ClassDef)
+                   and node.name == "Session")
+    moved = [
+        node.name for node in session.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(inner, ast.AugAssign)
+            and isinstance(inner.target, ast.Attribute)
+            and isinstance(inner.target.value, ast.Name)
+            and inner.target.value.id == "self"
+            and inner.target.attr == "_load_epoch"
+            and isinstance(inner.op, ast.Add)
+            for inner in ast.walk(node))]
+    assert moved and set(moved) <= {"load", "_boot"}, moved
 
 
 @needs_cordis
