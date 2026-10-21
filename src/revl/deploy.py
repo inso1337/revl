@@ -4820,11 +4820,13 @@ def launch_container_participant(
 # the CLI to only the effect-free `--dry-run` half. This slice closes the gap
 # the two left: it drives the coordinated PREPARE/COMMIT/ABORT protocol from a
 # map, over the ONE boundary Slice 1 actually proved out — the process boundary
-# (`via = local`). A container target is opened by `launch_container_participant`
-# and a machine boundary never admits; both stay outside this entry point, which
-# is honest because `admit_deploy_map` (called with no seam set here) admits only
-# `via = local` targets, so every participant this path builds is the conductor's
-# own child on this kernel.
+# (`via = local`). A container target is opened by `launch_container_participant`,
+# and a machine boundary admits only as a `via = ssh` target with both a `host`
+# and a pinned `known_hosts`, which :func:`deploy_ssh_map` drives; both stay
+# outside this entry point, which is honest because `admit_deploy_map` (called
+# with no seam set here) admits only `via = local` targets and that pinned-ssh
+# case, so every participant this path builds is the conductor's own child on
+# this kernel.
 #
 # What is deliberately NOT here, and named so the boundary is explicit:
 #   * the attested-bundle staging and the host-side chain verify (§2, `admit`):
@@ -4921,9 +4923,11 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
     This is the CLI's COMMIT path (design §1.3, `via = local`). It:
 
       1. admits the map (:func:`admit_deploy_map`) — the effect-free half that
-         refuses a machine boundary, an unknown `via`, a network provider, and
-         (with no seam set supplied here) every container target, so the only
-         thing left to build is a process-boundary child;
+         refuses a machine boundary EXCEPT the pinned-ssh case (`via = ssh` with
+         a `host` and a `known_hosts`, the target :func:`deploy_ssh_map`
+         drives), an unknown `via`, a network provider, and (with no seam set
+         supplied here) every container target, so the only thing left to build
+         here is a process-boundary child;
       2. builds one :class:`ProcessParticipant` per process from that process's
          declared components (:func:`_local_participant_spec`);
       3. hands the ordered list to :func:`run_deploy`, which owns the commit
