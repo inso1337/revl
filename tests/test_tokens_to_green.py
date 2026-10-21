@@ -154,7 +154,7 @@ def test_per_attempt_turns_and_tokens_in_remain_paired_through_green(
     monkeypatch.setattr(tokens, "_load_compiler", lambda root: (None, None, None))
     monkeypatch.setattr(
         tokens.rescore, "score_one",
-        lambda path, *args: {"ok": path.read_text().strip() == "green"},
+        lambda path, *args: {"ok": path.read_text(encoding="utf-8").strip() == "green"},
     )
 
     cells = tokens.compute_run("funded", compiler_root=ROOT)

@@ -940,7 +940,11 @@ export interface SidecarCapture {
    * compare this key on both passes when a capture carries it. A capture
    * recorded before the key existed has none and stays stat-only, so an older
    * WAL still replays; an `fsRm` capture carries none when the parked file is
-   * not a readable regular file and stays stat-only too (issue #2650). */
+   * not a readable regular file and stays stat-only too (issue #2650). A
+   * capture that DOES carry the key carries exactly 64 lowercase hex
+   * characters; a present `null`, number or malformed string is a corrupt
+   * record, refused as `EIDENTITY` on both install paths rather than treated
+   * as absent. Only an absent key is legacy. */
   sha256?: string
 }
 
@@ -1127,7 +1131,11 @@ function rawReplaceConfined(srcReal: string, dstReal: string): void {
  * resolution, and the bytes are read through the same fd the stat came from.
  * A capture with no `sha256` (a durable record written before the digest
  * existed) is compared stat-only and still restores, so an older WAL is not
- * stranded.
+ * stranded. A capture that carries the key must carry exactly 64 lowercase hex
+ * characters: a present `null`, number, list or malformed string is a corrupt
+ * record, refused as `EIDENTITY` before the read rather than compared
+ * stat-only, because dropping the digest would drop the one check that does not
+ * depend on the clock.
  *
  * A refusal THROWS, which the teardown loop records as `restore-residue` — the
  * outcome item 243 rule 6 already defines for an inverse that cannot complete.
@@ -1140,7 +1148,8 @@ function rawInstallCapturedSidecar(
   srcReal: string, dstReal: string,
   capture: SidecarCapture | null | undefined,
 ): void {
-  const observe = (real: string, what: string):
+  const observe = (real: string, what: string, sentence: string,
+    noun: string):
     { capture: SidecarCapture; digest: string | null } => {
     const [parent] = splitLeaf(real)
     try {
@@ -1181,6 +1190,18 @@ function rawInstallCapturedSidecar(
           real,
         )
       }
+      // A capture that carries the digest key must carry exactly 64 lowercase
+      // hex characters. A present `null`, number or malformed string is a
+      // corrupt record, refused here rather than silently compared stat-only:
+      // the digest is the one check that does not depend on the inode clock, so
+      // dropping it is the downgrade the key exists to close. Only an ABSENT
+      // key is the legacy record and keeps the stat-only behaviour (D10). The
+      // check runs after the type and link-count refusals, before the size
+      // comparison and the read, so a malformed record pays no read.
+      const expected = capture?.[SIDECAR_DIGEST_FIELD]
+      if (expected !== undefined) {
+        refuseMalformedDigest(expected, real, sentence, noun)
+      }
       // A capture always records `size` (`captureOf`), and this is the fstat of
       // the same fd the digest read below would use, so a size that differs is
       // already a refusal: the sidecar grew or shrank, and the reversal cannot
@@ -1200,12 +1221,12 @@ function rawInstallCapturedSidecar(
         )
       }
       // read the bytes through the SAME fd the stat came from, after the type
-      // and link-count refusals, and only when the capture records a digest.
-      // A legacy capture (or none at all) is stat-only by contract, so it pays
-      // no read and cannot be newly refused by one; a recorded digest that
+      // and link-count refusals, and only when the capture carries the digest
+      // key. An ABSENT key is the legacy capture (or none at all): stat-only by
+      // contract, so it pays no read and cannot be newly refused by one; a
+      // present key is a bare 64-lowercase-hex string by now, and one that
       // cannot be re-read fails closed rather than downgrading the comparison
       // (issue #2652).
-      const expected = capture?.[SIDECAR_DIGEST_FIELD]
       let digest: string | null = null
       if (typeof expected === 'string') {
         try {
@@ -1231,10 +1252,11 @@ function rawInstallCapturedSidecar(
     if (capture === null || capture === undefined) return
     const drifted = fields.filter((f) => capture[f] !== undefined
       && capture[f] !== observed[f])
-    // compared only when BOTH sides carry it: the digest is read only when the
-    // capture records one, so a legacy capture stays stat-only. This is the
-    // preimage path; the parked sidecar compares its digest in
-    // `rawInstallParkedSidecar`.
+    // compared only when both sides carry one: the digest is read only for a
+    // capture that carries the key, and a present key was validated as 64
+    // lowercase hex in `observe`, so a malformed value is refused there and
+    // only an ABSENT key is stat-only. This is the preimage path; the parked
+    // sidecar compares its digest in `rawInstallParkedSidecar`.
     const expected = capture[SIDECAR_DIGEST_FIELD]
     if (digest !== null && digest !== undefined
       && typeof expected === 'string' && digest !== expected) {
@@ -1249,11 +1271,13 @@ function rawInstallCapturedSidecar(
       )
     }
   }
-  const before = observe(srcReal, 'preimage sidecar')
+  const before = observe(srcReal, 'preimage sidecar',
+    'the preimage sidecar changed since it was captured', 'the captured preimage')
   refuse(before.capture, SIDECAR_CAPTURE_FIELDS, srcReal,
     'the preimage sidecar changed since it was captured', before.digest)
   replaceConfined(srcReal, dstReal)
-  const after = observe(dstReal, 'restored target')
+  const after = observe(dstReal, 'restored target',
+    'the restored target is not the captured preimage', 'the captured preimage')
   refuse(after.capture, INSTALLED_CAPTURE_FIELDS, dstReal,
     'the restored target is not the captured preimage', after.digest)
 }
@@ -1404,17 +1428,41 @@ function refuseDriftedIdentity(
   }
 }
 
+/** Refuse a recorded `sha256` that is PRESENT but not a bare 64-lowercase-hex
+ * string. `null`, a number, a list, an uppercase digest and a short string are
+ * all corrupt records of the same kind, and the peer of the digest arm of py
+ * `_refuse_drifted_identity` on the restore and `unrm` install paths.
+ *
+ * Only an ABSENT key is legacy. Treating a present `null` as absent would let a
+ * writer who can rewrite the record downgrade the sidecar check to stat-only,
+ * which is exactly the fail-open the key exists to close, so the caller tests
+ * presence with `undefined` and routes every present value here. */
+function refuseMalformedDigest(
+  recorded: unknown, real: string, sentence: string, noun: string,
+): void {
+  if (typeof recorded !== 'string' || !SHA256_HEX.test(recorded)) {
+    throw new FsOpError(
+      'EIDENTITY',
+      `${sentence} (the recorded sha256 is not 64 lowercase hex, so the `
+      + `capture is malformed); the reversal was refused rather than install `
+      + `a file that is not ${noun}`,
+      real,
+    )
+  }
+}
+
 /** Compare the parked file's current bytes to the digest `parkCapturedSidecar`
- * recorded, or do nothing when the capture carries none (issue #2666). Peer of
- * py `_refuse_drifted_digest`.
+ * recorded, or do nothing when the capture carries no key at all (issue #2666).
+ * Peer of py `_refuse_drifted_digest`.
  *
  * A capture with no `sha256` is a record written before the key existed (a
  * durable record replayed by `revl recover`) and keeps the stat-only behaviour,
  * exactly as `refuseDriftedIdentity` does for a witness that carries no capture
- * at all. When the key IS present, a mismatch, an unreadable file, or a value
- * that is not a bare lowercase hex digest is `EIDENTITY`: the point of the key
- * is to catch the same-tick rewrite the stat fields cannot see, so falling back
- * to stat-only would admit the very file it exists to refuse.
+ * at all. When the key IS present, even as `null`, a mismatch, an unreadable
+ * file, or a value that is not a bare lowercase hex digest is `EIDENTITY`: the
+ * point of the key is to catch the same-tick rewrite the stat fields cannot
+ * see, so falling back to stat-only would admit the very file it exists to
+ * refuse.
  *
  * Named separately, like `refuseDriftedIdentity`, so the pre-rename and
  * post-rename passes of `rawInstallParkedSidecar` state the same comparison
@@ -1428,15 +1476,8 @@ function refuseDriftedDigest(
 ): void {
   if (capture === null || capture === undefined) return
   const recorded = capture.sha256
-  if (recorded === undefined || recorded === null) return
-  if (typeof recorded !== 'string' || !SHA256_HEX.test(recorded)) {
-    throw new FsOpError(
-      'EIDENTITY',
-      `${sentence} (the recorded sha256 is not a lowercase SHA-256 digest); `
-      + `the reversal was refused rather than install a file that is not ${noun}`,
-      real,
-    )
-  }
+  if (recorded === undefined) return
+  refuseMalformedDigest(recorded, real, sentence, noun)
   const observed = parkedDigest(real, what)
   if (observed === null) {
     throw new FsOpError(
@@ -1519,11 +1560,13 @@ function rawParkCapturedSidecar(
  * an `O_NOFOLLOW` descriptor and compared on BOTH passes, before and after the
  * rename, with `EIDENTITY` on a mismatch. A recorded digest that cannot be
  * re-read is the same refusal: the check never falls back to stat-only. A
- * capture with no `sha256` (a record written before the key existed, or a
- * parked inode that is not a readable regular file) keeps the stat-only
- * behaviour, so a legacy WAL still replays and an honest `fsRm` of a
- * directory, of an already-hardlinked file, or of a write-only file still
- * installs.
+ * capture that carries the key must carry exactly 64 lowercase hex characters,
+ * so a present `null`, number or malformed string is `EIDENTITY` too; it is a
+ * corrupt record, not an absent key. A capture with no `sha256` at all (a
+ * record written before the key existed, or a parked inode that is not a
+ * readable regular file) keeps the stat-only behaviour, so a legacy WAL still
+ * replays and an honest `fsRm` of a directory, of an already-hardlinked file,
+ * or of a write-only file still installs.
  *
  * The check runs again on the INSTALLED result, because the rename is by name,
  * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops
