@@ -234,7 +234,7 @@ def test_the_ts_tier_registers_a_maps_keys():
     `rememberSecret` is not generated per program on this tier, so the artifact
     that carries the rule is `backends/typescript/runtime.ts` itself.
     """
-    runtime = (ROOT / "backends" / "typescript" / "runtime.ts").read_text()
+    runtime = (ROOT / "backends" / "typescript" / "runtime.ts").read_text(encoding="utf-8")
     assert "for (const key of value.keys()) rememberSecret(key, seen)" in runtime
     assert "for (const item of value.values()) rememberSecret(item, seen)" in runtime
 

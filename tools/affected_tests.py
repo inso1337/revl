@@ -126,6 +126,10 @@ BENCH_DEPENDENT_TESTS = (
     # repository, `bench/` included (five `bench/**/run.py` files are why it
     # exists), so a new or renamed bench module can change its verdict.
     "tests/test_load_by_path_is_the_only_by_path_loader.py",
+    # Issue #2748, whose module #2764 landed: its README test reads
+    # `bench/results/admission-latency.md` and checks README.md quotes the
+    # committed median, so a bench change to that artifact can change its verdict.
+    "tests/test_mcp_admission_walkthrough_2748.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
@@ -240,6 +244,15 @@ SELFHOST_ALWAYS = (
     "tests/test_selfhost_line_coverage.py",
     "tests/test_no_embedded_frontend_document_1120.py",
 )
+
+# The text-mode `open()` encoding guard (issue #2648) walks every `.py` in the
+# tree and fails on a new unpinned text-mode `open()` or `Path.open()`. The file
+# that adds one is usually connected to nothing else the diff selects: a test
+# adding `open(target)` names no compiler module, no tier and no stdlib file, so
+# no path rule can find it. Any `.py` change selects it, because a diff that
+# cannot touch Python cannot add the call. A documentation-only diff keeps its
+# exact cost bound and does not pay for the walk.
+OPEN_ENCODING_GUARD = "tests/test_open_encoding_guard.py"
 
 # Which self-host emitter port mirrors a backend tier's REFERENCE emitter:
 # `backends/<package>/emit.py` is what `selfhost/emit_<stem>.rvl` is held
@@ -625,8 +638,8 @@ def _node(p: Path) -> str:
 # derivable part of that relation, taken from the tests' own source rather than
 # restated here.
 #
-# It does NOT replace those tables, and the difference is measured: of the 18
-# modules BENCH_DEPENDENT_TESTS declares, exactly three SPELL a `bench/` path.
+# It does NOT replace those tables, and the difference is measured: of the 32
+# modules BENCH_DEPENDENT_TESTS declares, exactly 15 SPELL a `bench/` path.
 # The rest reach it through a computed root, a directory walk, or a declaration
 # made only in prose, and no AST can see those. The tables stay; what this adds
 # is that a dependency somebody wrote down plainly no longer has to be noticed
@@ -1384,6 +1397,10 @@ def select(changed, root) -> dict:
     ci_inputs = ci_backend_corpus_inputs(root)
 
     pytest_nodes: set[str] = set()
+    # A whole-tree read has no path set to select on, so every `.py` change
+    # carries it; a non-Python diff cannot add the call. See the constant.
+    if any(f.endswith(".py") for f in changed):
+        pytest_nodes.add(OPEN_ENCODING_GUARD)
     backends: set[str] = set()
     # `ruff` because lint is cheap. `vocabulary`
     # (`tools/check_vocabulary_mirrors.py`) because it has NO path set to
@@ -2053,7 +2070,10 @@ def _test_add_delete_override(changed, added, deleted, root):
             "full": False,
             "reason": ("only new test file(s) added: "
                        + " ".join(new_tests) + " -> targeted"),
-            "pytest": new_tests,
+            # An added test is a .py change and can carry an unpinned open(),
+            # so the whole-tree guard rides along even when select() is not
+            # reached for this diff.
+            "pytest": sorted(set(new_tests) | {OPEN_ENCODING_GUARD}),
             "backends": [],
             "gates": ["ruff"],
         }
@@ -2094,7 +2114,10 @@ def _test_add_delete_override(changed, added, deleted, root):
         "full": False,
         "reason": base["reason"] + "; + added test file(s) "
                   + " ".join(new_tests),
-        "pytest": sorted(set(base["pytest"]) | set(new_tests)),
+        # The added test files are .py changes, so a diff that adds one still
+        # carries the whole-tree guard even when the rest of it is not Python.
+        "pytest": sorted(set(base["pytest"]) | set(new_tests)
+                         | {OPEN_ENCODING_GUARD}),
         "backends": base["backends"],
         "gates": base["gates"],
     }

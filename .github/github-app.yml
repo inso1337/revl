@@ -90,7 +90,7 @@ instructions: |
     vocabulary declared in more than one place, either resolve the copies into one
     definition or record the reason with `tools/check_vocabulary_mirrors.py --write` plus a
     `note`. **If the mirror is already green on `main`** —
-    `tools/check_vocabulary_mirrors.py --check` reports "all recorded and in step" — do
+    `tools/check_vocabulary_mirrors.py --check` reports `0 problem(s)` — do
     **not** run `--write`: you would record a divergence that does not exist.
   - **The remedy for an artifact is a re-run, or a merge of `origin/main` (which produces a
     fresh run) — never a re-lane, never a weakened check.** Re-runs are refused while the

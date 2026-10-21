@@ -65,7 +65,7 @@ def _emit(ir, *args, **kwargs) -> str:
 
 
 def _ir(name: str = "user_cache") -> dict:
-    return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text())
+    return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text(encoding="utf-8"))
 
 
 def test_user_cache_emits_java_structure():
@@ -389,7 +389,7 @@ def test_version_gate_accepts_ir_1_2_3():
 
 def test_user_cache_golden_byte_equality():
     src = _emit(_ir("user_cache"))
-    golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
+    golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text(encoding="utf-8")
     assert src == golden, (
         "backends/java/golden/user_cache.java drifted from the emitter. "
         + _TAIL.format(t="java"))

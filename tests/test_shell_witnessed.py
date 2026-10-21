@@ -173,14 +173,14 @@ def test_lowered_shell_ops_persist_on_commit(workspace):
     session = _session()
     session.load(_compile(_MV_RM_SRC))
 
-    assert not a.exists() and b.read_text() == "hello"
+    assert not a.exists() and b.read_text(encoding="utf-8") == "hello"
     assert not doomed.exists()
     frame = _sole_frame(session)
     assert len(frame._transactional) == 2
 
     session.unload()  # clean unload == commit
 
-    assert b.read_text() == "hello", "commit wrongly reverted the lowered mv"
+    assert b.read_text(encoding="utf-8") == "hello", "commit wrongly reverted the lowered mv"
     assert not doomed.exists(), "commit wrongly restored the lowered rm"
     for entry in frame._transactional:
         assert entry.discharged is True and entry.replayed is False
@@ -198,9 +198,9 @@ def test_lowered_shell_ops_revert_on_abort(workspace):
 
     # the witnessed inverses ran: mv undone (b gone, a back), rm undone (doomed
     # back), residue-free.
-    assert a.read_text() == "hello", "abort did not reverse the lowered mv"
+    assert a.read_text(encoding="utf-8") == "hello", "abort did not reverse the lowered mv"
     assert not b.exists(), "abort left the moved file behind"
-    assert doomed.read_text() == "junk", "abort did not un-remove the lowered rm"
+    assert doomed.read_text(encoding="utf-8") == "junk", "abort did not un-remove the lowered rm"
     garbage = workspace / ws.GARBAGE_DIRNAME
     if garbage.exists():
         assert not any(garbage.iterdir()), "rm garbage residue left after abort"

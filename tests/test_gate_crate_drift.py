@@ -457,7 +457,7 @@ def test_the_identity_names_the_generated_bytes():
         (copy / "tests" / "admit.rs").write_text("// not compiled into the lib\n")
         assert GEN.crate_identity(copy) == same
         selfhost = copy / "src" / "selfhost.rs"
-        selfhost.write_text(selfhost.read_text() + "\n// one byte more\n")
+        selfhost.write_text(selfhost.read_text(encoding="utf-8") + "\n// one byte more\n")
         assert GEN.crate_identity(copy) != same
 
 
@@ -465,7 +465,7 @@ def test_build_rs_is_generated_and_computes_what_the_generator_does():
     build = (CRATE / "build.rs").read_text(encoding="utf-8")
     assert build == GEN.BUILD_RS
     assert "cargo:rustc-env=REVL_GATE_IDENTITY=" in build
-    assert 'build = "build.rs"' in (CRATE / "Cargo.toml").read_text()
+    assert 'build = "build.rs"' in (CRATE / "Cargo.toml").read_text(encoding="utf-8")
     frontier = (CRATE / "src" / "frontier.rs").read_text(encoding="utf-8")
     assert ('pub const FRONTIER_ID: &str = concat!("selfhost-admit:", '
             'env!("REVL_GATE_IDENTITY"));') in frontier

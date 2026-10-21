@@ -38,7 +38,7 @@ def _call(tool: str, arguments: dict) -> dict:
 @pytest.fixture(autouse=True)
 def clean_session(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "tenants.rvl").write_text(TENANTS.read_text())
+    (tmp_path / "tenants.rvl").write_text(TENANTS.read_text(encoding="utf-8"))
     old = server_mod.AUTHORING
     server_mod.set_authoring_trust(roots=(str(tmp_path),))
     server_mod.set_runtime_available(True)
@@ -53,7 +53,7 @@ def clean_session(tmp_path, monkeypatch):
 
 
 def _vs() -> dict:
-    return {"source": TENANTS.read_text(), "modules": {}}
+    return {"source": TENANTS.read_text(encoding="utf-8"), "modules": {}}
 
 
 def _spec(provide) -> dict:

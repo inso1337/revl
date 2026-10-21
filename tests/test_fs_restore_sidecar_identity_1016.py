@@ -313,7 +313,7 @@ def test_a_drifted_sidecar_aborts_as_restore_residue(workspace, monkeypatch):
 
     # and the drifted snapshot was NOT installed: the abort left the forward
     # mutation in place and named it, which is what residue means.
-    assert (workspace / "artifact.txt").read_text() == "v2"
+    assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v2"
 
 
 @needs_cordis
@@ -329,5 +329,5 @@ def test_an_untampered_abort_reports_no_residue_at_all(workspace):
 
     frame = _sole_frame(session)
     assert frame.compensation_residue == []
-    assert (workspace / "artifact.txt").read_text() == "v1"
+    assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v1"
     assert not any((workspace / ws.PREIMAGE_DIRNAME).iterdir())

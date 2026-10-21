@@ -422,7 +422,7 @@ def probe_no_new_false_admits(candidate: Candidate) -> Verdict:
     if not baseline_path.is_file():
         return failed(name, f"{CENSUS_BASELINE} is not present in the candidate tree")
     try:
-        head = json.loads(baseline_path.read_text())
+        head = json.loads(baseline_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return failed(name, f"{CENSUS_BASELINE} is unreadable: {exc}")
 
@@ -514,7 +514,7 @@ def probe_held_out(candidate: Candidate) -> Verdict:
         record = None
         if verdict_path.is_file():
             try:
-                record = json.loads(verdict_path.read_text())
+                record = json.loads(verdict_path.read_text(encoding="utf-8"))
             except ValueError:
                 record = None
 
@@ -1438,7 +1438,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        record = json.loads(args.candidate.read_text())
+        record = json.loads(args.candidate.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         print(f"evolution_reward: cannot read {args.candidate}: {exc}", file=sys.stderr)
         return 1

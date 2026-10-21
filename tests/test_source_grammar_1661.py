@@ -119,12 +119,12 @@ def test_committed_grammars_equal_a_fresh_derivation():
 
 
 def test_a_parser_change_changes_the_derivation():
-    source = (ROOT / "src" / "revl" / "parser.py").read_text()
+    source = (ROOT / "src" / "revl" / "parser.py").read_text(encoding="utf-8")
     edited = source.replace('self.expect("kw", "every")', 'self.expect("kw", "everyday")', 1)
     assert edited != source
     rendered = sg.render("lark", derived=sg.derive(edited))
     assert '"everyday"' in rendered
-    assert '"everyday"' not in (ROOT / "grammar" / "revl.lark").read_text()
+    assert '"everyday"' not in (ROOT / "grammar" / "revl.lark").read_text(encoding="utf-8")
 
 
 def test_cli_check_reports_no_drift(capsys):

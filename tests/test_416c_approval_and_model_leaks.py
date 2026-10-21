@@ -106,7 +106,7 @@ def _open_wal(session: Session, tmp_path) -> None:
 def _wal_records(session: Session) -> list:
     wal_path = session.recorder.wal.path
     session.unload()
-    return [json.loads(line) for line in Path(wal_path).read_text().splitlines()
+    return [json.loads(line) for line in Path(wal_path).read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 

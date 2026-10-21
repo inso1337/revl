@@ -1014,7 +1014,10 @@ def compile_source(source: str, filename: str = "<string>",
     compile records what it READ there instead of in the returned document, so
     the IR bytes stay identical whether or not a caller asked. `report
     ["dependencies"]` maps each user-origin module the compile loaded from the
-    disk to the exact text it compiled for it.
+    disk to the exact text it compiled for it. `report["host_extern_sources"]`
+    maps each compiled source path to the host-body extern names it declared.
+    Extern names are unique after lowering, so each name has one declaration
+    source in this map.
     """
     if manifest is None and not modules:
         rule = _export_rule()
@@ -1100,6 +1103,11 @@ def compile_source(source: str, filename: str = "<string>",
         _enforce_document(document, profile)
         if report is not None:
             report["dependencies"] = {}
+            host_externs = sorted(ext.name for ext in program.externs
+                                 if ext.bodies)
+            report["host_extern_sources"] = (
+                {os.path.abspath(filename): host_externs}
+                if host_externs else {})
         return document
 
     virtual = {os.path.abspath(filename): source}
@@ -1219,8 +1227,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
     `report` (issue #1779) is the caller-supplied out-parameter described on
     `compile_source`: it carries `report["dependencies"]`, every user-origin
-    module the loader read from the disk mapped to the text compiled for it.
-    It is never part of the returned document.
+    module the loader read from the disk mapped to the text compiled for it,
+    and `report["host_extern_sources"]`, the host-body extern names declared
+    by each compiled source path. Extern names are unique after lowering, so a
+    name has one declaration source. It is never part of the returned document.
 
     Under the export rule (`_export_rule`, issue #2547), on unless the MCP
     server turned it off, an operator compile that names or reaches a file
@@ -1695,6 +1705,12 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         # compiled for each.
         report["dependencies"] = dict(loader.dependencies)
         report["disk_reads"] = dict(loader.disk_reads)
+        host_extern_sources: dict[str, list[str]] = {}
+        for name, (_extern, path) in _included_host_externs(included).items():
+            host_extern_sources.setdefault(os.path.abspath(path), []).append(name)
+        report["host_extern_sources"] = {
+            path: sorted(names) for path, names in host_extern_sources.items()
+        }
     return document
 
 

@@ -245,7 +245,7 @@ def survey(tiers=None, documents=None, *, select=False) -> dict:
             reference_statements = {}
             for tier in tiers:
                 declared = set(re.findall(r"^\s*(?:pub\s+)?fn\s+(\w+)",
-                                         (ROOT / "selfhost" / f"emit_{tier}.rvl").read_text(), re.M))
+                                         (ROOT / "selfhost" / f"emit_{tier}.rvl").read_text(encoding="utf-8"), re.M))
                 owners = lines._owners(port_paths[tier])
                 port_statements[tier] = {n for n in cov.analysis2(str(port_paths[tier]))[1]
                                          if owners.get(n) in declared}

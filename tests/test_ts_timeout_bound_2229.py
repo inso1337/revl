@@ -299,7 +299,7 @@ def test_keyboard_interrupt_leaves_no_child_alive(monkeypatch, tmp_path):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
-    grandchild = int(pidfile.read_text().strip())
+    grandchild = int(pidfile.read_text(encoding="utf-8").strip())
     for _ in range(50):
         try:
             os.kill(grandchild, 0)

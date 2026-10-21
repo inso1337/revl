@@ -234,7 +234,7 @@ def test_a_server_started_from_two_revisions_reports_two_identities(tmp_path):
     first = _checkout(tmp_path / "one", "revision one")
     second = _checkout(tmp_path / "two", "revision one")
     marker = second / "revl" / "mcp" / "identity.py"
-    marker.write_text(marker.read_text() + "\n# a second revision\n")
+    marker.write_text(marker.read_text(encoding="utf-8") + "\n# a second revision\n")
     _git(tmp_path / "two", "commit", "-aqm", "revision two")
 
     one, two = _serve(first), _serve(second)

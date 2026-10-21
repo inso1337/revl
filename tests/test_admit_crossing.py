@@ -118,7 +118,7 @@ def _pristine(path):
 
 
 def _lines(sink):
-    return Path(sink).read_text().splitlines() if os.path.exists(sink) else []
+    return Path(sink).read_text(encoding="utf-8").splitlines() if os.path.exists(sink) else []
 
 
 # --------------------------------------------------------------------------- #

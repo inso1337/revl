@@ -420,7 +420,7 @@ def test_the_historical_collision_on_the_real_selfhost_files(tmp_path):
     shutil.copytree(SELFHOST, tmp_path / "selfhost")
     shutil.copytree(ROOT / "stdlib", tmp_path / "stdlib")
     types_rvl = tmp_path / "selfhost" / "types.rvl"
-    source = types_rvl.read_text()
+    source = types_rvl.read_text(encoding="utf-8")
     declared = re.search(r"^(?:pub )?type (\w+) = \{ name: Str, ty: Str \}$",
                          source, re.MULTILINE)
     assert declared is not None, (
@@ -434,7 +434,7 @@ def test_the_historical_collision_on_the_real_selfhost_files(tmp_path):
         "historical declaration; re-derive the plant from selfhost/types.rvl"
     )
     # the case half is the shipped one, unedited.
-    assert "| Field(FieldN)" in (tmp_path / "selfhost" / "parser.rvl").read_text()
+    assert "| Field(FieldN)" in (tmp_path / "selfhost" / "parser.rvl").read_text(encoding="utf-8")
     probe = tmp_path / "selfhost" / "probe.rvl"
     probe.write_text(
         'use "./types.rvl" { structural_parse }\n'

@@ -158,7 +158,7 @@ def gate_factory(tmp_path):
 
 
 def _lines(sink: str) -> list[str]:
-    return Path(sink).read_text().splitlines() if os.path.exists(sink) else []
+    return Path(sink).read_text(encoding="utf-8").splitlines() if os.path.exists(sink) else []
 
 
 # =========================================================================== #

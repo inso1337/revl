@@ -283,7 +283,7 @@ def test_an_adt_counterexample_shrinks_to_a_minimal_case(capsys):
 
 
 def test_the_example_program_passes(capsys):
-    ir = compile_source((ROOT / "examples" / "prop_test.rvl").read_text(), "ex.rvl")
+    ir = compile_source((ROOT / "examples" / "prop_test.rvl").read_text(encoding="utf-8"), "ex.rvl")
     failures, dossier = fault_mod.run_prop_units(ir, fault_mod.prop_units(ir))
     assert failures == 0
     assert dossier["counts"]["props"] == 3

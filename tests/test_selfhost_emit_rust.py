@@ -1460,7 +1460,7 @@ def test_a_declared_but_uncalled_deferred_emission_is_not_named(emitted, referen
     """The refusal is call-site keyed on the reference: the same extern with
     nothing calling it emits, and the port agrees byte for byte."""
     src = (ROOT / "tests" / "fixtures" / "emit_rust_refusals"
-           / "deferred_emission_call.rvl").read_text()
+           / "deferred_emission_call.rvl").read_text(encoding="utf-8")
     doc = tmp_path / "uncalled.rvl"
     doc.write_text(src.replace("{ emit deliver(sink, msg) }", "{ return }"))
     ir = compile_files([str(doc)])
@@ -1499,7 +1499,7 @@ def test_an_unvalidated_operation_is_not_named(emitted, reference, tmp_path):
     """The document without `validated` emits on the reference, and the port
     agrees byte for byte: the modifier alone carries the refusal."""
     src = (REFUSAL_FIXTURES / "emit_rust_refusals"
-           / "validated_emission_operation.rvl").read_text()
+           / "validated_emission_operation.rvl").read_text(encoding="utf-8")
     doc = tmp_path / "unvalidated.rvl"
     doc.write_text(src.replace("emission validated fn", "emission fn"))
     ir = compile_files([str(doc)])
@@ -1525,7 +1525,7 @@ RUST_REFUSED_BEFORE_A_FAULT_TEST = [
                          ids=[n for n, _, _ in RUST_REFUSED_BEFORE_A_FAULT_TEST])
 def test_a_refusal_before_a_fault_test_keeps_the_reference_order(
         emitted, reference, tmp_path, name, refusal, first):
-    src = (REFUSAL_FIXTURES / "emit_rust_refusals" / name).read_text()
+    src = (REFUSAL_FIXTURES / "emit_rust_refusals" / name).read_text(encoding="utf-8")
     doc = tmp_path / "with_fault_test.rvl"
     doc.write_text(src + "\n" + FAULT_TEST_SRC)
     ir = compile_files([str(doc)])

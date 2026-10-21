@@ -122,7 +122,7 @@ def project(tmp_path, monkeypatch):
 def _add(proj: Path) -> dict:
     plan = json.dumps({"lockAdd": {"name": "greeter", "registry": "local"}})
     assert _host.commit_add(str(proj), plan) == "committed"
-    lock = json.loads((proj / "truc.lock").read_text())
+    lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     (row,) = [r for r in lock["trucs"] if r["name"] == "greeter"]
     return row
 
@@ -350,4 +350,4 @@ def test_an_edit_naming_the_use_d_file_is_refused_and_nothing_writes_it(project)
     assert exported["ok"] is True, exported
     assert truc.read_bytes() == before
     # and the vendored note was never rendered into the project's own file
-    assert TRAP_BODY not in (proj / "main.rvl").read_text()
+    assert TRAP_BODY not in (proj / "main.rvl").read_text(encoding="utf-8")

@@ -239,7 +239,7 @@ def test_bench_results_are_left_alone_unless_asked(repo):
 def test_bench_results_take_mains_side_with_the_flag(repo):
     _tool(repo, _registry(repo), "--bench")
     assert "bench/results/r.json" not in _unmerged(repo)
-    assert json.loads((repo / "bench" / "results" / "r.json").read_text()) == {"main": 1}
+    assert json.loads((repo / "bench" / "results" / "r.json").read_text(encoding="utf-8")) == {"main": 1}
 
 
 def test_a_generator_whose_tool_is_missing_is_skipped_loudly(repo):
@@ -339,7 +339,7 @@ def test_a_file_main_moved_to_a_new_layout_takes_the_deletion_and_regenerates(tm
     assert records == '"a-feature"\n"m"\n"n"\n"b-main"\n'
     assert "old.json: main moved it to a new layout (deleted on main)" in result.stdout
     # the page main put in place of a generated file is main's, as written
-    assert (repo / "old.md").read_text() == "a hand-written page now\n"
+    assert (repo / "old.md").read_text(encoding="utf-8") == "a hand-written page now\n"
     assert "old.md: main moved it to a new layout (replaced on main)" in result.stdout
     staged = _git(repo, "diff", "--cached", "--name-status").stdout
     assert "records/a.jsonl" in staged
@@ -349,7 +349,7 @@ def test_before_main_moves_the_old_file_is_still_its_generators(tmp_path):
     repo = _layout_repo(tmp_path, main_moves=False)
     result = _tool(repo, _layout_registry(repo, {"group": "rec"}))
     assert result.returncode == 0, result.stdout
-    assert json.loads((repo / "old.json").read_text()) == ["a-feature", "m", "n", "b-main"]
+    assert json.loads((repo / "old.json").read_text(encoding="utf-8")) == ["a-feature", "m", "n", "b-main"]
 
 
 def test_before_main_moves_a_hand_file_keeps_its_rule(tmp_path):
@@ -399,7 +399,7 @@ def test_an_in_place_generator_resolves_its_own_conflict_markers(tmp_path):
     result = _tool(repo, registry)
     assert result.returncode == 0, result.stdout
     assert not _unmerged(repo)
-    assert (repo / "led.jsonl").read_text() == '["f1", 1]\n["f2", 2]\n["f3", 3]\n'
+    assert (repo / "led.jsonl").read_text(encoding="utf-8") == '["f1", 1]\n["f2", 2]\n["f3", 3]\n'
 
 
 def test_an_in_place_check_failure_prints_the_hand_step(tmp_path):
@@ -413,7 +413,7 @@ def test_an_in_place_check_failure_prints_the_hand_step(tmp_path):
 
 def test_an_in_place_generator_that_did_not_run_leaves_the_conflict(tmp_path):
     repo, registry = _in_place_repo(tmp_path, '["f2", 2]')
-    data = json.loads(registry.read_text())
+    data = json.loads(registry.read_text(encoding="utf-8"))
     data["registry"][0]["write"][0]["slow"] = True
     registry.write_text(json.dumps(data), encoding="utf-8")
     result = _tool(repo, registry, "--fast")
@@ -502,7 +502,7 @@ def test_a_generator_reruns_the_ones_it_feeds(repo):
     """Regenerating an input reruns the generator that reads it: `--only toy`
     with toy feeding `part` regenerates both."""
     registry = _registry(repo)
-    data = json.loads(registry.read_text())
+    data = json.loads(registry.read_text(encoding="utf-8"))
     data["registry"][0]["feeds"] = ["part"]
     registry.write_text(json.dumps(data), encoding="utf-8")
     result = _tool(repo, registry, "--only", "toy", "--no-check")
@@ -586,7 +586,7 @@ def test_lake_in_the_elan_home_is_found_when_path_lacks_it(tmp_path):
                             env=_bare_env(home))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "SKIPPED" not in result.stdout
-    assert marker.read_text().count("fake lake build") == 2   # write + check
+    assert marker.read_text(encoding="utf-8").count("fake lake build") == 2   # write + check
 
 
 def test_a_generator_skipped_for_a_missing_tool_fails_the_run(tmp_path):
@@ -653,7 +653,7 @@ def test_run_gate_finds_lake_in_the_elan_home(tmp_path):
     result = subprocess.run(["sh", str(ROOT / "formal" / "scripts" / "run_gate.sh")],
                             capture_output=True, text=True, env=_bare_env(home))
     assert "SKIP (loud)" not in result.stdout, result.stdout
-    assert marker.read_text().startswith("fake lake build"), result.stdout + result.stderr
+    assert marker.read_text(encoding="utf-8").startswith("fake lake build"), result.stdout + result.stderr
     assert result.returncode != 0
 
 

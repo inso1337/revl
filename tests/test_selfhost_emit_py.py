@@ -722,7 +722,7 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
 def test_witnessed_source_boundaries_are_frontend_rejections(tmp_path, body, message):
     from revl.lower import RevlError
 
-    source = (CORPUS_DIR / "witnessed.rvl").read_text().split("component Stasher")[0]
+    source = (CORPUS_DIR / "witnessed.rvl").read_text(encoding="utf-8").split("component Stasher")[0]
     path = tmp_path / "witnessed_boundary.rvl"
     path.write_text(source + body)
     with pytest.raises(RevlError, match=message):

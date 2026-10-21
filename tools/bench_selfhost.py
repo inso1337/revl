@@ -442,7 +442,7 @@ def main() -> int:
     lexer_loc = sum(src.count("\n") + 1 for src in lexer_srcs)
 
     emit_irs = [compile_files([str(EMIT_CORPUS_DIR / rel)]) for rel in EMIT_CORPUS]
-    emit_loc = sum((EMIT_CORPUS_DIR / rel).read_text().count("\n") + 1
+    emit_loc = sum((EMIT_CORPUS_DIR / rel).read_text(encoding="utf-8").count("\n") + 1
                    for rel in EMIT_CORPUS)
 
     # ---- correctness gates (assert equal output BEFORE timing) --------------

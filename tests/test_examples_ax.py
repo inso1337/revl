@@ -57,7 +57,7 @@ needs_cordis = pytest.mark.skipif(
 # ------------------------------------------------------------------ manifest
 
 def _documents() -> dict:
-    docs = [d for d in yaml.safe_load_all((EXAMPLE / "ax.yaml").read_text()) if d]
+    docs = [d for d in yaml.safe_load_all((EXAMPLE / "ax.yaml").read_text(encoding="utf-8")) if d]
     return {d["kind"]: d for d in docs}
 
 
