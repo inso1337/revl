@@ -2792,7 +2792,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
 fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
-  let name = mangle(value_str(value_field(step, "name")))
+  let name = mangle(host_key(value_str(value_field(step, "name"))))
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
   // `Secret[T]` param stamps survive.
@@ -3636,16 +3636,23 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   // so a fiber waiting on it would pend forever.
   let routes = value_field(comp, "routes")
   let routed = value_keys(routes)
+  // the body reads a requirement by its binding; the host spelling is what
+  // `_revl_ctx.<field>` is read through (issue #2394)
+  let req_keys = req_bindings(comp)
+  let reqs_host = req_hosts(comp)
+  let body_ir = rewrite_req_hosts(value_field(comp, "body"), req_keys)
+  var routed_hosts = []
   for (key of routed) {
     let route = value_field(routes, key)
-    out = out.push(line(1, `_revl_route_${key} = _revl_router(_revl_ctx, ${py_repr(key)}, ${py_repr(value_list(value_field(route, "realms")))}, ${py_repr(value_field(route, "strategy"))})`))
+    routed_hosts = routed_hosts.push(host_key(key))
+    out = out.push(line(1, `_revl_route_${host_key(key)} = _revl_router(_revl_ctx, ${py_repr(key)}, ${py_repr(value_list(value_field(route, "realms")))}, ${py_repr(value_field(route, "strategy"))})`))
   }
   out = out.push("")
   // Colour first, on the IR the reference reads (a routed require is still a
   // `req` there, so an async operation through it is awaited), then route.
-  let coloured = colour_component(value_field(comp, "body"), doc_colour(ir, value_field(comp, "requires"), [], true), services)
-  let marked = mark_component(coloured, value_field(comp, "requires"), services, name)
-  let body_steps = routed.length() > 0 ? route_reqs(marked, routed) : marked
+  let coloured = colour_component(body_ir, doc_colour(ir, reqs_host, [], true), services)
+  let marked = mark_component(coloured, reqs_host, services, name)
+  let body_steps = routed_hosts.length() > 0 ? route_reqs(marked, routed_hosts) : marked
   out = out.push(line(1, body_is_async(value_list(body_steps)) ? "async def _body():" : "def _body():"))
   // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
   // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
@@ -3662,9 +3669,13 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   out = out.push("")
   out = out.push(`${name} = {`)
   out = out.push(line(1, `'name': ${py_repr(name)},`))
+  var inject_raw = []
   var inject = []
   for (k of value_keys(value_field(comp, "requires"))) {
-    if (!list_contains(routed, k)) { inject = inject.push(mangle(k)) }
+    if (!list_contains(routed, k)) {
+      inject_raw = inject_raw.push(k)
+      inject = inject.push(mangle(host_key(k)))
+    }
   }
   // v2 realm placements (docs/design-v2-realms.md). A component that declares
   // `intercept` injects through the DICT form: every required key maps to its
@@ -3674,7 +3685,7 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   let icpt = value_field(comp, "intercept")
   if (value_keys(icpt).length() > 0) {
     var pairs = []
-    for (k of inject) { pairs = pairs.push(`${py_repr(k)}: ${py_repr(value_field(icpt, k))}`) }
+    for (k of inject_raw) { pairs = pairs.push(`${py_repr(mangle(host_key(k)))}: ${py_repr(value_field(icpt, k))}`) }
     out = out.push(line(1, `'inject': {${pairs.join(", ")}},`))
   } else {
     out = out.push(line(1, `'inject': ${py_repr(inject)},`))
@@ -4532,21 +4543,25 @@ fn idempotent_map_line(ir: Any) -> Str {
 // it}, keys sorted and components in declaration order, as the reference's
 // `_render_providers` writes it.
 fn providers_map_line(ir: Any) -> Str {
-  var keys = []
+  var hosts = []
   for (c of value_list(value_field(ir, "components"))) {
     for (key of value_keys(value_field(c, "provides"))) {
-      keys = keys.push(key)
+      hosts = hosts.push(host_key(key))
     }
   }
   var entries = []
-  for (key of list_sort(list_dedup(keys))) {
+  for (host of list_sort(list_dedup(hosts))) {
     var names = []
     for (c of value_list(value_field(ir, "components"))) {
-      if (list_contains(value_keys(value_field(c, "provides")), key)) {
+      var has = false
+      for (key of value_keys(value_field(c, "provides"))) {
+        if (host_key(key) == host) { has = true }
+      }
+      if (has) {
         names = names.push(py_repr(mangle(value_str(value_field(c, "name")))))
       }
     }
-    entries = entries.push(`${py_repr(key)}: [${names.join(", ")}]`)
+    entries = entries.push(`${py_repr(host)}: [${names.join(", ")}]`)
   }
   return `_REVL_PROVIDERS = {${entries.join(", ")}}`
 }
@@ -4573,7 +4588,7 @@ fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
   if (kind == "call") {
     var args = []
     for (a of value_list(value_field(st, "args"))) { args = args.push(expr(a)) }
-    let call = `await _revl_call(root, ${py_repr(value_field(st, "key"))}, ${py_repr(value_field(st, "method"))}, [${args.join(", ")}], ${py_repr(where)})`
+    let call = `await _revl_call(root, ${py_repr(host_key(value_str(value_field(st, "key"))))}, ${py_repr(value_field(st, "method"))}, [${args.join(", ")}], ${py_repr(where)})`
     let bind = value_field(st, "bind")
     let first = value_is_null(bind) ? call : `${mangle(value_str(bind))} = ${call}`
     return [line(indent, first), line(indent, "await _revl_settle()")]
@@ -4683,19 +4698,89 @@ fn fault_config_repr(cfg: Any) -> Str {
 }
 
 
-// Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
-// as a mangled host identifier (`_host_key`, issue #1914), and this port does
-// not port that mangling yet, so it would write the raw `::` key into host
-// names. Until it does, the port names every namespaced key it meets instead
-// of emitting a silent difference.
-fn namespaced_key_markers(ir: Any) -> List[Str] {
+// `_host_key` (issue #1914): a qualified provision key (`acme::greeter`) is a
+// legal wiring identity but never a legal host identifier, so it is mangled
+// into one here — and only here. An unqualified key is returned unchanged, so a
+// document that uses no namespacing emits exactly as before:
+//
+//   _host_key(k) = k                                    if "::" not in k
+//                = "__".join(p.replace("_", "_u") for p in k.split("::"))
+//
+// The rule is injective (see backends/python/emit.py), and `_check_host_keys`
+// refuses the one residual collision, a flat key that already spells a mangled
+// one (issue #2394).
+fn host_key(key: Str) -> Str {
+  if (key.indexOf("::") < 0) { return key }
+  var parts = []
+  for (part of key.split("::")) { parts = parts.push(part.split("_").join("_u")) }
+  return parts.join("__")
+}
+
+// `_key_binding`: the local a qualified key introduces, its trailing segment
+// (`acme::greeter` -> `greeter`). A `req` IR node and the isolate/intercept/
+// route tables name a key by this binding, not by the wiring identity.
+fn key_binding(key: Str) -> Str {
+  let parts = key.split("::")
+  return parts[parts.length() - 1]
+}
+
+// binding -> raw wiring key for a component's requirements.
+fn req_bindings(comp: Any) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  for (k of value_keys(value_field(comp, "requires"))) { out = out.set(key_binding(k), k) }
+  return out
+}
+
+// host spelling -> service for a component's requirements: the table the
+// colouring and validation passes look a `req` up in after the body rewrite.
+fn req_hosts(comp: Any) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  let raw = value_field(comp, "requires")
+  for (k of value_keys(raw)) { out = out.set(host_key(k), value_field(raw, k)) }
+  return out
+}
+
+// Every `req` node's `name` is its BINDING; the emitter reads
+// `_revl_ctx.<host>`, so the binding is replaced by the host spelling once,
+// before any byte of the component is rendered.
+fn rewrite_req_hosts(node: Any, keys: Map[Str, Str]) -> Any {
+  if (value_is_object(node)) {
+    if (node_kind(node) == "req") {
+      let nm = value_str(value_field(node, "name"))
+      let host = match keys.lookup(nm) { Some(v) => host_key(v), None => "" }
+      var out: Map[Str, Any] = Map.empty()
+      for (key of value_keys(node)) {
+        out = out.set(key, key == "name" && host != "" ? host : rewrite_req_hosts(value_field(node, key), keys))
+      }
+      return out
+    }
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(node)) { fields = fields.set(key, rewrite_req_hosts(value_field(node, key), keys)) }
+    return fields
+  }
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(rewrite_req_hosts(item, keys)) }
+    return items
+  }
+  return node
+}
+
+// `_check_host_keys`: the one collision the mangling cannot represent, a flat
+// key beside a namespaced one whose host spellings agree. The reference refuses
+// the document; the port has no exception channel, so it names the pair loudly
+// instead of emitting two providers under one name.
+fn host_key_collision_markers(ir: Any) -> List[Str] {
+  var seen: Map[Str, Str] = Map.empty()
   var out = []
   for (c of value_list(value_field(ir, "components"))) {
-    let cname = value_str(value_field(c, "name"))
-    for (table of ["requires", "provides"]) {
+    for (table of ["provides", "requires", "routes", "isolate", "intercept"]) {
       for (k of value_keys(value_field(c, table))) {
-        let mark = `<<UNSUPPORTED-NAMESPACED-KEY:${cname}.${k}>>`
-        if (k.indexOf("::") >= 0 && !list_contains(out, mark)) { out = out.push(mark) }
+        let host = host_key(k)
+        let prior = match seen.lookup(host) { Some(v) => v, None => "" }
+        if (prior != "") {
+          if (prior != k) { out = out.push(`<<UNSUPPORTED-HOST-KEY-COLLISION:${k}>>`) }
+        } else { seen = seen.set(host, k) }
       }
     }
   }
@@ -4935,7 +5020,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     pairs = pairs.push(`${py_repr(nm)}: ${nm}`)
   }
   out = out.push("COMPONENTS = {".concat(pairs.join(", ")).concat("}"))
-  out = out.concat(namespaced_key_markers(ir))
+  out = out.concat(host_key_collision_markers(ir))
   return out.join(newline()).concat(newline())
 }
 

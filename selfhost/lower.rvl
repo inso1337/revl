@@ -3117,6 +3117,13 @@ fn bind_names(env: List[Bind], i: Int, acc: List[Str]) -> List[Str] {
   return bind_names(env, i + 1, acc.push(env[i].name))
 }
 
+// The BINDINGS a requirement list introduces: a `req` node names a requirement
+// by the trailing segment of its wiring key (issue #2394).
+fn req_binding_names(reqs: List[Bind], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= reqs.length()) { return acc }
+  return req_binding_names(reqs, i + 1, acc.push(key_binding_of(reqs[i].name)))
+}
+
 fn bind_lookup(env: List[Bind], n: Str, i: Int) -> Str {
   if (i >= env.length()) { return "" }
   if (env[i].name == n) { return env[i].ty }
@@ -3404,7 +3411,8 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   // 162), validated by `p_route_stmt` — it carries its own prelude wording, so
   // the form is recognised BEFORE the ordering rule fires.
   if (atw(ts, i, "isolate")) {
-    if (atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")) {
+    let kl = qkey_len(ts, i + 1)
+    if (atw(ts, i + 1 + kl, "in") && ati(ts, i + 2 + kl, "realms")) {
       return p_route_stmt(ts, i, end, provh, reqh, cname, provs, setup, iso,
                           rts, icept, hoff, action)
     }
@@ -3412,10 +3420,10 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       return mk_refuse(provs, setup, iso, rts,
                       tagged("PRELUDE", prelude_msg("isolate")), ts, i)
     }
-    let key = tkc(ts, i + 1).text
+    let key = qkey_text(ts, i + 1)
     // kw `in`, kw `realm`, `(`, string label, `)` — the single-realm pin form.
-    if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
-        && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")) {
+    if (atw(ts, i + 1 + kl, "in") && atw(ts, i + 2 + kl, "realm")
+        && atk(ts, i + 3 + kl, "(") && atk(ts, i + 4 + kl, "string")) {
       if (!bind_has(reqh, key) && !bind_has(provh, key)) {
         return mk_refuse(provs, setup, iso, rts,
           tagged("G1", isolate_target_msg(key, cname)), ts, i)
@@ -3428,11 +3436,11 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
         return mk_refuse(provs, setup, iso, rts,
           tagged("G1", isolate_twice_msg(key, cname)), ts, i)
       }
-      let rlm = tkc(ts, i + 5).text
+      let rlm = tkc(ts, i + 4 + kl).text
       // advance past the closing `)` STRUCTURALLY (item 168): a line-based skip
       // swallows the rest of a single-line component body, losing every
       // declaration and `provide` block written after the pin.
-      let nx = atk(ts, i + 6, ")") ? i + 7 : skip_line(ts, i)
+      let nx = atk(ts, i + 5 + kl, ")") ? i + 6 + kl : skip_line(ts, i)
       return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
                          setup, iso.push(mk_provkey(key, rlm)), rts, icept,
                          hoff, action)
@@ -3448,7 +3456,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       return mk_refuse(provs, setup, iso, rts,
                       tagged("PRELUDE", prelude_msg("handoff")), ts, i)
     }
-    let key = tkc(ts, i + 1).text
+    let key = qkey_text(ts, i + 1)
     if (!bind_has(provh, key)) {
       return mk_refuse(provs, setup, iso, rts,
         tagged("HANDOFF", handoff_target_msg(key, cname)), ts, i)
@@ -3476,7 +3484,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       return mk_refuse(provs, setup, iso, rts,
                       tagged("PRELUDE", prelude_msg("intercept")), ts, i)
     }
-    let key = tkc(ts, i + 1).text
+    let key = qkey_text(ts, i + 1)
     if (!bind_has(reqh, key)) {
       return mk_refuse(provs, setup, iso, rts,
         tagged("G1", intercept_target_msg(key, cname, bind_has(provh, key))), ts, i)
@@ -3485,7 +3493,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       return mk_refuse(provs, setup, iso, rts,
         tagged("G1", intercept_twice_msg(key, cname)), ts, i)
     }
-    var k = i + 1
+    var k = i + qkey_len(ts, i + 1)
     while (k < end && !atk(ts, k, "{")) { k += 1 }
     if (atk(ts, k, "{")) {
       let ce = close_brace(ts, k)
@@ -3569,7 +3577,8 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     return mk_refuse(provs, setup, iso, rts,
                     tagged("PRELUDE", route_prelude_msg()), ts, i)
   }
-  let key = tkc(ts, i + 1).text
+  let key = qkey_text(ts, i + 1)
+  let kl = qkey_len(ts, i + 1)
   if (!bind_has(reqh, key)) {
     if (bind_has(provh, key)) {
       return mk_refuse(provs, setup, iso, rts,
@@ -3586,7 +3595,7 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     return mk_refuse(provs, setup, iso, rts,
       tagged("ROUTE", route_twice_msg(key, cname)), ts, i)
   }
-  let rc = p_route_clause(ts, i + 3)
+  let rc = p_route_clause(ts, i + 2 + kl)
   if (!rc.ok) {
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
                        setup, iso, rts, icept, hoff, action)
@@ -6315,7 +6324,9 @@ fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
   var i = 0
   while (i < reqs.length()) {
-    m = m.set(reqs[i].name, reqs[i].ty)
+    // a `req` node names its requirement by the BINDING, the trailing segment
+    // of a qualified key (issue #2394)
+    m = m.set(key_binding_of(reqs[i].name), reqs[i].ty)
     i += 1
   }
   return m
@@ -24934,7 +24945,7 @@ fn req_op_returns(ts: List[Token], reqs: List[Bind], al: Map[Str, Str],
     while (o < ops.length()) {
       let rt = svc_method_ret(ts, reqs[r].ty, ops[o], al)
       if (rt != "") {
-        out = tenv_put(out, "reqop ".concat(reqs[r].name).concat(".").concat(ops[o]), rt)
+        out = tenv_put(out, "reqop ".concat(key_binding_of(reqs[r].name)).concat(".").concat(ops[o]), rt)
       }
       o += 1
     }
@@ -24955,7 +24966,7 @@ fn req_async_ops(ts: List[Token], reqs: List[Bind], acc: List[Str]) -> List[Str]
     var o = 0
     while (o < ops.length()) {
       if (svc_method_async(ts, reqs[r].ty, ops[o])) {
-        out = out.push(reqs[r].name.concat(".").concat(ops[o]))
+        out = out.push(key_binding_of(reqs[r].name).concat(".").concat(ops[o]))
       }
       o += 1
     }
@@ -25143,7 +25154,9 @@ fn comp_header_provs(ts: List[Token], i: Int) -> List[Bind] {
     var k = j + 1
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
-      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
+      let kl = qkey_len(ts, k)
+      if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
+          && atk(ts, k + kl + 1, "ident")) {
         let rt = type_at(ts, k + 2)
         if (isProv) {
           out = out.push({ name: tkc(ts, k).text,
@@ -27247,12 +27260,13 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     return cir_body(ts, ce, end, cx, provs, sc, hostSc, acc)
   }
   if (atw(ts, i, "provide")) {
-    let key = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "{")) { return mk_irres(false, "") }
-    let pend = close_brace(ts, i + 2)
+    let kl = qkey_len(ts, i + 1)
+    let key = qkey_text(ts, i + 1)
+    if (!atk(ts, i + 1 + kl, "{")) { return mk_irres(false, "") }
+    let pend = close_brace(ts, i + 1 + kl)
     if (pend == 0 - 1) { return mk_irres(false, "") }
     let svc = bind_lookup(provs, key, 0)
-    let ms = cir_prov_methods(ts, i + 3, pend - 1, cx, sc, hostSc, svc,
+    let ms = cir_prov_methods(ts, i + 2 + kl, pend - 1, cx, sc, hostSc, svc,
                               cu_names(ts), "")
     if (!ms.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
@@ -27441,20 +27455,21 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   // used to keep refusing here — issue #2086 — which dropped the whole `Router`
   // body (and, with it, the `provide` step) on every routed document.
   if (atw(ts, i, "isolate")) {
-    if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
-        && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
-        && atk(ts, i + 6, ")")) {
-      return cir_body(ts, i + 7, end, cx, provs, sc, hostSc, acc)
+    let kl = qkey_len(ts, i + 1)
+    if (atw(ts, i + 1 + kl, "in") && atw(ts, i + 2 + kl, "realm")
+        && atk(ts, i + 3 + kl, "(") && atk(ts, i + 4 + kl, "string")
+        && atk(ts, i + 5 + kl, ")")) {
+      return cir_body(ts, i + 6 + kl, end, cx, provs, sc, hostSc, acc)
     }
-    if (atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")) {
-      let rp = p_route_clause(ts, i + 3)
+    if (atw(ts, i + 1 + kl, "in") && ati(ts, i + 2 + kl, "realms")) {
+      let rp = p_route_clause(ts, i + 2 + kl)
       if (!rp.ok) { return mk_irres(false, "") }
       return cir_body(ts, rp.i, end, cx, provs, sc, hostSc, acc)
     }
     return mk_irres(false, "")
   }
   if (atw(ts, i, "intercept")) {
-    var k = i + 1
+    var k = i + qkey_len(ts, i + 1)
     while (k < end && !atk(ts, k, "{")) { k += 1 }
     if (!atk(ts, k, "{")) { return mk_irres(false, "") }
     let ce = close_brace(ts, k)
@@ -27700,8 +27715,8 @@ fn ir_intercept(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
   var j = lo
   while (j < hi && !atw(ts, j, "intercept")) { j += 1 }
   if (j >= hi) { return mk_irres(true, acc) }
-  let key = tkc(ts, j + 1).text
-  var k = j + 1
+  let key = qkey_text(ts, j + 1)
+  var k = j + qkey_len(ts, j + 1)
   while (k < hi && !atk(ts, k, "{")) { k += 1 }
   if (!atk(ts, k, "{")) { return mk_irres(false, "") }
   let r = expr_at(ts, k)
@@ -27718,10 +27733,11 @@ fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
   var j = lo
   while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
   if (j >= hi) { return acc }
-  if (atw(ts, j + 2, "in") && atw(ts, j + 3, "realm")
-      && atk(ts, j + 4, "(") && atk(ts, j + 5, "string")) {
-    let e = jstr(tkc(ts, j + 1).text).concat(": ").concat(jstr(tkc(ts, j + 5).text))
-    return ir_isolate(ts, j + 6, hi, acc == "" ? e : acc.concat(", ").concat(e))
+  let kl = qkey_len(ts, j + 1)
+  if (atw(ts, j + 1 + kl, "in") && atw(ts, j + 2 + kl, "realm")
+      && atk(ts, j + 3 + kl, "(") && atk(ts, j + 4 + kl, "string")) {
+    let e = jstr(qkey_text(ts, j + 1)).concat(": ").concat(jstr(tkc(ts, j + 4 + kl).text))
+    return ir_isolate(ts, j + 5 + kl, hi, acc == "" ? e : acc.concat(", ").concat(e))
   }
   return ir_isolate(ts, j + 1, hi, acc)
 }
@@ -27741,14 +27757,15 @@ fn ir_routes(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
   var j = lo
   while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
   if (j >= hi) { return mk_irres(true, acc) }
-  if (atw(ts, j + 2, "in") && ati(ts, j + 3, "realms")) {
-    let rp = p_route_clause(ts, j + 3)
+  let kl = qkey_len(ts, j + 1)
+  if (atw(ts, j + 1 + kl, "in") && ati(ts, j + 2 + kl, "realms")) {
+    let rp = p_route_clause(ts, j + 2 + kl)
     // A malformed clause is a reference refusal, so there is nothing to compare
     // against — but the component HEADER still has to stay byte-identical, which
     // is why this reports `ok:false` (the caller omits the key) rather than
     // failing the component.
     if (!rp.ok) { return mk_irres(false, "") }
-    let e = jstr(tkc(ts, j + 1).text)
+    let e = jstr(qkey_text(ts, j + 1))
       .concat(": {\"realms\": [").concat(ir_caps_json(rp.rlms))
       .concat("], \"strategy\": ").concat(rp.strat == "" ? "null" : jstr(rp.strat))
       .concat("}")
@@ -27813,7 +27830,9 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
     var k = j + 1
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
-      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
+      let kl = qkey_len(ts, k)
+      if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
+          && atk(ts, k + kl + 1, "ident")) {
         // the declared type is read with `type_at`, not as the bare head ident.
         // A requirement can be PARAMETERIZED — item 130's required-stream
         // coeffect `requires feed: Stream[OrderPlaced]` is the one in the
@@ -27821,11 +27840,11 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
         // `requires`. Reading only the head rendered it `Stream`, one entry
         // short of the reference on every document that declares one, which no
         // corpus document did until `emit_py_corpus/streams.rvl`.
-        let rt = type_at(ts, k + 2)
-        let pair = { name: tkc(ts, k).text,
-                     ty: rt.ok ? rt.ty : tkc(ts, k + 2).text }
+        let rt = type_at(ts, k + kl + 1)
+        let pair = { name: qkey_text(ts, k),
+                     ty: rt.ok ? rt.ty : tkc(ts, k + kl + 1).text }
         if (isReq) { reqs = reqs.push(pair) } else { provs = provs.push(pair) }
-        k = rt.ok ? rt.i : k + 3
+        k = rt.ok ? rt.i : k + kl + 2
       } else { k += 1 }
     }
     j = k
@@ -27833,7 +27852,7 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
   let end = close_brace(ts, j)
   let lo = j + 1
   let hi = end == 0 - 1 ? j + 1 : end - 1
-  let reqSet = bind_names(reqs, 0, [])
+  let reqSet = req_binding_names(reqs, 0, [])
   // the program-global facts the body reader needs beyond its lexical scope
   let cx = { reqs: reqSet, cases: case_binds(ts, al),
              reqops: req_op_returns(ts, reqs, al, []),
