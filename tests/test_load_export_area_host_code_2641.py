@@ -24,10 +24,12 @@ whatever the trust mode, exactly as the swap door does.
 The two-sided shape of the swap test is kept here:
 
 - an export-area load reports the host code the inline load reports;
-- a load of operator files OUTSIDE the export area reports nothing. That
-  direction is the operator's own program, and reporting it would be a false
-  alarm. It is also the direction the tempting simplification (stop passing
-  `host_bodies=authored`) gets wrong.
+- a load of operator files OUTSIDE the export area reports nothing while host
+  code is UNTRUSTED, the mode in which that ownership is true. Under
+  `--author-trust trusted` the same file is agent text for the disclosure gate
+  (issue #2672), and `tests/test_load_ticket_bodies_2675.py` pins that direction
+  against the swap ticket. The direction the tempting simplification (stop
+  passing `host_bodies=authored`) gets wrong is the untrusted one.
 
 Two more tests drive the shared `_compile` guard over the transport, through
 the two verbs that dispatch through it: `revl_check` and `revl_admit`. `plan`
@@ -176,28 +178,19 @@ def test_an_export_area_load_reports_the_host_code_the_inline_one_does(
 
 
 @needs_cordis
-def test_a_load_of_operator_files_outside_the_export_area_reports_nothing(
+def test_trusted_load_of_files_outside_the_export_area_reports_host_code(
         transport, tmp_path):
-    """The other direction, which the fix must not break.
-
-    A candidate that is entirely jailed `files` OUTSIDE the export area is the
-    operator's own, and its host bodies are the operator's. Reporting them as
-    unreviewed agent code would raise a false alarm on the operator's own
-    program. This is what stops the tempting simplification from looking
-    correct: dropping `host_bodies=authored` would make the approval path
-    compute the bodies with no transport test at all, and this load would
-    report the operator's own `announce`.
-    """
+    """Trusted files-only inputs outside export areas still disclose host code."""
     sink = str(tmp_path / "sink.log")
     operator_file = tmp_path / "operator.rvl"
     operator_file.write_text(_emitter(sink), encoding="utf-8")
     assert not in_export_area(str(operator_file))  # really outside the export area
 
     ticket = _load_ticket(transport, {"files": [str(operator_file)]})
-    assert not ticket.get("unreviewedHostCode"), (
-        "an operator's own file is being reported as unreviewed agent host "
-        f"code, which is a false alarm on their own program: {ticket}")
-    assert "unreviewedHostCodeWarning" not in ticket, ticket
+    assert {entry["extern"] for entry in ticket.get("unreviewedHostCode", [])} == {
+        "announce",
+    }, ticket
+    assert "unreviewedHostCodeWarning" in ticket, ticket
 
 
 def test_the_shared_compile_guard_reports_export_area_files_and_only_those(

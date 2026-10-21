@@ -1002,10 +1002,50 @@ def _run_grammar(args) -> int:
     `grammar_summary.py`, not duplicated here."""
     from .grammar_summary import PROMPT_GRAMMAR, PROSE_GRAMMAR
 
+    if getattr(args, "tool", None):
+        return _run_tool_grammar(args)
     if (getattr(args, "format", None) or getattr(args, "notes", False)
             or getattr(args, "write", False) or getattr(args, "check", False)):
         return _run_source_grammar(args)
     sys.stdout.write(PROMPT_GRAMMAR if args.prompt else PROSE_GRAMMAR)
+    return 0
+
+
+def _run_tool_grammar(args) -> int:
+    """`revl grammar --tool Service.operation`: the argument half of a tool
+    contract, derived from the service declaration (issue #2704).
+
+    A `validated` emission already ships its return type as a schema and a
+    grammar; this does the same for what a model may ask the program to do, and
+    reports the operation's declared effect (`emission`, `capabilities`). The
+    output is one JSON document: the schema, its GBNF grammar, the JSON-Schema
+    dialect, the digests and the effect, all compile-time constants. It adds no
+    runtime and claims no argument-value refinement, which needs the caller's
+    held authority at the host's call boundary."""
+    from . import tool_schema  # noqa: PLC0415 - lazy, keeps the CLI import lean
+    from .compiler import compile_files  # noqa: PLC0415
+
+    if not args.sources:
+        print("error: `grammar --tool` needs the sources that declare the "
+              "service (e.g. `revl grammar --tool Mail.send app.rvl`)",
+              file=sys.stderr)
+        return 2
+    service, _, operation = args.tool.partition(".")
+    if not service or not operation:
+        print("error: --tool takes SERVICE.OPERATION (e.g. Mail.send)",
+              file=sys.stderr)
+        return 2
+    try:
+        ir = compile_files(args.sources)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        contract = tool_schema.tool_contract(ir, service, operation)
+    except tool_schema.ToolSchemaError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    sys.stdout.write(json.dumps(contract, indent=2, sort_keys=True) + "\n")
     return 0
 
 

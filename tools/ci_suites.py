@@ -70,6 +70,11 @@ COVERED = {
 COVERED_JOBS = {
     "root-suite-affected": "a sharded slice of the frontend job's `pytest tests/`, "
                            "which --with=frontend runs whole",
+    # Issue #2642's PR job runs the selector's cordis half, a slice of the
+    # guarded suite `frontend-cordis` runs whole (same runtime, same go pin),
+    # so `--with=frontend-cordis` reproduces it on this machine.
+    "cordis-affected": "a named slice of frontend-cordis's guarded `pytest tests/`, "
+                       "which --with=frontend-cordis runs whole",
 }
 
 

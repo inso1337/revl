@@ -158,3 +158,42 @@ Until then, `no_extern` + the granted allowlist is the injection-resistant cut:
 resistant for BOTH capability reach and smuggled host code, at the cost of the
 untrusted turn writing no host code of its own (it composes granted tools only).
 See the TODO in `src/revl/mcp/quarantine.py`.
+
+## Slice 1 of #2729 landed — confinement before execution
+
+The first slice of the deferred path is in: the parts that need no host-import
+surface. It closes the *checking* half while the admit-to-substrate half above
+stays open.
+
+- **The import check reads the produced bytes.** `revl.wasm_confinement
+  .check_component_imports` parses the import section of the built component —
+  its embedded core modules, recursively — instead of the emitter's own import
+  list. Every capability import (`coeffect:`, `route:`) must name a key in the
+  component's declared G8 reach, and every import must lie in the wasm tier's
+  expected namespaces (the structural seams, `spawn:`, `instance:`, the WAL
+  framing channel, the async job pump) or it is refused. A component-level
+  import that is not the wrapper's own `import-*` lift plumbing is refused too.
+  `run_component` applies the check by default, so a component whose bytes were
+  edited after emission is refused before anything executes.
+- **Limits are applied by the runtime, not left to the caller.** A generated
+  component runs under `ComponentLimits` (fuel, a linear-memory ceiling, and a
+  wall-clock ceiling): `run_component` always passes all three to wasmtime, with
+  `trap-on-grow-failure` so memory exhaustion is a contained trap, and raises a
+  `ComponentTrap` whose `reason` distinguishes fuel, memory and wall-clock. No
+  caller has an unbounded path.
+- **The policy seam is declarative and fails closed.** `wasm components
+  confined` asks for confinement; `wasm component limits fuel = ..., memory =
+  ..., wall = ...` states the ceilings (the JSON equivalent lives under
+  `"wasm": {"confined": ..., "limits": {...}}`). A policy that asks for
+  confinement without stating limits, or states only part of a set, is refused
+  with a named `ConfinementError` rather than run under a default. With no
+  policy the conservative default limits still apply, so generated components
+  are confined by default. The quarantine tier reads its limits from the bound
+  policy; a refusal is the `refused` verdict and the running composition is
+  untouched.
+
+Still open from this issue: the host-import surface (1 above), the per-turn
+admit-to-substrate crossing (2), threading granted-tool calls back onto the 245
+frame (3), and the policy switch that requires the wasm *tier* and refuses a
+tier with no physical confinement. Those remain the design above, not a claim of
+this slice. Evidence: `tests/test_wasm_confined_default_2729.py`.
