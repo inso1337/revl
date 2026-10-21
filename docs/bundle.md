@@ -233,12 +233,18 @@ recompile, and a changed byte fails the `host file` tier naming the file. A
 manifest record that was dropped or edited fails the `host files` line.
 
 A bundled file must sit inside the directory of the `.rvl` file that names it.
-That is stricter than the compiler, which lets a module reference a file
-anywhere in the compile root. A path that leaves the directory, a link that
-resolves outside it, and a file named by a module that is not among the bundled
-sources are refused at bundle time, and a refused bundle leaves an existing
-output directory alone. The path in a bundle's own text is checked again at
-verify and is never read from outside `source/`.
+A ref pin is resolved against the bundled root, the deepest directory of a
+bundled source that contains the target, while the file itself is carried
+relative to the module that names it. When the target also sits under a deeper
+bundled source root, the two paths differ: the pin names the file relative to
+that root and `source/` would carry it relative to the declaring module, so the
+bundle is refused and the message gives both paths. That is stricter than the
+compiler, which lets a module reference a file anywhere in the compile root. A
+path that leaves the directory, a link that resolves outside it, a ref whose
+pin and module-relative path disagree, and a file named by a module that is not
+among the bundled sources are refused at bundle time, and a refused bundle
+leaves an existing output directory alone. The path in a bundle's own text is
+checked again at verify and is never read from outside `source/`.
 
 What this does and does not prove. The `host file` line checks the carried
 file against the pin in the bundle's own `ir/ir.json` and the manifest record.

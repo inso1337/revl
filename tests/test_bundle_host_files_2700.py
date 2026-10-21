@@ -9,6 +9,8 @@ two refusals:
 - one changed byte in a carried file fails verify and names the file;
 - a path that leaves the module's directory is refused at bundle time, as
   written or through a link, and a refused bundle leaves an existing one alone;
+- a ref whose pin resolves from a deeper bundled root disagrees with the
+  module-relative path and is refused with the path it would have carried;
 - a file shared by two externs, a file whose module is not bundled, a file
   changed since the compile and paths that cannot share the flat `source/`
   tree are refused or recorded once per pin;
@@ -286,6 +288,28 @@ def test_file_of_an_unbundled_module_is_refused(tmp_path):
     out = tmp_path / "b.revlbundle"
     with pytest.raises(RevlError, match="not among the bundled sources"):
         _build(root, out)
+    assert not out.exists()
+
+
+def test_ref_pinned_from_a_deeper_bundled_root_is_refused(tmp_path):
+    """A ref pin records the path relative to the deepest root that contains the
+    target. When a second bundled source sits under `host/`, that root is
+    `host/`, so the pin says `engine.py` while the module-relative path the
+    bundle would carry is `host/engine.py`. The two disagree and the bundle is
+    refused instead of writing the file at a path its own import cannot use."""
+    src = tmp_path / "tree"
+    app = _write(src / "app.rvl", REF_RVL)
+    _write(src / "host" / "engine.py", ENGINE)
+    # a bundled source under `host/` makes that directory a compile root too
+    util = _write(src / "host" / "util.rvl",
+                  "extern pure fn util(x: Str) -> Str\n"
+                  '    = @py { return x }\n')
+    inputs = [str(app), str(util)]
+    ir = compile_files(inputs)                 # the compiler accepts it
+    assert ir["externs"][0]["refs"]["py"]["path"] == "engine.py"
+    out = tmp_path / "b.revlbundle"
+    with pytest.raises(RevlError, match="would resolve as"):
+        B.build_bundle(inputs, str(out), env={})
     assert not out.exists()
 
 
