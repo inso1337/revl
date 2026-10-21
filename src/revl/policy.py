@@ -129,6 +129,36 @@ def _parse_ttl(text: str) -> int:
         f"seconds)")
 
 
+# the units a wasm component's memory ceiling may name (issue #2729). Binary
+# units are what a wasm engineer writes; decimal units are accepted too because
+# an operator may think in bytes the way a vendor states them.
+_MEMORY_UNITS = {
+    "": 1, "b": 1,
+    "kib": 1024, "mib": 1024 ** 2, "gib": 1024 ** 3,
+    "kb": 1000, "mb": 1000 ** 2, "gb": 1000 ** 3,
+}
+
+
+def _parse_memory_bytes(text: str) -> int:
+    """Parse a memory ceiling (`1048576`, `8MiB`, `64MB`) to bytes."""
+    raw = text.strip().lower().replace("_", "")
+    match = re.fullmatch(r"(\d+)\s*([kmg]i?b|b)?", raw)
+    if not match:
+        raise ValueError(
+            f"malformed memory limit {text!r} — expected `<n>[B|KiB|MiB|GiB|"
+            f"KB|MB|GB]` (a bare number is bytes)")
+    number = int(match.group(1))
+    unit = (match.group(2) or "").replace(" ", "")
+    if unit == "b":
+        unit = ""
+    return number * _MEMORY_UNITS[unit]
+
+
+def _parse_wall_seconds(text: str) -> float:
+    """Parse a wall-clock ceiling (`120s`, `5m`, `500ms`) to seconds."""
+    return _parse_ttl(text) / 1000.0
+
+
 @dataclass(frozen=True)
 class ApprovalRule:
     """A ``capability C requires approval [ttl D] [require N of {a, b, c}]`` rule
@@ -735,6 +765,16 @@ class Policy:
     # so every policy written before this clause parses and behaves
     # byte-identically and nothing is refused that was not refused before.
     never_standing_rules: tuple[NeverStandingRule, ...] = ()
+    # issue #2729: generated wasm components are confined by default. A policy
+    # may ASK for that confinement (`wasm components confined`) and must then
+    # state the ceilings the component runs under (`wasm component limits
+    # fuel = ..., memory = ..., wall = ...`); a confinement declaration with no
+    # limits is refused at use, never silently defaulted. Absent by default, so
+    # every policy written before this clause parses and behaves identically.
+    wasm_confined: bool = False
+    wasm_fuel: int | None = None
+    wasm_memory_bytes: int | None = None
+    wasm_wall_seconds: float | None = None
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
@@ -747,6 +787,9 @@ class Policy:
             and not self.auto_approve_rules \
             and not self.never_standing_rules \
             and not self.approvals_bounded \
+            and not self.wasm_confined \
+            and self.wasm_fuel is None and self.wasm_memory_bytes is None \
+            and self.wasm_wall_seconds is None \
             and not self.evidence_root_local
 
     def reissue_strength(self) -> str | None:
@@ -1064,6 +1107,83 @@ def _validate_evidence_rooting(rules, root_local: bool) -> None:
                 f"the rule, or `evidence-root: local` to the policy")
 
 
+def _parse_wasm_limits(rest: str, source: str | None,
+                       lineno: int) -> dict[str, int | float]:
+    """Parse the limit set of `wasm component limits ...` (issue #2729).
+
+    All three ceilings are written together: fuel, memory and wall. A partial
+    set is refused at parse time rather than filled in later, because a policy
+    that says "confined" and means "unbounded on one axis" reads like a
+    promise it does not keep."""
+    body = rest.strip()
+    if body.startswith(":"):
+        body = body[1:].strip()
+    pieces = [piece.strip() for piece in body.split(",") if piece.strip()]
+    if not pieces:
+        raise PolicyError(
+            source, lineno,
+            "`wasm component limits` names no limits — expected "
+            "`fuel = <n>, memory = <n>, wall = <n>`")
+    values: dict[str, int | float] = {}
+    for piece in pieces:
+        key, sep, raw = piece.partition("=")
+        if not sep:
+            bits = piece.split(None, 1)
+            if len(bits) != 2:
+                raise PolicyError(
+                    source, lineno,
+                    f"malformed wasm limit {piece!r} — expected "
+                    f"`<fuel|memory|wall> = <value>`")
+            key, raw = bits
+        key = key.strip().lower()
+        raw = raw.strip()
+        if key not in ("fuel", "memory", "wall"):
+            raise PolicyError(
+                source, lineno,
+                f"unknown wasm component limit {key!r} — the ceilings are "
+                f"`fuel`, `memory` and `wall`")
+        if key in values:
+            raise PolicyError(source, lineno,
+                              f"wasm component limit `{key}` named twice")
+        try:
+            if key == "fuel":
+                values[key] = int(raw.replace("_", ""))
+            elif key == "memory":
+                values[key] = _parse_memory_bytes(raw)
+            else:
+                values[key] = _parse_wall_seconds(raw)
+        except ValueError as exc:
+            raise PolicyError(source, lineno, str(exc))
+    missing = [key for key in ("fuel", "memory", "wall") if key not in values]
+    if missing:
+        raise PolicyError(
+            source, lineno,
+            f"`wasm component limits` must state fuel, memory and wall "
+            f"together; missing {', '.join(missing)}")
+    _validate_wasm_limit_values(values, source, lineno)
+    return values
+
+
+def _validate_wasm_limit_values(values, source: str | None,
+                                lineno: int) -> None:
+    """Reject a limit set that cannot confine anything.
+
+    A non-positive fuel or wall ceiling would trap (or unboundedly wait) before
+    any candidate could run, and a memory ceiling below one wasm page cannot be
+    instantiated at all, so either is a parse error rather than a mysterious
+    `trapped` verdict later."""
+    if values["fuel"] <= 0:
+        raise PolicyError(source, lineno,
+                          "wasm component `fuel` must be a positive number")
+    if values["wall"] <= 0:
+        raise PolicyError(source, lineno,
+                          "wasm component `wall` must be a positive duration")
+    if values["memory"] < 65536:
+        raise PolicyError(
+            source, lineno,
+            "wasm component `memory` must be at least one 64 KiB wasm page")
+
+
 def _parse_dsl(text: str, source: str | None) -> Policy:
     """The line DSL. Grammar (blank lines and ``#`` comments ignored):
 
@@ -1074,6 +1194,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         mcp               may reach      <cap>[, <cap> ...]
         agent             may reach      <cap>[, <cap> ...]   (alias of mcp)
         tenants never reach each other
+        wasm components confined
+        wasm component limits fuel = <n>, memory = <n>, wall = <n>
     """
     rules: list[Rule] = []
     tenants = False
@@ -1081,6 +1203,10 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     leases_enforced = False
     quarantine_required = False
     approvals_bounded = False
+    wasm_confined = False
+    wasm_fuel: int | None = None
+    wasm_memory_bytes: int | None = None
+    wasm_wall_seconds: float | None = None
     approval_rules: list[ApprovalRule] = []
     declassify_rules: list[Rule] = []
     taint_flow_rules: list[TaintFlowRule] = []
@@ -1272,6 +1398,36 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                    "approvals require a bounded crossing count"):
             approvals_bounded = True
             continue
+        # issue #2729: the wasm confinement switch and the ceilings a generated
+        # component runs under. The two clauses are independent on purpose: a
+        # policy may require confinement without (yet) naming limits, and that
+        # combination is REFUSED at use (`wasm_confinement.limits_from_policy`)
+        # rather than quietly running unbounded.
+        if low in ("wasm components confined", "wasm component confined"):
+            wasm_confined = True
+            continue
+        wasm_limits_seen = False
+        for prefix in ("wasm component limits", "wasm components limits",
+                       "wasm limits"):
+            if low.startswith(prefix):
+                values = _parse_wasm_limits(line[len(prefix):], source, lineno)
+                wasm_fuel = int(values["fuel"])
+                wasm_memory_bytes = int(values["memory"])
+                wasm_wall_seconds = float(values["wall"])
+                # naming the ceilings IS asking for confinement; the JSON form
+                # treats a limits object the same way, so the two spellings of
+                # one policy cannot disagree.
+                wasm_confined = True
+                wasm_limits_seen = True
+                break
+        if wasm_limits_seen:
+            continue
+        if low.startswith("wasm "):
+            raise PolicyError(
+                source, lineno,
+                f"unrecognised wasm policy line: {raw.strip()!r} — expected "
+                f"`wasm components confined` or `wasm component limits "
+                f"fuel = <n>, memory = <n>, wall = <n>`")
         # item 251, Slice 1: `component <glob> may auto-approve <caps> [in realm
         # <r>] [admitting <o>-taint,...] [ttl <D>] [uses <N>]`. Checked before the
         # `may reach` loop (it shares neither verb, but this keeps the distilled
@@ -1341,7 +1497,11 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   evidence_root_local,
                   tuple(auto_approve_rules),
                   approvals_bounded=approvals_bounded,
-                  never_standing_rules=tuple(never_standing_rules))
+                  never_standing_rules=tuple(never_standing_rules),
+                  wasm_confined=wasm_confined,
+                  wasm_fuel=wasm_fuel,
+                  wasm_memory_bytes=wasm_memory_bytes,
+                  wasm_wall_seconds=wasm_wall_seconds)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -1534,6 +1694,58 @@ def _parse_json(text: str, source: str | None) -> Policy:
                               "a never-standing entry needs a `capability` glob")
         _validate_cap_globs((cap,), cap, source, 1)
         never_standing_rules.append(NeverStandingRule(cap))
+    # issue #2729: the `wasm` object, the JSON equivalent of the two DSL
+    # clauses. `limits` implies confinement; `confined` without `limits` is
+    # parsed (so the policy reads as written) but refused at use.
+    wasm = doc.get("wasm") or {}
+    if not isinstance(wasm, dict):
+        raise PolicyError(source, 1,
+                          "`wasm` must be an object with `confined` and/or "
+                          "`limits`")
+    unknown = sorted(set(wasm) - {"confined", "limits"})
+    if unknown:
+        raise PolicyError(
+            source, 1,
+            f"`wasm` names {', '.join(unknown)}, which this policy does not "
+            f"read; it reads `confined` and `limits`")
+    wasm_confined = bool(wasm.get("confined"))
+    wasm_fuel = wasm_memory_bytes = wasm_wall_seconds = None
+    raw_limits = wasm.get("limits")
+    if raw_limits is not None:
+        if not isinstance(raw_limits, dict):
+            raise PolicyError(source, 1,
+                              "`wasm.limits` must be an object with `fuel`, "
+                              "`memory` and `wall`")
+        unknown = sorted(set(raw_limits) - {"fuel", "memory", "wall"})
+        if unknown:
+            raise PolicyError(
+                source, 1,
+                f"`wasm.limits` names {', '.join(unknown)}; the ceilings are "
+                f"`fuel`, `memory` and `wall`")
+        missing = [key for key in ("fuel", "memory", "wall")
+                   if raw_limits.get(key) is None]
+        if missing:
+            raise PolicyError(
+                source, 1,
+                f"`wasm.limits` must state fuel, memory and wall together; "
+                f"missing {', '.join(missing)}")
+        try:
+            wasm_fuel = int(str(raw_limits["fuel"]).replace("_", ""))
+            memory = raw_limits["memory"]
+            wasm_memory_bytes = (
+                int(memory) if isinstance(memory, int) and not isinstance(memory, bool)
+                else _parse_memory_bytes(str(memory)))
+            wall = raw_limits["wall"]
+            wasm_wall_seconds = (
+                float(wall) if isinstance(wall, (int, float))
+                and not isinstance(wall, bool)
+                else _parse_wall_seconds(str(wall)))
+        except (TypeError, ValueError) as exc:
+            raise PolicyError(source, 1, f"`wasm.limits`: {exc}")
+        _validate_wasm_limit_values(
+            {"fuel": wasm_fuel, "memory": wasm_memory_bytes,
+             "wall": wasm_wall_seconds}, source, 1)
+        wasm_confined = True
     _validate_evidence_rooting(evidence_rules, evidence_root_local)
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
@@ -1544,7 +1756,11 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   evidence_root_local,
                   tuple(auto_approve_rules),
                   approvals_bounded=approvals_bounded,
-                  never_standing_rules=tuple(never_standing_rules))
+                  never_standing_rules=tuple(never_standing_rules),
+                  wasm_confined=wasm_confined,
+                  wasm_fuel=wasm_fuel,
+                  wasm_memory_bytes=wasm_memory_bytes,
+                  wasm_wall_seconds=wasm_wall_seconds)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
