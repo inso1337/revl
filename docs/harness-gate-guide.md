@@ -376,7 +376,9 @@ server was served with `--attempt-limit`, `attemptsRemaining`: the refusals
 `revl_check` and `revl_admit` have spent on the current unit of work (the
 loaded composition at its current generation). They are not axes and have no
 denominator; both reset on a fresh load, a new generation or an accepted
-check/admit, and `attemptsRemaining` is absent without a configured limit.
+check/admit, and `attemptsRemaining` is absent without a configured limit. The
+report is read against the live unit, so it shows the new unit's zero
+immediately after a fresh load or a generation move, before the next verdict.
 
 | axis | numerator | denominator |
 |---|---|---|

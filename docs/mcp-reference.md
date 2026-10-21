@@ -169,7 +169,10 @@ nothing about admission, only what the refusal tells the caller; whether to
 keep retrying is the operator's decision. Both values also ride on
 `revl_state`'s `loopAxes` report with the other session measures, where
 `attempt` is `0` before the first refusal and `attemptsRemaining` is absent
-unless a limit was configured.
+unless a limit was configured. The report is read against the live unit, so
+a fresh load's own response and `revl_state` show `attempt: 0` and the full
+budget immediately after the load, not the previous unit's count; a failed
+load changes neither and keeps the count.
 
 **Changes carry their undo.** Since issue #1703, a successful call to a verb
 that mutates the session answers with `undo: {tool, arguments}`: the one call

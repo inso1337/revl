@@ -9812,8 +9812,17 @@ class Session:
         """The agent-loop axes of issue #1738 (`revl.mcp.loop_axes`), each a
         numerator, a denominator and their ratio, cumulative for the session.
         Issue #2690 adds the current unit's attempt count and, only when the
-        operator configured one, the remaining budget."""
-        return self._loop_axes.document(self._owner, self.attempt_limit)
+        operator configured one, the remaining budget.
+
+        The attempt count is read against the unit live NOW (the loaded
+        composition, its load epoch and its generation): the counter's reset
+        is lazy, so a fresh load or a new generation must be visible here
+        immediately rather than at the next verdict. A successful load's own
+        response goes through `state()`, so it shows the new unit too; a
+        failed load moved none of the three and still shows the old count."""
+        from .loop_axes import attempt_unit  # noqa: PLC0415
+        return self._loop_axes.document(self._owner, self.attempt_limit,
+                                        unit=attempt_unit(self))
 
     def record_tool_call(self, name: str, arguments: dict, payload: dict,
                          ir_before: dict | None) -> None:

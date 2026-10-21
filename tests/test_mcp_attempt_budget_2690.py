@@ -46,6 +46,9 @@ def _fresh():
     old_axes = SESSION._loop_axes
     old_limit = getattr(SESSION, "attempt_limit", None)
     old_generation = SESSION._generation
+    # absent before issue #2690; restored as absent so a run against a tree
+    # without the load epoch fails on an assertion, not in the fixture
+    old_load_epoch = getattr(SESSION, "_load_epoch", None)
     SESSION._loop_axes = LoopAxes()
     SESSION.attempt_limit = None
     repeat.forget()
@@ -57,6 +60,11 @@ def _fresh():
         SESSION._loop_axes = old_axes
         SESSION.attempt_limit = old_limit
         SESSION._generation = old_generation
+        if old_load_epoch is None:
+            if hasattr(SESSION, "_load_epoch"):
+                del SESSION._load_epoch
+        else:
+            SESSION._load_epoch = old_load_epoch
         repeat.forget()
 
 
@@ -128,30 +136,99 @@ def test_a_new_generation_starts_a_new_unit():
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
 
 
+def test_a_new_generation_is_reported_as_a_new_unit_immediately():
+    SESSION.attempt_limit = 3
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    # a swap, rollback or undo moves the generation, and no verdict has run
+    # since: the report must not show the old unit's 2 of 3
+    SESSION._generation += 1
+    axes = _call("revl_state", {})["loopAxes"]
+    assert (axes["attempt"], axes["attemptsRemaining"]) == (0, 3)
+    # and the next refusal agrees with what the report just said
+    refusal = _call("revl_check", {"source": BAD})
+    assert (refusal["attempt"], refusal["attemptsRemaining"]) == (1, 2)
+
+
+def test_the_report_compares_the_unit_it_is_read_against():
+    axes = LoopAxes()
+    old = (False, 0, 0)
+    axes.record_attempt(old, refused=True)
+    axes.record_attempt(old, refused=True)
+    assert axes.document(None, 3, unit=old)["attempt"] == 2
+    fresh = axes.document(None, 3, unit=(True, 1, 1))
+    assert (fresh["attempt"], fresh["attemptsRemaining"]) == (0, 3)
+    # reading the report is a read: it does not move the counter, so a report
+    # can neither refund a failed load nor spend an attempt
+    assert axes.document(None, 3, unit=old)["attempt"] == 2
+
+
 def test_a_refused_load_does_not_start_a_new_unit():
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
     refused = _call("revl_load", {"source": BAD})
     assert refused["ok"] is False
     assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    # a failed load moved neither the epoch nor the generation, so the report
+    # still shows the count it never reset
+    assert _call("revl_state", {})["loopAxes"]["attempt"] == 2
 
 
-def test_a_limit_below_one_is_a_usage_error():
+def test_a_limit_below_one_is_a_usage_error_about_the_bound(capsys):
     from revl.cli.parser import build_parser  # noqa: PLC0415
 
+    parser = build_parser()
+    # the parser knows the option, so accepting the smallest valid budget is
+    # part of the test: on main the flag is unknown and this line exits
+    assert parser.parse_args(
+        ["mcp", "serve", "--attempt-limit", "1"]).attempt_limit == 1
     for value in ("0", "-2"):
         with pytest.raises(SystemExit):
-            build_parser().parse_args(["mcp", "serve", "--attempt-limit", value])
+            parser.parse_args(["mcp", "serve", "--attempt-limit", value])
+        err = capsys.readouterr().err
+        # refused for the bound, not for being an unrecognised argument
+        assert "at least 1" in err
+        assert "unrecognized arguments" not in err
+
+
+def test_a_fresh_load_epoch_restarts_the_report_in_ci():
+    """The fresh-load reset, visible without the cordis runtime.
+
+    A successful `Session.load` increments `_load_epoch` once it has booted
+    (`src/revl/mcp/session.py`), which is the move that makes a reload a new
+    unit even though its generation restarts at 1. Booting needs cordis, so
+    this drives that same move on the session and checks what the report does
+    with it; the cordis-gated test below drives the real load end to end.
+    """
+    SESSION.attempt_limit = 2
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    SESSION._load_epoch += 1
+    axes = _call("revl_state", {})["loopAxes"]
+    assert (axes["attempt"], axes["attemptsRemaining"]) == (0, 2)
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
 
 
 @needs_cordis
 def test_a_fresh_load_starts_a_new_unit_of_work():
+    SESSION.attempt_limit = 2
     assert _call("revl_load", {"source": GOOD})["ok"]
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
     assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    epoch = SESSION._load_epoch
     assert _call("revl_unload", {})["ok"]
-    assert _call("revl_load", {"source": GOOD})["ok"]
+    loaded = _call("revl_load", {"source": GOOD})
+    assert loaded["ok"]
+    # the load moved the unit: a new epoch, generation 1 again
+    assert SESSION._load_epoch == epoch + 1
+    # the load response itself carries the new unit's report, not the old 2
+    # of 2 it would have shown while the reset stayed lazy
+    assert (loaded["loopAxes"]["attempt"],
+            loaded["loopAxes"]["attemptsRemaining"]) == (0, 2)
+    axes = _call("revl_state", {})["loopAxes"]
+    assert (axes["attempt"], axes["attemptsRemaining"]) == (0, 2)
     # generation starts at 1 again, but this is a new unit: the count restarts
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_state", {})["loopAxes"]["attempt"] == 1
 
 
 # ------------------------------------------- the success paths are untouched

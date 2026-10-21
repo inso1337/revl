@@ -6674,16 +6674,16 @@ def _attempt_fields(name: str, payload: dict) -> dict:
     generation, so a fresh load or a new generation (a swap, rollback or undo)
     is a new unit. An accepted call resets it. It is advisory only: admission
     never reads it, so reaching or passing the budget changes nothing but what
-    the caller is told."""
+    the caller is told. `Session.loop_axes` compares the same unit at report
+    time (`loop_axes.attempt_unit`), so the refusal and the report agree."""
     if name not in _ATTEMPT_VERBS or not isinstance(payload, dict):
         return payload
     axes = getattr(SESSION, "_loop_axes", None)
     if axes is None:            # a stand-in session (tests) keeps its shape
         return payload
+    from .loop_axes import attempt_unit  # noqa: PLC0415 — cheap, no runtime
     refused = payload.get("ok") is False or payload.get("admitted") is False
-    axes.record_attempt(
-        (SESSION.loaded, getattr(SESSION, "_load_epoch", 0),
-         getattr(SESSION, "_generation", 0)), refused)
+    axes.record_attempt(attempt_unit(SESSION), refused)
     if not refused:
         return payload
     fields = {"attempt": axes.attempt}
