@@ -851,6 +851,14 @@ def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     and nothing is compiled."""
     taken = _provider_files(providers)
     for key in modules:
+        if "\0" in key:
+            raise RevlError(
+                key, 1,
+                "admission refused: an in-memory module key contains a NUL "
+                "byte and cannot name a filesystem path",
+                hint="Use a module key without NUL bytes; this key is also "
+                     "checked as a path when preventing provider replacement",
+                category="admission")
         registered = taken.get(os.path.realpath(os.path.abspath(key)))
         if registered is None:
             continue

@@ -18,6 +18,7 @@ import os
 
 import pytest
 
+from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.mcp import server
 from revl.mcp.session import Session
@@ -146,3 +147,15 @@ def test_target_derivation_refuses_the_same_module(tmp_path):
     ir = operator._compile_candidate({"source": CANDIDATE, "modules": {}})
     by_name = {c["name"]: c for c in ir["manifest"]["components"]}
     assert by_name["T"]["provides"] == ["tool"], by_name
+
+
+def test_a_nul_byte_in_a_module_key_is_a_named_admission_refusal():
+    """An invalid path-like module key is refused before realpath can leak an
+    internal ValueError through the agent-facing compile diagnostic."""
+    with pytest.raises(RevlError) as refused:
+        _compile({"bad\0module.rvl": HIJACK})
+
+    record = classify(refused.value)
+    assert record["code"] == "REVL", record
+    assert record["category"] == "admission", record
+    assert "NUL" in record["message"], record
