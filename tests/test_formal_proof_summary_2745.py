@@ -232,7 +232,7 @@ def test_gate_writes_the_summary_when_lake_fails(tmp_path):
     r, summ, sentinel = _run_gate(tmp_path, lake_exit=1)
     assert sentinel.exists()
     assert r.returncode == 1, r.stdout + r.stderr
-    text = summ.read_text()
+    text = summ.read_text(encoding="utf-8")
     assert "Gate: FAILED (exit 1)" in text
 
 
@@ -241,7 +241,7 @@ def test_gate_writes_the_summary_on_a_loud_skip_and_keeps_exit_77(tmp_path):
     r, summ, sentinel = _run_gate(tmp_path, lake_exit=None)
     assert sentinel.exists()
     assert r.returncode == 77, r.stdout + r.stderr
-    assert "SKIPPED" in summ.read_text()
+    assert "SKIPPED" in summ.read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
