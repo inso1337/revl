@@ -8634,9 +8634,13 @@ pub fn emit_rust_src(ir: Value) -> String {
         out.extend((emit_component_auto(comp.clone(), services.clone(), ir.clone())).iter().cloned());
     }
     out.extend((emit_bridge(ir.clone())).iter().cloned());
-    out = (out.revl_concat(&deferred_emission_markers(ir.clone()))).revl_concat(&validated_markers(ir.clone()));
-    out = (out.revl_concat(&host_key_collision_markers(ir.clone()))).revl_concat(&deferred_test_markers(ir.clone()));
-    out.extend((required_stream_markers(ir.clone())).iter().cloned());
+    let mut refusals = deferred_emission_markers(ir.clone()).revl_concat(&validated_markers(ir.clone()));
+    refusals = (refusals.revl_concat(&host_key_collision_markers(ir.clone()))).revl_concat(&deferred_test_markers(ir.clone()));
+    refusals.extend((required_stream_markers(ir.clone())).iter().cloned());
+    if ((refusals.revl_length() > 0i64) || drops_routed_requirement(ir.clone())) {
+        refusals.extend((namespaced_key_markers(ir.clone())).iter().cloned());
+    }
+    out.extend((refusals).iter().cloned());
     return rstrip__m1(&(out.revl_join(&newline()))).revl_concat(&newline());
 }
 
@@ -8717,6 +8721,31 @@ fn host_key_collision_markers(ir: Value) -> Vec<String> {
         }
     }
     return out;
+}
+
+fn namespaced_key_markers(ir: Value) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for c in value_list(value_field(ir.clone(), String::from("components"))) {
+        let cname = value_str(value_field(c.clone(), String::from("name")));
+        for table in vec![String::from("requires"), String::from("provides")] {
+            for k in value_keys(value_field(c.clone(), table)) {
+                let mark = format!("<<UNSUPPORTED-NAMESPACED-KEY:{}.{}>>", cname, k);
+                if ((k.revl_index_of("::") >= 0i64) && (!list_contains(out.clone(), mark.clone()))) {
+                    out.push(mark.clone());
+                }
+            }
+        }
+    }
+    return out;
+}
+
+fn drops_routed_requirement(ir: Value) -> bool {
+    for c in value_list(value_field(ir.clone(), String::from("components"))) {
+        if (value_keys(value_field(c.clone(), String::from("routes"))).revl_length() > 0i64) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn deferred_emission_markers(ir: Value) -> Vec<String> {
