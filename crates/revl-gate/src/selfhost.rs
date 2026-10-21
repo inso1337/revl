@@ -30543,8 +30543,20 @@ fn cir_bin(b: BinN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
         return mk_irres(false, String::from(""));
     }
     let tenv = cenv_ir(cx.clone(), sc.clone());
-    let opnd = operands_of(&b.op, &infer(b.l.clone(), tenv.clone()), &infer(b.r.clone(), tenv.clone()));
-    return mk_irres(true, ((((((String::from("{\"kind\": \"bin\", \"op\": ").revl_concat(&jstr(&b.op))).revl_concat(", \"left\": ")).revl_concat(&l.js)).revl_concat(", \"right\": ")).revl_concat(&r.js)).revl_concat(&if (opnd == "") { String::from("") } else { String::from(", \"operands\": ").revl_concat(&jstr(&opnd)) })).revl_concat("}"));
+    let lt = infer(b.l.clone(), tenv.clone());
+    let rt = infer(b.r.clone(), tenv.clone());
+    let opnd = operands_of(&b.op, &lt, &rt);
+    let lw = eq_widen_left(&b.op, lt.clone(), rt.clone());
+    let rw = eq_widen_right(&b.op, lt.clone(), rt.clone());
+    let mut ljs = l.js;
+    let mut rjs = r.js;
+    if (lw != "") {
+        ljs = cir_widen(ljs.clone(), lw.clone(), lt.clone());
+    }
+    if (rw != "") {
+        rjs = cir_widen(rjs.clone(), rw.clone(), rt.clone());
+    }
+    return mk_irres(true, ((((((String::from("{\"kind\": \"bin\", \"op\": ").revl_concat(&jstr(&b.op))).revl_concat(", \"left\": ")).revl_concat(&ljs)).revl_concat(", \"right\": ")).revl_concat(&rjs)).revl_concat(&if (opnd == "") { String::from("") } else { String::from(", \"operands\": ").revl_concat(&jstr(&opnd)) })).revl_concat("}"));
 }
 
 fn cir_un(u: UnN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
@@ -32954,6 +32966,36 @@ fn operands_of(op: &str, lt: &str, rt: &str) -> String {
     return String::from("");
 }
 
+fn eq_widen_left(op: &str, lt: String, rt: String) -> String {
+    if ((((op != "==") && (op != "!=")) && (op != "===")) && (op != "!==")) {
+        return String::from("");
+    }
+    let l = parse_head(lt.clone());
+    let r = parse_head(rt.clone());
+    if (((l == "Int") || (l == "Int32")) && (r == "Float")) {
+        return String::from("Float");
+    }
+    if ((l == "Int32") && (r == "Int")) {
+        return String::from("Int");
+    }
+    return String::from("");
+}
+
+fn eq_widen_right(op: &str, lt: String, rt: String) -> String {
+    if ((((op != "==") && (op != "!=")) && (op != "===")) && (op != "!==")) {
+        return String::from("");
+    }
+    let l = parse_head(lt.clone());
+    let r = parse_head(rt.clone());
+    if ((l == "Float") && ((r == "Int") || (r == "Int32"))) {
+        return String::from("Float");
+    }
+    if ((l == "Int") && (r == "Int32")) {
+        return String::from("Int");
+    }
+    return String::from("");
+}
+
 fn arm_payload(scrutTy: String, pat: &str, env: &[Bind]) -> String {
     if ((scrutTy != "") && (tenv_get(env, &(String::from("case ").revl_concat(&pat))) == scrutTy)) {
         return tenv_get(env, &(String::from("payload ").revl_concat(&pat)));
@@ -33304,8 +33346,20 @@ fn lir_parts(parts: Vec<PartN>, env: Vec<Bind>, al: std::collections::HashMap<St
 }
 
 fn lir_bin(b: BinN, env: Vec<Bind>, al: std::collections::HashMap<String, String>) -> String {
-    let opnd = operands_of(&b.op, &infer(b.l.clone(), env.clone()), &infer(b.r.clone(), env.clone()));
-    let mut s = ((((String::from("{\"kind\":\"bin\",\"op\":").revl_concat(&jstr(&b.op))).revl_concat(",\"left\":")).revl_concat(&lir_expr(b.l.clone(), env.clone(), al.clone()))).revl_concat(",\"right\":")).revl_concat(&lir_expr(b.r.clone(), env.clone(), al.clone()));
+    let lt = infer(b.l.clone(), env.clone());
+    let rt = infer(b.r.clone(), env.clone());
+    let opnd = operands_of(&b.op, &lt, &rt);
+    let lw = eq_widen_left(&b.op, lt.clone(), rt.clone());
+    let rw = eq_widen_right(&b.op, lt.clone(), rt.clone());
+    let mut ljs = lir_expr(b.l.clone(), env.clone(), al.clone());
+    let mut rjs = lir_expr(b.r.clone(), env.clone(), al.clone());
+    if (lw != "") {
+        ljs = cir_widen(ljs.clone(), lw.clone(), lt.clone());
+    }
+    if (rw != "") {
+        rjs = cir_widen(rjs.clone(), rw.clone(), rt.clone());
+    }
+    let mut s = ((((String::from("{\"kind\":\"bin\",\"op\":").revl_concat(&jstr(&b.op))).revl_concat(",\"left\":")).revl_concat(&ljs)).revl_concat(",\"right\":")).revl_concat(&rjs);
     if (opnd != "") {
         s = (s.revl_concat(",\"operands\":")).revl_concat(&jstr(&opnd));
     }

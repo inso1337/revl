@@ -15,18 +15,19 @@
 //!
 //! `revl-gate` is the SELF-HOST front end compiled to rust. It decides the
 //! COMPOSITION AND GUARANTEE layer (`G1`..`G4`, `A1`, `PRELUDE`, and parse
-//! failures as `BAD`). It runs NO type layer, so it has **no admission arm at
-//! all**: the three verdicts are `Refused`, `NoObjection` and
-//! `OutsideFrontier`, and `to_json` reports `"admitted": false` on every one of
-//! them.
+//! failures as `BAD`) plus the fn-body statement slice of the type layer
+//! (docs/design/457). It does not run the rest of the type layer, so its
+//! verdict surface has **no admission arm at all**: the three verdicts are
+//! `Refused`, `NoObjection` and `OutsideFrontier`, and `to_json` reports
+//! `"admitted": false` on every one of them.
 //!
 //! It DOES have a manifest arm (`revl_gate::admit_into`, issue #346): the same
 //! fold over the UNION of the running composition's provisions and the
 //! candidate's. That closes the ambient half of G2/G3 - a candidate that
 //! collides with what is already running is refused here, with the fold's own
-//! why-trace - and it still issues no admission: resolving the candidate's
-//! `requires` against a live provider and type-checking it is the reference
-//! type layer, which this gate does not run.
+//! why-trace - and it still issues no admission on the verdict surface: the
+//! admission question is a separate type (`revl_gate::issue_admission_into`),
+//! asked separately and answered over a closed grammar.
 //!
 //! So the rust harness is NOT a translation of the py harness's claim. The py
 //! harness proves an IDENTITY (`revl.gate.admit` is the reference admission
@@ -54,13 +55,15 @@
 //! candidate rather than to restate the design's expectations. Three things the
 //! measurement says, none of which was safe to assume:
 //!
-//! 1. **The gate catches the composition layer and the component header, and
-//!    nothing else.** Of the seven batch candidates the py admission gate
-//!    REFUSES, this gate refuses three (`G2` provision conflict, `G4`
-//!    undeclared emission, and the `G1` header rule - a `requires`/`provides`
-//!    naming a service the text never declares). The other four - an incomplete
-//!    `provide`, a genuine parse failure, a draft with an open hole, a type
-//!    error - come back as no-objections. Every one is in the tolerated
+//! 1. **The gate catches the composition layer, the component header and the
+//!    fn-body statement layer, and nothing else.** Of the eight batch
+//!    candidates the py admission gate REFUSES, this gate refuses five (`G2`
+//!    provision conflict, `G4` undeclared emission, the `G1` header rule - a
+//!    `requires`/`provides` naming a service the text never declares - the
+//!    `T1` return-type mismatch, and, on the manifest arm, the `A6` call to an
+//!    undeclared operation). The other three - an incomplete `provide`, a
+//!    genuine parse failure, a draft with an open hole - come back as
+//!    no-objections. Every one is in the tolerated
 //!    direction (a no-objection is never an admission), and every one is a
 //!    reason a host may not treat a no-objection as a green.
 //! 2. **The manifest arm refuses what py refuses, and admits nothing.** The
@@ -91,11 +94,13 @@
 //!
 //! This is a COMPILE-TIME screen, not a sandbox. A component this gate refuses
 //! never runs in the embedder's process. A component it does not refuse has
-//! only been screened at the composition/guarantee layer - it has not been
-//! type-checked, admitted, or confined, and no manifest parameter changes that:
+//! only been screened at the composition/guarantee layer and one slice of the
+//! type layer - it has not been fully type-checked, admitted, or confined, and
+//! no manifest parameter changes that:
 //! on the manifest arm a non-refusal means "nothing in the running composition
-//! collides with this", not "this can join it". `admitted` is not a thing this
-//! gate issues, and even a py admission is not "safe to run unwitnessed": the
+//! collides with this", not "this can join it". The verdict surface never
+//! issues `admitted` (only the separate `issue_admission` surface does), and
+//! even a py admission is not "safe to run unwitnessed": the
 //! reversible-run half is item 334.
 //!
 //! # Usage
@@ -230,8 +235,8 @@ component CacheMiss requires store: Store provides cache: Cache {
 /// Kv and Rogue (G2)`, and this gate must refuse it with the SAME code and the
 /// same sentence. It is deliberately NOT in `bench/inprocess_gate_harness.py`:
 /// the py harness's two manifest negatives exercise the A6/interface-drift
-/// refusals, which live in the type layer this gate does not run. This one is
-/// built to land on the leg the two tiers DO share.
+/// refusals. This one is built to land on the plain G2 leg both tiers share,
+/// with no operation resolution involved.
 const AMBIENT_PROVISION_CONFLICT: &str = r#"
 service Store {
   fn get(key: Str) -> Str
@@ -281,9 +286,9 @@ component C provides cache: Cache {
 }
 "#;
 
-/// A program the REFERENCE refuses on the type layer and this gate cannot see.
-/// Its presence in the batch is the point: it is the shape a host must not read
-/// as an admission.
+/// A return-type mismatch: the REFERENCE refuses it `T1`, and so does this gate
+/// since the fn-body statement layer landed (docs/design/457 T3a). Its presence
+/// in the batch is the control showing that layer is decided natively.
 const TYPE_LAYER_MISS: &str = "fn f() -> Int { return \"s\" }\n";
 
 /// A source the crate declines to decide because it is over the size bound.
@@ -1155,8 +1160,9 @@ The py harness (`bench/results/inprocess-gate.md`) proves an IDENTITY:
 `revl.gate.admit` IS the reference admission path, so the in-process verdict IS
 the reference verdict. **This harness cannot and does not claim that.**
 `revl-gate` is the self-host front end compiled to rust; it decides the
-composition/guarantee layer and runs NO type layer, so its VERDICT surface has
-no admission arm at all. Its three verdicts are `refused`, `no_objection` and
+composition/guarantee layer plus the fn-body statement slice of the type layer
+(docs/design/457) and not the rest of it, so its VERDICT surface has no
+admission arm at all. Its three verdicts are `refused`, `no_objection` and
 `outside_frontier`, and the wire reports `"admitted": false` on every one of
 them.
 
@@ -1248,21 +1254,21 @@ BOTH arms ({order}), which is the property that proves the gate is stateless.
 ### What the screen catches, measured
 
 Eight of these candidates are ones the py admission gate REFUSES. This gate
-refuses **four** of them: the `G2` provision conflict, the `G4` undeclared
+refuses **five** of them: the `G2` provision conflict, the `G4` undeclared
 emission, `cache_layer`'s `G1` header rule (a `requires` naming a service the
-text never declares - the same sentence py gives), and, on the manifest arm,
-`calls_missing_method`'s `A6` (a call to an operation the running service does
-not declare). The other four come back as no-objections:
+text never declares - the same sentence py gives), `type_layer_miss`'s `T1`
+(a return-type mismatch, which the fn-body statement layer now decides), and,
+on the manifest arm, `calls_missing_method`'s `A6` (a call to an operation the
+running service does not declare). The other three come back as no-objections:
 
 * `incomplete_provide` - a `provide` block missing a declared method;
 * `syntax_error` - a source the reference parser rejects outright. The crate
   documents parse failures as `BAD`, and that arm is real (`@@@ not revl @@@`
   gets it), but the self-host parser is more permissive than the reference and
   this program walks through it;
-* `hole_draft` - a draft with an open typed hole (py refuses `T3`);
-* `type_layer_miss` - a return-type mismatch (py refuses `T1`).
+* `hole_draft` - a draft with an open typed hole (py refuses `T3`).
 
-Every one of those four is in the TOLERATED direction: a no-objection is never
+Every one of those three is in the TOLERATED direction: a no-objection is never
 an admission, so none of them is a false admit. Together they are the reason the
 crate has no `Admitted` arm, and the reason an embedder that reads a
 no-objection as a green ships an unsafe host. The one candidate this gate
@@ -1363,10 +1369,12 @@ start from.
 
 This is a COMPILE-TIME screen, not a sandbox. A component this gate refuses
 never runs in the embedder's process. A component it does not refuse has been
-screened at the composition/guarantee layer ONLY: not type-checked, not
-admitted, not confined. `admitted` is not something this gate issues - not
-standalone and not from the manifest arm, which is a refusal arm that reads the
-running composition, not an admission into it. And even a py admission is not
+screened at the composition/guarantee layer and one slice of the type layer:
+not fully type-checked, not admitted, not confined. The VERDICT surface never
+issues `admitted` - not standalone and not from the manifest arm, which is a
+refusal arm that reads the running composition, not an admission into it. An
+admission comes only from the separate admission surface (`issue_admission`),
+over its closed grammar. And even a py admission is not
 "safe to run unwitnessed" - the reversible-run half is item 334.
 
 ## Re-run
