@@ -1082,6 +1082,14 @@ export of the held source.
   operator's file is never written; adopting an export is the operator's act,
   copying it out. After an export, the copies equal `revl_snapshot`'s
   `files_content`, and `disk.stale` (which names the loaded files) is empty.
+  The answer names what it left alone (issue #2766): when a loaded file still
+  holds the previous bytes rather than the held text, `note` names the copy and
+  that file, and `adopt` lists `{"file": <loaded path>, "export": <copy>}` for
+  each. It is decided from state, not from what this call wrote, so a second
+  export (which writes nothing) still names it, and a reverted export (whose
+  copy matches the loaded file again) does not. A client that reads the export
+  as done would stop with the loaded file holding the old bytes, so the
+  copy-out step is part of the answer.
 - A composition loaded from inline source writes to `path`, with its in-memory
   modules beside it, and refuses to replace an existing file unless
   `overwrite: true`.

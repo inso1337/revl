@@ -2599,11 +2599,64 @@ def _tool_export(arguments: dict) -> dict:
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
+    copied = _copied_not_adopted(held)
+    if copied:
+        payload["note"] = _copied_note(copied)
+        payload["adopt"] = copied
     if skipped:
         payload["skipped"] = skipped
     if damaged:
         payload["exportRecordDamaged"] = damaged
     return payload
+
+
+def _copied_not_adopted(held: dict) -> list[dict]:
+    """The loaded files whose bytes are not the held text, each with the copy
+    that holds it (issue #2766).
+
+    A files-loaded composition exports each changed file to its copy under
+    `.revl/export/`, never over the loaded file (issue #2524). The success
+    payload nevertheless said the held source was "written to disk" and
+    `disk.inSync` was true, so a client read the export as adopted and stopped
+    with the loaded file still holding the old bytes. This names the difference
+    in the payload; the divergence block keeps comparing against the copy, as
+    issue #2524 defined it.
+
+    Decided from state, not from what this call wrote: a second export writes
+    nothing (the copy already holds the text) and still leaves the loaded file
+    alone, and a revert can rewrite the copy so the loaded file already equals
+    the held text, which must not be reported as waiting for a copy-out."""
+    if not held.get("files"):
+        return []
+    texts = held.get("files_content") or {}
+    roots = _file_roots()
+    out = []
+    for path in held["files"]:
+        text = texts.get(path)
+        copy = _export_jail.export_copy(path, roots)
+        if copy != path and text is not None and _edit._read_disk(path) != text:
+            out.append({"file": path, "export": copy})
+    return out
+
+
+def _copied_note(copied: list[dict]) -> str:
+    """The export note when a loaded file is not the held text (issue #2766):
+    name the copy that holds the text and the file that still holds the old
+    bytes, and say that adopting the export means copying it over. It names a
+    copy, not a tool: the server does not know which file tool the client has
+    (#2524 leaves the copy-out to whoever asked for the export)."""
+    if len(copied) == 1:
+        one = copied[0]
+        return (f"the held source is at the export copy "
+                f"{one['export']}; the loaded file {one['file']} still holds "
+                "the previous bytes. An export never writes over a loaded file "
+                "outside the export directory: adopt it by copying the copy "
+                "over that file")
+    pairs = "; ".join(f"{i['file']} (copy {i['export']})" for i in copied)
+    return ("the held source is at export copies; these loaded files "
+            f"still hold the previous bytes: {pairs}. An export never writes "
+            "over a loaded file outside the export directory: adopt it by "
+            "copying each copy over its file")
 
 
 def _write_records(records) -> tuple | None:
