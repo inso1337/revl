@@ -152,6 +152,43 @@ fn emit_ir(ir: Any, tier: Str) -> Str {
   return emit_rust_src(ir)
 }
 
+// ================================================= dropped-shape refusal tail
+// Issue #2446. An emitter with no channel to raise still says which shape it
+// cannot render, with a `<<UNSUPPORTED-...>>` marker. For the markers below the
+// marker is not a missing DETAIL: the emitter answers without the component, or
+// without the whole live tier's body — a successful result whose bytes differ
+// from the reference and from which a caller cannot tell that code was
+// dropped. The self-host rule allows a loud NAMED refusal there, so the driver
+// turns exactly those markers into `REFUSED|UNSUPPORTED|...` and the caller
+// never sees a partial program as success.
+//
+// Only whole-shape drops are listed. A marker that names one deferred SECTION
+// beside emitted code (a test driver, a host stub, a namespaced key) keeps its
+// in-bytes marker: that is the convention `tools/selfhost_differential_survey.py`
+// reads as a port refusal, and the emitted program is otherwise the reference's.
+fn dropped_shape_marker(out: Str) -> Str {
+  for (p of ["<<UNSUPPORTED-LIVE-TIER:", "<<UNSUPPORTED-COMPONENT:",
+             "<<UNSUPPORTED-component-nonsimple:"]) {
+    let at = out.indexOf(p)
+    if (at >= 0) {
+      let rest = out.slice(at, out.length())
+      let close = rest.indexOf(">>")
+      let mark = close < 0 ? p : rest.slice(0, close + 2)
+      return mark
+    }
+  }
+  return ""
+}
+
+fn dropped_shape_refusal(out: Str, tier: Str) -> Str {
+  let mark = dropped_shape_marker(out)
+  if (mark == "") { return "" }
+  return "UNSUPPORTED|".concat(mark)
+    .concat(" is not supported by the self-host compiler on `").concat(tier)
+    .concat("`: the emitter drops that component (or the document's live ")
+    .concat("tier) and would return a program that differs from the reference's")
+}
+
 // ============================================================ use resolution
 // Issue #2093. The driver above resolved no `use`: it handed `lower_to_ir` the
 // ONE document text it was given, so a document that imports a component from a
@@ -2603,7 +2640,12 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // so a type the native link cannot carry is reported as that.
   let calls = tc_admit_imports(named, path, own)
   if (calls != "") { return "REFUSED|".concat(calls) }
-  return emit_ir(json_parse(typed.ir), tier)
+  let out = emit_ir(json_parse(typed.ir), tier)
+  // Issue #2446: a whole component (or the whole live tier's body) the emitter
+  // dropped is a refusal, not a partial program.
+  let dropped = dropped_shape_refusal(out, tier)
+  if (dropped != "") { return "REFUSED|".concat(dropped) }
+  return out
 }
 
 pub fn compile_to(source: Str, tier: Str) -> Str {
@@ -2663,7 +2705,11 @@ pub fn compile_to_into(source: Str, tier: Str, manifest: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_ambient(source, manifest)
   if (verdict != "") { return "REFUSED|".concat(verdict) }
-  return emit_ir(json_parse(lower_to_ir(source)), tier)
+  let out = emit_ir(json_parse(lower_to_ir(source)), tier)
+  // Issue #2446: same dropped-shape rule as `compile_to_at`.
+  let dropped = dropped_shape_refusal(out, tier)
+  if (dropped != "") { return "REFUSED|".concat(dropped) }
+  return out
 }
 
 // ============================================================ component wrap

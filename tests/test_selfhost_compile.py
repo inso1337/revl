@@ -3590,6 +3590,41 @@ def test_a_nested_if_joining_int_and_float_emits_the_reference_bytes(
     assert got == want, got[:300]
 
 
+# Issue #2446: a block-bodied provide method is outside the native java
+# emitter's subset and the go emitter has no component tier at all. Both used to
+# answer with target source in which the component had been DROPPED behind a
+# `<<UNSUPPORTED-...>>` marker — a successful result whose bytes differ from the
+# reference's, with no refusal. The self-host rule allows a loud named refusal
+# there, so the driver now returns one.
+_BLOCK_BODY_PROVIDE = (
+    "service Front { fn go() -> Str }\n\n"
+    "component App provides front: Front {\n"
+    "  provide front {\n"
+    "    fn go() {\n"
+    '      let s = "a"\n'
+    "      return s\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize("tier", ["go", "java"])
+def test_a_dropped_component_is_a_named_refusal(compile_to, tier):
+    assert compile_source(_BLOCK_BODY_PROVIDE)  # the reference emits it
+    got = compile_to(_BLOCK_BODY_PROVIDE, tier)
+    assert got.startswith("REFUSED|UNSUPPORTED|"), got[:160]
+    assert "component" in got.lower(), got[:200]
+    assert "self-host compiler" in got, got[:200]
+
+
+def test_the_block_body_provide_still_compiles_on_py(compile_to, reference_emit):
+    """NON-VACUITY: the refusal names the two tiers that cannot emit the shape;
+    the py tier still reproduces the reference's bytes."""
+    assert compile_to(_BLOCK_BODY_PROVIDE, "py") == reference_emit["py"](
+        compile_source(_BLOCK_BODY_PROVIDE))
+
+
 # Issue #2448: the reference refuses a variant case call whose payload has the
 # wrong type, and the native gate ADMITTED it on every tier — a silent admit of
 # an ill-typed program, not a difference in spelling. `selfhost/checker.rvl`
