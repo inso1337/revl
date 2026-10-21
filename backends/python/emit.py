@@ -1623,8 +1623,9 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
     exactly one budgeted crossing: `fn go(x) = call(x)`. Everything else is
     refused at emit time because the declaration would otherwise be silently
     under- or over-charged: a transformed payload, more than one call, a call
-    inside a loop or a conditional, or recursion. Crossings saturate at two,
-    since only "one" and "more than one" decide attributability."""
+    inside a loop or a conditional, recursion, or a budgeted extern carried as a
+    function value. Crossings saturate at two, since only "one" and "more than
+    one" decide attributability."""
     name = fn.get("name")
     if isinstance(name, str) and name in seen:
         # a recursive invocation may cross the extern any number of times
