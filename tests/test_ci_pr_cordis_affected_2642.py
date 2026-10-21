@@ -35,6 +35,7 @@ classified: `tests/test_ci_pr_queue_split_1678.py` and
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -51,6 +52,12 @@ FULL = "${{ steps.select.outputs.full == '1' }}"
 RUNS = ("${{ steps.probe.outputs.needed == '1' && "
         "steps.select.outputs.full != '1' }}")
 SELECTION = "${{ steps.select.outputs.pytest }}"
+#: The shell GitHub Actions runs a `run:` step with on ubuntu-latest: bash is
+#: the default when it is present (the documented fallback is `sh` only when
+#: bash is not). The probe step carries `set -o pipefail`, bash-only syntax, so
+#: the extracted body has to be executed by bash too: Ubuntu's `sh` is dash,
+#: which dies at that line before reaching the branch this file pins.
+PRODUCTION_SHELL = "bash"
 
 
 def _norm(cond) -> str:
@@ -224,12 +231,24 @@ def _probe_repo(tmp_path: Path, driver: str | None = None) -> Path:
 
 
 def _run_probe(tmp_path: Path, tree: Path, selection: str):
-    """The probe step's own shell, run against `tree`."""
+    """The probe step's own shell, run against `tree` under the shell the
+    workflow runs it with.
+
+    That is `bash`, the ubuntu-latest default for a `run:` step, not `sh`:
+    the probe body opens with `set -euo pipefail`, and Ubuntu's `sh` is dash,
+    which rejects `-o pipefail` at that line. Executing the extracted body
+    under `sh` measured this test's own shell rather than production's and
+    failed before the branch under test ran."""
     out = tmp_path / "github_output"
     out.write_text("", encoding="utf-8")
+    shell = shutil.which(PRODUCTION_SHELL)
+    assert shell is not None, (
+        f"{PRODUCTION_SHELL} is not on PATH: the probe step runs under bash "
+        "and carries `set -o pipefail`, so the extracted body cannot be "
+        "executed faithfully by any other shell")
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
            "SEL_PYTEST": selection, "GITHUB_OUTPUT": str(out)}
-    done = subprocess.run(["sh", "-c", _probe_script()], cwd=tree, env=env,
+    done = subprocess.run([shell, "-c", _probe_script()], cwd=tree, env=env,
                           capture_output=True, text=True, timeout=120,
                           check=False)
     return done, out.read_text(encoding="utf-8")
@@ -273,7 +292,13 @@ def test_the_probe_false_path_skip_is_driven_by_the_real_shell(tmp_path):
     """The probe's shell is executed, not just read: a selection with no
     cordis file takes the visible skip, a selection that names one is
     needed=1 (no pin on a fresh tree: the driver's STATUS missing), and an
-    answer that is neither is a hard error, never a skip."""
+    answer that is neither is a hard error, never a skip.
+
+    It runs under `bash`, the shell GitHub Actions gives a `run:` step on
+    ubuntu-latest, and executes the step's text unmodified, `set -euo
+    pipefail` included. That option is bash-only syntax: Ubuntu's `sh` is
+    dash, which exits at that line, so `sh -c` ran the body under a shell
+    production never uses and measured the test's own shell instead."""
     tree = _probe_repo(tmp_path / "plain")
     done, out = _run_probe(tmp_path, tree, "tests/test_plain_thing.py")
     assert done.returncode == 0, done.stdout + done.stderr
