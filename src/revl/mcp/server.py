@@ -836,6 +836,74 @@ def _provider_files(providers: dict) -> dict[str, str]:
             for path in providers}
 
 
+def _provider_use_closure(providers: dict) -> dict[str, tuple[str, str]]:
+    """Issue #2778: every file the providers' own text `use`s, by realpath.
+
+    The displacement refusal below compared the agent's modules with the
+    provider FILES themselves. A provider's `use` imports are ordinary files
+    on disk, not registered providers, and the composition compile resolves a
+    provider's `use` through the in-memory sources map first, so an agent
+    module keyed at a dependency's path still composes in the place of the
+    file the provider depends on: the provider's text is unchanged and its
+    behaviour changes.
+
+    Resolution mirrors the operator compile exactly. Each module is walked
+    from the absolute path the loader keys it by, and a nested `use` resolves
+    relative to that path's directory first, then the search path
+    (`REVL_IMPORT_PATH`, then the stdlib). The realpath is only the comparison
+    key, so every spelling of one file collides with the same agent module
+    while a symlinked dependency is still walked from the directory the
+    compiler reads it through. A source that does not parse and a `use` that
+    does not resolve are skipped: the provider compile owns those errors and
+    refuses them before anything runs.
+    """
+    from ..compiler import _default_search_path  # noqa: PLC0415 - same package
+    from ..parser import parse_text  # noqa: PLC0415 - avoids a parser import here
+
+    def resolve(importer: str, use_path: str) -> str:
+        target = os.path.join(os.path.dirname(importer), use_path)
+        if os.path.isfile(target):
+            return target
+        for base in _default_search_path():
+            candidate = os.path.join(base, use_path)
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    closure: dict[str, tuple[str, str]] = {}
+    seen = {os.path.realpath(path) for path in providers}
+    for registered, text in providers.items():
+        # the frontier carries the path the compiler would LOAD the module by,
+        # and the realpath is used only to compare one file against another
+        frontier = [registered]
+        sources = {registered: text}
+        while frontier:
+            importer = frontier.pop()
+            try:
+                program = parse_text(sources.pop(importer), importer)
+            except (RevlError, RecursionError):
+                # the provider compile reports an unparseable module itself
+                continue
+            for use in program.uses:
+                target = resolve(importer, use.path)
+                if not target:
+                    continue
+                real = os.path.realpath(target)
+                if real in seen:
+                    continue
+                seen.add(real)
+                closure[real] = (registered, use.path)
+                loaded = os.path.abspath(target)
+                try:
+                    with open(loaded, encoding="utf-8") as handle:
+                        sources[loaded] = handle.read()
+                except (OSError, UnicodeDecodeError):
+                    # the provider compile owns a dependency it cannot read
+                    continue
+                frontier.append(loaded)
+    return closure
+
+
 def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     """Issue #2763: refuse a candidate whose in-memory module names a file the
     operator registered as a `--provider`, under any spelling of that path.
@@ -848,23 +916,44 @@ def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     the agent's text compiled in the provider's place. A refusal, not a silent
     drop: the reason names the module as the caller sent it and the provider
     it collided with, a path inside the roots the jail refusal already shows,
-    and nothing is compiled."""
+    and nothing is compiled.
+
+    Issue #2778: the same rule covers the files a provider's own text `use`s.
+    Those are not registered providers, but the composition compile resolves a
+    provider's `use` through the in-memory map first, so a module keyed at a
+    dependency's path would compose in the place of the file the provider
+    depends on."""
     taken = _provider_files(providers)
+    dependencies = _provider_use_closure(providers)
     for key in modules:
-        registered = taken.get(os.path.realpath(os.path.abspath(key)))
-        if registered is None:
+        real = os.path.realpath(os.path.abspath(key))
+        registered = taken.get(real)
+        if registered is not None:
+            raise RevlError(
+                key, 1,
+                f"admission refused: module `{key}` names the operator-sanctioned "
+                f"provider `{registered}`; an agent-supplied module may not take "
+                f"a granted provider's place",
+                hint="a `--provider` module is the operator's own host code and "
+                     "is composed under the path the operator registered; it "
+                     "cannot be replaced from the transport under any spelling "
+                     "of that path. Send your module under a path of its own and "
+                     "compose the provider's service through `use` of the "
+                     "registered path, or ask the operator to change the provider",
+                category="admission")
+        owner = dependencies.get(real)
+        if owner is None:
             continue
+        dependency_provider, use_path = owner
         raise RevlError(
             key, 1,
-            f"admission refused: module `{key}` names the operator-sanctioned "
-            f"provider `{registered}`; an agent-supplied module may not take "
-            f"a granted provider's place",
-            hint="a `--provider` module is the operator's own host code and "
-                 "is composed under the path the operator registered; it "
-                 "cannot be replaced from the transport under any spelling "
-                 "of that path. Send your module under a path of its own and "
-                 "compose the provider's service through `use` of the "
-                 "registered path, or ask the operator to change the provider",
+            f"admission refused: module `{key}` names `{use_path}`, a file the "
+            f"operator-sanctioned provider `{dependency_provider}` uses; an "
+            f"agent-supplied module may not take a provider's dependency's place",
+            hint="the provider's own `use` resolves through the composition's "
+                 "in-memory sources first, so a module sent under a path the "
+                 "provider imports would compose in place of the file the "
+                 "operator sanctioned. Send your module under a path of its own",
             category="admission")
 
 
