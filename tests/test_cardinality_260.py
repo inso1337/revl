@@ -523,3 +523,21 @@ component Agent requires model: Model provides agent: Loop {
     out = buf.getvalue()
     assert "cardinality: model <= config.max_steps per activation" in out
     assert "(1 per iteration)" in out
+
+
+def test_self_call_inside_local_arrow_invoked_twice_stays_unbounded():
+    """A local arrow's body contains one static self-call node but the
+    recursive path invokes that arrow twice, so its actual recursion branches."""
+    agent = _agent_model_verdict("""
+fn recurse_twice(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let x = step(msgs)
+  let again = next => recurse_twice(next, step, n - 1)
+  let first = again(msgs)
+  return again(msgs)
+}""", "recurse_twice(msgs, msgs2 => emit model.complete(msgs2), 5)")
+    entry = agent["per_capability"]["model"]
+    assert agent["verdict"] == "unbounded"
+    assert entry["kind"] == "unbounded"
+    assert entry["bound"] is None
+    assert "recursion" in entry["reason"]

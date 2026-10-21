@@ -145,7 +145,34 @@ the refusal changes (issue #1694):
   refusal names.
 
 Different arguments, a different verb, or a call that succeeds resets the count.
-A successful response is never rewritten.
+A successful response is never rewritten. This `repeat.attempt` counts
+refusals of *the same call*; the next section counts refusals on the *unit of
+work*, which is a different question.
+
+**Refusals carry the attempt count and the remaining budget.** Since issue
+#2690, every refusal from `revl_check` or `revl_admit` carries `attempt`: how
+many times those two verdict verbs have refused this unit of work, 1-based.
+The unit is the loaded composition at its current generation, so a fresh load,
+a new generation (a swap, rollback or undo) or a successful check or admit
+starts it again. `attemptsRemaining` says how much of the operator's budget is
+left:
+
+```json
+{"ok": false, "attempt": 3, "attemptsRemaining": 0,
+ "diagnostics": [{"severity": "error", "code": "G2", "...": "..."}]}
+```
+
+The budget comes from session configuration, never from the caller:
+`revl mcp serve --attempt-limit N`. Without that flag the field is absent, not
+a made-up number. The count is advisory: reaching or passing the limit changes
+nothing about admission, only what the refusal tells the caller; whether to
+keep retrying is the operator's decision. Both values also ride on
+`revl_state`'s `loopAxes` report with the other session measures, where
+`attempt` is `0` before the first refusal and `attemptsRemaining` is absent
+unless a limit was configured. The report is read against the live unit, so
+a fresh load's own response and `revl_state` show `attempt: 0` and the full
+budget immediately after the load, not the previous unit's count; a failed
+load changes neither and keeps the count.
 
 **Changes carry their undo.** Since issue #1703, a successful call to a verb
 that mutates the session answers with `undo: {tool, arguments}`: the one call
