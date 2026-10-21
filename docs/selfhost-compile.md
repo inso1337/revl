@@ -384,6 +384,29 @@ functions, types, components and externs: lexer through emitter, one revl
 composition, no reference bytes in the chain, byte-exact with the reference on py
 and rust.
 
+### Known type-check gaps (issue #2405)
+
+The native gate now gives the reference's verdict and message for a `var`
+reassignment and for `if` branches of different types (issue #2442), for a
+nominal record's generic field given the wrong type argument (gap 5), and for a
+record update on an applied generic record (gap 9). A record literal for a
+BARE generic record (gap 3) is a named refusal: the reference expands the
+declaration and names the field, and the native gate does not instantiate a
+bare parameter, so it says so rather than admitting the document.
+
+Still admitted silently, each listed on the issue:
+
+- gap 4: a wrong field nested inside a recursive generic record literal
+  (`L[Str]` for `L[Int]`); the expansion stops at the recursion.
+- gap 6: a function value passed where its parameter types differ by a type
+  argument.
+- gap 7: a generic record applied with the wrong number of type arguments. No
+  reproducer the reference refuses has been found yet.
+- gap 8: an `Opt[Box[Str]]` match binder used as `Box[Int]`; a block-arm `let`
+  is not typed against the binder.
+- gap 10: a prop body whose match block arm ends in an `if`; the reference
+  refuses the arm as not ending in an expression.
+
 ## What the reference is still used for (proof oracle, not pipeline)
 
 The typed component body is no longer a reference-only remainder. Items 242 + 241

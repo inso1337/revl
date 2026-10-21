@@ -3564,6 +3564,72 @@ def test_a_well_typed_var_or_if_is_admitted_on_both_sides(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2405, remaining gaps: a nominal record field declared as an applied
+# generic record given a literal of the wrong type argument (gap 5), and a
+# record update on an applied generic record (gap 9). The reference names both
+# exactly, and the native gate now gives the same verdict and message. A record
+# literal for a BARE generic record (gap 3) is a named refusal: the reference
+# expands the declaration (`field `v` of `Box` expects `T`, got `Int``) and the
+# native gate does not instantiate a bare parameter, so it says so instead of
+# admitting the document.
+_ISSUE_2405_REMAINING_EXACT = {
+    "nominal_generic_field": (
+        "type Box[T] = { v: T }\ntype R = { b: Box[Int] }\nfn f() -> Int {\n"
+        "  let r: R = { b: { v: \"s\" } }\n  return 1\n}\n"),
+    "record_update_on_generic": (
+        "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box[Int] = { v: 1 }\n"
+        "  let c = { b | v = 2 }\n  return 1\n}\n"),
+}
+
+_ISSUE_2405_REMAINING_NAMED = {
+    "bare_generic_literal": (
+        "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box = { v: 1 }\n"
+        "  return 1\n}\n"),
+    "bare_generic_literal_call": (
+        "type Box[T] = { v: T }\nfn g(b: Box[Int]) -> Int { return b.v }\n"
+        "fn f() -> Int {\n  let b: Box = { v: 1 }\n  return g(b)\n}\n"),
+}
+
+_ISSUE_2405_REMAINING_CONTROLS = {
+    "bare_generic_annotation": "type Box[T] = { v: T }\nfn f(b: Box) -> Int { return 1 }\n",
+    "record_update_plain": (
+        "type Row = { a: Int }\nfn f() -> Int {\n  let r: Row = { a: 1 }\n"
+        "  let s = { r | a = 2 }\n  return s.a\n}\n"),
+    "generic_literal": (
+        "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box[Int] = { v: 1 }\n"
+        "  return b.v\n}\n"),
+}
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_EXACT))
+def test_a_generic_record_mistype_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text = _ISSUE_2405_REMAINING_EXACT[name]
+    want = _reference_refusal(text)
+    assert want != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|TYPE|" + want, got[:160]
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_NAMED))
+def test_a_bare_generic_record_literal_is_a_named_refusal(
+        compile_rvl, name, tier):
+    text = _ISSUE_2405_REMAINING_NAMED[name]
+    assert _reference_refusal(text) != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got.startswith("REFUSED|TYPE|a record literal for the bare generic record `Box` ")
+    assert "issue #2405" in got
+
+
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_CONTROLS))
+def test_the_well_typed_generic_record_forms_are_admitted(admit, name):
+    text = _ISSUE_2405_REMAINING_CONTROLS[name]
+    assert _reference_refusal(text) == ""
+    assert admit(text) == ""
+
+
 # Issue #2447: the reference refuses a variant case call with the wrong number
 # of payload arguments. The documents are the reference's own table,
 # tests/test_case_call_arity.py; `selfhost/*.rvl` does not count the arguments

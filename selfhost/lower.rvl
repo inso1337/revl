@@ -13997,10 +13997,74 @@ fn tk_check(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
   }
 }
 
+// Issue #2405 (gap 5): the reference's `compatible` resolves a declared
+// record met by a record literal field-wise, and names the first field whose
+// declared type is an applied generic record the literal does not fit
+// (`field `b` of `R` expects `Box[Int]`, got `{v: Str}``). Deeper and
+// non-generic field mismatches keep the caller's own message.
+fn tk_nominal_literal_mismatch(expected: Str, actual: Str, env: List[Bind]) -> Str {
+  if (!tk_nominal_name(expected) || !tk_is_struct(actual)) { return "" }
+  let shape = tk_nominal_shape(expected, env)
+  if (shape == "" || !tk_is_struct(shape)) { return "" }
+  let fs = tk_split_depth(shape.slice(1, shape.length() - 1))
+  var i = 0
+  while (i < fs.length()) {
+    let ci = fs[i].indexOf(":")
+    if (ci == 0 - 1) { return "" }
+    let f = ty_trim(fs[i].slice(0, ci))
+    let fty = ty_trim(fs[i].slice(ci + 1, fs[i].length()))
+    let afty = tk_struct_field(actual, f)
+    if (afty != "" && tk_generic_record(fty, env) && tk_is_struct(afty)
+        && !tk_compat_env(fty, afty, env)) {
+      return "field `".concat(f).concat("` of `").concat(tk_render(expected))
+        .concat("` expects `").concat(tk_render(fty)).concat("`, got `")
+        .concat(tk_render(afty)).concat("`")
+    }
+    i += 1
+  }
+  return ""
+}
+
+// Issue #2405 (gap 6): two function types whose parameter types differ by a
+// type argument are not compatible, and the reference names the argument
+// position. Decided only where a generic record is involved on either side:
+// every other function-type pairing keeps the gradual frontier.
+fn tk_fn_ty_mismatch(expected: Str, actual: Str, env: List[Bind]) -> Bool {
+  if (!tk_is_fn_ty(expected) || !tk_is_fn_ty(actual)) { return false }
+  let ep = ty_parse(expected).args
+  let ap = ty_parse(actual).args
+  if (ep.length() != ap.length() || ep.length() == 0) { return false }
+  var i = 0
+  while (i < ep.length() - 1) {
+    if (ep[i] != "" && ap[i] != ""
+        && (grec_mentioned(ep[i], env) || grec_mentioned(ap[i], env))
+        && !tk_compat_env(ep[i], ap[i], env)) { return true }
+    i += 1
+  }
+  return false
+}
+
 fn tk_check_flat(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
   let r = tk_infer(e, env)
   if (r.v != "") { return r }
   if (r.ty == "") { return r }
+  if (tk_fn_ty_mismatch(expected, r.ty, env)) {
+    return tk_mismatch(where_, expected, r.ty)
+  }
+  // issue #2405 (gap 5): a declared record's generic field, named exactly as
+  // the reference names it
+  let nom = tk_nominal_literal_mismatch(expected, r.ty, env)
+  if (nom != "") { return tk_no("TYPE", nom) }
+  // issue #2405 (gap 3): a BARE generic record (`Box`, no arguments) is a type
+  // the reference does not resolve a record literal against; it expands the
+  // declaration and refuses the first field (`field `v` of `Box` expects `T`,
+  // got `Int``). The native gate does not instantiate a bare one, so it names
+  // the shape instead of admitting it silently.
+  let bh = parse_head(expected)
+  if (expected == bh && tk_is_struct(r.ty) && tenv_get(env, "gpar ".concat(bh)) != "") {
+    return tk_no("TYPE", "a record literal for the bare generic record `"
+      .concat(bh).concat("` is not typed by the native gate (issue #2405)"))
+  }
   // issue #2399: a generic record is checked against its instantiated fields
   if (!tk_compat_env(expected, r.ty, env)) {
     return tk_mismatch(where_, expected, r.ty)
@@ -14471,6 +14535,13 @@ fn tk_recupd(base: Expr, upds: List[InitN], env: List[Bind]) -> TInf {
     let v = tk_upd_values(upds, 0, env)
     if (v.v != "") { return v }
     return tk_ok("")
+  }
+  // issue #2405 (gap 9): the reference's `record_update` admits a structural
+  // record or a declared one written bare, and refuses an APPLIED generic
+  // record by name (`Box[Int]` is not a record position there).
+  if (tk_generic_record(b.ty, env)) {
+    return tk_no("TYPE", "record update requires a record type, `"
+      .concat(tk_render(b.ty)).concat("` is not one"))
   }
   return tk_upd_fields(b.ty, upds, 0, env, false)
 }

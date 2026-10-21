@@ -19695,6 +19695,51 @@ fn tk_check(e: Expr, expected: String, env: Vec<Bind>, where__: &str) -> TInf {
 };
 }
 
+fn tk_nominal_literal_mismatch(expected: String, actual: &str, env: &[Bind]) -> String {
+    if ((!tk_nominal_name(expected.clone())) || (!tk_is_struct(actual))) {
+        return String::from("");
+    }
+    let shape = tk_nominal_shape(&expected, env);
+    if ((shape == "") || (!tk_is_struct(&shape))) {
+        return String::from("");
+    }
+    let fs = tk_split_depth(&(shape.revl_slice(1i64, (shape.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
+    let mut i = 0i64;
+    while (i < fs.revl_length()) {
+        let ci = (fs)[(i) as usize].revl_index_of(":");
+        if (ci == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return String::from("");
+        }
+        let f = ty_trim(&((fs)[(i) as usize].revl_slice(0i64, ci)));
+        let fty = ty_trim(&((fs)[(i) as usize].revl_slice((ci).checked_add(1i64).expect("revl: Int overflow"), (fs)[(i) as usize].revl_length())));
+        let afty = tk_struct_field(actual, &f);
+        if ((((afty != "") && tk_generic_record(&fty, env)) && tk_is_struct(&afty)) && (!tk_compat_env(fty.clone(), afty.clone(), env))) {
+            return (((((((String::from("field `").revl_concat(&f)).revl_concat("` of `")).revl_concat(&tk_render(expected.clone()))).revl_concat("` expects `")).revl_concat(&tk_render(fty.clone()))).revl_concat("`, got `")).revl_concat(&tk_render(afty.clone()))).revl_concat("`");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return String::from("");
+}
+
+fn tk_fn_ty_mismatch(expected: String, actual: String, env: &[Bind]) -> bool {
+    if ((!tk_is_fn_ty(&expected)) || (!tk_is_fn_ty(&actual))) {
+        return false;
+    }
+    let ep = ty_parse(expected.clone()).args;
+    let ap = ty_parse(actual.clone()).args;
+    if ((ep.revl_length() != ap.revl_length()) || (ep.revl_length() == 0i64)) {
+        return false;
+    }
+    let mut i = 0i64;
+    while (i < (ep.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) {
+        if (((((ep)[(i) as usize] != "") && ((ap)[(i) as usize] != "")) && (grec_mentioned(&(ep)[(i) as usize], env) || grec_mentioned(&(ap)[(i) as usize], env))) && (!tk_compat_env((ep)[(i) as usize].clone(), (ap)[(i) as usize].clone(), env))) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
 fn tk_check_flat(e: Expr, expected: String, env: Vec<Bind>, where__: &str) -> TInf {
     let r = tk_infer(e.clone(), env.clone());
     if (r.v != "") {
@@ -19702,6 +19747,17 @@ fn tk_check_flat(e: Expr, expected: String, env: Vec<Bind>, where__: &str) -> TI
     }
     if (r.ty == "") {
         return r;
+    }
+    if tk_fn_ty_mismatch(expected.clone(), r.ty.clone(), &env) {
+        return tk_mismatch(where__, expected.clone(), r.ty.clone());
+    }
+    let nom = tk_nominal_literal_mismatch(expected.clone(), &r.ty, &env);
+    if (nom != "") {
+        return tk_no("TYPE", &nom);
+    }
+    let bh = parse_head(expected.clone());
+    if (((expected == bh) && tk_is_struct(&r.ty)) && (tenv_get(&env, &(String::from("gpar ").revl_concat(&bh))) != "")) {
+        return tk_no("TYPE", &((String::from("a record literal for the bare generic record `").revl_concat(&bh)).revl_concat("` is not typed by the native gate (issue #2405)")));
     }
     if (!tk_compat_env(expected.clone(), r.ty.clone(), &env)) {
         return tk_mismatch(where__, expected.clone(), r.ty.clone());
@@ -20101,6 +20157,9 @@ fn tk_recupd(base: Expr, upds: Vec<InitN>, env: Vec<Bind>) -> TInf {
             return v;
         }
         return tk_ok(String::from(""));
+    }
+    if tk_generic_record(&b.ty, &env) {
+        return tk_no("TYPE", &((String::from("record update requires a record type, `").revl_concat(&tk_render(b.ty.clone()))).revl_concat("` is not one")));
     }
     return tk_upd_fields(b.ty.clone(), upds.clone(), 0i64, env.clone(), false);
 }
