@@ -730,6 +730,47 @@ def test_the_read_text_guard_mapping_names_the_walking_test():
         "`endswith('.py')` predicate is no longer its surface")
 
 
+def test_a_change_to_the_guard_module_or_its_scan_rules_selects_it():
+    """A change to the guard's own module is the drift class at its source.
+
+    The scan rules are IN that module: `SKIP_DIRS` is the tree surface the walk
+    covers, `source_files` the walker, `scan` the AST check and `REASON` the
+    report a finding carries. Editing any of them changes which call sites the
+    guard can see, so the diff must re-run the guard over the whole tree.
+
+    The modified-test arm also selects the module by name, so the *reason* is
+    pinned too: without the `.py` rule this test would pass for the wrong
+    reason. If a scan rule moves into a helper module, that helper is a `.py`
+    and the rule still selects the guard for it; the `hasattr` pin above is
+    what notices the move and keeps this test next to the rules."""
+    guard = _guard_scan_module()
+    for attr in ("SKIP_DIRS", "source_files", "scan", "REASON"):
+        assert hasattr(guard, attr), (
+            f"the guard's scan rule {attr} is no longer in "
+            f"{at.READ_TEXT_GUARD_TEST}. If it moved to another module, that "
+            "module is a `.py` and the `.py` rule selects the guard for it, "
+            "but this pin has to move with it.")
+    r = sel(at.READ_TEXT_GUARD_TEST)
+    assert r["full"] is False, r
+    assert at.READ_TEXT_GUARD_TEST in r["pytest"], r["pytest"]
+    assert "read_text encoding guard" in r["reason"], r["reason"]
+
+
+def test_a_change_to_the_selector_itself_selects_the_guard():
+    """The selector is where the rule lives, so its own diff is a `.py` diff.
+
+    It selects the mapping's own unit test through the self-test arm, and the
+    whole-tree guard through this rule; neither is reached by an import graph
+    from `tools/affected_tests.py`. A change here can edit `select()` itself,
+    which decides whether the guard runs at all, so the recursion has to close
+    without a manual full run."""
+    r = sel("tools/affected_tests.py")
+    assert r["full"] is False, r
+    assert "tests/test_affected_tests.py" in r["pytest"], r["pytest"]
+    assert at.READ_TEXT_GUARD_TEST in r["pytest"], r["pytest"]
+    assert "read_text encoding guard" in r["reason"], r["reason"]
+
+
 def test_a_vendored_python_backend_module_selects_the_wheel_gate_narrowly():
     """The #1092 path itself: a py-tier module the wheel vendors picks up the
     wheel gate, and does so WITHOUT escalating to FULL. Widening the selector
