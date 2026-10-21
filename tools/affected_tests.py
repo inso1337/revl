@@ -1725,8 +1725,9 @@ def select(changed, root) -> dict:
         # shards; they never decide which tests run (the shards partition the
         # collection whatever the weights say, which
         # tests/test_root_suite_shards_1774.py pins). A refresh of them, or of
-        # the tool that writes them, selects that test alone instead of a FULL
-        # run across four shards. tests/_shard.py itself stays FULL.
+        # the tool that writes them, selects that test instead of a FULL run
+        # across four shards; the .py writer also carries the whole-tree
+        # open-encoding guard (issue #2771). tests/_shard.py itself stays FULL.
         if f in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
             pytest_nodes.add("tests/test_root_suite_shards_1774.py")
             reasons.append(f"{f} (shard balance only)")
