@@ -835,28 +835,43 @@ def check_tier(tier: str, source: str) -> tuple[str, str, str]:
 #   py:    `ZeroDivisionError: integer modulo by zero`, `IndexError: list ...`
 #   ts:    `RangeError: Division by zero`, `Error: revl: list index out ...`
 #   go:    `panic: runtime error: integer divide by zero`, `index out of range`
-#   java:  `ArithmeticException: / by zero`, `IndexOutOfBoundsException`
+#   java:  `ArithmeticException: / by zero`, `Index 1 out of bounds for length 1`
 #   rust:  `attempt to calculate the remainder with a divisor of zero`,
 #          `index out of bounds`
-#   wasm:  a trap (`integer divide by zero`, `out of bounds memory access`)
+#   wasm:  a trap (`integer divide by zero`, `out of bounds memory access`, or
+#          the ambiguous `unreachable`, which names no cause and is therefore
+#          not compared as a divergence)
 _FAULT_SIGNS = {
     "divzero": ("modulo by zero", "division by zero", "divide by zero",
-                "div by zero", "divisor of zero", "/ by zero"),
+                "div by zero", "divisor of zero", "/ by zero",
+                "integer divide by zero"),
     "index": ("index out of range", "index out of bounds", "list index",
-              "out-of-bounds", "array index out of bounds"),
+              "out-of-bounds", "out of bounds", "array index out of bounds",
+              "indexoutofboundsexception", "out of bounds for length"),
     "overflow": ("int overflow", "integer overflow", "attempt to add with overflow",
                  "attempt to subtract with overflow",
                  "attempt to multiply with overflow"),
 }
 
+#: A trap whose text names no cause. wasmtime reports some traps as
+#: `wasm trap: wasm 'unreachable' instruction executed`, which is the same
+#: string for a failed assertion, an explicit trap and a guarded fault. It is
+#: accepted as a fault (a tier that returned a VALUE where the reference
+#: faulted is still caught) but its KIND is not compared, because the message
+#: does not carry one.
+_AMBIGUOUS_TRAP = "unreachable"
+
 
 def classify_fault(message: str, stdout: str) -> str | None:
     """The fault kind a tier's failed run names, or None when its output names
-    no fault (a build failure, a refusal, an environment problem)."""
+    no fault (a build failure, a refusal, an environment problem). 'trap' is a
+    fault whose text is ambiguous (see `_AMBIGUOUS_TRAP`)."""
     blob = (message + "\n" + stdout).lower()
     for kind, signs in _FAULT_SIGNS.items():
         if any(sign in blob for sign in signs):
             return kind
+    if _AMBIGUOUS_TRAP in blob:
+        return "trap"
     return None
 
 
@@ -1187,7 +1202,10 @@ def main(argv=None) -> int:
                 continue
             for tier in others:
                 outcome, tmsg, tout = check_fault(tier, fault_src)
-                if outcome in (fault.kind, "skip"):
+                if outcome in (fault.kind, "skip", "trap"):
+                    # "trap": the tier faulted but its text names no cause
+                    # (wasm's `unreachable`), so the kind cannot be compared.
+                    # A tier that returns a VALUE is still caught below.
                     continue
                 if outcome == "refusal":
                     sig = tmsg.split(":", 2)[-1].strip()[:60]

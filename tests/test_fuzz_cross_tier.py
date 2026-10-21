@@ -176,6 +176,21 @@ def test_fault_classifier_separates_runtime_faults_from_build_errors():
     assert F.classify_fault(
         "1 of 1 test(s) passed",
         "FAIL t: IndexError: list index out of range") == "index"
+    # java and wasm spell the same faults differently; missing either made
+    # check_fault answer "unknown", which the driver recorded as a divergence
+    assert F.classify_fault(
+        "java exited 1",
+        "Exception in thread \"main\" java.lang.IndexOutOfBoundsException: "
+        "Index 1 out of bounds for length 1") == "index"
+    assert F.classify_fault(
+        "java exited 1",
+        "java.lang.ArithmeticException: / by zero") == "divzero"
+    assert F.classify_fault(
+        "wasm failed",
+        "wasm trap: wasm `unreachable` instruction executed") == "trap"
+    assert F.classify_fault(
+        "wasm failed",
+        "Error: wasm trap: out of bounds memory access") == "index"
     # a build rejection is not a fault, even when its text names the divisor
     assert F.classify(
         "go test exited 1",
