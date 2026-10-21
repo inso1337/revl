@@ -135,6 +135,15 @@ CORPUS = [
     # binder decision had no oracle over it. Added FAILING FIRST, and the
     # component half of F3's binder-free arms was the divergence it caught.
     "services_match.rvl",    # a match in a provide-method body: the body-IS-the-bind, unread-bind and read-bind arms, over an ADT and an Opt
+    # issue #2715 review: a mixed Int/Float equality in a PROVIDE-METHOD body.
+    # The component renderer's `widen` branch is separate from the module-fn
+    # `_expr` and no corpus document reached it (the statement ledger saw the
+    # two new lines as uncovered), while `cexpr` ignored the marker entirely.
+    # Both operand orders and `!=` are covered, so a one-sided fix cannot pass.
+    # It sits in `tests/noncensus_corpus/` because it is an emitter-oracle
+    # document, not a breadth program: keeping it out of the census directories
+    # leaves the committed census program set unchanged.
+    "../../noncensus_corpus/services_int_float_equality.rvl",
     # issue #721 / item 458: provide-method CONTROL FLOW (`if`/`else`/`while`/
     # `for`/`break`/`continue`, items 548 and 681), which is the shape a
     # ternary-chained dispatch migrates to once the hoist helpers come out. The

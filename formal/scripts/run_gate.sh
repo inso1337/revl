@@ -10,7 +10,13 @@
 #    block — that file is outside the RevL library root, so it is outside
 #    CheckAxioms.lean and outside the layering gate, and its bridge
 #    theorems are what make the differential oracle bite;
-# 6. the harness census (formal/harness/diff_corpus.py).
+# 6. the harness census (formal/harness/diff_corpus.py), which also fails a
+#    row kind whose corpus has no accepted or no refused document.
+#
+# When $GITHUB_STEP_SUMMARY is set, a proof-status table (theorems per
+# guarantee, oracle rows, accepted and refused documents per row kind) is
+# appended to it on every exit, a failure or a skip included
+# (formal/scripts/proof_summary.py, issue #2745).
 #
 # Steps 1 and 2 need no toolchain and always run. Item 418 step 8: the
 # axioms gate cannot tell a load-bearing theorem from a vacuous one, and
@@ -23,6 +29,19 @@
 # `exit 0` skip-guard inside the Makefile cannot stop the target.
 set -e
 cd "$(dirname "$0")/.." # formal/
+
+# A summary of a previous run must not pass for this one's.
+rm -f .axioms.out .oracle-axioms.out harness/out/row_census.json
+
+summarize() {
+  rc=$?
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    python3 scripts/proof_summary.py --exit-code "$rc" \
+      >> "$GITHUB_STEP_SUMMARY" || true
+  fi
+  exit "$rc"
+}
+trap summarize EXIT
 
 # These two need no toolchain, so they run before the elan guard: a
 # machine without lake still gets the layering and non-vacuity verdicts.

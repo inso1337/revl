@@ -193,6 +193,13 @@ file, does not admit and does not swap. `plan()` takes the running IR as an
 argument and mutates nothing in it (`test_a_plan_mutates_nothing`). It is safe
 to call on production state.
 
+It also raises no approval ticket, so it does not report `unreviewedHostCode`:
+a plan says what a swap would do, not whether the operator should approve it.
+That attribution is on the approval ticket a load or swap raises, when the
+approval gate raises one (`revl_load`, `revl_swap`). When the plan computes an
+emission surface it still names the host code the composition would reach, but
+not who wrote it.
+
 A plan is also not a *timing* claim. It says which components tear down and in
 what order; it says nothing about how long that takes, or about in-flight
 calls crossing the swap.

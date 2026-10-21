@@ -58,6 +58,8 @@ from .typecheck import (
     _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
+    _OPEN_CALLABLE_HEADS,
+    is_function_type,
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
@@ -106,6 +108,7 @@ from .resources import (
     resource_taint,
 )
 from .parser import (
+    EQUALITY_OPS,
     NESTING_LIMIT,
     recursion_headroom,
     _describe_expr,
@@ -7202,6 +7205,47 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
     return node
 
 
+def _mark_equality_widen(op: str, left: dict, right: dict,
+                         left_type: str | None,
+                         right_type: str | None) -> None:
+    """Mark the narrower operand of a mixed-width equality (issue #2715).
+
+    `==` requires only that one type is compatible with the other, in either
+    direction, so two mixed comparisons reach every backend: `Int`/`Float` and
+    `Int32`/`Int`. Neither carried a conversion. In the first, TypeScript
+    compared `3n === 3` (false, a wrong answer) and go did not build at all
+    (`int64` against `float64`). In the second, TypeScript compared
+    `3n === 3` for an `Int32` (a `number`) against an `Int` (a `bigint`), and
+    go compared `int32` against `int64` (also a build failure); java boxed
+    `Integer`/`Long` and python absorbed both through its one int type. `a:
+    Int32 == 3` is the same bug, because an unannotated integer literal is an
+    `Int`.
+
+    Marking the OPERAND — not the `bin` node — reuses the one conversion every
+    backend already renders at a marked site, and leaves same-width equality
+    untouched (`bigint` against `bigint`, `long` against `long`, `int32`
+    against `int32`, `i64` against `i64`, is already sound).
+
+    The operand is marked with the `widen` key a call argument, `let` and
+    `return` site already carries: `"Float"` for the numeric ladder's top, or
+    `"Int"` for the lossless `Int32 -> Int` step (python absorbs that one).
+    Additive, no `ir_version` change. An untyped operand is left unmarked: an
+    absent annotation, never a guess.
+    """
+    if op not in EQUALITY_OPS:
+        return
+    lhead = parse_type(left_type)[0]
+    rhead = parse_type(right_type)[0]
+    if lhead in ("Int", "Int32") and rhead == "Float":
+        left["widen"] = "Float"
+    elif lhead == "Float" and rhead in ("Int", "Int32"):
+        right["widen"] = "Float"
+    elif lhead == "Int32" and rhead == "Int":
+        left["widen"] = "Int"
+    elif lhead == "Int" and rhead == "Int32":
+        right["widen"] = "Int"
+
+
 def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
     """An annotated `let`/`var` pins an empty-collection literal (roadmap 76b, 107).
 
@@ -7383,13 +7427,18 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # `_operand_annotation` decides the annotation for BOTH strata; the
         # component stratum reads the same decision off the types `infer_ir`
         # recovers from its lowered operands (issue #2198).
-        if expr.op in _ANNOTATED_BIN_OPS:
-            annotation = _operand_annotation(
-                expr.op,
-                infer_ast(expr.left, type_env, types, None),
-                infer_ast(expr.right, type_env, types, None))
-            if annotation is not None:
-                node["operands"] = annotation
+        if expr.op in _ANNOTATED_BIN_OPS or expr.op in EQUALITY_OPS:
+            lt = infer_ast(expr.left, type_env, types, None)
+            rt = infer_ast(expr.right, type_env, types, None)
+            if expr.op in _ANNOTATED_BIN_OPS:
+                annotation = _operand_annotation(expr.op, lt, rt)
+                if annotation is not None:
+                    node["operands"] = annotation
+            else:
+                # issue #2715: a mixed Int/Float equality widens its Int
+                # operand, exactly as a call argument does.
+                _mark_equality_widen(expr.op, node["left"], node["right"],
+                                     lt, rt)
         return node
     if isinstance(expr, ExprUn):
         if expr.op == "try":
@@ -8178,10 +8227,11 @@ def _binder_names(node, out: list) -> None:
     """Append every `(name, line)` this subtree BINDS.
 
     A parameter, a `let`/`var`, a destructure, a `for` bind, an arrow
-    parameter, a match-arm payload, and the component-body binders (an effect
-    `let`, an approval `let`, a lifecycle `call ... as`). Traversal is generic
-    over the AST dataclasses so a binder form added to the grammar is covered
-    without a second edit here; only the RECOGNITION is enumerated.
+    parameter, a match-arm payload, the `every … in` item, and the
+    component-body binders (an effect `let`, an approval `let`, a lifecycle
+    `call ... as`). Traversal is generic over the AST dataclasses so a binder
+    form added to the grammar is covered without a second edit here; only the
+    RECOGNITION is enumerated.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -8199,7 +8249,21 @@ def _binder_names(node, out: list) -> None:
             out.extend((name, pattern.line) for name in pattern.binds)
             if pattern.rest:
                 out.append((pattern.rest, pattern.line))
-    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt)):
+    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt,
+                           StreamIterStmt)):
+        # One binder form can have NO type for the type environment to judge
+        # (#2544): the `every <x> in <sub>` item (item 130: a plain iteration
+        # carries no contract), which StreamIterStmt binds. It is enumerated
+        # here so a call on one is refused, rather than silently reaching a
+        # same-named module `fn`, whenever such a callable is in scope. With no
+        # same-named callable there is no fall-through to refuse; the call
+        # lowers as a call on the binder's `name` node. The component
+        # `let <x> = effect <acquire>` arm is the paired form: its binder now
+        # carries the acquisition's family as its type (a host `Map` is
+        # `Map[Any, Any]`), so the typecheck guard judges a call on it, and the
+        # component scan here keeps refusing the module `fn`/extern pairing at
+        # this earlier site (pinned in
+        # tests/test_2544_provide_param_shadows_module_fn.py).
         if isinstance(node.bind, str):
             out.append((node.bind, node.line))
     elif isinstance(node, ExprArrow):
@@ -9854,6 +9918,34 @@ def _check_arrow_return_annotation(arrow, body: dict, env: Env,
              env.services, filename, arrow.line, ARROW_BODY_WHERE)
 
 
+def _component_scope_value_is_callee(name: str, env: Env,
+                                     scope: dict[str, str]) -> bool:
+    """True if the scope binds `name` to a value that is the callee of a bare
+    call, so a same-named module callable must not take the call.
+
+    Issue #1823's owner ruling on #2544: a function-valued parameter
+    (`(Int) -> Int`, `Fn[Int, Int]`) is the callee, not a same-named module
+    `fn`. The typecheck layer admits such a call as a call on the value, so
+    the lowering must lower it that way or the parameter is silently dropped.
+    `Any`/`Value` (erased dynamic types that can hold a function) and `Never`
+    (the uninhabited bottom, whose call is vacuous) are callable for the same
+    reason the typecheck guard leaves their calls open. A scoped built-in
+    constructor is the value, not the constructor (issue #2490). A binder
+    whose type the environment does not hold stays with the module callable:
+    only a type that says "callable value" moves the call off it.
+
+    The type environment is keyed by the scope's safe id (`env.params`), so
+    read `name` through `scope` first, falling back to the surface spelling.
+    """
+    if name in _BUILTIN_CONSTRUCTORS:
+        return True
+    safe = scope.get(name, name)
+    ty = env.type_env.get(safe)
+    if ty is None and safe != name:
+        ty = env.type_env.get(name)
+    return is_function_type(ty) or parse_type(ty)[0] in _OPEN_CALLABLE_HEADS
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -10243,11 +10335,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
             # `callables` holds the constructors too, so a scoped one must not
-            # fall through to a `fn` node here. A scoped name that spells a
-            # module fn still resolves to the module fn (a `fn` body refuses
-            # that shadowing; the self-host lowers it the same way), which is
-            # why this arm is not `name not in scope`.
-            if name in callables and not (name in scope and name in _BUILTIN_CONSTRUCTORS):
+            # fall through to a `fn` node here. A scoped name whose type is a
+            # callable VALUE is the callee (issue #1823: a function-valued
+            # parameter is what `f(n)` calls, not a same-named module `fn`;
+            # the owner ruling on #2544 requires the binder to win). A scoped
+            # name of any other type still resolves to the module fn -- a
+            # `fn` body refuses that shadowing at item 445, and the typecheck
+            # guard refuses the provide-parameter form -- which is why this
+            # arm is not `name not in scope`.
+            if name in callables and not (
+                    name in scope
+                    and _component_scope_value_is_callee(name, env, scope)):
                 # item 187: fill omitted trailing arguments with their default
                 # expressions before async coercion, so the module-fn call the
                 # emitters see is fully supplied (no per-tier default handling).
@@ -10363,14 +10461,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # fn stratum's own function is what keeps the two from drifting apart
         # again: without it the arithmetic family was silently missing here and
         # each backend fell back to its host operator (issue #2198).
-        if expr.op in _ANNOTATED_BIN_OPS:
+        if expr.op in _ANNOTATED_BIN_OPS or expr.op in EQUALITY_OPS:
             tenv = getattr(env, "type_env", None) or {}
-            annotation = _operand_annotation(
-                expr.op,
-                infer_ir(node["left"], tenv, env.types, env.services),
-                infer_ir(node["right"], tenv, env.types, env.services))
-            if annotation is not None:
-                node["operands"] = annotation
+            lt = infer_ir(node["left"], tenv, env.types, env.services)
+            rt = infer_ir(node["right"], tenv, env.types, env.services)
+            if expr.op in _ANNOTATED_BIN_OPS:
+                annotation = _operand_annotation(expr.op, lt, rt)
+                if annotation is not None:
+                    node["operands"] = annotation
+            else:
+                # issue #2715: the same mixed Int/Float equality marker the fn
+                # stratum sets; the two strata cannot disagree about `==`.
+                _mark_equality_widen(expr.op, node["left"], node["right"],
+                                     lt, rt)
         return node
     if isinstance(expr, ExprUn):
         if expr.op == "try":
@@ -13871,6 +13974,22 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # `host_locals`), so the type is resolved here where it is known.
             if acquired_type is None:
                 acquired_type = _host_result_type(acquire, env)
+            # issue #2544: a HOST acquisition (`Map.new()`, `Pool.open(..)`)
+            # yields a handle of its family, and the binding must carry that
+            # family as its type. An untyped binder is invisible to the call
+            # guard in typecheck.py, so a call on it (`Tag("x")`, `Tag` being
+            # the handle) was admitted without being judged even when the name
+            # also names a module callee. The host constructor form types the
+            # same value as its family; `Map`'s key and value types are the
+            # resource's own (a host local does not carry them), so the open
+            # `Map[Any, Any]` is its static type and stands where any
+            # `Map[K, V]` does.
+            if acquired_type is None and acquire.get("kind") == "host":
+                _acquired_family = str(acquire.get("fn") or "").partition(".")[0]
+                if _acquired_family in _HOST_FAMILIES:
+                    acquired_type = (f"{_acquired_family}[Any, Any]"
+                                     if _acquired_family == "Map"
+                                     else _acquired_family)
             # issue #1968: an effect-acquired binding whose type is a HOST
             # family is a handle even when the acquisition spelled no host call
             # (a typed hole, an extern's declared return). `Map` is the one
@@ -14690,9 +14809,22 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     navigate=_b1_navigate(env, "return", "borrowed", _ret_res))
             actual = _sweep(lowered_return, ms.line)
             if decl.returns:
-                check_ir(lowered_return, decl.returns, env.type_env,
-                         env.types, env.services, filename, ms.line,
-                         f"`{method.name}` returns")
+                # issue #2083 / #2544: the named refusal below is the wording
+                # the `Unit` body guarantee is stated in, and it must be the
+                # one a program meets. Since #2620 types an effect binder from
+                # its acquisition's family (a host `Map` is `Map[Any, Any]`), a
+                # body that IS the handle now reaches the generic return-type
+                # check as a typed value, and "returns expects `Unit`" fires
+                # before the guard. Leave the generic mismatch out for exactly
+                # the shape the guard refuses; the raise below still refuses
+                # it, so this reorders the refusal and admits nothing.
+                unit_body_refused = bool(
+                    decl.returns == "Unit" and actual != "Unit"
+                    and _unit_body_drops_host_value(lowered_return, env))
+                if not unit_body_refused:
+                    check_ir(lowered_return, decl.returns, env.type_env,
+                             env.types, env.services, filename, ms.line,
+                             f"`{method.name}` returns")
                 # issue #2083: `check_ir` leaves an UNKNOWN body alone (`if
                 # actual and ...`), so a resource READ — whose value no host
                 # table types — was admitted as the body of a method declared
@@ -14701,8 +14833,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # rooted at the component's own resource is refused unless it
                 # is a host call admitted as a `Unit` body (issues #2123,
                 # #2127).
-                if decl.returns == "Unit" and actual != "Unit" \
-                        and _unit_body_drops_host_value(lowered_return, env):
+                if unit_body_refused:
                     raise RevlError(
                         filename, ms.line,
                         f"`{method.name}` implements `{svc.name}.{method.name}`, "

@@ -231,7 +231,9 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     length is unchanged. `(dev, ino)` alone cannot see this. The capture records
     `ctime_ns` too, which catches the rewrite once the inode timestamp clock has
     ticked; a rewrite that lands inside one tick leaves every stat field equal
-    (issue #2647), and the parked path reads no bytes, so it stays stat-only."""
+    (issue #2647), so the capture also carries the sha256 of the parked bytes,
+    recorded at park for a readable regular file, and install compares it on
+    both passes."""
     mod = _fs_module()
     witness, target, sidecar = _removed(mod, workspace)
     before = os.stat(sidecar)
@@ -416,6 +418,57 @@ def test_a_capture_with_the_digest_key_dropped_still_reverses(workspace):
 
     assert open(target, encoding="utf-8").read() == "payload"
     assert not os.path.exists(sidecar)
+
+
+# ===========================================================================
+# The recorded digest must BE a digest. A capture that carries the key and then
+# holds something that is not one is a corrupt record, not a legacy one.
+# `_refuse_drifted_identity`, the helper the restore path shares with `unrm`,
+# refuses it as EIDENTITY instead of falling through to stat-only, which would
+# drop the one check that does not depend on the clock.
+# ===========================================================================
+
+def test_a_present_null_recorded_digest_is_refused(workspace):
+    """A present null is a capture that says it recorded a digest and carries
+    no digest. Treating the key's presence as absence would silently compare
+    stat-only, so `_refuse_drifted_identity` refuses it as `EIDENTITY` before
+    the parked bytes are compared. The refusal leaves the parked sidecar and
+    the target exactly where the park left them."""
+    mod = _fs_module()
+    witness, target, sidecar = _removed(mod, workspace)
+    witness["capture"]["sha256"] = None
+
+    with pytest.raises(ws.FsOpError) as ei:
+        mod.unrm(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "not 64 lowercase hex" in ei.value.message, \
+        "the refusal must name the malformed record, not a digest mismatch"
+
+    assert not os.path.exists(target), \
+        "the parked file was installed over the original path anyway"
+    assert open(sidecar, encoding="utf-8").read() == "payload", \
+        "the refused sidecar was consumed"
+
+
+def test_a_recorded_digest_that_is_not_lowercase_hex_is_refused(workspace):
+    """The other malformed shape: a value that is present and a string but not
+    a bare lowercase SHA-256. The key's presence still means the record claimed
+    a digest, so the same helper refuses it `EIDENTITY` rather than degrading
+    the content check to nothing."""
+    mod = _fs_module()
+    witness, target, sidecar = _removed(mod, workspace)
+    witness["capture"]["sha256"] = "z" * 64      # 64 characters, not hex
+
+    with pytest.raises(ws.FsOpError) as ei:
+        mod.unrm(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "not 64 lowercase hex" in ei.value.message, \
+        "the refusal must name the malformed record, not a digest mismatch"
+
+    assert not os.path.exists(target), \
+        "the parked file was installed over the original path anyway"
+    assert open(sidecar, encoding="utf-8").read() == "payload", \
+        "the refused sidecar was consumed"
 
 
 def test_the_installed_digest_is_rechecked_after_the_rename(workspace, monkeypatch):

@@ -145,7 +145,34 @@ the refusal changes (issue #1694):
   refusal names.
 
 Different arguments, a different verb, or a call that succeeds resets the count.
-A successful response is never rewritten.
+A successful response is never rewritten. This `repeat.attempt` counts
+refusals of *the same call*; the next section counts refusals on the *unit of
+work*, which is a different question.
+
+**Refusals carry the attempt count and the remaining budget.** Since issue
+#2690, every refusal from `revl_check` or `revl_admit` carries `attempt`: how
+many times those two verdict verbs have refused this unit of work, 1-based.
+The unit is the loaded composition at its current generation, so a fresh load,
+a new generation (a swap, rollback or undo) or a successful check or admit
+starts it again. `attemptsRemaining` says how much of the operator's budget is
+left:
+
+```json
+{"ok": false, "attempt": 3, "attemptsRemaining": 0,
+ "diagnostics": [{"severity": "error", "code": "G2", "...": "..."}]}
+```
+
+The budget comes from session configuration, never from the caller:
+`revl mcp serve --attempt-limit N`. Without that flag the field is absent, not
+a made-up number. The count is advisory: reaching or passing the limit changes
+nothing about admission, only what the refusal tells the caller; whether to
+keep retrying is the operator's decision. Both values also ride on
+`revl_state`'s `loopAxes` report with the other session measures, where
+`attempt` is `0` before the first refusal and `attemptsRemaining` is absent
+unless a limit was configured. The report is read against the live unit, so
+a fresh load's own response and `revl_state` show `attempt: 0` and the full
+budget immediately after the load, not the previous unit's count; a failed
+load changes neither and keeps the count.
 
 **Changes carry their undo.** Since issue #1703, a successful call to a verb
 that mutates the session answers with `undo: {tool, arguments}`: the one call
@@ -1082,6 +1109,14 @@ export of the held source.
   operator's file is never written; adopting an export is the operator's act,
   copying it out. After an export, the copies equal `revl_snapshot`'s
   `files_content`, and `disk.stale` (which names the loaded files) is empty.
+  The answer names what it left alone (issue #2766): when a loaded file still
+  holds the previous bytes rather than the held text, `note` names the copy and
+  that file, and `adopt` lists `{"file": <loaded path>, "export": <copy>}` for
+  each. It is decided from state, not from what this call wrote, so a second
+  export (which writes nothing) still names it, and a reverted export (whose
+  copy matches the loaded file again) does not. A client that reads the export
+  as done would stop with the loaded file holding the old bytes, so the
+  copy-out step is part of the answer.
 - A composition loaded from inline source writes to `path`, with its in-memory
   modules beside it, and refuses to replace an existing file unless
   `overwrite: true`.
