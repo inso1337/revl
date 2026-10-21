@@ -166,6 +166,6 @@ attestation (`revl attest --verify`).
   metrics.
 
 The document `compute_metrics` returns has stable top-level keys `events`,
-`emissions`, `failures`, `lifecycleDuration` — exactly what `--json` prints —
+`emissions`, `failures`, `lifecycleDuration` — exactly what `--json` prints,
 plus the optional `run` block described above, present only on an attested
 trace.

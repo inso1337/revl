@@ -115,7 +115,7 @@ A reader treats each new field as optional — a v1 event (no `ts`, no `code`, n
 unchanged; v3 only *adds*. A reader treats each new field as optional, and a
 v1/v2 event is still a valid, fully-handled record.
 
-* **the model crossing's contract** (issue #2694) — an `emit` that carries an
+* **the model crossing's contract** (issue #2694): an `emit` that carries an
   `llm` payload (a model completion, `docs/design/121-revl-trace.md`) may also
   carry the contract the completion was held to and the role's declared
   placement:
@@ -136,7 +136,7 @@ v1/v2 event is still a valid, fully-handled record.
   `revl-controlled`. A crossing with no grammar (an unvalidated emission) or no
   declared role **omits** the field rather than writing an empty value.
 
-* **the attested-run header** (issue #2730) — `revl run --trace FILE
+* **the attested-run header** (issue #2730): `revl run --trace FILE
   --attestation ATTESTATION.json` records the admission's identity on the
   **first** trace event, and on no other:
 

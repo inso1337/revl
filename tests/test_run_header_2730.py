@@ -30,7 +30,7 @@ from revl import metrics as mt  # noqa: E402
 from revl import otel as ot  # noqa: E402
 from revl import run  # noqa: E402
 from revl import why_runtime as wr  # noqa: E402
-from revl.compiler import compile_files, compile_source  # noqa: E402
+from revl.compiler import compile_source  # noqa: E402
 
 KEY = b"2730-attestation-key-material"
 
