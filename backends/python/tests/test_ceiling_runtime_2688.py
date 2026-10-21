@@ -30,10 +30,18 @@ may spend, and a re-activation is a new spend.
 A wrapper must not launder the declaration. `emit go(x)` where
 `fn go(x) = call(x)` is still a `kind: "fn"` crossing, but the emit names `go`,
 not the extern, so a direct declaration lookup found nothing and the crossing
-fired unmetered. The emitter now resolves the callee through the document's
-local functions (`_function_ceiling_caps`) and sends the reached extern's
-ceiling declarations; the runtime refuses a budgeted callee that arrives with
-empty caps (`CeilingCapsMissing`) as a second, fail-closed line of defence.
+fired unmetered. The emitter resolves the callee through the document's local
+functions (`_function_ceiling_caps`) and sends the reached extern's ceiling
+declarations; the runtime refuses a budgeted callee that arrives with empty caps
+(`CeilingCapsMissing`) as a second, fail-closed line of defence.
+
+Only the exact pass-through wrapper is attributable: the meter charges one
+crossing with the outer arguments. A value-position wrapper never reaches the
+seam at all, a payload-transforming wrapper would be charged on the wrong
+arguments, and a multi-call wrapper would be charged once however many crossings
+it makes. Those shapes are refused at emit time with the named
+`CeilingUnattributable`, naming the capability and the shape, so a declared
+budget is a compile-time contract rather than a promise the runtime cannot keep.
 """
 
 from __future__ import annotations
@@ -396,6 +404,106 @@ def test_an_empty_caps_crossing_with_declared_ceilings_fails_closed():
     with pytest.raises(runtime_mod.CeilingCapsMissing):
         runtime_mod.extern_emit(root, "go", module.go, ("a",))
     assert host.CALLS == [], "a fail-closed refusal never reaches the host body"
+
+
+# ---------------------------------------------------------------------------
+# the shapes the meter cannot attribute are refused at emit time (#2688)
+# ---------------------------------------------------------------------------
+
+#: The identity wrapper above is the ONE shape the meter can attribute exactly.
+#: These two are not: the first hands the extern a payload the wrapper did not
+#: receive, the second crosses the extern more than once per invocation.
+_TRANSFORMING = 'fn go() -> Int { return call("0123456789") }'
+_MULTI_CALL = (
+    "fn go(x: Str) -> Int { let a = call(x) let b = call(x) return a }")
+
+
+def _provide_program(decl: str, method_body: str, prelude: str = ""):
+    """Like `_program`, but the component PROVIDES one operation, so a
+    value-position emission has a method body to sit in."""
+    host = f"ceiling_host_{next(_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_"))
+    (directory / f"{host}.py").write_text(
+        _HOST_SOURCE.format(sleep=0.0), encoding="utf-8")
+    source = (
+        f'extern emission[{decl}] fn call(x: Str) -> Int = @py ref call from "{host}.py"\n'
+        f"{prelude + chr(10) if prelude else ''}"
+        "service Ops { emission fn m() }\n"
+        "component C provides ops: Ops {\n"
+        "  provide ops {\n"
+        f"    fn m() {{ {method_body} }}\n"
+        "  }\n"
+        "}\n")
+    main = directory / "main.rvl"
+    main.write_text(source, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return str(main), host
+
+
+def _refusal(decl: str, body: str, prelude: str = "", provide: bool = False):
+    """Compile, then emit: the emission must be refused by name, so no Python
+    module is produced and the host body never runs."""
+    path, host = (_provide_program(decl, body, prelude) if provide
+                  else _program(decl, body, prelude=prelude))
+    compiled = compile_files([path])
+    try:
+        emit.emit(compiled)
+    except emit.CeilingUnattributable as error:
+        return error, importlib.import_module(host)
+    pytest.fail("a budgeted wrapper shape was emitted instead of refused")
+
+
+def test_a_value_position_wrapper_is_refused_at_emit_time():
+    """`let a = emit go("a")` in a provide-method body names a local wrapper.
+    That path never reaches `extern_emit`, so neither the caps argument nor the
+    empty-caps backstop can meter or refuse it; the emitter refuses by name."""
+    error, host = _refusal(
+        "net(calls=1)", 'let a = emit go("a") return a',
+        prelude=_WRAPPER, provide=True)
+    assert isinstance(error, emit.CeilingUnattributable)
+    assert error.capability == "net(calls=1)"
+    assert error.shape == "a value-position emission"
+    assert "net(calls=1)" in str(error)
+    assert "value-position" in str(error)
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
+def test_a_payload_transforming_wrapper_is_refused_at_emit_time():
+    """A wrapper that supplies its own payload (`call("0123456789")`) would be
+    charged on the outer arguments, not the bytes the extern receives, so a
+    `bytes=4` declaration would be silently exceeded. Refused by name."""
+    error, host = _refusal(
+        'net(bytes="4B")', '  emit go()', prelude=_TRANSFORMING)
+    assert isinstance(error, emit.CeilingUnattributable)
+    assert "size=4" in error.capability
+    assert error.shape == "a payload-transforming call"
+    assert "payload-transforming" in str(error)
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
+def test_a_multi_call_wrapper_is_refused_at_emit_time():
+    """A wrapper that crosses the same budgeted extern twice per invocation is
+    charged once at the wrapper seam, so `calls=1` would be silently exceeded.
+    Refused by name instead of emitting the under-metered crossing."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")', prelude=_MULTI_CALL)
+    assert isinstance(error, emit.CeilingUnattributable)
+    assert error.capability == "net(calls=1)"
+    assert error.shape == "more than one call"
+    assert "more than one call" in str(error)
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
+def test_the_statement_form_identity_wrapper_is_still_metered():
+    """The control for the three refusals: the exact pass-through wrapper is
+    still emitted with the reached declaration and metered by the runtime."""
+    module, host, code = _load(
+        "net(calls=1)", '  emit go("a")', prelude=_WRAPPER)
+    assert "caps=('net(calls=1)',)" in code
+    error = asyncio.run(_activate(module))
+    assert error is None
+    assert host.CALLS == ["a"]
 
 
 def test_a_time_overrun_journals_refusal_not_completion_with_observed_counts():

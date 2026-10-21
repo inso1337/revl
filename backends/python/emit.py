@@ -123,6 +123,28 @@ class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
 
 
+class CeilingUnattributable(EmitError):
+    """An emission reaches a budgeted extern through a shape the runtime meter
+    cannot attribute exactly (issue #2688).
+
+    The meter at `runtime.extern_emit` charges ONE crossing and the arguments
+    it is handed. A value-position emission never reaches that seam at all, a
+    wrapper that transforms the payload hands the meter the outer arguments,
+    and a wrapper that crosses more than once in one invocation is charged
+    once. Each would leave a declared `calls`/`size`/`time` ceiling silently
+    unenforced, so the emitter refuses the program by name instead of emitting
+    a crossing the declaration cannot bound."""
+
+    def __init__(self, capability: str, shape: str) -> None:
+        self.capability = capability
+        self.shape = shape
+        super().__init__(
+            f"declared ceiling on `{capability}` cannot be enforced at emit "
+            f"time: the emission reaches the budgeted extern through {shape}, "
+            f"which the runtime meter cannot attribute exactly; emit the "
+            f"extern call directly")
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -1507,12 +1529,186 @@ def _function_ceiling_caps(functions: list, externs: list) -> dict:
     return caps_by_function
 
 
+#: The reasons a wrapper emission is refused at emit time. The runtime meter
+#: sees one crossing and the outer arguments, so each of these shapes would
+#: leave its declared ceiling under- or over-charged.
+_SHAPE_VALUE_POSITION = "a value-position emission"
+_SHAPE_TRANSFORMING = "a payload-transforming call"
+_SHAPE_MULTIPLE = "more than one call"
+_SHAPE_LOOPED = "a call inside a loop"
+_SHAPE_CONDITIONAL = "a conditional call"
+_SHAPE_RECURSIVE = "a recursive call"
+
+
+def _identity_payload(args: Any, params: list) -> bool:
+    """Whether a call passes the enclosing function's parameters through
+    unchanged and in the same order, the only wrapper shape whose outer
+    arguments ARE the extern's payload."""
+    if not isinstance(args, list) or len(args) != len(params):
+        return False
+    return all(isinstance(arg, dict) and arg.get("kind") == "var"
+               and arg.get("name") == param
+               for arg, param in zip(args, params))
+
+
+def _call_callee_name(node: Any) -> Optional[str]:
+    """The callee name of a module-fn call node (`kind: "call"` with a `var`
+    callee) or a host-extern crossing (`kind: "fn"`), else None."""
+    if not isinstance(node, dict):
+        return None
+    if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+        return node["name"]
+    if node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var" \
+                and isinstance(callee.get("name"), str):
+            return callee["name"]
+    return None
+
+
+def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
+                           seen: "frozenset[str]" = frozenset()) -> tuple:
+    """Classify ONE local function that reaches a budgeted extern: how many
+    host-extern crossings one invocation of it makes, and the first shape the
+    runtime meter cannot attribute exactly (issue #2688).
+
+    The meter charges one crossing with the arguments handed to the emission,
+    so a wrapper is exact only when it passes its own parameters unchanged to
+    exactly one budgeted crossing: `fn go(x) = call(x)`. Everything else is
+    refused at emit time because the declaration would otherwise be silently
+    under- or over-charged: a transformed payload, more than one call, a call
+    inside a loop or a conditional, or recursion. Crossings saturate at two,
+    since only "one" and "more than one" decide attributability."""
+    name = fn.get("name")
+    path = seen | {name} if isinstance(name, str) else seen
+    params = [p.get("name") for p in fn.get("params") or []]
+    crossings = 0
+    reason: Optional[str] = None
+
+    def miss(found: str) -> None:
+        nonlocal reason
+        if reason is None:
+            reason = found
+
+    def count(value: int) -> None:
+        nonlocal crossings
+        crossings = min(2, crossings + min(2, value))
+
+    def visit(node: Any, looped: bool, conditional: bool) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item, looped, conditional)
+            return
+        if not isinstance(node, dict):
+            return
+        target = _call_callee_name(node)
+        if target is not None:
+            args = node.get("args") or []
+            if target in externs:
+                if _ceiling_capabilities(externs[target].get("capabilities")):
+                    count(1)
+                    if looped:
+                        miss(_SHAPE_LOOPED)
+                    if conditional:
+                        miss(_SHAPE_CONDITIONAL)
+                    if not _identity_payload(args, params):
+                        miss(_SHAPE_TRANSFORMING)
+            elif target in functions:
+                callee = functions[target]
+                reached: set = set()
+                _collect_extern_reach(callee.get("body"), externs, functions,
+                                      reached, {target})
+                if any(_ceiling_capabilities(
+                        externs[other].get("capabilities"))
+                       for other in reached):
+                    nested, nested_reason = _wrapper_ceiling_shape(
+                        callee, externs, functions, path)
+                    count(nested)
+                    if nested_reason is not None:
+                        miss(nested_reason)
+                    if looped:
+                        miss(_SHAPE_LOOPED)
+                    if conditional:
+                        miss(_SHAPE_CONDITIONAL)
+                    if not _identity_payload(args, params):
+                        miss(_SHAPE_TRANSFORMING)
+            visit(args, looped, conditional)
+            return
+        step = node.get("step")
+        if step in ("while", "for"):
+            for key, value in node.items():
+                if key != "body":
+                    visit(value, looped, conditional)
+            visit(node.get("body"), True, conditional)
+            return
+        if step == "if":
+            visit(node.get("cond"), looped, conditional)
+            visit(node.get("then"), looped, True)
+            visit(node.get("else"), looped, True)
+            return
+        kind = node.get("kind")
+        if kind == "match":
+            # exactly one arm runs, so the crossing count depends on the value
+            visit(node.get("scrutinee"), looped, conditional)
+            visit(node.get("arms"), looped, True)
+            return
+        if kind == "arrow":
+            # deferred to a call site: it may run zero or many times
+            visit(node.get("body"), looped, True)
+            return
+        for key, value in node.items():
+            # an inverse slot runs on unwind, not as part of the crossing the
+            # budget meters, so it is not counted (matches the reach resolver)
+            if key not in _INVERSE_KEYS:
+                visit(value, looped, conditional)
+
+    visit(fn.get("body"), False, False)
+    if crossings > 1 and reason is None:
+        reason = _SHAPE_MULTIPLE
+    if crossings == 0 and reason is None:
+        # the reach resolver saw a budgeted extern but the forward walk did
+        # not, which only a recursive wrapper can produce: refuse, never skip
+        reason = _SHAPE_RECURSIVE
+    return crossings, reason
+
+
+def _function_ceiling_shapes(functions: list, externs: list) -> dict:
+    """Map each local function whose emission cannot be metered exactly to the
+    shape reason that refuses it (issue #2688).
+
+    Only a function that reaches a budgeted extern appears. An exact
+    pass-through (the identity wrapper `fn go(x) = call(x)`) is ABSENT, so its
+    emission keeps the metered shape the existing tests pin; the other shapes
+    are refused by :class:`CeilingUnattributable` at the firing site."""
+    externs_by_name = {ext["name"]: ext for ext in externs or []}
+    functions_by_name = {fn["name"]: fn for fn in functions or []
+                         if isinstance(fn.get("name"), str)}
+    shapes: dict = {}
+    for fn in functions or []:
+        name = fn.get("name")
+        if not isinstance(name, str) or name in externs_by_name:
+            continue
+        reached: set = set()
+        _collect_extern_reach(fn.get("body"), externs_by_name,
+                              functions_by_name, reached, {name})
+        if not any(_ceiling_capabilities(
+                externs_by_name[other].get("capabilities"))
+                for other in reached):
+            continue
+        _crossings, reason = _wrapper_ceiling_shape(
+            fn, externs_by_name, functions_by_name)
+        if reason is not None:
+            shapes[name] = reason
+    return shapes
+
+
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
                  plan_groups: list | None = None,
                  scopes: dict | None = None,
                  decorated: set | None = None,
-                 function_ceilings: dict | None = None) -> None:
+                 function_ceilings: dict | None = None,
+                 function_shapes: dict | None = None) -> None:
         self.ir = component
         # issue #2688: the ceiling declarations of the externs each local
         # function reaches (`_function_ceiling_caps`). A wrapper emission names
@@ -1520,6 +1716,11 @@ class _ComponentEmitter:
         # budget reaches the seam. Empty for a document with no budgeted extern,
         # so every existing emission is byte-identical.
         self._function_ceilings: dict = dict(function_ceilings or {})
+        # the wrapper shapes the runtime meter cannot attribute
+        # (`_function_ceiling_shapes`): a value-position, payload-transforming,
+        # multi-call, looped, conditional or recursive wrapper is refused by
+        # name at the firing site instead of emitting an unmeterable crossing.
+        self._function_shapes: dict = dict(function_shapes or {})
         # the externs `declared_crossing` decorates (computer-use crossings):
         # they register their own compensation, so a provide-method site does
         # not write the explicit line for them (`_method_compensated_extern`)
@@ -2662,6 +2863,15 @@ class _ComponentEmitter:
         # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
         out.add(indent, "_revl_raise_first(_revl_group)")
 
+    def _refuse_unattributable(self, raw_name: str, caps: tuple,
+                               shape: str) -> None:
+        """Refuse an emission whose callee reaches a budgeted extern in a shape
+        the runtime meter cannot attribute exactly (issue #2688), naming the
+        capability and the shape rather than emitting a crossing the declared
+        ceiling cannot bound."""
+        capability = ", ".join(caps) if caps else str(raw_name)
+        raise CeilingUnattributable(capability, shape)
+
     def _extern_emit_fire(self, expr: dict, where: str) -> str:
         """The Python expression that fires a DIRECT host-extern emission
         (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
@@ -2688,16 +2898,27 @@ class _ComponentEmitter:
         names a wrapper, and a direct lookup found no declaration for `go`, so
         the crossing reached the runtime with empty caps and fired unmetered.
         `_function_ceilings` carries the declaration of the extern a wrapper
-        reaches (`_function_ceiling_caps`), so the wrapper emission is metered
-        exactly as the direct one. A wrapper that reaches no budgeted extern is
-        absent from the map, keeping its emission unchanged."""
+        reaches (`_function_ceiling_caps`), so an identity wrapper emission is
+        metered exactly as the direct one.
+
+        A wrapper the meter cannot attribute exactly is REFUSED here instead
+        (`_function_ceiling_shapes`): a payload-transforming wrapper would be
+        charged on the outer args, and a multi-call, looped, conditional or
+        recursive wrapper would be charged for one crossing however many it
+        makes. Emitting it would leave the declaration silently unenforced, so
+        the fail-closed choice is a named emit-time refusal (issue #2688)."""
         self.uses.add("extern_emit")
         raw_name = expr.get("name")
         name = _ident(raw_name, f"{where}: function")
         args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
         direct = self._extern_by_name.get(raw_name)
-        caps = (tuple(direct.get("capabilities") or ()) if direct is not None
-                else self._function_ceilings.get(raw_name, ()))
+        if direct is not None:
+            caps = tuple(direct.get("capabilities") or ())
+        else:
+            caps = self._function_ceilings.get(raw_name, ())
+            shape = self._function_shapes.get(raw_name)
+            if caps and shape is not None:
+                self._refuse_unattributable(raw_name, caps, shape)
         budget = (f", caps={caps!r}"
                   if _ceiling_capabilities(caps) else "")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
@@ -2733,12 +2954,24 @@ class _ComponentEmitter:
     def _is_value_emission(self, expr: dict) -> bool:
         """A value-position call of an `emission` extern inside a provide-method
         body (`return emit f(x)`, `let r = emit f(x)`), see
-        `_route_value_emissions`. A deferred emission is an `emit` step only."""
+        `_route_value_emissions`. A deferred emission is an `emit` step only.
+
+        Issue #2688: a value-position emission never reaches `extern_emit`, so
+        it carries no `caps=` and the empty-caps backstop never sees it. A
+        DIRECT extern is routed through `_value_emission_fire` (and therefore
+        metered); a LOCAL function call in that position is a value-position
+        wrapper, which the runtime meter cannot attribute at all, so it is
+        refused by name at emit time (`_function_ceilings`)."""
         if not self._route_value_emissions:
             return False
         name = expr.get("name")
-        decl = self._extern_by_name.get(name) or {}
-        return decl.get("class") == "emission" and name not in (self.deferred or {})
+        decl = self._extern_by_name.get(name)
+        if decl is not None:
+            return decl.get("class") == "emission" and name not in (self.deferred or {})
+        caps = self._function_ceilings.get(name)
+        if caps:
+            self._refuse_unattributable(name, caps, _SHAPE_VALUE_POSITION)
+        return False
 
     def _emission_fire(self, expr: dict, where: str) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
@@ -6170,11 +6403,16 @@ def emit(ir: dict) -> str:
     # tags the function itself as the runtime backstop). Empty when no extern
     # declares a ceiling, so existing emissions and module text are unchanged.
     function_ceilings = _function_ceiling_caps(functions, externs)
+    # issue #2688: the wrappers whose emission the runtime meter cannot
+    # attribute exactly, refused by name at the firing site. Empty when every
+    # wrapper reaching a budgeted extern is an exact pass-through.
+    function_shapes = _function_ceiling_shapes(functions, externs)
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),
                           scopes.get(component.get("name")), set(crossings),
-                          function_ceilings=function_ceilings)
+                          function_ceilings=function_ceilings,
+                          function_shapes=function_shapes)
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]
