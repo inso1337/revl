@@ -48,24 +48,29 @@ sys.path[:0] = [os.path.join(repo, "src"),
                 os.path.join(repo, "backends", "python")]
 import replay
 
-effect = os.environ["EFFECT_PATH"]
-with open(effect, "w", encoding="utf-8") as fh:
-    fh.write("landed")                       # the effect takes place
-
 wal = replay.WriteAheadLog(os.environ["WAL_PATH"], ir={}, generation=1).open()
 timeline = replay.Timeline("Svc")
 timeline.attach_wal(wal, {})
-timeline.record_yield(lambda: os.unlink(effect), "activation")
+if os.environ["MODE"] == "emission":
+    # an emission's record is written BEFORE the host body runs, so an append
+    # crash here is not the effect-to-record window
+    timeline.record_emission("Host", "read", (), "Host", ("<emission>", 1))
+else:
+    effect = os.environ["EFFECT_PATH"]
+    with open(effect, "w", encoding="utf-8") as fh:
+        fh.write("landed")                   # the effect takes place
+    timeline.record_yield(lambda: os.unlink(effect), "activation")
 wal.close()
 """
 
 
-def _run_child(tmp_path: Path, *, crash_at: str | None) -> tuple[int, str, str]:
+def _run_child(tmp_path: Path, *, crash_at: str | None,
+               mode: str = "effect") -> tuple[int, str, str]:
     """Run the child above; return (exit code, effect path, WAL path)."""
     effect = str(tmp_path / "effect.txt")
     wal_path = str(tmp_path / "run.wal")
     env = dict(os.environ, REPO=str(ROOT), EFFECT_PATH=effect,
-               WAL_PATH=wal_path)
+               WAL_PATH=wal_path, MODE=mode)
     env.pop("REVL_CRASH_BEFORE_RECORD", None)
     if crash_at is not None:
         env["REVL_CRASH_BEFORE_RECORD"] = crash_at
@@ -77,7 +82,13 @@ def _run_child(tmp_path: Path, *, crash_at: str | None) -> tuple[int, str, str]:
 
 def _effect_records(wal_path: str) -> list:
     return [r for r in replay.WriteAheadLog.read(wal_path)["records"]
-            if r.get("record") == "effect"]
+            if r.get("record") == "effect" and r.get("kind") != "emission"]
+
+
+def _emission_records(wal_path: str) -> list:
+    return [r for r in replay.WriteAheadLog.read(wal_path)["records"]
+            if r.get("kind") == "emission"]
+
 
 
 @pytest.fixture
@@ -147,4 +158,57 @@ def test_the_same_run_without_the_fault_point_records_and_reports_it(tmp_path):
     assert report["committedEffects"] == 1
     # an in-process closure inverse is moot after a crash, not residue
     assert [entry["label"] for entry in report["moot"]] == ["activation/effect"]
+    assert "activation/effect" in render(report)
+
+
+def test_an_emission_is_excluded_even_when_armed_by_its_own_label(tmp_path):
+    """The kind check, not a label miss, keeps emissions out of this window.
+
+    The fault point is armed with the emission's own label, `Host.read`, which
+    would otherwise match `step.label`; the child records only that emission and
+    exits cleanly, so the emission's append is never a crash site. The record
+    lands: an emission's record is written before the host body runs, so it is
+    not the effect-to-record window."""
+    code, _, wal_path = _run_child(tmp_path, crash_at="Host.read",
+                                   mode="emission")
+    assert code == 0, (
+        f"the emission's append was treated as the effect window, got exit "
+        f"{code}")
+
+    [record] = _emission_records(wal_path)
+    assert record["label"] == "Host.read"
+    assert record["kind"] == "emission"
+    # and it is the only record the child wrote
+    assert len(replay.WriteAheadLog.read(wal_path)["records"]) == 1
+
+
+def test_any_arms_the_fault_point_on_the_effect_record(tmp_path):
+    """`any` matches the effect without naming it: the child dies before the
+    append, the effect it performed stays in the world and the log has no
+    record of it."""
+    code, effect, wal_path = _run_child(tmp_path, crash_at="any")
+    assert code == 137, (
+        f"`any` did not arm the fault point, got exit {code}")
+    assert os.path.exists(effect), "the effect did not take place"
+    assert _effect_records(wal_path) == [], (
+        "the effect record landed even though `any` armed the fault point")
+    assert replay.WriteAheadLog.read(wal_path)["records"] == []
+
+
+def test_a_label_no_step_carries_leaves_the_record_alone(tmp_path):
+    """A label that matches neither the step's label nor its effect name does
+    not arm the fault point: the child completes and its record lands, so the
+    match is not "crash on anything armed"."""
+    code, effect, wal_path = _run_child(tmp_path, crash_at="no-such-effect")
+    assert code == 0, (
+        f"an unmatched label armed the fault point, got exit {code}")
+    assert os.path.exists(effect), "the effect did not take place"
+
+    [record] = _effect_records(wal_path)
+    assert record["label"] == "activation/effect"
+    assert record["kind"] == "effect"
+
+    report = recover(wal_path)
+    assert report["verdict"] == "rolled-back"
+    assert report["committedEffects"] == 1
     assert "activation/effect" in render(report)
