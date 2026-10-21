@@ -885,19 +885,34 @@ fn collect_ctors(ts: List[Token], start: Int, end: Int, multi: Bool,
   return out
 }
 
+// The ADT case names the document declares, as a set of RESOLVABLE
+// constructors. A name two type declarations both use is dropped, not unioned:
+// the reference's `_case_table` records the second declaration of a `CASE_KEY`
+// as ambiguous and leaves the name unbound (`type A = X | Y`, `type B = X | Z`
+// then refuses a bare `X` — "`X` is not declared in this function"). A union
+// here made every such name resolve in the component gate, so a component body
+// using one was admitted where the reference refuses (issue #2449, whose
+// document declares its own `Dot` beside the carried `Shape = Dot | Box(Int)`).
 fn type_ctors(ts: List[Token]) -> List[Str] {
   var out: List[Str] = []
+  var amb: List[Str] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (atw(ts, i, "type")) {
       let end = type_decl_end(ts, i + 1)
-      out = collect_ctors(ts, i + 1, end, has_top_bar(ts, i + 1, end), out)
+      let mine = collect_ctors(ts, i + 1, end, has_top_bar(ts, i + 1, end), [])
+      for (n of mine) {
+        if (contains(out, n) || contains(amb, n)) { amb = union_into(amb, [n]) }
+        else { out = out.push(n) }
+      }
       i = end
     } else {
       i += 1
     }
   }
-  return out
+  var resolvable: List[Str] = []
+  for (n of out) { if (!contains(amb, n)) { resolvable = resolvable.push(n) } }
+  return resolvable
 }
 
 fn join_comma(xs: List[Str], i: Int, acc: Str) -> Str {
@@ -14300,10 +14315,44 @@ fn tk_case_payload(c: CallN, env: List[Bind], argTys: List[Str]) -> TInf {
   if (adt == "") { return tk_ok("") }
   let pl = tenv_get(env, "payload ".concat(n))
   if (pl == "" || argTys.length() == 0 || argTys[0] == "") { return tk_ok("") }
+  // A GENERIC case (`type Mb[T] = Jj(T)`) unifies its payload against the
+  // argument, so `Jj(1)` and `Jj("s")` are both admitted. The case row holds
+  // the parameter's own spelling, which is not a concrete type to compare
+  // against; refusing there would be a false refusal with the wrong sentence,
+  // the one direction the gate may not err in (the wider `Mb[Int]` vs `Mb`
+  // readings are recorded elsewhere). An argument that still carries a type
+  // parameter is the same silence.
+  if (tk_ty_has_tparam(pl, env) || tk_ty_has_tparam(argTys[0], env)) {
+    return tk_ok("")
+  }
   if (!tk_compat_env(pl, argTys[0], env)) {
     return tk_mismatch("`".concat(n).concat("(...)` payload"), pl, argTys[0])
   }
   return tk_ok("")
+}
+
+// Whether a type spelling still mentions an UNSUBSTITUTED type parameter: a
+// bare head that no `type` declares and that is not a builtin head, at the top
+// or in any argument. A declared type (record, variant, generic record) is
+// concrete and recurses, so `Mb[T]` reports its argument and `Row` does not.
+// The reading is deliberately permissive about an undeclared head: a type the
+// walk cannot name is exactly where the reference's payload rule makes no
+// claim, and the gate may not invent one.
+fn tk_ty_has_tparam(t: Str, env: List[Bind]) -> Bool {
+  let s = ty_trim(t)
+  if (s == "" || s.startsWith("{") || tk_is_fn_ty(s)) { return false }
+  let h = tkp_head(s)
+  if (tk_builtin_head(h) || tenv_get(env, "decl ".concat(h)) != ""
+      || tk_record_base(h, env) || ty_variant_decl(h, env)) {
+    let args = tkp_args(s)
+    var i = 0
+    while (i < args.length()) {
+      if (tk_ty_has_tparam(args[i], env)) { return true }
+      i += 1
+    }
+    return false
+  }
+  return true
 }
 
 // A call: every argument is walked for the refusals inside it. Argument-vs-
