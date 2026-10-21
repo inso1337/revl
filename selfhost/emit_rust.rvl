@@ -7082,7 +7082,9 @@ pub fn emit_rust_src(ir: Any) -> Str {
   out = out.concat(namespaced_key_markers(ir))
   // A routed require needs a per-realm router struct and live-worker lookup.
   // This port does not emit those yet; do not leave the plain require above
-  // looking complete (issue #2796).
+  // looking complete (issue #2796). The marker sits outside the reference-order
+  // block above (the reference emitter's ordering of emitted items), so it is
+  // not part of the byte-agreement ordering.
   for (comp of components) {
     let routes = value_field(comp, "routes")
     for (key of value_keys(routes)) {

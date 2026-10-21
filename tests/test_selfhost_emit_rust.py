@@ -1503,7 +1503,11 @@ def test_a_routed_require_is_named_until_the_router_is_ported(emitted, reference
 
     assert "struct RevlRouterRouterWorker" in expected
     assert "struct RevlRouterRouterWorker" not in actual
-    assert "<<UNSUPPORTED-ROUTED-REQUIRE:Router.worker>>" in actual
+    # Exactly one marker, for the routed require; the plain `require` in the
+    # same fixture (Counter.ledger) is not routed and gets none.
+    assert actual.count("<<UNSUPPORTED-ROUTED-REQUIRE") == 1
+    assert actual.count("<<UNSUPPORTED-ROUTED-REQUIRE:Router.worker>>") == 1
+    assert "Counter.ledger" not in actual
 
 
 def test_an_unvalidated_operation_is_not_named(emitted, reference, tmp_path):
