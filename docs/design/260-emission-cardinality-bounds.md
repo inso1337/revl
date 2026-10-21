@@ -502,8 +502,10 @@ statement form the exact pass-through wrapper (`emit go(x)` where
 `fn go(x) = call(x)`) is the one wrapper shape that stays metered; the same
 wrapper in value position is refused like any other value-position emission.
 The compile-time contract now covers the named call, the statement-form identity
-wrapper and the function value: the first two are metered, the third is refused,
-and every other wrapper shape is refused rather than emitted.
+wrapper and a wrapper function value: the first two are metered, the third is
+refused, and every other wrapper shape is refused rather than emitted. This
+contract is about wrapper (module function) bodies; a component method that binds
+an emission extern to a value is a different layer, listed below.
 
 Not enforced by this slice, tracked rather than implied:
 
@@ -511,6 +513,11 @@ Not enforced by this slice, tracked rather than implied:
   statically-counted `calls` case is a compile refusal already);
 * a `deferred` extern (enqueued and fired at session commit) and a
   spawn-handle emission (`s.inner.method()`), which do not pass this seam;
+* an emission extern, or a local function that reaches one, bound to a value
+  inside a COMPONENT METHOD body: the checker's emit requirement does not follow
+  a value binding there, so the crossing does not reach the seam and its declared
+  ceiling is unenforced. This is pre-existing on main and tracked in #2834; the
+  fix belongs in the checker, not in this slice;
 * the other five tiers.
 
 Tier list: Python only, so far; the above are the Slice 3 follow-up.
