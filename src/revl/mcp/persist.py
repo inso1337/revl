@@ -237,7 +237,7 @@ def admitted_name(snap: dict | None) -> str:
 
 
 def _recompile(sources: dict, name: str = "<snapshot>.rvl",
-               profile=None) -> dict:
+               profile=None, report: dict | None = None) -> dict:
     """Compile the snapshotted sources through the very entry points a live
     `revl_load` uses. This *is* the gate: parse + check + lower run here, so a
     component the current checker rejects raises `RevlError` right here.
@@ -250,7 +250,8 @@ def _recompile(sources: dict, name: str = "<snapshot>.rvl",
     source = sources.get(ORIGIN_SOURCE)
     modules = sources.get(ORIGIN_MODULES)
     if source is not None:
-        return compile_source(source, name, modules=modules, profile=profile)
+        return compile_source(source, name, modules=modules, profile=profile,
+                              report=report)
 
     files = sources.get(ORIGIN_FILES)
     if files:
@@ -265,7 +266,7 @@ def _recompile(sources: dict, name: str = "<snapshot>.rvl",
                         for path, text in
                         (sources.get(ORIGIN_DEPENDENCIES) or {}).items()})
         return compile_files(list(files), sources=virtual or None,
-                             profile=profile)
+                             profile=profile, report=report)
 
     from .session import SessionError  # noqa: PLC0415
 
@@ -367,7 +368,8 @@ def _refuse_policy_downgrade(session, meta: dict) -> None:
             "refuse-don't-degrade)")
 
 
-def restore(session, snap: dict, profile=None) -> dict:
+def restore(session, snap: dict, profile=None,
+            report: dict | None = None) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -400,7 +402,8 @@ def restore(session, snap: dict, profile=None) -> dict:
     _refuse_policy_downgrade(session, meta)
 
     try:
-        ir = _recompile(sources, admitted_name(snap), profile=profile)
+        ir = _recompile(sources, admitted_name(snap), profile=profile,
+                        report=report)
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic

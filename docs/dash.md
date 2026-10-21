@@ -97,7 +97,45 @@ choice is being asked of them.
   `--mcp-scope` marks components admitted through the MCP session for the
   policy's `mcp` sandbox.
 
-## 5. Usage
+## 5. Rejected candidates (opt-in)
+
+The decisions queue says that a policy refused. The rejected-candidates section
+says why, edge by edge. It is off by default, so the default model and `--json`
+output are unchanged. It is enabled with `rejected=True` on `dash.build_model`
+or `dash.Dashboard`, together with a `policy`.
+
+For each component the policy refuses, it lists every refused edge as
+`component -> capability: guarantee`, with the repairs the refusal's `navigate`
+record allows beside it:
+
+```
+REJECTED CANDIDATES  (read-only; nothing here runs or admits)
+  TenantAJob
+    TenantAJob -> bus: may reach only [kv]
+        repair (author, clears-this-gate): drop the reach: remove the emission edge ...
+        repair (operator, candidate): extend the matched `may reach` allow rule ...
+```
+
+The guarantee is the allow list or deny pattern that fired. Each repair keeps
+who enacts it and its proof marker (`clears-this-gate` or `candidate`), as
+`navigate` returned them. The section only re-reads the refusal. It runs
+nothing, admits nothing, and applies no repair.
+
+Under the untrusted-author profile (`profile=AdmissionProfile.untrusted_author(...)`)
+the section is the single collapsed verdict from `navigate.collapsed()` and
+nothing else: no component, capability, guarantee or family. Every refusal
+renders the same bytes, so the section cannot be used to rebuild the operator's
+policy. The full detail is for the operator view only.
+
+Under that profile the policy exceptions in the decisions queue are collapsed to
+the same verdict, so nothing else in the output names the refused edge.
+
+There is no CLI flag for it yet, so `--json` output is unchanged. The Python
+API adds a `rejected` key to the model when it is enabled.
+
+Tests: `tests/test_dash_rejected_2756.py`.
+
+## 6. Usage
 
 ```
 revl dash <sources.rvl...> [options]

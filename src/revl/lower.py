@@ -106,6 +106,7 @@ from .resources import (
     resource_taint,
 )
 from .parser import (
+    EQUALITY_OPS,
     NESTING_LIMIT,
     recursion_headroom,
     _describe_expr,
@@ -7202,6 +7203,47 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
     return node
 
 
+def _mark_equality_widen(op: str, left: dict, right: dict,
+                         left_type: str | None,
+                         right_type: str | None) -> None:
+    """Mark the narrower operand of a mixed-width equality (issue #2715).
+
+    `==` requires only that one type is compatible with the other, in either
+    direction, so two mixed comparisons reach every backend: `Int`/`Float` and
+    `Int32`/`Int`. Neither carried a conversion. In the first, TypeScript
+    compared `3n === 3` (false, a wrong answer) and go did not build at all
+    (`int64` against `float64`). In the second, TypeScript compared
+    `3n === 3` for an `Int32` (a `number`) against an `Int` (a `bigint`), and
+    go compared `int32` against `int64` (also a build failure); java boxed
+    `Integer`/`Long` and python absorbed both through its one int type. `a:
+    Int32 == 3` is the same bug, because an unannotated integer literal is an
+    `Int`.
+
+    Marking the OPERAND — not the `bin` node — reuses the one conversion every
+    backend already renders at a marked site, and leaves same-width equality
+    untouched (`bigint` against `bigint`, `long` against `long`, `int32`
+    against `int32`, `i64` against `i64`, is already sound).
+
+    The operand is marked with the `widen` key a call argument, `let` and
+    `return` site already carries: `"Float"` for the numeric ladder's top, or
+    `"Int"` for the lossless `Int32 -> Int` step (python absorbs that one).
+    Additive, no `ir_version` change. An untyped operand is left unmarked: an
+    absent annotation, never a guess.
+    """
+    if op not in EQUALITY_OPS:
+        return
+    lhead = parse_type(left_type)[0]
+    rhead = parse_type(right_type)[0]
+    if lhead in ("Int", "Int32") and rhead == "Float":
+        left["widen"] = "Float"
+    elif lhead == "Float" and rhead in ("Int", "Int32"):
+        right["widen"] = "Float"
+    elif lhead == "Int32" and rhead == "Int":
+        left["widen"] = "Int"
+    elif lhead == "Int" and rhead == "Int32":
+        right["widen"] = "Int"
+
+
 def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
     """An annotated `let`/`var` pins an empty-collection literal (roadmap 76b, 107).
 
@@ -7383,13 +7425,18 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # `_operand_annotation` decides the annotation for BOTH strata; the
         # component stratum reads the same decision off the types `infer_ir`
         # recovers from its lowered operands (issue #2198).
-        if expr.op in _ANNOTATED_BIN_OPS:
-            annotation = _operand_annotation(
-                expr.op,
-                infer_ast(expr.left, type_env, types, None),
-                infer_ast(expr.right, type_env, types, None))
-            if annotation is not None:
-                node["operands"] = annotation
+        if expr.op in _ANNOTATED_BIN_OPS or expr.op in EQUALITY_OPS:
+            lt = infer_ast(expr.left, type_env, types, None)
+            rt = infer_ast(expr.right, type_env, types, None)
+            if expr.op in _ANNOTATED_BIN_OPS:
+                annotation = _operand_annotation(expr.op, lt, rt)
+                if annotation is not None:
+                    node["operands"] = annotation
+            else:
+                # issue #2715: a mixed Int/Float equality widens its Int
+                # operand, exactly as a call argument does.
+                _mark_equality_widen(expr.op, node["left"], node["right"],
+                                     lt, rt)
         return node
     if isinstance(expr, ExprUn):
         if expr.op == "try":
@@ -10363,14 +10410,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # fn stratum's own function is what keeps the two from drifting apart
         # again: without it the arithmetic family was silently missing here and
         # each backend fell back to its host operator (issue #2198).
-        if expr.op in _ANNOTATED_BIN_OPS:
+        if expr.op in _ANNOTATED_BIN_OPS or expr.op in EQUALITY_OPS:
             tenv = getattr(env, "type_env", None) or {}
-            annotation = _operand_annotation(
-                expr.op,
-                infer_ir(node["left"], tenv, env.types, env.services),
-                infer_ir(node["right"], tenv, env.types, env.services))
-            if annotation is not None:
-                node["operands"] = annotation
+            lt = infer_ir(node["left"], tenv, env.types, env.services)
+            rt = infer_ir(node["right"], tenv, env.types, env.services)
+            if expr.op in _ANNOTATED_BIN_OPS:
+                annotation = _operand_annotation(expr.op, lt, rt)
+                if annotation is not None:
+                    node["operands"] = annotation
+            else:
+                # issue #2715: the same mixed Int/Float equality marker the fn
+                # stratum sets; the two strata cannot disagree about `==`.
+                _mark_equality_widen(expr.op, node["left"], node["right"],
+                                     lt, rt)
         return node
     if isinstance(expr, ExprUn):
         if expr.op == "try":
