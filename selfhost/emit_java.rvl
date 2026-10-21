@@ -3866,11 +3866,8 @@ fn key_binding(key: Str) -> Str {
 // The service a `req` node names: its BINDING in the component's raw-keyed
 // requirement table (issue #2394).
 fn req_service_of(comp: Any, name: Str) -> Str {
-  let rq = value_field(comp, "requires")
-  for (k of value_keys(rq)) {
-    if (k == name || key_binding(k) == name) { return value_str(value_field(rq, k)) }
-  }
-  return ""
+  let raw = map_get(req_bindings(comp), name)
+  return raw == "" ? "" : value_str(value_field(value_field(comp, "requires"), raw))
 }
 
 // binding -> raw wiring key for a component's requirements.
