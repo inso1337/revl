@@ -130,3 +130,98 @@ def test_divergence_signature_is_stable_and_specific():
     assert go_none == "undefined: None"
     assert "is not an interface" in go_iface
     assert go_none != go_iface
+
+
+def test_string_generator_reaches_non_ascii_and_renders_back():
+    """Issue #2727, part 1: the alphabet reaches the unit boundaries. The
+    generator must produce an accented letter, a combining-mark sequence and a
+    non-BMP scalar, and each must render back to a revl literal the reference
+    tier accepts with the same value."""
+    gen = F.Generator(random.Random(5))
+    literals = [gen._str_lit() for _ in range(200)]
+    assert any(ord(ch) > 127 for lit in literals for ch in lit), (
+        "the string alphabet is still ASCII-only")
+    assert any(ord(ch) > 0xFFFF for lit in literals for ch in lit), (
+        "no non-BMP scalar was generated")
+    assert any("\u0301" in lit or "\u0308" in lit for lit in literals), (
+        "no combining-mark sequence was generated")
+
+    for atom in F._NONASCII_STR_ATOMS:
+        src = f'pub fn probe() -> Str {{ return "{atom}" }}'
+        value = F.reference_value(src)
+        assert value == atom
+        literal = F.render_literal("Str", value)
+        assert literal.startswith('"') and literal.endswith('"')
+        aug = F.assertion_source(src, "Str", value)
+        assert aug is not None, f"literal for {atom!r} was discarded"
+        outcome, _msg, _out = F._run_tier(F.REFERENCE, compile_source(aug))
+        assert outcome == "pass", f"{atom!r} did not round-trip"
+
+
+def test_fault_classifier_separates_runtime_faults_from_build_errors():
+    """Issue #2727, part 2: a fault kind is read from the runtime's own words,
+    across hosts; a toolchain rejection that merely NAMES the operator is not a
+    fault (Go refuses a constant divisor at compile time, it does not fault)."""
+    assert F.classify_fault(
+        "go test exited 1",
+        "panic: runtime error: integer divide by zero") == "divzero"
+    assert F.classify_fault(
+        "vitest exited 1", "RangeError: Division by zero") == "divzero"
+    assert F.classify_fault(
+        "1 of 1 test(s) passed",
+        "FAIL t: ZeroDivisionError: integer modulo by zero") == "divzero"
+    assert F.classify_fault(
+        "go test exited 1",
+        "panic: runtime error: index out of range [1] with length 1") == "index"
+    assert F.classify_fault(
+        "1 of 1 test(s) passed",
+        "FAIL t: IndexError: list index out of range") == "index"
+    # java and wasm spell the same faults differently; missing either made
+    # check_fault answer "unknown", which the driver recorded as a divergence
+    assert F.classify_fault(
+        "java exited 1",
+        "Exception in thread \"main\" java.lang.IndexOutOfBoundsException: "
+        "Index 1 out of bounds for length 1") == "index"
+    assert F.classify_fault(
+        "java exited 1",
+        "java.lang.ArithmeticException: / by zero") == "divzero"
+    assert F.classify_fault(
+        "wasm failed",
+        "wasm trap: wasm `unreachable` instruction executed") == "trap"
+    assert F.classify_fault(
+        "wasm failed",
+        "Error: wasm trap: out of bounds memory access") == "index"
+    # a build rejection is not a fault, even when its text names the divisor
+    assert F.classify(
+        "go test exited 1",
+        "./gen_test.go:10:14: invalid operation: division by zero") == "build"
+
+
+def test_generated_fault_programs_agree_with_the_reference_kind():
+    """The generator's two deliberate faults reach the driver as faults (not
+    discarded values), and the reference reports the kind the runner will be
+    compared on."""
+    found: dict[str, str] = {}
+    for seed in range(200):
+        gen = F.Generator(random.Random(seed))
+        src = gen.program().render()
+        try:
+            F.reference_value(src)
+        except F.ReferenceFault as fault:
+            if fault.kind is not None:
+                found.setdefault(fault.kind, src)
+        if {"divzero", "index"} <= set(found):
+            break
+    assert set(found) >= {"divzero", "index"}, (
+        f"the generator never produced both fault kinds: {sorted(found)}")
+    for kind, src in found.items():
+        outcome, message, out = F.check_fault(F.REFERENCE, src + F._FAULT_TEST)
+        assert outcome == kind, f"{kind} probe reported {outcome}: {message}\n{out}"
+
+
+def test_fault_comparison_batch_completes_on_py_only():
+    """The new fault path is exercised end to end (reference fault, no
+    comparison tiers) without crashing."""
+    rc = F.main(["--seed", "23", "--count", "40", "--tiers", "py",
+                 "--no-fixtures", "--quiet"])
+    assert rc == 0

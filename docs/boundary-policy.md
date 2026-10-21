@@ -108,6 +108,12 @@ approvals require bounded crossings
 # (item 344) or a distilled auto-approve rule (item 251) for it
 capability mail.send  may never be granted standing
 capability shell.*    may never be granted standing
+
+# require a generated wasm component to run confined, and name its ceilings
+# (issue #2729). A `wasm components confined` line with no limits is REFUSED,
+# not defaulted; with no policy at all the conservative defaults apply.
+wasm components confined
+wasm component limits fuel = 1000000000, memory = 64MiB, wall = 120s
 ```
 
 The JSON form parses to the same policy:
@@ -121,7 +127,9 @@ The JSON form parses to the same policy:
   "tenants": {"neverReachEachOther": true},
   "mcp": {"allow": ["llm", "kv*"]},
   "approvalCeilings": {"refuseUnbounded": true},
-  "neverStanding": ["mail.send", "shell.*"]
+  "neverStanding": ["mail.send", "shell.*"],
+  "wasm": {"confined": true,
+           "limits": {"fuel": 1000000000, "memory": "64MiB", "wall": "120s"}}
 }
 ```
 
@@ -191,6 +199,21 @@ The JSON form parses to the same policy:
 
   An unmarked capability mints and distills exactly as before, so a policy
   written without this clause behaves byte-identically.
+* **`wasm components confined` / `wasm component limits …` (issue #2729).**
+  A generated wasm component always runs confined: the produced component's
+  import section is checked against what the component declared, and fuel, a
+  linear-memory ceiling and a wall-clock ceiling are applied before execution
+  (`ComponentTrap` distinguishes which ceiling was hit). The check compares the
+  **full composed address** (`coeffect:<realm>/<key>`, `route:<key>`), so a
+  realm is part of the authority and an import placed in a realm the component
+  did not declare is refused. A declared `*` is the unnameable boundary and
+  does not prove that a named import is inside it, so only a concrete
+  declaration covers a concrete address. This clause names the ceilings
+  explicitly. A policy that asks for confinement but states no limits, or only
+  part of a set, is **refused** with a named `ConfinementError` rather than run
+  under a default — the policy reads as a promise, so an unnamed ceiling is not
+  filled in silently. With no policy the conservative defaults still apply, so
+  a generated component is confined by default.
 
 ### What a capability token may be
 

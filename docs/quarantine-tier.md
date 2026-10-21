@@ -66,10 +66,12 @@ reuses the gauntlet verbatim, then adds the substrate battery:
    A probe that **returns** is a clean round trip. A probe that **traps** is
    caught here — wasmtime exits non-zero, the host was never touched — and
    recorded with the runtime's own failure detail. A probe that **times out**
-   is likewise recorded, not raised: the guest is bounded by a fuel budget, so
-   a boundary function that does not terminate is graded (`timeout`), and the
-   battery stops at the first such probe rather than paying the wall-clock
-   budget for every remaining one. Neither is ever re-raised.
+   is likewise recorded, not raised: each probe runs under the policy's fuel,
+   linear-memory and wall-clock ceilings (or the conservative defaults when the
+   policy names none), so a boundary function that does not terminate is graded
+   (`timeout`), and the battery stops at the first such probe rather than
+   paying the wall-clock budget for every remaining one. Neither is ever
+   re-raised.
 
 ### Verdicts
 
@@ -81,6 +83,7 @@ reuses the gauntlet verbatim, then adds the substrate battery:
 | `rejected` | admission refused; the candidate never reached the substrate | — |
 | `deferred` | no canonical-ABI-emittable boundary function: every boundary signature carries a type the canonical boundary still cannot lower (Float, Map, resource, function-value) | — |
 | `unavailable` | `wasm-tools`/`wasmtime` absent; grade + lowering still ran | — |
+| `refused` | the candidate is not confined: the produced component imports something it never declared, or the policy asks for wasm confinement without limits (issue #2729) | **not** eligible |
 
 A `trapped` verdict is the tier's whole point: the candidate's fault would have
 *escaped on a hosted tier*, but in quarantine it is a caught trap, **proven by
@@ -142,9 +145,9 @@ revl quarantine candidate.rvl --policy quarantine.txt   # + admission decision
 ```
 
 Exit status: `0` when the candidate passed (or was deferred/unavailable —
-nothing to fail on), `1` when it was trapped, timed out, or rejected, and — with
-`--require-runtime` — `3` when the toolchain is absent so the candidate could
-not actually be proven.
+nothing to fail on), `1` when it was trapped, timed out, rejected, or refused
+(unconfined), and — with `--require-runtime` — `3` when the toolchain is absent
+so the candidate could not actually be proven.
 
 ## Scope: what the boundary carries
 
