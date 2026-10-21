@@ -310,16 +310,17 @@ def test_a_refresh_overwrites_measured_files_and_drops_removed_ones():
 
 def test_a_weights_refresh_is_not_a_full_run():
     """A refreshed weights file changes shard balance only, so the JSON's
-    selection is this file alone; the writer's is this file plus the read_text
-    encoding guard, because the writer is a `.py` (issue #2639's main-health
-    finding). Neither escalates to FULL."""
+    selection is this file alone; the writer's is this file plus the two
+    whole-tree encoding guards, because the writer is a `.py` (issues #2639
+    and #2648). Neither escalates to FULL."""
     sys.path.insert(0, str(ROOT / "tools"))
     import affected_tests  # noqa: PLC0415
-    guard = "tests/test_read_text_encoding_guard.py"
+    guards = {"tests/test_read_text_encoding_guard.py",
+              "tests/test_open_encoding_guard.py"}
     want = {
         "tests/shard_weights.json": {"tests/test_root_suite_shards_1774.py"},
         "tools/refresh_shard_weights.py": {
-            "tests/test_root_suite_shards_1774.py", guard},
+            "tests/test_root_suite_shards_1774.py"} | guards,
     }
     for changed, expected in want.items():
         sel = affected_tests.select([changed], ROOT)
