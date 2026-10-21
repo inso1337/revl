@@ -226,6 +226,119 @@ def test_the_fn_spelling_of_a_function_type_is_admitted_too():
     }]
 
 
+# ------------------ the carve-out is CHECKED, not merely admitted
+#
+# Owner ruling on #2544: admitting a function-valued parameter as the callee
+# must not hand its calls to the ordinary path unjudged. Both spellings of a
+# function type take the same `call_function_value` path in `infer_ast` and in
+# `local_function_call_type`, so the arity, every argument and the result are
+# held to the declared signature exactly as they are for `(Int) -> Str`.
+# Before the fix the arrow spelling was checked while `Fn[...]` fell out of
+# both dispatches (they compared the parsed head with `->` only), so a
+# `Fn[Int, Str]` parameter accepted `f(s)` beside a module `fn f`, and a
+# `-> Int` method accepted a call returning `Str`.
+
+def test_a_fn_spelling_parameter_call_checks_its_argument_types():
+    """The provide-method half of the blocker: `f: Fn[Int, Int]` called with
+    a `Str` beside a module `fn f` was admitted before this fix, which is the
+    same silent weakening the arrow spelling never had."""
+    source = "\n".join([
+        "fn f(x: Int) -> Int { return x }",                    # 1
+        "service M {",                                         # 2
+        "  fn go(f: Fn[Int, Int], s: Str) -> Int",             # 3
+        "}",                                                   # 4
+        "component C provides m: M {",                         # 5
+        "  provide m {",                                       # 6
+        "    fn go(f, s) = f(s)",                              # 7
+        "  }",                                                 # 8
+        "}",                                                   # 9
+    ]) + "\n"
+    with pytest.raises(RevlError, match="argument 1 of `f` expects `Int`, got `Str`") as exc:
+        compile_source(source, "t.rvl")
+    assert exc.value.code == "T1"
+    assert exc.value.category == "type-mismatch"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 7)
+
+
+def test_a_fn_spelling_call_returning_str_is_refused_in_an_int_method():
+    """The result half: `f: Fn[Int, Str]` is called and the call's `Str`
+    flows into a method declared `-> Int`. With the callee untyped the result
+    was unknown, so the return check had nothing to refuse."""
+    source = "\n".join([
+        "fn f(x: Int) -> Int { return x }",                    # 1
+        "service M {",                                         # 2
+        "  fn go(f: Fn[Int, Str], n: Int) -> Int",             # 3
+        "}",                                                   # 4
+        "component C provides m: M {",                         # 5
+        "  provide m {",                                       # 6
+        "    fn go(f, n) = f(n)",                              # 7
+        "  }",                                                 # 8
+        "}",                                                   # 9
+    ]) + "\n"
+    with pytest.raises(RevlError, match="returns expects `Int`, got `Str`") as exc:
+        compile_source(source, "t.rvl")
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 7)
+
+
+def test_a_fn_spelling_call_checks_arity():
+    """Arity comes from the same function type, so `Fn[Int, Int]` called with
+    two arguments is refused with the type's own spelling in the message."""
+    source = "\n".join([
+        "fn f(x: Int) -> Int { return x }",                    # 1
+        "service M {",                                         # 2
+        "  fn go(f: Fn[Int, Int], n: Int) -> Int",             # 3
+        "}",                                                   # 4
+        "component C provides m: M {",                         # 5
+        "  provide m {",                                       # 6
+        "    fn go(f, n) = f(n, n)",                           # 7
+        "  }",                                                 # 8
+        "}",                                                   # 9
+    ]) + "\n"
+    with pytest.raises(RevlError, match="`f` is a `Fn\\[Int, Int\\]` and takes 1 argument") as exc:
+        compile_source(source, "t.rvl")
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 7)
+
+
+def test_the_ast_dispatch_checks_a_fn_spelling_parameter_too():
+    """The `fn`-body half: a `Fn[Int, Int]` parameter called with a `Str` in a
+    `fn` body was admitted for the same reason (`infer_ast`'s callee dispatch
+    recognised only `->`). The module fn is absent here, so the item-445
+    lowering scan does not pre-empt the typecheck rule under test."""
+    with pytest.raises(RevlError, match="argument 1 of `f` expects `Int`, got `Str`") as exc:
+        compile_source(
+            "fn g(f: Fn[Int, Int], s: Str) -> Int { return f(s) }", "t.rvl")
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 1)
+
+
+@pytest.mark.parametrize("fn_type", ["(Int) -> Str", "Fn[Int, Str]"])
+def test_a_matching_signature_is_admitted_in_both_spellings(fn_type):
+    """Positive controls for both spellings, in both strata: the matching call
+    must stay admitted, so the fix refuses on the signature and not on the
+    spelling. `fn g` has no same-named module fn (the item-445 scan would
+    pre-empt a fn-body test that had one); the provide method does, which is
+    the #1823 shape the carve-out exists for."""
+    assert compile_source(
+        f"fn g(f: {fn_type}, n: Int) -> Str {{ return f(n) }}\n",
+        "t.rvl",
+    ) is not None
+    ir = compile_source(
+        "fn f(x: Int) -> Int { return x }\n"
+        f"service M {{ fn go(f: {fn_type}, n: Int) -> Str }}\n"
+        "component C provides m: M {\n"
+        "  provide m { fn go(f, n) = f(n) }\n"
+        "}\n",
+        "t.rvl",
+    )
+    assert ir["components"][0]["body"][0]["methods"][0]["body"] == [{
+        "step": "return",
+        "expr": {"kind": "call", "callee": {"kind": "name", "id": "f"},
+                 "args": [{"kind": "name", "id": "n"}]},
+    }]
+
+
 # -------------------------- the binder forms the carve-out must NOT widen to
 
 @pytest.mark.parametrize("source", [

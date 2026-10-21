@@ -2457,10 +2457,13 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             name = expr.callee.name
             # a local of function type shadows everything else: `let g = ...`
             # / a `(Int) -> Int` parameter is the callee, not a same-named
-            # top-level fn or ADT case
+            # top-level fn or ADT case. Both spellings of a function type are
+            # the callee and both are CHECKED by `call_function_value` here:
+            # `is_function_type` covers `->` and `Fn[...]`, so admitting the
+            # generic spelling cannot leave a call unchecked (issue #2544).
             local = tenv.get(name)
             head = parse_type(local)[0]
-            if head == FN_HEAD:
+            if is_function_type(local):
                 return call_function_value(expr, local, f"`{name}`", arg_types,
                                            tenv, types, filename, line)
             # issue #2544: a binder whose type is NOT a function cannot be the
@@ -2468,10 +2471,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             # case and silently drops the binding. Refuse it by type, but only
             # when such a callable actually EXISTS: with none there is no
             # fall-through to refuse, and the ordinary checks own the call.
-            # The #1823 carve-out above covers only the arrow spelling: it
-            # returns at the `FN_HEAD` arm. A `Fn[...]` local reaches this
-            # guard and is exempted here by `is_function_type` (both spellings
-            # are function types, see `_FUNCTION_TYPE_HEADS`).
+            # A function-typed binder never reaches this guard: both spellings
+            # return at the arm above.
             # `Any`/`Value` are erased dynamic types that may hold a function,
             # `Never` is the uninhabited bottom (a call on it is vacuous), and
             # a still-unknown binder is ⊥, so none of them is "definitely not
@@ -2617,7 +2618,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
         callee_t = infer_ast(expr.callee, tenv, types, filename)
-        if parse_type(callee_t)[0] == FN_HEAD:
+        if is_function_type(callee_t):
             return call_function_value(expr, callee_t, IN_PLACE_CALLEE,
                                        arg_types, tenv, types, filename, line)
         return None
@@ -2905,7 +2906,7 @@ def check_case_call_arity(expr, tenv: dict, types: dict,
             or not isinstance(expr.callee, ExprVar):
         return
     name = expr.callee.name
-    if parse_type(tenv.get(name))[0] == FN_HEAD:
+    if is_function_type(tenv.get(name)):
         return
     case = (types.get(CASES_KEY) or {}).get(name)
     if case is not None:
@@ -3068,7 +3069,9 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
     a `name` node a component position writes for a parameter or `let`-bound
     arrow (`g(1)` in a provide method), as `infer_ast` types the same call
     through `call_function_value`: the arity and every argument are held to
-    the function type, and the result is its return.
+    the function type, and the result is its return. Both spellings of a
+    function type, `(Int) -> Str` and `Fn[Int, Str]`, take this path and are
+    checked; admitting the generic spelling must not leave a call unjudged.
 
     Issue #2490: a provide-method parameter named `Some` is the callee of
     `Some(1)` as it is in a `fn` body, and this arm gives that call the type
@@ -3081,15 +3084,13 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
     name = callee.get("id")
     fn_type = tenv.get(name)
     head, parts = parse_type(fn_type)
-    if head != FN_HEAD:
+    if not is_function_type(fn_type):
         # issue #2544, the case-constructor half: a call on a local lowers to
         # this `call`/`name` shape, while a case call lowers to a `var`, so a
         # non-function local here is the same dropped binding the AST guard
         # refuses -- only when the module `fn`/extern or case it would be
         # dropped for exists (the AST guard's `names_a_module_callee`).
-        # A function-typed binder stays admitted whichever spelling declared
-        # it; `Any`/`Value`/`Never` and a still-unknown binder stay admitted
-        # too.
+        # `Any`/`Value`/`Never` and a still-unknown binder stay admitted too.
         if (filename and fn_type is not None
                 and not is_function_type(fn_type)
                 and head not in _OPEN_CALLABLE_HEADS
@@ -3252,7 +3253,7 @@ def _check_generic_case(expr, ehead: str | None, eargs: list[str], tenv: dict,
     from .parser import ExprVar
     callee = expr.callee
     if not isinstance(callee, ExprVar) \
-            or parse_type(tenv.get(callee.name))[0] == FN_HEAD:
+            or is_function_type(tenv.get(callee.name)):
         return False
     case = (types.get(CASES_KEY) or {}).get(callee.name)
     params = generic_variant_params(case and case["adt"], types)
