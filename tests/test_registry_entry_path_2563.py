@@ -38,8 +38,6 @@ import inspect
 import json
 import os
 
-import pytest
-
 from revl import registry, registry_evidence
 from revl.__main__ import main
 from revl.truc import _host
