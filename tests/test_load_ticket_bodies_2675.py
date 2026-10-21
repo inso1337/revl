@@ -194,3 +194,35 @@ def test_the_trusted_files_only_load_and_swap_tickets_agree(transport, tmp_path)
     load_ticket = _load_ticket(transport, {"files": [str(candidate)]})
     assert load_ticket.get("unreviewedHostCode") == \
         swap_ticket["unreviewedHostCode"], load_ticket
+
+
+# A second trusted file that declares its own host body and nothing else, so a
+# mixed candidate has two files' bodies to name and a module's beside them.
+_SECOND_BODY = (
+    "extern pure fn second_note(x: Str) -> Str = @py { return x }\n"
+)
+
+
+@needs_cordis
+def test_a_trusted_load_with_files_and_a_module_names_both_bodies(
+        transport, tmp_path):
+    """An edited buffer riding in `modules` does not replace the files' bodies.
+
+    A draft boot or a load carries an edited file as a `modules` entry beside
+    the files it did not edit. Before #2675 the trusted-files attribution was
+    skipped whenever `modules` was non-empty, so the ticket named only the
+    module's body and dropped the outside file's body from what a yes admits.
+    Both files are the trusted author's text, so the ticket names both.
+    """
+    first = _candidate_file(tmp_path)
+    second = tmp_path / "second-2675.rvl"
+    second.write_text(_SECOND_BODY, encoding="utf-8")
+    assert not in_export_area(str(second))
+
+    ticket = _load_ticket(transport, {
+        "files": [str(first), str(second)],
+        "modules": {str(first): _CANDIDATE + "// edited\n"},
+    })
+    assert {entry["extern"] for entry in ticket["unreviewedHostCode"]} == {
+        "candidate_note", "second_note",
+    }, ticket

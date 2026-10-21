@@ -158,11 +158,10 @@ def test_virtual_draft_boot_passes_host_source_provenance(monkeypatch):
     from revl.mcp.approval import ApprovalRequired
 
     candidate_module = os.path.abspath("candidate-helper-2631.rvl")
-    provider_module = os.path.abspath("operator-provider-2631.rvl")
-    modules = {
-        candidate_module: _CANDIDATE_MODULE,
-        provider_module: _OPERATOR_PROVIDER,
-    }
+    # The provider is composed from AUTHORING.providers (the fixture registers
+    # it), so its text must not ride in the agent's `modules`: an agent module
+    # that names the provider's path is refused (issue #2763).
+    modules = {candidate_module: _CANDIDATE_MODULE}
     report = {}
     working_set = {"source": _CANDIDATE, "modules": modules}
     ir = edit.compile_virtual(working_set, report=report)

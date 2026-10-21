@@ -112,7 +112,8 @@ from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
-from .session import ApprovalRefused, NothingLoaded, Session, SessionError
+from .session import (AUTHORED_HOST_BODIES_KEY, ApprovalRefused,
+                      NothingLoaded, Session, SessionError, host_body_entries)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -651,7 +652,9 @@ def _authoring_refusal(arguments: dict) -> dict | None:
 # a yes lets run.
 _AUTHORED_HOST_BODIES: list = []
 _LIVE_HOST_BODIES: list = []
-_ORIGIN_AUTHORED_HOST_BODIES = "_revl_authored_host_bodies"
+# The origin member's value is defined in `session`; this is the spelling the
+# server and its tests read it by, so the key has one definition.
+_ORIGIN_AUTHORED_HOST_BODIES = AUTHORED_HOST_BODIES_KEY
 
 
 def _with_authored_host_bodies(origin: dict, bodies: list | None) -> dict:
@@ -666,18 +669,9 @@ def _with_authored_host_bodies(origin: dict, bodies: list | None) -> dict:
 
 
 def _host_bodies(ir: dict) -> list:
-    """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends}`. This is the surface G8 does not check
-    inside (item 24) and the item-246 classifier never looks at."""
-    out = []
-    for extern in ir.get("externs") or []:
-        bodies = extern.get("bodies") or {}
-        if not bodies:
-            continue
-        out.append({"extern": extern.get("name"),
-                    "classification": extern.get("class"),
-                    "backends": sorted(bodies)})
-    return sorted(out, key=lambda e: str(e["extern"]))
+    """Every extern in `ir` that carries a verbatim host body, in the
+    disclosure record the session module defines."""
+    return host_body_entries(ir)
 
 
 def _transport_authored(source: str | None, files: list[str] | None,
@@ -1011,12 +1005,15 @@ def _authored_host_bodies(ir: dict, source: str | None,
     named_export, reached_export = _export_area_parts(files, report)
     candidate_sources.update(os.path.abspath(path) for path in named_export)
     candidate_sources.update(os.path.abspath(path) for path in reached_export)
-    # In trusted host-code mode a files-only compile outside the export area
-    # is still treated as carrying host code for admission and disclosure
-    # (#2672). There is no transport source or export path to attribute
-    # narrowly, so use the source map returned by that exact compile.
+    # In trusted host-code mode a file passed through `files` outside the
+    # export area is still treated as carrying host code for admission and
+    # disclosure (#2672). There is no transport source or export path to
+    # attribute that text narrowly, so use the source map returned by that
+    # exact compile. A candidate can carry `modules` beside those files (an
+    # edited buffer, an in-memory `use` target): the module text is not a
+    # reason to drop the files' bodies, so the two sets merge (#2675).
     if (include_trusted_files and report.get("authored")
-            and source is None and not modules):
+            and source is None):
         candidate_sources.update(report.get("host_extern_sources", {}))
     if not candidate_sources:
         return []

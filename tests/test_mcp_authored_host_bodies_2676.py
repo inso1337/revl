@@ -140,43 +140,55 @@ def test_server_side_swap_ticket_uses_the_compile_report(monkeypatch):
     assert _body_names(authored) == {"candidate_helper", "candidate_root"}
 
 
-def test_edit_refusal_ticket_carries_the_exact_candidate_bodies(monkeypatch):
-    from revl.mcp.approval import ApprovalRequired
+_EDIT_A = (
+    "service Ops { fn ping() -> Int }\n"
+    "extern emission[notify] fn note_a(msg: Str) = @py { return }\n"
+    "component OpsV1 provides ops: Ops {\n"
+    "  provide ops { fn ping() = 1 }\n"
+    "}\n"
+)
+_EDIT_B = (
+    "extern pure fn note_b(x: Str) -> Str = @py { return x }\n"
+)
 
-    ir, modules, _report, _authored = _compiled_candidate()
-    fake = SimpleNamespace(
-        loaded=True,
-        ir=ir,
-        origin={"source": _CANDIDATE, "modules": modules},
-        draft=None,
-    )
 
-    def swap(candidate, **_kwargs):
-        error = ApprovalRequired({"hash": "sha256:edit", "capabilities": []})
-        error.candidate = candidate
-        raise error
+@needs_cordis
+def test_edit_ticket_names_every_loaded_file_body_beside_the_edited_module(
+        tmp_path):
+    """The real edit door, with the mixed candidate #2675 is about.
 
-    fake.swap = swap
-    monkeypatch.setattr(server._leases, "check_swap", lambda *_args: None)
-    monkeypatch.setattr(server._quarantine, "gate_swap", lambda *_args: None)
+    Editing one of two loaded files makes that file an edited buffer in
+    `modules` beside `files`. The trusted-files attribution was skipped
+    whenever `modules` was non-empty, so at the carrier this ticket named only
+    the edited file's `note_a` and dropped `note_b`. Both files are the
+    trusted author's text, so a yes admits both and the ticket names both.
+    The load, compile, admission, swap and activation gate are all real; only
+    the approval answer is absent, which is what makes the ticket.
+    """
+    first = tmp_path / "edit-a-2676.rvl"
+    second = tmp_path / "edit-b-2676.rvl"
+    first.write_text(_EDIT_A, encoding="utf-8")
+    second.write_text(_EDIT_B, encoding="utf-8")
+    loaded = server._run_handler("revl_load", {
+        "files": [str(first), str(second)], "record": True})
+    assert loaded["ok"] is True, loaded
+    session = server.SESSION
     try:
-        edit_result = edit.apply_edit(fake, {"edits": [{
-            "range": [len(_CANDIDATE), len(_CANDIDATE)],
-            "replacement": "// edited\n",
+        session.approval_policy = "auto"
+        result = server._run_handler("revl_edit", {"edits": [{
+            "target": str(first),
+            "anchor": "  provide ops { fn ping() = 1 }",
+            "replacement": ('  emit note_a("edited")\n'
+                            "  provide ops { fn ping() = 2 }"),
         }]})
-    except ApprovalRequired as error:
-        caught = error
-    else:
-        pytest.fail(f"edit did not reach the swap approval gate: {edit_result!r}")
-
-    # The ticket, not the exception attribute, is what the caller receives:
-    # the shared handler recovers the candidate's bodies when the edit path
-    # attaches them to the exception.
-    ticket = server._approval_required(caught)["ticket"]
-    assert _body_names(ticket["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
-    }
-    assert "operator_helper" not in _body_names(ticket["unreviewedHostCode"])
+        assert result["ok"] is False, result
+        assert result["approvalRequired"] is True, result
+        assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
+            "note_a", "note_b",
+        }
+    finally:
+        if session.loaded:
+            session.unload()
 
 
 def test_repair_gate_carries_the_candidate_bodies(monkeypatch):
@@ -337,7 +349,14 @@ def test_files_only_load_ticket_matches_host_code_trust(
 
 
 def test_fork_and_apply_keep_live_authored_host_bodies(monkeypatch):
-    """Fork restore and apply-generation history retain disclosure metadata."""
+    """The fork handler tags a retained generation record, and the live set.
+
+    `fork_confirm` is stubbed here on purpose: the real restore is exercised by
+    `test_fork_confirm_real_restore_keeps_the_parent_provenance` below. This
+    test pins the second, separate carry the handler does, over a branch's
+    `_history` entries, which the portable snapshot the real restore uses does
+    not carry. The stub keeps that loop deterministic and runtime-free.
+    """
     from revl.mcp.approval import ApprovalRequired
     from revl.mcp.session import Session
 
@@ -373,7 +392,14 @@ def test_fork_and_apply_keep_live_authored_host_bodies(monkeypatch):
 
 def test_fork_confirm_ticket_uses_the_parent_generation_bodies(monkeypatch):
     """A branch restore that refuses carries the parent's disclosed set, not
-    an empty candidate ticket (the fork path has no compile report of its own)."""
+    an empty candidate ticket (the fork path has no compile report of its own).
+
+    `fork_confirm` is stubbed because this is the refusal branch: the real
+    restore is exercised by the success-path test below. Reaching this branch
+    for real needs a class-(c) activation in the parent generation, which would
+    boot the ticket at load instead; the stub pins the handler's recovery of
+    the parent's set without a runtime.
+    """
     from revl.mcp.approval import ApprovalRequired
     from revl.mcp.session import Session
 
@@ -398,15 +424,77 @@ def test_fork_confirm_ticket_uses_the_parent_generation_bodies(monkeypatch):
     }
 
 
+_FORK_SOURCE = (
+    "extern pure fn fs_write(p: Str, data: Str) -> Unit = @py { return }\n"
+    "extern pure fn fs_del(p: Str) -> Unit = @py { return }\n"
+    "extern pure fn fork_note(x: Str) -> Str = @py { return x }\n"
+    "service Ops { emission fn write(p: Str, data: Str) }\n"
+    "component Agent provides ops: Ops {\n"
+    "  provide ops {\n"
+    "    fn write(p, data) { effect fs_write(p, data) undo fs_del(p) }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_fork_confirm_real_restore_keeps_the_parent_provenance(tmp_path):
+    """The real branch restore, not a stubbed confirm.
+
+    `Session.fork_confirm` snapshots the rewound parent, mints the branch and
+    restores the portable snapshot into it; that snapshot deliberately omits
+    the in-memory provenance member. The fork handler carries the parent's
+    disclosed bodies onto the branch, so the live set a later call/act ticket
+    reads still names them.
+    """
+    from revl import compile_source
+    from revl.mcp.session import Session
+
+    authored = [{"extern": "fork_note", "classification": "pure",
+                 "backends": ["py"]}]
+    parent = Session()
+    parent._wal_path = str(tmp_path / "parent-2676.wal")
+    parent.load(compile_source(_FORK_SOURCE, "fork-2676.rvl"), record=True,
+                origin=server._with_authored_host_bodies(
+                    {"source": _FORK_SOURCE}, authored))
+    server.SESSION = parent
+    branch = None
+    try:
+        called = server._run_handler(
+            "revl_call", {"key": "ops", "method": "write",
+                          "args": [str(tmp_path / "fork.txt"), "v1"]})
+        assert called["ok"] is True, called
+        enumerated = server._run_handler("revl_fork", {"at": 1})
+        assert enumerated["ok"] is True, enumerated
+        confirmed = server._run_handler(
+            "revl_fork_confirm", {"hash": enumerated["hash"]})
+        assert confirmed["ok"] is True, confirmed
+        branch = server.SESSION
+        assert branch is not parent
+        # the restore dropped the member; the handler put it back
+        assert _body_names(branch.origin[
+            server._ORIGIN_AUTHORED_HOST_BODIES]) == {"fork_note"}
+        # and a later handler's ticket reads the live set from that origin
+        assert _body_names(server._LIVE_HOST_BODIES) == {"fork_note"}
+    finally:
+        if branch is not None and branch.loaded:
+            branch.unload()
+
+
 _APPLY_RUNNING = (
     "service Ping { fn ping() -> Int }\n"
+    "extern emission[notify] fn carried_note(msg: Str) = @py { return }\n"
     "component Pinger provides ping: Ping {\n"
     "  provide ping { fn ping() = 1 }\n"
     "}\n"
 )
 
+# `carried_note` is byte-identical in both compositions: the apply leaves it
+# untouched, so it reaches the post-apply origin only through the carry clause,
+# not through the applied-body comparison.
 _APPLY_CANDIDATE = (
     "service Ping { fn ping() -> Int }\n"
+    "extern emission[notify] fn carried_note(msg: Str) = @py { return }\n"
     "extern emission[notify] fn applied_note(msg: Str) = @py { return }\n"
     "component Pinger provides ping: Ping {\n"
     '  emit applied_note("applied")\n'
@@ -418,7 +506,9 @@ _APPLY_CANDIDATE = (
 @needs_cordis
 def test_apply_records_the_resulting_provenance_as_the_live_generation():
     """A plan-artifact apply records the post-apply bodies, not the pre-apply
-    origin, so a later call/act ticket names the body the apply installed."""
+    origin, so a later call/act ticket names the body the apply installed. A
+    body the pre-apply generation already disclosed and the resulting
+    composition still holds is carried, not dropped."""
     from revl import compile_source
     from revl.apply import build_artifact
     from revl.mcp.approval import ApprovalRequired
@@ -431,7 +521,10 @@ def test_apply_records_the_resulting_provenance_as_the_live_generation():
         running)
     session = Session()
     try:
-        session.load(running, origin={"source": _APPLY_RUNNING})
+        session.load(running, origin=server._with_authored_host_bodies(
+            {"source": _APPLY_RUNNING},
+            [{"extern": "carried_note", "classification": "emission",
+              "backends": ["py"]}]))
         result = session.apply(artifact)
         assert result["applied"] is True, result
         assert set(result["resulting"]) == {"Pinger"}
@@ -439,18 +532,23 @@ def test_apply_records_the_resulting_provenance_as_the_live_generation():
         server.SESSION = session
         # The apply door replaces the provenance member with the resulting
         # bodies; the admission inputs stay, so snapshot and edit still see
-        # what the session holds.
+        # what the session holds. `applied_note` is new, so the comparison adds
+        # it; `carried_note` is unchanged, so only the carry clause can hold it.
         assert _body_names(session.origin[
-            server._ORIGIN_AUTHORED_HOST_BODIES]) == {"applied_note"}
+            server._ORIGIN_AUTHORED_HOST_BODIES]) == {
+            "applied_note", "carried_note",
+        }
         assert session.origin["source"] == _APPLY_RUNNING
 
         server._remember_live_host_bodies()
-        assert _body_names(server._LIVE_HOST_BODIES) == {"applied_note"}
+        assert _body_names(server._LIVE_HOST_BODIES) == {
+            "applied_note", "carried_note",
+        }
 
         ticket = server._approval_required(
             ApprovalRequired({"hash": "sha256:apply", "capabilities": []}))
         assert _body_names(ticket["ticket"]["unreviewedHostCode"]) == {
-            "applied_note",
+            "applied_note", "carried_note",
         }
     finally:
         if session.loaded:

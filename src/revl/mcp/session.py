@@ -398,6 +398,29 @@ HISTORY_LIMIT = 64
 AUTHORED_HOST_BODIES_KEY = "_revl_authored_host_bodies"
 
 
+def host_body_entry(extern: dict) -> dict:
+    """The disclosure record for one extern that carries a host body.
+
+    The server's live-body reader and the applied-generation provenance below
+    both produce this record, so the fields a ticket names have one
+    definition rather than one per producer.
+    """
+    return {"extern": extern.get("name"),
+            "classification": extern.get("class"),
+            "backends": sorted(extern.get("bodies") or {})}
+
+
+def host_body_entries(ir: dict | None) -> list:
+    """Every extern in `ir` that carries a verbatim host body, as
+    `{extern, classification, backends}`. This is the surface G8 does not
+    check inside (item 24) and the item-246 classifier never looks at."""
+    out = []
+    for extern in (ir or {}).get("externs") or []:
+        if extern.get("bodies"):
+            out.append(host_body_entry(extern))
+    return sorted(out, key=lambda entry: str(entry.get("extern")))
+
+
 def _applied_host_bodies(running_ir: dict | None,
                          resulting_ir: dict | None) -> list:
     """The host bodies an apply installed or changed.
@@ -418,9 +441,7 @@ def _applied_host_bodies(running_ir: dict | None,
         prior = before.get(extern.get("name")) or {}
         if (prior.get("bodies") or {}) == bodies:
             continue
-        applied.append({"extern": extern.get("name"),
-                        "classification": extern.get("class"),
-                        "backends": sorted(bodies)})
+        applied.append(host_body_entry(extern))
     return sorted(applied, key=lambda entry: str(entry.get("extern")))
 
 
@@ -441,12 +462,9 @@ def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
     carried = []
     for entry in ((origin or {}).get(AUTHORED_HOST_BODIES_KEY) or []):
         current = live.get(entry.get("extern")) or {}
-        bodies = current.get("bodies") or {}
-        if not bodies:
+        if not current.get("bodies"):
             continue
-        carried.append({"extern": entry.get("extern"),
-                        "classification": current.get("class"),
-                        "backends": sorted(bodies)})
+        carried.append(host_body_entry(current))
     merged = {entry.get("extern"): entry for entry in carried}
     for entry in _applied_host_bodies(running_ir, resulting_ir):
         merged[entry["extern"]] = entry
