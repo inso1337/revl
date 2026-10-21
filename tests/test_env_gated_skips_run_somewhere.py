@@ -89,6 +89,7 @@ import ast
 import fnmatch
 import posixpath
 import re
+import shlex
 from pathlib import Path
 
 import os
@@ -386,16 +387,53 @@ def _ci_sets() -> set[str]:
 #: `$RUNNER_TEMP/x`, which is an option's value.
 _RUN_TIME_SELECTION = re.compile(r"\$\{?\w+\}?")
 
+#: `pytest` as a command word, for a line shlex cannot parse: not part of a
+#: filename (`affected_pytest_receipt`) or an option (`--pytest-exit`).
+_COMMAND_PYTEST = re.compile(r"(?<![\w-])(?:[\w./-]*/)?pytest(?=$|\s)")
+
+#: Tokens that end a pytest invocation's own argument list. Everything after
+#: one belongs to another command (`| tee "$log"`) or is a redirect, so it is
+#: not a test target. Without this a `$log` after a pipe reads as the run-time
+#: selection and hides the files the invocation actually named.
+_SHELL_SEPARATOR = frozenset({
+    "|", "||", ";", "&&", "&", ">", ">>", "<", "<<", "2>", "2>&1", "&>",
+})
+
+
+def _shell_tokens(line: str) -> list[str]:
+    """The shell words of one `run:` line, or its bare `pytest` arguments when
+    it does not parse (a continuation backslash, an unbalanced quote in
+    prose). The fallback still requires a command word, so a filename or an
+    option that happens to contain `pytest` is not read as a call."""
+    # a trailing `\` is a line continuation; this reads one line at a time, so
+    # it is removed before the quote-aware split rather than treated as an
+    # escaped newline.
+    cleaned = line.rstrip().removesuffix("\\").rstrip()
+    try:
+        return shlex.split(cleaned, comments=True, posix=True)
+    except ValueError:
+        found = _COMMAND_PYTEST.search(cleaned)
+        if found is None:
+            return []
+        return ["pytest", *cleaned[found.end():].split()]
+
 
 def _pytest_targets(run: str) -> list[str]:
     """Repo-relative paths a `run:` block hands to pytest.
 
     A step that runs pytest with no path at all collects the whole rootdir, so
     it covers everything; that is returned as a bare ".".
+
+    Only a real command word counts. A comment that names pytest, an option
+    such as `--pytest-exit`, and a tool whose filename contains it
+    (`tools/affected_pytest_receipt.py`) are prose or arguments, not
+    invocations. Reading either as a bare call reported "." and silently
+    satisfied every gated file at once, which is how issue #2642's job made
+    the runtime-coverage check unable to fail.
     """
     targets: list[str] = []
     for line in run.splitlines():
-        if "pytest" not in line:
+        if "pytest" not in line or line.lstrip().startswith("#"):
             continue
         prefix = ""
         # `cd backends/python && .venv/bin/pytest -q` runs in a subdirectory,
@@ -403,7 +441,18 @@ def _pytest_targets(run: str) -> list[str]:
         cd_match = re.search(r"cd\s+([\w./-]+)\s*&&", line)
         if cd_match:
             prefix = cd_match.group(1).rstrip("/") + "/"
-        args = line.split("pytest", 1)[1].split()
+        tokens = _shell_tokens(line)
+        at = next((i for i, token in enumerate(tokens)
+                   if posixpath.basename(token) == "pytest"), None)
+        if at is None:
+            continue
+        args = tokens[at + 1:]
+        # `|`, `&&`, a redirect and the like end the invocation's own
+        # arguments: `| tee "$log"` is not a target, and reading its `$log` as
+        # the run-time selection would hide the files the line named.
+        end = next((i for i, arg in enumerate(args) if arg in _SHELL_SEPARATOR),
+                   len(args))
+        args = args[:end]
         # `pytest $SEL_PYTEST`: the files are chosen at run time (the
         # affected-tests selector), so nothing here says which ones run. It
         # used to fall through to "no path at all" and be credited with the
@@ -1430,6 +1479,92 @@ def _runtime_gaps(gated: dict[str, list[str]],
     )
 
 
+def _runtime_selection_gaps(gated: dict[str, list[str]],
+                            selects) -> list[str]:
+    """Gated files the cordis-half driver's fallback selection would skip.
+
+    The comparison itself, kept free of both the driver import and the source
+    scan so the control below can drive it with text it writes, the same way
+    `_runtime_gaps` is.
+    """
+    return sorted(rel for rel in gated if not selects(rel))
+
+
+def _cordis_half():
+    """`tools/cordis_half.py`, imported the way its own tests import it."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        import cordis_half
+    finally:
+        sys.path.pop(0)
+    return cordis_half
+
+
+def test_every_runtime_gated_file_is_selected_by_the_cordis_half():
+    """The PR job's `STATUS none` must only ever mean "nothing here needs the
+    runtime", and it reads the file's TEXT, not this file's AST scan (a fresh
+    CI runner has no test dependency to import). So the two definitions have to
+    agree on every gated file: a file gated on the interpreter path alone
+    (`backends/python/.venv/bin/python`, no `cordis` in its text) is gated here
+    and invisible to the driver, so the cordis-affected job would skip the pin,
+    the setup, the run and the receipt and stay green while the file never
+    executes -- the silent pass issue #2642 is about, one layer up.
+
+    This invariant is what licenses that negative answer. The shape pin in
+    tests/test_ci_pr_cordis_affected_2642.py keeps the job's probe-false branch
+    to it, loud and visible.
+    """
+    driver = _cordis_half()
+    gated = _runtime_gated_files()
+    assert gated, (
+        "no runtime-gated file was found, so this invariant measures nothing")
+    missed = _runtime_selection_gaps(
+        gated,
+        lambda rel: driver.names_runtime(
+            (ROOT / rel).read_text(encoding="utf-8")))
+    assert not missed, (
+        "these files gate on the cordis-py runtime but do not name the token "
+        f"the cordis-affected job selects on ({driver.RUNTIME_TOKEN!r}), so "
+        "that job answers `STATUS none`, skips the runtime and stays green "
+        "while they never execute:\n"
+        + "\n".join(f"  {rel}" for rel in missed)
+        + "\n\nName the runtime itself in the gate, which is the token the "
+        "driver selects on, or teach the driver and this check the new shape "
+        "deliberately."
+    )
+
+
+def test_the_runtime_selection_check_can_actually_fail(tmp_path):
+    """A check that cannot fail proves nothing, so the invariant is driven with
+    the one shape it exists to catch: a gated file that names only the
+    interpreter path. The real driver must not select it, and the invariant's
+    comparison must report that as a gap."""
+    driver = _cordis_half()
+    tree = tmp_path / "repo"
+    (tree / "tests").mkdir(parents=True)
+    venv_gate = (
+        "import pytest\n"
+        "VENV = '/repo/backends/python/.venv/bin/python'\n"
+        "@pytest.mark.skipif(not VENV, reason='no runtime')\n"
+        "def test_x():\n    pass\n")
+    (tree / "tests" / "test_venv_only_gate.py").write_text(
+        venv_gate, encoding="utf-8")
+    (tree / "tests" / "test_names_cordis.py").write_text(
+        "CORDIS = 'cordis'\n", encoding="utf-8")
+
+    # the control's premise: this shape is exactly what the driver misses
+    assert not driver.names_runtime(venv_gate)
+    # and the real selection is neither empty nor indiscriminate, so the
+    # comparison below is not vacuous in either direction
+    assert driver.files_from_selection(["tests/"], tree) == [
+        "tests/test_names_cordis.py"]
+    assert _runtime_selection_gaps(
+        {"tests/test_venv_only_gate.py": ["not VENV"]},
+        lambda rel: driver.names_runtime(
+            (tree / rel).read_text(encoding="utf-8")),
+    ) == ["tests/test_venv_only_gate.py"]
+
+
 def test_every_cordis_gated_test_runs_in_a_job_that_provisions_the_runtime():
     """No runtime-gated test may pass by never running (issue #1067).
 
@@ -1483,6 +1618,25 @@ def test_the_runtime_coverage_check_can_actually_fail():
     assert _pytest_targets(_command_lines(prose)) == []
     real = "backends/python/.venv/bin/python -m pytest tests/ -q"
     assert _pytest_targets(_command_lines(real)) == ["tests/"]
+    # a comment that names pytest, an option such as --pytest-exit, and a tool
+    # whose filename contains it are NOT invocations. Issue #2642's job comments
+    # on the exit status it reads back and calls affected_pytest_receipt.py, so
+    # reading either as a bare call reported "." for its steps and would have
+    # credited the job with every gated file at once.
+    assert _pytest_targets("# pytest are then all skipped") == []
+    assert _pytest_targets("python3 tools/affected_pytest_receipt.py \\") == []
+    assert _pytest_targets('  --pytest-exit "$rc" \\') == []
+    # and the parsing did not get weaker: a real bare call is still the
+    # catch-all it is meant to be.
+    assert _pytest_targets("python3 -m pytest -q") == ["."]
+    # a real invocation that ends in a pipeline is still credited: the `$log`
+    # after `| tee` is not the run-time selection, and reading it as one would
+    # drop the files the line names (the swap job's five suites).
+    piped = ('pytest tests/test_swap_a.py tests/test_swap_b.py -q '
+             '2>&1 | tee "$log"')
+    assert _pytest_targets(piped) == ["tests/test_swap_a.py",
+                                      "tests/test_swap_b.py"]
+    assert _pytest_targets("pytest $SEL_PYTEST -q || rc=$?") == []
     assert "." not in [t for _job, targets in _runtime_provisioning_jobs()
                        for t in targets]
     # and a job that collects everything but installs nothing is not a job at

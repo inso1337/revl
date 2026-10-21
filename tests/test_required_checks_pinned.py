@@ -66,7 +66,7 @@ observation of the server, not the intent, and no unit test can re-read it. So
 until that PATCH lands, `census-artifact` is intended-required and NOT enforced.
 
 NOTE on the partition counts: this partition marks 12 jobs intended-required
-(7 of them enforced) and 12 non-required, over the 24 jobs ci.yml defines. The
+(7 of them enforced) and 13 non-required, over the 25 jobs ci.yml defines. The
 two sides are reconciled at the branch-protection settings, which are out of
 tree; whichever is stale, this test at least makes the job-name side of the
 contract explicit and drift-proof. It reads ci.yml as text, so it needs no
@@ -225,6 +225,15 @@ NOT_REQUIRED_CHECKS = {
     # a merge_group candidate (`if:` names `github.event_name ==
     # 'pull_request'`), so it could not be a required context as written.
     "swap-template-cordis": "issue #2672 review PR path for the swap/authoring suites; advisory by design, and frontend-cordis covers the same suites on every other event",
+    # Issue #2642, option B: the PR path for the cordis half of the affected
+    # selection. `root-suite-affected` installs `.[test]` and can only skip a
+    # guarded file (the #2642 receipt makes that skip red, but a red board is
+    # not execution); `frontend-cordis` runs those tests for real, off pull
+    # requests only (issue #1678). Advisory by DESIGN, same as the swap path
+    # above: it is PR-only, so it cannot report on a merge_group candidate and
+    # must not be a branch-protection context as written. `frontend-cordis` is
+    # its cover on every other event; promotion is a separate, measured change.
+    "cordis-affected": "issue #2642 option B PR path for the cordis half of the affected selection; advisory by design, and frontend-cordis covers the guarded suite on every other event",
 }
 
 

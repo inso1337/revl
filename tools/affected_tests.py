@@ -72,6 +72,15 @@ BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
 GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs",
              "vocabulary", "census")
 
+# The bare-`read_text` encoding guard (issue #2639, main-health finding). The
+# test AST-walks every `.py` in the tree and reports a `.read_text` call with no
+# `encoding`, so what it guards is a CALL and not a symbol: the file that gains
+# one is not imported by the test, and no mapping table can name it. PR #2655
+# landed the guard, and 76d80f879 then added four bare sites under `bench/` and
+# `tests/` on main, where no narrow selection ran it. Every `.py` diff therefore
+# selects it (see `select`); a docs-only diff does not pay for the tree walk.
+READ_TEXT_GUARD_TEST = "tests/test_read_text_encoding_guard.py"
+
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
 # computes the wider lazy-inclusive graph that also fails safe to FULL; this tuple
@@ -1397,10 +1406,6 @@ def select(changed, root) -> dict:
     ci_inputs = ci_backend_corpus_inputs(root)
 
     pytest_nodes: set[str] = set()
-    # A whole-tree read has no path set to select on, so every `.py` change
-    # carries it; a non-Python diff cannot add the call. See the constant.
-    if any(f.endswith(".py") for f in changed):
-        pytest_nodes.add(OPEN_ENCODING_GUARD)
     backends: set[str] = set()
     # `ruff` because lint is cheap. `vocabulary`
     # (`tools/check_vocabulary_mirrors.py`) because it has NO path set to
@@ -1422,6 +1427,30 @@ def select(changed, root) -> dict:
     # affected selection, including the documentation-only one the fast path
     # exists to keep cheap.
     reasons: list[str] = []
+
+    # --- two whole-tree guards that no path rule can name (#2639, #2648) --- #
+    # `READ_TEXT_GUARD_TEST` AST-walks every `.py` in the tree for a
+    # `.read_text` call with no `encoding`; `OPEN_ENCODING_GUARD` walks the same
+    # surface for a text-mode `open()` or `Path.open()` with none. What they
+    # guard is a CALL, not a symbol: the file that gains one is not imported by
+    # either test and no mapping table can name it. This is deliberately an
+    # additive pre-loop check rather than a dispatch arm, because nearly every
+    # arm below ends in `continue` and a `.py` change routinely takes one of
+    # them (`bench/`, `tools/`, a modified test). Before this line those arms
+    # selected only their own tests, so 76d80f879 added four bare read_text
+    # sites that way on main with nothing reporting them. A non-`.py` diff
+    # cannot add a call, so the docs-only fast path does not pay for either
+    # whole-tree scan (the read_text guard's tree test measures ~3.8s of a
+    # 15-110s affected run on this tree).
+    if any(f.endswith(".py") for f in changed):
+        pytest_nodes.add(OPEN_ENCODING_GUARD)
+        pytest_nodes.add(READ_TEXT_GUARD_TEST)
+        reasons.append(
+            "a .py change can add a bare read_text site "
+            "(read_text encoding guard)")
+        reasons.append(
+            "a .py change can add an unpinned text-mode open() site "
+            "(open encoding guard)")
 
     for f in changed:
         # --- the self-evolution progress counters (issue #1224) ------------ #
@@ -1724,10 +1753,10 @@ def select(changed, root) -> dict:
         # issue #1774: the shard weights only balance root-suite-affected's
         # shards; they never decide which tests run (the shards partition the
         # collection whatever the weights say, which
-        # tests/test_root_suite_shards_1774.py pins). A refresh of them, or of
-        # the tool that writes them, selects that test instead of a FULL run
-        # across four shards; the .py writer also carries the whole-tree
-        # open-encoding guard (issue #2771). tests/_shard.py itself stays FULL.
+        # tests/test_root_suite_shards_1774.py pins). A weights JSON refresh
+        # selects that test instead of a FULL run across four shards; the .py
+        # writer also carries both whole-tree encoding guards (issues #2639
+        # and #2648). tests/_shard.py itself stays FULL.
         if f in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
             pytest_nodes.add("tests/test_root_suite_shards_1774.py")
             reasons.append(f"{f} (shard balance only)")
@@ -2049,7 +2078,10 @@ def _test_add_delete_override(changed, added, deleted, root):
       * it imports a `revl.<mod>` the diff touched; or
       * it names a backend tier or stdlib module the diff touched.
     A diff that adds ONLY test files is narrow by definition: nothing else
-    changed, so nothing but the new tests can newly fail.
+    changed, so only the new tests' bodies (and the whole-tree guard, since an
+    added test is a new `.py`) can newly fail. The bare-`read_text` guard rides
+    along either way: its body is exactly where a new call site can appear (two
+    of 76d80f879's four sites were in added test files).
     """
     root = Path(root)
     changed = [_norm(f) for f in changed]
@@ -2070,11 +2102,13 @@ def _test_add_delete_override(changed, added, deleted, root):
         return {
             "full": False,
             "reason": ("only new test file(s) added: "
-                       + " ".join(new_tests) + " -> targeted"),
-            # An added test is a .py change and can carry an unpinned open(),
-            # so the whole-tree guard rides along even when select() is not
-            # reached for this diff.
-            "pytest": sorted(set(new_tests) | {OPEN_ENCODING_GUARD}),
+                       + " ".join(new_tests)
+                       + " (+ read_text and open encoding guards) -> targeted"),
+            # An added test is a .py change and can carry an unpinned open()
+            # or a bare read_text(), so both whole-tree guards ride along even
+            # when select() is not reached for this diff.
+            "pytest": sorted(set(new_tests)
+                             | {READ_TEXT_GUARD_TEST, OPEN_ENCODING_GUARD}),
             "backends": [],
             "gates": ["ruff"],
         }
@@ -2111,14 +2145,21 @@ def _test_add_delete_override(changed, added, deleted, root):
             continue
         return _full(f"added test file {f} maps to no touched module -> full")
 
+    reason = base["reason"] + "; + added test file(s) " + " ".join(new_tests)
+    if READ_TEXT_GUARD_TEST not in base["pytest"]:
+        # `rest` has no `.py`, so `select(rest)` did not carry the guard; the
+        # added test's own body can still introduce a bare call site.
+        reason += " (+ read_text encoding guard)"
+    if OPEN_ENCODING_GUARD not in base["pytest"]:
+        reason += " (+ open encoding guard)"
     return {
         "full": False,
-        "reason": base["reason"] + "; + added test file(s) "
-                  + " ".join(new_tests),
+        "reason": reason,
         # The added test files are .py changes, so a diff that adds one still
-        # carries the whole-tree guard even when the rest of it is not Python.
+        # carries both whole-tree guards even when the rest of it is not
+        # Python.
         "pytest": sorted(set(base["pytest"]) | set(new_tests)
-                         | {OPEN_ENCODING_GUARD}),
+                         | {READ_TEXT_GUARD_TEST, OPEN_ENCODING_GUARD}),
         "backends": base["backends"],
         "gates": base["gates"],
     }
