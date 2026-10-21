@@ -130,18 +130,30 @@ def test_a_refusal_through_the_verbs_hatch_carries_the_count_too():
 
 
 def test_a_new_generation_starts_a_new_unit():
+    """A swap, rollback or undo moves the generation, and that move is
+    simulated here: those doors boot a composition, so driving one needs the
+    cordis runtime and belongs to the swap/rollback/undo suites. This checks
+    the counter's contract against the move they make, and the body says so.
+    """
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
-    # a swap, rollback or undo moves the generation without a load
+    # simulation of the generation move (see the docstring): a swap, rollback
+    # or undo increments the generation without a load
     SESSION._generation += 1
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
 
 
 def test_a_new_generation_is_reported_as_a_new_unit_immediately():
+    """The generation move below is simulated, deliberately: a real one goes
+    through swap, rollback or undo, which need cordis to boot a composition.
+    What this test covers is the part with no cordis-free public door, the
+    report's comparison against the live unit at read time.
+    """
     SESSION.attempt_limit = 3
     assert _call("revl_check", {"source": BAD})["attempt"] == 1
     assert _call("revl_check", {"source": BAD})["attempt"] == 2
-    # a swap, rollback or undo moves the generation, and no verdict has run
-    # since: the report must not show the old unit's 2 of 3
+    # simulation of the generation move: a swap, rollback or undo increments
+    # it, and no verdict has run since, so the report must not show the old
+    # unit's 2 of 3
     SESSION._generation += 1
     axes = _call("revl_state", {})["loopAxes"]
     assert (axes["attempt"], axes["attemptsRemaining"]) == (0, 3)
@@ -171,6 +183,44 @@ def test_a_refused_load_does_not_start_a_new_unit():
     # a failed load moved neither the epoch nor the generation, so the report
     # still shows the count it never reset
     assert _call("revl_state", {})["loopAxes"]["attempt"] == 2
+
+
+def test_a_failed_load_after_the_epoch_move_does_not_refund_the_budget(
+        monkeypatch):
+    """A load that fails after the move still leaves the old unit.
+
+    The epoch bump lives late in `Session._boot`, after the candidate is
+    installed, so a fault in an activation (or any later step) happens with
+    the move already made. `load` captured the whole namespace before it
+    called the body and puts it back, which is what makes the failed load
+    refund nothing. Booting far enough to fault for real needs cordis, so the
+    fault is injected at `_boot`; the checkpoint and the `load` body are the
+    real ones, and that restore is what this covers. Without it a failed load
+    would move the unit and the next verdict would start at 1, handing back
+    the spent budget.
+    """
+    SESSION.attempt_limit = 2
+    assert _call("revl_check", {"source": BAD})["attempt"] == 1
+    assert _call("revl_check", {"source": BAD})["attempt"] == 2
+    epoch, generation = SESSION._load_epoch, SESSION._generation
+
+    def boot_then_fault(ir, config, record, origin):
+        # the moves a boot that got this far would have made, then the fault
+        # the checkpoint has to undo
+        SESSION._load_epoch += 1
+        SESSION._generation = 1
+        raise RuntimeError("fault after the epoch move")
+
+    monkeypatch.setattr(SESSION, "_boot", boot_then_fault)
+    with pytest.raises(RuntimeError, match="fault after the epoch move"):
+        SESSION.load({"components": []})
+    monkeypatch.undo()
+
+    assert (SESSION._load_epoch, SESSION._generation) == (epoch, generation)
+    # the old unit is still live: the count continues, it does not restart
+    refusal = _call("revl_check", {"source": BAD})
+    assert (refusal["attempt"], refusal["attemptsRemaining"]) == (3, 0)
+    assert _call("revl_state", {})["loopAxes"]["attempt"] == 3
 
 
 def test_a_limit_below_one_is_a_usage_error_about_the_bound(capsys):
@@ -214,10 +264,18 @@ def test_session_load_owns_the_epoch_move():
     path stopped bumping the epoch, and no real load would start a new unit.
 
     The move lives in `Session._boot`, the body `Session.load` calls, so the
-    guard names both and fails if the increment moves somewhere else."""
+    guard names both and fails if the increment moves somewhere else.
+    Allowing `load` as well as `_boot` is deliberate: the invariant is that
+    the bump happens after `load` captured its checkpoint, not that it sits in
+    one named body, and `load` is what owns that checkpoint. The failed-load
+    test above keeps the allowance honest, because a bump placed before the
+    capture would survive the restore and be seen as a refund. Pinning the
+    exact function would fail that refactor without protecting anything the
+    failed-load test does not already protect."""
     import ast  # noqa: PLC0415 — test-only
 
-    tree = ast.parse((ROOT / "src/revl/mcp/session.py").read_text())
+    tree = ast.parse(
+        (ROOT / "src/revl/mcp/session.py").read_text(encoding="utf-8"))
     session = next(node for node in tree.body
                    if isinstance(node, ast.ClassDef)
                    and node.name == "Session")
