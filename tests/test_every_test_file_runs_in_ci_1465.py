@@ -88,7 +88,7 @@ _DYNAMIC_STEPS = {
         "and tests/ is covered by the plain `pytest tests/ -q` steps anyway."
     ),
     # Issue #2672's review adds the PR path for the cordis-guarded swap and
-    # authoring suites. The five files ARE explicit on the invocation, but
+    # authoring suites. The nine files ARE explicit on the invocation, but
     # it ends `2>&1 | tee "$log"` so the receipt (#2642) can read the summary
     # back, and this scan is not a shell parser: `2>&1`, `|`, `tee` and
     # `$log` land among the target tokens, so the invocation reads as
@@ -100,9 +100,31 @@ _DYNAMIC_STEPS = {
         "tests/test_self_extending_334.py "
         "tests/test_mcp_authoring_loop_1704.py "
         "tests/test_swap_author_flag_2518.py "
-        "tests/test_handoff_realm_2510.py -q 2>&1 | tee \"$log\"` so the "
+        "tests/test_handoff_realm_2510.py "
+        "tests/test_swap_transactional_1446.py "
+        "tests/test_load_export_area_host_code_2641.py "
+        "tests/test_mcp_authored_host_bodies_2676.py "
+        "tests/test_load_ticket_bodies_2675.py -q 2>&1 | tee \"$log\"` so the "
         "#2642 receipt can read the summary back. The redirection tokens make "
         "the invocation unresolved to this scan (see the comment above)."
+    ),
+    # Issue #2642's option B: the cordis half of the affected selection. Its
+    # real run is inside `tools/cordis_half.py`, which this scan cannot see, so
+    # it credits NO specific file. The one unresolved invocation it reports is
+    # the `affected selection: pytest $nodes` progress line copied from
+    # `root-suite-affected`: the standalone `pytest` token there is a log
+    # label, and the target is the selector's own `PYTEST` line. A FULL
+    # selection is bounded out and says so, so this job runs only a named
+    # selection. Listed so the "too dynamic to parse: list it explicitly" rule
+    # stays an exact account; tests/ coverage remains with the plain
+    # `pytest tests/ -q` steps.
+    ("ci.yml", "cordis-affected"): (
+        "the `echo \"affected selection: pytest $nodes\"` progress line is a "
+        "log label, not a second invocation; the job runs a named selection "
+        "through tools/cordis_half.py and bounds the FULL fallback out, so "
+        "the echoed target is unresolved to this scan. This job credits no "
+        "file: tests/ is covered by the plain `pytest tests/ -q` steps in "
+        "`frontend` and `frontend-cordis`."
     ),
 }
 
