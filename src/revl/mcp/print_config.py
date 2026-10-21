@@ -53,6 +53,7 @@ FORWARDED = (
     ("approval_policy", "--approval-policy", "value", None),
     ("approval_record_values", "--approval-record-values", "value", "withheld"),
     ("author_trust", "--author-trust", "value", "untrusted"),
+    ("attempt_limit", "--attempt-limit", "value", None),
     ("provider", "--provider", "paths", None),
     ("grant", "--grant", "values", None),
     ("bind_realm", "--bind-realm", "values", None),

@@ -67,7 +67,7 @@ import copy
 import os
 import re
 
-from ..compiler import compile_source, file_not_found
+from ..compiler import file_not_found
 from ..diagnostics import report
 from ..errors import RevlError
 from . import effect_classes as _effect_classes
@@ -760,36 +760,39 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
     A refused compile records nothing — the exception leaves `vs` untouched.
 
     `report` (issue #1779's out-parameter, as `compile_under_authoring` takes
-    it) lets a caller read what the compile read, and `report["authored"]` says
-    whether the compiled text arrived over the transport (#2423). A working set
-    with inline `source` is such text; a files-only set is decided by
-    `compile_under_authoring` from the files it named and reached."""
-    from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
-
-    report = {} if report is None else report
+    it) lets callers read what the compile read. It also reports whether the
+    compiled text arrived over the transport (#2423), and which source paths
+    declared host bodies so approval tickets can attribute them (#2631).
+    `_swap_server_side` uses it to identify `use`-reached export files, and
+    `_boot_draft` passes it to the ticket builder."""
+    compile_report: dict = {}
     if vs.get("source") is not None:
-        document = compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
-                                  replacing=replacing, modules=vs.get("modules") or None,
-                                  profile=AUTHORING.profile(), report=report)
-        report["authored"] = True
+        from .server import compile_under_authoring  # noqa: PLC0415 — cycle
+
+        document = compile_under_authoring(
+            vs["source"], None, manifest=manifest,
+            modules=vs.get("modules") or None,
+            replacing=replacing, report=compile_report)
     elif vs.get("files"):
         from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
         document = compile_under_authoring(None, list(vs["files"]),
                                            manifest=manifest,
                                            modules=file_modules(vs) or None,
-                                           replacing=replacing, report=report)
+                                           replacing=replacing, report=compile_report)
     else:
         raise EditError("the working source set has no source to compile")
     from .server import _dependency_buffers  # noqa: PLC0415 — cycle
 
-    dependencies = _dependency_buffers(report)
+    dependencies = _dependency_buffers(compile_report)
     if dependencies:
         vs[ORIGIN_DEPENDENCIES] = dependencies
-    elif vs.get("source") is not None or report.get("dependencies") is not None:
+    elif vs.get("source") is not None or compile_report.get("dependencies") is not None:
         # a compile that read no dependency file leaves none behind, so a
         # `use`-reached truc that stops being reached stops being a buffer
         vs[ORIGIN_DEPENDENCIES] = {}
+    if report is not None:
+        report.update(compile_report)
     return document
 
 
@@ -1043,6 +1046,11 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     # it PENDING past the commit (session.py's health gate lets that component
     # through). Both paths say so, from the same helper.
     unmet = unmet_requirements(ir)
+    authored_host_bodies = _srv._authored_host_bodies(
+        ir, vs.get("source"),
+        file_modules(vs) if vs.get("files") else vs.get("modules"),
+        files=vs.get("files"), report=compile_report,
+        include_trusted_files=True)
     if not commit:
         return {"ok": True, "edited": True, "admitted": True, "swapped": False,
                 "speculative": True, "_proposal": vs, "applied": applied,
@@ -1052,8 +1060,14 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                 "note": "proposed and verified: admission and every gate passed "
                         "against the running composition, which is unchanged. "
                         "Commit it, or discard it"}
-    state = session.swap(ir, origin=_origin_from(vs),
-                         agent_authored=bool(compile_report.get("authored")))
+    origin = _srv._with_authored_host_bodies(
+        _origin_from(vs), authored_host_bodies)
+    try:
+        state = session.swap(ir, origin=origin,
+                             agent_authored=bool(compile_report.get("authored")))
+    except _srv.ApprovalRequired as error:
+        error.host_bodies = authored_host_bodies
+        raise
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
