@@ -247,7 +247,8 @@ revl idiom effect-undo --json
 ### `revl grammar`
 
 Print the language surface, sized for a prompt, or a machine-readable grammar
-of revl source for a grammar-constrained decoder. No sources.
+of revl source for a grammar-constrained decoder. No sources, except the
+`--tool` form below, which needs the files declaring the service.
 
 - `--prompt` - the dense, complete, prompt-pinnable grammar (also shipped as
   `docs/syntax-2.0.prompt.txt`) instead of the short human summary.
