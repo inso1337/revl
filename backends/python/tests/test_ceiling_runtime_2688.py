@@ -20,6 +20,20 @@ the host body:
 Each over-budget case is refused with the named `CeilingExceeded`, the host body
 does not run for the refused crossing, and a within-budget control completes.
 A budget-free extern still emits byte-identically and traces nothing.
+
+The budget is per ACTIVATION (one component activation, not one provide call):
+`Frame` owns the counters, so a second activation starts fresh. That is the
+design's stated unit (`docs/design/260-emission-cardinality-bounds.md` §3: a
+per-activation max), and it is intended - a ceiling bounds what one activation
+may spend, and a re-activation is a new spend.
+
+A wrapper must not launder the declaration. `emit go(x)` where
+`fn go(x) = call(x)` is still a `kind: "fn"` crossing, but the emit names `go`,
+not the extern, so a direct declaration lookup found nothing and the crossing
+fired unmetered. The emitter now resolves the callee through the document's
+local functions (`_function_ceiling_caps`) and sends the reached extern's
+ceiling declarations; the runtime refuses a budgeted callee that arrives with
+empty caps (`CeilingCapsMissing`) as a second, fail-closed line of defence.
 """
 
 from __future__ import annotations
@@ -27,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import itertools
+import json
 import pathlib
 import sys
 import tempfile
@@ -37,6 +52,7 @@ import pytest
 from cordis import Context
 
 import emit
+import replay
 import runtime as runtime_mod
 
 _SRC = pathlib.Path(__file__).resolve().parents[3] / "src"
@@ -64,17 +80,19 @@ def call(x):
 _counter = itertools.count()
 
 
-def _program(decl: str, body: str, sleep: float = 0.0):
+def _program(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
     """Write a program plus its trusted host module into a fresh directory and
     return `(path, host_module_name)`. The host module name is unique per
     program, so its embedded sleep value cannot collide across the tests in
-    this file."""
+    this file. `prelude` is module-level text between the extern and the
+    component - the wrapper function the bypass tests need."""
     host = f"ceiling_host_{next(_counter)}"
     directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_"))
     (directory / f"{host}.py").write_text(
         _HOST_SOURCE.format(sleep=sleep), encoding="utf-8")
     source = (
         f'extern emission[{decl}] fn call(x: Str) -> Int = @py ref call from "{host}.py"\n'
+        f"{prelude + chr(10) if prelude else ''}"
         f"component C {{\n{body}\n}}\n")
     main = directory / "main.rvl"
     main.write_text(source, encoding="utf-8")
@@ -83,8 +101,8 @@ def _program(decl: str, body: str, sleep: float = 0.0):
     return str(main), host
 
 
-def _load(decl: str, body: str, sleep: float = 0.0):
-    path, host = _program(decl, body, sleep)
+def _load(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
+    path, host = _program(decl, body, sleep, prelude)
     code = emit.emit(compile_files([path]))
     module = types.ModuleType(f"ceiling_module_{next(_counter)}")
     exec(compile(code, "ceiling_module.py", "exec"), module.__dict__)  # noqa: S102
@@ -104,8 +122,8 @@ async def _activate(module):
     return None
 
 
-def _run(decl: str, body: str, sleep: float = 0.0):
-    module, host, _code = _load(decl, body, sleep)
+def _run(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
+    module, host, _code = _load(decl, body, sleep, prelude)
     error = asyncio.run(_activate(module))
     return error, host.CALLS
 
@@ -306,3 +324,160 @@ def test_the_meters_are_per_activation():
     runtime_mod._bind_frame(root, runtime_mod.Frame(root, "C"))
     runtime_mod.extern_emit(root, "call", host, ("c",), caps=("net(calls=1)",))
     assert calls == ["a", "c"]
+
+
+# ---------------------------------------------------------------------------
+# the wrapper must not launder the declaration (security review, #2688)
+# ---------------------------------------------------------------------------
+
+#: `emit go(..)` names a LOCAL function, not an extern. The emitter used to look
+#: `go` up in `extern_by_name`, find nothing, pass no `caps=`, and let both host
+#: calls fire. These tests pin the resolved-declaration path.
+_WRAPPER = "fn go(x: Str) -> Int { return call(x) }"
+
+
+def test_a_wrapper_cannot_launder_a_calls_ceiling():
+    """`go(x) = call(x)` emitted twice under `calls=1`: the second host call is
+    refused with `CeilingExceeded` and a refusal record, and never fires."""
+    module, host, code = _load(
+        "net(calls=1)", '  emit go("a")\n  emit go("b")', prelude=_WRAPPER)
+    # the wiring, asserted at the source: the wrapper emission carries the
+    # declaration of the extern it reaches, not an empty caps=
+    assert "caps=('net(calls=1)',)" in code
+    assert module.go._revl_declared_caps == ("net(calls=1)",)
+    events: list[str] = []
+    runtime_mod.set_trace(events.append)
+    try:
+        error = asyncio.run(_activate(module))
+    finally:
+        runtime_mod.set_trace(None)
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert (error.kind, error.limit, error.observed) == ("calls", 1, 2)
+    assert error.capability == "net(calls=1)"
+    assert host.CALLS == ["a"], "the refused wrapper crossing must not fire"
+    assert "ceiling net(calls=1) calls=2/1 refused" in events
+
+
+def test_a_wrapper_cannot_launder_a_size_ceiling():
+    """The same wrapper under `bytes="4B"`: a 5-byte payload is refused before
+    the host body, and the refusal names the observed bytes."""
+    error, calls = _run(
+        'net(bytes="4B")', '  emit go("a")', prelude=_WRAPPER)
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert (error.kind, error.limit, error.observed) == ("size", 4, 5)
+    assert calls == [], "the over-budget payload must never reach the host"
+
+
+def test_a_wrapper_cannot_launder_a_time_ceiling():
+    """A wrapper around a 20ms host body under `time="10ms"`: the overrun is
+    caught when the wrapper returns, before the next crossing starts."""
+    error, calls = _run(
+        'net(time="10ms")', '  emit go("a")\n  emit go("b")',
+        sleep=0.02, prelude=_WRAPPER)
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert error.kind == "time"
+    assert error.limit == 10
+    assert error.observed >= 20
+    assert calls == ["a"], "the crossing after the overrun must not fire"
+
+
+def test_an_empty_caps_crossing_with_declared_ceilings_fails_closed():
+    """The runtime backstop: the emitted callee carries its declared ceilings,
+    so reaching `extern_emit` with EMPTY caps is refused by name instead of
+    firing unmetered. Both the extern and the wrapper are tagged."""
+    module, host, _code = _load(
+        "net(calls=1)", '  emit call("a")', prelude=_WRAPPER)
+    assert module.call._revl_declared_caps == ("net(calls=1)",)
+    root = Context()
+    runtime_mod._bind_frame(root, runtime_mod.Frame(root, "C"))
+    with pytest.raises(runtime_mod.CeilingCapsMissing) as caught:
+        runtime_mod.extern_emit(root, "call", module.call, ("a",))
+    assert "net(calls=1)" in str(caught.value)
+    with pytest.raises(runtime_mod.CeilingCapsMissing):
+        runtime_mod.extern_emit(root, "go", module.go, ("a",))
+    assert host.CALLS == [], "a fail-closed refusal never reaches the host body"
+
+
+def test_a_time_overrun_journals_refusal_not_completion_with_observed_counts():
+    """The WAL ordering fix: the `time` check runs BEFORE the completion record,
+    so an overrun writes `emission-refused` (never `emission-complete`), and the
+    JSON record carries the observed counts beside the ceiling spelling."""
+    module, host, _code = _load(
+        'net(time="10ms")', '  emit call("a")', sleep=0.02)
+    wal_path = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_wal_")) / "wal.jsonl"
+    timeline = replay.Timeline("C")
+    wal = replay.WriteAheadLog(str(wal_path), ir={}).open()
+    timeline.attach_wal(wal)
+    ctx = replay._RecordingContext(Context(), timeline, {}, {})
+    runtime_mod._bind_frame(ctx, runtime_mod.Frame(ctx, "C"))
+    try:
+        with pytest.raises(runtime_mod.CeilingExceeded):
+            runtime_mod.extern_emit(ctx, "call", module.call, ("a",),
+                                    caps=("net(time=10)",))
+    finally:
+        wal.close()
+    records = [json.loads(line)
+               for line in wal_path.read_text(encoding="utf-8").splitlines()]
+    outcomes = [record for record in records
+                if str(record.get("record", "")).startswith("emission-")]
+    assert [record["record"] for record in outcomes] == ["emission-refused"]
+    refusal = outcomes[0]
+    observed = refusal["ceiling"]["net(time=10)"]
+    assert observed["calls"] == 1
+    assert observed["bytes"] >= 1
+    assert observed["elapsed"] >= 20
+    assert refusal["error"]["type"] == "CeilingExceeded"
+    assert refusal["error"]["kind"] == "time"
+    assert host.CALLS == ["a"]
+
+
+def test_the_budget_is_per_activation_and_that_is_intended():
+    """`calls=1` is a per-ACTIVATION budget: one component activation may cross
+    once, a fresh activation may cross once again. This is the design's stated
+    unit (docs/design/260 §3) and is intentional; a `size`/`time` deadline is
+    anchored the same way, at the token's first crossing in that activation."""
+    root = Context()
+    runtime_mod._bind_frame(root, runtime_mod.Frame(root, "C"))
+    calls = []
+
+    def host(x):
+        calls.append(x)
+
+    runtime_mod.extern_emit(root, "call", host, ("a",), caps=("net(calls=1)",))
+    with pytest.raises(runtime_mod.CeilingExceeded):
+        runtime_mod.extern_emit(root, "call", host, ("b",),
+                                caps=("net(calls=1)",))
+    runtime_mod._bind_frame(root, runtime_mod.Frame(root, "C"))
+    runtime_mod.extern_emit(root, "call", host, ("c",), caps=("net(calls=1)",))
+    assert calls == ["a", "c"]
+
+
+def test_an_mcp_session_call_surfaces_the_typed_refusal(tmp_path):
+    """End to end over the MCP session: a provided operation that emits the
+    wrapper twice under `calls=1` raises the runtime's own `CeilingExceeded`
+    out of `Session.call`, and the host saw only the in-budget crossing."""
+    from revl.mcp.session import Session  # noqa: PLC0415
+
+    host_name = f"ceiling_mcp_host_{next(_counter)}"
+    (tmp_path / f"{host_name}.py").write_text(
+        _HOST_SOURCE.format(sleep=0.0), encoding="utf-8")
+    (tmp_path / "main.rvl").write_text(
+        f'extern emission[net(calls=1)] fn call(x: Str) -> Int '
+        f'= @py ref call from "{host_name}.py"\n'
+        f"{_WRAPPER}\n"
+        "service Ops { emission fn twice() }\n"
+        "component C provides ops: Ops {\n"
+        "  provide ops {\n"
+        '    fn twice() { emit go("a") emit go("b") }\n'
+        "  }\n"
+        "}\n", encoding="utf-8")
+    if str(tmp_path) not in sys.path:
+        sys.path.insert(0, str(tmp_path))
+    session = Session()
+    session.load(compile_files([str(tmp_path / "main.rvl")]))
+    with pytest.raises(runtime_mod.CeilingExceeded) as caught:
+        session.call("ops", "twice", [])
+    assert (caught.value.kind, caught.value.limit) == ("calls", 1)
+    assert "declared calls ceiling 1" in str(caught.value)
+    host = importlib.import_module(host_name)
+    assert host.CALLS == ["a"], "the refused MCP crossing must not fire"

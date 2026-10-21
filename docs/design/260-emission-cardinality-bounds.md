@@ -457,15 +457,44 @@ with the named `CeilingExceeded`:
 | `size`  | per-activation canonical payload-byte count     | `CeilingExceeded(kind="size")`   |
 | `time`  | deadline from the first crossing, monotonic clock, checked before each crossing and again on its return | `CeilingExceeded(kind="time")` |
 
+The unit is per ACTIVATION, as §3 specifies, and that is intended: one
+component activation may spend the declared budget, and a re-activation is a
+new spend. The counters live on `Frame`, so they do not leak across
+activations.
+
 A metered crossing writes a `ceiling <token> <kind>=<observed>/<limit>` run
 trace event, and the refusal writes the same line with `refused` after it
-(never-reached is the absence of either), and the audit `--json`
-boundary/extern surface carries the ceiling spelling itself. A budgeted
-crossing with no activation frame cannot be attributed and is refused
-(`CeilingUnmetered`) rather than read as unbounded. Tier list: Python
-only, so far; the other five tiers and the direct required-service `size`/`time`
-case (the statically-counted path's `calls` is a compile refusal already) remain
-the Slice 3 follow-up.
+(never-reached is the absence of either). The static `audit --json`
+boundary/extern surface carries the ceiling spelling; the runtime AUDIT RECORD
+for a metered crossing (the WAL's `emission-complete` / `emission-refused` JSON)
+carries the observed counts under `ceiling`, `{token: {calls, bytes, elapsed}}`,
+so a reader sees what the run spent as well as what the declaration allows.
+The `time` check runs BEFORE the completion record: an overrun is journalled as
+`emission-refused`, never as `emission-complete`, so a receipt cannot claim a
+crossing completed under a spent deadline.
+
+Two fail-closed backstops sit at the same seam. A budgeted crossing that
+reaches it with no activation frame is refused (`CeilingUnmetered`), and a
+callee the emitter tagged as declaring a ceiling but whose arrived `caps=` is
+empty is refused by name (`CeilingCapsMissing`) rather than fired unmetered.
+That second backstop exists because of the wrapper bypass found in security
+review: `extern emission[net(calls=1)] fn call(...)`, `fn go(x) = call(x)`,
+`emit go(x)` names the wrapper, so a direct declaration lookup found no
+ceiling and both host calls fired. The emitter now resolves the callee through
+the document's local functions (`_function_ceiling_caps`, recursive with a
+cycle guard) and sends the reached extern's declarations; the emitted extern
+and wrapper functions also carry `_revl_declared_caps`, which is what the
+runtime backstop compares against.
+
+Not enforced by this slice, tracked rather than implied:
+
+* a `size`/`time` ceiling on a direct REQUIRED-SERVICE method crossing (the
+  statically-counted `calls` case is a compile refusal already);
+* a `deferred` extern (enqueued and fired at session commit) and a
+  spawn-handle emission (`s.inner.method()`), which do not pass this seam;
+* the other five tiers.
+
+Tier list: Python only, so far; the above are the Slice 3 follow-up.
 
 ### 3.3 Attenuation on delegation
 

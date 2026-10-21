@@ -75,7 +75,7 @@ except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this mod
 _ENTRY_STAMP = itertools.count()
 
 __all__ = [
-    "CeilingExceeded", "CeilingUnmetered",
+    "CeilingCapsMissing", "CeilingExceeded", "CeilingUnmetered",
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
     "EstopHalted", "EstopRefused", "fail_error",
@@ -1489,11 +1489,48 @@ class CeilingUnmetered(RuntimeError):
             f"activation, so it cannot be metered")
 
 
+class CeilingCapsMissing(RuntimeError):
+    """A declared-ceiling crossing reached the seam with no capability spelling.
+
+    The emitter tags a budgeted extern (and any local function that reaches
+    one) with `_revl_declared_caps`, so the runtime can tell "this callee
+    declares a ceiling" from "this callee declares none". If the declaration
+    exists but the emitted call carries no `caps=`, the crossing would meter
+    nothing and silently run unmetered — the exact bypass #2688 is fixing. The
+    runtime refuses by name instead: a missing spelling is a wiring defect,
+    never a license to fire (issue #2688)."""
+
+    def __init__(self, capabilities: "tuple") -> None:
+        self.capabilities = tuple(capabilities)
+        named = ", ".join(f"`{spelling}`" for spelling in self.capabilities)
+        super().__init__(
+            f"declared ceiling(s) {named} reached the runtime seam with no "
+            f"capability spellings; refusing to fire an unmetered crossing")
+
+
 def _ceiling_now() -> float:
     """The clock a declared `time` ceiling is measured against: the monotonic
     clock, never wall-clock (a clock adjustment must not move a deadline). Kept
     a module function so a test can substitute a controlled clock."""
     return time.monotonic()
+
+
+def _extern_outcome(ctx, step, outcome: str, error, frame, ceilings: tuple) -> None:
+    """Journal one extern crossing outcome, with the observed counts (issue
+    #2688).
+
+    The recorder hook (`_revl_record_extern_outcome`) writes the durable WAL
+    record; the observed counts are the runtime half of the audit JSON, so the
+    document names what the activation actually spent, not only the static
+    ceiling spelling. A context that does not record (the real cordis one)
+    makes this a no-op, exactly as before. `observed` is None for an unmetered
+    crossing, keeping its record byte-identical."""
+    callback = getattr(ctx, "_revl_record_extern_outcome", None)
+    if not callable(callback):
+        return
+    observed = (frame._ceiling_observations(ceilings)
+                if frame is not None else None)
+    callback(step, outcome, error, observed)
 
 
 def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
@@ -1507,6 +1544,16 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
     activation frame BEFORE the record and the host body: the crossing is
     refused with :class:`CeilingExceeded` when it would take the observed
     `calls`, `size` (payload bytes) or elapsed `time` past its declared limit.
+
+    Two fail-closed backstops guard the declaration itself. A budgeted callee
+    (tagged `_revl_declared_caps` by the emitter) that arrives with empty `caps`
+    is refused by name (:class:`CeilingCapsMissing`) instead of firing
+    unmetered, and a budgeted crossing with no activation frame is refused
+    (:class:`CeilingUnmetered`). The emitted seam journals the observed counts
+    (`calls`, `bytes`, `elapsed`) with the outcome, so the audit JSON says what
+    the run spent as well as what the declaration allows; a `time` overrun is
+    journalled BEFORE the completion record as `emission-refused`, never as
+    `emission-complete`.
 
     Without this the py tier compiled such a crossing to a bare module-level
     call, so the recorder never saw it, the WAL carried no `KIND_EMISSION` step
@@ -1532,46 +1579,65 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
     # issue #2688: the declared ceiling, enforced at the same seam and before
     # the same point. Only a crossing that DECLARES a budget meters (and only a
     # budgeted crossing traces), so an undeclared one is byte-identical.
+    #
+    # FAIL CLOSED on a declaration the emitter failed to forward: a budgeted
+    # callee carries `_revl_declared_caps` (set by the emitter), so empty caps
+    # beside a non-empty tag is a wiring defect, not an unbounded extern. It is
+    # refused by name rather than fired unmetered.
+    declared_caps = getattr(fn, "_revl_declared_caps", ())
     ceilings = _declared_ceilings(caps) if caps else ()
+    if declared_caps and not ceilings:
+        raise CeilingCapsMissing(declared_caps)
     frame = None
     if ceilings:
         frame = _frame_for_ctx(ctx)
         if frame is None:
             raise CeilingUnmetered(ceilings[0][0])
-        payload = None
-        if any("size" in limits for _token, limits in ceilings):
-            payload = len(_revl_canonical_args_bytes(args))
+        # Canonical payload bytes are measured for EVERY budgeted crossing, not
+        # only when a `size` declaration is present: the audit record reports
+        # the observed bytes beside calls and elapsed, and a 0 there when a
+        # payload was never measured would be a false observation.
+        payload = len(_revl_canonical_args_bytes(args))
         frame._meter_ceilings(ceilings, payload)
     record = getattr(ctx, "_revl_record_extern", None)
     step = record(name, args) if callable(record) else None
     try:
         result = fn(*args)
     except BaseException as error:
-        outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-        if callable(outcome):
-            outcome(step, "emission-failed", error)
+        _extern_outcome(ctx, step, "emission-failed", error, frame, ceilings)
         raise
     if inspect.isawaitable(result):
         async def await_extern():
             try:
                 value = await result
             except BaseException as error:
-                outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-                if callable(outcome):
-                    outcome(step, "emission-failed", error)
+                _extern_outcome(ctx, step, "emission-failed", error,
+                                frame, ceilings)
                 raise
-            outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-            if callable(outcome):
-                outcome(step, "emission-complete", None)
+            # issue #2688: the time check runs BEFORE the completion record.
+            # Recording completion first wrote a receipt that said the crossing
+            # finished while the ceiling check was about to refuse it, so the
+            # WAL settled an over-budget emission. A refusal is journalled as
+            # `emission-refused` and never as `emission-complete`.
             if frame is not None:
-                frame._check_time_ceilings(ceilings)
+                try:
+                    frame._check_time_ceilings(ceilings)
+                except BaseException as error:
+                    _extern_outcome(ctx, step, "emission-refused", error,
+                                    frame, ceilings)
+                    raise
+            _extern_outcome(ctx, step, "emission-complete", None,
+                            frame, ceilings)
             return value
         return await_extern()
-    outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-    if callable(outcome):
-        outcome(step, "emission-complete", None)
     if frame is not None:
-        frame._check_time_ceilings(ceilings)
+        try:
+            frame._check_time_ceilings(ceilings)
+        except BaseException as error:
+            _extern_outcome(ctx, step, "emission-refused", error,
+                            frame, ceilings)
+            raise
+    _extern_outcome(ctx, step, "emission-complete", None, frame, ceilings)
     return result
 
 
@@ -3651,8 +3717,8 @@ class Frame:
         All-or-nothing: every declaration is CHECKED first and the counters are
         committed only when no ceiling is crossed, so a refused crossing neither
         spends a `calls` use nor charges its payload bytes. `payload` is the
-        canonical payload-byte count, supplied only when some declaration has a
-        `size` ceiling.
+        canonical payload-byte count, measured for every budgeted crossing so
+        the audit record can report observed bytes alongside calls and elapsed.
 
         Semantics (named rather than implied, so the trace is readable):
         * `calls` counts crossings per capability declaration per activation;
@@ -3723,6 +3789,30 @@ class Frame:
             elapsed = int((now - started) * 1000.0)
             if elapsed > limit:
                 self._refuse_ceiling(token, "time", limit, elapsed)
+
+    def _ceiling_observations(self, declarations: tuple) -> dict:
+        """The observed counts behind this activation's metered declarations.
+
+        Returned as `{token: {"calls": n, "bytes": n, "elapsed": ms}}`, the
+        runtime half of the audit record: the static `revl audit --json`
+        surface carries the DECLARED ceiling spelling, while this carries what
+        the run actually counted, so a reviewer can tell "never reached" from
+        "enforced within budget" from "refused". `bytes` is the canonical
+        payload-byte total (the `size` ceiling's observed quantity) and
+        `elapsed` is monotonic milliseconds since the token's first crossing,
+        0 before it has one. Called only for a budgeted crossing, so an
+        undeclared one allocates nothing extra."""
+        now = _ceiling_now()
+        observed = {}
+        for token, _limits in declarations:
+            started = self._ceiling_started.get(token)
+            observed[token] = {
+                "calls": self._ceiling_calls.get(token, 0),
+                "bytes": self._ceiling_bytes.get(token, 0),
+                "elapsed": (0 if started is None
+                            else int((now - started) * 1000.0)),
+            }
+        return observed
 
     def install(self, body: Callable) -> Any:
         """Install the component body (a generator function) as one effect.

@@ -1406,12 +1406,120 @@ def _is_map_cas(acquire: Any) -> bool:
             and acquire.get("method") in _MAP_CAS_VERBS)
 
 
+#: The canonical capability spellings that carry a ceiling parameter (issue
+#: #2688). `requests`/`bytes` are resolved to `calls`/`size` by `cap_order`
+#: before the IR is written, so these three names are the whole surface.
+_CEILING_MARKERS = ("calls=", "size=", "time=")
+
+
+def _ceiling_capabilities(capabilities) -> tuple:
+    """The spellings among `capabilities` that DECLARE a ceiling.
+
+    Returns () for an absent list or one with no ceiling parameter, so an
+    extern that only scopes a capability (`fs.write(path="/tmp")`) keeps the
+    pre-#2688 emission exactly. Order is preserved: the spellings are the
+    declaration text a reviewer reads and the runtime token it traces."""
+    return tuple(spelling for spelling in (capabilities or ())
+                 if isinstance(spelling, str)
+                 and any(marker in spelling for marker in _CEILING_MARKERS))
+
+
+def _collect_extern_reach(node: Any, externs: dict, functions: dict,
+                          out: set, seen: set) -> None:
+    """Collect the extern NAMES a function body reaches in forward evaluation.
+
+    Both IR call shapes count: a component-body extern call is `kind: "fn"`,
+    while a module-function call is `kind: "call"` with a `var` callee (the
+    shape `_lower_fns` produces). A call to another local function recurses, so
+    a wrapper reached through a wrapper is resolved too. Inverse slots (`undo`,
+    `compensate`) are skipped: they run on unwind, not as part of the crossing
+    the budget meters."""
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind == "fn" and isinstance(node.get("name"), str):
+            _resolve_reach(node["name"], externs, functions, out, seen)
+        elif kind == "call":
+            callee = node.get("callee")
+            if isinstance(callee, dict) and callee.get("kind") == "var" \
+                    and isinstance(callee.get("name"), str):
+                _resolve_reach(callee["name"], externs, functions, out, seen)
+        for key, value in node.items():
+            if key not in _INVERSE_KEYS:
+                _collect_extern_reach(value, externs, functions, out, seen)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_extern_reach(item, externs, functions, out, seen)
+
+
+def _resolve_reach(name: str, externs: dict, functions: dict,
+                   out: set, seen: set) -> None:
+    """Resolve ONE callee name: an extern contributes itself, a local function
+    contributes the externs its body reaches. `seen` breaks recursion."""
+    if name in externs:
+        out.add(name)
+        return
+    fn = functions.get(name)
+    if fn is None or name in seen:
+        return
+    seen.add(name)
+    try:
+        _collect_extern_reach(fn.get("body"), externs, functions, out, seen)
+    finally:
+        seen.discard(name)
+
+
+def _function_ceiling_caps(functions: list, externs: list) -> dict:
+    """Map each local function that reaches a BUDGETED extern to the ceiling
+    declarations of the extern(s) it reaches (issue #2688).
+
+    This is the wrapper case: `extern emission[net(calls=1)] fn call(...)`,
+    `fn go(x) = call(x)`, `emit go(x)`. The `emit` expression names `go`, a
+    `kind: "fn"` node with no declaration of its own, so a direct
+    `extern_by_name` lookup finds no ceiling and the crossing fired unmetered.
+    Resolving the callee through the local-function bodies restores the
+    declaration. A wrapper that reaches several budgeted externs gets the union
+    (conservatively metered token by token); a wrapper that reaches none gets no
+    entry, so its emission stays byte-identical.
+
+    One table is built per document and shared by the component emitters and
+    `_emit_functions`, so the caps a `_extern_emit_fire` sends and the
+    `_revl_declared_caps` backstop tag on the function itself cannot drift."""
+    externs_by_name = {ext["name"]: ext for ext in externs or []}
+    functions_by_name = {fn["name"]: fn for fn in functions or []
+                         if isinstance(fn.get("name"), str)}
+    caps_by_function: dict = {}
+    for fn in functions or []:
+        name = fn.get("name")
+        if not isinstance(name, str) or name in externs_by_name:
+            continue
+        reached: set = set()
+        _collect_extern_reach(fn.get("body"), externs_by_name,
+                              functions_by_name, reached, {name})
+        caps: list = []
+        for extern_name in sorted(reached):
+            declarations = _ceiling_capabilities(
+                externs_by_name[extern_name].get("capabilities"))
+            for spelling in declarations:
+                if spelling not in caps:
+                    caps.append(spelling)
+        if caps:
+            caps_by_function[name] = tuple(caps)
+    return caps_by_function
+
+
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
                  plan_groups: list | None = None,
                  scopes: dict | None = None,
-                 decorated: set | None = None) -> None:
+                 decorated: set | None = None,
+                 function_ceilings: dict | None = None) -> None:
         self.ir = component
+        # issue #2688: the ceiling declarations of the externs each local
+        # function reaches (`_function_ceiling_caps`). A wrapper emission names
+        # the wrapper, not the extern, so this is the only way its declared
+        # budget reaches the seam. Empty for a document with no budgeted extern,
+        # so every existing emission is byte-identical.
+        self._function_ceilings: dict = dict(function_ceilings or {})
         # the externs `declared_crossing` decorates (computer-use crossings):
         # they register their own compensation, so a provide-method site does
         # not write the explicit line for them (`_method_compensated_extern`)
@@ -2573,15 +2681,25 @@ class _ComponentEmitter:
         canonical capability spellings ride to the seam as `caps=`, where the
         runtime parses them and the activation frame meters the crossing before
         the host body runs. An extern with no budget passes nothing, so its
-        emitted call is byte-identical and no trace line is added."""
+        emitted call is byte-identical and no trace line is added.
+
+        The callee is resolved through the document's local functions, not only
+        through `_extern_by_name`: `emit go(..)` where `fn go(x) = call(x)`
+        names a wrapper, and a direct lookup found no declaration for `go`, so
+        the crossing reached the runtime with empty caps and fired unmetered.
+        `_function_ceilings` carries the declaration of the extern a wrapper
+        reaches (`_function_ceiling_caps`), so the wrapper emission is metered
+        exactly as the direct one. A wrapper that reaches no budgeted extern is
+        absent from the map, keeping its emission unchanged."""
         self.uses.add("extern_emit")
-        name = _ident(expr.get("name"), f"{where}: function")
+        raw_name = expr.get("name")
+        name = _ident(raw_name, f"{where}: function")
         args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-        caps = tuple((self._extern_by_name.get(expr.get("name")) or {})
-                     .get("capabilities") or ())
+        direct = self._extern_by_name.get(raw_name)
+        caps = (tuple(direct.get("capabilities") or ()) if direct is not None
+                else self._function_ceilings.get(raw_name, ()))
         budget = (f", caps={caps!r}"
-                  if any(marker in spelling for spelling in caps
-                         for marker in ("calls=", "size=", "time=")) else "")
+                  if _ceiling_capabilities(caps) else "")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
                 f"({args}{',' if args else ''}){budget})")
         if self._in_async and not self._in_arrow \
@@ -4570,15 +4688,22 @@ def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
     return out
 
 
-def _emit_functions(functions: list) -> "_Lines":
+def _emit_functions(functions: list, function_ceilings: dict | None = None) -> "_Lines":
     global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
+    # issue #2688: the runtime backstop tag. A local function that reaches a
+    # budgeted extern carries the declaration it inherits, so a crossing that
+    # reaches `extern_emit` with empty caps is REFUSED by the runtime instead of
+    # firing unmetered. Emitted only for such a function, so every other module's
+    # text is byte-identical.
+    ceilings = function_ceilings or {}
     # issue #2204: reset on every exit, not only the normal one. An `EmitError`
     # from a body used to leave the last function's colour in these module
     # globals, which the next `emit` on the same (now shared) module inherited.
     try:
         for fn in functions:
-            name = _ident(fn["name"], "function name")
+            public_name = _ident(fn["name"], "function name")
+            name = public_name
             params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
             # item 92: a phase-2 async-colored fn emits `async def`; its body renders
             # in an async context with its async-typed parameters as the await-locals
@@ -4603,6 +4728,9 @@ def _emit_functions(functions: list) -> "_Lines":
             if memoized:
                 out.extend(_emit_memo_wrapper(
                     _ident(fn["name"], "function name"), fn["params"], is_async))
+            caps = ceilings.get(fn.get("name"))
+            if caps:
+                out.add(0, f"{public_name}._revl_declared_caps = {caps!r}")
     finally:
         _PY_IN_ASYNC = False
         _PY_IN_ARROW = False
@@ -4743,6 +4871,12 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
+        # issue #2688: the declared-ceiling tag the runtime backstop reads. A
+        # budgeted extern reached with empty caps must NOT be treated as
+        # unbounded, so the function object carries the declaration the emitter
+        # would have sent. Absent for an extern with no ceiling, so every other
+        # `def` is byte-identical.
+        ceiling_caps = _ceiling_capabilities(ext.get("capabilities"))
         # item 421 F6: the extern's declared return carried `Secret[T]`, so its
         # result is where a confidential value ENTERS the value world (item 256
         # §7a). A decorator marks it there, the narrowest place: one wrapper per
@@ -4792,6 +4926,8 @@ def _emit_externs(externs: list, crossings: dict | None = None,
                        f"({ext['name']!r}, {thunk}{ui}{call})")
         if "py" in refs and "py" not in bodies:
             out.extend(_emit_py_ref_thunk(name, params, ext, refs["py"]))
+            if ceiling_caps:
+                out.add(0, f"{name}._revl_declared_caps = {ceiling_caps!r}")
             continue
         if "py" not in bodies:
             raise EmitError(
@@ -4842,6 +4978,8 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         # an injected secret or config local is a statement in its own right;
         # a body of only comments is not (issue #2284)
         out.close_block(mark, 1)
+        if ceiling_caps:
+            out.add(0, f"{name}._revl_declared_caps = {ceiling_caps!r}")
         out.add(0)
     return out
 
@@ -6027,10 +6165,16 @@ def emit(ir: dict) -> str:
     # and byte-identical to before).
     plan_groups = _parallel_step_groups(ir)
     crossings, scopes = _crossing_facts(ir)
+    # issue #2688: the ceiling declaration of the extern each local function
+    # reaches, shared by every component emitter and by `_emit_functions` (which
+    # tags the function itself as the runtime backstop). Empty when no extern
+    # declares a ceiling, so existing emissions and module text are unchanged.
+    function_ceilings = _function_ceiling_caps(functions, externs)
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),
-                          scopes.get(component.get("name")), set(crossings))
+                          scopes.get(component.get("name")), set(crossings),
+                          function_ceilings=function_ceilings)
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]
@@ -6456,7 +6600,7 @@ def emit(ir: dict) -> str:
             out.add(0)
         out.extend(_emit_types(types))
     if functions:
-        out.extend(_emit_functions(functions))
+        out.extend(_emit_functions(functions, function_ceilings))
     if externs:
         out.extend(_emit_externs(externs, crossings, gated=bool(components)))
     if tests:
