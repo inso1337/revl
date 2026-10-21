@@ -473,6 +473,7 @@ def run_repair(session, arguments: dict,
     verdicts, gate = _run_gates(session, candidate_arg, running_ir, policy,
                                 set(arguments.get("accept") or []),
                                 over_the_transport=over_the_transport)
+    host_bodies = gate.pop("_approval_host_bodies", [])
     if gate["blocked"]:
         status = (STATUS_AWAITING_ACK if gate["reason"] == "widening"
                   else STATUS_REJECTED)
@@ -500,7 +501,9 @@ def run_repair(session, arguments: dict,
 
     try:
         remediation = strategy.remediate(session, gate["candidate_ir"],
-                                         origin=candidate_arg,
+                                         origin={**candidate_arg,
+                                                 "_revl_authored_host_bodies":
+                                                     list(host_bodies)},
                                          over_the_transport=over_the_transport,
                                          authored=gate["authored"])
     except Exception as exc:  # noqa: BLE001 — a swap failure is a graded result
@@ -513,6 +516,10 @@ def run_repair(session, arguments: dict,
         # follow-up).
         if getattr(exc, "code", None):
             remediation["code"] = exc.code
+        from .server import ApprovalRequired, _approval_required  # noqa: PLC0415
+        if isinstance(exc, ApprovalRequired):
+            remediation["approval"] = _approval_required(
+                exc, host_bodies=host_bodies)
         remediation["canaryFollowOn"] = _canary_follow_on()
         return _assemble(STATUS_REJECTED, component, fault, sliced, eligibility,
                          candidate=candidate, verdicts=verdicts,
@@ -560,6 +567,12 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
         verdicts["policy"] = {"evaluated": False,
                               "reason": f"candidate is not a whole composition: {error}"}
         return verdicts, {"blocked": True, "reason": "gauntlet"}
+
+    from .server import _authored_host_bodies  # noqa: PLC0415
+    host_bodies = _authored_host_bodies(
+        candidate_ir, candidate_arg.get("source"),
+        candidate_arg.get("modules"), files=candidate_arg.get("files"),
+        report=compile_report, include_trusted_files=True)
 
     # -- realm placement (issue #2520): the swap below is `session.swap`, past
     # the realm-removal check `revl_edit`/`revl_change` run in `edit.admit`
@@ -617,14 +630,16 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
         if widen["widened"] and policy.ack_on_widen:
             return verdicts, {"blocked": True, "reason": "widening",
                               "candidate_ir": candidate_ir,
-                              "authored": bool(compile_report.get("authored"))}
+                              "authored": bool(compile_report.get("authored")),
+                              "_approval_host_bodies": host_bodies}
     else:
         verdicts["widening"] = {"evaluated": False,
                                 "reason": "nothing loaded — no running boundary to "
                                           "diff the candidate against"}
 
     return verdicts, {"blocked": False, "reason": None, "candidate_ir": candidate_ir,
-                      "authored": bool(compile_report.get("authored"))}
+                      "authored": bool(compile_report.get("authored")),
+                      "_approval_host_bodies": host_bodies}
 
 
 def _exported_part(candidate_arg: dict, compile_report: dict | None,

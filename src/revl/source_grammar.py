@@ -20,8 +20,11 @@ union of its paths:
   of the cursor too (`self.peek_ahead(1).kind == ":"`), a method opening with
   `self.next()` takes its callers' guards, and a method called with an
   operator tuple (`self._bin(self._mul, ("+", "-"))`) is compiled once per
-  distinct argument list, so its `self.next()` reads one of those operators;
-  likewise a method called with a constant flag (`self.stmt(in_method=False)`)
+  distinct argument list, so its `self.next()` reads one of those operators.
+  A module-level string tuple named as that argument (`EQUALITY_OPS`) is
+  resolved from the parser source, so the vocabulary can be declared once and
+  imported by lowering. Likewise a method called with a constant flag
+  (`self.stmt(in_method=False)`)
   is compiled once per flag, with the branches the flag decides cut;
 * a value read off the cursor and tested against a constant set
   (`choice = tok.value if tok.kind == "ident" else None`, then
@@ -279,9 +282,14 @@ def _settle(term):
 # --------------------------------------------------------------------------
 
 class _Compiler:
-    def __init__(self, methods: dict, entries: dict | None = None):
+    def __init__(self, methods: dict, entries: dict | None = None,
+                 constants: dict | None = None):
         self.methods = methods
         self.entries = entries or {}
+        # Module-level string tuples in the parser (`EQUALITY_OPS`), so a
+        # vocabulary the lowering also reads can still specialise `_bin`
+        # without spelling the operator tuple twice.
+        self.constants = constants or {}
         self.rules: dict = {}           # rule name -> grammar
         self.specs: dict = {}           # rule name -> (method, env)
         self.calls: dict = {}           # rule name -> [guard at each call site]
@@ -325,7 +333,7 @@ class _Compiler:
         callee_env = {}
         for param in relevant:
             if param in bound:
-                desc = _describe(bound[param], env)
+                desc = _describe(bound[param], env, self.constants)
                 if desc is not None:
                     callee_env[param] = desc
         if not callee_env:
@@ -838,8 +846,15 @@ def _self_method(call):
     return None
 
 
-def _describe(arg, env):
-    """A call argument as a specialisation descriptor, or None."""
+def _describe(arg, env, constants=None):
+    """A call argument as a specialisation descriptor, or None.
+
+    `constants` maps the parser module's top-level string tuples, so
+    `self._bin(self._cmp, EQUALITY_OPS)` specialises the same way the literal
+    tuple did. The vocabulary then lives in one declaration that lowering can
+    import (the vocabulary-mirror gate), while the grammar derivation still
+    reads the operators.
+    """
     if (isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
             and arg.value.id == "self"):
         return ("methods", (arg.attr,))
@@ -851,8 +866,11 @@ def _describe(arg, env):
             and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
                     for e in arg.elts)):
         return ("consts", tuple(e.value for e in arg.elts))
-    if isinstance(arg, ast.Name) and arg.id in env:
-        return env[arg.id]
+    if isinstance(arg, ast.Name):
+        if arg.id in env:
+            return env[arg.id]
+        if constants and arg.id in constants:
+            return ("consts", constants[arg.id])
     return None
 
 
@@ -886,6 +904,28 @@ def parser_methods(source: str | None = None) -> dict:
     raise ValueError("revl.parser defines no Parser class")
 
 
+def parser_constants(source: str | None = None) -> dict:
+    """`{name: tuple}` for the parser module's top-level string-tuple constants.
+
+    These are the closed vocabularies a parse method can be specialised on, and
+    an operator tuple declared once (so lowering can import the same object)
+    still has to reach `_bin` here. Only tuples of string literals qualify: the
+    derivation never evaluates an expression, and a computed value has no
+    static spelling to read.
+    """
+    tree = ast.parse(source if source is not None else _parser_module_source())
+    out: dict = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, (ast.Tuple, ast.List))):
+            elts = node.value.elts
+            if elts and all(isinstance(e, ast.Constant)
+                            and isinstance(e.value, str) for e in elts):
+                out[node.targets[0].id] = tuple(e.value for e in elts)
+    return out
+
+
 # The rules every category starts from (`CATEGORIES` below names them).
 _STARTS = ("_parse_program", "stmt__in_method_off", "fn_stmt", "pure_expr", "type_")
 
@@ -904,7 +944,8 @@ def derive(source: str | None = None):
     guard, so a method that opens with `self.next()` reads what its callers
     tested for. A rule with any unguarded call site gets no entry guard."""
     methods = parser_methods(source)
-    first = _Compiler(methods)
+    constants = parser_constants(source)
+    first = _Compiler(methods, constants=constants)
     first.specs.update(_START_SPECS)
     first.reach(_STARTS)
     entries = {}
@@ -915,7 +956,7 @@ def derive(source: str | None = None):
                 merged = _guard_union(merged, g)
             if merged is not None:
                 entries[rule] = merged
-    second = _Compiler(methods, entries)
+    second = _Compiler(methods, entries, constants=constants)
     second.specs.update(first.specs)
     second.reach(_STARTS)
     return second.rules, second.notes, second.unguarded

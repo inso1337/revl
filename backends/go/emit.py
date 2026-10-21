@@ -612,12 +612,16 @@ def _expr(node, env: _Env, expected=None) -> str:
     """
     if not isinstance(node, dict):
         raise EmitError("expr must be an object: %r" % (node,))
-    # An implicit Int -> Float coercion site (docs/arithmetic.md): go's
-    # untyped-constant rule used to absorb it silently; the marker makes the
-    # conversion explicit in the emitted source.
-    if node.get("widen") == "Float":
+    # A coercion site marked by the frontend (docs/arithmetic.md): go's
+    # untyped-constant rule used to absorb Int -> Float silently, and this
+    # component renderer (separate from `_go_v3_expr`) used to read only that
+    # marker, so `a: Int32 == 3` reached the operator as int32 against int64
+    # and go did not build (issue #2715). Both conversions are spelled here
+    # exactly as the v3 renderer spells them.
+    if node.get("widen") in ("Float", "Int"):
         inner = {k: v for k, v in node.items() if k != "widen"}
-        return "float64(%s)" % (_expr(inner, env, expected),)
+        return ("float64(%s)" if node.get("widen") == "Float"
+                else "int64(%s)") % (_expr(inner, env, expected),)
     kind = node.get("kind")
     if kind == "name":
         return env.name_ref(node["id"])

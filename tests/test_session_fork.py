@@ -342,6 +342,9 @@ def test_parent_is_frozen_non_callable_after_fork_confirm(tmp_path):
     """HIGH 1: after `fork_confirm` the parent is retired at k and non-callable;
     the branch is the only live continuation over the shared workspace."""
     session = _session()
+    # issue #2690: the operator's attempt budget is serve configuration, not
+    # parent state, and the branch is the session the server drives next
+    session.attempt_limit = 7
     _load(session, tmp_path / "parent.wal")
     filea = str(tmp_path / "a.txt")
     session.call("ops", "write", [filea, "v1"])            # records the fs effect
@@ -353,6 +356,7 @@ def test_parent_is_frozen_non_callable_after_fork_confirm(tmp_path):
     result = session.fork_confirm(report["hash"])
     assert result["forked"] is True
     branch = result["branchSession"]
+    assert branch.attempt_limit == 7
 
     # the parent is frozen: any op is refused
     from revl.mcp.session import SessionError

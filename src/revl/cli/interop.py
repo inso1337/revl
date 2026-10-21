@@ -254,6 +254,14 @@ def _bind_session_authority(args) -> int | None:
         from ..mcp.server import SESSION
 
         SESSION.approval_record_values = values
+    # issue #2690: the operator's attempt budget for the check/admit loop. The
+    # caller never sets it; a refusal reports what remains of what the
+    # operator allowed. Omit for no limit at all.
+    limit = getattr(args, "attempt_limit", None)
+    if limit is not None:
+        from ..mcp.server import SESSION
+
+        SESSION.attempt_limit = limit
     # issue #1697: the client asked for the whole verb list up front
     if getattr(args, "all_tools", False):
         from ..mcp import disclosure
