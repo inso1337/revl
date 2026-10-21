@@ -172,6 +172,11 @@ COMPONENT_DOCS = [
     # issue #1369: the `"unit": "ui"` mark on a method that crosses a
     # computer-use verb, and its absence on one that crosses none
     "ui_unit.rvl",
+    # issue #2715 review: the component stratum's mixed-equality widen, which
+    # the native producer must stamp on the same operand as the reference
+    # ("widen" on the operand, never on the `bin` node). The document is an
+    # emitter oracle and sits outside the census directories.
+    "../../noncensus_corpus/services_int_float_equality.rvl",
 ]
 
 # The document whose `externs` section is lowered byte-exact (item 241): the

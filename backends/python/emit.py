@@ -1713,6 +1713,15 @@ class _ComponentEmitter:
     def _expr(self, expr: Any, where: str) -> str:
         if not isinstance(expr, dict) or "kind" not in expr:
             raise EmitError(f"{where}: malformed expression {expr!r}")
+        # An implicit Int -> Float coercion site inside a component body: the
+        # frontend marks it on the node (docs/arithmetic.md), and this renderer
+        # (the component stratum's, distinct from the module-level `_expr`
+        # below) must spell the conversion too, or a provide method's mixed
+        # equality compares an int against a float un-widened while the same
+        # expression in a module `fn` is widened (issue #2715 review).
+        if expr.get("widen") == "Float":
+            inner = {k: v for k, v in expr.items() if k != "widen"}
+            return f"float({self._expr(inner, where)})"
         kind = expr["kind"]
         if kind == "builtin":
             t = self._expr(expr.get("target"), where)

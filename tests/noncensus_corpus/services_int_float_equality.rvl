@@ -1,0 +1,33 @@
+// A mixed Int/Float equality in a PROVIDE-METHOD body (issue #2715 review).
+//
+// The component stratum has its own python renderer: `_ComponentEmitter._expr`
+// in the reference, `cexpr` in selfhost/emit_py.rvl. Both are distinct from the
+// module-fn `_expr`, which already read the frontend's `"widen": "Float"`
+// marker on the operand of `x == 4.0`. Nothing in the corpus reached the
+// COMPONENT renderer's widen branch, so the statement ledger recorded it as
+// newly uncovered (40 -> 42), and the self-host `cexpr` did not read the
+// marker at all: a provide method compared an int against a float un-widened
+// while the same expression in a `fn` was widened.
+//
+// Both operand orders and `!=` are here, so a one-sided fix cannot pass. The
+// document is also the byte-parity oracle for the native chain, which is why
+// the self-host lowering must stamp the same marker on the same operand.
+//
+// It sits in `tests/noncensus_corpus/` on purpose: this is an emitter-oracle
+// document that reaches one reference branch, not a scoring or breadth
+// program. Keeping it outside the census directories leaves the committed
+// census program set (and its per-generation independence floors) unchanged;
+// the emitter oracles list it in their CORPUS explicitly.
+service Scores {
+  fn above(x: Int) -> Bool
+  fn below(x: Int) -> Bool
+  fn differs(x: Int) -> Bool
+}
+
+component Judge provides scores: Scores {
+  provide scores {
+    fn above(x) = x == 4.0
+    fn below(x) = 4.0 == x
+    fn differs(x) = x != 4.0
+  }
+}
