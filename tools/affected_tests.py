@@ -135,6 +135,10 @@ BENCH_DEPENDENT_TESTS = (
     # repository, `bench/` included (five `bench/**/run.py` files are why it
     # exists), so a new or renamed bench module can change its verdict.
     "tests/test_load_by_path_is_the_only_by_path_loader.py",
+    # Issue #2748, whose module #2764 landed: its README test reads
+    # `bench/results/admission-latency.md` and checks README.md quotes the
+    # committed median, so a bench change to that artifact can change its verdict.
+    "tests/test_mcp_admission_walkthrough_2748.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
@@ -643,8 +647,8 @@ def _node(p: Path) -> str:
 # derivable part of that relation, taken from the tests' own source rather than
 # restated here.
 #
-# It does NOT replace those tables, and the difference is measured: of the 18
-# modules BENCH_DEPENDENT_TESTS declares, exactly three SPELL a `bench/` path.
+# It does NOT replace those tables, and the difference is measured: of the 32
+# modules BENCH_DEPENDENT_TESTS declares, exactly 15 SPELL a `bench/` path.
 # The rest reach it through a computed root, a directory walk, or a declaration
 # made only in prose, and no AST can see those. The tables stay; what this adds
 # is that a dependency somebody wrote down plainly no longer has to be noticed
@@ -1749,9 +1753,10 @@ def select(changed, root) -> dict:
         # issue #1774: the shard weights only balance root-suite-affected's
         # shards; they never decide which tests run (the shards partition the
         # collection whatever the weights say, which
-        # tests/test_root_suite_shards_1774.py pins). A refresh of them, or of
-        # the tool that writes them, selects that test alone instead of a FULL
-        # run across four shards. tests/_shard.py itself stays FULL.
+        # tests/test_root_suite_shards_1774.py pins). A weights JSON refresh
+        # selects that test instead of a FULL run across four shards; the .py
+        # writer also carries both whole-tree encoding guards (issues #2639
+        # and #2648). tests/_shard.py itself stays FULL.
         if f in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
             pytest_nodes.add("tests/test_root_suite_shards_1774.py")
             reasons.append(f"{f} (shard balance only)")

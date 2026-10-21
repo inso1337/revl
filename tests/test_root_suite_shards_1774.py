@@ -315,17 +315,17 @@ def test_a_weights_refresh_is_not_a_full_run():
     and #2648). Neither escalates to FULL."""
     sys.path.insert(0, str(ROOT / "tools"))
     import affected_tests  # noqa: PLC0415
-    guards = {"tests/test_read_text_encoding_guard.py",
-              "tests/test_open_encoding_guard.py"}
-    want = {
-        "tests/shard_weights.json": {"tests/test_root_suite_shards_1774.py"},
-        "tools/refresh_shard_weights.py": {
-            "tests/test_root_suite_shards_1774.py"} | guards,
-    }
-    for changed, expected in want.items():
+    shard = "tests/test_root_suite_shards_1774.py"
+    # Issues #2639 and #2648: a `.py` change carries both whole-tree guards, so
+    # the writer selects them too; the JSON weights file cannot add a call.
+    guards = ["tests/test_open_encoding_guard.py",
+              "tests/test_read_text_encoding_guard.py"]
+    for changed, expected in (("tests/shard_weights.json", [shard]),
+                              ("tools/refresh_shard_weights.py",
+                               sorted(guards + [shard]))):
         sel = affected_tests.select([changed], ROOT)
         assert not sel["full"], sel["reason"]
-        assert set(sel["pytest"]) == expected, sel
+        assert sel["pytest"] == expected, sel
     assert affected_tests.select(["tests/_shard.py"], ROOT)["full"]
 
 
