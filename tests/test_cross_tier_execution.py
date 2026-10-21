@@ -807,6 +807,24 @@ def test_every_tier_emits_the_conversion(backend, conversion):
         "coercion site (docs/arithmetic.md)")
 
 
+def test_python_component_body_widens_a_mixed_equality():
+    """The marker is set in BOTH lowering strata, so both python renderers
+    must read it. The component stratum has its own `_Emitter._expr`, and it
+    used to ignore `widen`, so a provide method answered the comparison
+    un-widened while the same expression in a module `fn` was widened: above
+    2^53 the two disagreed with each other and with ts/go/rust/java."""
+    source = """
+service S { fn eq(x: Int) -> Bool }
+component C provides s: S {
+  provide s { fn eq(x) { return x == 3.0 } }
+}
+"""
+    emitted = _emit("python", source)
+    assert "float(x) == 3.0" in emitted, (
+        "a provide method must widen the Int operand of a mixed equality, "
+        "exactly as a module fn does (issue #2715)")
+
+
 # ------------------------------------------------- pinned arithmetic divergences
 #
 # These are NOT the intended semantics. They are the current per-tier behaviour,
