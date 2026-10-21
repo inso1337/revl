@@ -14668,15 +14668,24 @@ fn tk_if_join(a: Str, b: Str, env: List[Bind]) -> TInf {
 // and `${f}` for a plain fn was emitted as `str(f)` here while the reference
 // refused it by name. The refusal is the reference's sentence; the type
 // spelling is rendered the way `tk_mismatch` renders one.
+//
+// It runs in the PURE stratum only. `_mark_interp_type` is reached from the
+// module-fn lowering, and a component body never goes through it: the
+// reference admits a provide method interpolating a compound value
+// (`fn loose(xs) = \`xs=${anyText(xs)}\`` in the go corpus fixture
+// `comp_provide_builtins.rvl`, and a direct `${xs}` too). Refusing there was a
+// false rejection, which the gate/reference census caught as a moved case.
 fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
   if (i >= parts.length()) { return tk_ok("Str") }
   if (parts[i].kind == "e") {
     let r = tk_infer(parts[i].e, env)
     if (r.v != "") { return r }
-    let why = tk_interp_reason(r.ty, env)
-    if (why != "") {
-      return tk_no("T1", "`${...}` cannot interpolate ".concat(why)
-        .concat(" (`").concat(tk_render(r.ty)).concat("`)"))
+    if (!ir_stratum(env)) {
+      let why = tk_interp_reason(r.ty, env)
+      if (why != "") {
+        return tk_no("T1", "`${...}` cannot interpolate ".concat(why)
+          .concat(" (`").concat(tk_render(r.ty)).concat("`)"))
+      }
     }
   }
   return tk_parts(parts, i + 1, env)

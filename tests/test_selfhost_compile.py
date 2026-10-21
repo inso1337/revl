@@ -3714,6 +3714,26 @@ def test_a_scalar_template_operand_still_compiles(compile_to):
     assert not compile_to(source, "py").startswith("REFUSED|")
 
 
+def test_a_component_template_may_interpolate_a_compound_value(
+        compile_to, reference_emit):
+    """NON-VACUITY, the other direction: the reference reaches
+    `_mark_interp_type` from module-fn lowering only, and a component body
+    never goes through it — a provide method interpolating a `List` or a call
+    returning one is ADMITTED. Refusing there was a false rejection (the
+    gate/reference census caught it: `emit_go_corpus/comp_provide_builtins.rvl`
+    moved from agree-admit to false-reject)."""
+    source = (
+        "fn anyText(x: List[Int]) -> List[Int] { return x }\n"
+        "service S { fn f(xs: List[Int]) -> Str }\n\n"
+        "component C provides s: S {\n"
+        "  provide s {\n"
+        "    fn f(xs) = `xs=${anyText(xs)} ${xs}`\n"
+        "  }\n"
+        "}\n")
+    assert not compile_to(source, "py").startswith("REFUSED|")
+    assert compile_to(source, "py") == reference_emit["py"](compile_source(source))
+
+
 # Issue #2447: the reference refuses a variant case call with the wrong number
 # of payload arguments. The documents are the reference's own table,
 # tests/test_case_call_arity.py; `selfhost/*.rvl` does not count the arguments
