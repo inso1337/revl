@@ -889,7 +889,7 @@ fn collect_ctors(ts: List[Token], start: Int, end: Int, multi: Bool,
 // constructors. A name two type declarations both use is dropped, not unioned:
 // the reference's `_case_table` records the second declaration of a `CASE_KEY`
 // as ambiguous and leaves the name unbound (`type A = X | Y`, `type B = X | Z`
-// then refuses a bare `X` — "`X` is not declared in this function"). A union
+// then refuses a bare `X`, with "`X` is not declared in this function"). A union
 // here made every such name resolve in the component gate, so a component body
 // using one was admitted where the reference refuses (issue #2449, whose
 // document declares its own `Dot` beside the carried `Shape = Dot | Box(Int)`).
@@ -2798,12 +2798,12 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
 // Issue #2461: the scan reads TOKENS, and the body of a backtick `${...}` is
 // one opaque lexer token, so a call written only inside a template is not seen
 // here. That case is still refused by name, through the `tk_named` check the
-// template's operand walk reaches — so the refusal holds, but this scan is not
+// template's operand walk reaches, so the refusal holds, but this scan is not
 // what delivers it.
 //
 // A mention is skipped where the name RESOLVES to a binding rather than to the
 // fn: the declaration's own name, a member read (`r.f`), and any mention inside
-// a `fn` or `test` body that binds the name itself — a parameter, a lambda
+// a `fn` or `test` body that binds the name itself: a parameter, a lambda
 // parameter, a record-literal field (`f:`) or a `let` (issue #2461). The
 // reference resolves the nearest binding first and admits all of these; they
 // used to draw this refusal. The body scope tracks its own bindings only, so a
@@ -2903,7 +2903,7 @@ fn dp_defaulted_fns(ts: List[Token]) -> Map[Str, Int] {
 // The arguments of a call whose `(` sits just before `j`: commas at depth 0
 // plus one, or 0 for `()`; -1 when the list never closes. A trailing comma
 // (`f(1, 3,)`, which the parser reads as two arguments) leaves the last slot
-// empty, so the count is the commas alone in that case — `n + 1` would make the
+// empty, so the count is the commas alone in that case; `n + 1` would make the
 // call look like it passes one argument too many (issue #2461).
 fn dp_arg_count(ts: List[Token], j0: Int) -> Int {
   var j = j0
@@ -14430,7 +14430,6 @@ fn tk_ty_has_tparam(t: Str, env: List[Bind]) -> Bool {
 }
 
 // A call: every argument is walked for the refusals inside it. Argument-vs-
-
 // signature checking is T2b's slice, so the call's own type comes from the
 // annotation engine.
 fn tk_call(c: CallN, env: List[Bind]) -> TInf {
@@ -14465,7 +14464,7 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // case's declared type (`typecheck.infer_ast`'s ExprCall arm; the counterpart
   // is `selfhost/checker.rvl`'s `case_call_ty`). This walk resolved a case name
   // as "unchecked" and never compared the payload, so `Box("x")` for
-  // `type Shape = Dot | Box(Int)` was ADMITTED and emitted on every tier — a
+  // `type Shape = Dot | Box(Int)` was ADMITTED and emitted on every tier: a
   // silent admit, not a spelling difference. Nothing is said where either side
   // is unknown or a body-rebound name shadows the constructor, which is the
   // reference's own gradual silence.
@@ -14693,13 +14692,13 @@ fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
 
 // The reference's `_interp_refusal` answer for one operand type, "" when the
 // operand may be interpolated. Answered only for types this walk can PROVE
-// compound — an unknown, `Any`, a generic parameter and every scalar pass
+// compound: an unknown, `Any`, a generic parameter and every scalar pass
 // through, which is the reference's own gradual silence.
 //
 // A NOMINAL record or variant is answered only for its BARE spelling: the
 // reference looks the type up exactly (`types.get(inferred)`), so an applied
 // generic (`R[Int]`, `S[Int]`) misses the table and is ADMITTED (issue #2459
-// review). Dispatching on the head name refused it — a false rejection.
+// review). Dispatching on the head name refused it, a false rejection.
 fn tk_interp_reason(t: Str, env: List[Bind]) -> Str {
   if (t == "" || t == "Any" || t == "Value") { return "" }
   if (t.startsWith("{")) { return "a record" }
@@ -28351,7 +28350,7 @@ fn binop_ty(op: Str, lt: Str, rt: Str) -> Str {
 // The reference's `join`, restricted to the spellings this annotation engine
 // names: identical types meet at themselves, and the NUMERIC widening pairs
 // meet where `compatible` allows the flow (`Float` accepts `Int` and `Int32`,
-// `Int` accepts `Int32`) — `join(Int, Float)` is `Float`, not unknown.
+// `Int` accepts `Int32`), so `join(Int, Float)` is `Float`, not unknown.
 //
 // Issue #2460: answering "" for `Int`/`Float` made a NESTED `if` lose the
 // widening entirely, because the outer join then met `("", Int)` and the

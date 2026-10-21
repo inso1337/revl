@@ -3840,7 +3840,7 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
 // `_host_key` (issue #1914): a namespaced wiring key (`acme::greeter`) mangles
 // to one Java identifier (`__`-joined, each part's `_` escaped to `_u`); an
 // unqualified key is returned unchanged. Used only by the collision marker
-// below — the port still refuses to EMIT a namespaced key (issue #2389).
+// below: the port still refuses to EMIT a namespaced key (issue #2389).
 fn java_host_key(k: Str) -> Str {
   if (k.indexOf("::") < 0) { return k }
   var parts = k.split("::")
@@ -3850,7 +3850,7 @@ fn java_host_key(k: Str) -> Str {
 }
 
 // Issue #2458: `_check_host_keys` is the FIRST statement of the reference
-// `emit` — ahead of the holes, deferred, validated and fault-test refusals —
+// `emit`, ahead of the holes, deferred, validated and fault-test refusals,
 // and it refuses the one collision the mangling cannot represent: a flat key
 // that already spells a mangled qualified key (`acme__ops` beside `acme::ops`).
 // The port had no marker for it, so the first refusal it named was a later one.
@@ -3864,7 +3864,7 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
     for (table of ["provides", "requires", "routes", "isolate", "intercept"]) {
       for (k of value_keys(value_field(c, table))) {
         let host = java_host_key(k)
-        let at = index_of(seen_hosts, host)
+        let at = list_index_of(seen_hosts, host)
         if (at < 0) {
           seen_hosts = seen_hosts.push(host)
           seen_keys = seen_keys.push(k)
@@ -3881,7 +3881,10 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
   return out
 }
 
-fn index_of(xs: List[Str], x: Str) -> Int {
+// Named `list_index_of` rather than `index_of`: that name is the language's
+// string builtin, and a same-named helper compiles to a mangled form whose
+// coverage is attributed to the builtin's unexecuted shim.
+fn list_index_of(xs: List[Str], x: Str) -> Int {
   var i = 0
   while (i < xs.length()) {
     if (xs[i] == x) { return i }

@@ -2112,7 +2112,7 @@ def test_a_document_case_sharing_a_carried_name_is_refused(compile_rvl, tmp_path
 
 # Issue #2450: a carried variant's NULLARY case built in a module function. The
 # document's own read has no `Dot` case, so the native producer lowered the name
-# as a variable and the py tier wrote `return Dot` — the class, not an instance.
+# as a variable and the py tier wrote `return Dot`, the class, not an instance.
 # The carried declarations are now spliced into the LOWERING text as well, so the
 # name lowers as the tagged `adt` the reference builds.
 _CARRIED_CASE_IN_FN = (
@@ -3621,7 +3621,7 @@ def test_a_nested_if_joining_int_and_float_emits_the_reference_bytes(
 # Issue #2446: a block-bodied provide method is outside the native java
 # emitter's subset and the go emitter has no component tier at all. Both used to
 # answer with target source in which the component had been DROPPED behind a
-# `<<UNSUPPORTED-...>>` marker — a successful result whose bytes differ from the
+# `<<UNSUPPORTED-...>>` marker: a successful result whose bytes differ from the
 # reference's, with no refusal. The self-host rule allows a loud named refusal
 # there, so the driver now returns one.
 _BLOCK_BODY_PROVIDE = (
@@ -3654,7 +3654,7 @@ def test_the_block_body_provide_still_compiles_on_py(compile_to, reference_emit)
 
 
 # Issue #2448: the reference refuses a variant case call whose payload has the
-# wrong type, and the native gate ADMITTED it on every tier — a silent admit of
+# wrong type, and the native gate ADMITTED it on every tier: a silent admit of
 # an ill-typed program, not a difference in spelling. `selfhost/checker.rvl`
 # already refuses it, but the driver's gate is `lower.rvl`'s `tk_call`, which
 # resolved a case constructor as "unchecked" and never compared the payload.
@@ -3718,7 +3718,7 @@ def test_a_component_template_may_interpolate_a_compound_value(
         compile_to, reference_emit):
     """NON-VACUITY, the other direction: the reference reaches
     `_mark_interp_type` from module-fn lowering only, and a component body
-    never goes through it — a provide method interpolating a `List` or a call
+    never goes through it: a provide method interpolating a `List` or a call
     returning one is ADMITTED. Refusing there was a false rejection (the
     gate/reference census caught it: `emit_go_corpus/comp_provide_builtins.rvl`
     moved from agree-admit to false-reject)."""

@@ -156,7 +156,7 @@ fn emit_ir(ir: Any, tier: Str) -> Str {
 // Issue #2446. An emitter with no channel to raise still says which shape it
 // cannot render, with a `<<UNSUPPORTED-...>>` marker. For the markers below the
 // marker is not a missing DETAIL: the emitter answers without the component, or
-// without the whole live tier's body — a successful result whose bytes differ
+// without the whole live tier's body: a successful result whose bytes differ
 // from the reference and from which a caller cannot tell that code was
 // dropped. The self-host rule allows a loud NAMED refusal there, so the driver
 // turns exactly those markers into `REFUSED|UNSUPPORTED|...` and the caller
@@ -203,7 +203,7 @@ fn dropped_shape_refusal(out: Str, tier: Str) -> Str {
   return "UNSUPPORTED|".concat(mark)
     .concat(" is not supported by the self-host compiler on `").concat(tier)
     .concat("`: the emitter drops that component (or the document's live ")
-    .concat("tier) and would return a program that differs from the reference's")
+    .concat("tier) and would return a program that differs from the reference's.")
 }
 
 // ============================================================ use resolution
@@ -2575,7 +2575,7 @@ fn ad_module_key(path: Str) -> Str {
 //     (issue #2449: the document declares its own `Dot` and the carried type
 //     declares `Dot` too, so the reference's merged case table drops both as
 //     ambiguous and a bare `Dot` in a component body resolves to no
-//     requirement — G1). Adopting the merged verdict is what makes the native
+//     requirement, a G1 refusal). Adopting the merged verdict is what makes the
 //     gate draw the reference's refusal.
 // Any other verdict stands, through `tc_import_first`.
 type TcCarriedAdmission = { names: List[Str], refusal: Str }
@@ -2633,8 +2633,8 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // always; `ul_link_types` then takes the names as already lowered (`pre`) and
   // does not append them a second time.
   let full = ul_with_carried_text(named, path)
-  // Issue #2374 / #2449: and admit what the reference admits — the merged
-  // text with every carried declaration spliced in — so a document case that
+  // Issue #2374 / #2449: and admit what the reference admits, the merged
+  // text with every carried declaration spliced in, so a document case that
   // reuses a carried case's name draws the reference's ambiguity refusal.
   let carried = tc_carried_admission(source, path, verdict, full)
   if (carried.refusal != "") { return "REFUSED|".concat(carried.refusal) }
