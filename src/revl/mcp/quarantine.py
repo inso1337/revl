@@ -97,8 +97,11 @@ import subprocess
 import tempfile
 
 from ..errors import RevlError
+from ..policy import _allow_for, component_realms
 from ..wasm_confinement import (
     ConfinementError,
+    component_isolate,
+    component_name,
     component_targets,
     declared_capabilities,
     limits_from_policy,
@@ -232,7 +235,8 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
     runtime's own wall-clock budget and was killed, ``deferred`` when the
     candidate has no canonical-ABI-emittable boundary function to present (every
     boundary signature carries a still-un-lowerable type — Float/Map/resource/
-    function-value), and ``unavailable`` when the toolchain is absent."""
+    function-value), and ``unavailable`` when the toolchain is absent or the
+    component never instantiated (nothing ran, so no trap was caught)."""
     EmitError = canonical.EmitError
 
     # 0. Confinement first (issue #2729): the policy's ceilings, or the
@@ -241,6 +245,17 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
     limits = limits_from_policy(policy)
     declared = declared_capabilities(ir, service)
     targets = component_targets(ir)
+    # The candidate's realm placement and the policy's allow-list for it. The
+    # byte check compares the FULL composed address, so without the placement an
+    # isolated component's own `coeffect:<realm>/<key>` import would be refused;
+    # without the allow-list the check would ignore every `may reach` rule. Both
+    # are read from the same tables policy evaluation uses.
+    isolate = component_isolate(ir, service)
+    candidate_name = component_name(ir, service)
+    allow = None
+    if policy is not None and candidate_name is not None:
+        allow = _allow_for(policy, candidate_name,
+                           component_realms(ir, candidate_name))
 
     # 1. Lower to the canonical ABI. No Str-surface function => the aggregate
     #    follow-on; deferred honestly, not forced through a boundary that cannot
@@ -313,7 +328,14 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
                     try:
                         result = canonical.run_component_str(
                             component, func, arg, limits=limits,
-                            declared=declared, declared_targets=targets)
+                            declared=declared, allowed=allow,
+                            # A candidate is the provided service, never a
+                            # spawn template: the `config { }` channel belongs
+                            # to a spawned template reading its own fields, so
+                            # this component has no config field to declare and
+                            # a config import in its bytes is refused.
+                            config_fields=tuple(),
+                            isolate=isolate, declared_targets=targets)
                         probe["outcome"] = "returned"
                         probe["result"] = result
                         returned += 1
@@ -328,13 +350,23 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
                         # budget lands here too ("all fuel consumed by
                         # WebAssembly"): a runaway candidate is a trap, not a
                         # special case.
-                        if getattr(error, "reason", None) == "wall":
+                        reason = getattr(error, "reason", None)
+                        if reason == "wall":
                             probe["outcome"] = "timeout"
                             probe["timeout"] = (
                                 "did not return within the probe's wall-clock "
                                 "ceiling and was stopped by the runtime — the "
                                 "host was never touched")
                             timed_out += 1
+                        elif reason == "instantiate":
+                            # The guest never ran, so this is not the sandbox
+                            # catching an escape. Grading it `trapped` would
+                            # report a setup failure as a contained trap; the
+                            # battery could not run the candidate at all.
+                            return _unavailable(
+                                "the candidate's component did not instantiate, "
+                                f"so the battery could not run it: {error}",
+                                functions=functions)
                         else:
                             probe["outcome"] = "trapped"
                             probe["trap"] = _trap_detail(str(error))
@@ -384,8 +416,14 @@ def _trap_detail(message: str) -> str:
     """Condense wasmtime's failure text to the salient line(s). The full
     backtrace is noise in a dossier; the fact of the trap and its cause line
     are the signal that the sandbox physically caught the escape."""
-    prefix = "component invocation failed: "
-    text = message[len(prefix):] if message.startswith(prefix) else message
+    text = message
+    if message.startswith("component invocation "):
+        # `ComponentTrap` leads with a reason-specific sentence
+        # ("component invocation trapped: ...", "... hit its fuel ceiling: ...");
+        # the dossier wants the wasmtime cause, not that lead.
+        _lead, separator, rest = message.partition(": ")
+        if separator:
+            text = rest
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     # keep the first couple of meaningful lines (the error + first cause)
     return " / ".join(lines[:3]) if lines else "wasm trap (no detail)"

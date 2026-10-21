@@ -1871,7 +1871,14 @@ jobs:
       # witnessed teardown, provide-method witnessing, reserved-word idents,
       # str-literal length — had never executed here. The tier's frontend half
       # lives in tests/test_wasm_backend.py, so it stays named alongside.
-      - run: pytest backends/wasm/ tests/test_wasm_backend.py -q --junitxml=/tmp/wasm-junit.xml
+      # issue #2729: `tests/test_wasm_confined_default_2729.py` drives the
+      # byte-level import check and the produced component's limits. Thirteen
+      # of its tests need `wasm-tools` + `wasmtime`, which this job installs
+      # and pins, and they read the same REVL_REQUIRE_WASMTIME switch;
+      # collecting it here is what makes those tests real in CI instead of
+      # skips. Its other tests build the component framing by hand and run
+      # everywhere.
+      - run: pytest backends/wasm/ tests/test_wasm_backend.py tests/test_wasm_confined_default_2729.py -q --junitxml=/tmp/wasm-junit.xml
         env:
           # turns "wasmtime not installed" from a silent skip into a failure;
           # unset locally, so offline dev still skips cleanly

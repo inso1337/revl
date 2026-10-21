@@ -14,8 +14,16 @@ Three behaviours, each with a test that fails before this slice:
 The memory and fuel traps are distinct reasons on the same contained-trap path.
 The emitter-level check (``emit._assert_imports_within_requires``) reads the
 emitter's own import list, so a mutated component's bytes pass it; these tests
-mutate the produced component's embedded core module to prove the new check
-reads what actually runs.
+mutate the produced component's embedded core module (or synthesize the
+component's framing directly) to prove the new check reads what actually runs.
+
+The admission tests below build the component framing BY HAND. That is
+deliberate: the check under test reads the import section, so a hand-built
+component is the same input a mutated real one produces, needs no wasm-tools or
+wasmtime, and therefore does not skip in any job that collects this file. The
+toolchain-gated tests that remain are the ones that need a real component built
+and executed; CI's `backend-wasm` job installs both tools and runs this file
+with `REVL_REQUIRE_WASMTIME=1`, so even those never skip there.
 """
 
 from __future__ import annotations
@@ -105,6 +113,45 @@ def _uleb(value: int) -> bytes:
         out.append(byte | (0x80 if value else 0))
         if not value:
             return bytes(out)
+
+
+def _encode_name(text: str) -> bytes:
+    data = text.encode("utf-8")
+    return _uleb(len(data)) + data
+
+
+def _core_with_import(module: str, field: str) -> bytes:
+    """A minimal core module whose import section names exactly one import."""
+    payload = (_uleb(1) + _encode_name(module) + _encode_name(field)
+               + b"\x00" + _uleb(0))          # func, type index 0
+    return b"\0asm\x01\0\0\0" + b"\x02" + _uleb(len(payload)) + payload
+
+
+def _component_with_core(core: bytes) -> bytes:
+    return b"\0asm\x0d\x00\x01\x00" + b"\x01" + _uleb(len(core)) + core
+
+
+def _import_component(module: str, field: str) -> bytes:
+    """A component whose embedded core module carries one injected import.
+
+    No toolchain: this is the same framing `wasm-tools component new` produces
+    for the module, and the check reads the bytes rather than the emitter."""
+    return _component_with_core(_core_with_import(module, field))
+
+
+def _component_level(component: bytes, name: str, sort: int,
+                     descriptor: bytes = b"\x01",
+                     name_tag: int = 0x00) -> bytes:
+    """Append a component-level import section to `component`'s bytes.
+
+    `descriptor` is the sort-specific body that follows the tag; the default
+    (`03 01`) is a type import with a `sub resource` bound. `name_tag` is the
+    extern-name kind that precedes the name; the standard one is `0x00`. The
+    parser under test reads framing, name kind, name and sort, so this is the
+    exact shape it sees."""
+    payload = (_uleb(1) + bytes([name_tag]) + _encode_name(name)
+               + bytes([sort]) + descriptor)
+    return component + b"\x0a" + _uleb(len(payload)) + payload
 
 
 def _replace_first_core_module(component: bytes, core: bytes) -> bytes:
@@ -220,6 +267,158 @@ def test_aggregate_component_component_level_imports_are_confined(tmp_path):
         emitted["core_wat"], emitted["wit"], tmp_path, emitted["world"],
         name="registry")
     check_component_imports(component.read_bytes(), declared=frozenset())
+
+
+def test_a_capability_import_is_checked_by_its_composed_address():
+    # The bug: `coeffect:tenantb/kv` was admitted whenever `kv` was declared,
+    # because the realm was stripped before the comparison. A capability is
+    # the full address; the realm is part of the authority.
+    imported = _import_component("coeffect:tenantb/kv", "put")
+    check_component_imports(imported, declared=frozenset({"kv"}),
+                            isolate={"kv": "tenantb"})
+    with pytest.raises(ConfinementError, match="composed address"):
+        check_component_imports(imported, declared=frozenset({"kv"}),
+                                isolate={"kv": "tenanta"})
+    with pytest.raises(ConfinementError, match="composed address"):
+        # no placement means the shared realm; a realm-qualified import is not
+        # that address.
+        check_component_imports(imported, declared=frozenset({"kv"}))
+
+
+def test_an_isolated_component_may_not_import_the_shared_realm():
+    # The converse mismatch: a component placed in `tenanta` must import
+    # `coeffect:tenanta/kv`, never the shared `coeffect:kv`.
+    imported = _import_component("coeffect:kv", "put")
+    with pytest.raises(ConfinementError, match="composed address"):
+        check_component_imports(imported, declared=frozenset({"kv"}),
+                                isolate={"kv": "tenanta"})
+
+
+def test_a_declared_star_does_not_make_the_key_check_vacuous():
+    # `*` is the unnameable boundary: it cannot prove that a NAMED import is
+    # inside it. Only a concrete declaration covers a concrete address.
+    imported = _import_component("coeffect:kv", "put")
+    with pytest.raises(ConfinementError, match="composed address"):
+        check_component_imports(imported, declared=frozenset({"*"}))
+    check_component_imports(imported, declared=frozenset({"*", "kv"}))
+
+
+def test_a_route_import_is_checked_by_its_composed_address():
+    imported = _import_component("route:kv", "live")
+    check_component_imports(imported, declared=frozenset({"kv"}))
+    with pytest.raises(ConfinementError, match="composed address"):
+        check_component_imports(imported, declared=frozenset())
+    # a routed require has no single-realm address: the emitter renders
+    # `route:<key>`, so a realm-qualified route import is not that address.
+    with pytest.raises(ConfinementError, match="composed address"):
+        check_component_imports(_import_component("route:tenantb/kv", "live"),
+                                declared=frozenset({"kv"}),
+                                isolate={"kv": "tenantb"})
+
+
+def test_the_policy_allow_list_bounds_a_declared_import():
+    imported = _import_component("coeffect:kv", "put")
+    check_component_imports(imported, declared=frozenset({"kv"}),
+                            allowed=("kv",))
+    with pytest.raises(ConfinementError, match="policy does not allow"):
+        check_component_imports(imported, declared=frozenset({"kv"}),
+                                allowed=("other",))
+    with pytest.raises(ConfinementError, match="policy does not allow"):
+        check_component_imports(imported, declared=frozenset({"kv"}),
+                                allowed=())
+
+
+def test_a_spawn_import_must_name_a_target_and_the_new_field():
+    imported = _import_component("spawn:Admin", "new")
+    check_component_imports(imported, declared=frozenset(),
+                            declared_targets=frozenset({"Admin"}))
+    with pytest.raises(ConfinementError, match="Admin"):
+        check_component_imports(imported, declared=frozenset(),
+                                declared_targets=frozenset({"Store"}))
+    with pytest.raises(ConfinementError, match="new"):
+        check_component_imports(_import_component("spawn:Admin", "evil"),
+                                declared=frozenset(),
+                                declared_targets=frozenset({"Admin"}))
+    with pytest.raises(ConfinementError, match="sibling"):
+        check_component_imports(_import_component("spawn:Admin/extra", "new"),
+                                declared=frozenset(),
+                                declared_targets=frozenset({"Admin", "extra"}))
+
+
+def test_an_instance_import_must_name_a_target_and_a_key_dot_method_field():
+    imported = _import_component("instance:Admin", "secret.read")
+    check_component_imports(imported, declared=frozenset(),
+                            declared_targets=frozenset({"Admin"}))
+    with pytest.raises(ConfinementError, match="Admin"):
+        check_component_imports(imported, declared=frozenset(),
+                                declared_targets=frozenset({"Store"}))
+    with pytest.raises(ConfinementError, match="key"):
+        check_component_imports(_import_component("instance:Admin", "secret"),
+                                declared=frozenset(),
+                                declared_targets=frozenset({"Admin"}))
+    with pytest.raises(ConfinementError, match="sibling"):
+        check_component_imports(
+            _import_component("instance:Admin/extra", "secret.read"),
+            declared=frozenset(),
+            declared_targets=frozenset({"Admin", "extra"}))
+
+
+def test_structural_seam_fields_are_the_known_ones():
+    for module, field in (("host", "job_run"), ("dispose", "instance"),
+                          ("coeffect:revl:wal", "record")):
+        check_component_imports(_import_component(module, field),
+                                declared=frozenset())
+    for module, field in (("host", "evil"), ("dispose", "evil"),
+                          ("coeffect:revl:wal", "evil")):
+        with pytest.raises(ConfinementError, match="structural"):
+            check_component_imports(_import_component(module, field),
+                                    declared=frozenset())
+    # a config field is bound only when the caller declares it; an ordinary
+    # component has no config surface, so the default is empty and refuses.
+    with pytest.raises(ConfinementError, match="structural"):
+        check_component_imports(_import_component("config", "admin"),
+                                declared=frozenset())
+    check_component_imports(_import_component("config", "admin"),
+                            declared=frozenset(),
+                            config_fields=("admin",))
+
+
+def test_component_level_import_evil_is_refused():
+    # `import-*` is not a prefix that makes an import plumbing: `import-evil`
+    # is an import like any other and is refused.
+    evil = _component_level(_import_component("host", "job_run"),
+                            "import-evil", 0x03)
+    with pytest.raises(ConfinementError, match="COMPONENT level"):
+        check_component_imports(evil, declared=frozenset())
+
+
+def test_component_level_plumbing_name_must_match_its_sort():
+    # A type import called `import-func-*` is a spoof of the function family.
+    spoof = _component_level(_import_component("host", "job_run"),
+                             "import-func-t", 0x03)
+    with pytest.raises(ConfinementError, match="import-type"):
+        check_component_imports(spoof, declared=frozenset())
+
+
+def test_component_level_lift_plumbing_is_accepted():
+    # the wrapper's real plumbing, in both families, is accepted.
+    check_component_imports(
+        _component_level(_import_component("host", "job_run"),
+                         "import-type-t", 0x03),
+        declared=frozenset())
+    check_component_imports(
+        _component_level(_import_component("host", "job_run"),
+                         "import-func-f", 0x01, descriptor=b"\x00"),
+        declared=frozenset())
+
+
+def test_a_nonstandard_component_level_name_kind_is_refused():
+    # wasm-tools emits extern-name kind 0x00; any other kind is an import shape
+    # this checker cannot read, so it is refused rather than skipped.
+    weird = _component_level(_import_component("host", "job_run"),
+                             "import-type-t", 0x03, name_tag=0x01)
+    with pytest.raises(ConfinementError, match="extern-name"):
+        check_component_imports(weird, declared=frozenset())
 
 
 # --------------------------------------------------------------------------- #
@@ -379,6 +578,160 @@ def _spin_component(tmp_path: pathlib.Path) -> pathlib.Path:
 
 def _grow_component(tmp_path: pathlib.Path) -> pathlib.Path:
     return _guest(tmp_path, _GROW_WAT)
+
+
+# --------------------------------------------------------------------------- #
+# 2b. trap classification: a ceiling, a real trap, an instantiation failure and
+#     a plain non-zero exit are different reasons, decided from wasmtime's text.
+# --------------------------------------------------------------------------- #
+
+def test_trap_reasons_are_classified_separately():
+    canonical = _canonical()
+    classify = canonical._classify_failure
+    assert classify("wasm trap: all fuel consumed by WebAssembly") == "fuel"
+    assert classify("wasm trap: failed to grow memory from 1 to 2 pages") == "memory"
+    assert classify("wasm trap: memory growth exceeds memory type's limits") == "memory"
+    assert classify("wasm trap: Memory maximum size exceeded") == "memory"
+    assert classify("wasm trap: interrupt") == "wall"
+    assert classify("wasm trap: integer overflow") == "trap"
+    assert classify("failed to instantiate: unknown import `env.secret`") == "instantiate"
+    # a message that merely contains the word is NOT a wall-clock ceiling: the
+    # old substring match made every "timeout" a wall trap.
+    assert classify("error: /tmp/timeout-artifacts: no such file") == "exit"
+
+
+def test_an_instantiation_failure_does_not_claim_a_trap_ceiling():
+    canonical = _canonical()
+    error = canonical.ComponentTrap("instantiate",
+                                    "unknown import `host.secret`")
+    assert "did not instantiate" in str(error)
+    assert "trap ceiling" not in str(error)
+
+
+# --------------------------------------------------------------------------- #
+# 2c. the quarantine battery: traps are graded, refusals are not swallowed, and
+#     the policy's allow-list and the candidate's realm placement are supplied.
+# --------------------------------------------------------------------------- #
+
+class _FakeEmitError(Exception):
+    pass
+
+
+class _FakeTrap(_FakeEmitError):
+    def __init__(self, reason, detail):
+        self.reason = reason
+        super().__init__(detail)
+
+
+class _FakeCanonical:
+    """The slice of `backends/wasm/canonical.py` `_run_substrate` calls.
+
+    The flow under test is the battery's accounting and its forwarding of the
+    confinement inputs, not wasmtime; a stub lets it run with no toolchain."""
+
+    EmitError = _FakeEmitError
+    ComponentTrap = _FakeTrap
+
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls = []
+
+    def emit_component(self, ir, *, service):
+        return {"core_wat": "", "wit": "", "world": "",
+                "package": "revl:candidate", "interface": "go",
+                "functions": ["go"]}
+
+    def wasm_tools_binary(self):
+        return "wasm-tools"
+
+    def wasmtime_binary(self):
+        return "wasmtime"
+
+    def build_component(self, core_wat, wit, out_dir, world, name="x"):
+        return pathlib.Path("component.wasm")
+
+    def validate_component(self, component):
+        return None
+
+    def run_component_str(self, component, func, arg, **kwargs):
+        self.calls.append(kwargs)
+        if self.outcome == "trap":
+            raise self.ComponentTrap("trap", "wasm trap: integer overflow")
+        if self.outcome == "instantiate":
+            raise self.ComponentTrap(
+                "instantiate", "wasm trap: failed to instantiate component")
+        if self.outcome == "refuse":
+            raise ConfinementError("the composed address is not declared")
+        return "ok"
+
+
+_ISOLATED_SOURCE = """
+service Kv { fn get(k: Str) -> Str }
+component Store requires kv: Kv provides store: Kv {
+  isolate kv in realm("tenantb")
+  provide store { fn get(k) = "x" }
+}
+"""
+
+
+def _isolated_ir():
+    return compile_source(_ISOLATED_SOURCE), "Kv"
+
+
+def test_the_battery_forwards_the_allow_list_and_the_realm_placement():
+    from revl.mcp import quarantine as Q
+
+    ir, service = _isolated_ir()
+    policy = parse_policy("component Store may reach kv")
+    fake = _FakeCanonical("return")
+    substrate = Q._run_substrate(fake, ir, service, policy=policy)
+
+    assert substrate["status"] == "passed", substrate
+    assert fake.calls
+    assert fake.calls[0]["allowed"] == ("kv",)
+    assert fake.calls[0]["isolate"] == {"kv": "tenantb"}
+
+
+def test_a_trap_in_a_probe_is_graded_not_raised():
+    from revl.mcp import quarantine as Q
+
+    ir, service = _isolated_ir()
+    fake = _FakeCanonical("trap")
+    substrate = Q._run_substrate(fake, ir, service)
+
+    assert substrate["status"] == "trapped", substrate
+    assert substrate["counts"]["trapped"] == len(fake.calls)
+
+
+def test_an_instantiation_failure_is_not_graded_as_a_trap():
+    # The old classifier called any non-zero exit a `trap`, so a component that
+    # never instantiated was reported as a contained runtime escape. Nothing
+    # ran, so the battery could not run it: unavailable, not trapped.
+    from revl.mcp import quarantine as Q
+
+    ir, service = _isolated_ir()
+    fake = _FakeCanonical("instantiate")
+    substrate = Q._run_substrate(fake, ir, service)
+
+    assert substrate["status"] == "unavailable", substrate
+    assert substrate["ran"] is False
+    assert "did not instantiate" in substrate["reason"]
+    assert substrate["counts"]["trapped"] == 0
+
+
+def test_a_confinement_refusal_reaches_the_refused_verdict(monkeypatch):
+    # A refusal is the byte check refusing the produced component before
+    # anything ran. It must reach `run`, which maps it to `refused`; it must
+    # never be graded as a guest outcome.
+    from revl.mcp import quarantine as Q
+    from revl.mcp.session import Session
+
+    fake = _FakeCanonical("refuse")
+    monkeypatch.setattr(Q, "_load_canonical", lambda: fake)
+    report = Q.run(Session(), {"source": 'fn tag(s: Str) -> Str { return s }'})
+
+    assert report["verdict"] == "refused", report
+    assert report["substrate"]["reason"]
 
 
 # --------------------------------------------------------------------------- #

@@ -64,7 +64,7 @@ regenerated rather than edited.
 | backend-ir.md | needs-work | 11 |  |
 | backends-roadmap.md | needs-work | 42 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
-| boundary-policy.md | needs-work | 26 |  |
+| boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
 | capabilities.md | needs-work | 46 |  |
 | capability-attenuation.md | needs-work | 25 |  |

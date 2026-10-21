@@ -20,7 +20,8 @@ This module is the enforcement half:
     the embedded core modules of a component, recursively — and
     :func:`check_component_imports` refuses an undeclared capability import, a
     ``spawn:``/``instance:`` import naming a component outside the composition,
-    or an import outside the expected namespaces;
+    an import outside the expected namespaces, or a structural seam import
+    naming a field the wasm tier does not define;
   * :class:`ComponentLimits` is the fuel/memory/wall ceiling a generated
     component runs under, and :data:`DEFAULT_COMPONENT_LIMITS` is conservative
     so a caller that passes nothing still runs confined;
@@ -36,7 +37,22 @@ composition), the durable-WAL framing channel (``coeffect:revl:wal``, exempt
 exactly as the emitter and ``least_authority`` exempt it), and the async job
 pump. Anything else is not something a generated revl component may reach, so
 it is refused rather than trusted. Component-level imports (the wrapper's own
-``import-*`` canonical-lift plumbing) are decoded and checked too.
+``import-func-``/``import-type-`` canonical-lift plumbing) are decoded and
+checked too: a name that merely starts with ``import-`` is not plumbing.
+
+A capability import is compared by its FULL COMPOSED ADDRESS, not its leaf key.
+The emitter renders ``coeffect:<realm>/<key>`` from the component's ``isolate``
+placement (``emit.py:_import_module``), so ``coeffect:tenantb/kv`` and
+``coeffect:kv`` are different authorities even though both end in ``kv``.
+``check_component_imports`` therefore takes the component's ``isolate`` map and
+admits only the addresses that map produces; an import in a realm the component
+does not declare is refused.
+
+A declared ``*`` is the unnameable boundary, not a wildcard that makes the key
+check vacuous: it never proves a NAMED import is inside it, so a concrete
+capability address must be backed by a concrete declaration. That mirrors the
+emitter, whose ``requires`` is a key->service map and therefore has no ``*``
+entry an import could resolve through.
 """
 
 from __future__ import annotations
@@ -158,7 +174,15 @@ _CORE_MAGIC = b"\0asm\x01\0\0\0"
 _COMPONENT_MAGIC = b"\0asm\x0d\x00\x01\x00"
 
 # Imports with no module-name suffix are the wasm tier's structural ABI seams.
-_EXACT_MODULES = frozenset({"host", "config", "dispose", "revl:wal"})
+# Each binds exactly one field (or, for `config`, only the fields the caller
+# declares for the component): an unknown field is not "more of the same seam",
+# it is an unread host surface and is refused.
+_STRUCTURAL_FIELDS = {
+    "host": frozenset({"job_run"}),
+    "dispose": frozenset({"instance"}),
+    "coeffect:revl:wal": frozenset({"record"}),
+}
+_EXACT_MODULES = frozenset({"host", "config", "dispose"})
 
 # The durable-WAL framing channel is rendered under the capability prefix but
 # is a first-party host binding, not a declared capability: `emit.py` and
@@ -170,6 +194,13 @@ _PREFIXED_MODULES = ("coeffect:", "route:", "spawn:", "instance:")
 
 # The namespaces that actually carry named authority.
 _CAPABILITY_PREFIXES = ("coeffect:", "route:")
+
+# The wrapper's component-level lift plumbing is exactly two name families, one
+# per extern sort: `import-func-<name>` for a function and `import-type-<name>`
+# for a type (`wasm-tools component new`). The name must match the SORT the
+# import section declares: a type import called `import-func-t` is a spoof.
+_COMPONENT_LEVEL_PREFIXES = {0x01: "import-func-", 0x03: "import-type-"}
+_COMPONENT_LEVEL_SORTS = {0x01: "function", 0x03: "type"}
 
 
 @dataclass(frozen=True)
@@ -253,32 +284,43 @@ def _skip_import_desc(data: bytes, pos: int, kind: int) -> int:
         "refusing to interpret an import shape this checker does not know")
 
 
-def _component_level_import_names(payload: bytes) -> list[str]:
-    """The names of a component import section's entries.
+def _component_level_imports(payload: bytes) -> list[tuple[str, int]]:
+    """The (name, sort) pairs of a component import section's entries.
 
     The wrapper `wasm-tools component new` emits imports its own canonical lift
-    plumbing (`import-func-<export>`, `import-type-<record>`, ...); those are
-    not authority-bearing. They ARE still read (and checked by the caller)
-    rather than skipped: an unreadable import is not a confined one. Each entry
-    is a sort byte, a length-prefixed name, then a sort-specific descriptor; the
-    shapes below are the ones this wrapper emits, and an unknown shape is
-    refused rather than guessed at.
+    plumbing (`import-func-<export>`, `import-type-<record>`); those are not
+    authority-bearing, but they are named by a small, closed convention and are
+    READ rather than skipped. Each entry is an extern-name kind byte (only
+    the standard 0x00 is readable here), a length-prefixed name, then a
+    sort-specific descriptor; the shapes below are the ones this wrapper emits,
+    and an unknown shape is refused rather than guessed at.
+
+    Only the two sort families a wrapper can legitimately present are decoded:
+    a function import (``0x01``) and a type import (``0x03``). A bare ``import-``
+    prefix is not enough to be plumbing (`import-evil` is an import like any
+    other), and the name must agree with the sort it declares, so
+    `import-func-t` typed as a TYPE is refused as the spoof it is.
     """
-    names: list[str] = []
+    entries: list[tuple[str, int]] = []
     count, pos = _uleb(payload, 0)
     for _ in range(count):
         if pos >= len(payload):
             raise ConfinementError(
                 "the produced component's import section is truncated")
-        _sort = payload[pos]         # the wrapper's extern-name tag (0x00)
+        name_tag = payload[pos]      # 0x00 = a standard extern name
         pos += 1
+        if name_tag != 0x00:
+            raise ConfinementError(
+                f"the produced component's import section uses extern-name "
+                f"kind 0x{name_tag:02x}; only the standard 0x00 name is an "
+                f"import this checker can read, so refusing it rather than "
+                f"skipping an unreadable import")
         name, pos = _name(payload, pos)
         if pos >= len(payload):
             raise ConfinementError(
                 "the produced component's import section is truncated")
         # the descriptor's own tag names the import sort: 0x01 func (a type
-        # index), 0x03 type (an equality kind then a type index); the other
-        # index-shaped sorts are accepted the same way.
+        # index), 0x03 type (an equality kind then a type index).
         tag = payload[pos]
         pos += 1
         if tag == 0x03:
@@ -296,15 +338,16 @@ def _component_level_import_names(payload: bytes) -> list[str]:
                 raise ConfinementError(
                     f"the produced component import {name!r} uses an unknown "
                     f"type-bound kind 0x{bound:02x}")
-        elif tag in (0x00, 0x01, 0x02, 0x04):
+        elif tag == 0x01:
             _type_idx, pos = _uleb(payload, pos)
         else:
             raise ConfinementError(
-                f"the produced component import {name!r} uses extern descriptor "
-                f"tag 0x{tag:02x}, which this checker does not understand; "
-                f"refusing it rather than skipping an unreadable import")
-        names.append(name)
-    return names
+                f"the produced component imports {name!r} at the COMPONENT "
+                f"level with extern sort 0x{tag:02x}, which is not the "
+                f"wrapper's lift plumbing (only a function or a type import "
+                f"is); refusing it rather than skipping an unreadable import")
+        entries.append((name, tag))
+    return entries
 
 
 def _core_imports(data: bytes) -> list[WasmImport]:
@@ -341,9 +384,9 @@ def component_imports(data: bytes) -> tuple[WasmImport, ...]:
     A component's embedded core modules are the surface that carries authority
     (``coeffect:`` / ``route:`` channels and the structural seams); nested
     components are walked recursively. A component-level import has no such
-    module/field split and is not a shape the emitted component uses, so its
-    presence is refused rather than skipped: an unreadable import is not a
-    confined one.
+    module/field split: the wrapper's own ``import-func-``/``import-type-``
+    lift plumbing is admitted by name and sort, and anything else there is
+    refused rather than skipped. An unreadable import is not a confined one.
     """
     if data.startswith(_CORE_MAGIC):
         return tuple(_core_imports(data))
@@ -365,14 +408,16 @@ def component_imports(data: bytes) -> tuple[WasmImport, ...]:
         elif section_id == 4:  # a nested component
             imports.extend(component_imports(payload))
         elif section_id == 10:  # a component-level import
-            for name in _component_level_import_names(payload):
-                if not name.startswith("import-"):
+            for name, sort in _component_level_imports(payload):
+                expected = _COMPONENT_LEVEL_PREFIXES[sort]
+                if not name.startswith(expected) or len(name) == len(expected):
                     raise ConfinementError(
                         f"the produced component imports {name!r} at the "
-                        f"COMPONENT level, which is not the core-module "
-                        f"capability surface this check reads and is not a "
-                        f"generated revl component's own lift plumbing; "
-                        f"refusing it rather than skipping an unreadable import")
+                        f"COMPONENT level as a {_COMPONENT_LEVEL_SORTS[sort]}, "
+                        f"which is not the wrapper's `{expected}<name>` lift "
+                        f"plumbing; a bare `import-` prefix is not plumbing, "
+                        f"so refusing it rather than skipping an unreadable "
+                        f"import")
         pos = end
     return tuple(imports)
 
@@ -383,39 +428,107 @@ def _allowed_by(key: str, allow) -> bool:
     return any(fnmatchcase(key, pattern) for pattern in allow)
 
 
+def _capability_key(module: str) -> str:
+    """The leaf capability token of a ``coeffect:``/``route:`` address.
+
+    The policy allow-list and the G8 reach are written in tokens, not addresses,
+    so this is the ONLY place the realm half of an address is discarded — after
+    the full-address comparison has already admitted the import. Losing the
+    realm earlier is the bug this check exists to close.
+    """
+    _prefix, _, rest = module.partition(":")
+    return rest.rsplit("/", 1)[-1]
+
+
+def _declared_addresses(declared, isolate) -> frozenset[str]:
+    """The composed capability addresses a component's declaration covers.
+
+    The emitter composes ``coeffect:<realm>/<key>`` from the component's
+    ``isolate`` placement and ``route:<key>`` for a routed require
+    (``emit.py:_import_module``), so the expected set is derived the same way.
+    A key with no placement is the shared realm: ``coeffect:<key>``.
+
+    A ``*`` declaration is the unnameable boundary and contributes NO address:
+    it cannot prove that a NAMED import is inside it, so it never makes the
+    check vacuous. This matches the emitter, where ``requires`` is a key->service
+    map and an import can only be created from a resolved key.
+    """
+    addresses: set[str] = set()
+    placement = dict(isolate or {})
+    for key in declared:
+        if key == "*":
+            continue
+        realm = placement.get(key)
+        addresses.add(f"coeffect:{realm}/{key}" if realm else f"coeffect:{key}")
+        addresses.add(f"route:{key}")
+    return frozenset(addresses)
+
+
+def _structural_field(module: str, field: str, config_fields) -> bool:
+    if module == "config":
+        # The template's own `config { ... }` fields are the only ones the
+        # runtime binds; a caller that does not know them (an ordinary
+        # component has none) passes nothing, which refuses every config import
+        # rather than trusting an unread field name.
+        return field in config_fields
+    return field in _STRUCTURAL_FIELDS[module]
+
+
 def check_component_imports(data: bytes, *,
                             declared,
                             allowed=None,
+                            config_fields=(),
+                            isolate=None,
                             component: str = "<component>",
                             declared_targets=()) -> tuple[WasmImport, ...]:
     """Refuse a produced component whose import section is not confined.
 
     ``declared`` is the capability surface the component declared (its G8
-    reach). ``allowed`` is the boundary policy's allow-list for it, or ``None``
-    when no policy rule constrains it. ``declared_targets`` is the composition's
+    reach); ``isolate`` is that component's ``key -> realm`` placement, so a
+    capability import is matched by its FULL composed address
+    (``coeffect:<realm>/<key>`` / ``route:<key>``) rather than its leaf key.
+    ``allowed`` is the boundary policy's allow-list for it, or ``None`` when no
+    policy rule constrains it; it is matched against the leaf token, because
+    that is the vocabulary policy rules are written in. ``config_fields`` is the
+    set of config fields the component may read (empty for every component that
+    is not a spawn template). ``declared_targets`` is the composition's
     component names: a ``spawn:<target>`` or ``instance:<component>`` import
     reaches another component, so a target that is not part of the composition
-    is refused. A capability import must name a declared key (a bare ``*``
-    declaration covers any key) and, when an allow-list is present, a key inside
-    it. An import outside the expected namespaces is refused unconditionally.
+    is refused, and so is an unknown field on the seam.
+
+    An import outside the expected namespaces is refused unconditionally.
     """
     imports = component_imports(data)
     declared = frozenset(declared)
     targets = frozenset(declared_targets)
+    config_fields = frozenset(config_fields)
+    addresses = _declared_addresses(declared, isolate)
     for imported in imports:
         module = imported.module
         if module in _EXACT_MODULES or module in _STRUCTURAL_MODULES:
+            if not _structural_field(module, imported.field, config_fields):
+                raise ConfinementError(
+                    f"the produced component `{component}` imports "
+                    f"{imported.render()} on the structural `{module}` channel, "
+                    f"whose field the wasm tier does not define; that channel "
+                    f"carries only its own ABI field(s), so an unknown field is "
+                    f"an unread host surface (issue #2729, the byte-level "
+                    f"import check)")
             continue
         if module.startswith(_CAPABILITY_PREFIXES):
-            rest = module.split(":", 1)[1]
-            key = rest.rsplit("/", 1)[-1]
-            if "*" not in declared and key not in declared:
+            if module not in addresses:
+                declared_note = (
+                    "none" if not addresses else
+                    ", ".join(sorted(addresses)))
                 raise ConfinementError(
                     f"the produced component `{component}` imports host "
-                    f"capability {imported.render()}, whose key `{key}` it "
-                    f"does not declare; the import section must be a "
-                    f"subset of the component's declared capabilities "
-                    f"(issue #2729, the byte-level import check)")
+                    f"capability {imported.render()} at the composed address "
+                    f"`{module}`, which this component does not declare; a "
+                    f"capability is the full address, not its leaf key, so the "
+                    f"realm is part of the authority. Declared addresses: "
+                    f"{declared_note} (issue #2729, the byte-level import "
+                    f"check)")
+            key = _capability_key(module)
             if allowed is not None and not _allowed_by(key, allowed):
                 raise ConfinementError(
                     f"the produced component `{component}` imports host "
@@ -423,14 +536,38 @@ def check_component_imports(data: bytes, *,
                     f"boundary policy does not allow; a confined component "
                     f"reaches no more than the policy grants")
             continue
-        if module.startswith(("spawn:", "instance:")):
-            target = module.split(":", 1)[1].rsplit("/", 1)[-1]
-            if target not in targets:
+        if module.startswith("spawn:"):
+            target = module[len("spawn:"):]
+            if ("/" in target or ":" in target or not target
+                    or target not in targets):
                 raise ConfinementError(
                     f"the produced component `{component}` imports "
                     f"{imported.render()}, which reaches component `{target}` "
                     f"that is not part of this composition; a cross-component "
-                    f"import must name a declared component")
+                    f"import must name a declared component, not a sibling path")
+            if imported.field != "new":
+                raise ConfinementError(
+                    f"the produced component `{component}` imports "
+                    f"{imported.render()}, whose field is not the `new` spawn "
+                    f"ABI; a spawn import carries only `new`")
+            continue
+        if module.startswith("instance:"):
+            target = module[len("instance:"):]
+            if ("/" in target or ":" in target or not target
+                    or target not in targets):
+                raise ConfinementError(
+                    f"the produced component `{component}` imports "
+                    f"{imported.render()}, which reaches component `{target}` "
+                    f"that is not part of this composition; a cross-component "
+                    f"import must name a declared component, not a sibling path")
+            key, dot, op = imported.field.partition(".")
+            if not dot or not key or not op or "." in op:
+                raise ConfinementError(
+                    f"the produced component `{component}` imports "
+                    f"{imported.render()}, whose field is not the "
+                    f"`<key>.<method>` instance-accessor ABI; only a provision "
+                    f"read through a spawn handle is a defined instance "
+                    f"field")
             continue
         raise ConfinementError(
             f"the produced component `{component}` imports {imported.render()}, "
@@ -439,6 +576,45 @@ def check_component_imports(data: bytes, *,
             f"{', '.join(_PREFIXED_MODULES)}); a generated component may reach "
             f"no host surface other than its declared capability seams")
     return imports
+
+
+def _component_entry(ir: dict, service: str | None) -> dict | None:
+    """The composition entry that provides ``service``, if exactly one does.
+
+    The canonical emitter lowers one provider component; ``service`` names the
+    provided service, so its component is the subject of the import check. With
+    no match (the pure-``fn`` shape, which has no component) there is no
+    per-component placement to read and the caller falls back to the union.
+    """
+    if service is None:
+        return None
+    for component in ir.get("components") or []:
+        if service in (component.get("provides") or {}).values():
+            return component
+    return None
+
+
+def component_name(ir: dict, service: str | None = None) -> str | None:
+    """The name of the component ``service`` provides, or ``None``."""
+    component = _component_entry(ir, service)
+    return component.get("name") if component is not None else None
+
+
+def component_isolate(ir: dict, service: str | None = None) -> dict[str, str]:
+    """The ``key -> realm`` placement of the component ``service`` provides.
+
+    Without a matching provider, the union over the composition is returned: a
+    composition that places a key in two realms still contributes both composed
+    addresses, and a caller that knows only one component should pass its
+    ``service`` rather than rely on this fallback.
+    """
+    component = _component_entry(ir, service)
+    if component is not None:
+        return dict(component.get("isolate") or {})
+    out: dict[str, str] = {}
+    for component in ir.get("components") or []:
+        out.update(component.get("isolate") or {})
+    return out
 
 
 def declared_capabilities(ir: dict, service: str | None = None) -> frozenset[str]:
@@ -454,11 +630,9 @@ def declared_capabilities(ir: dict, service: str | None = None) -> frozenset[str
 
     audit = audit_report(ir)
     names = set((audit.get("boundary") or {}).keys())
-    if service is not None:
-        for component in ir.get("components") or []:
-            if service in (component.get("provides") or {}).values():
-                names = {component.get("name")}
-                break
+    component = _component_entry(ir, service)
+    if component is not None:
+        names = {component.get("name")}
     out: set[str] = set()
     for name in names:
         out.update(reach.token for reach in component_reach(audit, name))
