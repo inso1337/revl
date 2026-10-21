@@ -495,6 +495,38 @@ def test_a_multi_call_wrapper_is_refused_at_emit_time():
     assert host.CALLS == [], "an emit-time refusal never reaches the host"
 
 
+def test_a_recursive_wrapper_is_refused_at_emit_time():
+    """A recursive wrapper crosses the extern once per level, so the meter
+    cannot bound it. The classifier stops at the cycle and refuses by name
+    instead of recursing until the interpreter gives up."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")',
+        prelude='fn go(x: Str) -> Int { let a = call(x) return go(x) }')
+    assert error.shape == "a recursive call"
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
+def test_a_loop_crossing_is_refused_at_emit_time():
+    """A crossing in a loop condition runs once per iteration while the meter
+    charges the wrapper once, so it is refused by name."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")',
+        prelude='fn go(x: Str) -> Int { while (call(x) > 0) { return 1 } return 0 }')
+    assert error.shape == "a call inside a loop"
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
+def test_a_conditional_expression_crossing_is_refused_at_emit_time():
+    """A crossing in one branch of a conditional expression may not run at all,
+    so the meter would over-charge. Refused by name."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")',
+        prelude='fn go(x: Str) -> Int '
+                '{ return if (x == "") { call(x) } else { 0 } }')
+    assert error.shape == "a conditional call"
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
 def test_the_statement_form_identity_wrapper_is_still_metered():
     """The control for the three refusals: the exact pass-through wrapper is
     still emitted with the reached declaration and metered by the runtime."""

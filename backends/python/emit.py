@@ -1580,6 +1580,9 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
     inside a loop or a conditional, or recursion. Crossings saturate at two,
     since only "one" and "more than one" decide attributability."""
     name = fn.get("name")
+    if isinstance(name, str) and name in seen:
+        # a recursive invocation may cross the extern any number of times
+        return 2, _SHAPE_RECURSIVE
     path = seen | {name} if isinstance(name, str) else seen
     params = [p.get("name") for p in fn.get("params") or []]
     crossings = 0
@@ -1637,8 +1640,11 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
         step = node.get("step")
         if step in ("while", "for"):
             for key, value in node.items():
-                if key != "body":
-                    visit(value, looped, conditional)
+                if key == "body":
+                    continue
+                # a `while` condition is re-evaluated every iteration; a `for`
+                # iterable is evaluated once
+                visit(value, True if step == "while" else looped, conditional)
             visit(node.get("body"), True, conditional)
             return
         if step == "if":
@@ -1647,6 +1653,12 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
             visit(node.get("else"), looped, True)
             return
         kind = node.get("kind")
+        if kind == "if":
+            # the conditional EXPRESSION runs exactly one branch
+            visit(node.get("cond"), looped, conditional)
+            visit(node.get("then"), looped, True)
+            visit(node.get("else"), looped, True)
+            return
         if kind == "match":
             # exactly one arm runs, so the crossing count depends on the value
             visit(node.get("scrutinee"), looped, conditional)

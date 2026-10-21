@@ -486,17 +486,19 @@ cycle guard) and sends the reached extern's declarations; the emitted extern
 and wrapper functions also carry `_revl_declared_caps`, which is what the
 runtime backstop compares against.
 
-Only a shape the meter can attribute exactly is emitted. The meter charges one
-crossing with the arguments it is handed, so an emission whose callee reaches a
-budgeted extern through any other shape is REFUSED at emit time with the named
-`CeilingUnattributable`, naming the capability and the shape: a value-position
-wrapper (it never reaches the seam at all), a payload-transforming wrapper (the
-meter would charge the outer arguments, not the extern's payload), or a wrapper
-that crosses the extern more than once in one invocation, including inside a
-loop or a conditional. Emitting those would leave the declaration silently
-unenforced, so a declared budget is a compile-time contract rather than a
-runtime promise. The exact pass-through wrapper (`fn go(x) = call(x)`) is the
-one wrapper shape that stays metered.
+An emission whose callee reaches a budgeted extern through a shape the meter
+cannot attribute exactly is REFUSED at emit time. The meter charges one crossing
+with the arguments it is handed, so the emitter classifies the callee and refuses
+any other shape with the named `CeilingUnattributable`, naming the capability and
+the shape: a value-position wrapper (it never reaches the seam at all), a
+payload-transforming wrapper (the meter would charge the outer arguments, not the
+extern's payload), or a wrapper that crosses the extern more than once in one
+invocation, including inside a loop or a conditional. Emitting those would leave
+the declaration silently unenforced, so a declared budget is a compile-time
+contract rather than a runtime promise. In statement form the exact pass-through
+wrapper (`emit go(x)` where `fn go(x) = call(x)`) is the one wrapper shape that
+stays metered; the same wrapper in value position is refused like any other
+value-position emission.
 
 Not enforced by this slice, tracked rather than implied:
 
