@@ -170,6 +170,10 @@
 
 ["function", "selfhost-emit-rust-rvl-borrow-list-arg-the", "borrow_list_arg", 1, 1]
 
+["reason", "selfhost-emit-rust-rvl-drops-routed-requirement-the", "selfhost/emit_rust.rvl::drops_routed_requirement: The true return fires only on a component that carries a routed requirement (`routes`, issue #2796), which this port drops without the router struct the reference emits. Those bytes diverge by construction, so no byte-agreement document can reach the line. The refusal route does not apply either: the reference EMITS a routed requirement, so a document in tests/fixtures/emit_rust_refusals/ that carried one would not be refused for it, and reaching this line from a refusal the reference states for something else is the unrelated-refusal pairing the ledger forbids. Recorded until issue #2796 ports the router struct."]
+
+["function", "selfhost-emit-rust-rvl-drops-routed-requirement-the", "drops_routed_requirement", 1, 1]
+
 ["reason", "selfhost-emit-rust-rvl-strip-index-clone-the", "selfhost/emit_rust.rvl::strip_index_clone: the self-host mirror of the reference _v3_strip_index_clone (item 437d) read-only clone elision. As on the reference tier the bare index place is covered and the residual is the field-off-index shape reached by no corpus document."]
 
 ["function", "selfhost-emit-rust-rvl-strip-index-clone-the", "strip_index_clone", 1, 1]
