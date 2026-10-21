@@ -585,6 +585,32 @@ fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
     _assert_fanout_unbounded(agent)
 
 
+def test_branching_recursion_with_a_self_call_in_a_loop_body_stays_refused():
+    """A branching recursion whose extra self-call sits inside a `while` body
+    must be refused as unbounded, never certified: the loop runs that call once
+    per iteration, which the syntactic per-path count does not cover. The
+    uncounted-construct check must flag a real lowered loop body, not only a
+    local arrow (fuel 2 keeps the syntactic count of 2 per path under the
+    ceiling)."""
+    from revl.cardinality import _self_call_in_uncounted_construct
+    body = """
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let x = step(msgs)
+  var i = 0
+  while (i < n) { let a = tree(step, msgs, n - 1); i = i + 1 }
+  return tree(step, msgs, n - 1)
+}"""
+    ir = compile_source(_HEAD + body, "t.rvl")
+    decl = next(fn for fn in ir["functions"] if fn.get("name") == "tree")
+    assert _self_call_in_uncounted_construct(decl["body"], "tree") is True
+    agent = _agent_model_verdict(
+        body, "tree(msgs2 => emit model.complete(msgs2), msgs, 2)")
+    assert agent["verdict"] == "unbounded"
+    entry = agent["per_capability"]["model"]
+    assert entry["kind"] == "unbounded" and entry["bound"] is None
+
+
 def test_branching_recursion_that_fails_clause_one_keeps_the_fanout_reason():
     """A branching recursion whose fuel does not decrease on one back-edge was
     reported with the fan-out reason before #2699 and still is."""
