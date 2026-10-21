@@ -126,6 +126,10 @@ BENCH_DEPENDENT_TESTS = (
     # repository, `bench/` included (five `bench/**/run.py` files are why it
     # exists), so a new or renamed bench module can change its verdict.
     "tests/test_load_by_path_is_the_only_by_path_loader.py",
+    # Issue #2748, whose module #2764 landed: its README test reads
+    # `bench/results/admission-latency.md` and checks README.md quotes the
+    # committed median, so a bench change to that artifact can change its verdict.
+    "tests/test_mcp_admission_walkthrough_2748.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
@@ -634,8 +638,8 @@ def _node(p: Path) -> str:
 # derivable part of that relation, taken from the tests' own source rather than
 # restated here.
 #
-# It does NOT replace those tables, and the difference is measured: of the 18
-# modules BENCH_DEPENDENT_TESTS declares, exactly three SPELL a `bench/` path.
+# It does NOT replace those tables, and the difference is measured: of the 32
+# modules BENCH_DEPENDENT_TESTS declares, exactly 15 SPELL a `bench/` path.
 # The rest reach it through a computed root, a directory walk, or a declaration
 # made only in prose, and no AST can see those. The tables stay; what this adds
 # is that a dependency somebody wrote down plainly no longer has to be noticed
