@@ -14809,9 +14809,22 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     navigate=_b1_navigate(env, "return", "borrowed", _ret_res))
             actual = _sweep(lowered_return, ms.line)
             if decl.returns:
-                check_ir(lowered_return, decl.returns, env.type_env,
-                         env.types, env.services, filename, ms.line,
-                         f"`{method.name}` returns")
+                # issue #2083 / #2544: the named refusal below is the wording
+                # the `Unit` body guarantee is stated in, and it must be the
+                # one a program meets. Since #2620 types an effect binder from
+                # its acquisition's family (a host `Map` is `Map[Any, Any]`), a
+                # body that IS the handle now reaches the generic return-type
+                # check as a typed value, and "returns expects `Unit`" fires
+                # before the guard. Leave the generic mismatch out for exactly
+                # the shape the guard refuses; the raise below still refuses
+                # it, so this reorders the refusal and admits nothing.
+                unit_body_refused = bool(
+                    decl.returns == "Unit" and actual != "Unit"
+                    and _unit_body_drops_host_value(lowered_return, env))
+                if not unit_body_refused:
+                    check_ir(lowered_return, decl.returns, env.type_env,
+                             env.types, env.services, filename, ms.line,
+                             f"`{method.name}` returns")
                 # issue #2083: `check_ir` leaves an UNKNOWN body alone (`if
                 # actual and ...`), so a resource READ — whose value no host
                 # table types — was admitted as the body of a method declared
@@ -14820,8 +14833,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # rooted at the component's own resource is refused unless it
                 # is a host call admitted as a `Unit` body (issues #2123,
                 # #2127).
-                if decl.returns == "Unit" and actual != "Unit" \
-                        and _unit_body_drops_host_value(lowered_return, env):
+                if unit_body_refused:
                     raise RevlError(
                         filename, ms.line,
                         f"`{method.name}` implements `{svc.name}.{method.name}`, "
