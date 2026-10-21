@@ -40017,6 +40017,10 @@ fn poison() -> String {
     return String::from("!poison");
 }
 
+fn is_fn_head(head: &str) -> bool {
+    return ((head == fn_head()) || (head == "Fn"));
+}
+
 fn builtin_type_names() -> Vec<String> {
     return vec![String::from("Int"), String::from("Int32"), String::from("Float"), String::from("Str"), String::from("Bool"), String::from("Bytes"), String::from("Unit"), String::from("Opt"), String::from("List"), String::from("Map"), String::from("Result"), String::from("Any"), String::from("Never"), String::from("Value")];
 }
@@ -40478,8 +40482,8 @@ pub fn compatible(expected: String, actual: String) -> bool {
             return compatible(inner, actual.clone());
         }
     }
-    if (ehead == fn_head()) {
-        if ((ehead != ahead) || (eargs.revl_length() != aargs.revl_length())) {
+    if (is_fn_head(&ehead) && is_fn_head(&ahead)) {
+        if (eargs.revl_length() != aargs.revl_length()) {
             return false;
         }
         let mut i = 0i64;
