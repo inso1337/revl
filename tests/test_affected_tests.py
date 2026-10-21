@@ -149,7 +149,9 @@ def test_added_test_file_alone_is_not_full():
     # Nothing else changed, so nothing but the new test can newly fail.
     r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
     assert r is not None and r["full"] is False
-    assert r["pytest"] == ["tests/test_newthing.py"]
+    # An added test is a .py change, so the whole-tree open-encoding guard
+    # rides along (issue #2648); nothing else is over-selected.
+    assert set(r["pytest"]) == {"tests/test_newthing.py", at.OPEN_ENCODING_GUARD}
     assert r["backends"] == []
 
 
@@ -437,7 +439,10 @@ def test_modified_test_file_without_importers_is_only_itself():
     """A leaf test nothing imports still selects just itself (no over-selection).
     A synthetic name is used so the assertion does not rot when tests are added."""
     r = sel("tests/test__no_importer_sentinel__.py")
-    assert r["pytest"] == ["tests/test__no_importer_sentinel__.py"]
+    # The whole-tree open-encoding guard rides on every .py change
+    # (issue #2648), so it is the one extra node here.
+    assert set(r["pytest"]) == {"tests/test__no_importer_sentinel__.py",
+                                at.OPEN_ENCODING_GUARD}
 
 
 def test_test_importers_ignores_prefix_siblings():
@@ -616,6 +621,35 @@ def test_every_selection_carries_the_vocabulary_gate():
     assert "vocabulary" in at.GATES_ALL, (
         "the FULL gate does not carry the vocabulary-mirror gate, which is the "
         "hole that let issue #1332's four classes past a FULL pre-merge run."
+    )
+
+
+def test_a_python_change_carries_the_open_encoding_guard():
+    """Issue #2648. `tests/test_open_encoding_guard.py` walks every `.py` file
+    and fails on a new text-mode `open()` or `Path.open()` without an encoding.
+    A test that adds `open(target)` is connected to nothing else the diff
+    selects: it names no compiler module, no tier and no stdlib file, so no
+    path rule can find it. Every `.py` change therefore carries it, while a
+    documentation-only diff keeps its exact cost bound: a non-Python change
+    cannot add the call.
+    """
+    assert at.OPEN_ENCODING_GUARD == "tests/test_open_encoding_guard.py"
+    for f in ("tests/test_goldens.py", "tools/heldout_scoring.py"):
+        result = sel(f)
+        assert result["full"] or at.OPEN_ENCODING_GUARD in result["pytest"], (
+            f"{f} does not select the open-encoding guard, so a Python diff "
+            "can add an unpinned open() without the guard firing."
+        )
+    docs = sel("README.md")
+    assert at.OPEN_ENCODING_GUARD not in docs["pytest"], (
+        "a documentation-only diff cannot add a Python open() call, and the "
+        "docs-only selection has an exact cost bound."
+    )
+    added = at._test_add_delete_override(
+        ["tests/test_newthing.py"], {"tests/test_newthing.py"}, set(), ROOT)
+    assert added is not None and at.OPEN_ENCODING_GUARD in added["pytest"], (
+        "a diff that only adds a test file bypasses select(), so the added-test "
+        "path has to carry the guard itself."
     )
 
 
