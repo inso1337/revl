@@ -3567,6 +3567,29 @@ def test_a_well_typed_var_or_if_is_admitted_on_both_sides(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2460: an `if` whose branches join `Int` and `Float` is a `Float` in the
+# reference (`join`) and the native annotation engine answered unknown, so a
+# NESTED one fell back to `Int` on the outer join and the return-position widen
+# marker was stamped: the py tier wrote `return float(r)` where the reference
+# writes `return r`. The verdict matched, the bytes did not, and nothing was
+# refused.
+_NESTED_IF_FLOAT = (
+    "fn pick(c: Bool, d: Bool) -> Float {\n"
+    "  let r = if (c) { if (d) { 1 } else { 2.5 } } else { 3 }\n"
+    "  return r\n}\n"
+)
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_a_nested_if_joining_int_and_float_emits_the_reference_bytes(
+        compile_rvl, reference_emit, tmp_path, tier):
+    doc = tmp_path / "nested_if.rvl"
+    doc.write_text(_NESTED_IF_FLOAT, encoding="utf-8")
+    want = reference_emit[tier](compile_files([str(doc)]))
+    got = compile_rvl["compile_to_at"](_NESTED_IF_FLOAT, tier, str(doc))
+    assert got == want, got[:300]
+
+
 # Issue #2448: the reference refuses a variant case call whose payload has the
 # wrong type, and the native gate ADMITTED it on every tier — a silent admit of
 # an ill-typed program, not a difference in spelling. `selfhost/checker.rvl`

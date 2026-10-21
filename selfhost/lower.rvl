@@ -28259,10 +28259,26 @@ fn binop_ty(op: Str, lt: Str, rt: Str) -> Str {
   return ""
 }
 
+// The reference's `join`, restricted to the spellings this annotation engine
+// names: identical types meet at themselves, and the NUMERIC widening pairs
+// meet where `compatible` allows the flow (`Float` accepts `Int` and `Int32`,
+// `Int` accepts `Int32`) — `join(Int, Float)` is `Float`, not unknown.
+//
+// Issue #2460: answering "" for `Int`/`Float` made a NESTED `if` lose the
+// widening entirely, because the outer join then met `("", Int)` and the
+// pass-through below answered `Int`. The return-position widen marker is
+// computed from this inference, so the py tier wrote `return float(r)` where
+// the reference writes `return r`: same verdict, different bytes, no refusal.
+// The "" pass-throughs are kept: they are the gradual silence the annotations
+// already rest on, and narrowing them is a separate ratchet.
 fn join_ty(a: Str, b: Str) -> Str {
   if (a == b) { return a }
   if (a == "") { return b }
   if (b == "") { return a }
+  if (b == "Float" && (a == "Int" || a == "Int32")) { return "Float" }
+  if (a == "Float" && (b == "Int" || b == "Int32")) { return "Float" }
+  if (a == "Int" && b == "Int32") { return "Int" }
+  if (b == "Int" && a == "Int32") { return "Int" }
   return ""
 }
 
