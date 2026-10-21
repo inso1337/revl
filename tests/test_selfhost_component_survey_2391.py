@@ -46,7 +46,7 @@ def _load_survey():
 #: table is the goal; adding to it needs an issue number in the comment.
 KNOWN_SILENT = {
     # a routed require on rust has no router struct and no marker (issue #2796)
-    "tests/fixtures/emit_py_placement.rvl",
+    ("tests/fixtures/emit_py_placement.rvl", "rust"),
 }
 
 
@@ -79,8 +79,7 @@ def test_no_component_document_diverges_silently(surveyed):
                     if row["status"] == "byte_divergence")
     errors = sorted((row["document"], row["tier"]) for row in report["results"]
                     if row["status"] == "port_error")
-    known = sorted((document, tier) for document in KNOWN_SILENT
-                   for tier in ("rust", "java"))
+    known = sorted(KNOWN_SILENT)
     assert len(report["results"]) >= 100, counts
     assert not errors, errors
     assert silent == known, (
