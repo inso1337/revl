@@ -2276,6 +2276,19 @@ fn cmatch(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
 
 // The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
 fn cexpr(node: Any) -> Str {
+  // An implicit Int -> Float coercion site inside a component body. The
+  // frontend marks the operand of a mixed equality (docs/arithmetic.md, issue
+  // #2715) and this second python renderer must read the marker, or a provide
+  // method compares un-widened while the same expression in a module `fn` is
+  // widened. The reference copies the node without the key and re-enters; the
+  // same copy lets a nested widen node be wrapped on the way back in.
+  if (value_str(value_field(node, "widen")) == "Float") {
+    var inner: Map[Str, Any] = Map.empty()
+    for (k of value_keys(node)) {
+      if (k != "widen") { inner = inner.set(k, value_field(node, k)) }
+    }
+    return `float(${cexpr(inner)})`
+  }
   let kind = node_kind(node)
   if (kind == "__await__") { return `(await ${cexpr(value_field(node, "expr"))})` }
   if (kind == "do") {

@@ -326,6 +326,8 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
     _collect_self_calls(body, fname, self_calls)
     if not self_calls:
         return refuse("mutual")
+    if _has_self_call_in_arrow(body, fname):
+        return refuse("arrow-recursion")
 
     # --- clause 4 (the CRITICAL): at most one in-SCC call site per path. Two
     # self-calls sequentially reachable on one path fan out to `2^n - 1`.
@@ -399,11 +401,30 @@ def _collect_self_calls(node, fname: str, out: list) -> None:
             _collect_self_calls(value, fname, out)
 
 
+def _has_self_call_in_arrow(node, fname: str, inside_arrow: bool = False) -> bool:
+    """Whether a recursive call sits inside an arrow whose invocation count
+    the linear path check cannot see."""
+    if isinstance(node, dict):
+        inside_arrow = inside_arrow or node.get("kind") == "arrow"
+        if inside_arrow and _is_self_call(node, fname):
+            return True
+        return any(_has_self_call_in_arrow(value, fname, inside_arrow)
+                   for value in node.values())
+    if isinstance(node, list):
+        return any(_has_self_call_in_arrow(value, fname, inside_arrow)
+                   for value in node)
+    return False
+
+
 def _cert_reason(kind: str, fname: str) -> str:
     """Why a bounded-SHAPED self-recursion is still `unbounded` (docs/design/260
     §2.2/§2.3). The fan-out reason is the load-bearing one: it is the CRITICAL a
     prior review missed, so it names the `2^n` blow-up explicitly."""
     reasons = {
+        "arrow-recursion": (f"recursion through `{fname}` contains a self-call inside "
+                            "an arrow expression whose invocation count the linear "
+                            "path check cannot bound; it remains unbounded, never "
+                            "the linear ceiling"),
         "fanout": (f"branching/tree recursion through `{fname}` reaches more than "
                    "one recursive call on a single path (it fans out to ~2^n "
                    "crossings); it fails the linear-iteration restriction and is "

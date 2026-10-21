@@ -112,7 +112,8 @@ from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
-from .session import ApprovalRefused, NothingLoaded, Session, SessionError
+from .session import (AUTHORED_HOST_BODIES_KEY, ApprovalRefused,
+                      NothingLoaded, Session, SessionError, host_body_entries)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -146,8 +147,11 @@ class AuthoringTrust:
                     declares it with `--grant` or it is not enforced. A set —
                     even empty — turns it on.
     `providers`   — `{path: source}` of OPERATOR-sanctioned host-code modules,
-                    merged under the agent's own `modules` so an untrusted turn
-                    can COMPOSE host-backed services without authoring them.
+                    keyed by absolute path (`set_authoring_trust` normalises
+                    the path the operator typed), composed beside the agent's
+                    own `modules` so an untrusted turn can COMPOSE host-backed
+                    services without authoring them. An agent module that
+                    resolves to a provider's file is refused (issue #2763).
                     This is `Gate.propose`'s granted-providers map, same shape,
                     same rule: reaching their externs directly is still refused
                     by `check_no_host_extern_reach`; only their SERVICES compose.
@@ -213,6 +217,13 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
         if roots is not None:
             fields["roots"] = tuple(os.path.realpath(os.path.abspath(r))
                                     for r in roots)
+    if fields.get("providers") is not None:
+        # issue #2763: normalised ONCE, here, to the absolute path the compile
+        # keys its in-memory modules by. `--provider` stores the path as the
+        # operator typed it, relative to the cwd it was read against, so the
+        # absolute path is the one the compile keys that same text by.
+        fields["providers"] = {os.path.abspath(path): text
+                               for path, text in fields["providers"].items()}
     AUTHORING = replace(AUTHORING, **fields)
     return AUTHORING
 
@@ -641,21 +652,26 @@ def _authoring_refusal(arguments: dict) -> dict | None:
 # a yes lets run.
 _AUTHORED_HOST_BODIES: list = []
 _LIVE_HOST_BODIES: list = []
+# The origin member's value is defined in `session`; this is the spelling the
+# server and its tests read it by, so the key has one definition.
+_ORIGIN_AUTHORED_HOST_BODIES = AUTHORED_HOST_BODIES_KEY
+
+
+def _with_authored_host_bodies(origin: dict, bodies: list | None) -> dict:
+    """Keep disclosure provenance with an admitted generation's origin.
+
+    Persistence deliberately serializes only admission inputs; this private
+    in-memory member lets rollback and generation history retain the exact
+    authorship set without adding it to portable snapshots.
+    """
+    origin[_ORIGIN_AUTHORED_HOST_BODIES] = list(bodies or [])
+    return origin
 
 
 def _host_bodies(ir: dict) -> list:
-    """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends}`. This is the surface G8 does not check
-    inside (item 24) and the item-246 classifier never looks at."""
-    out = []
-    for extern in ir.get("externs") or []:
-        bodies = extern.get("bodies") or {}
-        if not bodies:
-            continue
-        out.append({"extern": extern.get("name"),
-                    "classification": extern.get("class"),
-                    "backends": sorted(bodies)})
-    return sorted(out, key=lambda e: str(e["extern"]))
+    """Every extern in `ir` that carries a verbatim host body, in the
+    disclosure record the session module defines."""
+    return host_body_entries(ir)
 
 
 def _transport_authored(source: str | None, files: list[str] | None,
@@ -813,16 +829,63 @@ def _ride_exported(texts: dict, authored: dict, assets: dict,
     authored.update(texts)
 
 
+def _provider_files(providers: dict) -> dict[str, str]:
+    """`{realpath: registered path}` of the operator's providers, the form a
+    caller-supplied path is compared in everywhere else (`_within_roots`)."""
+    return {os.path.realpath(os.path.abspath(path)): path
+            for path in providers}
+
+
+def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
+    """Issue #2763: refuse a candidate whose in-memory module names a file the
+    operator registered as a `--provider`, under any spelling of that path.
+
+    A `--provider` module is the operator's own host code, composed under the
+    path the operator registered. Before, the merge compared the agent's keys
+    with the providers' as typed, while the compile read a map keyed by
+    absolute path: an agent module sent as the provider's absolute path, or as
+    `./` plus the registered path, was a different key and the same file, and
+    the agent's text compiled in the provider's place. A refusal, not a silent
+    drop: the reason names the module as the caller sent it and the provider
+    it collided with, a path inside the roots the jail refusal already shows,
+    and nothing is compiled."""
+    taken = _provider_files(providers)
+    for key in modules:
+        registered = taken.get(os.path.realpath(os.path.abspath(key)))
+        if registered is None:
+            continue
+        raise RevlError(
+            key, 1,
+            f"admission refused: module `{key}` names the operator-sanctioned "
+            f"provider `{registered}`; an agent-supplied module may not take "
+            f"a granted provider's place",
+            hint="a `--provider` module is the operator's own host code and "
+                 "is composed under the path the operator registered; it "
+                 "cannot be replaced from the transport under any spelling "
+                 "of that path. Send your module under a path of its own and "
+                 "compose the provider's service through `use` of the "
+                 "registered path, or ask the operator to change the provider",
+            category="admission")
+
+
 def _compile_candidate(source, files, manifest, modules, replacing, profile,
                        report) -> dict:
     """One pass of `compile_under_authoring`: the decision compile and, with
     operator-sanctioned providers, the composition compile."""
     providers = dict(AUTHORING.providers or {})
-    # operator-sanctioned modules ride UNDER the agent's own `modules`: an
-    # agent-supplied entry can never displace a provider the operator granted.
+    # Issue #2763: an agent-supplied module may not take a provider's place.
+    # Providers are keyed by absolute path (`set_authoring_trust`), and the
+    # compile below reads a map keyed the same way, so the comparison that
+    # guards the merge has to be made in that form too: a module sent as the
+    # provider's absolute path, a `./` spelling of it, or a symlink to the
+    # file is the same file. Resolved with `realpath`, the path jail's rule.
+    # The outcome is a refusal, not a silent drop of either text: the agent
+    # learns which provider it collided with and sends its module elsewhere.
+    if modules:
+        _refuse_provider_displacement(modules, providers)
     merged = dict(providers)
     if modules:
-        merged.update({k: v for k, v in modules.items() if k not in merged})
+        merged.update(modules)
 
     # every in-memory module, keyed the way `compile_files` resolves a `use`:
     # by absolute path. The agent's own modules ride here in BOTH compiles of
@@ -921,7 +984,8 @@ def _authored_host_bodies(ir: dict, source: str | None,
                           modules: dict | None, *,
                           files: list[str] | None = None,
                           report: dict,
-                          include_trusted_files: bool = False) -> list:
+                          include_trusted_files: bool = False,
+                          source_name: str = "<candidate>.rvl") -> list:
     """The host bodies declared by candidate-authored sources in `ir`.
 
     The merged composition also includes operator-sanctioned provider modules.
@@ -933,7 +997,7 @@ def _authored_host_bodies(ir: dict, source: str | None,
 
     candidate_sources = set()
     if source is not None:
-        candidate_sources.add(os.path.abspath("<candidate>.rvl"))
+        candidate_sources.add(os.path.abspath(source_name))
     candidate_sources.update(os.path.abspath(path) for path in (modules or {}))
     # Files only count as candidate-authored when the compile treated them as
     # agent text. Ordinary operator files can also be passed through `files`;
@@ -941,13 +1005,15 @@ def _authored_host_bodies(ir: dict, source: str | None,
     named_export, reached_export = _export_area_parts(files, report)
     candidate_sources.update(os.path.abspath(path) for path in named_export)
     candidate_sources.update(os.path.abspath(path) for path in reached_export)
-    # In trusted host-code mode a files-only compile outside the export area
-    # is still treated as carrying host code for admission and disclosure
-    # (#2672). There is no transport source or export path to attribute
-    # narrowly, so use the source map returned by that exact compile.
+    # In trusted host-code mode a file passed through `files` outside the
+    # export area is still treated as carrying host code for admission and
+    # disclosure (#2672). There is no transport source or export path to
+    # attribute that text narrowly, so use the source map returned by that
+    # exact compile. A candidate can carry `modules` beside those files (an
+    # edited buffer, an in-memory `use` target): the module text is not a
+    # reason to drop the files' bodies, so the two sets merge (#2675).
     if (include_trusted_files and report.get("authored")
-            and source is None and not modules
-            and not candidate_sources):
+            and source is None):
         candidate_sources.update(report.get("host_extern_sources", {}))
     if not candidate_sources:
         return []
@@ -1294,14 +1360,24 @@ def _k_counts(entries: list) -> dict:
 
 
 def _remember_live_host_bodies() -> None:
-    """Re-read the host bodies the LIVE composition carries, so a later
-    class-(c) ticket can name them. Called after every completed tool call, so
-    load / swap / edit / restore / undo / rollback / unload are all covered by
-    one line rather than five that could drift apart. Empty under a closed
-    authoring trust: the profile refused every agent-authored host body, so the
-    only bodies that can be live came from the operator's own jailed files and
-    there is nothing to warn about."""
+    """Refresh the authored-body set for the LIVE composition.
+
+    Called after every completed tool call, so load / swap / edit / restore /
+    undo / rollback / unload share one update point. The origin carries the
+    provenance computed by the compile that admitted the generation; walking
+    the merged IR here would mislabel operator provider bodies as agent code.
+    """
     global _LIVE_HOST_BODIES
+    origin = getattr(SESSION, "origin", None) or {}
+    if _ORIGIN_AUTHORED_HOST_BODIES in origin:
+        # Every MCP admission path tags its origin with the compile's report,
+        # including an empty set, so this member is authoritative when present.
+        _LIVE_HOST_BODIES = (list(origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
+                             if AUTHORING.host_code else [])
+        return
+    # A composition loaded without admission inputs (a direct `Session.load`,
+    # composed.py) has no report to attribute from. Keep the pre-#2676
+    # behaviour for that shape rather than going silent on its live tickets.
     ir = getattr(SESSION, "ir", None)
     _LIVE_HOST_BODIES = (_host_bodies(ir)
                          if ir and AUTHORING.host_code else [])
@@ -1426,7 +1502,9 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
     """Boot a compiled composition: `Session.load`, then record what it
     authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(
-        ir, source, modules, files=files, report=compile_report)
+        ir, source, modules, files=files, report=compile_report,
+        include_trusted_files=True)
+    _with_authored_host_bodies(origin, authored)
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
@@ -1610,6 +1688,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                                      files=files,
                                      report=compile_report,
                                      include_trusted_files=True)
+    _with_authored_host_bodies(origin, authored)
     # issue #2628: read once, asked two different questions below. The ticket
     # asks whether the author wrote this text, which for a file inside an
     # export directory is yes by its path. The realm check asks whether a
@@ -1937,9 +2016,16 @@ def _swap_server_side(replacing: tuple) -> dict:
     # operator's own while host code is untrusted, and under `--author-trust
     # trusted` it is the agent's too (issue #2672). So a trusted host-code
     # author's text still runs the disclosure gate.
+    authored = _authored_host_bodies(
+        full, vs.get("source"), edited if vs.get("files") else vs.get("modules"),
+        files=vs.get("files"),
+        report=compile_report, include_trusted_files=True)
+    origin = _with_authored_host_bodies(_edit._origin_from(vs), authored)
     try:
-        state = SESSION.swap(full, origin=_edit._origin_from(vs),
+        state = SESSION.swap(full, origin=origin,
                              agent_authored=bool(compile_report.get("authored")))
+    except ApprovalRequired as exc:
+        return _approval_required(exc, host_bodies=authored)
     except SessionError as error:
         return _session_error(error, **_refusal_code(error))
     return {"ok": True, "admitted": True, "swapped": True,
@@ -2820,6 +2906,10 @@ def _edit_loaded_result(arguments: dict, verify, commit: bool) -> dict:
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback(profile=AUTHORING.profile())}
+    except ApprovalRequired as error:
+        previous = SESSION.previous_origin or {}
+        return _approval_required(
+            error, host_bodies=previous.get(_ORIGIN_AUTHORED_HOST_BODIES, []))
     except SessionError as error:
         # a rollback refused after its teardown restarted the running
         # generation cold, and says which state that dropped (issue #2424)
@@ -2853,6 +2943,9 @@ def _tool_undo(arguments: dict) -> dict:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
         result = SESSION.undo(arguments.get("to"), profile=AUTHORING.profile())
+    except ApprovalRequired as error:
+        return _approval_required(
+            error, host_bodies=getattr(error, "host_bodies", []))
     except SessionError as error:
         return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
@@ -2956,8 +3049,17 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     if not fork_hash:
         return _session_error("provide `hash` — the fork hash revl_fork returned, "
                               "binding exactly the rewound span and residue")
+    parent_origin = getattr(SESSION, "origin", None) or {}
+    authored_host_bodies = list(
+        parent_origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
     try:
         result = SESSION.fork_confirm(fork_hash)
+    except ApprovalRequired as error:
+        # The branch restore is a new admission of the parent generation, so a
+        # class-(c) refusal there names the bodies the parent generation
+        # already disclosed (`Session.fork_confirm` carries no ticket bodies
+        # of its own).
+        return _approval_required(error, host_bodies=authored_host_bodies)
     except SessionError as error:
         return _session_error(error)
     if result.get("refused"):
@@ -2967,6 +3069,20 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     # every subsequent verb drives the branch, and never serialize the live object
     branch = result.pop("branchSession", None)
     if branch is not None:
+        # Session.fork_confirm restores a portable snapshot, which deliberately
+        # omits this in-memory disclosure metadata. The fork is still the same
+        # admitted generation, so carry its provenance onto the branch and its
+        # retained generation record. `Session.apply` records its resulting IR
+        # with this origin, allowing later call/act tickets to keep naming the
+        # authored bodies after a plan-artifact apply.
+        branch_origin = getattr(branch, "origin", None)
+        if isinstance(branch_origin, dict):
+            _with_authored_host_bodies(branch_origin, authored_host_bodies)
+        for entry in getattr(branch, "_history", ()):
+            generation_origin = entry.get("origin")
+            if isinstance(generation_origin, dict):
+                _with_authored_host_bodies(generation_origin,
+                                           authored_host_bodies)
         SESSION = branch
     return {"ok": True, **result}
 
@@ -2990,9 +3106,15 @@ def _approval_required(exc: ApprovalRequired,
     COPY, after the hash the outstanding-ticket table is keyed by), so
     approve/consume is byte-identical.
 
-    `host_bodies` is the candidate's own, from a verb that has not recorded
-    them: `revl_load` and `revl_swap`, which record them only once the load or
-    swap succeeds (issues #1444, #1446)."""
+    `host_bodies` is the candidate's own. Load and swap pass it directly,
+    because they record it only after success (issues #1444, #1446); edit
+    attaches it to the exception for this shared handler to recover."""
+    if host_bodies is None:
+        # Some callers (notably `revl_edit`) cannot shape the approval result
+        # at the point where the candidate is known. They attach the exact
+        # candidate provenance to the exception so the shared handler can
+        # disclose it without falling back to the currently running bodies.
+        host_bodies = getattr(exc, "host_bodies", None)
     ticket = exc.ticket
     fields = _ticket_host_code(exc, host_bodies)
     if fields:
@@ -3020,11 +3142,12 @@ def _ticket_host_code(exc: ApprovalRequired, host_bodies: list | None) -> dict:
     host code, as before."""
     candidate = exc.candidate
     if candidate is None:
-        bodies = (host_bodies if host_bodies is not None
-                  else _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES)
+        bodies = (host_bodies if host_bodies is not None else _LIVE_HOST_BODIES)
         return _host_code_fields(bodies) if bodies else {}
-    bodies = (host_bodies if host_bodies is not None
-              else _host_bodies(candidate) if AUTHORING.host_code else [])
+    # A merged candidate IR also includes operator providers. If the caller did
+    # not carry the compile's provenance report, omit the disclosure instead of
+    # claiming every host body was candidate-authored.
+    bodies = host_bodies or []
     if not bodies:
         return {}
     fields = _host_code_fields(bodies)
@@ -3367,8 +3490,8 @@ def _tool_quarantine(arguments: dict) -> dict:
     standard wasm component and run its lifecycle + fault battery in wasmtime's
     component-model sandbox — where an escape is a trap, not an incident. Returns
     a report whose `verdict` is passed | trapped | timeout | rejected | deferred
-    | unavailable, plus the policy admission decision. The live composition is
-    never touched (docs/quarantine-tier.md)."""
+    | unavailable | refused, plus the policy admission decision. The live
+    composition is never touched (docs/quarantine-tier.md)."""
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — quarantine proves "
                               "a candidate component in the sandbox")
@@ -3466,8 +3589,20 @@ def _tool_restore(arguments: dict) -> dict:
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()
+    sources = snap.get("sources") if isinstance(snap, dict) else {}
+    sources = sources or {}
+    compile_report: dict = {"authored": True}
     try:
-        return {"ok": True, **SESSION.restore(snap, profile=profile)}
+        result = SESSION.restore(snap, profile=profile, report=compile_report)
+    except ApprovalRequired as error:
+        from .persist import admitted_name  # noqa: PLC0415
+
+        authored = _authored_host_bodies(
+            error.candidate or {}, sources.get("source"),
+            sources.get("modules"), files=sources.get("files"),
+            report=compile_report, include_trusted_files=True,
+            source_name=admitted_name(snap))
+        return _approval_required(error, host_bodies=authored)
     except RestoreError as error:
         if profile is not None and error.revl_error is not None:
             return _restore_authoring_refusal(error.revl_error)
@@ -3486,6 +3621,20 @@ def _tool_restore(arguments: dict) -> dict:
         return payload
     except SessionError as error:
         return _session_error(error)
+    from .persist import admitted_name  # noqa: PLC0415
+
+    authored = _authored_host_bodies(
+        SESSION.ir or {}, sources.get("source"), sources.get("modules"),
+        files=sources.get("files"), report=compile_report,
+        include_trusted_files=True, source_name=admitted_name(snap))
+    if not isinstance(SESSION.origin, dict):
+        SESSION.origin = {}
+    _with_authored_host_bodies(SESSION.origin, authored)
+    if SESSION._history:
+        SESSION._history[-1]["origin"] = SESSION.origin
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
+    return {"ok": True, **result}
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -4054,8 +4203,20 @@ def _tool_plan(arguments: dict) -> dict:
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
+    # issue #2641 follow-up: a plan admits nothing, so it raises no approval
+    # ticket and has no `unreviewedHostCode` to get wrong. The attribution is
+    # made by the approval ticket a load or swap raises, when the gate raises
+    # one. Say so in the answer rather than leave the absence to be read as
+    # "no host code": the emission surface below, when computed, still names
+    # the host code the composition would reach, but not who wrote it.
     payload = {**result, "against": against,
-               "note": "nothing was admitted, swapped or written — this is a plan"}
+               "note": ("nothing was admitted, swapped or written — this is a "
+                        "plan. It raises no approval ticket, so it does not "
+                        "report `unreviewedHostCode`; that attribution is on "
+                        "the approval ticket a load or swap raises, when the "
+                        "approval gate raises one. When the plan computes an "
+                        "emission surface, it names the host code the "
+                        "composition would reach, but not who wrote it")}
     warnings = _leases.advise_plan(SESSION, arguments)
     if warnings:
         payload["leaseWarnings"] = warnings
@@ -5267,8 +5428,12 @@ TOOLS = [
                        "eligible), `rejected` (admission refused; never reached "
                        "the substrate), `deferred` (no Str-surface function — "
                        "records/lists across the boundary are the aggregate "
-                       "follow-on) or `unavailable` (wasm-tools/wasmtime absent; "
-                       "the grade + lowering still ran). It also reports the "
+                       "follow-on), `unavailable` (wasm-tools/wasmtime absent; "
+                       "the grade + lowering still ran) or `refused` (the "
+                       "candidate is not confined: an undeclared import in its "
+                       "produced bytes, or a policy that asks for wasm "
+                       "confinement without limits; nothing ran). It also "
+                       "reports the "
                        "policy admission decision (`admission`): where a bound "
                        "policy declares `quarantine required` (item 33), a "
                        "candidate is admissible only after it passes — unless the "
@@ -6659,6 +6824,40 @@ def _instructions() -> str:
 # unchanged; `structuredContent` keeps the payload's own order.
 _ACTIONABLE = ("ok", "note", "disk", "next", "hint")
 
+# issue #2690: the two verdict verbs of the authoring loop. Their refusals say
+# how many attempts this unit of work has spent, so a caller driving a retry
+# loop can tell a first refusal from a tenth.
+_ATTEMPT_VERBS = frozenset({"revl_check", "revl_admit"})
+
+
+def _attempt_fields(name: str, payload: dict) -> dict:
+    """`payload` with `attempt` (and `attemptsRemaining` when the operator
+    configured a limit) on a `revl_check`/`revl_admit` refusal, unchanged
+    otherwise (issue #2690).
+
+    The count is per unit of work: the loaded composition at its current
+    generation, so a fresh load or a new generation (a swap, rollback or undo)
+    is a new unit. An accepted call resets it. It is advisory only: admission
+    never reads it, so reaching or passing the budget changes nothing but what
+    the caller is told. `Session.loop_axes` compares the same unit at report
+    time (`loop_axes.attempt_unit`), so the refusal and the report agree."""
+    if name not in _ATTEMPT_VERBS or not isinstance(payload, dict):
+        return payload
+    axes = getattr(SESSION, "_loop_axes", None)
+    if axes is None:            # a stand-in session (tests) keeps its shape
+        return payload
+    from .loop_axes import attempt_unit, attempts_remaining  # noqa: PLC0415
+    refused = payload.get("ok") is False or payload.get("admitted") is False
+    axes.record_attempt(attempt_unit(SESSION), refused)
+    if not refused:
+        return payload
+    fields = {"attempt": axes.attempt}
+    limit = getattr(SESSION, "attempt_limit", None)
+    if limit is not None:
+        fields["attemptsRemaining"] = attempts_remaining(limit, axes.attempt)
+    return {**payload, **fields}
+
+
 
 def _actionable_first(payload):
     """`payload` with `_ACTIONABLE` keys first, in that order, then the rest in
@@ -6710,6 +6909,7 @@ def handle(message: dict) -> dict | None:
         # session holds now; issue #1694: a refusal of the same call as the
         # refusal just before it says so instead of repeating byte for byte
         state = _ambient.footer(SESSION)
+        payload = _attempt_fields(name, payload)
         payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
         payload = _ambient.stamp(payload, state)
         result = {
@@ -6755,7 +6955,10 @@ def _hatch_call(arguments: dict) -> dict:
             next=_remedy.call(_disclosure.DISCOVERY, {}))
     # the inner call is a call: `args` is checked against the named verb's
     # own schema, exactly as a direct call's arguments are (issue #2532)
-    return _unknown_arguments(verb, args) or _call_tool(verb, args)
+    payload = _unknown_arguments(verb, args) or _call_tool(verb, args)
+    # issue #2690: the hatch is documented as indistinguishable from a direct
+    # call, so its check/admit refusals carry the attempt fields too
+    return _attempt_fields(verb, payload)
 
 
 def _unknown_arguments(name: str, arguments: dict) -> dict | None:

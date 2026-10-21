@@ -962,11 +962,11 @@ def _run_quarantine(args) -> int:
     battery in wasmtime's component-model sandbox — where an escape is a trap.
 
     Prints the verdict (passed | trapped | timeout | rejected | deferred |
-    unavailable) and, with --policy, the admission decision. Exit status: 0 when
-    the candidate passed (or was deferred/unavailable — nothing to fail on), 1
-    when it was trapped, timed out, or rejected, and (with --require-runtime) 3
-    when the substrate toolchain is absent so the candidate could not be
-    proven."""
+    unavailable | refused) and, with --policy, the admission decision. Exit
+    status: 0 when the candidate passed (or was deferred/unavailable — nothing
+    to fail on), 1 when it was trapped, timed out, rejected, or refused
+    (unconfined), and (with --require-runtime) 3 when the substrate toolchain
+    is absent so the candidate could not be proven."""
     from ..mcp import quarantine as _quarantine  # noqa: PLC0415
     from ..mcp.session import Session  # noqa: PLC0415
 
@@ -992,7 +992,7 @@ def _run_quarantine(args) -> int:
         print(_render_quarantine(report))
 
     verdict = report.get("verdict")
-    if verdict in ("trapped", "timeout", "rejected"):
+    if verdict in ("trapped", "timeout", "rejected", "refused"):
         return 1
     if verdict == "unavailable" and getattr(args, "require_runtime", False):
         return 3
@@ -1005,7 +1005,7 @@ def _render_quarantine(report: dict) -> str:
     verdict = report.get("verdict")
     glyph = {"passed": "PASS", "trapped": "TRAP", "timeout": "TIMEOUT",
              "rejected": "REJECT", "deferred": "DEFER",
-             "unavailable": "SKIP"}.get(verdict, "?")
+             "unavailable": "SKIP", "refused": "REFUSE"}.get(verdict, "?")
     lines = [f"quarantine: {glyph}  ({verdict})", f"  {report.get('note', '')}"]
     sub = report.get("substrate") or {}
     counts = sub.get("counts") or {}
