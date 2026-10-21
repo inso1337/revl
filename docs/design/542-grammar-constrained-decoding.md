@@ -875,3 +875,41 @@ object a runtime component (`revl.providers`, `revl run --providers`), and issue
 `docs/model-providers.md` has the per-adapter table of exact and approximated
 types, and `bench/structured_output_bench.py` measures the path end to end.
 
+## 13. The tool form (issue #2704)
+
+Everything above constrains what a model may SEND BACK. What a model may ASK
+THE PROGRAM TO DO is the other direction: a tool offered to a model is a
+service operation with typed parameters, a capability scope and an effect, and
+before this slice those facts were written once in the declaration and again,
+by hand, in the schema the host sent to the model. `revl grammar --tool
+Service.operation` derives the argument half from the declaration alone, with
+the same three pieces:
+
+* the argument JSON Schema, built by `json_schema_for(validated=True)` over the
+  parameter types, so a record or variant argument has exactly the closed wire
+  form the return boundary already validates;
+* the GBNF grammar rendered from that same schema object (not a second walk
+  over the surface type), so the two dialects describe one language;
+* the digests, in the same form a return-type grammar carries.
+
+One narrowing matches the return form: every parameter is `required` and the
+argument object is closed. A grammar that omitted an optional member would not
+be the language the schema describes, and the derivation keeps one language.
+
+A grammar fixes syntax, never values. `emission[mail.send(account="ops",
+folder=folder)] fn send(...)` binds the declared capability parameter to the
+caller's argument (issue #1985), so the value that arrives is whatever the
+caller passed. `revl.tool_schema.refine_arguments` resolves each declared
+capability against the call's arguments and refuses any the held capability set
+does not cover, using the one `cap_order` partial order the rest of the compiler
+uses. A call whose `folder` is outside the held path cone is refused even
+though the grammar accepted the string; this step is not optional, for the same
+reason item 257's validator is not. The split from section 2 is unchanged:
+revl STATES the contract, the provider PERFORMS the decode, and nothing here
+claims the provider enforced either artifact.
+
+The first slice adds no runtime: it emits data and a pure refinement check.
+Wiring the harness's tool surface to read the derived schema instead of its
+hand-kept copy is the companion slice, filed on that repository when this one
+merges.
+

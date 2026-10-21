@@ -274,6 +274,14 @@ of revl source for a grammar-constrained decoder. No sources.
   `grammar/revl.gbnf` and `grammar/revl.ebnf` (run from a checkout). A parser
   change that alters the grammar fails `tests/test_source_grammar_1661.py` until
   `revl grammar --write` is run.
+- `--tool Service.operation` - the argument contract of one service operation,
+  derived from its declaration (issue #2704): the JSON Schema of its parameters,
+  the GBNF grammar rendered from that same schema, the JSON-Schema dialect, and
+  the digests. Needs the `.rvl` sources that declare the service. This is the
+  tool half of what a `validated` emission already gets for its return type; it
+  changes no runtime. The capability refinement it enables
+  (`revl.tool_schema.refine_arguments`) checks a call's argument VALUES against
+  the held capability's cone, which a grammar cannot do.
 
 ```bash
 revl grammar                                      # the short summary
@@ -281,6 +289,7 @@ revl grammar --prompt                             # the full surface, to pin in 
 revl grammar --format gbnf                        # a whole program, as GBNF
 revl grammar --format lark --category expression  # one expression, for llguidance
 revl grammar --check                              # is grammar/ current?
+revl grammar --tool Mail.send app.rvl             # a tool's argument schema + grammar
 ```
 
 ### `revl doctor`
