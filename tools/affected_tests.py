@@ -107,6 +107,9 @@ BENCH_DEPENDENT_TESTS = (
     # server.
     "tests/test_constrained_decoding_1462.py",
     "tests/test_demand_ranking.py",
+    # Issue #2709: measures a host extern call on the Python tier by running
+    # `bench/extern_call_cost.py`'s arms, so a bench change must re-run it.
+    "tests/test_extern_call_cost_2709.py",
     # FRAMEWORK-BENCH-1. It reads `bench/hosts.json` and the committed report,
     # survey and injection artifacts, and it is the gate that catches a
     # committed artifact drifting from the ledgers it was recomputed from, so a
