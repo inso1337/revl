@@ -126,6 +126,9 @@ BENCH_DEPENDENT_TESTS = (
     # repository, `bench/` included (five `bench/**/run.py` files are why it
     # exists), so a new or renamed bench module can change its verdict.
     "tests/test_load_by_path_is_the_only_by_path_loader.py",
+    # Issue #2748: reads `bench/results/admission-latency.md` and ties the
+    # walkthrough's latency claim to it, so a bench change must re-run it.
+    "tests/test_mcp_admission_walkthrough_2748.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
