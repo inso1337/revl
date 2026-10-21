@@ -7153,13 +7153,6 @@ fn key_binding(key: Str) -> Str {
   return parts[parts.length() - 1]
 }
 
-// binding -> raw wiring key for a component's requirements (issue #2394).
-fn req_bindings(comp: Any) -> Map[Str, Str] {
-  var out: Map[Str, Str] = Map.empty()
-  for (k of value_keys(value_field(comp, "requires"))) { out = out.set(key_binding(k), k) }
-  return out
-}
-
 fn host_key_collision_markers(ir: Any) -> List[Str] {
   var seen: Map[Str, Str] = Map.empty()
   var out = []

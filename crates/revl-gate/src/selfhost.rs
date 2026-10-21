@@ -8699,14 +8699,6 @@ fn key_binding(key: &str) -> String {
     return (parts)[((parts.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
 }
 
-fn req_bindings(comp: Value) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    for k in value_keys(value_field(comp.clone(), String::from("requires"))) {
-        out.insert(key_binding(&k), k.clone());
-    }
-    return out;
-}
-
 fn host_key_collision_markers(ir: Value) -> Vec<String> {
     let mut seen = std::collections::HashMap::new();
     let mut out: Vec<String> = vec![];
