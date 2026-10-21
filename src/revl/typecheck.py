@@ -1141,14 +1141,18 @@ def compatible(expected: str | None, actual: str | None,
         # generic same-head rule at the tail of this function.
         if ahead != "Async":
             return compatible(eargs[0] if eargs else None, actual, types)
-    if ehead == FN_HEAD:
+    if ehead in _FUNCTION_TYPE_HEADS or ahead in _FUNCTION_TYPE_HEADS:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
         # the position can use: parameters contravariant, result covariant.
         # The generic elementwise rule below would make parameters covariant,
         # which accepts `(Int) -> X` where `(Float) -> X` is required and then
-        # hands the callee a Float.
-        if ehead != ahead or len(eargs) != len(aargs):
+        # hands the callee a Float. Both spellings of a function type are one
+        # type here: `(Int) -> Str` and `Fn[Int, Str]` parse to the same
+        # `[param..., return]` shape and meet each other (#2544).
+        if (ehead not in _FUNCTION_TYPE_HEADS
+                or ahead not in _FUNCTION_TYPE_HEADS
+                or len(eargs) != len(aargs)):
             return False
         return (all(compatible(a, e, types) for e, a in zip(eargs[:-1], aargs[:-1]))
                 and compatible(eargs[-1], aargs[-1], types))
@@ -2861,7 +2865,7 @@ def _check_arrow_args(args, params, tenv: dict, types: dict,
         return
     for i, (arg, param) in enumerate(zip(args, params)):
         phead, pargs = parse_type(param)
-        if isinstance(arg, ExprArrow) and phead == FN_HEAD:
+        if isinstance(arg, ExprArrow) and is_function_type(param):
             check_ast(arg, param, tenv, types, filename,
                       f"argument {i + 1} of {what}")
         elif not isinstance(arg, ExprArrow) and phead == FN_HEAD and pargs \
@@ -3054,6 +3058,11 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     """Type a call through a value of function type (a `let`-bound arrow, a
     parameter, a record field read into a `let` …)."""
     _, parts = parse_type(fn_type)
+    if not parts or parts == [""]:
+        # a bare `Fn` (or `Fn[]`) is accepted as a function-typed spelling but
+        # names no signature, so a call on it has nothing to be held to. Stay
+        # untyped, as before the value path admitted the generic spelling.
+        return None
     params, returns = parts[:-1], parts[-1]
     check_function_value_arity(what, fn_type, params, len(expr.args),
                                filename, line)
@@ -3097,6 +3106,10 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
                 and names_a_module_callee(name, types)):
             refuse_call_on_non_function(surface_name(name), fn_type, filename,
                                         line)
+        return None
+    if not parts or parts == [""]:
+        # a bare `Fn`/`Fn[]` spelling has no signature to check the call
+        # against; leave it untyped rather than index past an empty list
         return None
     params, returns = parts[:-1], parts[-1]
     args = node.get("args") or []
@@ -3181,7 +3194,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
     if _is_wildcard(expected):
         infer_ast(expr, tenv, types, filename)
         return
-    if ehead != FN_HEAD:
+    if ehead not in _FUNCTION_TYPE_HEADS:
         raise RevlError(
             filename, line,
             f"{where} expects `{render_type(expected)}`, got an arrow",
@@ -3190,6 +3203,12 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
             code="T1", category="type-mismatch",
             expected=render_type(expected), actual="a function value",
         )
+    if not eargs:
+        # a bare `Fn` names a function type with no signature. The checker
+        # accepts the spelling elsewhere, so there is nothing here to hold the
+        # arrow to; infer it rather than indexing past an empty argument list.
+        infer_ast(expr, tenv, types, filename)
+        return
     want_params, want_return = eargs[:-1], eargs[-1]
     if len(expr.params) != len(want_params):
         rendered = ", ".join(render_type(p) or "_" for p in want_params) or "no parameters"

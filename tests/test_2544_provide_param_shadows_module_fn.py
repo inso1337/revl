@@ -339,6 +339,45 @@ def test_a_matching_signature_is_admitted_in_both_spellings(fn_type):
     }]
 
 
+def test_a_bare_fn_typed_parameter_call_does_not_crash_the_checker():
+    """A bare `Fn` (no type arguments) is accepted where a type is written,
+    but it names no signature. Now that the value path admits the spelling,
+    a call on it must stay untyped rather than index past an empty parameter
+    list: the checker accepted this shape before the call-routing change and
+    must not turn it into an `IndexError`. Both strata."""
+    assert compile_source(
+        "fn g(f: Fn) -> Int { return f() }\n", "t.rvl") is not None
+    assert compile_source(
+        "service M { fn go(f: Fn) -> Int }\n"
+        "component C provides m: M { provide m { fn go(f) = f() } }\n",
+        "t.rvl",
+    ) is not None
+
+
+@pytest.mark.parametrize("inner", ["(Int) -> Int", "Fn[Int, Int]"])
+def test_an_arrow_argument_to_a_function_typed_parameter_is_checked(inner):
+    """A function-typed parameter whose own parameter is a function type takes
+    an arrow, which `_check_arrow_args` must check in either spelling of the
+    INNER type. Before the callee was typed the call path never reached the
+    check, so an arrow whose body returned the wrong type compiled; a matching
+    arrow must stay admitted. The `Fn[Int, Int]` inner spelling also pins
+    `compatible` treating the two spellings as one function type, since the
+    arrow's inferred type is spelled with `->`."""
+    matching = (
+        f"fn g(f: Fn[{inner}, Int], n: Int) -> Int "
+        "{ return f(x => x + n) }\n"
+    )
+    assert compile_source(matching, "t.rvl") is not None
+    wrong = (
+        f"fn g(f: Fn[{inner}, Int], n: Int) -> Int "
+        '{ return f(x => "s") }\n'
+    )
+    with pytest.raises(RevlError, match="the body of this arrow .* expects `Int`, got `Str`") as exc:
+        compile_source(wrong, "t.rvl")
+    assert exc.value.code == "T1"
+    assert (exc.value.filename, exc.value.line) == ("t.rvl", 1)
+
+
 # -------------------------- the binder forms the carve-out must NOT widen to
 
 @pytest.mark.parametrize("source", [
