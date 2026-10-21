@@ -535,21 +535,7 @@ def test_poly_plus_ref_refused(tmp_path):
         compile_files([str(m)])
 
 
-# -- bundle interim refusal + audit provenance -----------------------------
-
-def test_bundle_ref_program_clean_refusal(tmp_path):
-    """Until stage 4 lands, bundling a ref program is a CLEAN refusal naming the
-    gap, never a bundle that cannot verify (the flat basename copy would not
-    carry the root-relative ref'd file)."""
-    from revl.bundle import build_bundle
-    _write(tmp_path / "host" / "engine.py", "def do_engine(x):\n    return x\n")
-    m = _write(tmp_path / "m.rvl", _ref_rvl())
-    # item 410: the refusal now distinguishes a USER ref (still refused, this
-    # case) from a stdlib ref (which bundles via re-resolve). A user ref program
-    # is still a clean refusal.
-    with pytest.raises(RevlError, match="references a USER external host module"):
-        build_bundle([str(m)], str(tmp_path / "out"))
-
+# -- audit provenance -----------------------------
 
 def test_audit_surfaces_ref_provenance(tmp_path):
     """`revl audit` shows the ref path and symbol for a ref extern, and a

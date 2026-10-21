@@ -1338,11 +1338,15 @@ function parkedStat(real: string, what: string): fs.BigIntStats {
  * was fstat'd, never by reopening the name.
  *
  * The two callers read null differently and deliberately. `park` omits the
- * key, because refusing an honest `fsRm` of a directory, of an already-
- * hardlinked file, or of a write-only file is over-refusal. `install` fails
- * closed, because a capture that RECORDED a digest says the file was readable
- * when it was parked, so not being able to re-read it now is drift, never a
- * reason to fall back to the stat fields a same-tick rewrite hides. */
+ * key only when the parked inode is not a readable regular file, because
+ * refusing an honest `fsRm` of a directory or of a write-only file is
+ * over-refusal; a readable regular file is digested, and a second link does
+ * not stop it being one, so a hardlinked parked file is digested and
+ * compared too. `install` fails closed, because a capture that RECORDED a
+ * digest says the file was readable when it was parked, so not being able to
+ * re-read it now is drift, never a reason to fall back to the stat fields a
+ * same-tick rewrite hides. A capture with no key is a legacy record and
+ * keeps the stat-only comparison, so it still replays. */
 function parkedDigest(real: string, what: string): string | null {
   const [parent] = splitLeaf(real)
   try {
@@ -1455,14 +1459,14 @@ function refuseMalformedDigest(
  * recorded, or do nothing when the capture carries no key at all (issue #2666).
  * Peer of py `_refuse_drifted_digest`.
  *
- * A capture with no `sha256` is a record written before the key existed (a
+ * A capture with no `sha256` key is a record written before the key existed (a
  * durable record replayed by `revl recover`) and keeps the stat-only behaviour,
  * exactly as `refuseDriftedIdentity` does for a witness that carries no capture
  * at all. When the key IS present, even as `null`, a mismatch, an unreadable
- * file, or a value that is not a bare lowercase hex digest is `EIDENTITY`: the
- * point of the key is to catch the same-tick rewrite the stat fields cannot
- * see, so falling back to stat-only would admit the very file it exists to
- * refuse.
+ * file, or a value that is not a bare lowercase hex string (a non-string shape
+ * included) is `EIDENTITY`: the point of the key is to catch the same-tick
+ * rewrite the stat fields cannot see, so falling back to stat-only would admit
+ * the very file it exists to refuse.
  *
  * Named separately, like `refuseDriftedIdentity`, so the pre-rename and
  * post-rename passes of `rawInstallParkedSidecar` state the same comparison
@@ -1565,8 +1569,9 @@ function rawParkCapturedSidecar(
  * corrupt record, not an absent key. A capture with no `sha256` at all (a
  * record written before the key existed, or a parked inode that is not a
  * readable regular file) keeps the stat-only behaviour, so a legacy WAL still
- * replays and an honest `fsRm` of a directory, of an already-hardlinked file,
- * or of a write-only file still installs.
+ * replays and an honest `fsRm` of a directory or of a write-only file still
+ * installs. A parked hardlinked file that is readable is still a readable
+ * regular file, so it carries a digest and both passes compare it.
  *
  * The check runs again on the INSTALLED result, because the rename is by name,
  * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops

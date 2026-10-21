@@ -249,6 +249,10 @@ PY_COMPONENT_DOCS = [
     "services_basic.rvl", "services_body.rvl", "services_config.rvl",
     "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
     "externs.rvl", "secrets_nested.rvl",
+    # issue #2715 review: the component renderer's mixed-equality widen, which
+    # the native chain must reproduce from the marked operand (the document is
+    # an emitter oracle and lives outside the census directories).
+    "../../noncensus_corpus/services_int_float_equality.rvl",
 ]
 RUST_COMPONENT_DOCS = [
     "service.rvl", "services_multi.rvl", "requires.rvl", "effect_emit.rvl",
