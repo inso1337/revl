@@ -2406,22 +2406,13 @@ fn is_ws_char(ch: Str) -> Bool {
     || c == 8287 || c == 12288
 }
 
-// `str.strip()` for a directive line (the stdlib `trim` strips ASCII only).
-fn strip_ws(s: Str) -> Str {
-  var a = 0
-  var b = s.length()
-  while (a < b && is_ws_char(s.charAt(a))) { a = a + 1 }
-  while (b > a && is_ws_char(s.charAt(b - 1))) { b = b - 1 }
-  return s.slice(a, b)
-}
-
 // `_GO_IMPORT_DIRECTIVE_WORD` (`^//revl:import(?:\s|$)` on the stripped line):
-// whether a body line is a `//revl:import` directive. A longer word
+// whether a body line is a `//revl:import` directive, that is whether its first
+// whitespace-separated word is the directive's name. A longer word
 // (`//revl:imported`) is an ordinary comment.
 fn is_import_directive(l: Str) -> Bool {
-  let t = strip_ws(l)
-  if (!t.startsWith("//revl:import")) { return false }
-  return t.length() == 13 || is_ws_char(t.charAt(13))
+  let words = ws_words(l)
+  return words.length() > 0 && words[0] == "//revl:import"
 }
 
 // The whitespace-separated words of `s`.
@@ -2469,21 +2460,18 @@ fn is_go_language_keyword(w: Str) -> Bool {
     "switch", "type", "var"], w)
 }
 
-fn quoted_import_path(p: Str) -> Str {
-  return p.startsWith("\"") ? p : `"${p}"`
-}
-
 // `_go_import_spec`: the Go import spec (`"time"`, `tm "time"`, `. "strings"`)
 // a directive line asks for, as `[spec]`; `[]` for a line the reference
 // refuses with an EmitError (it does not parse as `//revl:import [alias]
 // <path>`, or its alias is a Go keyword).
 fn import_spec(l: Str) -> List[Str] {
-  let t = strip_ws(l)
-  let words = ws_words(t.slice(13, t.length()))
-  let n = words.length()
-  let one = n == 1 && is_import_path(words[0])
-  let two = n == 2 && is_import_alias(words[0]) && is_import_path(words[1]) && !is_go_language_keyword(words[0])
-  let spec = one ? quoted_import_path(words[0]) : (two ? `${words[0]} ${quoted_import_path(words[1])}` : "")
+  let words = ws_words(l)
+  let n = words.length() - 1
+  let one = n == 1 && is_import_path(words[1])
+  let two = n == 2 && is_import_alias(words[1]) && is_import_path(words[2]) && !is_go_language_keyword(words[1])
+  let path = n == 2 ? words[2] : (n == 1 ? words[1] : "")
+  let quoted = path.startsWith("\"") ? path : `"${path}"`
+  let spec = one ? quoted : (two ? `${words[1]} ${quoted}` : "")
   return spec == "" ? [] : [spec]
 }
 
@@ -2503,11 +2491,11 @@ fn import_name(spec: Str) -> Str {
 // `_go_refuse_extern_alias_clash`: the alias of a hoisted aliased spec that the
 // module's import block already binds to a different spec (one the preamble
 // imports, or another directive's), else "". The same spec twice is one import.
-// `preamble` holds the block's lines so far, indented.
+// `preamble` holds the block's lines so far, indented, the hoisted specs
+// included (`hoisted` is the list of them, to pick the aliased ones).
 fn import_alias_clash(preamble: List[Str], hoisted: List[Str]) -> Str {
   var specs: List[Str] = []
   for (l of preamble) { if (trim(l) != "") { specs = specs.push(trim(l)) } }
-  for (h of hoisted) { if (!list_contains(specs, h)) { specs = specs.push(h) } }
   for (spec of list_sort(hoisted)) {
     if (spec.indexOf(" ") >= 0) {
       let alias = import_name(spec)
@@ -5798,10 +5786,11 @@ test "a hoisted alias the import block already binds is a clash" {
   assert import_name(`tm "time"`) == "tm"
   assert import_name(`"text/template"`) == "template"
   assert import_name(`"os"`) == "os"
-  assert import_alias_clash([], [`tm "time"`, `tm "text/template"`]) == "tm"
-  assert import_alias_clash([line(1, `"fmt"`)], [`fmt "strings"`]) == "fmt"
-  assert import_alias_clash([], [`tm "time"`, `tm "time"`]) == ""
-  assert import_alias_clash([], [`_ "embed"`, `_ "x/y"`]) == ""
+  let two = [line(1, `tm "time"`), line(1, `tm "text/template"`)]
+  assert import_alias_clash(two, [`tm "time"`, `tm "text/template"`]) == "tm"
+  assert import_alias_clash([line(1, `"fmt"`), line(1, `fmt "strings"`)], [`fmt "strings"`]) == "fmt"
+  assert import_alias_clash([line(1, `tm "time"`)], [`tm "time"`]) == ""
+  assert import_alias_clash([line(1, `_ "embed"`), line(1, `_ "x/y"`)], [`_ "embed"`, `_ "x/y"`]) == ""
 }
 
 test "a body Python splitlines would break differently takes a marker" {
