@@ -1141,7 +1141,7 @@ def compatible(expected: str | None, actual: str | None,
         # generic same-head rule at the tail of this function.
         if ahead != "Async":
             return compatible(eargs[0] if eargs else None, actual, types)
-    if ehead in _FUNCTION_TYPE_HEADS or ahead in _FUNCTION_TYPE_HEADS:
+    if ehead in _FUNCTION_TYPE_HEADS and ahead in _FUNCTION_TYPE_HEADS:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
         # the position can use: parameters contravariant, result covariant.
@@ -1150,9 +1150,16 @@ def compatible(expected: str | None, actual: str | None,
         # hands the callee a Float. Both spellings of a function type are one
         # type here: `(Int) -> Str` and `Fn[Int, Str]` parse to the same
         # `[param..., return]` shape and meet each other (#2544).
-        if (ehead not in _FUNCTION_TYPE_HEADS
-                or ahead not in _FUNCTION_TYPE_HEADS
-                or len(eargs) != len(aargs)):
+        #
+        # BOTH sides have to be function types for this rule to own the pair.
+        # A one-sided pair is not a function flow: an expected `Opt[?T]` with a
+        # function actual is the ordinary `T -> Opt[T]` injection, and a
+        # function expected with a non-function actual is not a function value
+        # at all. Owning either here refused the injection direction that the
+        # `Opt` rule below admits, so those pairs fall through to it. Because
+        # the test names both heads, the two spellings of one function type
+        # still meet each other in either direction.
+        if len(eargs) != len(aargs):
             return False
         return (all(compatible(a, e, types) for e, a in zip(eargs[:-1], aargs[:-1]))
                 and compatible(eargs[-1], aargs[-1], types))

@@ -88,6 +88,22 @@ def test_function_type_parameters_are_contravariant_and_results_covariant():
     assert not compatible("(Int) -> Int", "(Int, Int) -> Int")
 
 
+def test_a_one_sided_function_pair_is_not_owned_by_the_contravariant_rule():
+    """The function rule owns a pair only when BOTH sides are function types.
+
+    An expected `Opt[?T]` against a function-valued actual is the ordinary
+    `T -> Opt[T]` injection, and a function expected against a non-function
+    actual is not a function value at all, so neither pair may be forced
+    through the contravariant rule. The two spellings of one function type
+    still meet each other, because the rule tests both heads.
+    """
+    assert compatible("Opt[?T]", "(Int) -> Str")
+    assert compatible("Opt[?T]", "Fn[Int, Str]")
+    assert not compatible("(Int) -> Str", "Opt[?T]")
+    assert compatible("(Int) -> Str", "Fn[Int, Str]")
+    assert compatible("Fn[Int, Str]", "(Int) -> Str")
+
+
 def test_function_type_is_usable_wherever_a_type_is_written():
     ir = compile_source(
         "type Step = (Int) -> Int\n"
