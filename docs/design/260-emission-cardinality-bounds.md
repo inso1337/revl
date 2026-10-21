@@ -501,8 +501,8 @@ declared budget is a compile-time contract rather than a runtime promise. In
 statement form the exact pass-through wrapper (`emit go(x)` where
 `fn go(x) = call(x)`) is the one wrapper shape that stays metered; the same
 wrapper in value position is refused like any other value-position emission.
-The contract now covers every shape a callee can take: a direct named call and
-the statement-form identity wrapper are metered, a function value is refused,
+The compile-time contract now covers the named call, the statement-form identity
+wrapper and the function value: the first two are metered, the third is refused,
 and every other wrapper shape is refused rather than emitted.
 
 Not enforced by this slice, tracked rather than implied:
