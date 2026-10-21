@@ -31,6 +31,7 @@ wrote bundle app.revlbundle
 ```
 app.revlbundle/
   source/probe.rvl          the .rvl sources, verbatim
+  source/<host files>       spliced body files and user host modules, byte for byte (only when the composition has them)
   ir/ir.json                the compiled IR (path-normalized, deterministic)
   ir/manifest.json          the item-28 audit/interchange document
   components.lock           the provides/requires surface + source/manifest hashes
@@ -89,6 +90,7 @@ established, and the same `Check` type reused verbatim:
 | --- | --- | --- |
 | **source** | the committed source bytes re-hash to the recorded hash | `registry._sha256` |
 | **IR** | the recompiled audit document is byte-reproducible from the source and hashes to the recorded value | `registry._audit_document` |
+| **host file [path]** | each spliced body file and user host module the IR pins is read from the bundle's `source/` tree and re-hashes to the pin; a changed, missing or misplaced file is a MISMATCH naming it (only for a bundle that carries one) | `hostfile`, `hostref` pins |
 | **dependency lock** | the rebuilt provides/requires surface equals `components.lock` | `truc.reproduce._surface` |
 | **policy surface** | the rebuilt capabilities/emissions equal `policy.json` | `truc.reproduce._policy_of` |
 | **emitted [backend]** | each backend re-emits byte-for-byte to the committed artifact, the emitted output *corresponds to* that backend | the backend emitters |
@@ -216,6 +218,49 @@ never earned.
 over the existing `revl run` once a bundle's `source/` and `topology.json` are in
 hand, and is left as a follow-up; `bundle`/`verify`, the produce-and-prove pair
 - are the load-bearing half and ship first.
+
+---
+
+## Host files
+
+An extern body can be spliced from a file (`= @py file "helpers.py"`) or point at
+a user host module (`= @py ref sym from "host/engine.py"`). `revl bundle`
+carries each such file under `source/`, at the path its declaring `.rvl` file
+resolves it from, so `revl verify` recompiles from the bundle alone. The file's
+sha256 is pinned in `ir/ir.json` and recorded in `runtime-manifest.json` under
+`hostFiles`. `verify` re-hashes every carried file against the pin, before the
+recompile, and a changed byte fails the `host file` tier naming the file. A
+manifest record that was dropped or edited fails the `host files` line.
+
+A bundled file must sit inside the directory of the `.rvl` file that names it.
+A ref pin is resolved against the bundled root, the deepest directory of a
+bundled source that contains the target, while the file itself is carried
+relative to the module that names it. When the target also sits under a deeper
+bundled source root, the two paths differ: the pin names the file relative to
+that root and `source/` would carry it relative to the declaring module, so the
+bundle is refused and the message gives both paths. That is stricter than the
+compiler, which lets a module reference a file anywhere in the compile root. A
+path that leaves the directory, a link that resolves outside it, a ref whose
+pin and module-relative path disagree, and a file named by a module that is not
+among the bundled sources are refused at bundle time, and a refused bundle
+leaves an existing output directory alone. The path in a bundle's own text is
+checked again at verify and is never read from outside `source/`.
+
+What this does and does not prove. The `host file` line checks the carried
+file against the pin in the bundle's own `ir/ir.json` and the manifest record.
+The body-file digests are not part of the audit manifest that the `IR` line
+recompares, and `ir/ir.json` itself is not recompiled and compared. So if
+someone edits the file, the `hostFiles` record and the pin in `ir/ir.json`
+together and consistently, the `host file` line passes. That edit is caught
+only by the `emitted` line, and only for a backend whose artifact the bundle
+carries (a body for a backend that was not bundled is not covered), or by a
+signed attestation, which binds the whole IR including the pin. A bundle you
+need to trust should carry a signature and be checked with the key.
+
+A standard-library reference carries nothing: the verifier re-resolves it from
+its own install (`stdlib refs` line). The pin is one file deep, so a module
+that imports a sibling is not covered. Tiers that refuse these bodies keep
+refusing them.
 
 ---
 
