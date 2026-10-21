@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_source  # noqa: E402
 from revl.test import RUNNERS  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _err(src: str) -> str:
@@ -287,14 +288,12 @@ def test_concurrency_exactly_one_true_on_the_reference_runtime():
 # check and the insert, or ran the executor with preemption, so these two tests
 # pin the assumption: one structural, one behavioural.
 def _runtime_module():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "revl_py_runtime_iia_guard", ROOT / "backends" / "python" / "runtime.py")
-    runtime = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = runtime
-    spec.loader.exec_module(runtime)
-    return runtime
+    # `runtime.py` is loaded by path under a name only this file uses, so its
+    # `@dataclass` annotations resolve (py3.12+) and no other loader replaces
+    # the module; `tests/_load_by_path.py` reuses one module per name and file.
+    return load_by_path(
+        "revl_py_runtime_iia_guard",
+        ROOT / "backends" / "python" / "runtime.py")
 
 
 def test_insert_if_absent_carries_no_suspension_point():
