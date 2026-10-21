@@ -1017,9 +1017,11 @@ def _run_tool_grammar(args) -> int:
 
     A `validated` emission already ships its return type as a schema and a
     grammar; this does the same for what a model may ask the program to do, and
-    adds the capability refinement the grammar cannot make. The output is one
-    JSON document: the schema, its GBNF grammar, the JSON-Schema dialect and
-    the digests, all compile-time constants."""
+    reports the operation's declared effect (`emission`, `capabilities`). The
+    output is one JSON document: the schema, its GBNF grammar, the JSON-Schema
+    dialect, the digests and the effect, all compile-time constants. It adds no
+    runtime and claims no argument-value refinement, which needs the caller's
+    held authority at the host's call boundary."""
     from . import tool_schema  # noqa: PLC0415 - lazy, keeps the CLI import lean
     from .compiler import compile_files  # noqa: PLC0415
 

@@ -425,6 +425,28 @@ above 2^53 — so the frontend marks that operand with the same
 native exact comparison. The executing cross-tier probe covers a parameter, a
 record field and a list element, in both operand orders, for `==` and `!=`.
 
+The same mixed-width rule covers the OTHER adjacent pair, `Int32` and `Int`,
+which issue #2715 originally missed. `a: Int32 == 3` is `Int32` against an
+unannotated `Int` literal, so it hit exactly the same defect one rung down:
+TypeScript compared a `number` against a `bigint` (false), go compared `int32`
+against `int64` (no build), java boxed `Integer` against `Long`, and python
+absorbed it. The lossless step is `Int32 -> Int`, so the frontend marks the
+`Int32` operand with `"widen": "Int"` (`BigInt(a)`, `int64(a)`,
+`((long) (a))`, `(a as i64)`, `(i64.extend_i32_s a)`; python absorbs it as its
+one int type). Same-width `Int/Int` and `Int32/Int32` stay unmarked.
+
+Above 2^53 the `Int -> Float` comparison is exact only up to binary64's
+rounding, and that has a visible consequence: it is **not transitive**. With
+`9007199254740993` and `9007199254740992` as `Int`s and `9007199254740992.0` as
+the `Float` in the middle, `a == f` and `f == b` are both true while `a == b`
+is false, because the first comparison rounds `a` to 2^53. This is the price of
+the checker's one-way `compatible("Float", "Int")` rule and of comparing two
+numbers by numeric value; narrowing the widen to a "safe" range is not
+statically decidable, so the rule is kept and the behaviour is pinned. `NaN` is
+unequal to every `Int` and to itself, and `1` never equals `+Inf`; the
+executing cross-tier probe pins all three cases alongside the two operand
+orders, so a tier that papers over binary64 with a custom equality fails.
+
 ## Sized integers: `Int32`
 
 `Int` is the right default — it indexes, counts and sizes things, which is the

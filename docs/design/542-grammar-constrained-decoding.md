@@ -890,26 +890,38 @@ the same three pieces:
   form the return boundary already validates;
 * the GBNF grammar rendered from that same schema object (not a second walk
   over the surface type), so the two dialects describe one language;
-* the digests, in the same form a return-type grammar carries.
+* the digests, in the same form a return-type grammar carries;
+* the operation's declared effect: `emission` and the capability spellings of
+  a scoped emission, so a host can tell a pure read from one that fires
+  authority, and a scoped emission from a bare one ("any capability" is the
+  absence of a scope and is reported as an empty list).
 
 One narrowing matches the return form: every parameter is `required` and the
 argument object is closed. A grammar that omitted an optional member would not
 be the language the schema describes, and the derivation keeps one language.
 
-A grammar fixes syntax, never values. `emission[mail.send(account="ops",
-folder=folder)] fn send(...)` binds the declared capability parameter to the
-caller's argument (issue #1985), so the value that arrives is whatever the
-caller passed. `revl.tool_schema.refine_arguments` resolves each declared
-capability against the call's arguments and refuses any the held capability set
-does not cover, using the one `cap_order` partial order the rest of the compiler
-uses. A call whose `folder` is outside the held path cone is refused even
-though the grammar accepted the string; this step is not optional, for the same
-reason item 257's validator is not. The split from section 2 is unchanged:
-revl STATES the contract, the provider PERFORMS the decode, and nothing here
-claims the provider enforced either artifact.
+A grammar fixes syntax, never values, and this slice does NOT derive the value
+check. `emission[mail.send(account="ops", folder=folder)] fn send(...)` binds
+the declared capability parameter to the caller's argument (issue #1985), so a
+`folder` outside the caller's held path cone is grammatically well formed. A
+check for it needs the caller's HELD set, which lives in the host that
+dispatches the call, not in the compiler. An earlier cut exported a
+`refine_arguments` helper that had no caller and returned no violations for a
+bare-emission operation whose declared list was empty: the fail-open shape the
+review removed. So the contract stops at data and carries no refinement claim.
+The split from section 2 is unchanged: revl STATES the contract, the provider
+PERFORMS the decode, and nothing here claims the provider enforced either
+artifact.
 
-The first slice adds no runtime: it emits data and a pure refinement check.
-Wiring the harness's tool surface to read the derived schema instead of its
-hand-kept copy is the companion slice, filed on that repository when this one
-merges.
+The first slice adds no runtime: it emits data. Reading the derived contract in
+the harness's tool surface, and enforcing argument values against its own held
+authority at the call boundary, is the companion slice filed on that repository
+when this one merges.
+
+One range divergence the schema exposes, pre-existing and not introduced here:
+JSON Schema `integer` is unbounded, so `2^63` is a well-formed argument while
+go, java and rust carry `Int` as an i64 and refuse or fault outside it, whereas
+python and TypeScript's `bigint` hold arbitrary precision. The return form's
+schema has the same shape. Bounding it is a wire-format decision, not a tool
+contraction.
 

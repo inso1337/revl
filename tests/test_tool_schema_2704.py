@@ -10,9 +10,17 @@ to do. This file pins the derivation added for it:
     when a parameter type changes;
   * the schema is the closed object the grammar's language describes: a
     well-formed call is accepted and an extra field is rejected;
-  * the capability refinement refuses a call whose argument value falls outside
-    the declared capability parameter, even though the grammar accepted the
-    string (a grammar fixes syntax, not values).
+  * the contract reports the operation's DECLARED EFFECT, `emission` and the
+    capability spellings of a scoped emission, so a host reading it can tell a
+    pure read from one that fires authority;
+  * the schema's `"integer"` is unbounded JSON, which the grammar accepts and
+    which the i64 tiers cannot carry. That divergence is PRE-EXISTING (the
+    return boundary's schema has it too) and is pinned here so the tool form
+    cannot be read as a cross-tier range guarantee.
+
+The contract is data: no value refinement is derived here, because a value
+check needs the caller's held capability set and lives at the host's call
+boundary, not in the compiler (see the module docstring).
 
 The grammar recogniser is item 513's, imported rather than re-written, so the
 tool form is judged by the same GBNF semantics as the return form.
@@ -115,51 +123,48 @@ def test_unknown_operation_is_a_named_refusal():
         tool_schema.tool_contract(ir, "Nope", "read")
 
 
-def test_refinement_admits_a_call_inside_the_held_cone():
-    ir = compile_source(MAIL, "mail.rvl")
-    declared = tool_schema.operation_capabilities(ir, "Mail", "send")
-    declarations = ir.get("capability_declarations")
-    call = {"to": "ops@example.test", "folder": "/data/inbox", "mode": 1}
-    held = ['mail.send(account="ops", folder="/data")']
-    assert tool_schema.refine_arguments(declared, call, held, declarations) == []
-    # a bare token covers every value of its cone
-    assert tool_schema.refine_arguments(declared, call, ["mail.send"],
-                                        declarations) == []
+BARE = """
+service Notify {
+  emission fn send(to: Str) -> Bool
+}
+"""
 
 
-def test_refinement_refuses_a_value_outside_the_held_capability():
-    """The grammar accepted both calls: `folder` is a Str either way. Only the
-    refinement checks the VALUE against the capability's cone."""
-    ir = compile_source(MAIL, "mail.rvl")
-    declared = tool_schema.operation_capabilities(ir, "Mail", "send")
-    declarations = ir.get("capability_declarations")
-    grammar = tool_schema.tool_contract(ir, "Mail", "send")["grammar"]["text"]
-    inside = '{"to": "t", "folder": "/data/inbox", "mode": 1}'
-    outside = '{"to": "t", "folder": "/etc/passwd", "mode": 1}'
-    assert accepts(grammar, inside) and accepts(grammar, outside)
+def test_contract_reports_the_declared_effect():
+    """A host reading the contract must be able to tell a pure read from one
+    that fires authority, and a scoped emission from a bare one. The refinement
+    was removed because it checked only a declaration-local capability list and
+    had no call boundary; the declaration itself is still reported."""
+    pure = tool_schema.tool_contract(compile_source(PLAIN, "tool.rvl"),
+                                     "Files", "read")
+    assert pure["emission"] is False
+    assert pure["capabilities"] == []
 
-    held = ['mail.send(account="ops", folder="/data")']
-    violations = tool_schema.refine_arguments(
-        declared, {"to": "t", "folder": "/etc/passwd", "mode": 1}, held,
-        declarations)
-    assert len(violations) == 1
-    assert "not covered" in violations[0]
-    assert "folder" in violations[0]
-    assert "/etc/passwd" in violations[0]
-    # no held capability at all is the same refusal, never a silent pass
-    assert tool_schema.refine_arguments(
-        declared, {"to": "t", "folder": "/data/inbox", "mode": 1}, [],
-        declarations)
+    scoped_ir = compile_source(MAIL, "mail.rvl")
+    scoped = tool_schema.tool_contract(scoped_ir, "Mail", "send")
+    assert scoped["emission"] is True
+    assert scoped["capabilities"] == \
+        tool_schema.operation_capabilities(scoped_ir, "Mail", "send")
+    assert any("mail.send" in cap for cap in scoped["capabilities"])
+
+    bare = tool_schema.tool_contract(compile_source(BARE, "notify.rvl"),
+                                     "Notify", "send")
+    assert bare["emission"] is True
+    # "any capability" is the absence of a scope, reported as empty rather
+    # than dropped from the contract
+    assert bare["capabilities"] == []
 
 
-def test_refinement_refuses_a_binding_the_call_does_not_supply():
-    ir = compile_source(MAIL, "mail.rvl")
-    declared = tool_schema.operation_capabilities(ir, "Mail", "send")
-    with pytest.raises(tool_schema.ToolSchemaError, match="does not supply"):
-        tool_schema.refine_arguments(
-            declared, {"to": "t", "mode": 1},
-            ['mail.send(account="ops", folder="/data")'],
-            ir.get("capability_declarations"))
+def test_schema_and_grammar_accept_an_unbounded_integer():
+    """PRE-EXISTING divergence, pinned so the tool form does not read as a
+    cross-tier range guarantee: JSON `integer` is unbounded, so 2^63 is a
+    well-formed argument here while go/java/rust carry an i64. The return
+    boundary's schema has the same shape."""
+    ir = compile_source(PLAIN, "tool.rvl")
+    contract = tool_schema.tool_contract(ir, "Files", "read")
+    assert contract["schema"]["properties"]["mode"] == {"type": "integer"}
+    assert accepts(contract["grammar"]["text"],
+                   '{"path": "/tmp/x", "mode": 9223372036854775808}')
 
 
 def test_cli_writes_the_contract(tmp_path):
@@ -177,6 +182,8 @@ def test_cli_writes_the_contract(tmp_path):
     assert contract["grammar"]["format"] == "gbnf"
     assert contract["grammar"]["digest"]
     assert contract["json_schema"]["format"] == "json-schema"
+    assert contract["emission"] is True
+    assert any("mail.send" in cap for cap in contract["capabilities"])
 
 
 def test_cli_refuses_a_tool_without_sources_or_with_a_bad_name(tmp_path):

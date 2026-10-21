@@ -17,26 +17,34 @@ This module derives the argument half from the declaration alone:
   grammar's language (a grammar that omitted an extra member would not be the
   same language as the schema).
 * :func:`tool_contract` - the schema, its GBNF grammar and the JSON-Schema
-  dialect, each with the digest form `decode_grammar` already defines. The
-  grammar is rendered from the schema object, never from a second walk over the
-  surface type, so the two halves cannot drift.
-* :func:`refine_arguments` - the value check the grammar cannot make. A grammar
-  fixes syntax, not values: `fs.write(path=path)` binds the declared capability
-  parameter to the caller's argument, and a call whose value falls outside the
-  held capability's cone is refused here even though the grammar accepted the
-  string. This is not optional, for the same reason the return boundary keeps
-  its post-hoc validator: revl STATES and the provider PERFORMS.
+  dialect, each with the digest form `decode_grammar` already defines, plus the
+  operation's declared EFFECT: `emission` and the `capabilities` a scoped
+  emission names. The grammar is rendered from the schema object, never from a
+  second walk over the surface type, so the two halves cannot drift.
 
-The compiler/provider split is unchanged (design 542 sections 2 and 3): the
-contract is data, identical on every tier, and nothing here calls a decoder or
-claims the provider enforced the grammar.
+THIS MODULE DERIVES DATA, NOT ENFORCEMENT. It adds no runtime and no call
+boundary, so it does not check a call's argument VALUES against a held
+capability cone. That check needs the caller's held set, which lives in the
+host that dispatches the call; a refinement helper here would be a claim no
+caller honours (the fail-open shape this issue was reviewed for), so it was
+removed rather than left unwired. The harness's tool surface is the companion
+slice that reads this contract and can enforce against its own authority.
+
+A RANGE DIVERGENCE THIS SCHEMA EXPOSES, pre-existing and not introduced here:
+JSON Schema `"type": "integer"` is unbounded, so the grammar and schema accept
+an integer of any magnitude for an `Int` parameter. revl documents `Int` as
+64-bit two's complement, and go, java and rust carry it as i64 (refusing or
+faulting outside that range), while python and TypeScript's `bigint` hold
+arbitrary precision. A model that emits 2^63 therefore passes this schema on
+every tier and only some tiers can run it. Bounding the schema is a wire-format
+decision; until then the contract reports a JSON integer with no range,
+exactly as the return boundary's schema already does.
 """
 
 from __future__ import annotations
 
 import json
 
-from . import cap_order
 from .decode_grammar import (decode_grammar_for, grammar_digest,
                              json_schema_grammar_for)
 from .type_schema import (expressibility_reason, fully_expressible,
@@ -101,12 +109,17 @@ def argument_schema(ir: dict, service: str, operation: str) -> dict:
 
 def tool_contract(ir: dict, service: str, operation: str) -> dict:
     """The whole tool contract for one operation: the argument schema, the GBNF
-    grammar rendered from it, the wire-schema dialect, and their digests.
+    grammar rendered from it, the wire-schema dialect, their digests, and the
+    operation's declared effect (`emission`, `capabilities`).
 
     The digests use `grammar_digest`, the same identity a return-type grammar
     carries, so a provider may cache a compiled artifact by it and a parameter
-    type change necessarily changes the value it names.
+    type change necessarily changes the value it names. A bare emission carries
+    `emission: true` and an empty capability list: "any capability", the IR's
+    own spelling of it, is reported as the absence of a scope rather than
+    silently dropped.
     """
+    spec = _operation(ir, service, operation)
     schema = argument_schema(ir, service, operation)
     schema_text = json.dumps(schema, sort_keys=True, separators=(",", ":"))
     return {
@@ -116,92 +129,6 @@ def tool_contract(ir: dict, service: str, operation: str) -> dict:
         "schema_digest": grammar_digest(schema_text),
         "grammar": decode_grammar_for(schema),
         "json_schema": json_schema_grammar_for(schema),
+        "emission": bool(spec.get("emission")),
+        "capabilities": operation_capabilities(ir, service, operation),
     }
-
-
-def _resolved_capabilities(declared: list[str] | tuple[str, ...],
-                           arguments: dict,
-                           declarations: dict | None) -> list[cap_order.Cap]:
-    """Resolve each declared capability against the call's arguments.
-
-    An argument-bound parameter (`fs.write(path=path)`, issue #1985) takes the
-    caller's value for that argument; a literal or `config.` symbol is carried
-    through unchanged. A binding that names an argument the call does not
-    supply is a refused call, not an unconstrained one: the declared destination
-    would be missing from the check.
-    """
-    out: list[cap_order.Cap] = []
-    for text in declared or ():
-        token = text.split("(", 1)[0]
-        declaration = (declarations or {}).get(token)
-        cap = cap_order.parse_cap(text, declaration)
-        raw: list[tuple[str, object]] = []
-        for name, value in cap.params:
-            if isinstance(value, cap_order.Symbol) and value.is_arg:
-                if value.ref not in arguments:
-                    raise ToolSchemaError(
-                        f"the declared capability `{text}` binds parameter "
-                        f"`{name}` to argument `{value.ref}`, which the call "
-                        f"does not supply")
-                raw.append((name, arguments[value.ref]))
-            else:
-                raw.append((name, value))
-        out.append(cap_order.make_cap(token, raw, declaration))
-    return out
-
-
-def refine_arguments(declared: list[str] | tuple[str, ...], arguments: dict,
-                     held: list[str] | tuple[str, ...],
-                     declarations: dict | None = None) -> list[str]:
-    """Refuse a call whose arguments put it outside the held capabilities.
-
-    The grammar accepted the argument string; this checks the VALUE. Every
-    declared capability of the operation is resolved (an argument-bound
-    parameter takes the caller's value) and must be covered by some held
-    capability, using the one partial order `cap_order` defines. An empty
-    return means the call is within the caller's authority; otherwise each
-    string names the capability that is not held and the argument, when one
-    bound it.
-
-    `declarations` is the document's `capability -> {name: kind}` map
-    (`ir["capability_declarations"]`), which lets a declared resource dimension
-    be read back; omitting it leaves only the core parameter registry, exactly
-    as `cap_order` documents (fail closed).
-    """
-    held_caps = []
-    for text in held or ():
-        token = text.split("(", 1)[0]
-        held_caps.append(cap_order.parse_cap(text, (declarations or {}).get(token)))
-    arg_bound = declared_symbols(declared, declarations)
-    violations: list[str] = []
-    for cap in _resolved_capabilities(declared, arguments, declarations):
-        if cap_order.covered_by_any(held_caps, cap):
-            continue
-        bound = [
-            f"argument `{arg_bound[(cap.token, name)].ref}` = "
-            f"{arguments[arg_bound[(cap.token, name)].ref]!r}"
-            for name, _value in cap.params
-            if (cap.token, name) in arg_bound
-        ]
-        detail = f" ({'; '.join(bound)})" if bound else ""
-        violations.append(
-            f"`{cap.to_str()}`{detail} is not covered by the held capabilities "
-            f"({', '.join(held) or 'none'}): the call asks for authority the "
-            f"caller does not hold")
-    return violations
-
-
-def declared_symbols(declared: list[str] | tuple[str, ...],
-                     declarations: dict | None) -> dict[tuple[str, str],
-                                                         object]:
-    """The declared (token, parameter) pairs whose value is an argument-bound
-    symbol, so `refine_arguments` can name the argument in its refusal without
-    re-reading the declaration. Kept separate and pure for that one purpose."""
-    out: dict[tuple[str, str], object] = {}
-    for text in declared or ():
-        token = text.split("(", 1)[0]
-        cap = cap_order.parse_cap(text, (declarations or {}).get(token))
-        for name, value in cap.params:
-            if isinstance(value, cap_order.Symbol) and value.is_arg:
-                out[(token, name)] = value
-    return out

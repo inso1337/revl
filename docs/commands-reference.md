@@ -275,14 +275,18 @@ of revl source for a grammar-constrained decoder. No sources, except the
   `grammar/revl.gbnf` and `grammar/revl.ebnf` (run from a checkout). A parser
   change that alters the grammar fails `tests/test_source_grammar_1661.py` until
   `revl grammar --write` is run.
-- `--tool Service.operation` - the argument contract of one service operation,
-  derived from its declaration (issue #2704): the JSON Schema of its parameters,
-  the GBNF grammar rendered from that same schema, the JSON-Schema dialect, and
-  the digests. Needs the `.rvl` sources that declare the service. This is the
-  tool half of what a `validated` emission already gets for its return type; it
-  changes no runtime. The capability refinement it enables
-  (`revl.tool_schema.refine_arguments`) checks a call's argument VALUES against
-  the held capability's cone, which a grammar cannot do.
+- `--tool Service.operation` - the contract of one service operation, derived
+  from its declaration (issue #2704): the JSON Schema of its parameters, the
+  GBNF grammar rendered from that same schema, the JSON-Schema dialect, the
+  digests, and the operation's declared effect (`emission`, `capabilities`).
+  Needs the `.rvl` sources that declare the service. This is the tool half of
+  what a `validated` emission already gets for its return type; it changes no
+  runtime. The contract is DATA: it does not check argument values against a
+  held capability cone, which needs the caller's held set at the host's call
+  boundary, so no such check is claimed here. Its `"integer"` is unbounded JSON
+  while go, java and rust carry `Int` as an i64; that range divergence is
+  pre-existing (the return boundary's schema has it too) and is not repaired by
+  this command.
 
 ```bash
 revl grammar                                      # the short summary
