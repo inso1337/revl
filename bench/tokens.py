@@ -188,7 +188,7 @@ def _recorded_attempt_metrics(run: str) -> dict[tuple[str, str, int], dict]:
     out: dict[tuple[str, str, int], dict] = {}
     if not path.is_file():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue

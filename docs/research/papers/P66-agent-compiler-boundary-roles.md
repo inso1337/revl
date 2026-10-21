@@ -56,7 +56,7 @@ Tree: revl main at commit 45bec431f.
 | Rejection carries code, guarantee, fix; nine guarantees as pass/fail/unchecked | `tests/test_mcp_authoring_loop_1704.py::test_a_refusal_fails_its_guarantee_with_the_code_and_fix` | shipped | |
 | Initialize instructions name the loop in order | `tests/test_mcp_authoring_loop_1704.py` (module docstring, lines 1-15) | shipped | |
 | Authoring loop: scaffold, fillSpec, fmt, explain, admit | `docs/authoring-for-agents.md:17-132` | shipped | `fmt` is IR-equivalence gated |
-| About 1 ms admission | `README.md:197-199`; `bench/results/admission-latency.md:10-13` | shipped | Measured 0.165 ms median, 0.179 p90, 0.659 p99, 4000 samples, Apple M1 Max, Python 3.14.3. The README's "about a millisecond" rounds that number up about six-fold; the README should cite the tracked figure |
+| Admission latency, 0.165 ms median | `README.md:198-204`; `bench/results/admission-latency.md:12-14` | shipped | One tracked run of the Python gate, in-process `compile_source(..., manifest=running)` round-trip for a small candidate against a two-component running composition, Apple M1 Max, Python 3.14.3: 0.165 ms median, 0.179 p90, 0.659 p99, 4000 samples. Not MCP transport latency. The README cites this figure (after #2764) |
 | Guard test ceiling | `tests/test_admission_latency.py:40` (`CEILING_MS = 20.0`) | shipped | The test comment says the tight figure lives in the tracked result, CI only catches catastrophe |
 | Lighthouse: agent authors .rvl, refusal fed back, admitted component emitted to ts | `docs/v2.0-roadmap.md:1168-1217` | designed | Roadmap text says "Shape to validate"; no test or example runs the loop |
 
@@ -80,7 +80,7 @@ Tree: revl main at commit 45bec431f.
 ## Threats to validity and limits
 
 - Taxonomy completeness is asserted by the project's own doc, not tested; a fifth role (for example the agent as a peer across a federation boundary) might exist.
-- The latency number is one scenario on one machine; the README rounds it up to "about a millisecond", while the tracked figure is 0.165 ms. The tracked number is the one to state.
+- The latency number is one scenario on one machine: one tracked run of the Python gate, in-process, not MCP transport latency. The README states the tracked 0.165 ms median with that scope.
 - No evidence that agents perform better; the interface may shift effort from runtime to refusal loops.
 - The check only enforces what the language can express (G1-G9); extern host bodies sit outside it. The authoring doc says an untrusted author may not write an extern at all (`docs/authoring-for-agents.md:56-60`).
 - Role 2 live-call tests skip without the cordis-py runtime (`docs/mcp-bridge.md:9-11`).

@@ -18,7 +18,7 @@ SPEC.loader.exec_module(bench_run)
 def test_cline_runner_records_input_tokens_and_model_iterations(monkeypatch):
     fixture = ROOT / "tests" / "fixtures" / "cline-run-result.jsonl"
     completed = subprocess.CompletedProcess(
-        args=["cline"], returncode=0, stdout=fixture.read_text(), stderr=""
+        args=["cline"], returncode=0, stdout=fixture.read_text(encoding="utf-8"), stderr=""
     )
     monkeypatch.setattr(bench_run.subprocess, "run", lambda *args, **kwargs: completed)
 
@@ -108,7 +108,7 @@ def _prepare_main_case(tmp_path, monkeypatch, replies, compile_results,
 
     bench_run.main()
     rows = [json.loads(line) for line in
-            (results / "results.jsonl").read_text().splitlines()]
+            (results / "results.jsonl").read_text(encoding="utf-8").splitlines()]
     return rows, (results / "summary.md").read_text(encoding="utf-8")
 
 

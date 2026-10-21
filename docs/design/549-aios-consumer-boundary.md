@@ -111,7 +111,9 @@ The review's sentence is: *revl becomes the operating system for a portfolio of
 specialized local models, where each model makes only the decisions it is
 suited for and every consequential action passes through a typed,
 capability-checked runtime.* Five capabilities have to exist for it to be true.
-Each is adjudicated here with the item that owns each side.
+Each is adjudicated here with the item that owns each side. Apply [the
+substrate-boundary rule](../substrate-boundary.md) to each host action before
+making the all-actions claim.
 
 ### 3.1 The model portfolio
 

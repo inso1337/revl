@@ -195,11 +195,14 @@ lands until the same checker that guards human commits says yes. A rejected
 candidate cannot deploy, and every rejection carries the guarantee it violated
 plus the rewrite that fixes it. Tool safety annotations are derived from the
 method body rather than asserted by an author, so a tool cannot call itself
-read-only when it emits. In-memory admission runs in about a millisecond per
-candidate (its guard test holds the round-trip under a 20 ms regression
-ceiling; the tracked figure lives in
-[bench/results/admission-latency.md](bench/results/admission-latency.md)), fast
-enough to sit inside a generation loop.
+read-only when it emits. One tracked run of the Python gate measured the
+in-process `compile_source(..., manifest=running)` round-trip at a median of
+**0.165 ms** for a small candidate against a two-component running composition
+on an Apple M1 Max / Python 3.14.3. This is not MCP transport latency.
+`tests/test_admission_latency.py` holds a 20 ms ceiling, which is only a
+regression guard, not a performance claim. See the
+[measurement](bench/results/admission-latency.md) and a
+[worked MCP admission example](docs/mcp-admission-walkthrough.md).
 [docs/mcp-bridge.md](docs/mcp-bridge.md) has the shapes;
 [docs/guide-ai-agents.md](docs/guide-ai-agents.md) has the workflow.
 
