@@ -5351,15 +5351,16 @@ fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
     if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
     else { rn = rn.set(b, `self.${mangle(b)}`) }
   }
-  let rk = req_bindings(comp)
-  for (req of rk.keys()) { rn = rn.set(req, `self.${mangle(host_key(map_get(rk, req)))}`) }
+  for (raw of value_keys(value_field(comp, "requires"))) {
+    rn = rn.set(key_binding(raw), `self.${mangle(host_key(raw))}`)
+  }
   if (has_config(comp)) { rn = rn.set("config", "self.config") }
   return rn
 }
 fn method_undo_rename(comp: Any, method: Any) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
   for (b of binds(comp)) { rn = rn.set(b, `${b}_undo`) }
-  for (req of req_bindings(comp).keys()) { rn = rn.set(req, `${req}_undo`) }
+  for (raw of value_keys(value_field(comp, "requires"))) { let req = key_binding(raw) rn = rn.set(req, `${req}_undo`) }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) rn = rn.set(pn, `${pn}_undo`) }
   return rn
 }
@@ -5367,8 +5368,10 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   let pad = ind(indent)
   var out = []
   for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${mangle(b)}.clone();`) }
-  let rk = req_bindings(comp)
-  for (req of rk.keys()) { out = out.push(`${pad}let ${req}_undo = self.${mangle(host_key(map_get(rk, req)))}.clone();`) }
+  for (raw of value_keys(value_field(comp, "requires"))) {
+    let req = key_binding(raw)
+    out = out.push(`${pad}let ${req}_undo = self.${mangle(host_key(raw))}.clone();`)
+  }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
@@ -5609,8 +5612,11 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
   var out = []
   for (method of provide_methods(body, key)) {
     let orig = value_str(value_field(method, "name"))
-    var mn = mangle(orig)
-    if (use_mname) { mn = mangle(mname(orig)) }
+    // `_method_ident`: the rust spelling of a service method is its `_mname`
+    // spelling then the identifier ladder, on BOTH component paths. The simple
+    // path used to skip `_mname`, so a method named `drop` emitted `fn drop`
+    // (the destructor) where the reference emits `drop_` (issue #2391).
+    let mn = mangle(mname(orig))
     let svc_method = value_field(svc_methods, orig)
     var ps = []
     var vt: Map[Str, Str] = Map.empty()
@@ -5908,9 +5914,9 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
   var undoR: Map[Str, Str] = Map.empty()
   undoR = undoR.set(raw_bind, undo_name)
-  let rk = req_bindings(comp)
-  for (req of rk.keys()) {
-    out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(map_get(rk, req)))}.clone();`)
+  for (raw of value_keys(value_field(comp, "requires"))) {
+    let req = key_binding(raw)
+    out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(raw))}.clone();`)
     undoR = undoR.set(req, `${req}_undo`)
   }
   let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -5989,9 +5995,9 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     }
     let acq_src = render_expr(value_field(step, "acquire"), ctx)
     var undoR: Map[Str, Str] = Map.empty()
-    let rk = req_bindings(comp)
-    for (req of rk.keys()) {
-      out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(map_get(rk, req)))}.clone();`)
+    for (raw of value_keys(value_field(comp, "requires"))) {
+      let req = key_binding(raw)
+      out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(raw))}.clone();`)
       undoR = undoR.set(req, `${req}_undo`)
     }
     let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -6042,9 +6048,9 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     // timer (or a later step) can still use the original (no E0382). Mirrors
     // how `effect`/`let-effect` clone reqs into their undo closures.
     var tR: Map[Str, Str] = Map.empty()
-    let rk = req_bindings(comp)
-    for (req of rk.keys()) {
-      out = out.push(`${pad}let ${req}_t${n} = ${mangle(host_key(map_get(rk, req)))}.clone();`)
+    for (raw of value_keys(value_field(comp, "requires"))) {
+      let req = key_binding(raw)
+      out = out.push(`${pad}let ${req}_t${n} = ${mangle(host_key(raw))}.clone();`)
       tR = tR.set(req, `${req}_t${n}`)
     }
     out = out.push(`${pad}let _revl_timer_${n} = ${schedule}(${interval}, move || {`)
@@ -6176,9 +6182,9 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
       // every prior activation bind the compensate reads, so the `move`
       // closure owns copies the forward emit cannot have moved.
       var cR: Map[Str, Str] = Map.empty()
-      let rk = req_bindings(comp)
-      for (req of rk.keys()) {
-        out = out.push(`${pad}let ${req}_comp = ${mangle(host_key(map_get(rk, req)))}.clone();`)
+      for (raw of value_keys(value_field(comp, "requires"))) {
+        let req = key_binding(raw)
+        out = out.push(`${pad}let ${req}_comp = ${mangle(host_key(raw))}.clone();`)
         cR = cR.set(req, `${req}_comp`)
       }
       for (local of sorted_common(expr_var_names(cnode, Map.empty()).keys(), abinds)) {

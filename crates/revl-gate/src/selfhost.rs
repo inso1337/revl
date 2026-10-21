@@ -7072,9 +7072,8 @@ fn method_scope_rename(comp: Value, services: Value, ctx_: Ctx__m1) -> std::coll
             rn.insert(b.clone(), format!("self.{}", mangle(b.clone())));
         }
     }
-    let rk = req_bindings(comp.clone());
-    for req in { let mut ks: std::vec::Vec<String> = rk.keys().cloned().collect(); ks.sort(); ks } {
-        rn.insert(req.clone(), format!("self.{}", mangle(host_key(map_get(rk.clone(), req.clone())))));
+    for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+        rn.insert(key_binding(&raw), format!("self.{}", mangle(host_key(raw.clone()))));
     }
     if has_config(comp.clone()) {
         rn.insert(String::from("config"), String::from("self.config"));
@@ -7087,7 +7086,8 @@ fn method_undo_rename(comp: Value, method: Value) -> std::collections::HashMap<S
     for b in binds(comp.clone()) {
         rn.insert(b.clone(), format!("{}_undo", b));
     }
-    for req in { let mut ks: std::vec::Vec<String> = req_bindings(comp.clone()).keys().cloned().collect(); ks.sort(); ks } {
+    for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+        let req = key_binding(&raw);
         rn.insert(req.clone(), format!("{}_undo", req));
     }
     for p in value_list(value_field(method.clone(), String::from("params"))) {
@@ -7103,9 +7103,9 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     for b in binds(comp.clone()) {
         out.push(format!("{}let {}_undo = self.{}.clone();", pad, b, mangle(b.clone())));
     }
-    let rk = req_bindings(comp.clone());
-    for req in { let mut ks: std::vec::Vec<String> = rk.keys().cloned().collect(); ks.sort(); ks } {
-        out.push(format!("{}let {}_undo = self.{}.clone();", pad, req, mangle(host_key(map_get(rk.clone(), req.clone())))));
+    for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+        let req = key_binding(&raw);
+        out.push(format!("{}let {}_undo = self.{}.clone();", pad, req, mangle(host_key(raw.clone()))));
     }
     for p in value_list(value_field(method.clone(), String::from("params"))) {
         let pn = value_str(p.clone());
@@ -7355,10 +7355,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
     let mut out: Vec<String> = vec![];
     for method in provide_methods(body.clone(), key) {
         let orig = value_str(value_field(method.clone(), String::from("name")));
-        let mut mn = mangle(orig.clone());
-        if use_mname {
-            mn = mangle(mname(orig.clone()));
-        }
+        let mn = mangle(mname(orig.clone()));
         let svc_method = value_field(svc_methods.clone(), orig.clone());
         let mut ps: Vec<String> = vec![];
         let mut vt = std::collections::HashMap::new();
@@ -7616,9 +7613,9 @@ fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_
     out.push(format!("{}let {} = {}.clone();", pad, undo_name, bind));
     let mut undoR = std::collections::HashMap::new();
     undoR.insert(raw_bind.clone(), undo_name.clone());
-    let rk = req_bindings(comp.clone());
-    for req in { let mut ks: std::vec::Vec<String> = rk.keys().cloned().collect(); ks.sort(); ks } {
-        out.push(format!("{}let {}_undo = {}.clone();", pad, req, mangle(host_key(map_get(rk.clone(), req.clone())))));
+    for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+        let req = key_binding(&raw);
+        out.push(format!("{}let {}_undo = {}.clone();", pad, req, mangle(host_key(raw.clone()))));
         undoR.insert(req.clone(), format!("{}_undo", req));
     }
     let undox = render_expr(value_field(step.clone(), String::from("undo")), set_rn(ctx_.clone(), undoR.clone()));
@@ -7675,9 +7672,9 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         }
         let acq_src = render_expr(value_field(step.clone(), String::from("acquire")), ctx_.clone());
         let mut undoR = std::collections::HashMap::new();
-        let rk = req_bindings(comp.clone());
-        for req in { let mut ks: std::vec::Vec<String> = rk.keys().cloned().collect(); ks.sort(); ks } {
-            out.push(format!("{}let {}_undo = {}.clone();", pad, req, mangle(host_key(map_get(rk.clone(), req.clone())))));
+        for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+            let req = key_binding(&raw);
+            out.push(format!("{}let {}_undo = {}.clone();", pad, req, mangle(host_key(raw.clone()))));
             undoR.insert(req.clone(), format!("{}_undo", req));
         }
         let undox = render_expr(value_field(step.clone(), String::from("undo")), set_rn(ctx_.clone(), undoR.clone()));
@@ -7707,9 +7704,9 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         let interval = value_int(value_field(step.clone(), String::from("interval_ms")));
         let n = (tbase).checked_add(1i64).expect("revl: Int overflow");
         let mut tR = std::collections::HashMap::new();
-        let rk = req_bindings(comp.clone());
-        for req in { let mut ks: std::vec::Vec<String> = rk.keys().cloned().collect(); ks.sort(); ks } {
-            out.push(format!("{}let {}_t{} = {}.clone();", pad, req, n, mangle(host_key(map_get(rk.clone(), req.clone())))));
+        for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+            let req = key_binding(&raw);
+            out.push(format!("{}let {}_t{} = {}.clone();", pad, req, n, mangle(host_key(raw.clone()))));
             tR.insert(req.clone(), format!("{}_t{}", req, n));
         }
         out.push(format!("{}let _revl_timer_{} = {}({}, move || {{", pad, n, schedule, interval));
@@ -7785,9 +7782,9 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         let cnode = value_field(step.clone(), String::from("compensate"));
         if (!value_is_null(cnode.clone())) {
             let mut cR = std::collections::HashMap::new();
-            let rk = req_bindings(comp.clone());
-            for req in { let mut ks: std::vec::Vec<String> = rk.keys().cloned().collect(); ks.sort(); ks } {
-                out.push(format!("{}let {}_comp = {}.clone();", pad, req, mangle(host_key(map_get(rk.clone(), req.clone())))));
+            for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
+                let req = key_binding(&raw);
+                out.push(format!("{}let {}_comp = {}.clone();", pad, req, mangle(host_key(raw.clone()))));
                 cR.insert(req.clone(), format!("{}_comp", req));
             }
             for local in sorted_common({ let mut ks: std::vec::Vec<String> = expr_var_names(cnode.clone(), std::collections::HashMap::new()).keys().cloned().collect(); ks.sort(); ks }, abinds.clone()) {
