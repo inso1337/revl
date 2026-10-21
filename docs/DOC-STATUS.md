@@ -52,7 +52,7 @@ regenerated rather than edited.
 | README.md | needs-work | 0 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 74 |  |
+| arithmetic.md | needs-work | 76 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 1 |  |
 | audit-diff.md | needs-work | 14 |  |
@@ -64,7 +64,7 @@ regenerated rather than edited.
 | backend-ir.md | needs-work | 11 |  |
 | backends-roadmap.md | needs-work | 42 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
-| boundary-policy.md | needs-work | 26 |  |
+| boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
 | capabilities.md | needs-work | 46 |  |
 | capability-attenuation.md | needs-work | 25 |  |
