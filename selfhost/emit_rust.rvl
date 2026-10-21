@@ -7080,6 +7080,15 @@ pub fn emit_rust_src(ir: Any) -> Str {
   out = out.concat(host_key_collision_markers(ir)).concat(deferred_test_markers(ir))
   out = out.concat(required_stream_markers(ir))
   out = out.concat(namespaced_key_markers(ir))
+  // A routed require needs a per-realm router struct and live-worker lookup.
+  // This port does not emit those yet; do not leave the plain require above
+  // looking complete (issue #2796).
+  for (comp of components) {
+    let routes = value_field(comp, "routes")
+    for (key of value_keys(routes)) {
+      out = out.push(`<<UNSUPPORTED-ROUTED-REQUIRE:${value_str(value_field(comp, "name"))}.${key}>>`)
+    }
+  }
   return rstrip(out.join(newline())).concat(newline())
 }
 

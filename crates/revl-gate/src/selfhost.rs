@@ -8641,7 +8641,7 @@ pub fn emit_rust_src(ir: Value) -> String {
         out.extend((revl_teardown_preamble()).iter().cloned());
     }
     out.extend((declared_compensate_marker(ir.clone())).iter().cloned());
-    for comp in components {
+    for comp in components.clone() {
         out.extend((emit_component_auto(comp.clone(), services.clone(), ir.clone())).iter().cloned());
     }
     out.extend((emit_bridge(ir.clone())).iter().cloned());
@@ -8649,6 +8649,12 @@ pub fn emit_rust_src(ir: Value) -> String {
     out = (out.revl_concat(&host_key_collision_markers(ir.clone()))).revl_concat(&deferred_test_markers(ir.clone()));
     out.extend((required_stream_markers(ir.clone())).iter().cloned());
     out.extend((namespaced_key_markers(ir.clone())).iter().cloned());
+    for comp in components {
+        let routes = value_field(comp.clone(), String::from("routes"));
+        for key in value_keys(routes.clone()) {
+            out.push(format!("<<UNSUPPORTED-ROUTED-REQUIRE:{}.{}>>", value_str(value_field(comp.clone(), String::from("name"))), key));
+        }
+    }
     return rstrip__m1(&(out.revl_join(&newline()))).revl_concat(&newline());
 }
 

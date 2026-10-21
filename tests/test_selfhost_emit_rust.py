@@ -1495,6 +1495,17 @@ def test_a_reference_refusal_is_named_by_the_port(emitted, reference, rel, refus
     assert marker in emitted["emit_rust_src"](ir)
 
 
+def test_a_routed_require_is_named_until_the_router_is_ported(emitted, reference):
+    """The port must not emit an ordinary require after dropping its route."""
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_py_placement.rvl")])
+    expected = reference.emit(ir)
+    actual = emitted["emit_rust_src"](ir)
+
+    assert "struct RevlRouterRouterWorker" in expected
+    assert "struct RevlRouterRouterWorker" not in actual
+    assert "<<UNSUPPORTED-ROUTED-REQUIRE:Router.worker>>" in actual
+
+
 def test_an_unvalidated_operation_is_not_named(emitted, reference, tmp_path):
     """The document without `validated` emits on the reference, and the port
     agrees byte for byte: the modifier alone carries the refusal."""
