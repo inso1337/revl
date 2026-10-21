@@ -13,7 +13,6 @@ summary over fixture log strings, and the shell wiring over a stub `lake`.
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import sys
