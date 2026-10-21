@@ -15,11 +15,16 @@ that builds the component header used to read only the trailing segment, so the
 emitters never saw the qualification at all.
 
 The issue's exit test is "each namespaced source matches the reference bytes on
-py, rust and java, with no marker". The rust and java emitters still have loud,
-named gaps that are not this issue's: rust has no `lifecycle test` or routed
-requirement lowering, and java's legacy component path has no `requires`
-support. Those documents are therefore compared on the tiers that cover them;
-the rest of each source is byte-compared where the tier covers it.
+py, rust and java, with no marker". py covers all four of the issue's sources.
+rust and java do not: neither ports a `lifecycle test` section, which keeps
+ISSUE_REPRODUCER, TWO_NAMESPACES and KEYWORD_PARTS off both tiers; rust also
+drops a routed requirement (issue #2796), which keeps ROUTED_NAMESPACED off
+rust; and java's legacy component path carries no `requires`, which keeps
+TWO_NAMESPACES and ROUTED_NAMESPACED off java. On those pairs the document
+carries `<<UNSUPPORTED-NAMESPACED-KEY:...>>` for every key the tier could not
+verify, beside the marker naming the actual unported construct, so the
+difference is loud rather than silent. Every other source is byte-compared on
+each tier whose covered slice takes it.
 """
 
 from __future__ import annotations
@@ -37,7 +42,6 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import compile_files  # noqa: E402
-from revl.errors import RevlError  # noqa: E402
 
 import test_namespaced_key_emit_1914 as namespaced  # noqa: E402
 
@@ -99,10 +103,12 @@ component C provides s: S, front: Front {
 """
 
 #: The documents each tier's covered self-host slice can compare byte for byte.
+#: rust and java leave the four sources out that they cannot emit whole; the
+#: module docstring names which and why.
 COVERED = {
     "py": (namespaced.ISSUE_REPRODUCER, namespaced.KEYWORD_PARTS,
            namespaced.ROUTED_NAMESPACED, namespaced.WASM_PAIR, PROVIDE_ONLY,
-           VALIDATED_NS, BOX_METHOD),
+           VALIDATED_NS, BOX_METHOD, namespaced.TWO_NAMESPACES),
     "rust": (namespaced.WASM_PAIR, PROVIDE_ONLY, BOX_METHOD),
     "java": (PROVIDE_ONLY, BOX_METHOD),
 }
@@ -169,7 +175,7 @@ def _source_ir(source: str):
 
 
 @pytest.mark.parametrize("tier", sorted(COVERED))
-@pytest.mark.parametrize("source", range(7), ids=lambda i: "doc%d" % i)
+@pytest.mark.parametrize("source", range(8), ids=lambda i: "doc%d" % i)
 def test_emitter_matches_the_reference_on_a_namespaced_source(
         emitted, reference, tier, source):
     """A namespaced component document emits the reference's bytes, with no

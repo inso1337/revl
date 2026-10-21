@@ -4700,7 +4700,7 @@ fn fault_config_repr(cfg: Any) -> Str {
 
 // `_host_key` (issue #1914): a qualified provision key (`acme::greeter`) is a
 // legal wiring identity but never a legal host identifier, so it is mangled
-// into one here — and only here. An unqualified key is returned unchanged, so a
+// into one here, and only here. An unqualified key is returned unchanged, so a
 // document that uses no namespacing emits exactly as before:
 //
 //   _host_key(k) = k                                    if "::" not in k

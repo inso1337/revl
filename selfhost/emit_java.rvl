@@ -3841,7 +3841,7 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
 
 // `_host_key` (issue #1914): a qualified provision key (`acme::greeter`) is a
 // legal wiring identity but never a legal Java identifier, so it is mangled
-// into one here — and only here. An unqualified key is returned unchanged, so a
+// into one here, and only here. An unqualified key is returned unchanged, so a
 // document that uses no namespacing emits exactly as before:
 //
 //   _host_key(k) = k                                    if "::" not in k
@@ -3891,6 +3891,34 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
         if (prior != "") {
           if (prior != k) { out = out.push(`<<UNSUPPORTED-HOST-KEY-COLLISION:${k}>>`) }
         } else { seen = seen.set(host, k) }
+      }
+    }
+  }
+  return out
+}
+
+// A component the emitter answers with a named `<<UNSUPPORTED-component-nonsimple>>`
+// marker: neither the simple path nor the modern subset takes it.
+fn has_nonsimple_component(ir: Any) -> Bool {
+  for (c of value_list(value_field(ir, "components"))) {
+    if (!component_simple_ok(c) && !(modern_supported(c) && needs_modern_subset(c))) { return true }
+  }
+  return false
+}
+
+// Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
+// as a mangled host identifier, and the port now mangles it too (issue #2394).
+// The marker below is not a claim that the key is unported; it names a key the
+// port could NOT prove against the reference bytes because the document was
+// refused elsewhere. See the call site.
+fn namespaced_key_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (c of value_list(value_field(ir, "components"))) {
+    let cname = value_str(value_field(c, "name"))
+    for (table of ["requires", "provides"]) {
+      for (k of value_keys(value_field(c, table))) {
+        let mark = `<<UNSUPPORTED-NAMESPACED-KEY:${cname}.${k}>>`
+        if (k.indexOf("::") >= 0 && !list_contains(out, mark)) { out = out.push(mark) }
       }
     }
   }
@@ -4013,17 +4041,29 @@ pub fn emit_java_src(ir: Any) -> Str {
   // before the deferred in-file test section (one named marker per test
   // instead of silence, issue #1123), and a required stream, refused only while
   // the components are emitted, comes after it.
-  out = out.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
+  var refusals = deferred_emission_markers(ir).concat(validated_markers(ir))
   // issue #2492: an extern with no `@java` body. The reference raises this one
   // from inside the extern block, and that block is emitted while the class
   // body is built, which the reference reaches BEFORE it renders components.
   // So this marker belongs with the two whole-document refusals above rather
   // than after them: it precedes the deferred in-file test section and the
   // required-stream refusal, both of which the reference reaches later.
-  out = out.concat(extern_no_java_body_markers(ir))
-  out = out.concat(deferred_test_markers(ir))
-  out = out.concat(required_stream_markers(ir))
-  out = out.concat(host_key_collision_markers(ir))
+  refusals = refusals.concat(extern_no_java_body_markers(ir))
+  refusals = refusals.concat(deferred_test_markers(ir))
+  refusals = refusals.concat(required_stream_markers(ir))
+  refusals = refusals.concat(host_key_collision_markers(ir))
+  // Issue #2394: a namespaced key's host spelling is PROVEN only when the port
+  // emits the whole document, because only then are its bytes comparable with
+  // the reference's. A document that already hit a refusal above, or that the
+  // legacy component path answers with `<<UNSUPPORTED-component-nonsimple>>`
+  // (no `requires` support among others), reaches those bytes nowhere, so it
+  // names the namespaced keys it could not verify instead of letting that
+  // difference stay silent. A document the port emits whole draws no such
+  // marker: byte parity proves its keys.
+  if (refusals.length() > 0 || has_nonsimple_component(ir)) {
+    refusals = refusals.concat(namespaced_key_markers(ir))
+  }
+  out = out.concat(refusals)
   return rstrip(out.join(newline())).concat(newline())
 }
 

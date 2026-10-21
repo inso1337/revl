@@ -84,8 +84,9 @@ def test_every_refusal_document_is_marked_by_the_port(tiers, tier):
 
 
 # Issue #2389: on py, rust and java a namespaced provision key either emits the
-# reference bytes or carries a named marker. The ports do not mangle the key
-# yet, so each one names it (`<<UNSUPPORTED-NAMESPACED-KEY:Comp.key>>`).
+# reference bytes or carries a named marker. Each tier mangles the key as the
+# reference does (issue #2394), so the marker names only a key whose document
+# the tier could not emit whole (`<<UNSUPPORTED-NAMESPACED-KEY:Comp.key>>`).
 NAMESPACED_TIERS = ("py", "rust", "java")
 NAMESPACED_SOURCES = ("ISSUE_REPRODUCER", "TWO_NAMESPACES",
                       "ROUTED_NAMESPACED", "KEYWORD_PARTS")

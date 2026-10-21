@@ -652,9 +652,10 @@ def test_an_extern_with_a_java_body_emits_no_refusal(emitted, reference, tmp_pat
     assert "<<UNSUPPORTED-EXTERN-NO-JAVA-BODY" not in emitted["emit_java_src"](ir)
 
 
-# A namespaced key no longer draws a marker (issue #2394: the port mangles it
-# as the reference does), so a document with a deferred call and a namespaced
-# key surfaces only the DEFERRED refusal.
+# The reference refuses a deferred emission before it looks at host keys, so a
+# document with both must surface the DEFERRED marker first on the port. The
+# namespaced key keeps its marker too: the reference bytes are unreachable here,
+# so the port names the key it could not verify (issue #2394).
 NAMESPACED_AND_DEFERRED = """extern emission deferred fn deliver(sink: Str, msg: Str)
   = @py { return } = @ts { return; } = @rs { () } = @go { return } = @java { return; }
 service Ops { emission fn enqueue(sink: Str, msg: Str) }
@@ -666,7 +667,7 @@ component Agent provides acme::ops: Ops {
 """
 
 
-def test_a_deferred_call_is_named_in_a_namespaced_document(
+def test_a_deferred_call_is_named_before_a_namespaced_key(
         emitted, reference, tmp_path):
     path = tmp_path / "ns_and_deferred.rvl"
     path.write_text(NAMESPACED_AND_DEFERRED)
@@ -675,7 +676,8 @@ def test_a_deferred_call_is_named_in_a_namespaced_document(
         reference.emit(ir)
     got = emitted["emit_java_src"](ir)
     markers = re.findall(r"<<UNSUPPORTED-[A-Z-]+:", got)
-    assert markers == ["<<UNSUPPORTED-DEFERRED-EMISSION:"], markers
+    assert "<<UNSUPPORTED-NAMESPACED-KEY:" in markers, markers
+    assert markers[0] == "<<UNSUPPORTED-DEFERRED-EMISSION:", markers
 
 
 # issue #2408: the reference refuses a deferred call and a `validated` crossing
