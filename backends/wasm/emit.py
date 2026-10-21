@@ -1369,8 +1369,16 @@ class _ComponentEmitter:
         if not isinstance(node, dict):
             return node
         kind = node.get("kind")
+        # The frontend's additive `widen` marker (docs/arithmetic.md) sits on
+        # the OPERAND, so a rewrite that rebuilds the node must carry it or the
+        # v3 engine below sees two widths and refuses a comparison this tier
+        # already lowers. `kind: lit/field/index/builtin` fall through the
+        # dict-comprehension return, which copies it; these two are rebuilt.
+        # The marker rides the SAME dict-display statement, so the statement
+        # ledger does not grow a branch no corpus document reaches.
         if kind == "name":
-            return {"kind": "var", "name": node.get("id")}
+            return {"kind": "var", "name": node.get("id"),
+                    **({"widen": node["widen"]} if node.get("widen") else {})}
         if kind == "fn":
             name = _ident(node.get("name"), f"{where}: function")
             if name not in self.fn_by_name and name in self.externs:
@@ -1391,6 +1399,7 @@ class _ComponentEmitter:
                 "callee": {"kind": "var", "name": name},
                 "args": [self._to_v3(arg, scope, types, where)
                          for arg in node.get("args") or []],
+                **({"widen": node["widen"]} if node.get("widen") else {}),
             }
         if kind == "format":
             parts: list[list] = []
