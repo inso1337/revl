@@ -166,18 +166,35 @@ fn emit_ir(ir: Any, tier: Str) -> Str {
 // beside emitted code (a test driver, a host stub, a namespaced key) keeps its
 // in-bytes marker: that is the convention `tools/selfhost_differential_survey.py`
 // reads as a port refusal, and the emitted program is otherwise the reference's.
+// `<<UNSUPPORTED-COMPONENT:parallel-emit>>` is one such SECTION marker (the py
+// porter's fan-out statement), not a dropped component, so it is excluded by
+// its payload. The chosen marker is the EARLIEST in the output, which is the
+// first shape the emitter could not render.
+fn marker_from(out: Str, p: Str, from: Int) -> Int {
+  let rest = out.slice(from, out.length())
+  let k = rest.indexOf(p)
+  return k < 0 ? 0 - 1 : from + k
+}
+
 fn dropped_shape_marker(out: Str) -> Str {
+  var best = ""
+  var bestat = 0 - 1
   for (p of ["<<UNSUPPORTED-LIVE-TIER:", "<<UNSUPPORTED-COMPONENT:",
              "<<UNSUPPORTED-component-nonsimple:"]) {
-    let at = out.indexOf(p)
-    if (at >= 0) {
+    var at = marker_from(out, p, 0)
+    while (at >= 0) {
       let rest = out.slice(at, out.length())
       let close = rest.indexOf(">>")
       let mark = close < 0 ? p : rest.slice(0, close + 2)
-      return mark
+      if ((mark != "<<UNSUPPORTED-COMPONENT:parallel-emit>>")
+          && ((bestat < 0) || (at < bestat))) {
+        best = mark
+        bestat = at
+      }
+      at = marker_from(out, p, at + 1)
     }
   }
-  return ""
+  return best
 }
 
 fn dropped_shape_refusal(out: Str, tier: Str) -> Str {

@@ -3734,6 +3734,40 @@ def test_a_component_template_may_interpolate_a_compound_value(
     assert compile_to(source, "py") == reference_emit["py"](compile_source(source))
 
 
+# Issue #2459 review: an APPLIED generic is not answered by the reference's
+# `_interp_refusal` (its `types.get(inferred)` lookup misses `S[Int]`/`R[Int]`),
+# so it is admitted. Dispatching on the head name refused it.
+_APPLIED_GENERIC_INTERP = {
+    "variant": "type S[T] = A(T) | B\nfn show(s: S[Int]) -> Str { return `${s}` }\n",
+    "record": "type R[T] = { x: T }\nfn show(r: R[Int]) -> Str { return `${r}` }\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_APPLIED_GENERIC_INTERP))
+def test_an_applied_generic_template_operand_is_admitted(
+        compile_to, reference_emit, name):
+    source = _APPLIED_GENERIC_INTERP[name]
+    assert not compile_to(source, "py").startswith("REFUSED|")
+    assert compile_to(source, "py") == reference_emit["py"](compile_source(source))
+
+
+# Issue #2446 review: `<<UNSUPPORTED-COMPONENT:parallel-emit>>` is the py
+# porter's marker for ONE fan-out statement inside an otherwise emitted
+# component, not a dropped component. The whole-shape refusal must not match it.
+_PARALLEL_EMIT = (
+    "extern emission async fn send(msg: Str) -> Int\n"
+    "  = @py { return 1 } = @ts { return 1; } = @rs { 1 } = @go { return 1 }"
+    " = @java { return 1; }\n\n"
+    "component C {\n  await emit send(\"a\")\n  await emit send(\"b\")\n}\n"
+)
+
+
+def test_a_component_section_marker_is_not_a_dropped_component(compile_to):
+    got = compile_to(_PARALLEL_EMIT, "py")
+    assert not got.startswith("REFUSED|"), got[:160]
+    assert "<<UNSUPPORTED-COMPONENT:parallel-emit>>" in got, got[:300]
+
+
 # Issue #2447: the reference refuses a variant case call with the wrong number
 # of payload arguments. The documents are the reference's own table,
 # tests/test_case_call_arity.py; `selfhost/*.rvl` does not count the arguments

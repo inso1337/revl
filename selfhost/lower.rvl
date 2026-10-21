@@ -14695,6 +14695,11 @@ fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
 // operand may be interpolated. Answered only for types this walk can PROVE
 // compound — an unknown, `Any`, a generic parameter and every scalar pass
 // through, which is the reference's own gradual silence.
+//
+// A NOMINAL record or variant is answered only for its BARE spelling: the
+// reference looks the type up exactly (`types.get(inferred)`), so an applied
+// generic (`R[Int]`, `S[Int]`) misses the table and is ADMITTED (issue #2459
+// review). Dispatching on the head name refused it — a false rejection.
 fn tk_interp_reason(t: Str, env: List[Bind]) -> Str {
   if (t == "" || t == "Any" || t == "Value") { return "" }
   if (t.startsWith("{")) { return "a record" }
@@ -14703,6 +14708,7 @@ fn tk_interp_reason(t: Str, env: List[Bind]) -> Str {
   if (h == "List" || h == "Map" || h == "Set" || h == "Opt" || h == "Result") {
     return "a compound value"
   }
+  if (tkp_args(t).length() > 0) { return "" }
   if (ty_variant_decl(h, env)) { return "a variant" }
   if (tk_record_base(h, env) || tenv_get(env, "grec ".concat(h)) != "") {
     return "a record"
