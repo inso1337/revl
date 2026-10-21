@@ -492,13 +492,18 @@ with the arguments it is handed, so the emitter classifies the callee and refuse
 any other shape with the named `CeilingUnattributable`, naming the capability and
 the shape: a value-position wrapper (it never reaches the seam at all), a
 payload-transforming wrapper (the meter would charge the outer arguments, not the
-extern's payload), or a wrapper that crosses the extern more than once in one
-invocation, including inside a loop or a conditional. Emitting those would leave
-the declaration silently unenforced, so a declared budget is a compile-time
-contract rather than a runtime promise. In statement form the exact pass-through
-wrapper (`emit go(x)` where `fn go(x) = call(x)`) is the one wrapper shape that
-stays metered; the same wrapper in value position is refused like any other
-value-position emission.
+extern's payload), a wrapper that crosses the extern more than once in one
+invocation, including inside a loop or a conditional, or a wrapper that holds the
+budgeted extern as a function VALUE (`let f = call return f(x)`,
+`apply(call)`), which hides the callee the meter would charge behind a binding or
+a parameter. Emitting those would leave the declaration silently unenforced, so a
+declared budget is a compile-time contract rather than a runtime promise. In
+statement form the exact pass-through wrapper (`emit go(x)` where
+`fn go(x) = call(x)`) is the one wrapper shape that stays metered; the same
+wrapper in value position is refused like any other value-position emission.
+The contract now covers every shape a callee can take: a direct named call and
+the statement-form identity wrapper are metered, a function value is refused,
+and every other wrapper shape is refused rather than emitted.
 
 Not enforced by this slice, tracked rather than implied:
 

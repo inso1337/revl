@@ -1538,6 +1538,7 @@ _SHAPE_MULTIPLE = "more than one call"
 _SHAPE_LOOPED = "a call inside a loop"
 _SHAPE_CONDITIONAL = "a conditional call"
 _SHAPE_RECURSIVE = "a recursive call"
+_SHAPE_FUNCTION_VALUE = "a call through a function value"
 
 
 def _identity_payload(args: Any, params: list) -> bool:
@@ -1564,6 +1565,51 @@ def _call_callee_name(node: Any) -> Optional[str]:
                 and isinstance(callee.get("name"), str):
             return callee["name"]
     return None
+
+
+def _value_reference_ceilings(name: str, externs: dict,
+                              functions: dict) -> tuple:
+    """The ceiling declarations a function VALUE named `name` reaches.
+
+    `let f = call` and `apply(call)` hand a budgeted extern onward as a value,
+    so the crossing happens through the callee the value is applied to and the
+    runtime meter cannot attribute it to the enclosing wrapper's arguments. A
+    local function used this way contributes the externs its body reaches, the
+    same resolution `_function_ceiling_caps` applies to a named call. The tuple
+    is empty for a parameter or local that names no budgeted extern."""
+    if name in externs:
+        return tuple(_ceiling_capabilities(externs[name].get("capabilities")))
+    reached: set = set()
+    _resolve_reach(name, externs, functions, reached, set())
+    caps: list = []
+    for extern_name in sorted(reached):
+        for spelling in _ceiling_capabilities(
+                externs[extern_name].get("capabilities")):
+            if spelling not in caps:
+                caps.append(spelling)
+    return tuple(caps)
+
+
+def _function_value_refs(node: Any, out: set) -> None:
+    """Collect every name a function body uses as a value (a `kind: "var"`
+    node), skipping inverse slots: `undo`/`compensate` run on unwind, not as
+    part of the crossing the budget meters, matching `_collect_extern_reach`.
+
+    The set feeds `_function_ceiling_shapes` against the caps table, so a
+    function that only reaches a budgeted extern through a value is classified
+    instead of silently skipped. Passing it through the CAPS table rather than
+    adding value references to `_collect_extern_reach` keeps the reach resolver
+    on named calls, the path a runtime crossing can be attributed to."""
+    if isinstance(node, dict):
+        if node.get("kind") == "var" and isinstance(node.get("name"), str):
+            out.add(node["name"])
+            return
+        for key, value in node.items():
+            if key not in _INVERSE_KEYS:
+                _function_value_refs(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _function_value_refs(item, out)
 
 
 def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
@@ -1603,6 +1649,16 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
                 visit(item, looped, conditional)
             return
         if not isinstance(node, dict):
+            return
+        if node.get("kind") == "var" and isinstance(node.get("name"), str):
+            # a budgeted extern, or a local function that reaches one, handed
+            # onward as a VALUE (`let f = call`, `apply(call)`, a list/record
+            # element): the crossing happens through whatever callee the value
+            # is applied to, so this wrapper's own arguments are not the ones
+            # the meter charges. The callee-position var of a named call is the
+            # attributable path and never reaches this branch.
+            if _value_reference_ceilings(node["name"], externs, functions):
+                miss(_SHAPE_FUNCTION_VALUE)
             return
         target = _call_callee_name(node)
         if target is not None:
@@ -1684,17 +1740,28 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
     return crossings, reason
 
 
-def _function_ceiling_shapes(functions: list, externs: list) -> dict:
+def _function_ceiling_shapes(functions: list, externs: list,
+                             ceilings: dict) -> dict:
     """Map each local function whose emission cannot be metered exactly to the
-    shape reason that refuses it (issue #2688).
+    shape reason that refuses it and the ceiling declarations to name (issue
+    #2688).
 
-    Only a function that reaches a budgeted extern appears. An exact
-    pass-through (the identity wrapper `fn go(x) = call(x)`) is ABSENT, so its
-    emission keeps the metered shape the existing tests pin; the other shapes
-    are refused by :class:`CeilingUnattributable` at the firing site."""
+    A function appears when it reaches a budgeted extern by name (the paths
+    `_function_ceiling_caps` already resolves) OR when its body holds such a
+    function as a VALUE (`_function_value_refs`, fed against `ceilings`): a
+    value reference is invisible to the reach resolver, so the previous skip
+    left `let f = call return f(x)` with no reason and the emit-site guard never
+    fired. An exact pass-through (the identity wrapper `fn go(x) = call(x)`) is
+    ABSENT, so its emission keeps the metered shape the existing tests pin; the
+    other shapes are refused by :class:`CeilingUnattributable` at the firing
+    site, which names the capabilities carried beside the reason."""
     externs_by_name = {ext["name"]: ext for ext in externs or []}
     functions_by_name = {fn["name"]: fn for fn in functions or []
                          if isinstance(fn.get("name"), str)}
+    budgeted_externs = {
+        name for name, ext in externs_by_name.items()
+        if _ceiling_capabilities(ext.get("capabilities"))}
+    budgeted_names = budgeted_externs | set(ceilings)
     shapes: dict = {}
     for fn in functions or []:
         name = fn.get("name")
@@ -1703,14 +1770,24 @@ def _function_ceiling_shapes(functions: list, externs: list) -> dict:
         reached: set = set()
         _collect_extern_reach(fn.get("body"), externs_by_name,
                               functions_by_name, reached, {name})
-        if not any(_ceiling_capabilities(
-                externs_by_name[other].get("capabilities"))
-                for other in reached):
+        reached_budgeted = {other for other in reached
+                            if _ceiling_capabilities(
+                                externs_by_name[other].get("capabilities"))}
+        value_refs: set = set()
+        _function_value_refs(fn.get("body"), value_refs)
+        if not reached_budgeted and not (value_refs & budgeted_names):
             continue
         _crossings, reason = _wrapper_ceiling_shape(
             fn, externs_by_name, functions_by_name)
-        if reason is not None:
-            shapes[name] = reason
+        if reason is None:
+            continue
+        caps: list = list(ceilings.get(name, ()))
+        for ref in sorted(value_refs & budgeted_names):
+            for spelling in _value_reference_ceilings(
+                    ref, externs_by_name, functions_by_name):
+                if spelling not in caps:
+                    caps.append(spelling)
+        shapes[name] = (reason, tuple(caps))
     return shapes
 
 
@@ -1730,8 +1807,11 @@ class _ComponentEmitter:
         self._function_ceilings: dict = dict(function_ceilings or {})
         # the wrapper shapes the runtime meter cannot attribute
         # (`_function_ceiling_shapes`): a value-position, payload-transforming,
-        # multi-call, looped, conditional or recursive wrapper is refused by
-        # name at the firing site instead of emitting an unmeterable crossing.
+        # multi-call, looped, conditional, recursive or function-value wrapper
+        # is refused by name at the firing site instead of emitting an
+        # unmeterable crossing. Each entry carries the reached declarations
+        # beside the reason, since a function-value reference is absent from
+        # `_function_ceilings` by construction.
         self._function_shapes: dict = dict(function_shapes or {})
         # the externs `declared_crossing` decorates (computer-use crossings):
         # they register their own compensation, so a provide-method site does
@@ -2924,10 +3004,12 @@ class _ComponentEmitter:
 
         A wrapper the meter cannot attribute exactly is REFUSED here instead
         (`_function_ceiling_shapes`): a payload-transforming wrapper would be
-        charged on the outer args, and a multi-call, looped, conditional or
+        charged on the outer args, a multi-call, looped, conditional or
         recursive wrapper would be charged for one crossing however many it
-        makes. Emitting it would leave the declaration silently unenforced, so
-        the fail-closed choice is a named emit-time refusal (issue #2688)."""
+        makes, and a wrapper holding the extern as a function value (`let f =
+        call`, `apply(call)`) hides the callee the meter would charge entirely.
+        Emitting it would leave the declaration silently unenforced, so the
+        fail-closed choice is a named emit-time refusal (issue #2688)."""
         self.uses.add("extern_emit")
         raw_name = expr.get("name")
         name = _ident(raw_name, f"{where}: function")
@@ -2937,9 +3019,15 @@ class _ComponentEmitter:
             caps = tuple(direct.get("capabilities") or ())
         else:
             caps = self._function_ceilings.get(raw_name, ())
-            shape = self._function_shapes.get(raw_name)
-            if caps and shape is not None:
-                self._refuse_unattributable(raw_name, caps, shape)
+            entry = self._function_shapes.get(raw_name)
+            if entry is not None:
+                # a function-value reference is invisible to the reach
+                # resolver, so `caps` is empty for that shape; the reason
+                # carries the declarations it reaches so the refusal still
+                # names the ceiling it would leave unenforced
+                reason, reached_caps = entry
+                self._refuse_unattributable(
+                    raw_name, caps or reached_caps, reason)
         budget = (f", caps={caps!r}"
                   if _ceiling_capabilities(caps) else "")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
@@ -2990,8 +3078,10 @@ class _ComponentEmitter:
         if decl is not None:
             return decl.get("class") == "emission" and name not in (self.deferred or {})
         caps = self._function_ceilings.get(name)
-        if caps:
-            self._refuse_unattributable(name, caps, _SHAPE_VALUE_POSITION)
+        entry = self._function_shapes.get(name)
+        if caps or entry is not None:
+            self._refuse_unattributable(
+                name, caps or entry[1], _SHAPE_VALUE_POSITION)
         return False
 
     def _emission_fire(self, expr: dict, where: str) -> str:
@@ -6427,7 +6517,8 @@ def emit(ir: dict) -> str:
     # issue #2688: the wrappers whose emission the runtime meter cannot
     # attribute exactly, refused by name at the firing site. Empty when every
     # wrapper reaching a budgeted extern is an exact pass-through.
-    function_shapes = _function_ceiling_shapes(functions, externs)
+    function_shapes = _function_ceiling_shapes(
+        functions, externs, function_ceilings)
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),

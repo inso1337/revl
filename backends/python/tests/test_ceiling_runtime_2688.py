@@ -527,6 +527,57 @@ def test_a_conditional_expression_crossing_is_refused_at_emit_time():
     assert host.CALLS == [], "an emit-time refusal never reaches the host"
 
 
+#: The three function-value bypasses: the extern is not the callee of any named
+#: call, so `_call_callee_name` never saw it and the wrapper was emitted with no
+#: caps argument at all.
+_EXTERN_ALIAS = 'fn go(x: Str) -> Int { let f = call return f(x) }'
+_WRAPPER_ALIAS = (
+    "fn h(x: Str) -> Int = call(x)\n"
+    "fn go(x: Str) -> Int { let g = h return g(x) }")
+_EXTERN_VALUE = (
+    "fn apply(f: (Str) -> Int) -> Int { return f(\"a\") }\n"
+    "fn go(x: Str) -> Int = apply(call)")
+
+
+def _assert_function_value_refusal(error, host) -> None:
+    assert isinstance(error, emit.CeilingUnattributable)
+    assert error.capability == "net(calls=1)"
+    assert error.shape == "a call through a function value"
+    assert "a call through a function value" in str(error)
+    assert "net(calls=1)" in str(error)
+    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+
+
+def test_an_extern_alias_is_refused_at_emit_time():
+    """`let f = call return f(x)` binds the budgeted extern to a local and
+    calls through the binding. No named call names the extern, so the reach
+    resolver found nothing and the wrapper emission carried no caps. The
+    function value is refused by name instead."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")', prelude=_EXTERN_ALIAS)
+    _assert_function_value_refusal(error, host)
+
+
+def test_a_wrapper_alias_is_refused_at_emit_time():
+    """`let g = h return g(x)` reaches the extern through a local function
+    held as a value. `h` is an exact pass-through when called directly, but a
+    value alias hides the callee from the meter, so the enclosing wrapper is
+    refused by name."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")', prelude=_WRAPPER_ALIAS)
+    _assert_function_value_refusal(error, host)
+
+
+def test_an_extern_passed_as_an_argument_is_refused_at_emit_time():
+    """`apply(call)` hands the budgeted extern to another function, which calls
+    it through the parameter. The callee the meter is handed is the wrapper,
+    and the extern itself never reaches the seam, so the enclosing wrapper is
+    refused by name."""
+    error, host = _refusal(
+        "net(calls=1)", '  emit go("a")', prelude=_EXTERN_VALUE)
+    _assert_function_value_refusal(error, host)
+
+
 def test_the_statement_form_identity_wrapper_is_still_metered():
     """The control for the three refusals: the exact pass-through wrapper is
     still emitted with the reached declaration and metered by the runtime."""
