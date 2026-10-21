@@ -3837,6 +3837,59 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
   return out
 }
 
+// `_host_key` (issue #1914): a namespaced wiring key (`acme::greeter`) mangles
+// to one Java identifier (`__`-joined, each part's `_` escaped to `_u`); an
+// unqualified key is returned unchanged. Used only by the collision marker
+// below — the port still refuses to EMIT a namespaced key (issue #2389).
+fn java_host_key(k: Str) -> Str {
+  if (k.indexOf("::") < 0) { return k }
+  var parts = k.split("::")
+  var escaped = []
+  for (p of parts) { escaped = escaped.push(p.split("_").join("_u")) }
+  return escaped.join("__")
+}
+
+// Issue #2458: `_check_host_keys` is the FIRST statement of the reference
+// `emit` — ahead of the holes, deferred, validated and fault-test refusals —
+// and it refuses the one collision the mangling cannot represent: a flat key
+// that already spells a mangled qualified key (`acme__ops` beside `acme::ops`).
+// The port had no marker for it, so the first refusal it named was a later one.
+// One marker per colliding pair, first seen key first, across exactly the five
+// wiring tables the reference reads.
+fn host_key_collision_markers(ir: Any) -> List[Str] {
+  var seen_hosts = []
+  var seen_keys = []
+  var out = []
+  for (c of value_list(value_field(ir, "components"))) {
+    for (table of ["provides", "requires", "routes", "isolate", "intercept"]) {
+      for (k of value_keys(value_field(c, table))) {
+        let host = java_host_key(k)
+        let at = index_of(seen_hosts, host)
+        if (at < 0) {
+          seen_hosts = seen_hosts.push(host)
+          seen_keys = seen_keys.push(k)
+        } else {
+          let first = seen_keys[at]
+          if (first != k) {
+            let mark = `<<UNSUPPORTED-HOST-KEY-COLLISION:${first} / ${k}>>`
+            if (!list_contains(out, mark)) { out = out.push(mark) }
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
+fn index_of(xs: List[Str], x: Str) -> Int {
+  var i = 0
+  while (i < xs.length()) {
+    if (xs[i] == x) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
 // Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
 // as a mangled host identifier (`_host_key`, issue #1914), and this port does
 // not port that mangling yet, so it would write the raw `::` key into host
@@ -3972,6 +4025,10 @@ pub fn emit_java_src(ir: Any) -> Str {
   // before the deferred in-file test section (one named marker per test
   // instead of silence, issue #1123), and a required stream, refused only while
   // the components are emitted, comes after it.
+  // Issue #2458: the host-key collision is the reference's FIRST refusal in
+  // `emit` (`_check_host_keys` is its first statement), so its marker opens
+  // the refusal section. The comment below keeps the order of the rest.
+  out = out.concat(host_key_collision_markers(ir))
   out = out.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
   // issue #2492: an extern with no `@java` body. The reference raises this one
   // from inside the extern block, and that block is emitted while the class
