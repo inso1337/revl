@@ -13,7 +13,11 @@ path is one a backend job can observe), which the drain accepts as SKIPPED, and
 `root-suite-affected` runs on pull requests only, because `frontend` runs the
 whole root suite on every other event. Issue #2672's review adds
 `swap-template-cordis`, PR-only and advisory: `frontend-cordis` runs the same
-swap and authoring suites with the cordis runtime on every other event.
+swap and authoring suites with the cordis runtime on every other event. Issue
+#2642's option B adds `cordis-affected`, also PR-only and advisory: it runs the
+cordis half of a named affected selection under the pinned runtime (the FULL
+fallback is bounded out and says so), and `frontend-cordis` covers the whole
+guarded suite on every other event.
 
 This file evaluates each job's `if:` and `needs:` per event and pins that split.
 A job's `if:` is evaluated for real, not pattern-matched: the conditions in
@@ -44,10 +48,12 @@ BACKENDS = frozenset({
 })
 REQUIRED = frozenset({"lint"}) | BACKENDS
 # A job that runs on pull requests only, and the job that covers it on every
-# other event (issue #1817; #2672's review adds a second PR-only job).
+# other event (issue #1817; #2672's review and #2642's option B add two more
+# PR-only jobs).
 PR_ONLY = {
     "root-suite-affected": "frontend",
     "swap-template-cordis": "frontend-cordis",
+    "cordis-affected": "frontend-cordis",
 }
 NON_PR_EVENTS = ("merge_group", "push", "schedule", "workflow_dispatch",
                  "workflow_call")

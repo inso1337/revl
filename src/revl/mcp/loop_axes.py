@@ -41,6 +41,13 @@ The definitions (docs/harness-gate-guide.md carries the same text):
     Unresolved compensation records `revl_abort` left (the `compensationResidue`
     it returns) over the aborts. A failed swap that reboots its predecessor is
     not an abort here.
+
+Issue #2690 adds `attempt` and, when the operator configured a budget,
+`attemptsRemaining`: the refusals of the current unit of work, reported beside
+the six axes rather than as one of them, because it has no denominator. The
+report is read against the unit live at read time, so a fresh load or a new
+generation shows the new unit's count immediately, without waiting for the
+next verdict to reset the lazy counter.
 """
 
 from __future__ import annotations
@@ -129,6 +136,27 @@ def is_refusal(payload: dict) -> bool:
             or payload.get("admissible") is False)
 
 
+def attempt_unit(session) -> tuple:
+    """The unit of work a check/admit attempt count belongs to (issue #2690).
+
+    The loaded composition, the load epoch and the generation. `_load_epoch`
+    moves on every successful load, so an unload followed by a load is a new
+    unit even though the generation number starts at 1 again; a failed load
+    moves neither, so it refunds nothing. Read through `getattr` because two
+    of the three are session internals and a stand-in session (a test double
+    for `SESSION`) may carry only some of them."""
+    return (getattr(session, "loaded", False),
+            getattr(session, "_load_epoch", 0),
+            getattr(session, "_generation", 0))
+
+
+def attempts_remaining(limit: int, attempt: int) -> int:
+    """The operator's budget less the attempts spent, clamped at zero (issue
+    #2690). The refusal field and the report share this one definition, so
+    they cannot drift apart."""
+    return max(0, limit - attempt)
+
+
 class LoopAxes:
     """The session-cumulative counters behind the six axes."""
 
@@ -144,6 +172,12 @@ class LoopAxes:
         self.refused_at_run = 0
         self.aborts = 0
         self.abort_residue = 0
+        # issue #2690: refused verdicts on the current unit of work, so a
+        # caller driving the check/admit loop can tell a first refusal from a
+        # tenth. `_attempt_unit` is what the count belongs to (the session's
+        # load epoch, moved by a fresh load).
+        self.attempt = 0
+        self._attempt_unit = None
 
     # -- producers --------------------------------------------------------
 
@@ -166,6 +200,19 @@ class LoopAxes:
     def record_abort(self, residue: list) -> None:
         self.aborts += 1
         self.abort_residue += len(residue or [])
+
+    def record_attempt(self, unit, refused: bool) -> None:
+        """One verdict from `revl_check`/`revl_admit` on the unit of work
+        `unit` (issue #2690). A refusal spends an attempt; an accepted call
+        resets the count, and so does a fresh load, because its epoch is a
+        different unit. Advisory only: admission never reads it."""
+        if unit != self._attempt_unit:
+            self._attempt_unit = unit
+            self.attempt = 0
+        if refused:
+            self.attempt += 1
+        else:
+            self.attempt = 0
 
     def record_tool(self, name: str, arguments: dict, payload: dict,
                     touched: list[str] | None) -> None:
@@ -191,14 +238,27 @@ class LoopAxes:
 
     # -- the report -------------------------------------------------------
 
-    def document(self, live_owner=None) -> dict:
+    def document(self, live_owner=None, attempt_limit=None, unit=None) -> dict:
+        """The report. `unit` is the unit of work live at read time
+        (`attempt_unit`); when it names a unit other than the one the count
+        belongs to, the report shows the new unit's count (zero) and its full
+        budget, not the previous unit's. Reporting is a read: it never moves
+        the counter, so reading the report spends nothing and refunds
+        nothing."""
         crossed = sum(self.boundary.values())
         prompts = self.closed_prompts
         sessions = self.closed_sessions
         if live_owner is not None:
             prompts += sum((live_owner.prompts or {}).values())
             sessions += 1
-        return {
+        # issue #2690: the reset in `record_attempt` is lazy, so the report
+        # has to compare the live unit itself. A fresh load or a new
+        # generation moves the unit without a verdict in between; reporting
+        # the old count there would contradict the refusal the next verdict
+        # returns, and the docs.
+        attempt = (self.attempt if unit is None or unit == self._attempt_unit
+                   else 0)
+        report = {
             "reversibilityRate": _axis(self.boundary["a"], crossed),
             "autoApprovedWithProof": _axis(self.boundary["a"] + self.boundary["b"],
                                            crossed),
@@ -208,4 +268,12 @@ class LoopAxes:
                 self.refused_before, self.refused_before + self.refused_at_run),
             "residueAfterAbort": _axis(self.abort_residue, self.aborts),
             "boundaryCalls": {**self.boundary, "unclassified": self.unclassified},
+            # issue #2690: the aggregate attempt count rides here with the
+            # other session measures. `attemptsRemaining` is absent unless the
+            # operator configured a limit, never a made-up number.
+            "attempt": attempt,
         }
+        if attempt_limit is not None:
+            report["attemptsRemaining"] = attempts_remaining(attempt_limit,
+                                                             attempt)
+        return report
