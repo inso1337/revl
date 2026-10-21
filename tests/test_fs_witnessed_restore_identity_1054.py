@@ -229,7 +229,7 @@ def test_the_portable_copy_path_records_the_sidecar_digest(root, frame,
     # The recorded digest is live evidence, not a dead field: the same witness
     # restores the bytes the portable path snapshotted.
     fs._witnessed_restore(witness)
-    assert open(target).read() == "v1"
+    assert open(target, encoding="utf-8").read() == "v1"
 
 
 # ===========================================================================
@@ -291,7 +291,7 @@ def test_a_legitimate_restore_still_succeeds_with_the_digest_recorded(root, fram
 
     fs._witnessed_restore(witness)             # no raise, no diagnostics
 
-    assert open(target).read() == "v1"
+    assert open(target, encoding="utf-8").read() == "v1"
     assert not os.path.exists(sidecar)
 
 
@@ -308,7 +308,7 @@ def test_a_capture_recorded_before_the_digest_still_restores(root, frame):
 
     fs._witnessed_restore({**witness, "capture": legacy})
 
-    assert open(target).read() == "v1"
+    assert open(target, encoding="utf-8").read() == "v1"
     assert not os.path.exists(sidecar)
 
 
@@ -373,9 +373,9 @@ def test_a_present_invalid_recorded_digest_is_refused(root, frame, recorded):
     assert ws.SIDECAR_DIGEST_FIELD in ei.value.message
     assert "not 64 lowercase hex" in ei.value.message, \
         "the refusal must name the malformed record, not a digest mismatch"
-    assert open(target).read() == "v2", \
+    assert open(target, encoding="utf-8").read() == "v2", \
         "an invalid recorded digest must not degrade to an install"
-    assert open(sidecar).read() == "v1", "the refused sidecar was consumed"
+    assert open(sidecar, encoding="utf-8").read() == "v1", "the refused sidecar was consumed"
 
 
 def test_an_unreadable_sidecar_is_refused_as_an_identity_failure(root, frame):
@@ -393,11 +393,11 @@ def test_an_unreadable_sidecar_is_refused_as_an_identity_failure(root, frame):
         assert ei.value.code == "EIDENTITY"
         assert "preimage sidecar" in ei.value.message
         assert "could not be read" in ei.value.message
-        assert open(target).read() == "v2", \
+        assert open(target, encoding="utf-8").read() == "v2", \
             "an unreadable sidecar must not be installed"
     finally:
         os.chmod(sidecar, 0o600)
-    assert open(sidecar).read() == "v1", "the refused sidecar was consumed"
+    assert open(sidecar, encoding="utf-8").read() == "v1", "the refused sidecar was consumed"
 
 
 # ===========================================================================
@@ -569,7 +569,7 @@ def test_a_stat_drift_is_refused_before_the_sidecar_bytes_are_read(root, frame,
         fs._witnessed_restore(witness)
     assert ei.value.code == "EIDENTITY"
     assert "ino" in ei.value.message or "size" in ei.value.message
-    assert open(target).read() == "v2"
+    assert open(target, encoding="utf-8").read() == "v2"
 
 
 def test_the_installed_result_is_rechecked_after_the_rename(root, frame, monkeypatch):

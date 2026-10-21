@@ -110,6 +110,14 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 from revl.export_wit import (  # noqa: E402
     _kebab_name, _kebab_type, _split_generic, export_wit)
+# issue #2729: the confinement seam. `check_component_imports` reads the
+# PRODUCED component's bytes (not the emitter's bookkeeping), and
+# `ComponentLimits` is the fuel/memory/wall ceiling every run applies.
+from revl.wasm_confinement import (  # noqa: E402
+    DEFAULT_COMPONENT_LIMITS,
+    ComponentLimits,
+    check_component_imports,
+)
 
 _DEFAULT_PACKAGE = "revl:exported"
 
@@ -1324,31 +1332,148 @@ def wasmtime_binary() -> str | None:
     return str(fallback) if fallback.is_file() else None
 
 
+class ComponentTrap(EmitError):
+    """A guest that hit one of its confinement ceilings, contained.
+
+    ``reason`` is one of ``"fuel"`` (work budget), ``"memory"`` (linear-memory
+    ceiling), ``"wall"`` (elapsed time), ``"trap"`` (a wasm trap wasmtime
+    caught), ``"instantiate"`` (the component never instantiated, so nothing
+    ran) or ``"exit"`` (a non-zero exit that is neither a trap nor an
+    instantiation failure). A caller that grades traps can tell them apart
+    without parsing wasmtime's text; the guest never escaped, so this is a
+    contained outcome, not an incident.
+
+    The message is reason-specific deliberately: an instantiation failure is
+    NOT a guest that "hit its trap ceiling", and calling it one is how a
+    swallowed setup failure reads as a contained runtime escape."""
+
+    _MESSAGES = {
+        "fuel": "component invocation hit its fuel ceiling",
+        "memory": "component invocation hit its memory ceiling",
+        "wall": "component invocation hit its wall-clock ceiling",
+        "trap": "component invocation trapped",
+        "instantiate": "the component did not instantiate",
+        "exit": "the component exited non-zero",
+    }
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        self.detail = detail
+        lead = self._MESSAGES.get(
+            reason, f"component invocation failed ({reason})")
+        super().__init__(f"{lead}: {detail}")
+
+
+def _wall_arg(seconds: float) -> str:
+    """wasmtime's `timeout` takes integer units; express seconds as ms."""
+    return f"{max(1, round(seconds * 1000))}ms"
+
+
+def _classify_failure(stderr: str) -> str:
+    """Which kind of non-zero outcome wasmtime's stderr describes.
+
+    Deliberately narrower than a substring search for "timeout": any message
+    containing that word used to become a wall-clock trap. The wall marker is
+    the epoch interrupt wasmtime's own `-W timeout` produces; a message that
+    merely mentions the word is an `exit`, not a ceiling hit. Likewise an
+    instantiation/link failure is `instantiate`, not a `trap`: the guest never
+    ran, so it proves nothing about containment.
+    """
+    text = stderr.lower()
+    if "all fuel consumed by webassembly" in text:
+        return "fuel"
+    if ("growing memory" in text or "memory growth" in text
+            or "memory maximum size exceeded" in text
+            or "exceeds memory limits" in text
+            or "failed to grow memory" in text or "memory.grow" in text
+            or "out of memory" in text or "memory allocation" in text):
+        return "memory"
+    if "wasm trap: interrupt" in text:
+        return "wall"
+    if "wasm trap" in text:
+        return "trap"
+    if ("failed to instantiate" in text or "failed to link" in text
+            or "unknown import" in text or "incompatible import" in text
+            or "missing import" in text):
+        return "instantiate"
+    return "exit"
+
+
+def _run_limits(limits: ComponentLimits | None, fuel: int | None,
+                memory_bytes: int | None, wall_seconds: float | None
+                ) -> ComponentLimits:
+    base = limits if limits is not None else DEFAULT_COMPONENT_LIMITS
+    return ComponentLimits(
+        fuel=base.fuel if fuel is None else fuel,
+        memory_bytes=base.memory_bytes if memory_bytes is None else memory_bytes,
+        wall_seconds=base.wall_seconds if wall_seconds is None else wall_seconds)
+
+
 def run_component(component_path: pathlib.Path, invoke: str, *,
-                  fuel: int | None = None) -> str:
+                  limits: ComponentLimits | None = None,
+                  fuel: int | None = None,
+                  memory_bytes: int | None = None,
+                  wall_seconds: float | None = None,
+                  declared=None,
+                  allowed=None,
+                  config_fields=(),
+                  isolate=None,
+                  declared_targets=()) -> str:
     """Invoke `invoke` (a WAVE call expr, e.g. ``make("x", 5)``) on the
     component under wasmtime's COMPONENT MODEL (``wasmtime run --invoke``, which
     only accepts a component here) and return wasmtime's WAVE-formatted result
     line. Proves the canonical round trip end to end.
 
-    ``fuel`` bounds the guest by *work* (wasm instructions) rather than by
-    elapsed time: when the budget is spent wasmtime traps with "all fuel
-    consumed by WebAssembly" and exits non-zero, which reads as an ordinary
-    contained trap. Without it the only bound on a boundary function that never
-    returns is the wall-clock ``timeout`` below, so a guest that loops forever
-    is killed as a ``subprocess.TimeoutExpired`` — a Python exception, not a
-    trap — which is the wrong shape for a caller that grades traps. Callers
-    that invoke an untrusted candidate should pass a budget."""
+    CONFINED BY DEFAULT (issue #2729): the produced component's import section
+    is read from its bytes and checked before anything executes — an undeclared
+    capability import (by its FULL composed address), or an import outside the
+    wasm tier's expected namespaces or seam fields, raises
+    :class:`ConfinementError` — and fuel, a linear-memory ceiling and a
+    wall-clock ceiling are ALWAYS applied. ``limits`` overrides the conservative
+    :data:`revl.wasm_confinement.DEFAULT_COMPONENT_LIMITS`; the per-axis
+    keywords exist so a caller can tighten one ceiling without restating the
+    others. There is no unbounded mode.
+
+    A guest that exceeds a ceiling ends as a contained :class:`ComponentTrap`
+    whose ``reason`` distinguishes fuel, memory and wall-clock from a real wasm
+    trap, an instantiation failure and a plain non-zero exit. ``declared`` is
+    the component's declared capability set (its G8 reach); ``isolate`` is its
+    ``key -> realm`` placement, so the check compares the composed address;
+    ``allowed`` is the boundary policy's allow-list for it, if any; and
+    ``config_fields`` is the set of config fields a spawn template may read.
+    """
+    limits = _run_limits(limits, fuel, memory_bytes, wall_seconds)
     binary = wasmtime_binary()
     if binary is None:
         raise EmitError("wasmtime not found")
-    argv = [binary, "run"]
-    if fuel is not None:
-        argv += ["-W", f"fuel={fuel}"]
-    argv += ["--invoke", invoke, str(component_path)]
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    path = pathlib.Path(component_path)
+    check_component_imports(path.read_bytes(),
+                            declared=declared or frozenset(),
+                            allowed=allowed, config_fields=config_fields,
+                            isolate=isolate, component=str(path),
+                            declared_targets=declared_targets)
+    argv = [
+        binary, "run",
+        "-W", f"fuel={limits.fuel}",
+        "-W", f"max-memory-size={limits.memory_bytes}",
+        # a guest that grows past the ceiling must TRAP, not read -1 and
+        # continue: a contained trap is the confinement proof.
+        "-W", "trap-on-grow-failure=y",
+        "-W", f"timeout={_wall_arg(limits.wall_seconds)}",
+        "--invoke", invoke, str(path),
+    ]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=limits.wall_seconds + 10)
+    except subprocess.TimeoutExpired as exc:
+        # the runtime's own timeout did not fire (or was not honoured); our
+        # backstop did. Still a contained wall-clock outcome, never a hang.
+        raise ComponentTrap(
+            "wall", f"the guest did not return within the "
+                    f"{limits.wall_seconds}s ceiling and was killed") from exc
     if result.returncode != 0:
-        raise EmitError(f"component invocation failed: {result.stderr.strip()}")
+        detail = result.stderr.strip()
+        raise ComponentTrap(_classify_failure(detail), detail)
     return result.stdout.strip()
 
 
@@ -1359,7 +1484,15 @@ ARGV_STR_LIMIT = 100_000
 
 
 def run_component_str(component_path: pathlib.Path, func: str, arg: str, *,
-                      fuel: int | None = None) -> str:
+                      limits: ComponentLimits | None = None,
+                      fuel: int | None = None,
+                      memory_bytes: int | None = None,
+                      wall_seconds: float | None = None,
+                      declared=None,
+                      allowed=None,
+                      config_fields=(),
+                      isolate=None,
+                      declared_targets=()) -> str:
     """`func(arg)` for a ``string``-returning export — unquotes the WAVE result.
 
     The argument rides in ONE argv entry (`--invoke 'func("...")'`), and Linux
@@ -1373,15 +1506,21 @@ def run_component_str(component_path: pathlib.Path, func: str, arg: str, *,
     first Linux run of a suite that was green on macOS, where only the TOTAL
     `ARG_MAX` of 1 MiB applies).
 
-    ``fuel`` is forwarded to :func:`run_component`; pass a budget when the
-    candidate is untrusted, so a non-terminating boundary function traps
-    instead of stalling the runtime until the wall-clock timeout."""
+    ``limits``/``fuel``/``memory_bytes``/``wall_seconds`` and the import check
+    (``declared``, ``allowed``, ``config_fields``, ``isolate``,
+    ``declared_targets``) are forwarded to :func:`run_component`; a generated
+    component is confined by default, so no caller has to remember to pass a
+    budget."""
     if len(arg) > ARGV_STR_LIMIT:
         raise EmitError(
             f"argument of {len(arg)} bytes exceeds what one argv entry can "
             f"carry ({ARGV_STR_LIMIT}); drive it through "
             f"call_str_export_in_memory() instead of the wasmtime CLI")
-    out = run_component(component_path, f'{func}("{arg}")', fuel=fuel)
+    out = run_component(component_path, f'{func}("{arg}")', limits=limits,
+                        fuel=fuel, memory_bytes=memory_bytes,
+                        wall_seconds=wall_seconds, declared=declared,
+                        allowed=allowed, config_fields=config_fields,
+                        isolate=isolate, declared_targets=declared_targets)
     if len(out) >= 2 and out[0] == '"' and out[-1] == '"':
         return out[1:-1]
     return out
@@ -1398,6 +1537,12 @@ def call_str_export_in_memory(core_wat: str, func: str, arg: str) -> tuple[str, 
     wasmtime CLI at all (see `run_component_str`). Everything the guest does is
     unchanged — same emitted core module, same allocator, same lift and lower —
     so this is a different way IN, not a weaker assertion.
+
+    It is an in-process ABI DRIVER, not the confinement path: it is used by the
+    heap tests for payloads argv cannot carry and makes no sandbox claim.
+    A generated component runs through :func:`run_component`, which checks the
+    produced import section and applies the fuel/memory/wall limits BEFORE
+    execution (issue #2729).
 
     What it does NOT cover, and why the CLI path is kept for every size that
     fits in argv: wasmtime's own canonical-ABI validation of the wrapped

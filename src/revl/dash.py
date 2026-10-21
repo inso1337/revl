@@ -69,7 +69,8 @@ def build_model(ir: dict, *, live_state: dict | None = None,
                 trace=None, timeline=None,
                 prev_audit: dict | None = None,
                 accepted=None, accept_all: bool = False,
-                policy=None, mcp_scope=None) -> dict:
+                policy=None, mcp_scope=None,
+                rejected: bool = False, profile=None) -> dict:
     """The read-only cockpit model, assembled from the read surfaces.
 
     * ``ir`` — a compiled composition document (the dependency graph source).
@@ -87,6 +88,15 @@ def build_model(ir: dict, *, live_state: dict | None = None,
       audit are the policy-exception queue (item 33), each with its why-trace.
     * ``mcp_scope`` — components admitted through the MCP session, for the
       policy's ``mcp`` sandbox; ``"*"`` means every component.
+    * ``rejected`` — opt in to the rejected-candidates section (issue #2756):
+      for each component the ``policy`` refuses, every refused edge with the
+      failing guarantee and the repair the refusal's ``navigate`` record allows.
+      Absent by default, so a model built without it is unchanged.
+    * ``profile`` — the admission profile the view is shown under. With the
+      untrusted-author profile the policy rows of the decisions queue and the
+      rejected section are each the single collapsed verdict and nothing else
+      (``navigate.collapsed``); the policy topology is not shown. Absent, the
+      model is byte-identical to before.
 
     The input dicts are treated as immutable; nothing here writes back.
     """
@@ -97,9 +107,10 @@ def build_model(ir: dict, *, live_state: dict | None = None,
 
     graph = _build_graph(index, live_state or {})
     trace_view = _build_trace(trace, timeline)
+    violations = _policy_violations(safe_ir, policy, mcp_scope, profile)
     decisions = _build_decisions(
         safe_ir, prev_audit=prev_audit, accepted=accepted,
-        accept_all=accept_all, policy=policy, mcp_scope=mcp_scope)
+        accept_all=accept_all, violations=violations, profile=profile)
 
     mode = MODE_STATIC
     if live_state:
@@ -107,7 +118,7 @@ def build_model(ir: dict, *, live_state: dict | None = None,
     elif trace_view is not None:
         mode = MODE_RECORDED
 
-    return {
+    model = {
         "ok": True,
         "readOnly": True,
         "mode": mode,
@@ -116,6 +127,9 @@ def build_model(ir: dict, *, live_state: dict | None = None,
         "trace": trace_view,
         "decisions": decisions,
     }
+    if rejected:
+        model["rejected"] = _build_rejected(violations, profile)
+    return model
 
 
 # ---------------------------------------------------------------- graph pane
@@ -295,13 +309,12 @@ def _timeline_view(timeline) -> list | None:
 
 
 def _build_decisions(ir: dict, *, prev_audit, accepted, accept_all,
-                     policy, mcp_scope) -> dict:
+                     violations, profile=None) -> dict:
     """The pending-decisions queue: boundary-widening acks (item 21) and
     policy exceptions (item 33), each with evidence attached."""
     widening = _widening_queue(ir, prev_audit, accepted, accept_all) \
         if prev_audit is not None else []
-    exceptions = _policy_queue(ir, policy, mcp_scope) \
-        if policy is not None else []
+    exceptions = _policy_queue(violations, profile)
 
     pending = ([w for w in widening if not w["acknowledged"]]
                + [e for e in exceptions])
@@ -356,19 +369,37 @@ def _decode_crossing(token: str) -> dict:
             "detail": token}
 
 
-def _policy_queue(ir: dict, policy, mcp_scope) -> list:
-    """Item 33's policy exceptions as a decision list. Each violation is a row;
-    its evidence is the violation's own why-trace — the offending chain that
-    names which component reaches what it may not, and how."""
+def _policy_violations(ir: dict, policy, mcp_scope, profile) -> list:
+    """The policy's violations over the current audit, computed once per model
+    so the decisions queue and the rejected section read the same result."""
+    if policy is None:
+        return []
     from . import policy as policy_mod  # noqa: PLC0415
     from .audit_diff import audit_report  # noqa: PLC0415
-    from .why import render as render_why  # noqa: PLC0415
 
     audit = audit_report(ir)
     scope = set(mcp_scope or ())
     mcp_components = (frozenset(audit.get("boundary") or {})
                       if "*" in scope else frozenset(scope))
-    violations = policy_mod.evaluate(policy, audit, mcp_components=mcp_components)
+    return policy_mod.evaluate(policy, audit, mcp_components=mcp_components,
+                               profile=profile)
+
+
+def _policy_queue(violations: list, profile=None) -> list:
+    """Item 33's policy exceptions as a decision list. Each violation is a row;
+    its evidence is the violation's own why-trace — the offending chain that
+    names which component reaches what it may not, and how. Under the
+    untrusted-author profile that chain would rebuild the operator's policy, so
+    the queue is one collapsed row whatever the number of violations."""
+    from .why import render as render_why  # noqa: PLC0415
+    from . import navigate as navigate_mod  # noqa: PLC0415
+
+    if navigate_mod.is_untrusted(profile):
+        if not violations:
+            return []
+        return [{"kind": DECISION_POLICY,
+                 "verdict": navigate_mod.collapsed()}]
+
     rows = []
     for v in violations:
         rows.append({
@@ -382,6 +413,70 @@ def _policy_queue(ir: dict, policy, mcp_scope) -> list:
                          "trace": render_why(v.why) if v.why else None},
         })
     return rows
+
+
+# ------------------------------------------------- rejected candidates pane
+#
+# Issue #2756. The decisions pane says THAT a policy refused; this pane says,
+# per rejected candidate, which edge failed which guarantee and what repair the
+# refusal's own `navigate` record allows. It only re-reads what the gate
+# returns: `policy.evaluate` is called for its violations, nothing is run,
+# admitted or acknowledged here. Opt-in, so the default model is unchanged.
+
+
+def _guarantee_of(violation) -> str:
+    """The failing guarantee, read off the refusal's `navigate.refused` facts
+    (the allow list or deny patterns that fired); a violation without a
+    navigate record falls back to the head of its own message."""
+    refused = (violation.navigate or {}).get("refused") or {}
+    if "allowed" in refused:
+        allowed = ", ".join(refused["allowed"]) or "nothing"
+        return f"may reach only [{allowed}]"
+    if "denied" in refused:
+        return f"may not reach [{', '.join(refused['denied'])}]"
+    return violation.message.split(" \u2014 ")[0]
+
+
+def _repairs_of(violation) -> list:
+    """The allowed repairs, in the order `navigate` already fixed: author
+    alternatives first, then operator, then runtime approval. A blocked record
+    has none and says why instead."""
+    nav = violation.navigate or {}
+    repairs = [{"enacts": a.get("enacts"), "proof": a.get("proof"),
+                "action": a.get("action")}
+               for a in nav.get("alternatives") or []]
+    if nav.get("blocked") and nav.get("reason"):
+        repairs.append({"enacts": None, "proof": None,
+                        "action": f"blocked: {nav['reason']}"})
+    return repairs
+
+
+def _build_rejected(violations: list, profile) -> dict:
+    """The rejected-candidates section. Operator view: one candidate per
+    refused component, one edge per violation. Untrusted-author view: only the
+    collapsed verdict, so the section cannot be used to rebuild the policy."""
+    from . import navigate as navigate_mod  # noqa: PLC0415
+
+    if navigate_mod.is_untrusted(profile):
+        return {"view": "author",
+                "verdict": navigate_mod.collapsed() if violations else None}
+
+    candidates: dict[str, list] = {}
+    for v in violations:
+        nav = v.navigate or {}
+        candidates.setdefault(v.component, []).append({
+            "from": v.component,
+            "capability": v.token,
+            "kind": v.kind,
+            "family": nav.get("family"),
+            "guarantee": _guarantee_of(v),
+            "repairs": _repairs_of(v),
+        })
+    return {
+        "view": "operator",
+        "candidates": [{"candidate": name, "edges": edges}
+                       for name, edges in sorted(candidates.items())],
+    }
 
 
 # ---------------------------------------------------------------- rendering
@@ -438,6 +533,9 @@ def render_model(model: dict, *, color: bool = False) -> str:
         out.extend(_render_trace(model["trace"], p))
     out.append("")
     out.extend(_render_decisions(model["decisions"], p))
+    if model.get("rejected") is not None:
+        out.append("")
+        out.extend(_render_rejected(model["rejected"], p))
     return "\n".join(out)
 
 
@@ -546,6 +644,10 @@ def _render_decisions(decisions: dict, p: _Palette) -> list:
         out.append(f"\n  {p.bold}policy exceptions{p.reset} "
                    f"{p.dim}(item 33 — admission refused, awaiting a call){p.reset}")
         for row in exceptions:
+            if "verdict" in row:
+                out.append(f"    {p.red}! blocked:{p.reset} "
+                           f"{row['verdict']['reason']}")
+                continue
             out.append(f"    {p.red}! {row['component']} reaches "
                        f"`{row['token']}` [{row['violation']}]{p.reset}")
             out.append(f"        {p.dim}{row['message']}{p.reset}")
@@ -557,6 +659,35 @@ def _render_decisions(decisions: dict, p: _Palette) -> list:
     if not widening and not exceptions:
         out.append(f"  {p.green}nothing pending — no widening to ack, "
                    f"no policy exception to rule on.{p.reset}")
+    return out
+
+
+def _render_rejected(rejected: dict, p: _Palette) -> list:
+    out = [f"{p.bold}REJECTED CANDIDATES{p.reset}  "
+           f"{p.dim}(read-only; nothing here runs or admits){p.reset}"]
+    if rejected.get("view") == "author":
+        verdict = rejected.get("verdict")
+        if verdict is None:
+            out.append(f"  {p.green}no candidate rejected.{p.reset}")
+        else:
+            out.append(f"  {p.red}blocked:{p.reset} {verdict['reason']}")
+        return out
+    candidates = rejected.get("candidates") or []
+    if not candidates:
+        out.append(f"  {p.green}no candidate rejected.{p.reset}")
+    for cand in candidates:
+        out.append(f"  {p.bold}{cand['candidate']}{p.reset}")
+        for edge in cand["edges"]:
+            out.append(f"    {p.red}{edge['from']} -> {edge['capability']}"
+                       f"{p.reset}: {edge['guarantee']}")
+            for repair in edge["repairs"]:
+                who = repair.get("enacts")
+                proof = repair.get("proof")
+                tag = f"{who}, {proof}" if who else "no repair"
+                out.append(f"        {p.dim}repair ({tag}):{p.reset} "
+                           f"{repair['action']}")
+            if not edge["repairs"]:
+                out.append(f"        {p.dim}no repair recorded{p.reset}")
     return out
 
 
@@ -576,7 +707,8 @@ class Dashboard:
     def __init__(self, ir: dict, *, session=None, live_state: dict | None = None,
                  trace=None, timeline=None, prev_audit: dict | None = None,
                  accepted=None, accept_all: bool = False,
-                 policy=None, mcp_scope=None) -> None:
+                 policy=None, mcp_scope=None,
+                 rejected: bool = False, profile=None) -> None:
         self._ir = ir
         self._session = session
         self._live_state = live_state
@@ -587,6 +719,8 @@ class Dashboard:
         self._accept_all = accept_all
         self._policy = policy
         self._mcp_scope = mcp_scope
+        self._rejected = rejected
+        self._profile = profile
 
     @classmethod
     def from_session(cls, session, **kwargs) -> "Dashboard":
@@ -614,7 +748,8 @@ class Dashboard:
             trace=self._trace, timeline=self._timeline,
             prev_audit=self._prev_audit, accepted=self._accepted,
             accept_all=self._accept_all, policy=self._policy,
-            mcp_scope=self._mcp_scope)
+            mcp_scope=self._mcp_scope, rejected=self._rejected,
+            profile=self._profile)
 
     def render(self, *, color: bool = False) -> str:
         return render_model(self.snapshot(), color=color)

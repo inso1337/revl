@@ -545,6 +545,11 @@ _STREAM_COMBINATORS = ("map", "filter", "take")
 # buffer. `error` is the default — deterministic, no silent loss.
 _STREAM_POLICIES = ("error", "drop_newest", "drop_oldest", "block")
 
+#: The equality operators, owned by the precedence rule that has to keep them
+#: in step with the ladder. Lowering reads this tuple instead of spelling the
+#: four strings a second time (the vocabulary-mirror gate, issue #1285).
+EQUALITY_OPS = ("==", "===", "!=", "!==")
+
 
 @dataclass
 class EffectStmt:
@@ -8893,7 +8898,7 @@ class Parser:
         return self._bin(self._eq, ("&",))
 
     def _eq(self):
-        return self._bin(self._cmp, ("==", "===", "!=", "!=="))
+        return self._bin(self._cmp, EQUALITY_OPS)
 
     def _cmp(self):
         return self._bin(self._shift, ("<", ">", "<=", ">="))
