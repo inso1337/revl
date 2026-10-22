@@ -1587,27 +1587,39 @@ def probe_host_fallback(candidate: Candidate) -> Verdict:
         name = "host-fallback"
         findings = []
         scanned = 0
+        walked = 0
+        skipped: list[str] = []
         for label, tiers in sorted(head.items()):
             if "error" in tiers:
                 continue
-            before = base.get(label) or {}
-            if "error" in before:
-                before = {}
+            before = base.get(label)
+            if not isinstance(before, dict) or "error" in before:
+                # A case the base did not compile is not a baseline: a tier
+                # refusing it now is not "lost a construct", there is nothing
+                # to have lost. Count it as unmeasured, not as a fallback.
+                skipped.append(f"{label} (no measurement at {candidate.base})")
+                continue
             # The head's corpus module names the tiers it walks, so a tier the
             # candidate dropped from it is absent from `tiers`: walk the base's.
             gone = sorted(set(before) - set(tiers))
             findings += [f"{label} on {tier}: measured at {candidate.base}, "
                          "not walked at head" for tier in gone]
             for tier, now in sorted(tiers.items()):
+                if tier not in before:
+                    # A tier the corpus added at head has no baseline either;
+                    # its first measurement is not a lost construct.
+                    skipped.append(f"{label} on {tier}")
+                    continue
+                walked += 1
                 scanned += 1
-                then = before.get(tier) or {"markers": [], "refused": False}
+                then = before[tier]
                 extra = Counter(now["markers"]) - Counter(then["markers"])
                 findings += [f"{label} on {tier}: {m}" + (f" x{n}" if n > 1 else "")
                              for m, n in sorted(extra.items())]
                 if now["refused"] and not then["refused"]:
                     findings.append(f"{label} on {tier}: emitted at "
                                     f"{candidate.base}, refused now")
-        if not scanned:
+        if not walked:
             return failed(name, "no conformance case compiled, so no emitted "
                                 "artifact was scanned",
                           ["tools/conformance.py CASES"])
@@ -1617,10 +1629,14 @@ def probe_host_fallback(candidate: Candidate) -> Verdict:
                 f"{len(findings)} fallback finding(s) since {candidate.base}: "
                 + "; ".join(findings[:6]),
                 ["tools/promotion_evidence.py measure --kind markers"])
+        note = _unmeasured_note(unmeasured)
+        if skipped:
+            note += (f"; {len(skipped)} case or tier had no measurement at "
+                     f"{candidate.base} and was not compared")
         return verified(
             name,
             f"{scanned} emitted artifact(s) scanned, no fallback marker beyond "
-            f"{candidate.base}'s and no tier newly refusing",
+            f"{candidate.base}'s and no tier newly refusing" + note,
             ["tools/promotion_evidence.py measure --kind markers"])
 
     return _evidence_probe(candidate, "host-fallback", "markers", judge)

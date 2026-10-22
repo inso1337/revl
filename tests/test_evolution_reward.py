@@ -1991,6 +1991,32 @@ def test_a_tier_the_candidate_drops_from_its_corpus_fails_host_fallback_only(
         in verdicts["host-fallback"].reason
 
 
+def test_a_tier_added_at_head_is_not_measured_rather_than_a_fallback(
+        reward, evidence_repo):
+    """A tier the corpus starts walking at head has no baseline. Its first
+    measurement is not a construct the candidate lost, so it must be counted
+    as unmeasured instead of failing host-fallback (issue #2706)."""
+    marker = "<<UNSUPPORTED-EXPR:host-call>>"
+    _rebase(evidence_repo, [("loop", _BOUNDED)], marker=marker,
+            tiers=("python",))
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], marker=marker,
+                  tiers=("python", "rust"))
+    verdicts = _score_new(reward, evidence_repo)
+    assert verdicts["host-fallback"].verified, verdicts["host-fallback"].reason
+    assert "had no measurement" in verdicts["host-fallback"].reason
+
+
+def test_a_case_that_did_not_compile_at_base_is_not_a_fallback(
+        reward, evidence_repo):
+    """With no base measurement there is nothing the candidate could have
+    lost; a tier refusing the case at head is unmeasured, not a fallback."""
+    _rebase(evidence_repo, [("loop", _BOUNDED)], broken=True)
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], refuse=True)
+    verdicts = _score_new(reward, evidence_repo)
+    assert verdicts["host-fallback"].verified, verdicts["host-fallback"].reason
+    assert "had no measurement" in verdicts["host-fallback"].reason
+
+
 def test_cases_new_at_head_are_counted_as_not_measured(reward, evidence_repo):
     _write_corpus(evidence_repo, [("loop", _BOUNDED), ("extra", _NO_CROSSING)])
     verdicts = _score_new(reward, evidence_repo)
