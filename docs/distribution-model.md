@@ -149,6 +149,11 @@ keeps the one-provider invariant while still fanning out.
 language-level `provide db with multiplicity(3)` … breaks G2 and destroys
 verification; the router pattern is the required shape."*)
 
+The named spelling is pinned by
+[`examples/rejections/g2_provider_multiplicity.rvl`](../examples/rejections/g2_provider_multiplicity.rvl):
+`tests/test_frontend.py` asserts only that the program is refused, so a future
+syntax that admits it fails there rather than arriving without a decision.
+
 ### Non-goal B, revl ships NO built-in load-balancing infrastructure
 
 There is **no** bundled Envoy, Nginx, HAProxy, or service-mesh sidecar, and

@@ -57,7 +57,7 @@ The positioning sentence the project itself uses is "Cordis has revertible effec
 | Transitive least fixed point over the call graph, as sets | `src/revl/emission_analysis.py:157-200`; `docs/capabilities.md` ("Transitivity") | shipped | Scoped externs contribute the scope, not their name; a bug where name-keying refused an in-bounds provider is documented in the docstring |
 | Scoped-extern subset behaviour | `tests/test_1234_g4_scoped_extern_subset.py:75`, `:84`; `tests/test_emission_capscope.py:51-90` | shipped | |
 | Lifecycle derived from DAG, no author-written lifecycle | `DESIGN.md:154-160`; `docs/guide-humans.md:9-35` | shipped | G2/G3 refusals: `examples/rejections/g2_provision_conflict.rvl`, `examples/rejections/g3_dependency_cycle.rvl` |
-| Pure code outside effect forms makes the accumulator complete | `README.md:127-135`; `DESIGN.md:161` and the guarantee table (G6) | shipped at head granularity | The proof status file says G6 is "full at head granularity"; `docs/vision.md:109` says G6 is "partial". The paper must state which one it relies on. The README's "provably" is softened in the abstract |
+| Pure code outside effect forms makes the accumulator complete | `README.md:127-135`; `DESIGN.md:161` and the guarantee table (G6) | shipped at head granularity | `formal/STATUS.md` (G6 row) and `docs/vision.md:109` agree: G6 is `full` at head granularity, the shape-level statement being the row's content. The paper relies on that head-granularity claim; the README's "provably" is softened in the abstract |
 | Host acquisition undo must be its release; `no_residue` red otherwise | `docs/rejections.md:193-232`; `CHANGELOG.md:472-477`; `tests/test_extern_acquire_inverse_1859.py`, `tests/test_host_undo_release_1859.py` | shipped | `docs/rejections.md:228`: "What this proves is the choice of inverse; that the host body reverts is still the declaration's assertion" |
 | Typed holes noted, never run; admission and backends refuse | `docs/holes.md:1-33`; `src/revl/holes.py:72-93` (code T3); `tests/test_holes.py:261`, `:304` | shipped | |
 | Decode table with origins | `docs/guarantees.md` (G1-G9, A, T families) | shipped | Several rows say "origin: unconfirmed", so the origin split is not complete |
@@ -89,11 +89,10 @@ The positioning sentence the project itself uses is "Cordis has revertible effec
 - Semantic inverse correctness is not decided: "The checker proves an inverse is present and well-shaped (G4)" and no more (`docs/vision.md:95-99`).
 - The extern boundary is trusted, not verified, though enumerable (`docs/vision.md:100-102`). Host body reversal "is still the declaration's assertion" (`docs/rejections.md:228`).
 - G7 (derived LIFO teardown) is "by lowering" and exercised by runtime scenarios; the only checker-side lever is totality of `verified fn` (`docs/rejections.md:530-538`). The "derived, hence correct" claim therefore rests on the lowering and runtime, not on a checker rule.
-- The metatheorems "transfer by construction, they are not re-proved here" (`docs/vision.md:103-110`). The Lean layer covers part of the admission judgment; G1 and G6 are partial, and T1-T3 have no theorem (`formal/STATUS.md`).
+- The metatheorems "transfer by construction, they are not re-proved here" (`docs/vision.md:103-110`). The Lean layer covers part of the admission judgment; G1 is `partial`, G2 to G9 are `full` at the granularity `formal/STATUS.md` states per row, and T1-T3 have no theorem.
 - Several origin labels in `docs/guarantees.md` are "unconfirmed", so the Cordis-inherited split is not fully sourced.
 - The corpus is the authors' own; no third-party study exists yet, so the paper cannot say the rules are low-burden.
 - The first-class dispatch case is conservatively read as `*` (unnameable boundary), which can over-refuse.
-- The status file (G6 row) says G6 is "full at head granularity", while `docs/vision.md:109` says G1 and G6 are "partial".
 
 ## Fact-check
 
