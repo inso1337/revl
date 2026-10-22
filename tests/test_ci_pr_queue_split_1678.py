@@ -496,3 +496,110 @@ def test_the_swap_job_selects_on_either_answer_and_fails_open():
     assert SWAP_JOB not in _runs(jobs, "pull_request", "true", "true",
                                  swap="false", swap_tests=""), (
         "a docs-only pull request wakes the cordis swap job")
+
+
+# --------------------------------------------------------------------------
+# The `changes` step itself, executed (security review fix).
+#
+# The pins above re-implement both regexes in Python and hand the JOB body an
+# answer pair, so none of them could see that the step's own `swap` condition
+# was `[ -n "$swap_tests" ] || grep "$SWAP_RE"`: that made a test-only diff of
+# an unnamed suite publish swap=true, and the job then ran the eleven plus the
+# file (twelve suites for a one-file test diff). These tests run the step's
+# REAL `run:` shell with `git diff --name-only` stubbed and assert the exact
+# GITHUB_OUTPUT pairs, then feed the published pair to the job body.
+# --------------------------------------------------------------------------
+
+def _git_stub(shim: Path) -> None:
+    """A `git` that answers the two calls the step makes: the fetch (no-op)
+    and the two `diff --name-only` shapes (all changed paths vs the ACMR
+    list). The step is the only thing under test; git itself is not."""
+    git = shim / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  fetch) exit 0 ;;\n"
+        "  diff)\n"
+        "    case \"$*\" in\n"
+        "      *--diff-filter=ACMR*) cat \"$STUB_SUITES\" ;;\n"
+        "      *) cat \"$STUB_CHANGED\" ;;\n"
+        "    esac ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8")
+    git.chmod(0o755)
+
+
+def _changes_step_outputs(tmp_path, changed, event="pull_request"):
+    """Run the `changes` step's real shell with the diff stubbed and return the
+    GITHUB_OUTPUT pairs it published, exactly as GitHub would read them."""
+    step = _step(CHANGES, "swap")
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "changed").write_text("".join(f"{p}\n" for p in changed),
+                                      encoding="utf-8")
+    # every stubbed path exists at HEAD, so the ACMR list is the same
+    (tmp_path / "suites").write_text("".join(f"{p}\n" for p in changed),
+                                     encoding="utf-8")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    _git_stub(shim)
+    out = tmp_path / "github-output"
+    out.write_text("", encoding="utf-8")
+    env = dict(os.environ)
+    env.update(step.get("env") or {})
+    env.update({
+        "EVENT_NAME": event,
+        "BASE_REF": "main",
+        "GITHUB_OUTPUT": str(out),
+        "STUB_CHANGED": str(tmp_path / "changed"),
+        "STUB_SUITES": str(tmp_path / "suites"),
+        "PATH": str(shim) + os.pathsep + env.get("PATH", ""),
+    })
+    subprocess.run(["bash", "-c", step["run"]], cwd=tmp_path, env=env,
+                   check=True, capture_output=True, text=True)
+    pairs = {}
+    for line in out.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        pairs[key] = value
+    return pairs
+
+
+def test_the_changes_step_publishes_swap_false_for_a_test_only_unnamed_diff(
+        tmp_path):
+    """The defect security found: a test-only diff to a suite the explicit
+    list does not name publishes swap=false plus swap_tests=<file>. That pair
+    selects the job through swap_tests alone, and the body runs ONE suite. The
+    first push published swap=true here (the `[ -n "$swap_tests" ]` OR), which
+    is why the job ran the eleven plus the file."""
+    published = _changes_step_outputs(tmp_path, ["tests/test_mcp_foo.py"])
+    assert published == {"swap_tests": "tests/test_mcp_foo.py",
+                         "swap": "false"}
+    assert SWAP_JOB in _runs(_jobs(), "pull_request", "true", "true",
+                             swap=published["swap"],
+                             swap_tests=published["swap_tests"]), (
+        "the job's `if:` no longer wakes on the pair the step published")
+    pytest_argv, receipt_argv = _job_selection(
+        tmp_path / "body", published["swap"], published["swap_tests"])
+    assert _targets(pytest_argv) == ["tests/test_mcp_foo.py"], pytest_argv
+    assert receipt_argv[receipt_argv.index("--selection") + 1] == (
+        "tests/test_mcp_foo.py")
+
+
+def test_the_changes_step_publishes_swap_true_and_no_tests_for_a_source_diff(
+        tmp_path):
+    """The source side is unchanged: swap=true and an EMPTY swap_tests, which
+    is the answer that runs the eleven. A changed suite on the explicit list
+    still publishes swap=true; its path also lands in swap_tests, and the job
+    body dedupes it against the eleven."""
+    published = _changes_step_outputs(tmp_path / "source",
+                                      ["src/revl/mcp/session.py"])
+    assert published == {"swap_tests": "", "swap": "true"}
+    listed = _changes_step_outputs(
+        tmp_path / "listed", ["tests/test_swap_author_flag_2518.py"])
+    assert listed == {"swap_tests": "tests/test_swap_author_flag_2518.py",
+                      "swap": "true"}
+    pytest_argv, _ = _job_selection(tmp_path / "body", listed["swap"],
+                                    listed["swap_tests"])
+    expected = next(s for s in _jobs()[SWAP_JOB]["steps"]
+                    if s.get("name") == SWAP_STEP)["env"]["SUITES"].split()
+    assert _targets(pytest_argv) == expected, pytest_argv

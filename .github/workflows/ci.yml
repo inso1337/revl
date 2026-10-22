@@ -342,8 +342,11 @@ jobs:
             | tr '\n' ' ' || true)
           swap_tests=${swap_tests% }
           echo "swap_tests=${swap_tests}" >> "$GITHUB_OUTPUT"
-          if [ -n "$swap_tests" ] \
-            || printf '%s\n' "$changed" | grep -Eq "$SWAP_RE"; then
+          # `swap` is the SOURCE answer only. `swap_tests` selects the job on
+          # its own (the job's `if:` ORs the two), but it must not make `swap`
+          # true as well: that would run the eleven PLUS the changed file for
+          # a one-file test-only diff (issue #2860 review).
+          if printf '%s\n' "$changed" | grep -Eq "$SWAP_RE"; then
             echo "swap=true" >> "$GITHUB_OUTPUT"
             echo "PR touches a swap/authoring file or suite: swap=true swap_tests=[$swap_tests]"
           else
