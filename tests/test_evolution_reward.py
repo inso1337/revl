@@ -2011,7 +2011,11 @@ def test_a_case_that_did_not_compile_at_base_is_not_a_fallback(
     """With no base measurement there is nothing the candidate could have
     lost; a tier refusing the case at head is unmeasured, not a fallback."""
     _rebase(evidence_repo, [("loop", _BOUNDED)], broken=True)
-    _write_corpus(evidence_repo, [("loop", _BOUNDED)], refuse=True)
+    # At head the case compiles and the tier prints a marker: with no base
+    # measurement the old code called that marker a new fallback. The new code
+    # counts the case as unmeasured instead.
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)],
+                  marker="<<UNSUPPORTED-EXPR:host-call>>")
     verdicts = _score_new(reward, evidence_repo)
     assert verdicts["host-fallback"].verified, verdicts["host-fallback"].reason
     assert "had no measurement" in verdicts["host-fallback"].reason
