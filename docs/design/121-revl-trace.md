@@ -214,9 +214,22 @@ trace: 3 model hop(s) over 41 trace event(s)
         cost      $0.0121 USD             (host-reported - unverified)
         latency   1.842s                  (revl-measured bracket; host owns its inside)
         attempts  1 of <= 3               (retry 2; within the 257 static ceiling)
+        schema    sha256:9f1c...          (revl-controlled)
+        grammar   sha256:4ab0...          (revl-controlled)
+        placement on_device               (revl-controlled)
         produced  ToolCalls(2)  -> emit[fs] write_report (#9)   (fiber token matched)
         verified  G9 (model-origin args refused into a granting sink; endorse required)
 ```
+
+The `schema`/`grammar`/`placement` lines (issue #2694) print only when the
+record carries them: a crossing with no decoding grammar has no `grammar` line,
+and a crossing on no declared `model role` has no `placement` line. They are
+compile-time facts, so they print without the unverified marker that
+host-reported fields carry. `schema` identifies the response schema the
+completion was validated against, `grammar` the decoding grammar a provider may
+have constrained it with, and `placement` the role's declared device placement;
+together they say which output contract this completion was held to (section
+2.2 records the payload and where each value comes from).
 
 The `produced` line prints ONLY when the fiber-local value-flow token is present
 and the activation id matches (Revision, §4 attack 3); with two activations of the
@@ -247,6 +260,9 @@ guarantee about the host.
       "attempts": {"count": 1, "ceiling": 3, "provenance": "revl-controlled"},
       "produced": [{"seq": 9, "capability": "fs", "key": "Report.write"}],
       "verifiedBy": ["G9"],
+      "schemaDigest": {"digest": "e3b0c4...", "provenance": "revl-controlled"},
+      "grammarDigest": {"digest": "9f86d0...", "provenance": "revl-controlled"},
+      "residence": {"value": "on_device", "provenance": "revl-controlled"},
       "promptDigest": {"salted": "hmac-sha256:...", "bytesBucket": "256-1k",
                        "provenance": "revl-side-args"}
     }
@@ -316,9 +332,10 @@ wrong was the hop itself.
 // `emit` when it models only load/withdraw (why_runtime.py:97). `activationId`
 // is present on every event so concurrent fibers of one component in one
 // generation are separable (gen is a process-global RELOAD counter, run.py:618,
-// NOT a per-activation id).
+// NOT a per-activation id). Issue #2694 adds three more optional members under
+// `llm` and bumps the trace schema to v3.
 {
-  "v": 2, "seq": 7, "event": "emit", "component": "AgentLoop",
+  "v": 3, "seq": 7, "event": "emit", "component": "AgentLoop",
   "activationId": "AgentLoop#g3#a1",        // revl-assigned per activation
   "capability": "model", "key": "Model.complete", "ts": 1234.56,
   "cause": { ... },
@@ -330,6 +347,9 @@ wrong was the hop itself.
     "attempts": 1, "attemptCeiling": 3,       // revl-controlled (257 retry N+1)
     "producedSeq": [9],                       // fiber-token-gated; omitted if ambiguous
     "verifiedBy": ["G9"],                     // revl-derived from the emission's guarantee
+    "schemaDigest":  {"digest": "e3b0c4...", "provenance": "revl-controlled"},  // 2694
+    "grammarDigest": {"digest": "9f86d0...", "provenance": "revl-controlled"},  // 2694
+    "residence":     {"value": "on_device",   "provenance": "revl-controlled"},  // 2694
     "promptDigest": {"salted": "hmac-sha256:...", "bytesBucket": "256-1k"}  // conditional; §4
   }
 }
@@ -341,6 +361,17 @@ The field provenances are fixed and not host-negotiable:
   these are as trustworthy as any lifecycle `ts`. `attemptCeiling` equals item
   257's static `N + 1` multiplier, which gives a free cross-check (section 3.2, the
   oracle).
+- **revl-controlled, contract** - `schemaDigest`, `grammarDigest`, `residence`
+  (issue #2694). These are compile-time facts read off the crossing's IR at record
+  time, never off the host return: `schemaDigest` is a sha256 over the canonical
+  bytes of the `response_schema` item 257 derived and bound in the IR,
+  `grammarDigest` is copied verbatim from the `response_grammar.digest` item 513
+  pinned, and `residence` is the declared device placement on the
+  `manifest.model_reach` row for the `model.<role>` capability the crossing names.
+  A crossing with no grammar (an unvalidated emission) or no declared role omits
+  the member rather than writing an empty value. They say which output contract
+  the answer was validated against; they do not prove the provider honoured the
+  grammar, which remains item 513's stated limit.
 - **revl-measured bracket** - `latencySeconds`. revl brackets the crossing with the
   monotonic clock honestly, but the field measures the BRACKET, not the host: a
   malicious `@py` body can modulate it by sleeping inside the bracket (a weak covert

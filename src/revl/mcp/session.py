@@ -2189,7 +2189,11 @@ class Session:
           entry: a successor that keeps the template byte-identical but CHANGES
           a component that spawns it (and so holds a handle to the migrated
           instances) can read the operator's state through that handle, so the
-          holders are part of the identity and that case refuses too.
+          holders are part of the identity and that case refuses too. A
+          successor that ADDS a component requiring a service the template or a
+          holder provides is new code reading the re-seated state through that
+          service's method, so the consumers are part of the identity as well
+          (the #2679 post-merge finding): an added consumer refuses.
         * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
           (a `handoff` on both the predecessor and the successor), but propose's
           decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
@@ -2217,19 +2221,22 @@ class Session:
             # is allowed to land (#2423 follow-up). A changed HOLDER is a
             # crossing even when the template itself is byte-identical: the
             # holder's new method reads the re-seated state through its spawn
-            # handle.
+            # handle. An ADDED consumer of a holder's (or the template's)
+            # provided service is the same crossing from the other side: the
+            # holder's unchanged method hands it the re-seated state.
             old_code = old_codes[name]
             if old_code is not None and old_code == _template_code(new_ir, name):
                 continue
             raise SessionError(
-                f"template {name!r} has live instance state and the successor "
-                f"changes it. The item-10 instance channel correlates old and "
-                f"new by template name and host class alone — both candidate-"
-                f"written, with no declared §5 type contract — so an agent-"
-                f"authored successor cannot inherit a running instance's "
-                f"operator state across the trust boundary. Quiesce the "
-                f"instances (or use a trusted operator swap) before swapping. "
-                f"Nothing was swapped; gen N is intact and still serving.",
+                f"template {name!r} has live instance state, and the successor "
+                f"changes the template or the code that holds or reaches it. "
+                f"The item-10 instance channel correlates old and new by "
+                f"template name and host class alone: both candidate-written, "
+                f"with no declared §5 type contract, so an agent-authored "
+                f"successor cannot inherit a running instance's operator state "
+                f"across the trust boundary. Quiesce the instances (or use a "
+                f"trusted operator swap) before swapping. Nothing was swapped; "
+                f"gen N is intact and still serving.",
                 code="STATE_UNDISCLOSED")
         running = self._declared_handoffs(old_ir)
         accepts = self._declared_handoffs(new_ir)
@@ -10121,8 +10128,10 @@ def _spawn_holders(ir: dict, name: str) -> set:
 def _template_code(ir: dict, name: str):
     """The code identity of a template (#2423 follow-up): its component entry,
     every top-level function and extern it calls or refers to, the components
-    that provide the services it (transitively) requires, AND the components
-    that (transitively) spawn it and so hold a handle to its live instances.
+    that provide the services it (transitively) requires, the components that
+    (transitively) spawn it and so hold a handle to its live instances, AND the
+    components that consume a service the template or one of its holders
+    provides.
 
     `_component_signature` alone names code that lives in the component. A
     template whose body calls a helper from a `use`-reached module keeps the
@@ -10132,13 +10141,24 @@ def _template_code(ir: dict, name: str):
     instance's state is re-seated onto and can observe, so both are part of the
     template's identity here. A component the template does not reach is not.
 
-    The reverse spawn edges are the other half (`_spawn_holders`). The
-    item-10 live-instance channel correlates old and new by the template's
-    NAME, and generational capture re-seats the operator's state onto the
+    The reverse spawn edges are half the observation surface
+    (`_spawn_holders`). The item-10 live-instance channel correlates old and new
+    by the template's NAME, and capture re-seats the operator's state onto the
     successor's instances; the successor's HOLDER then reads that state through
     its own spawn handle. A supervisor rewritten to expose the migrated state
     while `Worker` stays byte-identical is therefore a change of the code the
     state is re-seated under, and refuses here rather than migrating.
+
+    The other half is the SERVICE CONSUMERS of the template and its holders. A
+    holder's provided method can return the migrated state (`Supervisor.read`
+    calls `w.store.get`), so any component that requires that service can call
+    through to the operator's live state. A successor that ADDS such a consumer
+    adds new code that could not read the state before the capture existed, and
+    leaves every existing component byte-identical, so the consumer names have
+    to be part of the identity or that additive edit walks past the disclosure
+    gate (the #2679 post-merge finding). The relation is transitive: a component
+    that requires a service a consumer provides can call through to the same
+    value, so consumers of consumers are in too.
 
     Every side is normalized by `_code_shape` before comparison: the component
     signature already was, and so are the reached entries, so a helper whose
@@ -10153,12 +10173,36 @@ def _template_code(ir: dict, name: str):
     functions = {f.get("name"): f for f in ir.get("functions") or []}
     externs = {e.get("name"): e for e in ir.get("externs") or []}
     providers: dict = {}
+    consumers: dict = {}
     for comp in components.values():
         for key in comp.get("provides") or ():
             providers.setdefault(key, []).append(comp["name"])
+        for key in comp.get("requires") or ():
+            consumers.setdefault(key, []).append(comp["name"])
     reached: dict = {}
     seen: set = set()
-    frontier = sorted(_spawn_holders(ir, name) | {name})
+    # `observers` is the state-observation surface: the template and its
+    # holders, plus every component that (transitively) requires a service one
+    # of them provides. Only an observer's provided keys pull in consumers; a
+    # component the template merely CALLS cannot hand the state out again, and
+    # its own identity is already in through the forward walk below.
+    observers = _spawn_holders(ir, name) | {name}
+    frontier = sorted(observers)
+    while frontier:
+        comp = components.get(frontier.pop())
+        if comp is None:
+            continue
+        for key in comp.get("provides") or ():
+            for consumer in consumers.get(key, ()):
+                if consumer not in observers:
+                    observers.add(consumer)
+                    frontier.append(consumer)
+    # The forward walk then covers the observers AND the code they call: their
+    # body, the helpers they reach, and the providers of the services they
+    # require. It is a separate pass because a component can enter `observers`
+    # after it has already been seen as somebody's provider, and its own
+    # consumers still have to be collected.
+    frontier = sorted(observers)
     while frontier:
         cname = frontier.pop()
         if cname in seen:

@@ -910,8 +910,13 @@ def _knowledge_signed(src_dir: pathlib.Path, digest: str) -> bool:
         return False
     try:
         key = attest.resolve_key(None)
-        source = (src_dir / "component.rvl").read_text(encoding="utf-8")
-        ir = registry._normalize_ir_for_attest(compile_source(source, "component.rvl"))
+        source_path = src_dir / "component.rvl"
+        source = source_path.read_text(encoding="utf-8")
+        # the entry's REAL `component.rvl` (issue #2563): the export rule
+        # judges the text by this file, so an entry vendored from an export
+        # directory is compiled as the author's and cannot be counted signed
+        ir = registry._normalize_ir_for_attest(
+            compile_source(source, str(source_path)))
     except (RevlError, OSError):
         return False
     verdict = registry.assess_evidence(bundle, key=key, ir=ir)
@@ -1470,14 +1475,24 @@ def _remember_ship_knowledge(project_dir: str) -> None:
     _SHIP_KNOWLEDGE = records or None
 
 
-def gauntlet_evidence(source: str) -> str:
+def gauntlet_evidence(source: str, source_path: str = "") -> str:
     """Run the proving ground (item 31, `revl.mcp.gauntlet`) cold on the shipped
     source and return the facts the pure Shipper checks, plus the full dossier
     text to stamp. Isolated: the gauntlet boots the candidate in a throwaway
     Session and grades it — it never raises, so a broken source comes back as
     verdict "rejected", not an exception. This is the re-run that VERIFIES the
-    author's supplied evidence is current for the source being shipped."""
+    author's supplied evidence is current for the source being shipped.
+
+    `source_path` (issue #2563) is the project entry file the text was read
+    from. It is handed to the gauntlet as a FILE, so the export rule decides
+    the entry's authorship by its path exactly as the admission and publish
+    compiles do; without it the gauntlet compiled the text under
+    `<candidate>.rvl`, a label that answers no file, and an exported entry was
+    graded and BOOTED with the operator's trust. Empty means the text has no
+    file behind it (`ship_context` records the same empty path); the gauntlet
+    then grades it as before and the publish refuses it later."""
     import concurrent.futures  # noqa: PLC0415
+    import contextvars  # noqa: PLC0415
 
     from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
     from revl.mcp.session import Session  # noqa: PLC0415
@@ -1491,11 +1506,18 @@ def gauntlet_evidence(source: str) -> str:
         # truc runs on the operator's own machine over the package it is
         # shipping: the human is the author, so no MCP authoring trust applies
         # (see `server.compile_under_authoring`).
-        return gauntlet.run(Session(), {"source": source},
-                            over_the_transport=False)
+        candidate = ({"files": [source_path]} if source_path
+                     else {"source": source})
+        return gauntlet.run(Session(), candidate, over_the_transport=False)
 
+    # the compile happens on the worker thread, and a thread does not inherit
+    # the caller's context variables: `compiler._RULE` (the export rule for
+    # this command) would silently become the process default there. Carry
+    # the caller's context into the thread so the files form is judged by the
+    # same rule as every other compile `truc` runs.
+    caller_context = contextvars.copy_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        dossier = pool.submit(_grade).result()
+        dossier = pool.submit(caller_context.run, _grade).result()
     lifecycle = ((dossier.get("tested") or {}).get("lifecycle")) or {}
     admission = ((dossier.get("proved") or {}).get("admission")) or {}
     return json.dumps({

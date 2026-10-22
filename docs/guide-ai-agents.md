@@ -329,6 +329,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor / symbol), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
 | `revl_swap` · `revl_rollback` · `revl_undo` · `revl_unload` | replace a generation, undo the last swap, return to an earlier generation through the gate, tear down + prove no residue (R4) | [mcp-reference.md](mcp-reference.md#revl_swap) · [generation-history.md](generation-history.md) |
 | `revl_gauntlet` · `revl_quarantine` | grade a candidate (proved / tested / claimed), or prove an untrusted one in the wasm sandbox | [gauntlet.md](gauntlet.md) · [quarantine-tier.md](quarantine-tier.md) |
+| `revl_test_run` | run a selected test suite under the server's interpreter and read per-test outcomes, counts and verdict instead of scraping runner text | [mcp-reference.md](mcp-reference.md#revl_test_run) |
 | `revl_repair` · `revl_canary` | run the repair loop within policy, or canary a successor onto one realm slice and decide on evidence | [repair-loop.md](repair-loop.md) · [verified-canary.md](verified-canary.md) |
 | `revl_lease` | claim/renew/release a TTL-bound lease on a component so co-agents do not replace it under you | [component-leases.md](component-leases.md) |
 | `revl_snapshot` · `revl_restore` | capture / re-admit your evolved composition across a restart | [persistence.md](persistence.md) |

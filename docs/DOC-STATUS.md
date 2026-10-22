@@ -117,6 +117,7 @@ regenerated rather than edited.
 | integer-proposal.md | needs-work | 20 |  |
 | interchange-format.md | needs-work | 11 |  |
 | interop-bridge.md | needs-work | 51 |  |
+| label-compile-audit-2563.md | needs-work | 0 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
 | mcp-admission-walkthrough.md | needs-work | 1 |  |
 | mcp-bridge.md | needs-work | 75 |  |

@@ -569,7 +569,8 @@ def test_branching_recursion_huge_literal_fuel_stays_unbounded():
 def test_branching_recursion_with_a_self_call_in_a_local_arrow_stays_refused():
     """Two syntactic self-calls plus a self-call inside a local arrow invoked
     twice: the arrow makes the real call count larger than the syntactic one,
-    so the branching path must refuse (the old fan-out refusal and reason).
+    so the branching path must refuse. The arrow-expression refusal preempts
+    the fan-out wording for this shape; the verdict is still unbounded.
     Fuel 2 keeps the syntactic count (3 per path) under the ceiling, so only
     the arrow rule can refuse it."""
     agent = _agent_model_verdict("""
@@ -582,7 +583,11 @@ fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
   let c = tree(step, msgs, n - 1)
   return tree(step, msgs, n - 1)
 }""", "tree(msgs2 => emit model.complete(msgs2), msgs, 2)")
-    _assert_fanout_unbounded(agent)
+    entry = agent["per_capability"]["model"]
+    assert agent["verdict"] == "unbounded"
+    assert entry["kind"] == "unbounded" and entry["bound"] is None
+    assert "self-call inside an arrow expression" in entry["reason"]
+    assert "never the linear ceiling" in entry["reason"]
 
 
 def test_branching_recursion_with_a_self_call_in_a_loop_body_stays_refused():

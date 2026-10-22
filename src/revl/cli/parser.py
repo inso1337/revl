@@ -386,6 +386,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    audit.add_argument(
+        "--wal", metavar="FILE", default=None,
+        help="include observed budget records from FILE in a plain --json audit "
+             "(not with --policy or --diff)")
     audit.add_argument("--json-diagnostics", action="store_true",
                        help="on rejection, print a structured diagnostic (code, guarantee, "
                             "expected/actual, hint) instead of the human rendering")
@@ -1661,6 +1665,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "transition carries the cause chain behind it, "
                           "queryable with `revl why <c> --trace FILE` "
                           "(docs/why-runtime.md)")
+    run.add_argument("--attestation", default=None, metavar="PATH",
+                     help="record this composition's admission attestation in "
+                          "the trace: the attestation must bind THIS composition "
+                          "(its composition_hash must equal the run's), and its "
+                          "composition hash, key id and ruleset digest are "
+                          "written on the trace header and copied to every OTel "
+                          "span (issue #2730). The signature is not checked here; "
+                          "a consumer that wants proof runs `revl attest --verify`")
     run.add_argument("--withdraw", default=None, metavar="COMPONENT",
                      help="one-shot: boot, withdraw this live component while "
                           "recording the causal cascade, then diff the actual "

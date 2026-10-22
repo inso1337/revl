@@ -119,7 +119,7 @@ one run* — never a wall-clock time (docs/why-runtime.md §2).
 
 ## 3. Schema v1 graceful degradation
 
-The trace schema is v2 (docs/why-runtime.md §2.1); the fields these metrics need
+The trace schema is v3 (docs/why-runtime.md §2); the fields these metrics need
 all arrived additively — `ts` on every event, `code` on a FAILED cause, and the
 `emit` event kind. A v1 trace (or a v2 trace an older recorder wrote without a
 field) simply lacks the input, and each metric degrades honestly:
@@ -136,6 +136,24 @@ is unavailable when there are lifecycles to pair but the paired events carry no
 alone would be unsound. When there is genuinely nothing to measure (no completed
 lifecycle at all), the metric reports `count: 0`, not `unavailable`.
 
+### Grouping by composition (attested runs)
+
+A run traced from an admission attestation (`revl run --trace FILE
+--attestation ATTESTATION.json`, issue #2730) writes a header on the trace's
+first event, and `compute_metrics` copies it into an optional `run` block:
+
+```json
+"run": {"compositionHash": "<sha256>", "attestationKeyId": "<fingerprint>",
+        "rulesetDigest": "<sha256>"}
+```
+
+That is what lets two runs be compared as "the same composition" or "the same
+checker" without reading their first event. The block is **absent** on an
+unattested trace (never a block of nulls), and a value the attestation does not
+carry (an older record with no checker identity) is absent from the block.
+These are labels, not proof: a consumer that needs proof verifies the
+attestation (`revl attest --verify`).
+
 ## 4. The API
 
 `src/revl/metrics.py` is pure — it imports no runtime and reads only the
@@ -148,4 +166,6 @@ lifecycle at all), the metric reports `count: 0`, not `unavailable`.
   metrics.
 
 The document `compute_metrics` returns has stable top-level keys `events`,
-`emissions`, `failures`, `lifecycleDuration` — exactly what `--json` prints.
+`emissions`, `failures`, `lifecycleDuration` — exactly what `--json` prints,
+plus the optional `run` block described above, present only on an attested
+trace.

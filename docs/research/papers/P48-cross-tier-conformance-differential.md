@@ -31,10 +31,10 @@ Claim: cross-backend agreement is a testable contract with three levels of evide
 | Prior system or line of work | What it does | What revl does differently |
 |---|---|---|
 | Csmith, YARPGen, EMI (citation to be checked) | Random program generation, compare compilers or optimisation levels | Fixed authored corpus with a declared answer per case; agreement alone is insufficient. Generation is a separate paper (P49) |
-| WebAssembly spec tests, test262 (citation to be checked) | One suite, many engines, a spec as oracle | Suite is language-level and runs through six code generators to host languages, not engines of one language |
+| WebAssembly spec tests, test262 (see the [related-work table](../related-work.md)) | One suite, many engines, a spec as oracle | Suite is language-level and runs through six code generators to host languages, not engines of one language |
 | Kotlin Multiplatform, Haxe (citation to be checked) | One source, several targets | Neither is known to publish a per-construct, per-tier matrix with an execution claim column and a drift gate; this needs checking (citation to be checked) |
 | SPEC CPU (citation to be checked) | Benchmark portability across platforms | Not a correctness-of-semantics claim |
-| CakeML, CompCert (citation to be checked) | Proved compilers to one target | Proves only an abstract agreement condition; whether emitters meet it is left to an empirical matrix, stated openly |
+| CakeML, CompCert (see the [related-work table](../related-work.md)) | Proved compilers to one target | Proves only an abstract agreement condition; whether emitters meet it is left to an empirical matrix, stated openly |
 | McKeeman differential testing (citation to be checked) | Comparing implementations on one input | Adds the authored literal so unanimous wrongness fails |
 
 ## Evidence on main
