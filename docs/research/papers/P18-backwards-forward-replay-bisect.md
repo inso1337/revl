@@ -37,7 +37,7 @@ This is not a claim that stepping back restores program state, and not a claim a
 | Elm time-travel debugger, Redux DevTools | Replays a pure message history over a pure update function | Effects are not pure; the engine refuses to cross irreversible emissions and separates compensation from inversion |
 | git bisect | Binary search over commits for the first bad one, assuming monotone good-to-bad | Same search over a captured execution timeline, with the monotone assumption stated and an unverified label on the answer |
 | Saga pattern and compensating transactions (Garcia-Molina and Salem, 1987) (citation to be checked) | Compensation as a second action offsetting a first | Keeps compensation distinct from inversion in the type of step and in the report, and appends it to the timeline as an emission |
-| Algebraic effect handlers (Eff, Koka) (citation to be checked) | Control over effect operations, including resumption and rollback in some handlers | Not a handler library; the inverse-or-emit rule is enforced by the compiler across a composition, and the replay engine is an inspector over the runtime's accumulator |
+| Algebraic effect handlers (Eff, Koka; see the [related-work table](../related-work.md)) | Control over effect operations, including resumption and rollback in some handlers | Not a handler library; the inverse-or-emit rule is enforced by the compiler across a composition, and the replay engine is an inspector over the runtime's accumulator |
 
 ## Evidence on main
 Tree: revl main at commit 45bec431f.

@@ -503,7 +503,8 @@ def test_the_function_view_prints_uncovered_reference_lines(
     assert "_v3_infer_type" in by_name, (
         "the rust view no longer names `_v3_infer_type`, the function the "
         "issue's acceptance check is written against")
-    source = (ROOT / "backends" / "rust" / "emit.py").read_text().splitlines()
+    source = (ROOT / "backends" / "rust" / "emit.py").read_text(
+        encoding="utf-8").splitlines()
     ledger = lines._load_ledger()["reference"]["rust"]["functions"]
     for row in rows:
         assert row["measured"] == len(row["uncovered_lines"]) > 0
@@ -570,7 +571,7 @@ def test_write_resolves_a_conflicted_file(lines, monkeypatch, tmp_path):
     lines.write_ledger({half: {tier: {"functions": {"f": 3}, "sizes": {"f": 3}}
                                for tier in TIERS}
                         for half in ("reference", "selfhost")})
-    text = (base / "reference" / "py.jsonl").read_text()
+    text = (base / "reference" / "py.jsonl").read_text(encoding="utf-8")
     assert "<<<<<<<" not in text and text.count('"function"') == 1
     assert lines._load_ledger(base)["reference"]["py"]["functions"]["f"] == {
         "uncovered": 3, "budget": 2, "reason": "a"}
@@ -615,7 +616,7 @@ def test_write_files_a_reason_text_under_its_id(lines, monkeypatch, tmp_path):
     assert go["functions"]["by_new_text_too"]["reason"] == minted
     assert sorted(go["reasons"].values()) == sorted([known, fresh])
     assert {n: f["budget"] for n, f in go["functions"].items()} == counts
-    text = (base / "reference" / "go.jsonl").read_text()
+    text = (base / "reference" / "go.jsonl").read_text(encoding="utf-8")
     assert text.count(fresh) == 1, "the new reason's text is recorded once"
     assert lines.check(survey) == []
 
@@ -742,7 +743,7 @@ def test_the_e071d18ec_replay_fails_against_origin_main(
     message names the record, both counts, the measurement and the baseline."""
     def lower(ledger):
         path = ledger / "selfhost" / "rust.jsonl"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert '"callee_tparams", 1, 1]' in text
         path.write_text(text.replace('"callee_tparams", 1, 1]',
                                      '"callee_tparams", 0, 0]'))
@@ -784,7 +785,7 @@ def test_a_record_above_the_baseline_is_reported_not_refused(
     the check below already holds. Neither is the hiding direction."""
     def raise_record(ledger):
         path = ledger / "selfhost" / "rust.jsonl"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert '"callee_tparams", 1, 1]' in text
         path.write_text(text.replace('"callee_tparams", 1, 1]',
                                      '"callee_tparams", 2, 2]'))

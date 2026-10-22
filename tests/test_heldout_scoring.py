@@ -752,7 +752,7 @@ def test_the_allowance_is_the_censuss_own_baseline_families(tmp_path):
     """
     allowance = heldout.bypass_allowance(ROOT)
     blob = json.loads(
-        (ROOT / "tools" / "gate_reference_census_baseline.json").read_text())
+        (ROOT / "tools" / "gate_reference_census_baseline.json").read_text(encoding="utf-8"))
     expected = {name.split("/", 1)[1] for name in blob["buckets"]
                 if name.split("/", 1)[0] == "false-admit"}
     assert allowance == expected

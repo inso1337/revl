@@ -24332,6 +24332,30 @@ fn scope_has(sc: List[Bind], n: Str) -> Bool {
   return false
 }
 
+// The declared type of the INNERMOST binding of `n` ("" when it has none).
+// `scope_has` is the membership test (a lexical binder may be untyped) and
+// `bind_lookup` is the header-row read (where "" means absent); this is the
+// type read a scope binder needs.
+fn scope_ty(sc: List[Bind], n: Str) -> Str {
+  var i = sc.length() - 1
+  while (i >= 0) {
+    if (sc[i].name == n) { return sc[i].ty }
+    i -= 1
+  }
+  return ""
+}
+
+// Is this declared type a callable VALUE the binder can be called as? The
+// arrows `(Int) -> Int` and `Fn[Int, Int]`, plus the heads the reference's
+// #2544 guard leaves open: `Any`/`Value` (erased dynamic types that can hold a
+// function) and `Never` (the uninhabited bottom, whose call is vacuous).
+// Mirrors `is_function_type` + `_OPEN_CALLABLE_HEADS` in src/revl/typecheck.py.
+fn is_callable_value_ty(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  let h = ty_parse(ty).head
+  return h == "->" || h == "Fn" || h == "Any" || h == "Value" || h == "Never"
+}
+
 fn concat_binds(a: List[Bind], b: List[Bind]) -> List[Bind] {
   var out = a
   var i = 0
@@ -25841,8 +25865,17 @@ fn cir_nullary_case(n: Str, cx: CCtx) -> Bool {
 // generic tail's `call` on a `name` node (issue #1823). A scoped name that
 // spells a built-in constructor is the value, not the constructor, in a
 // component position as in a `fn` body (issue #2490).
+//
+// A CALLABLE-VALUED binder is the callee even when a module `fn`/extern shares
+// its name: that is issue #1823's owner ruling on #2544, and the reference now
+// applies it in `_component_scope_value_is_callee` (src/revl/lower.py). Before
+// it, `fn go(f, n) = f(n)` with a module `fn f` lowered to the module fn and
+// dropped the parameter. A binder whose type the producer does not hold keeps
+// the old answer (the module callable), exactly as the reference does.
 fn cir_calls_a_value(nm: Str, sc: List[Bind], cx: CCtx) -> Bool {
-  return scope_has(sc, nm) && bind_lookup(cx.fns, nm, 0) == ""
+  if (!scope_has(sc, nm)) { return false }
+  if (is_callable_value_ty(scope_ty(sc, nm))) { return true }
+  return bind_lookup(cx.fns, nm, 0) == ""
 }
 
 // `f(a)` where `f` is a scoped value: the reference's generic call tail,
@@ -26063,9 +26096,20 @@ fn cir_bin(b: BinN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   let r = cir_expr(b.r, sc, hostSc, cx)
   if (!l.ok || !r.ok) { return mk_irres(false, "") }
   let tenv = cenv_ir(cx, sc)
-  let opnd = operands_of(b.op, infer(b.l, tenv), infer(b.r, tenv))
+  let lt = infer(b.l, tenv)
+  let rt = infer(b.r, tenv)
+  let opnd = operands_of(b.op, lt, rt)
+  // The same equality marker the module-fn spine carries: the reference marks
+  // the operand node in BOTH strata, so `x == 3.0` in a provide method must
+  // reach the component emitters with `"widen": "Float"` (issue #2715).
+  let lw = eq_widen_left(b.op, lt, rt)
+  let rw = eq_widen_right(b.op, lt, rt)
+  var ljs = l.js
+  var rjs = r.js
+  if (lw != "") { ljs = cir_widen(ljs, lw, lt) }
+  if (rw != "") { rjs = cir_widen(rjs, rw, rt) }
   return mk_irres(true, "{\"kind\": \"bin\", \"op\": ".concat(jstr(b.op))
-    .concat(", \"left\": ").concat(l.js).concat(", \"right\": ").concat(r.js)
+    .concat(", \"left\": ").concat(ljs).concat(", \"right\": ").concat(rjs)
     .concat(opnd == "" ? "" : ", \"operands\": ".concat(jstr(opnd)))
     .concat("}"))
 }
@@ -28486,6 +28530,31 @@ fn operands_of(op: Str, lt: Str, rt: Str) -> Str {
   return ""
 }
 
+// The narrow-side marker of a mixed-width equality (lower.py's
+// `_mark_equality_widen`, issue #2715). `Float` is the numeric ladder's top;
+// `Int` is the lossless `Int32 -> Int` step, which python absorbs. Same-width
+// equality is already exact and carries nothing. `cir_widen` writes the key
+// onto the operand it names, exactly as the return-site widen already does, so
+// the reference IR (`"widen"` on the OPERAND, never on the `bin` node) is
+// reproduced in both strata.
+fn eq_widen_left(op: Str, lt: Str, rt: Str) -> Str {
+  if (op != "==" && op != "!=" && op != "===" && op != "!==") { return "" }
+  let l = parse_head(lt)
+  let r = parse_head(rt)
+  if ((l == "Int" || l == "Int32") && r == "Float") { return "Float" }
+  if (l == "Int32" && r == "Int") { return "Int" }
+  return ""
+}
+
+fn eq_widen_right(op: Str, lt: Str, rt: Str) -> Str {
+  if (op != "==" && op != "!=" && op != "===" && op != "!==") { return "" }
+  let l = parse_head(lt)
+  let r = parse_head(rt)
+  if (l == "Float" && (r == "Int" || r == "Int32")) { return "Float" }
+  if (l == "Int" && r == "Int32") { return "Int" }
+  return ""
+}
+
 fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
   // item 391 (self-host port): a USER variant's arm payload comes from the case
   // table (`_variant_case_payload`), gated on the case actually belonging to the
@@ -28874,10 +28943,21 @@ fn lir_parts(parts: List[PartN], env: List[Bind], al: Map[Str, Str]) -> Str {
 }
 
 fn lir_bin(b: BinN, env: List[Bind], al: Map[Str, Str]) -> Str {
-  let opnd = operands_of(b.op, infer(b.l, env), infer(b.r, env))
+  let lt = infer(b.l, env)
+  let rt = infer(b.r, env)
+  let opnd = operands_of(b.op, lt, rt)
+  // The reference's `_mark_equality_widen`: the narrower operand of a
+  // mixed-width equality carries the same `widen` marker a call argument does,
+  // on the OPERAND rather than the `bin` node (issue #2715).
+  let lw = eq_widen_left(b.op, lt, rt)
+  let rw = eq_widen_right(b.op, lt, rt)
+  var ljs = lir_expr(b.l, env, al)
+  var rjs = lir_expr(b.r, env, al)
+  if (lw != "") { ljs = cir_widen(ljs, lw, lt) }
+  if (rw != "") { rjs = cir_widen(rjs, rw, rt) }
   var s = "{\"kind\":\"bin\",\"op\":".concat(jstr(b.op))
-    .concat(",\"left\":").concat(lir_expr(b.l, env, al))
-    .concat(",\"right\":").concat(lir_expr(b.r, env, al))
+    .concat(",\"left\":").concat(ljs)
+    .concat(",\"right\":").concat(rjs)
   if (opnd != "") { s = s.concat(",\"operands\":").concat(jstr(opnd)) }
   return s.concat("}")
 }

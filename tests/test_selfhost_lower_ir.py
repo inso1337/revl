@@ -172,6 +172,11 @@ COMPONENT_DOCS = [
     # issue #1369: the `"unit": "ui"` mark on a method that crosses a
     # computer-use verb, and its absence on one that crosses none
     "ui_unit.rvl",
+    # issue #2715 review: the component stratum's mixed-equality widen, which
+    # the native producer must stamp on the same operand as the reference
+    # ("widen" on the operand, never on the `bin` node). The document is an
+    # emitter oracle and sits outside the census directories.
+    "../../noncensus_corpus/services_int_float_equality.rvl",
 ]
 
 # The document whose `externs` section is lowered byte-exact (item 241): the
@@ -661,8 +666,10 @@ def test_native_ir_preserves_idempotent_service_methods(lower_to_ir, modifiers):
 @pytest.mark.parametrize("service,method", [
     ("fn twice(f: (Int) -> Int, n: Int) -> Int", "fn twice(f, n) = f(f(n))"),
     ("fn apply(f: (Int) -> Int, n: Int) -> Int", "fn apply(f, n) = f(n)"),
-    # a module fn of the same name is the callee the reference reads first
+    # a module fn of the same name stays in scope, and the PARAMETER is the
+    # callee (issue #1823's owner ruling on #2544), in both type spellings
     ("fn go(f: (Int) -> Int, n: Int) -> Int", "fn go(f, n) = f(n)"),
+    ("fn go(f: Fn[Int, Int], n: Int) -> Int", "fn go(f, n) = f(n)"),
 ])
 def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
         lower_to_ir, service, method):
@@ -670,7 +677,12 @@ def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
     `cir_fncall` refuse (no module callable named `f`), and a failed method
     drops the WHOLE component `body`, so the native chain emitted the component
     with no provision. The reference lowers the callee as an expression: a
-    `call` on the parameter's `name` node."""
+    `call` on the parameter's `name` node.
+
+    Issue #2544's ruling: that is true even when a module `fn f` is in scope.
+    Every parametrised case pins the callee SHAPE here, not only the
+    native/reference byte equality, so a lowering that read the module fn while
+    both producers agreed would still fail this test."""
     prelude = "fn f(x: Int) -> Int { return x } " if method.startswith("fn go") else ""
     source = (f"{prelude}service M {{ {service} }} "
               f"component C provides m: M {{ provide m {{ {method} }} }}")
@@ -678,6 +690,10 @@ def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
     reference = compile_source(source)["components"][0]
     assert "body" in native
     assert native["body"] == reference["body"]
+    # the callee is the parameter's scoped `name` node, never the module `fn`
+    ret = reference["body"][0]["methods"][0]["body"][0]
+    assert ret["step"] == "return"
+    assert ret["expr"]["callee"] == {"kind": "name", "id": "f"}
 
 
 @pytest.mark.parametrize("returns,body", [
@@ -856,7 +872,7 @@ def test_native_ir_desugars_try_byte_for_byte(lower_to_ir, path):
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus
     document (the empty `{}` on function/type/extern-only documents included)."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native["services"] == reference["services"]
@@ -865,7 +881,7 @@ def test_native_ir_matches_reference_services(lower_to_ir, rel):
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_component_headers(lower_to_ir, rel):
     """Each component's source/config/requires/provides header is byte-identical."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert _headers(native["components"]) == _headers(reference["components"])
@@ -886,7 +902,7 @@ def test_native_ir_stamps_the_component_source(lower_to_ir_at, rel):
     `lower_to_ir_at(src, filename)` supplies the one input that is not the
     source text, and the key is then byte-identical to the reference for the
     same filename — over the whole corpus, not a chosen document."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir_at(src, rel))
     reference = compile_source(src, rel)
     assert [c.get("source") for c in native["components"]] == \
@@ -962,7 +978,7 @@ def test_no_native_ir_document_carries_a_manifest(lower_to_ir):
     This fails the moment the key appears, which is the point — the next pass
     that produces it has to come here and say what it produces."""
     for rel in COMPONENT_DOCS:
-        native = json.loads(lower_to_ir((CORPUS_DIR / rel).read_text()))
+        native = json.loads(lower_to_ir((CORPUS_DIR / rel).read_text(encoding="utf-8")))
         assert "manifest" not in native, rel
 
 
@@ -971,7 +987,7 @@ def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
     """Where the native producer emits a component `body` (item 242: the FULL
     typed component/method expression spine), it is byte-identical to the
     reference body."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     ref_by_name = {c["name"]: c for c in reference["components"]}
@@ -991,7 +1007,7 @@ def test_component_docs_emit_full_body(lower_to_ir, rel):
     byte-identical to the reference (not merely the simple-component slice): the
     activation/method spine (let-effect, effect, emit/compensate sagas, if+fail
     guards, timers, provide-method bodies) is complete."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     ref_by_name = {c["name"]: c for c in reference["components"]}
@@ -1007,7 +1023,7 @@ def test_native_ir_matches_reference_externs(lower_to_ir, rel):
     the verbatim `@backend` bodies (from the lexer's `hostbody` token) — is byte-
     identical to the reference IR on every corpus document (absent together on
     the extern-free documents)."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native.get("externs") == reference.get("externs")
@@ -1026,7 +1042,7 @@ def test_native_component_and_extern_ir_is_emitter_ready(lower_to_ir):
     sys.modules["runtime"] = stub
     try:
         for rel in COMPONENT_DOCS + EXTERN_DOCS:
-            src = (CORPUS_DIR / rel).read_text()
+            src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
             reference_ir = compile_source(src)
             native_ir = json.loads(lower_to_ir(src))
             assert refemit.emit(native_ir) == refemit.emit(reference_ir), rel
@@ -1043,7 +1059,7 @@ def test_native_ir_matches_reference_functions(lower_to_ir, rel):
     (statements + the typed-expression tree) — is byte-identical to the
     reference IR on every corpus document (absent together on the component-only
     documents)."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native.get("functions") == reference.get("functions")
@@ -1053,7 +1069,7 @@ def test_native_ir_matches_reference_functions(lower_to_ir, rel):
 def test_native_ir_matches_reference_types(lower_to_ir, rel):
     """The `types` section — user record/variant declarations — is byte-
     identical to the reference IR on every corpus document."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native.get("types") == reference.get("types")
@@ -1071,7 +1087,7 @@ def test_native_function_ir_is_emitter_ready(lower_to_ir):
     sys.modules["runtime"] = stub
     try:
         for rel in FUNCTION_EMIT_READY_DOCS:
-            src = (CORPUS_DIR / rel).read_text()
+            src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
             reference_ir = compile_source(src)
             native_ir = json.loads(lower_to_ir(src))
             assert refemit.emit(native_ir) == refemit.emit(reference_ir), rel
@@ -1086,7 +1102,7 @@ def test_native_function_ir_is_emitter_ready(lower_to_ir):
 def test_native_ir_version(lower_to_ir, rel):
     """`ir_version` matches the reference, except the one body-builtin document
     the header producer cannot see (it under-approximates to 1)."""
-    src = (CORPUS_DIR / rel).read_text()
+    src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     if rel in VERSION_BODY_DEPENDENT:
@@ -1106,7 +1122,7 @@ def test_native_ir_is_emitter_ready(lower_to_ir):
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub
     try:
-        src = (CORPUS_DIR / "services_basic.rvl").read_text()
+        src = (CORPUS_DIR / "services_basic.rvl").read_text(encoding="utf-8")
         reference_ir = compile_source(src)
         native_ir = json.loads(lower_to_ir(src))
         from_reference = refemit.emit(reference_ir)

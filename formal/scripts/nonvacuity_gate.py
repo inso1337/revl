@@ -64,7 +64,7 @@ KINDS = {"instance", "necessity", "contentless", "concrete"}
 def registered_from_check() -> list[str]:
     pat = re.compile(r"^#print axioms (RevL\.[A-Za-z0-9_.]+)\s*$")
     out = []
-    for line in CHECK.read_text().splitlines():
+    for line in CHECK.read_text(encoding="utf-8").splitlines():
         m = pat.match(line.strip())
         if m:
             out.append(m.group(1))
@@ -74,7 +74,7 @@ def registered_from_check() -> list[str]:
 def registered_from_gate() -> list[str]:
     pat = re.compile(r"^(RevL\.[A-Za-z0-9_.]+)")
     out = []
-    for line in GATE.read_text().splitlines():
+    for line in GATE.read_text(encoding="utf-8").splitlines():
         if not line.startswith("  RevL."):
             continue
         m = pat.match(line.strip())
@@ -101,7 +101,7 @@ def main() -> int:
         errors.append(f"{n}: registered twice in CheckAxioms.lean")
 
     rows: dict[str, tuple[str, list[str], str]] = {}
-    for lineno, raw in enumerate(REGISTRY.read_text().splitlines(), 1):
+    for lineno, raw in enumerate(REGISTRY.read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         parts = raw.split("\t")
@@ -158,7 +158,7 @@ def main() -> int:
                 f"rest on, not an exemption."
             )
 
-    status = STATUS.read_text()
+    status = STATUS.read_text(encoding="utf-8")
     for name in sorted(known):
         if f"`{name}`" not in status:
             errors.append(

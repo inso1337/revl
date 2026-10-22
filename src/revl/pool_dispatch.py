@@ -295,6 +295,10 @@ LOCAL_ONLY_RUN_FLAGS: tuple[tuple[str, str, Any], ...] = (
     ("require_settled_wal", "--require-settled-wal", False),
     ("allow_unsynced_wal", "--allow-unsynced-wal", False),
     ("trace", "--trace", None),
+    # issue #2730: the attestation is checked against THIS machine's
+    # composition and written to THIS run's trace, which a pool dispatch does
+    # not write; refused by name rather than accepted and dropped.
+    ("attestation", "--attestation", None),
     ("withdraw", "--withdraw", None),
     ("plan", "--plan", False),
     ("placement", "--placement", None),

@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 
 from . import retention as _retention
 from .errors import RevlError
-from .typecheck import parse_type, format_type, FN_HEAD
+from .typecheck import parse_type, format_type, FN_HEAD, is_function_type
 
 
 class LiteralSecretDefaultWarning(UserWarning):
@@ -316,7 +316,7 @@ def mentions_secret(type_name: str | None) -> bool:
     head, args = parse_type(type_name)
     if head == "Secret":
         return True
-    if head == FN_HEAD or head == "Fn":
+    if is_function_type(type_name):
         return False
     return any(mentions_secret(a) for a in args)
 

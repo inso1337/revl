@@ -226,7 +226,7 @@ def test_a_ui_transaction_unit_method_is_refused_by_name():
     (`tests/fixtures/emit_py_corpus/ui_unit.rvl`), whose `type_amount(..)
     compensate clear_amount()` is the shape the issue reports."""
     fixture = ROOT / "tests/fixtures/emit_py_corpus/ui_unit.rvl"
-    src = fixture.read_text()
+    src = fixture.read_text(encoding="utf-8")
     assert "compensate" in src or "UiTarget" in src
     emitter = _emitter()
     with pytest.raises(emitter.EmitError, match="#1979"):
@@ -242,7 +242,7 @@ def test_a_ui_transaction_unit_refusal_names_the_unit():
     fixture = ROOT / "tests/fixtures/emit_py_corpus/ui_unit.rvl"
     emitter = _emitter()
     with pytest.raises(emitter.EmitError, match=r"desk\.act.*UI transaction unit.*#1979"):
-        emitter.emit(compile_source(fixture.read_text(), "ui_unit.rvl"))
+        emitter.emit(compile_source(fixture.read_text(encoding="utf-8"), "ui_unit.rvl"))
 
 
 def test_a_document_without_a_computer_use_capability_is_untouched_by_that_gate():

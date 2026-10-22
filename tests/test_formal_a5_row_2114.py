@@ -390,18 +390,18 @@ def test_the_oracle_decides_the_row_with_the_model_legal_cols():
     """The verdict row is the L2 file's own `legalCols` over the two STRING
     columns the row carries, bridged by `a5RowB_iff`, and that bridge is under
     the axioms gate."""
-    src = ORACLE.read_text()
+    src = ORACLE.read_text(encoding="utf-8")
     assert re.search(
         r"def a5RowB .*:=\s*RevL\.A5\.legalCols r\.token r\.compensate", src)
     assert "#print axioms RevLOracle.a5RowB_iff" in src
     assert "#print axioms RevLOracle.a5RowBAll_iff" in src
-    assert "RevLOracle.a5RowB_iff" in GATE.read_text()
+    assert "RevLOracle.a5RowB_iff" in GATE.read_text(encoding="utf-8")
 
 
 def test_the_l2_file_states_both_directions_and_the_boundaries():
     """Two directions matching the registry's two rules, the three boundaries
     of reading the class off a token, and no `sorry`."""
-    src = LEAN.read_text()
+    src = LEAN.read_text(encoding="utf-8")
     assert re.search(r"def Registers \(d : Decl\) : Prop :=", src)
     assert re.search(r"def ClaimsNothing \(d : Decl\) : Prop :=", src)
     assert re.search(r"def Legal \(d : Decl\) : Prop := Registers d ∧ ClaimsNothing d", src)

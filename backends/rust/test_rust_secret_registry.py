@@ -59,13 +59,13 @@ emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
 from revl import compile_source  # noqa: E402
 
-SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text()
+SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text(encoding="utf-8")
 
 # The registry is NOT emitted: it is a fixed part of the runner crate, so the
 # runner's own console channels (item 421 F6(c)) read the same process-global
 # the emitted sinks do. The generated module imports it in secret mode.
 RUNNER_CONFIDENTIAL = BACKEND / "placement_runner" / "src" / "confidential.rs"
-CONFIDENTIAL = RUNNER_CONFIDENTIAL.read_text()
+CONFIDENTIAL = RUNNER_CONFIDENTIAL.read_text(encoding="utf-8")
 SECRET_IMPORT = "use crate::confidential::*;"
 
 # Long enough that an exact match means something, and not a substring of
@@ -136,13 +136,13 @@ def test_the_wal_descriptor_reads_through_the_registry_under_record():
     argument is scrubbed before it is written. Emitted only in secret mode, on
     the witnessed composition the crash-recovery proof records."""
     fixture = BACKEND / "scenarios" / "crashproof" / "crashproof.ir.json"
-    ir = json.loads(fixture.read_text())
+    ir = json.loads(fixture.read_text(encoding="utf-8"))
     ir["components"][0].setdefault("config", []).append(
         {"name": "api_key", "type": "Str", "default": "k", "secret": True})
     code = emit.emit(ir, record=True)
     assert "let args: Vec<String> = args.into_iter().map(revl_redact_text).collect();" in code
     assert "revl_mark_secret(&config.api_key);" in code
-    plain = emit.emit(json.loads(fixture.read_text()), record=True)
+    plain = emit.emit(json.loads(fixture.read_text(encoding="utf-8")), record=True)
     assert "pub fn revl_record_transactional" in plain  # the WAL sink is present
     assert "map(revl_redact_text)" not in plain
     assert "revl_redact_text" not in plain

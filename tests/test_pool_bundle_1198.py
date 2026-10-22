@@ -215,7 +215,7 @@ def _bundle() -> pb.Bundle:
 def signed_task(pool: Pool, wire: dict, digest: str, task_id: str) -> dict:
     """A task the OPERATOR signed, carrying ``wire`` as its bundle. The
     signature is real, so only the bundle checks can refuse it."""
-    charter = json.loads((pool.dir / pp.CHARTER_FILE).read_text())
+    charter = json.loads((pool.dir / pp.CHARTER_FILE).read_text(encoding="utf-8"))
     body = pd.build_task(
         pool_id=charter["pool_id"],
         charter_digest=pp.canonical_digest(charter), peer_id="alpha",

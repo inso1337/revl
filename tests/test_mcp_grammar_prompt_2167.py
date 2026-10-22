@@ -114,7 +114,7 @@ def test_prompt_with_a_format_is_refused_not_silently_ignored():
 def test_the_docs_path_the_prose_payload_used_to_name_is_not_packaged():
     """Why the old pointer was dead: the wheel maps in only `src/revl`, so a
     checkout's `docs/syntax-2.0.md` does not exist in an installed deployment."""
-    assert 'packages = ["src/revl"]' in (ROOT / "pyproject.toml").read_text()
+    assert 'packages = ["src/revl"]' in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert (ROOT / "docs" / "syntax-2.0.md").exists()
     assert not (ROOT / "src" / "revl" / "docs").exists()
 

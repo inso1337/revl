@@ -36,7 +36,7 @@ from ..compiler import compile_source
 
 
 def _load(path: str) -> dict:
-    text = Path(path).read_text()
+    text = Path(path).read_text(encoding="utf-8")
     return compile_source(text, path)
 
 
@@ -82,7 +82,7 @@ def _run_adapt(args) -> int:
 
     opt_ins: dict = {}
     if args.adapt:
-        opt_ins = json.loads(Path(args.adapt).read_text())
+        opt_ins = json.loads(Path(args.adapt).read_text(encoding="utf-8"))
 
     res = bridge_plan(req, prov, opt_ins,
                       req_types=req_types, prov_types=prov_types)
@@ -117,7 +117,7 @@ def _run_adapt(args) -> int:
     # the candidate is itself a committed adapter, `chain` re-displays the
     # proposed hop and the committed inner hop end to end, so the review sees
     # the composed loss rather than just this hop's slice of it.
-    cand_text = Path(args.candidate).read_text()
+    cand_text = Path(args.candidate).read_text(encoding="utf-8")
     depth = chain_depth_for(cand_text)
     plan["chainDepth"] = depth
     if depth > 1:

@@ -1,0 +1,25 @@
+// REJECTED - G4: a declared read-only capability, a body that writes.
+// `Store.load` is declared `emission[fs.read]`, so the provider promises to
+// cross only the read boundary. The body also emits `fs.write`, widening what
+// the declaration bounds. The fix is to widen the declaration, not the
+// capability: an auditor reads the declaration, so a promise the body breaks
+// is worse than no promise.
+//
+// expected error:
+//   `Store.load` is declared `emission[fs.read]`, but this implementation
+//   emits through `fs.write`
+
+extern emission[fs.read] fn read_file(p: Str) -> Str = @py { return "" }
+extern emission[fs.write] fn write_file(p: Str, s: Str) = @py { return }
+
+service Store { emission[fs.read] fn load(p: Str) -> Str }
+
+component FsReader provides store: Store {
+  provide store {
+    fn load(p) {
+      let s = emit read_file(p)
+      emit write_file(p, s)
+      return s
+    }
+  }
+}

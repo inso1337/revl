@@ -252,8 +252,8 @@ def test_the_corpus_carries_the_value_maps_and_the_handle(gate):
         "t1_inplace_map": ("frob", "Map[Str, Int]"),
     }
     for stem, (method, recv) in refused.items():
-        src = (CORPUS / f"{stem}.rvl").read_text()
+        src = (CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
         assert _reference(src) == _gate(gate, src) == _message(method, recv), stem
     for stem in ("ok_typed_host_acquisition", "ok_host_handle_verbs"):
-        src = (CORPUS / f"{stem}.rvl").read_text()
+        src = (CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
         assert _reference(src) == _gate(gate, src) == "", stem

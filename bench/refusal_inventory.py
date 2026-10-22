@@ -125,7 +125,7 @@ def _module_assignment(path: Path, name: str):
     if not path.is_file():
         raise SourceUnavailable(f"{_rel(path)} is not present")
     try:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
     except SyntaxError as exc:
         raise SourceUnavailable(f"{_rel(path)} does not parse: {exc}") from exc
     for node in tree.body:
@@ -194,7 +194,7 @@ def unported_constructs() -> dict:
     """Constructs the reference emitter implements and the port does not."""
     if not BLIND_SPOTS.is_file():
         raise SourceUnavailable(f"{_rel(BLIND_SPOTS)} is not present")
-    data = json.loads(BLIND_SPOTS.read_text())
+    data = json.loads(BLIND_SPOTS.read_text(encoding="utf-8"))
     tiers: dict[str, dict] = {}
     for tier, entry in sorted(data.items()):
         if not isinstance(entry, dict):
@@ -227,7 +227,7 @@ def unreached_constructs() -> dict:
     """Dispatch arms no corpus document exercises. Weaker than a refusal."""
     if not REACH_LEDGER.is_file():
         raise SourceUnavailable(f"{_rel(REACH_LEDGER)} is not present")
-    data = json.loads(REACH_LEDGER.read_text())
+    data = json.loads(REACH_LEDGER.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise SourceUnavailable(
             f"{_rel(REACH_LEDGER)} is not a JSON object")
@@ -255,7 +255,7 @@ def gate_reference_divergence() -> dict:
     selective argument this suite exists to correct."""
     if not CENSUS_BASELINE.is_file():
         raise SourceUnavailable(f"{_rel(CENSUS_BASELINE)} is not present")
-    data = json.loads(CENSUS_BASELINE.read_text())
+    data = json.loads(CENSUS_BASELINE.read_text(encoding="utf-8"))
     buckets = data.get("buckets")
     if not isinstance(buckets, dict):
         raise SourceUnavailable(

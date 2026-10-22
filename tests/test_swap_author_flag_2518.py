@@ -10,7 +10,10 @@ which author it serves, and a caller that does not say is a TypeError.
 
 The frame here (the #2510 shape) isolates `kv` in tenant_a and hands off a
 shared `board`; the successor points `board` at the tenant_a store. A
-successor the agent wrote starts cold; one the operator wrote migrates.
+successor the agent wrote starts cold; one the operator wrote migrates. A
+files-only candidate outside every export area is the operator's own text only
+while host code is untrusted (issue #2672); under `--author-trust trusted` it
+is the agent's too, so the controls below pin both directions.
 
 These drive a live composition, so they need the cordis-py runtime.
 """
@@ -219,16 +222,59 @@ def test_untrusted_repair_of_a_multi_realm_frame_starts_cold(tmp_path, recorded)
 
 
 @needs_runtime
-def test_control_trusted_operator_swap_hands_off_warm(tmp_path):
-    server_mod.set_authoring_trust(host_code=True)
+def test_control_operator_file_swap_hands_off_warm(tmp_path):
+    """The operator form that stays legal after the trusted-mode rule below:
+    the successor is written to a jailed file outside every export area and
+    host code is UNTRUSTED, so the compile reports no transport origin and the
+    file is the operator's own text. The hand-off migrates warm. The trusted
+    direction is the inverted control below; transport text stays agent text
+    under either trust, which tests/test_mcp_swap_template_2423.py pins."""
+    _untrusted()
     _operator_file(tmp_path)
-    successor = _mixed("open", 'realm("tenant_a")').replace(
-        "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)")
-    swapped = _call("revl_swap", {"source": REST + successor,
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(
+        REST + _mixed("open", 'realm("tenant_a")').replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    swapped = _call("revl_swap", {"files": [str(successor)],
                                   "replacing": ["Mixed"]})
     assert swapped["ok"] is True, swapped
     assert _secret_store(server_mod.SESSION).data[SECRET[0]] == SECRET[1]
     assert swapped["handoff"]["board"]["migrated"] is True
+
+
+@needs_runtime
+def test_control_trusted_file_swap_is_agent_text_and_starts_cold(tmp_path):
+    """The inverted control for the trusted-mode rule (issue #2672): the same
+    jailed file outside every export area, now under
+    `set_authoring_trust(host_code=True)`. The operator vouched for host
+    bodies that can rewrite any file the agent can reach, so the predicate
+    reports this files-only candidate authored and the warm hand-off is gone.
+
+    This frame declares `handoff board` and has no live instance state, so the
+    agent-authored direction starts cold under the #2510 multi-realm rule
+    rather than raising STATE_UNDISCLOSED; the disclosure refusal for a
+    files-only successor that changes live operator instance state is pinned
+    in tests/test_mcp_swap_template_2423.py
+    (`test_a_trusted_author_files_only_swap_of_a_rewritten_dependency_refuses`).
+    Before the predicate change the candidate compiled unprofiled and read as
+    the operator's own: the hand-off migrated warm and the seeded tenant_a
+    secret rode onto the successor."""
+    server_mod.set_authoring_trust(host_code=True)
+    _operator_file(tmp_path)
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(
+        REST + _mixed("open", 'realm("tenant_a")').replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    swapped = _call("revl_swap", {"files": [str(successor)],
+                                  "replacing": ["Mixed"]})
+    assert swapped["ok"] is True, swapped
+    assert swapped["swapped"] is True
+    assert swapped["handoff"]["board"]["migrated"] is False
+    assert swapped["handoff"]["board"]["reason"] == "multi-realm"
+    assert SECRET[0] not in _secret_store(server_mod.SESSION).data
+    assert _board_get(server_mod.SESSION) is None
 
 
 @needs_runtime

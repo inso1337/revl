@@ -113,7 +113,7 @@ def test_restore_cannot_steal_a_file_from_outside_the_root(workspace, outside):
     assert ei.value.code == "EOUTSIDE"
 
     assert canary.exists(), "restore STOLE a file from outside the workspace root"
-    assert canary.read_text() == _CANARY
+    assert canary.read_text(encoding="utf-8") == _CANARY
     assert not loot.exists(), "restore planted an outside file inside the root"
     assert sorted(p.name for p in outside.iterdir()) == ["canary.txt"]
 
@@ -130,7 +130,7 @@ def test_unrm_cannot_steal_a_file_from_outside_the_root(workspace, outside):
     assert ei.value.code == "EOUTSIDE"
 
     assert canary.exists(), "unrm STOLE a file from outside the workspace root"
-    assert canary.read_text() == _CANARY
+    assert canary.read_text(encoding="utf-8") == _CANARY
     assert not loot.exists()
 
 
@@ -169,7 +169,7 @@ def test_sidecar_symlink_cannot_exfiltrate_a_workspace_file(workspace, outside):
 
     leaked = [p.name for p in outside.iterdir() if p.name != "canary.txt"]
     assert leaked == [], f"workspace contents exfiltrated outside the root: {leaked}"
-    assert (workspace / "artifact.txt").read_text() == "v1", \
+    assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v1", \
         "a refused write must not mutate the target"
 
 
@@ -209,9 +209,9 @@ def test_write_refuses_a_hardlink_alias_out_of_the_root(workspace, outside):
 
     assert isinstance(result, mod.Err), "a hardlinked target must be refused"
     assert result.value["code"] == "EMULTILINK"
-    assert canary.read_text() == _CANARY, \
+    assert canary.read_text(encoding="utf-8") == _CANARY, \
         "the write went THROUGH the hardlink and mutated the outside file"
-    assert alias.read_text() == _CANARY
+    assert alias.read_text(encoding="utf-8") == _CANARY
 
 
 def test_hardlink_undo_would_leave_unenumerated_outside_residue(workspace, outside):
@@ -231,8 +231,8 @@ def test_hardlink_undo_would_leave_unenumerated_outside_residue(workspace, outsi
 
     # Ok-conditional registration: a refused mutation registers no inverse, so
     # there is no witness at all, and both names still hold the original bytes.
-    assert canary.read_text() == _CANARY
-    assert alias.read_text() == _CANARY
+    assert canary.read_text(encoding="utf-8") == _CANARY
+    assert alias.read_text(encoding="utf-8") == _CANARY
     assert os.stat(canary).st_ino == os.stat(alias).st_ino
 
 

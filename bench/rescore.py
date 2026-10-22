@@ -85,7 +85,7 @@ def load_compiler(root: Path):
 
 
 def score_one(path: Path, compile_source, RevlError, classify) -> dict:
-    code = path.read_text()
+    code = path.read_text(encoding="utf-8")
     try:
         compile_source(code, path.parent.parent.name + ".rvl")
         return {"ok": True}

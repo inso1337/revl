@@ -271,7 +271,7 @@ component KvStore provides kv: Kv {
 def test_realms_scope_the_cascade():
     """Replacing tenant A's store must not disturb tenant B (G2 is
     per-(key, realm), and so is the plan)."""
-    running = compile_source(Path(EXAMPLES / "tenants.rvl").read_text())
+    running = compile_source(Path(EXAMPLES / "tenants.rvl").read_text(encoding="utf-8"))
     result = plan(source="""
 component TenantAStore provides kv: Kv {
   isolate kv in realm("tenant_a")

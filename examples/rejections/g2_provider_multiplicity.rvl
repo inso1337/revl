@@ -1,0 +1,16 @@
+// REJECTED - G2 (non-goal A): no language-level multiplicity.
+// `provide db with multiplicity(N)` is the spelling docs/distribution-model.md
+// section 4 names and refuses. A key has one provider per realm, so the
+// grammar has no clause for a provider count, and this file pins that the
+// spelling STAYS refused. A test asserts only "refused", not the wording: the
+// point is the absence of the construct, not this particular parse error.
+//
+// expected error:
+//   expected {, found 'with'
+
+service Database { fn query(sql: Str) -> List[Row] }
+
+component PgDatabase provides db: Database {
+  let pool = effect Pool.open("pg://", 4) undo pool.close()
+  provide db with multiplicity(3) { fn query(sql) = pool.query(sql) }
+}

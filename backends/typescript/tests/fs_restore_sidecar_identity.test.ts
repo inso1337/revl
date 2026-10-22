@@ -26,8 +26,10 @@
 // because it does not depend on clock resolution. The same-tick test pins the
 // recorded stat tuple to the tampered file's own tuple before the inverse runs,
 // so only the digest can refuse and the result does not depend on the clock. A
-// capture with no `sha256` (an older WAL) is compared stat-only and still
-// restores.
+// capture with no `sha256` at all (an older WAL) is compared stat-only and
+// still restores. A capture that CARRIES the key must carry a bare
+// 64-lowercase-hex digest: a present `null`, number or malformed string is
+// refused `EIDENTITY`, not read as an absent key.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
@@ -227,6 +229,51 @@ describe('an untampered restore is unchanged', () => {
 })
 
 // ===========================================================================
+// A capture that CARRIES the digest key must carry a bare 64-lowercase-hex
+// digest. A present `null` is NOT "no digest": reading it as absent was the
+// fail-open this pins, because a writer who can rewrite the record to null
+// would downgrade the preimage check to stat-only, which is the check the key
+// exists to keep off the clock. Only an ABSENT key is legacy. The absent-key
+// legacy control and the valid-digest control already live above
+// ("a capture recorded before the digest still restores" and the test that
+// records the sidecar bytes digest).
+// ===========================================================================
+
+describe('a present recorded digest must be a bare 64-lowercase-hex string', () => {
+  it('refuses a present null digest and leaves the target untouched', () => {
+    const { witness, target, sidecar } = written()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    ;(witness.capture as unknown as Record<string, unknown>).sha256 = null
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('sha256')
+    expect(refusal.message).toContain('malformed')
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
+  })
+
+  it('refuses a recorded digest that is not 64 lowercase hex', () => {
+    const { witness, target, sidecar } = written()
+    if (witness.capture === null || witness.capture === undefined) {
+      throw new Error('the witness carries no capture')
+    }
+    ;(witness.capture as unknown as Record<string, unknown>).sha256 = 'z'.repeat(64)
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('sha256')
+    expect(refusal.message).toContain('malformed')
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
+  })
+})
+
+// ===========================================================================
 // The tampered sidecars. Each of these installed the attacker's file before.
 // ===========================================================================
 
@@ -258,6 +305,33 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     expect(fs.readFileSync(sidecar, 'utf-8')).toBe('zz')
   })
 
+  it('refuses a forged recorded digest on an honest sidecar', () => {
+    // The record is forged, the file is not: the sidecar still holds the bytes
+    // the snapshot wrote, and only the recorded sha256 is changed to another
+    // well-formed digest. A compare path that trusted the record, or that
+    // treated a well-formed digest as unverifiable, would install the honest
+    // bytes and report a clean reversal. The forged value is 64 lowercase hex,
+    // so it takes the mismatch branch rather than the malformed-record one.
+    const { witness, target, sidecar } = written()
+    const recorded = witness.capture
+    if (recorded === null || recorded === undefined) {
+      throw new Error('the witness carries no capture to forge')
+    }
+    const forged = { ...recorded, sha256: '0'.repeat(64) }
+    expect(forged.sha256).not.toBe(recorded.sha256)
+    expect(recorded.sha256).toBe(sha256('v1'))
+
+    const refusal = refusalOf(() => fsRestore({ ...witness, capture: forged }))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('sha256')
+    // a well-formed forged digest must take the mismatch branch, not the
+    // malformed-record branch
+    expect(refusal.message).toContain('sha256 differ')
+
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
+    expect(fs.readFileSync(sidecar, 'utf-8')).toBe('v1')
+  })
+
   it('refuses a rewrite between the pre-rename read and the rename', () => {
     // The post-install pass exists for the window between the first read and
     // the rename, which is by name. A writer can rewrite the sidecar in place
@@ -282,6 +356,40 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     // tampered file; the post-install pass is what refused, and the residue is
     // the target holding the tampered bytes rather than the sidecar slot.
     expect(fs.readFileSync(target, 'utf-8')).toBe('zz')
+    expect(fs.existsSync(sidecar)).toBe(false)
+  })
+
+  it('refuses one re-permissioned between the pre-rename check and the rename', () => {
+    // The digest cannot see a re-permissioning: the bytes, the size and the
+    // inode are all unchanged. The window is forced inside the rename, after
+    // the pre-rename pass has compared both the stat tuple and the digest, so
+    // the installed result is the only pass that can see it.
+    // `INSTALLED_CAPTURE_FIELDS` keeps `mode` precisely so the digest does not
+    // replace the permission control, and the refusal must name the field that
+    // drifted rather than the digest: the bytes are honest.
+    //
+    // The rename is by name and runs before the installed result is checked, so
+    // the target ends at the old version's bytes (the captured preimage) with
+    // the re-permissioned mode; the residue the refusal names is that mode,
+    // never the forward mutation or a tampered file.
+    const { witness, target, sidecar } = written()
+    const capture = witness.capture
+    if (capture === null || capture === undefined) {
+      throw new Error('the witness carries no capture to re-permission')
+    }
+    const capturedMode = Number(capture.mode) & 0o777
+    const rePermissioned = capturedMode === 0o640 ? 0o600 : 0o640
+    hooks.beforeRename = () => {
+      fs.chmodSync(sidecar, rePermissioned)
+    }
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('mode differ')
+    expect(refusal.message).not.toContain('sha256')
+    expect(refusal.message).toContain('the restored target')
+    expect(hooks.beforeRename).toBeUndefined()
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v1')
     expect(fs.existsSync(sidecar)).toBe(false)
   })
 

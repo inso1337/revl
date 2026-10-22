@@ -573,7 +573,7 @@ def _ref_all(src: str) -> list[tuple[int, str]]:
 
 
 def _fixture(name: str) -> str:
-    return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text()
+    return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text(encoding="utf-8")
 
 
 def _oneline(src: str) -> str:
@@ -1265,7 +1265,7 @@ component C provides s: S { provide s { fn go() { return 0 } } }
     # spawn narrows. Both workers provide `worker`, but as spawn templates neither
     # enters the static G2 table, so there is no provision conflict.
     ("per-tenant spawn narrowing composes",
-     (ROOT / "examples" / "tenant_attenuation.rvl").read_text()),
+     (ROOT / "examples" / "tenant_attenuation.rvl").read_text(encoding="utf-8")),
     # G4/G6 spawn-emission bounds ADMIT: an `emission[kv]` method spawning a
     # target that emits only `kv` is within bound.
     ("scoped method whose spawn target stays in bound admits", """
@@ -1874,7 +1874,7 @@ component Supervisor requires net: Kv provides sup: Sup {
     # reference resolves aliases before the scalar check).
     ("item 309: the checked-in deferred idempotent fixture",
      (ROOT / "tests" / "fixtures" /
-      "extern_idempotent_deferred.rvl").read_text()),
+      "extern_idempotent_deferred.rvl").read_text(encoding="utf-8")),
     ("item 309: a bare idempotent emission", _IDEM.format(mods="idempotent")),
     ("item 309: a keyed idempotent emission",
      _IDEM.format(mods="idempotent(key: id)")),
@@ -2121,7 +2121,7 @@ boot component B2 provides e2: Env2 {
     # `examples/rejections/` name.
     ("dynamic reserved key: a field read on a json_parse result",
      (ROOT / "backends" / "typescript" / "tests" / "fixtures"
-      / "dynamic_reserved_key.rvl").read_text(), "T1"),
+      / "dynamic_reserved_key.rvl").read_text(encoding="utf-8"), "T1"),
     # ---- calls and signatures (docs/design/457 T2b) ------------------------
     # The same walk resolves a CALL against a declaration: the signature table's
     # arity window and per-argument check (monomorphic by `compatible`, generic
@@ -4239,7 +4239,7 @@ def test_generated_spawn_attenuation_agree(admit, seed, oneline):
 # stdlib) precisely so their ONLY reference verdict is the in-slice one the block
 # asserts.
 def _infile_programs() -> list[str]:
-    text = (ROOT / "selfhost" / "lower.rvl").read_text()
+    text = (ROOT / "selfhost" / "lower.rvl").read_text(encoding="utf-8")
     section = text.split("======= tests")[-1]
     progs: list[str] = []
     for head in ("admit_src(", "admit_tag("):
@@ -7356,6 +7356,19 @@ _NR_LATER_SLICES = (
     # which is a true refusal of the same program and not a gate error. Owned by
     # the type layer, like `payload expects` above.
     "ternary branches disagree",
+    # issue #2544's TYPECHECK rule, and the one NAMED allowance this PR adds:
+    # a call on a binder whose type is definitely not a function, where a
+    # module `fn`/extern or case of the same name exists, is refused by the
+    # reference (`refuse_call_on_non_function`) and the binding is thereby not
+    # silently dropped. The self-host gate does not port that rule yet -- this
+    # PR is `Part of #2544`, not `Closes`, and `selfhost/lower.rvl` still
+    # admits the shape -- so a drawn program carrying this refusal is refused
+    # by the reference while the gate admits it, or reports its own refusal.
+    # Skipping it by name keeps the comparison honest instead of silently
+    # treating the gap as agreement; the port is #2544's next slice, tracked
+    # on the issue. The wording is this rule's alone
+    # (`refuse_call_on_non_function` is its only raiser).
+    "which is not a function",
 )
 
 _NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
@@ -7876,7 +7889,7 @@ _VERIFIED_CORPUS = ROOT / "tests" / "fixtures" / "verified_method_effect"
 
 @pytest.mark.parametrize("stem", ["t1_plain_site_undo", "t1_let_bound"])
 def test_verified_method_refusal_carries_the_statement_line(admit_all, stem):
-    src = (_VERIFIED_CORPUS / f"{stem}.rvl").read_text()
+    src = (_VERIFIED_CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
     ref = _ref_all(src)
     assert ref == [(8, "T1")], ref
     assert admit_all(src) == (
@@ -7885,7 +7898,7 @@ def test_verified_method_refusal_carries_the_statement_line(admit_all, stem):
 
 
 def test_verified_parse_refusal_rides_alone(admit_all):
-    src = (_VERIFIED_CORPUS / "t1_emit.rvl").read_text()
+    src = (_VERIFIED_CORPUS / "t1_emit.rvl").read_text(encoding="utf-8")
     assert _ref_all(src) == [(7, "T1")]
     assert admit_all(src) == "0|T1|expected `effect` after `verified`, found 'emit'"
 

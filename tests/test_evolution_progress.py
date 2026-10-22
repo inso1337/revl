@@ -645,11 +645,11 @@ def test_a_table_edited_to_a_lie_is_what_the_counters_cannot_see(
 
 
 def test_the_ratchets_that_refuse_a_lie_exist_where_the_docstring_says(progress):
-    source = (ROOT / "tests/test_selfhost_compile.py").read_text()
+    source = (ROOT / "tests/test_selfhost_compile.py").read_text(encoding="utf-8")
     assert "def test_the_residual_is_located_in_lower_not_in_the_emitter(" in source
-    reach = (ROOT / "tests/test_oracle_construct_reach.py").read_text()
+    reach = (ROOT / "tests/test_oracle_construct_reach.py").read_text(encoding="utf-8")
     assert "def test_the_committed_ledger_matches_this_tree(" in reach
-    census = (ROOT / "tools/gate_reference_census.py").read_text()
+    census = (ROOT / "tools/gate_reference_census.py").read_text(encoding="utf-8")
     assert "--check" in census
 
 
@@ -879,14 +879,14 @@ def test_the_census_counter_is_the_baseline_file(progress, tmp_path):
     """Recomputed here from the artifact itself, so the counter cannot drift
     into measuring something adjacent to the gate's own allowance."""
     baseline = json.loads(
-        (ROOT / "tools/gate_reference_census_baseline.json").read_text())
+        (ROOT / "tools/gate_reference_census_baseline.json").read_text(encoding="utf-8"))
     expected = {i for ids in baseline["buckets"].values() for i in ids}
     reading = progress.census_allowance(progress.WorkingTreeView(ROOT), tmp_path)
     assert reading.failing == expected
 
 
 def _module_literal(path, name):
-    for node in ast.parse(path.read_text()).body:
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
         target = (node.targets[0] if isinstance(node, ast.Assign) else
                   node.target if isinstance(node, ast.AnnAssign) else None)
         if isinstance(target, ast.Name) and target.id == name:
@@ -915,7 +915,7 @@ def test_the_native_chain_counter_is_the_residual_over_its_own_corpus(
 
 def test_the_reach_counter_is_the_emitter_half_of_the_ledger(progress, tmp_path):
     ledger = json.loads(
-        (ROOT / "tests/fixtures/oracle_construct_reach_ledger.json").read_text())
+        (ROOT / "tests/fixtures/oracle_construct_reach_ledger.json").read_text(encoding="utf-8"))
     expected = {f"{o}:{c}" for o in progress.REACH_ORACLES if o in ledger
                 for c in ledger[o]}
     reading = progress.reach_gaps(progress.WorkingTreeView(ROOT), tmp_path)
@@ -968,7 +968,7 @@ def test_the_cli_writes_a_ledger_the_promotion_rule_reads(
         [sys.executable, str(TOOL), "--tree", str(tiny), "--base", "HEAD",
          "--json", str(out)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    block = json.loads(out.read_text())
+    block = json.loads(out.read_text(encoding="utf-8"))
     entry = {"candidate": "c", "retained": True, "progress": block["progress"]}
     assert progress.promote([entry]).promoted is True
 

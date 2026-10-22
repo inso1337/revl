@@ -67,8 +67,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, replace
+from xml.etree import ElementTree as ET
 
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
@@ -112,7 +116,8 @@ from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
-from .session import ApprovalRefused, NothingLoaded, Session, SessionError
+from .session import (AUTHORED_HOST_BODIES_KEY, ApprovalRefused,
+                      NothingLoaded, Session, SessionError, host_body_entries)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -146,8 +151,11 @@ class AuthoringTrust:
                     declares it with `--grant` or it is not enforced. A set —
                     even empty — turns it on.
     `providers`   — `{path: source}` of OPERATOR-sanctioned host-code modules,
-                    merged under the agent's own `modules` so an untrusted turn
-                    can COMPOSE host-backed services without authoring them.
+                    keyed by absolute path (`set_authoring_trust` normalises
+                    the path the operator typed), composed beside the agent's
+                    own `modules` so an untrusted turn can COMPOSE host-backed
+                    services without authoring them. An agent module that
+                    resolves to a provider's file is refused (issue #2763).
                     This is `Gate.propose`'s granted-providers map, same shape,
                     same rule: reaching their externs directly is still refused
                     by `check_no_host_extern_reach`; only their SERVICES compose.
@@ -213,6 +221,13 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
         if roots is not None:
             fields["roots"] = tuple(os.path.realpath(os.path.abspath(r))
                                     for r in roots)
+    if fields.get("providers") is not None:
+        # issue #2763: normalised ONCE, here, to the absolute path the compile
+        # keys its in-memory modules by. `--provider` stores the path as the
+        # operator typed it, relative to the cwd it was read against, so the
+        # absolute path is the one the compile keys that same text by.
+        fields["providers"] = {os.path.abspath(path): text
+                               for path, text in fields["providers"].items()}
     AUTHORING = replace(AUTHORING, **fields)
     return AUTHORING
 
@@ -641,21 +656,56 @@ def _authoring_refusal(arguments: dict) -> dict | None:
 # a yes lets run.
 _AUTHORED_HOST_BODIES: list = []
 _LIVE_HOST_BODIES: list = []
+# The origin member's value is defined in `session`; this is the spelling the
+# server and its tests read it by, so the key has one definition.
+_ORIGIN_AUTHORED_HOST_BODIES = AUTHORED_HOST_BODIES_KEY
+
+
+def _with_authored_host_bodies(origin: dict, bodies: list | None) -> dict:
+    """Keep disclosure provenance with an admitted generation's origin.
+
+    Persistence deliberately serializes only admission inputs; this private
+    in-memory member lets rollback and generation history retain the exact
+    authorship set without adding it to portable snapshots.
+    """
+    origin[_ORIGIN_AUTHORED_HOST_BODIES] = list(bodies or [])
+    return origin
 
 
 def _host_bodies(ir: dict) -> list:
-    """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends}`. This is the surface G8 does not check
-    inside (item 24) and the item-246 classifier never looks at."""
-    out = []
-    for extern in ir.get("externs") or []:
-        bodies = extern.get("bodies") or {}
-        if not bodies:
-            continue
-        out.append({"extern": extern.get("name"),
-                    "classification": extern.get("class"),
-                    "backends": sorted(bodies)})
-    return sorted(out, key=lambda e: str(e["extern"]))
+    """Every extern in `ir` that carries a verbatim host body, in the
+    disclosure record the session module defines."""
+    return host_body_entries(ir)
+
+
+def _transport_authored(source: str | None, files: list[str] | None,
+                        modules: dict | None, report: dict) -> bool:
+    """Whether the document one `compile_under_authoring` compile returned
+    carries text that arrived over the transport (issue #2423 follow-up).
+
+    Read off the compile's own origins, and for the last case off the
+    authoring-trust config: `--author-trust trusted` says the operator vouches
+    for the agent's HOST CODE. Inline `source` and in-memory `modules` are text
+    the agent sent, and an edited buffer rides in `modules`
+    (`edit.file_modules` hands it over that way). A file inside an export
+    directory is the agent's by its path alone, whether `files` names it or a
+    `use` reached it, because `revl_export` is the only writer there (#2524);
+    the compile report names both (the paths the call listed and the modules it
+    read from disk). A files-only candidate outside every export area is the
+    operator's own jailed text, compiled unprofiled as at load, and is not
+    authored while host code is untrusted. Under `--author-trust trusted` it
+    is authored (issue #2672): the operator vouched for host bodies that can
+    rewrite any file the agent can reach, so an empty files-only swap must not
+    re-admit that file with the disclosure gate skipped.
+    """
+    if source is not None or modules:
+        return True
+    paths = set(files or ())
+    paths.update(report.get("disk_reads") or {})
+    paths.update(report.get("dependencies") or {})
+    if any(_export_jail.in_export_area(path) for path in paths):
+        return True
+    return AUTHORING.host_code
 
 
 def compile_under_authoring(source: str | None, files: list[str] | None,
@@ -731,7 +781,12 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     `report` (issue #1779) is the caller-supplied out-parameter `compile_files`
     and `compile_source` take: the user-origin modules this compile read from
     the disk, mapped to the text it compiled for each. It is filled on the
-    compile whose document is returned and never enters that document.
+    compile whose document is returned and never enters that document. It also
+    reports `report["authored"]`: whether that document carries text that
+    arrived over the transport, read off the compile's origins (and, for a
+    files-only candidate, off `AUTHORING.host_code`; `_transport_authored`).
+    Callers that decide whether a successor is agent-authored read that key,
+    not `AUTHORING.profile()`.
     """
     base = AUTHORING.profile() if over_the_transport else None
     inline = source is not None or bool(modules)
@@ -762,6 +817,9 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         if riding:
             report["dependencies"] = {**(report.get("dependencies") or {}),
                                       **riding}
+        report["authored"] = (over_the_transport
+                              and _transport_authored(source, files, modules,
+                                                      report))
     return document
 
 
@@ -775,16 +833,152 @@ def _ride_exported(texts: dict, authored: dict, assets: dict,
     authored.update(texts)
 
 
+def _provider_files(providers: dict) -> dict[str, str]:
+    """`{realpath: registered path}` of the operator's providers, the form a
+    caller-supplied path is compared in everywhere else (`_within_roots`)."""
+    return {os.path.realpath(os.path.abspath(path)): path
+            for path in providers}
+
+
+def _provider_use_closure(providers: dict) -> dict[str, tuple[str, str]]:
+    """Issue #2778: every file the providers' own text `use`s, by realpath.
+
+    The displacement refusal below compared the agent's modules with the
+    provider FILES themselves. A provider's `use` imports are ordinary files
+    on disk, not registered providers, and the composition compile resolves a
+    provider's `use` through the in-memory sources map first, so an agent
+    module keyed at a dependency's path still composes in the place of the
+    file the provider depends on: the provider's text is unchanged and its
+    behaviour changes.
+
+    Resolution mirrors the operator compile exactly. Each module is walked
+    from the absolute path the loader keys it by, and a nested `use` resolves
+    relative to that path's directory first, then the search path
+    (`REVL_IMPORT_PATH`, then the stdlib). The realpath is only the comparison
+    key, so every spelling of one file collides with the same agent module
+    while a symlinked dependency is still walked from the directory the
+    compiler reads it through. A source that does not parse and a `use` that
+    does not resolve are skipped: the provider compile owns those errors and
+    refuses them before anything runs.
+    """
+    from ..compiler import _default_search_path  # noqa: PLC0415 - same package
+    from ..parser import parse_text  # noqa: PLC0415 - avoids a parser import here
+
+    def resolve(importer: str, use_path: str) -> str:
+        target = os.path.join(os.path.dirname(importer), use_path)
+        if os.path.isfile(target):
+            return target
+        for base in _default_search_path():
+            candidate = os.path.join(base, use_path)
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    closure: dict[str, tuple[str, str]] = {}
+    seen = {os.path.realpath(path) for path in providers}
+    for registered, text in providers.items():
+        # the frontier carries the path the compiler would LOAD the module by,
+        # and the realpath is used only to compare one file against another
+        frontier = [registered]
+        sources = {registered: text}
+        while frontier:
+            importer = frontier.pop()
+            try:
+                program = parse_text(sources.pop(importer), importer)
+            except (RevlError, RecursionError):
+                # the provider compile reports an unparseable module itself
+                continue
+            for use in program.uses:
+                target = resolve(importer, use.path)
+                if not target:
+                    continue
+                real = os.path.realpath(target)
+                if real in seen:
+                    continue
+                seen.add(real)
+                closure[real] = (registered, use.path)
+                loaded = os.path.abspath(target)
+                try:
+                    with open(loaded, encoding="utf-8") as handle:
+                        sources[loaded] = handle.read()
+                except (OSError, UnicodeDecodeError):
+                    # the provider compile owns a dependency it cannot read
+                    continue
+                frontier.append(loaded)
+    return closure
+
+
+def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
+    """Issue #2763: refuse a candidate whose in-memory module names a file the
+    operator registered as a `--provider`, under any spelling of that path.
+
+    A `--provider` module is the operator's own host code, composed under the
+    path the operator registered. Before, the merge compared the agent's keys
+    with the providers' as typed, while the compile read a map keyed by
+    absolute path: an agent module sent as the provider's absolute path, or as
+    `./` plus the registered path, was a different key and the same file, and
+    the agent's text compiled in the provider's place. A refusal, not a silent
+    drop: the reason names the module as the caller sent it and the provider
+    it collided with, a path inside the roots the jail refusal already shows,
+    and nothing is compiled.
+
+    Issue #2778: the same rule covers the files a provider's own text `use`s.
+    Those are not registered providers, but the composition compile resolves a
+    provider's `use` through the in-memory map first, so a module keyed at a
+    dependency's path would compose in the place of the file the provider
+    depends on."""
+    taken = _provider_files(providers)
+    dependencies = _provider_use_closure(providers)
+    for key in modules:
+        real = os.path.realpath(os.path.abspath(key))
+        registered = taken.get(real)
+        if registered is not None:
+            raise RevlError(
+                key, 1,
+                f"admission refused: module `{key}` names the operator-sanctioned "
+                f"provider `{registered}`; an agent-supplied module may not take "
+                f"a granted provider's place",
+                hint="a `--provider` module is the operator's own host code and "
+                     "is composed under the path the operator registered; it "
+                     "cannot be replaced from the transport under any spelling "
+                     "of that path. Send your module under a path of its own and "
+                     "compose the provider's service through `use` of the "
+                     "registered path, or ask the operator to change the provider",
+                category="admission")
+        owner = dependencies.get(real)
+        if owner is None:
+            continue
+        dependency_provider, use_path = owner
+        raise RevlError(
+            key, 1,
+            f"admission refused: module `{key}` names `{use_path}`, a file the "
+            f"operator-sanctioned provider `{dependency_provider}` uses; an "
+            f"agent-supplied module may not take a provider's dependency's place",
+            hint="the provider's own `use` resolves through the composition's "
+                 "in-memory sources first, so a module sent under a path the "
+                 "provider imports would compose in place of the file the "
+                 "operator sanctioned. Send your module under a path of its own",
+            category="admission")
+
+
 def _compile_candidate(source, files, manifest, modules, replacing, profile,
                        report) -> dict:
     """One pass of `compile_under_authoring`: the decision compile and, with
     operator-sanctioned providers, the composition compile."""
     providers = dict(AUTHORING.providers or {})
-    # operator-sanctioned modules ride UNDER the agent's own `modules`: an
-    # agent-supplied entry can never displace a provider the operator granted.
+    # Issue #2763: an agent-supplied module may not take a provider's place.
+    # Providers are keyed by absolute path (`set_authoring_trust`), and the
+    # compile below reads a map keyed the same way, so the comparison that
+    # guards the merge has to be made in that form too: a module sent as the
+    # provider's absolute path, a `./` spelling of it, or a symlink to the
+    # file is the same file. Resolved with `realpath`, the path jail's rule.
+    # The outcome is a refusal, not a silent drop of either text: the agent
+    # learns which provider it collided with and sends its module elsewhere.
+    if modules:
+        _refuse_provider_displacement(modules, providers)
     merged = dict(providers)
     if modules:
-        merged.update({k: v for k, v in modules.items() if k not in merged})
+        merged.update(modules)
 
     # every in-memory module, keyed the way `compile_files` resolves a `use`:
     # by absolute path. The agent's own modules ride here in BOTH compiles of
@@ -875,28 +1069,60 @@ def _compile(source: str | None, files: list[str] | None,
                                  report=compile_report)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = _authored_host_bodies(
-        ir, source, modules,
-        export_area=_exported_candidate(files, compile_report) is not None)
+        ir, source, modules, files=files, report=compile_report)
     return ir
 
 
 def _authored_host_bodies(ir: dict, source: str | None,
                           modules: dict | None, *,
-                          export_area: bool = False) -> list:
-    """The agent-authored host bodies `ir` carries: empty unless the candidate
-    is the author's text under an open authoring trust.
+                          files: list[str] | None = None,
+                          report: dict,
+                          include_trusted_files: bool = False,
+                          source_name: str = "<candidate>.rvl") -> list:
+    """The host bodies declared by candidate-authored sources in `ir`.
 
-    `export_area` says the candidate carries a file inside an export directory.
-    Such a file is the author's by its path and always has been: `revl_export`
-    writes source only under `<root>/.revl/export/`, and `export_area.py` reads
-    that as authorship without consulting the trust at all. So this is not a
-    question about a profile, unlike the realm-removal check, which needs one to
-    have been applied to have something to compare against. Issue #2628: a swap
-    sent only as such a file reported no unreviewed host code, so the operator
-    approved a crossing without being told what the composition carried."""
-    authored = source is not None or bool(modules) or export_area
-    return (_host_bodies(ir) if authored and AUTHORING.host_code
-            else [])
+    The merged composition also includes operator-sanctioned provider modules.
+    The compile report keeps each host-body extern attached to its source so a
+    provider body is not presented on the approval ticket as the candidate's.
+    """
+    if not AUTHORING.host_code:
+        return []
+
+    candidate_sources = set()
+    if source is not None:
+        candidate_sources.add(os.path.abspath(source_name))
+    candidate_sources.update(os.path.abspath(path) for path in (modules or {}))
+    # Files only count as candidate-authored when the compile treated them as
+    # agent text. Ordinary operator files can also be passed through `files`;
+    # the export area is the path-based authorship boundary for those sources.
+    named_export, reached_export = _export_area_parts(files, report)
+    candidate_sources.update(os.path.abspath(path) for path in named_export)
+    candidate_sources.update(os.path.abspath(path) for path in reached_export)
+    # In trusted host-code mode a file passed through `files` outside the
+    # export area is still treated as carrying host code for admission and
+    # disclosure (#2672). There is no transport source or export path to
+    # attribute that text narrowly, so use the source map returned by that
+    # exact compile. A candidate can carry `modules` beside those files (an
+    # edited buffer, an in-memory `use` target): the module text is not a
+    # reason to drop the files' bodies, so the two sets merge (#2675).
+    if (include_trusted_files and report.get("authored")
+            and source is None):
+        candidate_sources.update(report.get("host_extern_sources", {}))
+    if not candidate_sources:
+        return []
+    provider_sources = {
+        os.path.abspath(path) for path in (AUTHORING.providers or {})
+    }
+    candidate_sources.difference_update(provider_sources)
+
+    authored_externs = {
+        name
+        for path, names in report.get("host_extern_sources", {}).items()
+        if path in candidate_sources
+        for name in names
+    }
+    return [body for body in _host_bodies(ir)
+            if body.get("extern") in authored_externs]
 
 
 def _summary(ir: dict) -> dict:
@@ -1227,14 +1453,24 @@ def _k_counts(entries: list) -> dict:
 
 
 def _remember_live_host_bodies() -> None:
-    """Re-read the host bodies the LIVE composition carries, so a later
-    class-(c) ticket can name them. Called after every completed tool call, so
-    load / swap / edit / restore / undo / rollback / unload are all covered by
-    one line rather than five that could drift apart. Empty under a closed
-    authoring trust: the profile refused every agent-authored host body, so the
-    only bodies that can be live came from the operator's own jailed files and
-    there is nothing to warn about."""
+    """Refresh the authored-body set for the LIVE composition.
+
+    Called after every completed tool call, so load / swap / edit / restore /
+    undo / rollback / unload share one update point. The origin carries the
+    provenance computed by the compile that admitted the generation; walking
+    the merged IR here would mislabel operator provider bodies as agent code.
+    """
     global _LIVE_HOST_BODIES
+    origin = getattr(SESSION, "origin", None) or {}
+    if _ORIGIN_AUTHORED_HOST_BODIES in origin:
+        # Every MCP admission path tags its origin with the compile's report,
+        # including an empty set, so this member is authoritative when present.
+        _LIVE_HOST_BODIES = (list(origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
+                             if AUTHORING.host_code else [])
+        return
+    # A composition loaded without admission inputs (a direct `Session.load`,
+    # composed.py) has no report to attribute from. Keep the pre-#2676
+    # behaviour for that shape rather than going silent on its live tickets.
     ir = getattr(SESSION, "ir", None)
     _LIVE_HOST_BODIES = (_host_bodies(ir)
                          if ir and AUTHORING.host_code else [])
@@ -1311,7 +1547,8 @@ def _tool_load(arguments: dict, compiled=None) -> dict:
     return _canonical.attach(
         _boot(ir, source, modules, arguments.get("config"),
               _load_records(arguments.get("record")), origin,
-              files=files, compile_report=compile_report), completed)
+              files=files,
+              compile_report=compile_report), completed)
 
 
 def _load_records(requested) -> bool:
@@ -1352,22 +1589,15 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         next=_remedy.load_next())
 
 
-def _boot(ir: dict, source, modules, config, record: bool, origin: dict, *,
-          files: list[str] | None = None,
-          compile_report: dict | None = None) -> dict:
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
+          *, files: list[str] | None = None,
+          compile_report: dict) -> dict:
     """Boot a compiled composition: `Session.load`, then record what it
-    authored. Shared by `revl_load` and a draft that has no holes left.
-
-    `files` and `compile_report` are the load caller's candidate, so a load
-    naming an export-area file reports the host code it carries exactly as a
-    swap does (issue #2641). `_exported_candidate` reads the named files and
-    the ones the compile reached by `use`. A draft boots through the same
-    function without them, which keeps its behaviour: a filled draft carries
-    its edited buffer in `modules`, so its bodies are reported as authored
-    before this value can matter."""
+    authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(
-        ir, source, modules,
-        export_area=_exported_candidate(files, compile_report or {}) is not None)
+        ir, source, modules, files=files, report=compile_report,
+        include_trusted_files=True)
+    _with_authored_host_bodies(origin, authored)
     try:
         state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
@@ -1391,8 +1621,9 @@ def _boot_draft(vs: dict, config, record, verify=None) -> dict:
     refusal = _leases.check(SESSION, "load", candidate)
     if refusal is not None:
         return _draft.still_a_draft(_refused_by_lease(refusal))
+    compile_report: dict = {}
     try:
-        ir = _edit.compile_virtual(vs)
+        ir = _edit.compile_virtual(vs, report=compile_report)
     except RevlError as error:
         return _draft.still_a_draft(report(error))
     refused = verify(candidate) if verify is not None else None
@@ -1400,7 +1631,8 @@ def _boot_draft(vs: dict, config, record, verify=None) -> dict:
         return _draft.still_a_draft(refused)
     modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
     booted = _boot(ir, vs.get("source"), modules, config, _load_records(record),
-                   _edit._origin_from(vs))
+                   _edit._origin_from(vs), files=vs.get("files"),
+                   compile_report=compile_report)
     if not booted.get("ok"):
         return _draft.still_a_draft(booted)
     return {**booted, "draft": False, "booted": True, "loaded": True}
@@ -1545,14 +1777,17 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # issue #1779: and what this compile READ rides with it, so the swapped-in
     # generation anchors records to the files it actually compiled
     origin = _origin(stored, _dependency_buffers(compile_report))
+    authored = _authored_host_bodies(full, source, modules,
+                                     files=files,
+                                     report=compile_report,
+                                     include_trusted_files=True)
+    _with_authored_host_bodies(origin, authored)
     # issue #2628: read once, asked two different questions below. The ticket
     # asks whether the author wrote this text, which for a file inside an
     # export directory is yes by its path. The realm check asks whether a
     # profile was applied, which needs the gate further down. Sharing the call
     # keeps the two answers about the same files.
     export_texts = _exported_candidate(files, compile_report)
-    authored = _authored_host_bodies(full, source, modules,
-                                     export_area=export_texts is not None)
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
     # realm by leaving its clause out. A swap of jailed `files` is exempt
@@ -1570,9 +1805,16 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # (#2585).
     # issue #2600: only text that actually compiled under the profile is
     # compared. With `--author-trust trusted` the profile is none, so an
-    # export-area file compiles exactly as it did before #2524, it stays the
-    # operator's own, and a swap of it keeps the #2487 exemption. Deciding by
-    # path alone would refuse that operator a swap this door admitted before.
+    # export-area file compiles exactly as it did before #2524 and a swap of it
+    # keeps the #2487 exemption; deciding by path alone would refuse that
+    # operator a swap this door admitted before. That exemption is now known to
+    # be narrower than the authorship rule: issue #2672 makes the same file the
+    # agent's text for the disclosure gate, because the vouched-for host bodies
+    # can rewrite it on disk. Skipping the realm comparison here is therefore
+    # the wrong answer for a trusted export-area file. The skip is retained
+    # only because #2600's exemption is a separate decision: a trusted swap
+    # that drops a realm clause is a known gap in this check, not evidence that
+    # the file is the operator's own.
     exported = (export_texts
                 if AUTHORING.profile() is not None else None)
     if source is not None or modules or exported is not None:
@@ -1586,14 +1828,16 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
     # issue #2423: authorship decides whether the item-334 disclosure gate runs.
-    # Inline source and modules arrived over the transport, and an export-area
-    # file is the agent's by its path (`compile_under_authoring` compiles both
-    # under the profile), so they are agent-authored. A files-only candidate
-    # outside every export area is the operator's own jailed text, compiled
-    # unprofiled, and keeps generational migration as any operator swap does.
-    agent_authored = (AUTHORING.profile() is not None
-                      and (source is not None or bool(modules)
-                           or export_texts is not None))
+    # The compile that produced `full` reports it (its `report["authored"]`),
+    # read off the text's origins: inline source and modules arrived over the
+    # transport, and an export-area file is the agent's by its path. A
+    # files-only candidate outside every export area is the operator's own
+    # jailed text, and keeps generational migration as any operator swap does,
+    # while host code is untrusted. Under `--author-trust trusted` it is the
+    # agent's too (issue #2672): the vouched-for host bodies can rewrite such a
+    # file on disk. A trusted host-code author is still the agent, and its text
+    # may not re-seat live operator instance state without the disclosure gate.
+    agent_authored = bool(compile_report.get("authored"))
     try:
         state = SESSION.swap(full, origin=origin,
                              agent_authored=agent_authored)
@@ -1858,23 +2102,23 @@ def _swap_server_side(replacing: tuple) -> dict:
         if refused is not None:
             return refused
     radius = _authoring_loop.blast_radius(running, full)  # issue #1704
-    # issue #2423: the same authorship rule as `_swap_inline`; an unedited
-    # files-only working set outside every export area is the operator's own,
-    # while inline source, an edited buffer, or an export-area file is the
-    # agent's text. The export-area part is read the way `_exported_candidate`
-    # reads it: a file the working set LISTS inside one, and a module the full
-    # compile reached there by `use`. The second is the one the paths alone
-    # cannot see, and it carries the agent's changed text (#2600), so leaving
-    # it out let a files-only candidate install authored text and migrate live
-    # state without the disclosure gate.
-    named_export, reached_export = _export_area_parts(vs.get("files"),
-                                                      compile_report)
-    agent_text = (vs.get("source") is not None or bool(edited)
-                  or bool(named_export or reached_export))
+    # issue #2423: the same authorship rule as `_swap_inline`, read off the
+    # compile that produced `full`. Inline source, an edited buffer, and a file
+    # the compile named or reached inside an export area are the agent's text;
+    # an unedited files-only working set outside every export area is the
+    # operator's own while host code is untrusted, and under `--author-trust
+    # trusted` it is the agent's too (issue #2672). So a trusted host-code
+    # author's text still runs the disclosure gate.
+    authored = _authored_host_bodies(
+        full, vs.get("source"), edited if vs.get("files") else vs.get("modules"),
+        files=vs.get("files"),
+        report=compile_report, include_trusted_files=True)
+    origin = _with_authored_host_bodies(_edit._origin_from(vs), authored)
     try:
-        state = SESSION.swap(full, origin=_edit._origin_from(vs),
-                             agent_authored=(AUTHORING.profile() is not None
-                                             and agent_text))
+        state = SESSION.swap(full, origin=origin,
+                             agent_authored=bool(compile_report.get("authored")))
+    except ApprovalRequired as exc:
+        return _approval_required(exc, host_bodies=authored)
     except SessionError as error:
         return _session_error(error, **_refusal_code(error))
     return {"ok": True, "admitted": True, "swapped": True,
@@ -2487,11 +2731,64 @@ def _tool_export(arguments: dict) -> dict:
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
+    copied = _copied_not_adopted(held)
+    if copied:
+        payload["note"] = _copied_note(copied)
+        payload["adopt"] = copied
     if skipped:
         payload["skipped"] = skipped
     if damaged:
         payload["exportRecordDamaged"] = damaged
     return payload
+
+
+def _copied_not_adopted(held: dict) -> list[dict]:
+    """The loaded files whose bytes are not the held text, each with the copy
+    that holds it (issue #2766).
+
+    A files-loaded composition exports each changed file to its copy under
+    `.revl/export/`, never over the loaded file (issue #2524). The success
+    payload nevertheless said the held source was "written to disk" and
+    `disk.inSync` was true, so a client read the export as adopted and stopped
+    with the loaded file still holding the old bytes. This names the difference
+    in the payload; the divergence block keeps comparing against the copy, as
+    issue #2524 defined it.
+
+    Decided from state, not from what this call wrote: a second export writes
+    nothing (the copy already holds the text) and still leaves the loaded file
+    alone, and a revert can rewrite the copy so the loaded file already equals
+    the held text, which must not be reported as waiting for a copy-out."""
+    if not held.get("files"):
+        return []
+    texts = held.get("files_content") or {}
+    roots = _file_roots()
+    out = []
+    for path in held["files"]:
+        text = texts.get(path)
+        copy = _export_jail.export_copy(path, roots)
+        if copy != path and text is not None and _edit._read_disk(path) != text:
+            out.append({"file": path, "export": copy})
+    return out
+
+
+def _copied_note(copied: list[dict]) -> str:
+    """The export note when a loaded file is not the held text (issue #2766):
+    name the copy that holds the text and the file that still holds the old
+    bytes, and say that adopting the export means copying it over. It names a
+    copy, not a tool: the server does not know which file tool the client has
+    (#2524 leaves the copy-out to whoever asked for the export)."""
+    if len(copied) == 1:
+        one = copied[0]
+        return (f"the held source is at the export copy "
+                f"{one['export']}; the loaded file {one['file']} still holds "
+                "the previous bytes. An export never writes over a loaded file "
+                "outside the export directory: adopt it by copying the copy "
+                "over that file")
+    pairs = "; ".join(f"{i['file']} (copy {i['export']})" for i in copied)
+    return ("the held source is at export copies; these loaded files "
+            f"still hold the previous bytes: {pairs}. An export never writes "
+            "over a loaded file outside the export directory: adopt it by "
+            "copying each copy over its file")
 
 
 def _write_records(records) -> tuple | None:
@@ -2756,12 +3053,19 @@ def _edit_loaded_result(arguments: dict, verify, commit: bool) -> dict:
     except SessionError as error:
         if not SESSION.loaded:
             return _session_error(NothingLoaded(str(error)))
-        return _session_error(error)
+        # a swap refusal from the edit's commit carries its machine-readable
+        # classification (e.g. STATE_UNDISCLOSED) to the boundary, as the swap
+        # door's own refusal does (#2423 follow-up).
+        return _session_error(error, **_refusal_code(error))
 
 
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback(profile=AUTHORING.profile())}
+    except ApprovalRequired as error:
+        previous = SESSION.previous_origin or {}
+        return _approval_required(
+            error, host_bodies=previous.get(_ORIGIN_AUTHORED_HOST_BODIES, []))
     except SessionError as error:
         # a rollback refused after its teardown restarted the running
         # generation cold, and says which state that dropped (issue #2424)
@@ -2795,6 +3099,9 @@ def _tool_undo(arguments: dict) -> dict:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
         result = SESSION.undo(arguments.get("to"), profile=AUTHORING.profile())
+    except ApprovalRequired as error:
+        return _approval_required(
+            error, host_bodies=getattr(error, "host_bodies", []))
     except SessionError as error:
         return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
@@ -2898,8 +3205,17 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     if not fork_hash:
         return _session_error("provide `hash` — the fork hash revl_fork returned, "
                               "binding exactly the rewound span and residue")
+    parent_origin = getattr(SESSION, "origin", None) or {}
+    authored_host_bodies = list(
+        parent_origin.get(_ORIGIN_AUTHORED_HOST_BODIES) or [])
     try:
         result = SESSION.fork_confirm(fork_hash)
+    except ApprovalRequired as error:
+        # The branch restore is a new admission of the parent generation, so a
+        # class-(c) refusal there names the bodies the parent generation
+        # already disclosed (`Session.fork_confirm` carries no ticket bodies
+        # of its own).
+        return _approval_required(error, host_bodies=authored_host_bodies)
     except SessionError as error:
         return _session_error(error)
     if result.get("refused"):
@@ -2909,6 +3225,20 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     # every subsequent verb drives the branch, and never serialize the live object
     branch = result.pop("branchSession", None)
     if branch is not None:
+        # Session.fork_confirm restores a portable snapshot, which deliberately
+        # omits this in-memory disclosure metadata. The fork is still the same
+        # admitted generation, so carry its provenance onto the branch and its
+        # retained generation record. `Session.apply` records its resulting IR
+        # with this origin, allowing later call/act tickets to keep naming the
+        # authored bodies after a plan-artifact apply.
+        branch_origin = getattr(branch, "origin", None)
+        if isinstance(branch_origin, dict):
+            _with_authored_host_bodies(branch_origin, authored_host_bodies)
+        for entry in getattr(branch, "_history", ()):
+            generation_origin = entry.get("origin")
+            if isinstance(generation_origin, dict):
+                _with_authored_host_bodies(generation_origin,
+                                           authored_host_bodies)
         SESSION = branch
     return {"ok": True, **result}
 
@@ -2932,9 +3262,15 @@ def _approval_required(exc: ApprovalRequired,
     COPY, after the hash the outstanding-ticket table is keyed by), so
     approve/consume is byte-identical.
 
-    `host_bodies` is the candidate's own, from a verb that has not recorded
-    them: `revl_load` and `revl_swap`, which record them only once the load or
-    swap succeeds (issues #1444, #1446)."""
+    `host_bodies` is the candidate's own. Load and swap pass it directly,
+    because they record it only after success (issues #1444, #1446); edit
+    attaches it to the exception for this shared handler to recover."""
+    if host_bodies is None:
+        # Some callers (notably `revl_edit`) cannot shape the approval result
+        # at the point where the candidate is known. They attach the exact
+        # candidate provenance to the exception so the shared handler can
+        # disclose it without falling back to the currently running bodies.
+        host_bodies = getattr(exc, "host_bodies", None)
     ticket = exc.ticket
     fields = _ticket_host_code(exc, host_bodies)
     if fields:
@@ -2962,11 +3298,12 @@ def _ticket_host_code(exc: ApprovalRequired, host_bodies: list | None) -> dict:
     host code, as before."""
     candidate = exc.candidate
     if candidate is None:
-        bodies = (host_bodies if host_bodies is not None
-                  else _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES)
+        bodies = (host_bodies if host_bodies is not None else _LIVE_HOST_BODIES)
         return _host_code_fields(bodies) if bodies else {}
-    bodies = (host_bodies if host_bodies is not None
-              else _host_bodies(candidate) if AUTHORING.host_code else [])
+    # A merged candidate IR also includes operator providers. If the caller did
+    # not carry the compile's provenance report, omit the disclosure instead of
+    # claiming every host body was candidate-authored.
+    bodies = host_bodies or []
     if not bodies:
         return {}
     fields = _host_code_fields(bodies)
@@ -3304,13 +3641,206 @@ def _tool_gauntlet(arguments: dict) -> dict:
     return dossier
 
 
+# -- selected test runs (issue #2843) ---------------------------------------
+
+#: One failing test's message is bounded: a pytest traceback can be tens of
+#: kilobytes and there is one per failing test, so an unbounded answer would be
+#: the runner's stdout under another name.
+_TEST_MESSAGE_LIMIT = 500
+
+#: The default wall-clock budget of one `revl_test_run` call, in seconds.
+_TEST_RUN_TIMEOUT = 300.0
+
+
+def _test_message(text: str | None) -> str | None:
+    """One test's message, whitespace-collapsed and bounded."""
+    if not text:
+        return None
+    text = " ".join(text.split())
+    if len(text) <= _TEST_MESSAGE_LIMIT:
+        return text
+    return text[: _TEST_MESSAGE_LIMIT - 4].rstrip() + " ..."
+
+
+def _test_node_id(case) -> str:
+    """The node id pytest would report for one junit `<testcase>`.
+
+    junit carries `file`, `classname` and `name`, and no node id, so the three
+    are reconstructed (`tests/test_a.py::TestX::test_y`) with no plugin.
+    """
+    file = case.get("file") or ""
+    name = case.get("name") or ""
+    cls = case.get("classname") or ""
+    if not file:
+        return f"{cls}::{name}" if cls else name
+    module = file[:-3].replace("/", ".") if file.endswith(".py") else file
+    inner = cls[len(module) + 1:] if cls.startswith(module + ".") else ""
+    prefix = file + ("::" + inner.replace(".", "::") if inner else "")
+    return f"{prefix}::{name}"
+
+
+def _test_entry(case) -> dict:
+    """One junit `<testcase>` as the answer's per-test entry."""
+    outcome = "passed"
+    node = None
+    for tag, mapped in (("failure", "failed"), ("error", "error"),
+                        ("skipped", "skipped")):
+        found = case.find(tag)
+        if found is not None:
+            outcome, node = mapped, found
+            break
+    try:
+        duration = round(float(case.get("time") or 0.0), 3)
+    except ValueError:
+        duration = 0.0
+    return {"nodeId": _test_node_id(case), "outcome": outcome,
+            "duration": duration,
+            "message": None if node is None else _test_message(
+                node.get("message") or node.text)}
+
+
+def _parse_junit(path: str) -> list[dict]:
+    """Every per-test entry in a junit report, or [] when it cannot be read."""
+    try:
+        tree = ET.parse(path)
+    except (OSError, ET.ParseError):
+        return []
+    return [_test_entry(case) for case in tree.getroot().iter("testcase")]
+
+
+def _test_run_refusal(message: str, code: str, **extra) -> dict:
+    """A named refusal from `revl_test_run`, with the run's receipt when it has
+    one. The verdict vocabulary is shared with a completed run, so a caller
+    reads `verdict` first and `code` when it is `refused`."""
+    return _session_error(message, category="usage", code=code, refused=True,
+                          verdict="refused", **extra)
+
+
+def _tool_test_run(arguments: dict) -> dict:
+    """Run a selected test suite under this server's interpreter and answer
+    with structured per-test results (issue #2843).
+
+    pytest runs as a subprocess with `--junitxml` into a temp file, which is
+    parsed and deleted; the runner's stdout is never read or echoed. `ok`
+    reports that the run produced an answer and the result is in `verdict`
+    (`passed` | `failed`), so a failing test is a result, not a tool fault. An
+    empty selection, a selection that collected no test and one where every
+    test skipped are named refusals, so a vacuous run cannot read green.
+    """
+    selection = arguments.get("selection")
+    if selection is None or selection == []:
+        return _test_run_refusal(
+            "`selection` is required: the test paths or pytest node ids to run, "
+            "e.g. [\"tests/test_mcp.py\"]. An empty selection is refused, so a "
+            "run over nothing cannot read as green", "EMPTY_SELECTION")
+    if not isinstance(selection, list) or not selection:
+        return _test_run_refusal(
+            "`selection` must be a non-empty array of test paths or node ids",
+            "BAD_SELECTION")
+    if not all(isinstance(item, str) and item.strip() for item in selection):
+        return _test_run_refusal(
+            "every `selection` entry must be a non-empty test path or node id",
+            "BAD_SELECTION")
+    for item in selection:
+        if item.startswith("-"):
+            return _test_run_refusal(
+                f"`selection` entry `{item}` looks like a pytest option; this "
+                "verb takes test paths and node ids, not options",
+                "BAD_SELECTION")
+        if not item.split("::", 1)[0].strip():
+            return _test_run_refusal(
+                f"`selection` entry `{item}` names no path before `::`",
+                "BAD_SELECTION")
+    cwd = arguments.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return _test_run_refusal(
+            "`cwd` is required: the working directory pytest runs in",
+            "BAD_CWD")
+    cwd = os.path.realpath(os.path.abspath(cwd))
+    if not os.path.isdir(cwd):
+        return _test_run_refusal(f"`cwd` {cwd} is not a directory", "BAD_CWD")
+    timeout = arguments.get("timeout", _TEST_RUN_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or not timeout > 0:
+        return _test_run_refusal(
+            f"`timeout` must be a positive number of seconds, not {timeout!r}",
+            "BAD_TIMEOUT")
+    # a test selection is a path argument like any other: the tree it can run
+    # and the directory it runs in stay inside the operator-sanctioned roots
+    roots = _file_roots()
+    outside: list[str] = []
+    if not _within_roots(cwd, roots):
+        outside.append(cwd)
+    for item in selection:
+        path = item.split("::", 1)[0]
+        if not path or not _within_roots(os.path.join(cwd, path), roots):
+            outside.append(path or item)
+    if outside:
+        allowed = ", ".join(f"`{root}`" for root in roots)
+        named = ", ".join(f"`{path}`" for path in sorted(set(outside)))
+        return _test_run_refusal(
+            f"refused: {named} is outside the operator-sanctioned root(s) "
+            f"[{allowed}]; a selection and its working directory are confined "
+            "like every other path argument", "OUTSIDE_ROOT")
+    fd, report = tempfile.mkstemp(prefix="revl-test-run-", suffix=".xml")
+    os.close(fd)
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               "-o", "junit_family=xunit1", f"--junitxml={report}", *selection]
+    started = time.monotonic()
+    try:
+        try:
+            proc = subprocess.run(
+                command, cwd=cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=float(timeout), check=False)
+        except subprocess.TimeoutExpired:
+            return _test_run_refusal(
+                f"the selection did not finish within {timeout:g} s; raise "
+                "`timeout` or narrow the selection", "TIMEOUT",
+                receipt={"command": command, "cwd": cwd, "exitCode": None,
+                         "durationSeconds": round(time.monotonic() - started, 3),
+                         "timeoutSeconds": float(timeout), "timedOut": True})
+        except OSError as error:
+            return _test_run_refusal(
+                f"pytest could not be started: {error}", "TEST_RUN_FAILED")
+        exit_code = proc.returncode
+        elapsed = round(time.monotonic() - started, 3)
+        tests = _parse_junit(report)
+    finally:
+        try:
+            os.unlink(report)
+        except OSError:
+            pass
+    receipt = {"command": command, "cwd": cwd, "exitCode": exit_code,
+               "durationSeconds": elapsed, "timeoutSeconds": float(timeout)}
+    if not tests:
+        return _test_run_refusal(
+            f"the selection collected no test: pytest exited {exit_code} and "
+            "reported no test case. Check the paths and node ids",
+            "NO_TESTS_COLLECTED", receipt=receipt, selection=list(selection))
+    counts = {"total": len(tests), "passed": 0, "failed": 0, "skipped": 0,
+              "errors": 0}
+    for entry in tests:
+        key = "errors" if entry["outcome"] == "error" else entry["outcome"]
+        counts[key] += 1
+    if counts["skipped"] == counts["total"]:
+        return _test_run_refusal(
+            f"all {counts['total']} selected test(s) were skipped; a skipped "
+            "run is not a passing run", "ALL_SKIPPED", receipt=receipt,
+            counts=counts)
+    verdict = "failed" if (counts["failed"] or counts["errors"]
+                           or exit_code != 0) else "passed"
+    return {"ok": True, "verdict": verdict, "selection": list(selection),
+            "tests": tests, "counts": counts, "receipt": receipt}
+
+
 def _tool_quarantine(arguments: dict) -> dict:
     """Quarantine a candidate: grade it with the gauntlet, then compile it to a
     standard wasm component and run its lifecycle + fault battery in wasmtime's
     component-model sandbox — where an escape is a trap, not an incident. Returns
     a report whose `verdict` is passed | trapped | timeout | rejected | deferred
-    | unavailable, plus the policy admission decision. The live composition is
-    never touched (docs/quarantine-tier.md)."""
+    | unavailable | refused, plus the policy admission decision. The live
+    composition is never touched (docs/quarantine-tier.md)."""
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — quarantine proves "
                               "a candidate component in the sandbox")
@@ -3408,8 +3938,20 @@ def _tool_restore(arguments: dict) -> dict:
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()
+    sources = snap.get("sources") if isinstance(snap, dict) else {}
+    sources = sources or {}
+    compile_report: dict = {"authored": True}
     try:
-        return {"ok": True, **SESSION.restore(snap, profile=profile)}
+        result = SESSION.restore(snap, profile=profile, report=compile_report)
+    except ApprovalRequired as error:
+        from .persist import admitted_name  # noqa: PLC0415
+
+        authored = _authored_host_bodies(
+            error.candidate or {}, sources.get("source"),
+            sources.get("modules"), files=sources.get("files"),
+            report=compile_report, include_trusted_files=True,
+            source_name=admitted_name(snap))
+        return _approval_required(error, host_bodies=authored)
     except RestoreError as error:
         if profile is not None and error.revl_error is not None:
             return _restore_authoring_refusal(error.revl_error)
@@ -3428,6 +3970,20 @@ def _tool_restore(arguments: dict) -> dict:
         return payload
     except SessionError as error:
         return _session_error(error)
+    from .persist import admitted_name  # noqa: PLC0415
+
+    authored = _authored_host_bodies(
+        SESSION.ir or {}, sources.get("source"), sources.get("modules"),
+        files=sources.get("files"), report=compile_report,
+        include_trusted_files=True, source_name=admitted_name(snap))
+    if not isinstance(SESSION.origin, dict):
+        SESSION.origin = {}
+    _with_authored_host_bodies(SESSION.origin, authored)
+    if SESSION._history:
+        SESSION._history[-1]["origin"] = SESSION.origin
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
+    return {"ok": True, **result}
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -3996,8 +4552,20 @@ def _tool_plan(arguments: dict) -> dict:
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
+    # issue #2641 follow-up: a plan admits nothing, so it raises no approval
+    # ticket and has no `unreviewedHostCode` to get wrong. The attribution is
+    # made by the approval ticket a load or swap raises, when the gate raises
+    # one. Say so in the answer rather than leave the absence to be read as
+    # "no host code": the emission surface below, when computed, still names
+    # the host code the composition would reach, but not who wrote it.
     payload = {**result, "against": against,
-               "note": "nothing was admitted, swapped or written — this is a plan"}
+               "note": ("nothing was admitted, swapped or written — this is a "
+                        "plan. It raises no approval ticket, so it does not "
+                        "report `unreviewedHostCode`; that attribution is on "
+                        "the approval ticket a load or swap raises, when the "
+                        "approval gate raises one. When the plan computes an "
+                        "emission surface, it names the host code the "
+                        "composition would reach, but not who wrote it")}
     warnings = _leases.advise_plan(SESSION, arguments)
     if warnings:
         payload["leaseWarnings"] = warnings
@@ -5191,6 +5759,43 @@ TOOLS = [
         "handler": _tool_gauntlet,
     },
     {
+        "name": "revl_test_run",
+        "description": "Run a selected test suite under this server's own "
+                       "interpreter and return per-test results instead of "
+                       "runner text: one entry per test with the node id, the "
+                       "outcome (passed | failed | skipped | error), the duration "
+                       "in seconds and the test's message (bounded), plus the "
+                       "summary counts, the verdict and a receipt with the exact "
+                       "command. pytest writes a junit report to a temp file, "
+                       "which is parsed and deleted; the runner's stdout is never "
+                       "returned. `ok` reports that a run produced an answer and "
+                       "the result is in `verdict` (passed | failed), so a failing "
+                       "test is a result, not a tool fault. An empty selection, a "
+                       "selection that collected no test and one where every test "
+                       "skipped are named refusals (EMPTY_SELECTION, "
+                       "NO_TESTS_COLLECTED, ALL_SKIPPED), so a vacuous run cannot "
+                       "read green. The selection and `cwd` are confined to the "
+                       "operator-sanctioned root(s), like every other path "
+                       "argument. See docs/mcp-reference.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "selection": {"type": "array", "items": {"type": "string"},
+                              "description": "the test paths or pytest node ids "
+                                             "to run (`path::Class::test`)"},
+                "cwd": {"type": "string",
+                        "description": "the working directory pytest runs in; "
+                                       "relative selections resolve against it"},
+                "timeout": {"type": "number",
+                            "description": "wall-clock budget in seconds "
+                                           "(default 300)"},
+            },
+            "required": ["selection", "cwd"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_test_run,
+    },
+    {
         "name": "revl_quarantine",
         "description": "Quarantine an UNTRUSTED candidate before it may touch a "
                        "hosted tier: grade it with the gauntlet (item 31), then "
@@ -5209,8 +5814,12 @@ TOOLS = [
                        "eligible), `rejected` (admission refused; never reached "
                        "the substrate), `deferred` (no Str-surface function — "
                        "records/lists across the boundary are the aggregate "
-                       "follow-on) or `unavailable` (wasm-tools/wasmtime absent; "
-                       "the grade + lowering still ran). It also reports the "
+                       "follow-on), `unavailable` (wasm-tools/wasmtime absent; "
+                       "the grade + lowering still ran) or `refused` (the "
+                       "candidate is not confined: an undeclared import in its "
+                       "produced bytes, or a policy that asks for wasm "
+                       "confinement without limits; nothing ran). It also "
+                       "reports the "
                        "policy admission decision (`admission`): where a bound "
                        "policy declares `quarantine required` (item 33), a "
                        "candidate is admissible only after it passes — unless the "
@@ -6601,6 +7210,40 @@ def _instructions() -> str:
 # unchanged; `structuredContent` keeps the payload's own order.
 _ACTIONABLE = ("ok", "note", "disk", "next", "hint")
 
+# issue #2690: the two verdict verbs of the authoring loop. Their refusals say
+# how many attempts this unit of work has spent, so a caller driving a retry
+# loop can tell a first refusal from a tenth.
+_ATTEMPT_VERBS = frozenset({"revl_check", "revl_admit"})
+
+
+def _attempt_fields(name: str, payload: dict) -> dict:
+    """`payload` with `attempt` (and `attemptsRemaining` when the operator
+    configured a limit) on a `revl_check`/`revl_admit` refusal, unchanged
+    otherwise (issue #2690).
+
+    The count is per unit of work: the loaded composition at its current
+    generation, so a fresh load or a new generation (a swap, rollback or undo)
+    is a new unit. An accepted call resets it. It is advisory only: admission
+    never reads it, so reaching or passing the budget changes nothing but what
+    the caller is told. `Session.loop_axes` compares the same unit at report
+    time (`loop_axes.attempt_unit`), so the refusal and the report agree."""
+    if name not in _ATTEMPT_VERBS or not isinstance(payload, dict):
+        return payload
+    axes = getattr(SESSION, "_loop_axes", None)
+    if axes is None:            # a stand-in session (tests) keeps its shape
+        return payload
+    from .loop_axes import attempt_unit, attempts_remaining  # noqa: PLC0415
+    refused = payload.get("ok") is False or payload.get("admitted") is False
+    axes.record_attempt(attempt_unit(SESSION), refused)
+    if not refused:
+        return payload
+    fields = {"attempt": axes.attempt}
+    limit = getattr(SESSION, "attempt_limit", None)
+    if limit is not None:
+        fields["attemptsRemaining"] = attempts_remaining(limit, axes.attempt)
+    return {**payload, **fields}
+
+
 
 def _actionable_first(payload):
     """`payload` with `_ACTIONABLE` keys first, in that order, then the rest in
@@ -6652,6 +7295,7 @@ def handle(message: dict) -> dict | None:
         # session holds now; issue #1694: a refusal of the same call as the
         # refusal just before it says so instead of repeating byte for byte
         state = _ambient.footer(SESSION)
+        payload = _attempt_fields(name, payload)
         payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
         payload = _ambient.stamp(payload, state)
         result = {
@@ -6697,7 +7341,10 @@ def _hatch_call(arguments: dict) -> dict:
             next=_remedy.call(_disclosure.DISCOVERY, {}))
     # the inner call is a call: `args` is checked against the named verb's
     # own schema, exactly as a direct call's arguments are (issue #2532)
-    return _unknown_arguments(verb, args) or _call_tool(verb, args)
+    payload = _unknown_arguments(verb, args) or _call_tool(verb, args)
+    # issue #2690: the hatch is documented as indistinguishable from a direct
+    # call, so its check/admit refusals carry the attempt fields too
+    return _attempt_fields(verb, payload)
 
 
 def _unknown_arguments(name: str, arguments: dict) -> dict | None:

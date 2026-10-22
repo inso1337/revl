@@ -144,11 +144,11 @@ def test_the_bound_corpus_is_the_refusals_and_the_admissions():
 @pytest.mark.parametrize("stem", sorted(BOUND_REFUSED))
 def test_a_handle_crossing_outside_the_parent_bound_is_refused(stem):
     with pytest.raises(RevlError) as excinfo:
-        compile_source((BOUND / f"{stem}.rvl").read_text(), f"{stem}.rvl")
+        compile_source((BOUND / f"{stem}.rvl").read_text(encoding="utf-8"), f"{stem}.rvl")
     assert excinfo.value.code == "G4"
     assert excinfo.value.message == BOUND_REFUSED[stem]
 
 
 @pytest.mark.parametrize("stem", BOUND_ADMITTED)
 def test_a_handle_crossing_inside_the_parent_bound_is_admitted(stem):
-    assert compile_source((BOUND / f"{stem}.rvl").read_text(), f"{stem}.rvl")
+    assert compile_source((BOUND / f"{stem}.rvl").read_text(encoding="utf-8"), f"{stem}.rvl")

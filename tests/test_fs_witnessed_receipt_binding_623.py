@@ -145,7 +145,7 @@ def test_replaced_write_binds_original_inode_and_preimage(root, session):
     assert receipt["created"] is False
     # the preimage snapshot exists so the inverse can restore the bytes
     assert entry.witness["preimage"]
-    assert p.read_text() == "new\n"
+    assert p.read_text(encoding="utf-8") == "new\n"
 
 
 def test_witnessed_restore_inverse_reverts_on_abort(root, session):
@@ -153,13 +153,13 @@ def test_witnessed_restore_inverse_reverts_on_abort(root, session):
     p = root / "f.txt"
     p.write_text("v1\n")
     fs.write_witnessed("f.txt", "v2\n")
-    assert p.read_text() == "v2\n"
+    assert p.read_text(encoding="utf-8") == "v2\n"
     entry = frame._transactional[0]
 
     # abort: the frame did not commit, so disposing the entry replays restore
     frame._committed = False
     entry()
-    assert p.read_text() == "v1\n"        # original bytes back
+    assert p.read_text(encoding="utf-8") == "v1\n"        # original bytes back
     assert entry.replayed is True
 
 
@@ -186,7 +186,7 @@ def test_witnessed_expect_absent_and_digest(root, session):
     with pytest.raises(fs.FsOpError) as ei:
         fs.write_witnessed("a.txt", "two\n", expect=fs.ABSENT)
     assert ei.value.code == "EEXPECT"
-    assert (root / "a.txt").read_text() == "one\n"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "one\n"
     assert len(frame._transactional) == 1     # the refusal bound nothing
 
     # a matching digest guard binds a second effect
@@ -201,7 +201,7 @@ def test_witnessed_digest_drift_refused_binds_nothing(root, session):
     with pytest.raises(fs.FsOpError) as ei:
         fs.write_witnessed("d.txt", "x\n", expect=_sha(b"stale\n"))
     assert ei.value.code == "EEXPECT"
-    assert (root / "d.txt").read_text() == "real\n"
+    assert (root / "d.txt").read_text(encoding="utf-8") == "real\n"
     assert frame._transactional == []
 
 
@@ -223,7 +223,7 @@ def test_explicit_bind_hook_used(root):
     fs.write_witnessed("y.txt", "data\n", bind=lambda w: bound.append(w) or "eff#1")
     assert len(bound) == 1
     assert bound[0]["receipt"]["created"] is True
-    assert (root / "y.txt").read_text() == "data\n"
+    assert (root / "y.txt").read_text(encoding="utf-8") == "data\n"
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +328,7 @@ def test_write_all_unknown_when_binder_fails_after_landing(root, session):
     assert inv["unknown"] == 1
     assert inv["unattempted"] == 1
     # the bytes DID land (the write was not the failure) — honest uncertainty
-    assert (root / "a.txt").read_text() == "1\n"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "1\n"
 
 
 def test_write_all_bound_rejects_oversized_batch():
@@ -387,5 +387,5 @@ def test_legacy_write_binds_nothing(root, session):
 def test_legacy_write_still_works_without_any_session(root):
     runtime.clear_session_owner()
     r = fs.write("solo.txt", "x\n")
-    assert (root / "solo.txt").read_text() == "x\n"
+    assert (root / "solo.txt").read_text(encoding="utf-8") == "x\n"
     assert r.new_digest == _sha(b"x\n")

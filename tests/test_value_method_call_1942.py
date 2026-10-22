@@ -65,7 +65,7 @@ ADMITTED = ("ok_arrow_param", "ok_host_handle_verbs", "ok_host_map",
 
 
 def _src(stem: str) -> str:
-    return (CORPUS / f"{stem}.rvl").read_text()
+    return (CORPUS / f"{stem}.rvl").read_text(encoding="utf-8")
 
 
 def test_the_corpus_is_the_refusals_and_the_admissions():

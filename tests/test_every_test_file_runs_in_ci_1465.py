@@ -87,6 +87,45 @@ _DYNAMIC_STEPS = {
         "cannot be credited with covering any specific file unconditionally, "
         "and tests/ is covered by the plain `pytest tests/ -q` steps anyway."
     ),
+    # Issue #2672's review adds the PR path for the cordis-guarded swap and
+    # authoring suites, and the dogfood adoption item 2 adds the changed
+    # MCP/swap suite that selected it. The target is `$selection`, built in the
+    # step from the eleven named suites (SUITES) plus the changed MCP/swap test
+    # suites the `changes` job published (SWAP_TESTS), then deduped; the
+    # invocation also ends `2>&1 | tee "$log"` so the receipt (#2642) can read
+    # the summary back. This scan is not a shell parser, so `$selection`,
+    # `$SWAP_TESTS`, `2>&1`, `|`, `tee` and `$log` land among the tokens and
+    # the invocation reads as unresolved. Listing it here is the deliberate
+    # carve-out the scan asks for, not a claim that the targets are unnameable:
+    # tests/test_ci_pr_queue_split_1678.py pins the selection rule (the two
+    # regexes) and the tree-wide invariant that every tests/test_mcp_*.py and
+    # tests/test_swap_*.py file selects the job. tests/ is covered by the plain
+    # `pytest tests/ -q` steps in `frontend` and `frontend-cordis`.
+    ("ci.yml", "swap-template-cordis"): (
+        "runs `pytest $selection -q 2>&1 | tee \"$log\"` so the #2642 receipt "
+        "can read the summary back; `$selection` is the eleven named suites "
+        "plus the changed MCP/swap test suites the `changes` job selected "
+        "(the `swap_tests` output). The expansion, redirection and pipe tokens "
+        "make the invocation unresolved to this scan (see the comment above)."
+    ),
+    # Issue #2642's option B: the cordis half of the affected selection. Its
+    # real run is inside `tools/cordis_half.py`, which this scan cannot see, so
+    # it credits NO specific file. The one unresolved invocation it reports is
+    # the `affected selection: pytest $nodes` progress line copied from
+    # `root-suite-affected`: the standalone `pytest` token there is a log
+    # label, and the target is the selector's own `PYTEST` line. A FULL
+    # selection is bounded out and says so, so this job runs only a named
+    # selection. Listed so the "too dynamic to parse: list it explicitly" rule
+    # stays an exact account; tests/ coverage remains with the plain
+    # `pytest tests/ -q` steps.
+    ("ci.yml", "cordis-affected"): (
+        "the `echo \"affected selection: pytest $nodes\"` progress line is a "
+        "log label, not a second invocation; the job runs a named selection "
+        "through tools/cordis_half.py and bounds the FULL fallback out, so "
+        "the echoed target is unresolved to this scan. This job credits no "
+        "file: tests/ is covered by the plain `pytest tests/ -q` steps in "
+        "`frontend` and `frontend-cordis`."
+    ),
 }
 
 _JUNCTION_RE = re.compile(r"&&|;")

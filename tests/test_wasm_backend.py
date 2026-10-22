@@ -37,7 +37,7 @@ def test_beacon_emits_goldens():
     ir = compile_files([str(ROOT / "examples" / "beacon.rvl")])
     modules = _emitter().emit(ir)
     for name in ("Beacon", "Auditor"):
-        golden = (ROOT / "backends" / "wasm" / "golden" / f"{name}.wat").read_text()
+        golden = (ROOT / "backends" / "wasm" / "golden" / f"{name}.wat").read_text(encoding="utf-8")
         assert modules[name] == golden, (
             f"backends/wasm/golden/{name}.wat drifted from the emitter. "
             + _TAIL.format(t="wasm"))
@@ -48,7 +48,7 @@ def test_pulse_await_lowering():
     the boundary yield structure survives in the golden."""
     ir = compile_files([str(ROOT / "examples" / "pulse.rvl")])
     pulse = _emitter().emit(ir)["Pulse"]
-    golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text()
+    golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text(encoding="utf-8")
     assert pulse == golden, (
         "backends/wasm/golden/Pulse.wat drifted from the emitter. "
         + _TAIL.format(t="wasm"))

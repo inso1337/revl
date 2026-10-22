@@ -84,7 +84,7 @@ def _entry(reg, name="greeter"):
 
 
 def _row(reg, name="greeter"):
-    return json.loads((reg / "index.json").read_text())["components"][name]
+    return json.loads((reg / "index.json").read_text(encoding="utf-8"))["components"][name]
 
 
 # -------------------------------------------------------- path-traversal names
@@ -138,11 +138,11 @@ def test_a_first_release_is_recorded_frozen_and_indexed(reg):
     assert record["previousVersion"] == ""
     assert record["bumpCheck"] == registry.BUMP_FIRST_RELEASE
     # the entry declares the release, and the release is frozen beside it.
-    assert (_entry(reg) / "version").read_text().strip() == "1.0.0"
+    assert (_entry(reg) / "version").read_text(encoding="utf-8").strip() == "1.0.0"
     assert registry.released_versions(_entry(reg)) == ["1.0.0"]
     frozen = _entry(reg) / "releases" / "1.0.0"
-    assert (frozen / "component.rvl").read_text() == V1
-    assert json.loads((frozen / "manifest.json").read_text())
+    assert (frozen / "component.rvl").read_text(encoding="utf-8") == V1
+    assert json.loads((frozen / "manifest.json").read_text(encoding="utf-8"))
     # a first release has nothing to diff against and gets no changelog rather
     # than an invented one.
     assert registry.release_changelog(reg, "greeter", "1.0.0") is None
@@ -161,7 +161,7 @@ def test_the_discoverability_fields_ride_into_the_published_row(reg):
 
     assert _row(reg)["description"] == "greets"
     assert _row(reg)["tags"] == ["greet"]
-    assert json.loads((_entry(reg) / registry.ENTRY_META_FILENAME).read_text()) \
+    assert json.loads((_entry(reg) / registry.ENTRY_META_FILENAME).read_text(encoding="utf-8")) \
         == {"description": "greets", "tags": ["greet"]}
 
 
@@ -190,7 +190,7 @@ def test_a_hand_edited_description_turns_the_check_red(reg):
     registry.publish_release(reg, "greeter", V1, version="1.0.0",
                              description="greets", tags=["greet"])
     index_path = reg / registry.INDEX_FILENAME
-    doc = json.loads(index_path.read_text())
+    doc = json.loads(index_path.read_text(encoding="utf-8"))
     doc["components"]["greeter"]["description"] = "does absolutely everything"
     index_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
@@ -258,7 +258,7 @@ def test_migrate_meta_lifts_the_fields_out_of_the_committed_index(reg):
 
     assert registry.migrate_meta(reg) == ["greeter"]
 
-    assert json.loads((_entry(reg) / registry.ENTRY_META_FILENAME).read_text()) \
+    assert json.loads((_entry(reg) / registry.ENTRY_META_FILENAME).read_text(encoding="utf-8")) \
         == {"description": "greets", "tags": ["greet"]}
     assert _row(reg)["description"] == "greets"
     assert registry.verify(reg) == []
@@ -303,8 +303,8 @@ def test_an_update_that_satisfies_the_computed_bump_publishes(reg):
     assert registry.released_versions(_entry(reg)) == ["1.0.0", "1.1.0"]
     # the release it replaced keeps its own bytes: the chain is diffable and a
     # substitution is visible rather than silent.
-    assert (_entry(reg) / "releases" / "1.0.0" / "component.rvl").read_text() == V1
-    assert (_entry(reg) / "component.rvl").read_text() == V1_PLUS
+    assert (_entry(reg) / "releases" / "1.0.0" / "component.rvl").read_text(encoding="utf-8") == V1
+    assert (_entry(reg) / "component.rvl").read_text(encoding="utf-8") == V1_PLUS
     assert _row(reg)["releases"] == ["1.0.0", "1.1.0"]
     assert registry.verify(reg) == []
 
@@ -352,7 +352,7 @@ def test_an_under_bump_is_refused_by_name(reg):
     assert "contradicts the computed bump" in message
     assert "requires a major bump (2.0.0 or later)" in message
     # and the registry is untouched: the published release still stands.
-    assert (_entry(reg) / "component.rvl").read_text() == V1
+    assert (_entry(reg) / "component.rvl").read_text(encoding="utf-8") == V1
     assert registry.released_versions(_entry(reg)) == ["1.0.0"]
     assert registry.verify(reg) == []
 
@@ -362,7 +362,7 @@ def test_a_published_release_is_immutable(reg):
     message = _refused(reg, source=V1_PLUS, version="1.0.0")
 
     assert "a release is immutable" in message
-    assert (_entry(reg) / "component.rvl").read_text() == V1
+    assert (_entry(reg) / "component.rvl").read_text(encoding="utf-8") == V1
 
 
 def test_a_version_that_goes_backwards_is_refused(reg):
@@ -388,7 +388,7 @@ def test_an_unversioned_entry_cannot_be_replaced(reg):
 
     assert "declares no version" in message
     assert "no computed bump to check a new one against" in message
-    assert (_entry(reg) / "component.rvl").read_text() == V1
+    assert (_entry(reg) / "component.rvl").read_text(encoding="utf-8") == V1
 
 
 def test_a_source_that_does_not_compile_never_reaches_the_registry(reg):
@@ -417,7 +417,7 @@ def test_an_uncheckable_bump_is_refused_under_the_default_scheme(reg):
 
     assert "cannot be verified" in message
     assert 'version_scheme = "opaque"' in message
-    assert (_entry(reg) / "component.rvl").read_text() == V1
+    assert (_entry(reg) / "component.rvl").read_text(encoding="utf-8") == V1
 
 
 def test_an_opaque_scheme_publishes_but_records_cannot_verify(reg):
@@ -450,7 +450,7 @@ def test_a_name_does_not_change_publisher_silently(reg):
     message = _refused(reg, source=V1_PLUS, version="1.1.0", publisher="squatter")
 
     assert "does not change hands silently" in message
-    assert (_entry(reg) / "component.rvl").read_text() == V1
+    assert (_entry(reg) / "component.rvl").read_text(encoding="utf-8") == V1
 
     # dropping the claim entirely is refused the same way.
     assert "does not change hands silently" in _refused(
@@ -492,11 +492,11 @@ def test_replacing_an_entry_that_predates_release_history_archives_it_honestly(r
     registry.publish_release(reg, "greeter", V1_PLUS, version="1.1.0")
 
     archived = json.loads(
-        (_entry(reg) / "releases" / "1.0.0" / "release.json").read_text())
+        (_entry(reg) / "releases" / "1.0.0" / "release.json").read_text(encoding="utf-8"))
     assert archived["version"] == "1.0.0"
     assert archived["bumpCheck"] == registry.BUMP_UNVERIFIABLE
     assert "archived when it was replaced" in archived["bumpCheckReason"]
-    assert (_entry(reg) / "releases" / "1.0.0" / "component.rvl").read_text() == V1
+    assert (_entry(reg) / "releases" / "1.0.0" / "component.rvl").read_text(encoding="utf-8") == V1
     assert registry.verify(reg) == []
 
 
@@ -505,8 +505,8 @@ def test_a_frozen_release_is_never_rewritten(reg):
     the release, and a later publish does not touch it."""
     registry.publish_release(reg, "greeter", V1, version="1.0.0")
     frozen = _entry(reg) / "releases" / "1.0.0" / "component.rvl"
-    before = frozen.read_text()
+    before = frozen.read_text(encoding="utf-8")
 
     registry.publish_release(reg, "greeter", V1_PLUS, version="1.1.0")
 
-    assert frozen.read_text() == before == V1
+    assert frozen.read_text(encoding="utf-8") == before == V1

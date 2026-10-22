@@ -90,6 +90,14 @@ def _hop_document(event: dict) -> dict:
     digest = llm.get("promptDigest")
     if isinstance(digest, dict):
         hop["promptDigest"] = digest
+    # issue #2694: the contract and placement of the crossing, tagged by the
+    # recorder. A suppressed/absent value stays absent (an unvalidated
+    # crossing has no grammar, a crossing with no model role has no
+    # residence), so the reader never manufactures a placeholder.
+    for key in ("schemaDigest", "grammarDigest", "residence"):
+        value = llm.get(key)
+        if isinstance(value, dict):
+            hop[key] = value
     return hop
 
 
@@ -248,6 +256,21 @@ def render(doc: dict) -> str:
             lines.append(f"        prompt    {digest.get('salted')}  "
                          f"[{digest.get('bytesBucket')}]  "
                          f"(salted digest - no text captured)")
+        # issue #2694: which contract the completion was held to, and where it
+        # ran. Both are revl-controlled, so they print without an unverified
+        # marker; a field the record does not carry does not print.
+        schema = hop.get("schemaDigest")
+        if isinstance(schema, dict):
+            lines.append(f"        schema    {schema.get('digest')}"
+                         f"        (revl-controlled)")
+        grammar = hop.get("grammarDigest")
+        if isinstance(grammar, dict):
+            lines.append(f"        grammar   {grammar.get('digest')}"
+                         f"        (revl-controlled)")
+        residence = hop.get("residence")
+        if isinstance(residence, dict):
+            lines.append(f"        placement {residence.get('value')}"
+                         f"        (revl-controlled)")
 
     defects = attempt_ceiling_defects(doc)
     if defects:

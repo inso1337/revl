@@ -8253,6 +8253,125 @@ def write_status(ledger: bool = False) -> int:
     return 0
 
 
+#: The row kinds that carry an accept/refuse verdict, as (Verdicts field,
+#: label). The label names the row and its guarantee for the job summary.
+#: `refused` (parse refusals, refusals by definition), `dispositions` and
+#: `recoveries` (execution outcomes), `g8surface` and `g5reg` (a surface and a
+#: count) carry no accept/refuse verdict and are not graded (issue #2745).
+ROW_KINDS = (
+    ("files", "V link (G2, G3)"),
+    ("comps", "G marker (G4)"),
+    ("providers", "P emission bound (G4)"),
+    ("spawns", "W attenuation (cap ceilings)"),
+    ("confinements", "C confinement (G6)"),
+    ("a9", "A9 provide clause"),
+    ("configs", "CD config is data (G4)"),
+    ("a2", "A2 acquisition order"),
+    ("deferred", "DF deferred position (G4)"),
+    ("approvals", "AP approval floor (G4)"),
+    ("bindings", "BU binding uniqueness (G6)"),
+    ("access", "G1 declared access"),
+    ("async_sites", "A1 async site"),
+    ("async_sigs", "A1S async signature"),
+    ("preludes", "PL prelude order"),
+    ("intercepts", "IC intercept target"),
+    ("methods", "MS method in service"),
+    ("places", "MPV model placement"),
+    ("model_reach", "MAV model reach"),
+    ("councils", "CTV council split"),
+    ("g9", "TAINT flow (G9)"),
+    ("retain", "RETAIN retention (G9)"),
+    ("inv", "INV inverse (G4)"),
+    ("sw", "SW witnessed site (G4)"),
+    ("a5", "A5 compensation"),
+    ("gc", "GC walk coverage (G9)"),
+)
+
+#: Row kinds whose corpus is one-sided today, as field -> (the side that has no
+#: document, why). Shrink-only, like `formal/out_of_fragment_ledger/`: a kind
+#: lacking a side that is not named here fails the gate, and an entry naming a
+#: side the corpus now has fails it too, so the exemption cannot outlive its
+#: reason. The missing side is proved in Lean, not exercised by a document.
+ONE_SIDED: dict[str, tuple[str, str]] = {
+    "g9": ("accepted", "rows are exported only for a taint refusal the "
+           "checker reports, so every document is a refusal"),
+    "retain": ("accepted", "rows are exported only for a retention refusal "
+               "the checker reports, so every document is a refusal"),
+    "inv": ("accepted", "rows are exported only for a G4 inverse refusal the "
+            "checker reports, so every document is a refusal"),
+    "gc": ("refused", "a document the checker refuses completes no walk, so "
+           "it has no row; the refusing side is the Lean "
+           "coversB_refuses_* theorems"),
+}
+
+
+def _row_refused(field: str, value: object) -> bool:
+    """Whether one reference verdict of kind `field` is a refusal. A `files`
+    verdict is a (disjoint, closed, link) triple, refused when any is not ok;
+    every other graded kind is `ok` or `fail`."""
+    if field == "files":
+        return any(v != "ok" for v in value)
+    return value != "ok"
+
+
+def row_census(ref: "Verdicts") -> dict[str, dict]:
+    """Per graded row kind: its rows, and how many corpus DOCUMENTS are
+    accepted and refused. A document is refused for a kind when any of its rows
+    of that kind is refused, accepted when it has rows and none is."""
+    out: dict[str, dict] = {}
+    for field, label in ROW_KINDS:
+        refused: set[str] = set()
+        accepted: set[str] = set()
+        rows = getattr(ref, field)
+        for key, value in rows.items():
+            doc = key if isinstance(key, str) else key[0]
+            (refused if _row_refused(field, value) else accepted).add(doc)
+        accepted -= refused
+        out[field] = {"label": label, "rows": len(rows),
+                      "accepted": len(accepted), "refused": len(refused)}
+    return out
+
+
+def polarity_coverage(census: dict[str, dict]) -> list[str]:
+    """The accept-and-refuse rule (issue #2745), as G6's
+    `confinement_coverage` states it for its own row: a row kind whose corpus
+    has no refused document (or no accepted one) is agreeing vacuously. Every
+    graded kind needs both, except the one-sided kinds `ONE_SIDED` names, and a
+    stale exemption is a finding too. Returns findings, gate failures."""
+    findings: list[str] = []
+    for field, c in census.items():
+        have = {"accepted": c["accepted"], "refused": c["refused"]}
+        exempt = ONE_SIDED.get(field)
+        for side, n in have.items():
+            if n == 0 and (exempt is None or exempt[0] != side):
+                findings.append(
+                    f"row polarity {c['label']}: no {side} corpus document, "
+                    "so the row can agree vacuously")
+        if exempt is not None and have[exempt[0]] != 0:
+            findings.append(
+                f"row polarity {c['label']}: ONE_SIDED exempts the "
+                f"{exempt[0]} side but {have[exempt[0]]} such document(s) "
+                "exist now, so delete the exemption")
+    return findings
+
+
+def write_row_census(census: dict[str, dict], path: Path) -> None:
+    """Write the census for `formal/scripts/proof_summary.py`, with each
+    kind's exemption beside its counts."""
+    kinds = {f: dict(c, exempt=({"side": ONE_SIDED[f][0],
+                                 "why": ONE_SIDED[f][1]}
+                                if f in ONE_SIDED else None))
+             for f, c in census.items()}
+    path.write_text(json.dumps({"row_kinds": kinds}, indent=1,
+                               sort_keys=True) + "\n", encoding="utf-8")
+
+
+def print_row_census(census: dict[str, dict]) -> None:
+    for c in census.values():
+        print(f"row polarity: {c['label']}: {c['rows']} rows, "
+              f"{c['accepted']} accepted and {c['refused']} refused documents")
+
+
 def main() -> int:
     tsv, file_facts, census = export()
     refusals: dict[str, str] = census["refusals"]
@@ -8282,6 +8401,9 @@ def main() -> int:
         return 0
     formal = parse_verdicts(formal_text)
     ref = reference_from_tsv(tsv)
+    polarity = row_census(ref)
+    write_row_census(polarity, out_dir / "row_census.json")
+    print_row_census(polarity)
 
     mismatches: list[str] = []
     for label, refmap, gotmap in (
@@ -8379,6 +8501,7 @@ def main() -> int:
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
     mismatches.extend(a5_coverage())
+    mismatches.extend(polarity_coverage(polarity))
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

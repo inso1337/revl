@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         if not path.is_file():
             print(f"no such report: {path}", file=sys.stderr)
             return 2
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         source = str(path)
 
     try:

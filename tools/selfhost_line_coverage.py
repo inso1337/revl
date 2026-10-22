@@ -250,7 +250,7 @@ PARTIAL = (
 
 def corpus_documents(tier: str) -> list[Path]:
     """The oracle's OWN corpus list (see tools/selfhost_coverage.py)."""
-    test = (ROOT / "tests" / f"test_selfhost_emit_{tier}.py").read_text()
+    test = (ROOT / "tests" / f"test_selfhost_emit_{tier}.py").read_text(encoding="utf-8")
     block = re.search(r"^CORPUS\s*=\s*\[(.*?)^\]", test, re.S | re.M)
     if block is None:  # pragma: no cover - shape change in an oracle
         raise SystemExit(f"cannot find a CORPUS list in test_selfhost_emit_{tier}.py")
@@ -309,7 +309,7 @@ def _owners(path: Path) -> dict[int, str]:
                     owners[line] = name
                 walk(child, name + ".")
 
-    walk(ast.parse(path.read_text()), "")
+    walk(ast.parse(path.read_text(encoding="utf-8")), "")
     return owners
 
 
@@ -535,7 +535,7 @@ def measure_selfhost() -> dict:
             source_rvl = ROOT / "selfhost" / f"emit_{tier}.rvl"
             module_path = scratch / f"selfhost_emit_{tier}.py"
             declared = set(re.findall(r"^\s*(?:pub\s+)?fn\s+(\w+)",
-                                      source_rvl.read_text(), re.M))
+                                      source_rvl.read_text(encoding="utf-8"), re.M))
             cov = coverage.Coverage(data_file=None, include=[str(module_path)])
             cov.start()
             try:

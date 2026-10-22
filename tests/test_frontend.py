@@ -33,7 +33,7 @@ def test_user_cache_compiles_to_reference_ir():
     """The frontend must produce exactly the hand-lowered IR that both
     backends were built and tested against."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
-    reference = json.loads((EXAMPLES / "user_cache.ir.json").read_text())
+    reference = json.loads((EXAMPLES / "user_cache.ir.json").read_text(encoding="utf-8"))
     assert ir == reference
 
 
@@ -41,7 +41,7 @@ def test_end_to_end_python_golden():
     """source -> frontend IR -> cordis-py emitter == checked-in golden."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_py_emit", ROOT / "backends" / "python" / "emit.py")
-    golden = (ROOT / "backends" / "python" / "golden" / "user_cache.py").read_text()
+    golden = (ROOT / "backends" / "python" / "golden" / "user_cache.py").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -49,7 +49,7 @@ def test_end_to_end_typescript_golden():
     """source -> frontend IR -> cordis-ts emitter == checked-in golden."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_ts_emit", ROOT / "backends" / "typescript" / "emit.py")
-    golden = (ROOT / "backends" / "typescript" / "golden" / "user_cache.ts").read_text()
+    golden = (ROOT / "backends" / "typescript" / "golden" / "user_cache.ts").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -62,7 +62,7 @@ def test_end_to_end_rust_golden():
     regenerated on another)."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_rust_emit", ROOT / "backends" / "rust" / "emit.py")
-    golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text()
+    golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -70,7 +70,7 @@ def test_end_to_end_java_golden():
     """source -> frontend IR -> cordis4j emitter == checked-in golden."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_java_emit", ROOT / "backends" / "java" / "emit.py")
-    golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text()
+    golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text(encoding="utf-8")
     assert emitter.emit(ir) == golden
 
 
@@ -276,6 +276,11 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # a provider declared read-only (`emission[fs.read]`) whose body writes:
+    # the cap is present, the promise is broken. Issue #2691's first demo leg.
+    "g4_emission_widens_declared_capability.rvl":
+        "`Store.load` is declared `emission[fs.read]`, but this implementation "
+        "emits through `fs.write`",
 
     # item 378: the third rule under G4, and the only one that judges a
     # DECLARED TYPE rather than a crossing. A config value is injected as
@@ -568,6 +573,13 @@ REJECTIONS = {
     "gcouncilsplit_on_tie_allow.rvl": "admits when the members disagree",
 }
 
+#: Rejection fixtures whose claim is only "this program is refused", with no
+#: pinned wording (issue #2689). A per-provider count clause has no grammar:
+#: the refusal is a parse error, and pinning its sentence would pin the
+#: absence of a construct instead of the construct staying absent. The test
+#: below fails only if a future syntax ever admits the program.
+REFUSED_ONLY = {"g2_provider_multiplicity.rvl"}
+
 # ------------------------------------------------------------------ coverage
 # The rejection suite is the checker's *definition* of sound: for every
 # guarantee/amendment the checker can refuse there is a program above that it
@@ -626,7 +638,7 @@ REJECTIONS = {
 
 def test_every_rejection_file_is_covered():
     on_disk = {p.name for p in (EXAMPLES / "rejections").glob("*.rvl")}
-    assert on_disk == set(REJECTIONS)
+    assert on_disk == set(REJECTIONS) | REFUSED_ONLY
 
 
 @pytest.mark.parametrize("filename,expected", sorted(REJECTIONS.items()))
@@ -634,6 +646,19 @@ def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
     assert expected in str(excinfo.value)
+
+
+@pytest.mark.parametrize("filename", sorted(REFUSED_ONLY))
+def test_refused_only_rejection(filename):
+    """Refused, whatever the wording or the code (issue #2689).
+
+    `g2_provider_multiplicity.rvl` spells the per-provider count clause the
+    design note names. Today the grammar has no such clause, so the refusal is
+    a parse error; if a future syntax admits it, this test fails and the
+    non-goal in docs/distribution-model.md section 4 needs a decision.
+    """
+    with pytest.raises(RevlError):
+        compile_files([str(EXAMPLES / "rejections" / filename)])
 
 
 @pytest.mark.parametrize("filename", [
@@ -695,7 +720,7 @@ def test_a1_async_op_via_ternary_in_async_method_ok():
 def test_migrator_compiles_to_reference_ir():
     """await + compensate lowering matches the frozen v1 reference."""
     ir = compile_files([str(EXAMPLES / "migrator.rvl")])
-    reference = json.loads((EXAMPLES / "migrator.ir.json").read_text())
+    reference = json.loads((EXAMPLES / "migrator.ir.json").read_text(encoding="utf-8"))
     assert ir == reference
 
 

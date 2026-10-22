@@ -1419,10 +1419,10 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.check:
-        baseline = json.loads(BASELINE.read_text())
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
         problems = compare(buckets, baseline)
         if with_lines:
-            problems += compare_lines(pairs, json.loads(LINE_LEDGER.read_text()))
+            problems += compare_lines(pairs, json.loads(LINE_LEDGER.read_text(encoding="utf-8")))
         if problems:
             print("\ngate/reference census FAILED:")
             for line in problems:

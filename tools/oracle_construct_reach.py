@@ -154,7 +154,7 @@ def _corpus_from_test(tier: str) -> list[Path]:
 
 def _lower_constructs() -> set[str]:
     """Extract the named IR dispatch values in the reference lowerer."""
-    tree = ast.parse((ROOT / "src/revl/lower.py").read_text())
+    tree = ast.parse((ROOT / "src/revl/lower.py").read_text(encoding="utf-8"))
     found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare) or len(node.ops) != 1:
@@ -199,7 +199,7 @@ def _compile_corpus() -> list[Path]:
     dependency; `tests/test_oracle_construct_reach.py` imports the oracle for
     real and holds this reading to it, which is where a shape change is caught.
     """
-    tree = ast.parse((ROOT / "tests" / "test_selfhost_compile.py").read_text())
+    tree = ast.parse((ROOT / "tests" / "test_selfhost_compile.py").read_text(encoding="utf-8"))
     lists: dict[str, list[str]] = {}
     tables: dict[str, ast.AST] = {}
     for node in tree.body:
@@ -301,7 +301,7 @@ def _census_guarantees() -> set[str]:
     The returned constants are the tags; `"OUT:" + message` is the
     out-of-slice fallback and names no guarantee, so it is excluded.
     """
-    tree = ast.parse((ROOT / "tests" / "test_selfhost_lower.py").read_text())
+    tree = ast.parse((ROOT / "tests" / "test_selfhost_lower.py").read_text(encoding="utf-8"))
     classify = next(
         (node for node in ast.walk(tree)
          if isinstance(node, ast.FunctionDef) and node.name == "_classify"),
@@ -455,7 +455,7 @@ def survey() -> dict[str, dict]:
 def _ledger() -> dict[str, list[str]]:
     """The recorded unreached sets, minus the `_`-prefixed prose keys JSON has
     no comment syntax for."""
-    raw = json.loads(LEDGER.read_text())
+    raw = json.loads(LEDGER.read_text(encoding="utf-8"))
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
@@ -473,7 +473,7 @@ def _blind_spots() -> dict[str, dict[str, str]]:
     _closure_problems` already fails a construct listed under two reasons in one
     tier.
     """
-    raw = json.loads(BLIND_SPOTS.read_text())
+    raw = json.loads(BLIND_SPOTS.read_text(encoding="utf-8"))
     out: dict[str, dict[str, str]] = {}
     for oracle, tier in _TIER_OF.items():
         decided: dict[str, str] = {}
@@ -488,7 +488,7 @@ def _blind_spots() -> dict[str, dict[str, str]]:
 def _dispositions() -> dict[str, dict[str, str]]:
     """`oracle -> {construct: reason}` -- the written dispositions of the ledger
     entries no sibling tier decides."""
-    raw = json.loads(DISPOSITIONS.read_text())
+    raw = json.loads(DISPOSITIONS.read_text(encoding="utf-8"))
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
@@ -606,7 +606,7 @@ def check(data: dict) -> list[str]:
 
 
 def write_ledger(data: dict) -> None:
-    ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
+    ledger = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else {}
     prose = {k: v for k, v in ledger.items() if k.startswith("_")}
     prose.setdefault("_about", _ABOUT)
     recorded = {oracle: sorted(report["unreached"])
