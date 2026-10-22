@@ -10,8 +10,10 @@
 //
 // READ THIS BEFORE YOU COPY ANY OF IT: THE ASYMMETRIC CONTRACT, JS EDITION
 // =======================================================================
-// The py gate (`pip install revl`, `revl.gate.admit`) is the full reference
-// compiler and can both refuse and ADMIT. This module cannot ADMIT ANYTHING.
+// The py gate (installed from a git checkout with `pip install -e .`; the
+// `revl` name on PyPI belongs to an unrelated project, so never
+// `pip install revl`) is the full reference compiler and can both refuse and
+// ADMIT. This module cannot ADMIT ANYTHING.
 // It is `crates/revl-gate` packaged for wasm: the composition and guarantee
 // layer (G1..G4, A1, PRELUDE, and parse failures as BAD) and NOT the reference
 // type layer. So `verdict.admitted` is `false` on every arm — that is the WIT

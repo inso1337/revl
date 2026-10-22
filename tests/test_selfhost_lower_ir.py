@@ -666,8 +666,10 @@ def test_native_ir_preserves_idempotent_service_methods(lower_to_ir, modifiers):
 @pytest.mark.parametrize("service,method", [
     ("fn twice(f: (Int) -> Int, n: Int) -> Int", "fn twice(f, n) = f(f(n))"),
     ("fn apply(f: (Int) -> Int, n: Int) -> Int", "fn apply(f, n) = f(n)"),
-    # a module fn of the same name is the callee the reference reads first
+    # a module fn of the same name stays in scope, and the PARAMETER is the
+    # callee (issue #1823's owner ruling on #2544), in both type spellings
     ("fn go(f: (Int) -> Int, n: Int) -> Int", "fn go(f, n) = f(n)"),
+    ("fn go(f: Fn[Int, Int], n: Int) -> Int", "fn go(f, n) = f(n)"),
 ])
 def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
         lower_to_ir, service, method):
@@ -675,7 +677,12 @@ def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
     `cir_fncall` refuse (no module callable named `f`), and a failed method
     drops the WHOLE component `body`, so the native chain emitted the component
     with no provision. The reference lowers the callee as an expression: a
-    `call` on the parameter's `name` node."""
+    `call` on the parameter's `name` node.
+
+    Issue #2544's ruling: that is true even when a module `fn f` is in scope.
+    Every parametrised case pins the callee SHAPE here, not only the
+    native/reference byte equality, so a lowering that read the module fn while
+    both producers agreed would still fail this test."""
     prelude = "fn f(x: Int) -> Int { return x } " if method.startswith("fn go") else ""
     source = (f"{prelude}service M {{ {service} }} "
               f"component C provides m: M {{ provide m {{ {method} }} }}")
@@ -683,6 +690,10 @@ def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
     reference = compile_source(source)["components"][0]
     assert "body" in native
     assert native["body"] == reference["body"]
+    # the callee is the parameter's scoped `name` node, never the module `fn`
+    ret = reference["body"][0]["methods"][0]["body"][0]
+    assert ret["step"] == "return"
+    assert ret["expr"]["callee"] == {"kind": "name", "id": "f"}
 
 
 @pytest.mark.parametrize("returns,body", [

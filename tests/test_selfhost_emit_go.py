@@ -1013,39 +1013,82 @@ def test_a_bad_import_directive_is_a_reference_refusal(reference, name, message)
         reference.emit(ir)
 
 
-# issue #2486: the port's `import_directive` (selfhost/emit_go.rvl) still trims
-# the quotes off the whole directive and the import block re-quotes it, so an
-# aliased directive emits `"tm "time"` where the reference emits `tm "time"`,
-# and the two directives the reference refuses come out as Go with no
-# `<<UNSUPPORTED` marker. A silent difference, recorded so it cannot read as
-# agreement.
-IMPORT_DIRECTIVE_SILENT_DIFFERENCES = (
-    "emit_go_refusals/import_directive_alias_clash.rvl",
-    "emit_go_refusals/import_directive_keyword_alias.rvl",
-    "emit_go_refusals/import_directive_malformed.rvl",
-    "emit_go_silent_differences/import_directive_alias.rvl",
+# issue #2486: the port reads a `//revl:import` directive with the reference's
+# rule (`_go_import_spec`): an optional alias, a quoted or bare path, the spec
+# written into the import block as is. The three directives the reference
+# refuses are named in the port (`<<UNSUPPORTED-EXTERN-IMPORT-...>>`).
+IMPORT_DIRECTIVE_REFUSALS = (
+    ("import_directive_malformed.rvl", "<<UNSUPPORTED-EXTERN-IMPORT-DIRECTIVE:stamp>>"),
+    ("import_directive_keyword_alias.rvl", "<<UNSUPPORTED-EXTERN-IMPORT-DIRECTIVE:stamp>>"),
+    ("import_directive_alias_clash.rvl", "<<UNSUPPORTED-EXTERN-IMPORT-ALIAS:tm>>"),
 )
 
 
-@pytest.mark.parametrize("rel", IMPORT_DIRECTIVE_SILENT_DIFFERENCES)
-def test_an_import_directive_is_a_known_silent_difference(emitted, reference, rel):
-    """Issue #2486: the reference refuses the document (or emits other bytes)
-    and the port answers with Go and no marker. Fails the day the port is
-    fixed, so the entry is removed."""
-    ir = compile_files([str(ROOT / "tests" / "fixtures" / rel)])
+def test_an_aliased_import_directive_is_byte_identical(emitted, reference):
+    """Was `"tm "time"` in the port against `tm "time"` in the reference."""
+    ir = compile_files([str(
+        ROOT / "tests" / "fixtures" / "emit_go_silent_differences"
+        / "import_directive_alias.rvl")])
+    want = reference.emit(ir)
     got = emitted["emit_go_src"](ir)
-    if rel.startswith("emit_go_refusals/"):
-        with pytest.raises(reference.EmitError, match="`//revl:import`"):
-            reference.emit(ir)
-    else:
-        assert got != reference.emit(ir), (
-            f"{rel}: the port now matches the reference byte for byte; DELETE "
-            f"the entry from IMPORT_DIRECTIVE_SILENT_DIFFERENCES and move the "
-            f"document into CORPUS.")
-    assert "<<UNSUPPORTED" not in got, (
-        f"{rel}: the port now names it ({got[:160]!r}); if that matches the "
-        f"reference's refusal, DELETE the entry from "
-        f"IMPORT_DIRECTIVE_SILENT_DIFFERENCES.")
+    assert '\ttm "time"\n' in want
+    assert got == want
+
+
+@pytest.mark.parametrize("name, marker", IMPORT_DIRECTIVE_REFUSALS,
+                         ids=[n for n, _ in IMPORT_DIRECTIVE_REFUSALS])
+def test_a_refused_import_directive_is_a_named_port_refusal(
+        emitted, reference, name, marker):
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_go_refusals" / name)])
+    with pytest.raises(reference.EmitError, match="`//revl:import`"):
+        reference.emit(ir)
+    assert marker in emitted["emit_go_src"](ir)
+
+
+@pytest.mark.parametrize("directive", [
+    "//revl:import encoding/json",
+    '//revl:import "encoding/json"',
+    '//revl:import js "encoding/json"',
+    '//revl:import _ "embed"',
+    '//revl:import . "strings"',
+    '//revl:import   tm   "time"   ',
+    # Python `\s` and `strip()` also read these as whitespace
+    '\u00a0//revl:import tm "time"',
+    '//revl:import\u00a0tm\u2003"time"\u3000',
+    '\x1f//revl:import tm "time"',
+])
+def test_an_accepted_import_directive_is_byte_identical(
+        emitted, reference, tmp_path, directive):
+    src = (ROOT / "tests" / "fixtures" / "emit_go_silent_differences"
+           / "import_directive_alias.rvl").read_text(encoding="utf-8")
+    doc = tmp_path / "d.rvl"
+    doc.write_text(src.replace('//revl:import tm "time"', directive))
+    ir = compile_files([str(doc)])
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED" not in got
+    assert got == reference.emit(ir)
+
+
+@pytest.mark.parametrize("directive", [
+    "//revl:import",
+    '//revl:import tm "time" x',
+    '//revl:import func "time"',
+    '//revl:import 1tm "time"',
+    '//revl:import "ti"me"',
+    '//revl:import tm "',
+    '\u00a0//revl:import func "time"',
+    '//revl:import\u00a0tm "time" x',
+])
+def test_a_refused_import_directive_spelling_is_marked_like_the_reference(
+        emitted, reference, tmp_path, directive):
+    src = (ROOT / "tests" / "fixtures" / "emit_go_silent_differences"
+           / "import_directive_alias.rvl").read_text(encoding="utf-8")
+    doc = tmp_path / "d.rvl"
+    doc.write_text(src.replace('//revl:import tm "time"', directive))
+    ir = compile_files([str(doc)])
+    with pytest.raises(reference.EmitError, match="`//revl:import`"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-EXTERN-IMPORT-DIRECTIVE:stamp>>" in emitted["emit_go_src"](ir)
 
 
 # item 560 / issue #1914: the one key pair the injective mangling cannot split

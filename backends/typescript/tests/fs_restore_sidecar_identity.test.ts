@@ -359,6 +359,40 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     expect(fs.existsSync(sidecar)).toBe(false)
   })
 
+  it('refuses one re-permissioned between the pre-rename check and the rename', () => {
+    // The digest cannot see a re-permissioning: the bytes, the size and the
+    // inode are all unchanged. The window is forced inside the rename, after
+    // the pre-rename pass has compared both the stat tuple and the digest, so
+    // the installed result is the only pass that can see it.
+    // `INSTALLED_CAPTURE_FIELDS` keeps `mode` precisely so the digest does not
+    // replace the permission control, and the refusal must name the field that
+    // drifted rather than the digest: the bytes are honest.
+    //
+    // The rename is by name and runs before the installed result is checked, so
+    // the target ends at the old version's bytes (the captured preimage) with
+    // the re-permissioned mode; the residue the refusal names is that mode,
+    // never the forward mutation or a tampered file.
+    const { witness, target, sidecar } = written()
+    const capture = witness.capture
+    if (capture === null || capture === undefined) {
+      throw new Error('the witness carries no capture to re-permission')
+    }
+    const capturedMode = Number(capture.mode) & 0o777
+    const rePermissioned = capturedMode === 0o640 ? 0o600 : 0o640
+    hooks.beforeRename = () => {
+      fs.chmodSync(sidecar, rePermissioned)
+    }
+
+    const refusal = refusalOf(() => fsRestore(witness))
+    expect(refusal.code).toBe('EIDENTITY')
+    expect(refusal.message).toContain('mode differ')
+    expect(refusal.message).not.toContain('sha256')
+    expect(refusal.message).toContain('the restored target')
+    expect(hooks.beforeRename).toBeUndefined()
+    expect(fs.readFileSync(target, 'utf-8')).toBe('v1')
+    expect(fs.existsSync(sidecar)).toBe(false)
+  })
+
   it('refuses when the recorded digest cannot be re-read', () => {
     // The digest is read through the same descriptor the stat comes from, so a
     // recorded digest that cannot be read must refuse the restore rather than

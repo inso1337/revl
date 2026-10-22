@@ -7356,6 +7356,19 @@ _NR_LATER_SLICES = (
     # which is a true refusal of the same program and not a gate error. Owned by
     # the type layer, like `payload expects` above.
     "ternary branches disagree",
+    # issue #2544's TYPECHECK rule, and the one NAMED allowance this PR adds:
+    # a call on a binder whose type is definitely not a function, where a
+    # module `fn`/extern or case of the same name exists, is refused by the
+    # reference (`refuse_call_on_non_function`) and the binding is thereby not
+    # silently dropped. The self-host gate does not port that rule yet -- this
+    # PR is `Part of #2544`, not `Closes`, and `selfhost/lower.rvl` still
+    # admits the shape -- so a drawn program carrying this refusal is refused
+    # by the reference while the gate admits it, or reports its own refusal.
+    # Skipping it by name keeps the comparison honest instead of silently
+    # treating the gap as agreement; the port is #2544's next slice, tracked
+    # on the issue. The wording is this rule's alone
+    # (`refuse_call_on_non_function` is its only raiser).
+    "which is not a function",
 )
 
 _NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")

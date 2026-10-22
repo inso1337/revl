@@ -76,6 +76,8 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
               "canary, resolve", (
         "revl_gauntlet", "revl_quarantine", "revl_repair", "revl_canary",
         "revl_resolve")),
+    "test": ("run a selected test suite and read per-test results", (
+        "revl_test_run",)),
     "replay": ("walk a recorded run: timeline, inspect, step back, bisect, "
                "replay forward", (
         "revl_timeline", "revl_inspect_step", "revl_step_back",

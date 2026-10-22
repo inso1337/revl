@@ -138,6 +138,11 @@ them into different realms (then the same pair is legal; see
 v2_same_realm_conflict.rvl for the realm-scoped variant). The why-trace
 names both providers so nobody has to grep for the second one.
 
+A per-provider count clause (`provide db with multiplicity(N)`,
+docs/distribution-model.md §4) has no grammar at all:
+[`g2_provider_multiplicity.rvl`](../examples/rejections/g2_provider_multiplicity.rvl)
+pins that it stays a refusal.
+
 ## G3 — acyclic dependencies
 
 If Alpha requires what Beta provides and vice versa, neither satisfaction

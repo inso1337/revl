@@ -276,6 +276,11 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # a provider declared read-only (`emission[fs.read]`) whose body writes:
+    # the cap is present, the promise is broken. Issue #2691's first demo leg.
+    "g4_emission_widens_declared_capability.rvl":
+        "`Store.load` is declared `emission[fs.read]`, but this implementation "
+        "emits through `fs.write`",
 
     # item 378: the third rule under G4, and the only one that judges a
     # DECLARED TYPE rather than a crossing. A config value is injected as
@@ -568,6 +573,13 @@ REJECTIONS = {
     "gcouncilsplit_on_tie_allow.rvl": "admits when the members disagree",
 }
 
+#: Rejection fixtures whose claim is only "this program is refused", with no
+#: pinned wording (issue #2689). A per-provider count clause has no grammar:
+#: the refusal is a parse error, and pinning its sentence would pin the
+#: absence of a construct instead of the construct staying absent. The test
+#: below fails only if a future syntax ever admits the program.
+REFUSED_ONLY = {"g2_provider_multiplicity.rvl"}
+
 # ------------------------------------------------------------------ coverage
 # The rejection suite is the checker's *definition* of sound: for every
 # guarantee/amendment the checker can refuse there is a program above that it
@@ -626,7 +638,7 @@ REJECTIONS = {
 
 def test_every_rejection_file_is_covered():
     on_disk = {p.name for p in (EXAMPLES / "rejections").glob("*.rvl")}
-    assert on_disk == set(REJECTIONS)
+    assert on_disk == set(REJECTIONS) | REFUSED_ONLY
 
 
 @pytest.mark.parametrize("filename,expected", sorted(REJECTIONS.items()))
@@ -634,6 +646,19 @@ def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
     assert expected in str(excinfo.value)
+
+
+@pytest.mark.parametrize("filename", sorted(REFUSED_ONLY))
+def test_refused_only_rejection(filename):
+    """Refused, whatever the wording or the code (issue #2689).
+
+    `g2_provider_multiplicity.rvl` spells the per-provider count clause the
+    design note names. Today the grammar has no such clause, so the refusal is
+    a parse error; if a future syntax admits it, this test fails and the
+    non-goal in docs/distribution-model.md section 4 needs a decision.
+    """
+    with pytest.raises(RevlError):
+        compile_files([str(EXAMPLES / "rejections" / filename)])
 
 
 @pytest.mark.parametrize("filename", [

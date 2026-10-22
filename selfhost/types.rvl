@@ -37,6 +37,13 @@ fn fn_head() -> Str { return "->" }
 fn tparam_mark() -> Str { return "?" }
 fn poison() -> Str { return "!poison" }
 
+// typecheck._FUNCTION_TYPE_HEADS: the heads that spell a function type. The
+// arrow spelling normalises to `fn_head()` in parse_type; the generic `Fn[...]`
+// spelling keeps its own head. Both name a callable value, so `compatible`
+// treats them as one type (#2544). Kept as a predicate so no caller compares
+// one spelling's head and silently misses the other.
+fn is_fn_head(head: Str) -> Bool { return head == fn_head() || head == "Fn" }
+
 // typecheck._BUILTIN_TYPE_NAMES: heads an explicit `[T]` list may not shadow.
 fn builtin_type_names() -> List[Str] {
   return ["Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
@@ -505,8 +512,16 @@ pub fn compatible(expected: Str, actual: Str) -> Bool {
       return compatible(inner, actual)
     }
   }
-  if (ehead == fn_head()) {
-    if (ehead != ahead || eargs.length() != aargs.length()) { return false }
+  // Both spellings of a function type are one type here (#2544), and BOTH
+  // sides have to be a function type for this rule to own the pair. A
+  // one-sided pair is not a function flow: an expected `Opt[?T]` with a
+  // function actual is the ordinary `T -> Opt[T]` injection below, and a
+  // function expected with a non-function actual is not a function value at
+  // all. The reference's branch reads the same way (typecheck.py, the
+  // `_FUNCTION_TYPE_HEADS` test on both sides), so the two implementations
+  // agree on `Fn[Int, Str]` against `(Int) -> Str` in either direction.
+  if (is_fn_head(ehead) && is_fn_head(ahead)) {
+    if (eargs.length() != aargs.length()) { return false }
     var i = 0
     var ok = true
     // parameters contravariant, result covariant

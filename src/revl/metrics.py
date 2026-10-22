@@ -28,10 +28,10 @@ gate.
 
 ### Schema v1 graceful degradation (detected by data, not by `v`)
 
-The trace schema is v2 (docs/why-runtime.md); the fields these metrics need
+The trace schema is v3 (docs/why-runtime.md); the fields these metrics need
 (`ts` on every event, `code` on a FAILED cause, the `emit` event kind) all
-arrived additively. A v1 trace, or a v2 trace an older recorder wrote without
-them, simply *lacks* the input:
+arrived additively through v2. A v1 trace, or a v2 trace an older recorder wrote
+without them, simply *lacks* the input:
 
 * **duration** needs `ts`. When load/withdraw lifecycles are present but none
   carry `ts`, the metric is reported as ``{"unavailable": …}`` — detected by the
@@ -179,16 +179,39 @@ def _duration_metrics(events: list[dict]) -> dict:
     }
 
 
+def _run_facts(events: list[dict]) -> dict | None:
+    """The attested-run header, when the trace carries one (issue #2730 slice 1).
+
+    The header is written on the first event; this scans for the first event
+    carrying a `run` mapping so a reordered or hand-built trace still finds it.
+    An unattested trace yields None, and the metrics document then has no `run`
+    key at all rather than an empty block."""
+    for event in events:
+        header = event.get("run")
+        if isinstance(header, dict) and header:
+            return dict(header)
+    return None
+
+
 def compute_metrics(events: list[dict]) -> dict:
     """The whole computation, pure over a list of trace events (the
     :mod:`revl.why_runtime` vocabulary). Returns a machine-readable metrics
-    document — the shape `revl metrics --json` prints and `render` formats."""
-    return {
+    document — the shape `revl metrics --json` prints and `render` formats.
+
+    A trace recorded under an attestation also carries a `run` block (issue
+    #2730): the composition hash, attestation key id and ruleset digest every
+    span repeats, so a consumer can group metrics by composition without
+    reading the trace's first event."""
+    document = {
         "events": len(events),
         "emissions": _emission_metrics(events),
         "failures": _failure_metrics(events),
         "lifecycleDuration": _duration_metrics(events),
     }
+    run = _run_facts(events)
+    if run is not None:
+        document["run"] = run
+    return document
 
 
 def metrics_from_file(path: str) -> dict:
@@ -209,6 +232,14 @@ def render(metrics: dict) -> str:
     """A compact human table of the three metrics (the default CLI output;
     `--json` prints the full document `compute_metrics` returns)."""
     lines = [f"metrics over {metrics.get('events', 0)} trace event(s)"]
+    run = metrics.get("run")
+    if isinstance(run, dict):
+        # issue #2730: the attested composition this run is grouped under
+        lines.append(f"run: composition {run.get('compositionHash')}"
+                     + (f"  attestation key {run.get('attestationKeyId')}"
+                        if run.get("attestationKeyId") else "")
+                     + (f"  ruleset {run.get('rulesetDigest')}"
+                        if run.get("rulesetDigest") else ""))
 
     # 1. emissions by capability
     emissions = metrics.get("emissions") or {}

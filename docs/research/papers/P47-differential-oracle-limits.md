@@ -38,7 +38,7 @@ The claim is limited and checkable. A differential oracle needs a measured reach
 | Mutation testing | Estimates whether tests would notice a change | Used here as an ablation: remove the secret fixtures and the gate must name the two markings (`tests/test_selfhost_coverage.py:127-160`) |
 | Coverage-guided fuzzing | Maximises reach on one implementation | Coverage of the reference by the oracle corpus, with a ledger the diff must edit |
 | Benchmark contamination literature (citation to be checked) | Detects test items leaking into training data | Provenance of scoring documents inside the repository, fail-closed on unknown |
-| CompCert translation validation (citation to be checked) | Validates each compilation against a spec | Not attempted; this paper is about the empirical oracle that stands where no proof exists |
+| CompCert translation validation (see the [related-work table](../related-work.md)) | Validates each compilation against a spec | Not attempted; this paper is about the empirical oracle that stands where no proof exists |
 | Reproducible-artifact practice (citation to be checked) | Publishes data and scripts | The census files are regenerated, never typed, and `--verify --strict` fails on hand edits (`docs/design/560-census-artifact.md`) |
 
 ## Evidence on main

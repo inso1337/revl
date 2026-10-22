@@ -13,8 +13,10 @@ Roadmap items 124 (profile) and 307 (repair patch).
 ## 1. What it is
 
 `revl audit` reports the **static** boundary surface: which emissions a
-component *may* cross (docs/capabilities.md). `revl metrics` (item 122) counts
-which emissions a run *did* cross, as a whole-run total. `revl profile` sits
+component *may* cross (docs/capabilities.md). With `--json --wal FILE`, audit
+also includes the budget counters recorded for crossings in that WAL; this does
+not replace the static surface. `revl metrics` (item 122) counts which
+emissions a run *did* cross, as a whole-run total. `revl profile` sits
 between them and pairs the two **per component**: it reads the declared surface
 from the composition and the exercised emissions from a `revl run --trace`
 JSONL trace, and reports, for each component, the set difference —

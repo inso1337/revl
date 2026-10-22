@@ -183,7 +183,7 @@ against, so run it before you push.
 ## The pre-commit contract
 
 Every change must pass these before it merges: the hook runs them locally and
-CI (`.github/workflows/ci.yml`) runs them again. A green local hook is the
+CI (`.github/workflows/ci.yml`) runs the ones it covers again. A green local hook is the
 minimum bar, not a substitute for CI, because the hook skips what your machine
 cannot run.
 
@@ -227,7 +227,9 @@ cannot run.
 **If you are an agent working a branch, read
 [docs/process.md](docs/process.md) first: it is authoritative for the
 branch-and-PR flow and it says the opposite of what this section assumes.**
-Under that process the full matrix runs in CI on the PR, agents run only the
+Under that process the PR jobs run in CI on the PR (the heavy jobs listed under
+"Pull request descriptions" run after merge, or on the merge queue when it is
+enabled), agents run only the
 tests covering what they changed plus `./tools/pre_pr.sh`, and the orchestrator
 merges on green. `make pre-merge` stays the local gate for anyone landing
 without that CI round-trip, and `make pre-merge-affected` is the narrow
@@ -343,6 +345,33 @@ have a new such case, extend that block; do not leave it implicit.)
 A diagnostic is itself a deliverable ([DESIGN.md](DESIGN.md) §9): it must name
 its guarantee and state the fix, and it is written for the model that will read
 it. A rejection whose message is a bare "error" is not done.
+
+## Pull request descriptions
+
+Describe validation precisely:
+
+- Name the local command and its result. For CI, name the job and event, and
+  report its result. A job skipped by its `if:` condition or changed-path
+  filter is not a pass.
+- Branch protection requires `lint` and the six `backend-*` jobs
+  (`backend-python`, `backend-typescript`, `backend-go`, `backend-rust`,
+  `backend-java`, and `backend-wasm`); `.github/workflows/ci.yml` defines them.
+  The backend jobs are path-filtered and may skip when no changed path can
+  affect them. `root-suite-affected` selects tests by changed paths and may fall
+  back to the full set.
+- The `ci.yml` jobs excluded from `pull_request` events are `frontend`,
+  `frontend-cordis`, `conformance`, `formal`, `temporal-exit`,
+  `sandbox-container`, and `sandbox-microvm`. They run on a `merge_group`
+  candidate when the merge queue is enabled in branch protection. Without the
+  queue, they run on pushes to `main`, the schedule, `workflow_dispatch`, and
+  `workflow_call`, as their conditions allow. Other workflow files have their
+  own triggers; check them before describing their results.
+- If a check did not run locally, say why and where it runs, including whether
+  it can run locally with the needed toolchain. For a check that runs only
+  after merge, state whether a failure would be fixed forward or reverted.
+
+Read the job's `if:` and the workflow's `on:` before claiming that a check
+ran before merge. A skipped job is not evidence of a pass.
 
 ## Adding or changing a backend tier
 

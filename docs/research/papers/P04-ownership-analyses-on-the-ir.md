@@ -37,7 +37,7 @@ These are two analyses with different machinery (a dataflow over locals, a nomin
 
 | Prior system or line of work | What it does | What revl does differently |
 |---|---|---|
-| Perceus reference counting (Koka) (citation to be checked) | Precise reference counting with reuse; in-place update when the count is one at run time | revl decides at compile time, flow-sensitively, from the source, and passes a fact to backends that have no reference counts (JS, Go) |
+| Perceus reference counting (Koka; see the [related-work table](../related-work.md)) | Precise reference counting with reuse; in-place update when the count is one at run time | revl decides at compile time, flow-sensitively, from the source, and passes a fact to backends that have no reference counts (JS, Go) |
 | Lean 4 destructive updates (citation to be checked) | Runtime uniqueness check, update in place when exclusive | No runtime check; a static marker per write |
 | Swift copy-on-write and `isKnownUniquelyReferenced` | Run-time uniqueness test on a buffer | Static, source-level, one analysis shared by six targets |
 | Rust ownership and borrowing | Types enforce unique ownership and borrows | revl does not expose it to users; the Rust backend gets the marker's obligation discharged by rustc (`docs/v2.0-roadmap.md:1860-1861`: Rust needs none of it) |
