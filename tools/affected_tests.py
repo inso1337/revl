@@ -103,6 +103,10 @@ BENCH_DEPENDENT_TESTS = (
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
+    # Issue #2859: the answer ledger's committed table is
+    # `bench/results/answer-ledger.md`, and the module checks that the
+    # committed table reproduces, so a bench change must re-run it.
+    "tests/test_answer_ledger_2859.py",
     # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
     # loaders and checks they leave one `revl` in the process.
     "tests/test_bench_compiler_reload_keeps_one_revl.py",

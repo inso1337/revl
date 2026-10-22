@@ -82,21 +82,23 @@ own child), `container` (a separate namespace set on this machine), or
 `machine` (a different kernel). :data:`TEARDOWN_PROMISE` answers what teardown
 is worth across each, because G7 is LIFO-complete over the *registered* entries
 of an accumulator and each boundary changes which set outlives the failure.
-Only the first two are opened here: a `machine` boundary is REFUSED, not
-best-efforted. §5b then puts a real participant behind a container boundary
+Only the first two are opened unconditionally: a `machine` boundary is opened
+only as `via = ssh` with both a `host` and a pinned `known_hosts` (the staging,
+transport and host-key pin have landed, and R4 makes trust-on-first-use a
+refusal), and is refused otherwise, not best-efforted. §5b then puts a real
+participant behind a container boundary
 (:func:`launch_container_participant`), reusing item 411's container driver and
 speaking the same stdio control channel — because the protocol in §3 never held
 an inverse, it does not care what kind of boundary the other end is behind.
 
-Deliberately NOT here, and named so the boundary is explicit: cross-machine
-orchestration (bundle staging, a remote `deploy-admit` runner, a load-measured
-signed COMMIT receipt, a pinned SSH host key), a replicated WAL, a quorum
-coordinator, and the Ed25519 upgrade to `attest.py`. The last one is a HARD prerequisite for
-a cross-trust-domain deploy (§2.4/§5-A1): a symmetric HMAC verifier is also a
-forger, so "signer untrusted" would be a fiction. Slice 1 is single-host, where
-signer and host are the same trust domain, so HMAC is honest here — and
-:func:`admit` REFUSES outright when a :class:`TrustStore` declares itself
-`cross_domain` under a symmetric algorithm, rather than pretending.
+Deliberately NOT here, and named so the boundary is explicit: a replicated WAL,
+a quorum coordinator, and the Ed25519 upgrade to `attest.py`. The last one is a
+HARD prerequisite for a cross-trust-domain deploy (§2.4/§5-A1): a symmetric HMAC
+verifier is also a forger, so "signer untrusted" would be a fiction. The default
+attestation is HMAC, which is honest while signer and host are one trust domain
+(the single-host case), and :func:`admit` REFUSES outright when a
+:class:`TrustStore` declares itself `cross_domain` under a symmetric algorithm,
+rather than pretending.
 """
 
 from __future__ import annotations
@@ -3896,9 +3898,10 @@ TEARDOWN_PROMISE = {
         "AND the WAL with it: there is no set on this side for G7 to be "
         "complete over, and the conductor holds no inverse it could run. The "
         "only honest verdict is `unresolved`, naming the target for a human. "
-        "That is why this slice REFUSES a machine boundary outright instead of "
-        "shipping a best-effort one — a deploy that cannot promise teardown "
-        "must not be the thing that quietly discovers it."),
+        "That is why a machine target is opened only under a pinned host key "
+        "and its deploy verdict is `unresolved`, never `rolled-back`; a "
+        "deploy that cannot promise teardown must not be the thing that "
+        "quietly discovers it."),
 }
 
 
@@ -4165,11 +4168,12 @@ def admit_deploy_map(placement: Mapping, *,
     Every refusal below is a refusal, not a downgrade. The ones that would
     otherwise be tempting to soften:
 
-    * a **machine** boundary is refused outright. Not "best effort", not
-      "unpinned but warned". There is no landed cross-machine control plane
-      (no staged bundle, no remote ``deploy-admit``, no load-measured signed
-      receipt, no pinned SSH host key), and per :data:`TEARDOWN_PROMISE` there
-      is no teardown to promise across it either.
+    * a **machine** boundary is opened only as `via = ssh` with both a `host`
+      and a pinned `known_hosts`, and refused otherwise. Not "best effort",
+      not "unpinned but warned": the staging, transport and pinned host key
+      have landed for that one shape, and host-key checking is never
+      trust-on-first-use (R4). Per :data:`TEARDOWN_PROMISE` there is still no
+      teardown to promise across it.
     * a **container** target that carries a cross-boundary seam is refused with
       the measured fact behind it, the same one
       `sandbox_runtime.ContainerDriver.preflight` refuses on: the seam is a
@@ -4509,7 +4513,8 @@ def deploy_command(args) -> int:
     whole fallible, EFFECT-FREE half — parse the map, admit every `[deploy]`
     target against the boundary rules (:func:`admit_deploy_map`) — and prints the
     verdict each target would return WITHOUT opening any boundary. A machine
-    boundary is refused outright, an unknown `via` is refused rather than read
+    boundary without a pinned `known_hosts` is refused outright, an unknown
+    `via` is refused rather than read
     as local, and a container target whose seam set this plan cannot prove
     seam-free fail-closes to `seam-set-unknown` — every rule refuses rather than
     downgrades, because the map is unauthenticated operator input (design R4).
@@ -4815,11 +4820,13 @@ def launch_container_participant(
 # the CLI to only the effect-free `--dry-run` half. This slice closes the gap
 # the two left: it drives the coordinated PREPARE/COMMIT/ABORT protocol from a
 # map, over the ONE boundary Slice 1 actually proved out — the process boundary
-# (`via = local`). A container target is opened by `launch_container_participant`
-# and a machine boundary never admits; both stay outside this entry point, which
-# is honest because `admit_deploy_map` (called with no seam set here) admits only
-# `via = local` targets, so every participant this path builds is the conductor's
-# own child on this kernel.
+# (`via = local`). A container target is opened by `launch_container_participant`,
+# and a machine boundary admits only as a `via = ssh` target with both a `host`
+# and a pinned `known_hosts`, which :func:`deploy_ssh_map` drives; both stay
+# outside this entry point, which is honest because `admit_deploy_map` (called
+# with no seam set here) admits only `via = local` targets and that pinned-ssh
+# case, so every participant this path builds is the conductor's own child on
+# this kernel.
 #
 # What is deliberately NOT here, and named so the boundary is explicit:
 #   * the attested-bundle staging and the host-side chain verify (§2, `admit`):
@@ -4916,9 +4923,11 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
     This is the CLI's COMMIT path (design §1.3, `via = local`). It:
 
       1. admits the map (:func:`admit_deploy_map`) — the effect-free half that
-         refuses a machine boundary, an unknown `via`, a network provider, and
-         (with no seam set supplied here) every container target, so the only
-         thing left to build is a process-boundary child;
+         refuses a machine boundary EXCEPT the pinned-ssh case (`via = ssh` with
+         a `host` and a `known_hosts`, the target :func:`deploy_ssh_map`
+         drives), an unknown `via`, a network provider, and (with no seam set
+         supplied here) every container target, so the only thing left to build
+         here is a process-boundary child;
       2. builds one :class:`ProcessParticipant` per process from that process's
          declared components (:func:`_local_participant_spec`);
       3. hands the ordered list to :func:`run_deploy`, which owns the commit
@@ -4941,7 +4950,8 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
 
     # After a clean admission with no seam set, every admitted target is
     # `via = local` (a container needs a proven-seam-free set this entry point
-    # does not supply, and a machine boundary is refused outright), so a process
+    # does not supply, and a machine target is routed through
+    # :func:`deploy_ssh_map`), so a process
     # with no `[deploy]` table and one that wrote `via = local` are the same
     # process-boundary child here.
     processes = placement.get("processes") or {}
