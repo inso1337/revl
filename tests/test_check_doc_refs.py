@@ -149,6 +149,57 @@ def test_a_ledger_entry_without_a_reason_is_a_red(tmp_path):
                       "--check"]) == 2
 
 
+def test_a_vendored_or_hidden_checkout_is_not_scanned(tmp_path):
+    root = _tree(tmp_path)
+    # A vendored checkout is not part of the documented tree. The CI jobs that
+    # run `backends/python/setup.sh` check `.cordis-py` out and the jobs that
+    # do not run it do not, so a reference into it must be neither ok nor a
+    # finding: otherwise the verdict, and the ledger entry that records it,
+    # depend on which job ran. The same absent path under a normal directory
+    # is still a finding.
+    vendored = _ref("backends/python/.cordis-py/src/cordis/context.py", 74)
+    plain = _ref("backends/python/src/cordis/context.py", 74)
+    _write(root, "docs/page.md", f"vendored `{vendored}` and plain `{plain}`\n")
+    # Nor is a file inside one scanned: its references are not the tree's.
+    _write(root, "src/.venv/lib/parse.py", f"# sees {_ref('src/gone.py', 3)}\n")
+    references, findings = _findings(root)
+    assert [r.cited for r in references] == [
+        "backends/python/src/cordis/context.py"]
+    assert [(f.kind, f.cited) for f in findings] == [
+        ("missing", "backends/python/src/cordis/context.py")]
+    # A checkout that happens to exist does not turn the reference into an
+    # anchor either, so the verdict stays the same either way.
+    _write(root, "backends/python/.cordis-py/src/cordis/context.py",
+           "one = 1\ntwo = 2\n" * 40)
+    references, findings = _findings(root)
+    assert [r.cited for r in references] == [
+        "backends/python/src/cordis/context.py"]
+    assert [(f.kind, f.cited) for f in findings] == [
+        ("missing", "backends/python/src/cordis/context.py")]
+    # A segment made only of dots is a relative step or an ellipsis shorthand,
+    # not a hidden directory, and stays in the scan.
+    _write(root, "docs/page.md", f"shorthand `{_ref('.../cordis/loader.py', 508)}`\n")
+    references, findings = _findings(root)
+    assert [(f.kind, f.cited) for f in findings] == [
+        ("missing", ".../cordis/loader.py")]
+
+
+def test_an_archived_document_is_a_frozen_quote_not_a_claim(tmp_path):
+    root = _tree(tmp_path)
+    # docs/roadmap-archive/ records what a file said at the time an item was
+    # closed. A later change to the cited file must not turn the quote into a
+    # red or an obsolete ledger entry, so archive documents are neither scanned
+    # nor resolved; the same reference in live prose is still a finding.
+    _write(root, "src/thing.py", "one = 1\n")
+    quote = _ref("src/thing.py", 99)
+    _write(root, "docs/roadmap-archive/11-old-item.md",
+           f"then the file said `{quote}`\n")
+    _write(root, "docs/live.md", f"see `{quote}` for the contract\n")
+    references, findings = _findings(root)
+    assert [r.source for r in references] == ["docs/live.md"]
+    assert [(f.kind, f.cited) for f in findings] == [("stale", "src/thing.py")]
+
+
 def test_the_committed_ledger_covers_the_real_tree():
     tool = _tool()
     report = tool.build_report(ROOT, tool.LEDGER)

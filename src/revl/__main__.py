@@ -440,9 +440,51 @@ def _run_goal(args, ir: dict) -> int:
     raise AssertionError(f"unknown goal subcommand {args.goal_command!r}")
 
 
+def _runtime_ceiling_surface(wal_path: str) -> dict:
+    """Project observed budget outcomes from one WAL into the audit JSON.
+
+    Keep the source path and WAL sequence beside each copied ceiling record so
+    a consumer can verify the values against the original durable record. Do
+    not expose the rest of the WAL here: effect arguments and error details can
+    contain host data unrelated to the audit surface.
+    """
+    from .wal import read_wal  # noqa: PLC0415 — only when a WAL was requested
+
+    loaded = read_wal(wal_path)
+    outcomes = {"emission-complete", "emission-refused", "emission-failed"}
+    records = []
+    for entry in loaded["records"]:
+        if not isinstance(entry, dict) or entry.get("record") not in outcomes:
+            continue
+        ceiling = entry.get("ceiling")
+        seq = entry.get("seq")
+        if type(seq) is not int or not isinstance(ceiling, dict) or not ceiling:
+            continue
+        records.append({"record": entry["record"], "seq": seq,
+                        "ceiling": ceiling})
+    return {"wal": wal_path,
+            "activation_complete": bool(loaded["complete"]),
+            "torn": bool(loaded["torn"]),
+            "records": records}
+
+
 def _run_audit(args, ir: dict) -> int:
     """`revl audit` — composition manifest + G8 boundary surface, with the
     item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
+    runtime_ceilings = None
+    if getattr(args, "wal", None):
+        if not args.json or getattr(args, "policy", None) or getattr(args, "diff", None):
+            print("error: `--wal` requires the plain `revl audit --json` report "
+                  "and cannot be combined with `--policy` or `--diff`",
+                  file=sys.stderr)
+            return 2
+        from .wal import WALIntegrityError  # noqa: PLC0415 — only with --wal
+        try:
+            runtime_ceilings = _runtime_ceiling_surface(args.wal)
+        except (OSError, ValueError, WALIntegrityError) as error:
+            print(f"error: cannot read audit WAL {args.wal}: {error}",
+                  file=sys.stderr)
+            return 2
     if getattr(args, "policy", None):
         # the third leg of the gate (item 33): absolute authority. The policy
         # is evaluated as set operations over the same audit graph `--diff`
@@ -566,7 +608,7 @@ def _run_audit(args, ir: dict) -> int:
             _capability_registers, _env_surface, _generated_surface,
             _recovery_surface, _retention_surface, _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
-        print(json.dumps(stamp(
+        document = stamp(
             {"manifest": manifest, "boundary": boundary,
              "externs": declared_externs,
              "distributability": distribution,
@@ -594,7 +636,10 @@ def _run_audit(args, ir: dict) -> int:
              **_retention_surface(ir),
              # issue #1896: the model digest behind each generated types file;
              # must match audit_report byte-for-byte, so it is the same call.
-             **_generated_surface(ir)}), indent=2))
+             **_generated_surface(ir)})
+        if runtime_ceilings is not None:
+            document["runtime_ceilings"] = runtime_ceilings
+        print(json.dumps(document, indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for row in ir.get("generated_from") or []:

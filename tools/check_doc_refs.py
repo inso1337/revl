@@ -14,7 +14,12 @@ cross-references) and comments and docstrings in Python under `src/` and
 `tests/`, where the scan is cheap and the anchors are dense. Other comment
 syntaxes are deliberately out of scope for this slice; the reference regex
 already accepts targets in six languages, so widening the sources later is a
-constant, not a redesign.
+constant, not a redesign. A hidden directory is not part of the documented
+tree either: `.cordis-py` is a vendored checkout in the jobs that run
+`backends/python/setup.sh`, and a local `.venv` may exist too. A file under
+one is skipped as a citing file and a reference into one is neither ok nor a
+finding, so whether such a checkout exists locally or in a CI job cannot
+change the verdict or the ledger.
 
 THREE CLASSES. Every reference is one of:
   * ok       -- the path resolves and the cited line exists;
@@ -70,6 +75,13 @@ LEDGER = REPO_ROOT / "tools" / "doc_refs_ledger.json"
 #: Where the sourced references are, relative to the repo root.
 MARKDOWN_ROOTS = ("docs",)
 PYTHON_ROOTS = ("src", "tests")
+
+#: Historical records, not current prose. `docs/roadmap-archive/` quotes old
+#: line anchors on purpose (a closed item records what a file said then), so a
+#: later change that moves or restores those lines must not turn a frozen quote
+#: into a red. Archived documents are neither scanned as citing files nor
+#: resolved as cited ones.
+ARCHIVE_ROOTS = ("docs/roadmap-archive",)
 
 #: One reference: a repo-relative path with a known source extension and a
 #: 1-based line. The path alphabet excludes spaces and backticks on purpose so
@@ -197,15 +209,43 @@ def _python_refs(path: pathlib.Path) -> list:
     return out
 
 
+def _hidden(rel: str) -> bool:
+    """True when a path, as written, has a hidden segment such as `.venv` or
+    `.cordis-py`.
+
+    A hidden directory is not part of the documented tree: the jobs that run
+    `backends/python/setup.sh` create `.cordis-py`, and a local `.venv` may
+    exist too. Whether one is there must not change the verdict, so it is
+    neither scanned as a citing file nor resolved as a cited one. A segment
+    made only of dots is a relative step (`../src/x.py`) or an ellipsis
+    shorthand (`.../x.py`), not a hidden name, so it is scanned as before.
+    """
+    return any(part.startswith(".") and part.strip(".")
+               for part in rel.split("/"))
+
+
+def _archived(rel: str) -> bool:
+    """True when a path is inside a historical archive (ARCHIVE_ROOTS).
+
+    An archive records what the tree said at the time, so its references are
+    frozen quotes, not claims that must still resolve.
+    """
+    return any(rel == archive or rel.startswith(archive + "/")
+               for archive in ARCHIVE_ROOTS)
+
+
 def scan(root: pathlib.Path = REPO_ROOT) -> tuple:
     """`(files, references)` for the tree under `root`, in a stable order."""
     files = []
     for base in MARKDOWN_ROOTS:
         if (root / base).is_dir():
-            files.extend(("markdown", p) for p in sorted((root / base).rglob("*.md")))
+            files.extend(("markdown", p) for p in sorted((root / base).rglob("*.md"))
+                         if not _hidden(p.relative_to(root).as_posix())
+                         and not _archived(p.relative_to(root).as_posix()))
     for base in PYTHON_ROOTS:
         if (root / base).is_dir():
-            files.extend(("python", p) for p in sorted((root / base).rglob("*.py")))
+            files.extend(("python", p) for p in sorted((root / base).rglob("*.py"))
+                         if not _hidden(p.relative_to(root).as_posix()))
     references = []
     for kind, path in files:
         rel = path.relative_to(root).as_posix()
@@ -215,7 +255,10 @@ def scan(root: pathlib.Path = REPO_ROOT) -> tuple:
             match = REF_SHAPE.match(raw)
             if match is None:
                 continue
-            ref = Reference(rel, match.group("path"), int(match.group("line")))
+            cited = match.group("path")
+            if _hidden(cited):
+                continue
+            ref = Reference(rel, cited, int(match.group("line")))
             key = (ref.cited, ref.line)
             if key in seen:
                 continue

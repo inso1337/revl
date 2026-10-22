@@ -386,6 +386,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    audit.add_argument(
+        "--wal", metavar="FILE", default=None,
+        help="include observed budget records from FILE in a plain --json audit "
+             "(not with --policy or --diff)")
     audit.add_argument("--json-diagnostics", action="store_true",
                        help="on rejection, print a structured diagnostic (code, guarantee, "
                             "expected/actual, hint) instead of the human rendering")

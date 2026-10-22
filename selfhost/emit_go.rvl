@@ -2395,26 +2395,138 @@ fn config_bind(ext: Any) -> Str {
   return `_revl_config := _revlExternConfig(${name}, []string{${required.join(", ")}}, map[string]any{${defaults.join(", ")}})`
 }
 
-// Only ever handed one character of a line.
+// Only ever handed one character of a line. The whitespace Python's `\s` and
+// `strip()` read, not only ASCII: the C0 separators (28-31), NEL, NBSP, Ogham
+// space, U+2000-U+200A, U+2028/2029, U+202F, U+205F and U+3000. A line break
+// among them never reaches here: `has_extra_linebreak` marks that extern first.
 fn is_ws_char(ch: Str) -> Bool {
   let c = ch.charCodeAt(0)
-  return c == 32 || (c >= 9 && c <= 13)
+  return c == 32 || (c >= 9 && c <= 13) || (c >= 28 && c <= 31) || c == 133 || c == 160
+    || c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239
+    || c == 8287 || c == 12288
 }
 
-// `_GO_IMPORT_DIRECTIVE` (`^\s*//revl:import\s+(.+?)\s*$`): `[path]` for a
-// directive line (the path may be empty, and the line is dropped either way),
-// `[]` for an ordinary body line.
-fn import_directive(l: Str) -> List[Str] {
-  var a = 0
-  while (a < l.length() && is_ws_char(l.charAt(a))) { a = a + 1 }
-  let t = l.slice(a, l.length())
-  if (!t.startsWith("//revl:import")) { return [] }
-  let rest = t.slice(13, t.length())
-  if (rest.length() < 2 || !is_ws_char(rest.charAt(0))) { return [] }
-  var path = trim(rest)
+// `_GO_IMPORT_DIRECTIVE_WORD` (`^//revl:import(?:\s|$)` on the stripped line):
+// whether a body line is a `//revl:import` directive, that is whether its first
+// whitespace-separated word is the directive's name. A longer word
+// (`//revl:imported`) is an ordinary comment.
+fn is_import_directive(l: Str) -> Bool {
+  let words = ws_words(l)
+  return words.length() > 0 && words[0] == "//revl:import"
+}
+
+// The whitespace-separated words of `s`.
+fn ws_words(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var word = ""
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.charAt(i)
+    if (is_ws_char(ch)) {
+      if (word != "") { out = out.push(word) }
+      word = ""
+    } else { word = word.concat(ch) }
+    i = i + 1
+  }
+  if (word != "") { out = out.push(word) }
+  return out
+}
+
+// `[A-Za-z_]\w*|\.`: an import alias. `is_word_char` is ASCII only, so a
+// non-ASCII alias is refused here where Python's `\w` would take it.
+fn is_import_alias(w: Str) -> Bool {
+  var all_word = w != ""
+  var i = 0
+  while (i < w.length()) {
+    all_word = all_word && is_word_char(w.charAt(i))
+    i = i + 1
+  }
+  let first = w == "" ? 0 : w.charCodeAt(0)
+  return w == "." || (all_word && !(first >= 48 && first <= 57))
+}
+
+// `"[^"\s]+"|[^"\s]+`: an import path, quoted or bare (a word has no space).
+fn is_import_path(w: Str) -> Bool {
+  let quoted = w.startsWith("\"")
+  let inner = quoted && w.length() >= 2 ? w.slice(1, w.length() - 1) : w
+  return w != "" && (!quoted || (w.length() >= 3 && w.endsWith("\""))) && inner.indexOf("\"") < 0
+}
+
+// `_GO_LANGUAGE_KEYWORDS`: none can name an import.
+fn is_go_language_keyword(w: Str) -> Bool {
+  return list_contains(["break", "case", "chan", "const", "continue", "default",
+    "defer", "else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+    "interface", "map", "package", "range", "return", "select", "struct",
+    "switch", "type", "var"], w)
+}
+
+// `_go_import_spec`: the Go import spec (`"time"`, `tm "time"`, `. "strings"`)
+// a directive line asks for, as `[spec]`; `[]` for a line the reference
+// refuses with an EmitError (it does not parse as `//revl:import [alias]
+// <path>`, or its alias is a Go keyword).
+fn import_spec(l: Str) -> List[Str] {
+  let words = ws_words(l)
+  let n = words.length() - 1
+  let one = n == 1 && is_import_path(words[1])
+  let two = n == 2 && is_import_alias(words[1]) && is_import_path(words[2]) && !is_go_language_keyword(words[1])
+  let path = n == 2 ? words[2] : (n == 1 ? words[1] : "")
+  let quoted = path.startsWith("\"") ? path : `"${path}"`
+  let spec = one ? quoted : (two ? `${words[1]} ${quoted}` : "")
+  return spec == "" ? [] : [spec]
+}
+
+// `_go_import_name`: the file-scope name an import spec binds: its alias, else
+// the last element of its path.
+fn import_name(spec: Str) -> Str {
+  let t = trim(spec)
+  let sp = t.indexOf(" ")
+  if (sp >= 0) { return t.slice(0, sp) }
+  var path = t
   while (path.startsWith("\"")) { path = path.slice(1, path.length()) }
   while (path.endsWith("\"")) { path = path.slice(0, path.length() - 1) }
-  return [path]
+  let parts = path.split("/")
+  return parts[parts.length() - 1]
+}
+
+// `_go_refuse_extern_alias_clash`: the alias of a hoisted aliased spec that the
+// module's import block already binds to a different spec (one the preamble
+// imports, or another directive's), else "". The same spec twice is one import.
+// `preamble` holds the block's lines so far, indented, the hoisted specs
+// included (`hoisted` is the list of them, to pick the aliased ones).
+fn import_alias_clash(preamble: List[Str], hoisted: List[Str]) -> Str {
+  var specs: List[Str] = []
+  for (l of preamble) { if (trim(l) != "") { specs = specs.push(trim(l)) } }
+  for (spec of list_sort(hoisted)) {
+    if (spec.indexOf(" ") >= 0) {
+      let alias = import_name(spec)
+      if (alias != "_" && alias != ".") {
+        for (other of list_sort(specs)) {
+          if (other != spec && import_name(other) == alias) { return alias }
+        }
+      }
+    }
+  }
+  return ""
+}
+
+type Hoisted = { kept: List[Str], specs: List[Str], bad: Bool }
+
+// `_hoist_go_imports`: the body lines a Go extern keeps, and the import specs
+// its `//revl:import` directives hoist. `bad` when a directive is one the
+// reference refuses.
+fn hoist_imports(body: Str) -> Hoisted {
+  var kept: List[Str] = []
+  var specs: List[Str] = []
+  var bad = false
+  if (body != "") {
+    for (bl of body.split(newline())) {
+      if (is_import_directive(bl)) {
+        let spec = import_spec(bl)
+        if (spec.length() == 0) { bad = true } else { specs = specs.push(spec[0]) }
+      } else { kept = kept.push(bl) }
+    }
+  }
+  return { kept: kept, specs: specs, bad: bad }
 }
 
 type Eout = { lines: List[Str], imports: List[Str] }
@@ -2451,32 +2563,32 @@ fn emit_externs(externs: List[Any]) -> Eout {
         out = out.push(`<<UNSUPPORTED-EXTERN-linebreak:${name}>>`)
         out = out.push("")
       } else {
-        // The wrapper needs a result to hand back, so a `Unit` extern takes no
-        // marking (the reference gates on `ret` too).
-        if (value_bool(value_field(ext, "secret_return")) && ret != "") {
+        let scan = hoist_imports(body)
+        if (scan.bad) {
+          out = out.push(`<<UNSUPPORTED-EXTERN-IMPORT-DIRECTIVE:${name}>>`)
+          out = out.push("")
+        } else {
+          // The wrapper needs a result to hand back, so a `Unit` extern takes no
+          // marking (the reference gates on `ret` too).
+          if (value_bool(value_field(ext, "secret_return")) && ret != "") {
+            out = out.push(`func ${name}(${params})${sigret} {`)
+            out = out.push(line(1, `return revlSecretResult(revlSecret_${name}(${arg_list}))`))
+            out = out.push("}")
+            out = out.push("")
+            name = "revlSecret_".concat(name)
+          }
           out = out.push(`func ${name}(${params})${sigret} {`)
-          out = out.push(line(1, `return revlSecretResult(revlSecret_${name}(${arg_list}))`))
+          if (has_config(ext)) { out = out.push(line(1, config_bind(ext))) }
+          let kept = scan.kept
+          imports = imports.concat(scan.specs)
+          if (kept.length() == 0) {
+            out = out.push(line(1, "// (empty extern body)"))
+          } else {
+            for (bl of kept) { out = out.push(tab().concat(rstrip(bl))) }
+          }
           out = out.push("}")
           out = out.push("")
-          name = "revlSecret_".concat(name)
         }
-        out = out.push(`func ${name}(${params})${sigret} {`)
-        if (has_config(ext)) { out = out.push(line(1, config_bind(ext))) }
-        var kept = []
-        if (body != "") {
-          for (bl of body.split(newline())) {
-            let directive = import_directive(bl)
-            if (directive.length() == 0) { kept = kept.push(bl) }
-            else { if (directive[0] != "") { imports = imports.push(directive[0]) } }
-          }
-        }
-        if (kept.length() == 0) {
-          out = out.push(line(1, "// (empty extern body)"))
-        } else {
-          for (bl of kept) { out = out.push(tab().concat(rstrip(bl))) }
-        }
-        out = out.push("}")
-        out = out.push("")
       }
     }
   }
@@ -3812,12 +3924,16 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     imports = imports.push(line(1, `"slices"`)).push(line(1, `"fmt"`)).push(line(1, `"sync"`))
     imports = imports.push(line(1, `stc "github.com/0xdenny218/stc-go"`))
   } else {
-    for (path of ext.imports) { imports = imports.push(line(1, `"${path}"`)) }
+    for (spec of ext.imports) { imports = imports.push(line(1, spec)) }
   }
   var unique = []
   for (imp of imports) { if (!list_contains(unique, imp)) { unique = unique.push(imp) } }
 
   var out = banner
+  // The reference refuses a hoisted alias the block already binds to another
+  // spec; the pure path is the only one that hoists (see above).
+  let clash = combined ? "" : import_alias_clash(imports, ext.imports)
+  if (clash != "") { out = out.push(`<<UNSUPPORTED-EXTERN-IMPORT-ALIAS:${clash}>>`) }
   if (unique.length() > 0) {
     out = out.push("import (").concat(list_sort(unique)).push(")").push("")
   }
@@ -5645,10 +5761,36 @@ test "a declared Secret[T] extern return wraps its verbatim body" {
 }
 
 test "an import directive leaves the extern body for the module import block" {
-  assert import_directive("//revl:import encoding/json") == ["encoding/json"]
-  assert import_directive(`${str_tab()}//revl:import "bytes"  `) == ["bytes"]
-  assert import_directive("return x") == []
-  assert import_directive("//revl:importx") == []
+  assert is_import_directive("//revl:import encoding/json")
+  assert is_import_directive(`${str_tab()}//revl:import "bytes"  `)
+  assert is_import_directive("//revl:import")
+  assert !is_import_directive("return x")
+  assert !is_import_directive("//revl:importx")
+  assert import_spec("//revl:import encoding/json") == [`"encoding/json"`]
+  assert import_spec(`${str_tab()}//revl:import "bytes"  `) == [`"bytes"`]
+  assert import_spec(`//revl:import tm "time"`) == [`tm "time"`]
+  assert import_spec(`//revl:import _ embed`) == [`_ "embed"`]
+  assert import_spec(`//revl:import . "strings"`) == [`. "strings"`]
+}
+
+test "an import directive the reference refuses has no spec" {
+  assert import_spec("//revl:import") == []
+  assert import_spec(`//revl:import tm "time" x`) == []
+  assert import_spec(`//revl:import func "time"`) == []
+  assert import_spec(`//revl:import 1tm "time"`) == []
+  assert import_spec(`//revl:import "ti"me"`) == []
+  assert import_spec(`//revl:import tm "`) == []
+}
+
+test "a hoisted alias the import block already binds is a clash" {
+  assert import_name(`tm "time"`) == "tm"
+  assert import_name(`"text/template"`) == "template"
+  assert import_name(`"os"`) == "os"
+  let two = [line(1, `tm "time"`), line(1, `tm "text/template"`)]
+  assert import_alias_clash(two, [`tm "time"`, `tm "text/template"`]) == "tm"
+  assert import_alias_clash([line(1, `"fmt"`), line(1, `fmt "strings"`)], [`fmt "strings"`]) == "fmt"
+  assert import_alias_clash([line(1, `tm "time"`)], [`tm "time"`]) == ""
+  assert import_alias_clash([line(1, `_ "embed"`), line(1, `_ "x/y"`)], [`_ "embed"`, `_ "x/y"`]) == ""
 }
 
 test "a body Python splitlines would break differently takes a marker" {

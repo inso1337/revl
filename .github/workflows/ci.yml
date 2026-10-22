@@ -175,6 +175,7 @@ jobs:
       frontend: ${{ steps.detect.outputs.frontend }}
       backends: ${{ steps.backends.outputs.backends }}
       swap: ${{ steps.swap.outputs.swap }}
+      swap_tests: ${{ steps.swap.outputs.swap_tests }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -267,6 +268,38 @@ jobs:
       # like `backends` above: the job skips only on the exact answer 'false',
       # so a detection crash (this step continues on error and sets nothing)
       # runs it rather than letting the coverage go quiet (#2642's lesson).
+      #
+      # TWO ANSWERS, because they cost different things.
+      #
+      # `swap` is the SOURCE selection: the MCP/session and authoring modules,
+      # the runtime/compiler/plan/apply doors they drive, the eleven named
+      # suites, the provisioning script and this workflow. It runs the eleven,
+      # which is the job's expensive shape.
+      #
+      # `swap_tests` is the TEST-SUITE selection: any changed
+      # `tests/test_mcp*.py` or `tests/test_swap*.py`, the bare
+      # `tests/test_mcp.py` and `tests/test_swap.py` and a file the explicit
+      # list in `swap` has never heard of (a NEW `tests/test_mcp_foo.py`)
+      # included. That selects the job too, but it runs only the changed suite
+      # under the pinned runtime. Editing an MCP or swap suite the explicit
+      # list does not name is not a reason to run the eleven, and it IS a
+      # reason to execute that file where `root-suite-affected` can only skip
+      # it (no runtime there) and `cordis-affected` runs only the guarded half
+      # of the selector's answer. The seven suites the explicit list DOES name
+      # stay source-side on purpose: editing one of those still runs the
+      # eleven, exactly as before. Widening `swap` itself with the same glob
+      # would have made every test-only MCP diff run all eleven, so the two
+      # answers are separate.
+      #
+      # `swap_tests` is space-joined and `SWAP_TEST_RE` admits only
+      # `[A-Za-z0-9_]` in the name, so the output is one line and no path in it
+      # can carry a space or a newline into the job's shell or into
+      # `$GITHUB_OUTPUT`. It is built from `--diff-filter=ACMR`, so a DELETED
+      # suite is not put in `swap_tests` (a missing path exits 4, "no tests
+      # ran", and the #2642 receipt would red the job for the deletion alone).
+      # `swap` still reads the unfiltered diff, so deleting an observed source
+      # file, or one of the twelve paths the explicit list names, selects the
+      # eleven exactly as before.
       - id: swap
         continue-on-error: true
         env:
@@ -278,22 +311,47 @@ jobs:
           # provision and route them. A new dependency belongs here, with the
           # suite that needs it.
           SWAP_RE: '^(src/revl/(mcp/|admission\.py|runtime\.py|run\.py|compiler\.py|lower\.py|placement\.py|plan\.py|apply\.py)|tests/test_mcp_swap_template_2423\.py|tests/test_self_extending_334\.py|tests/test_mcp_authoring_loop_1704\.py|tests/test_swap_author_flag_2518\.py|tests/test_handoff_realm_2510\.py|tests/test_mcp_declared_instance_capture_2673\.py|tests/test_mcp_declared_consumer_2679\.py|tests/test_swap_transactional_1446\.py|tests/test_load_export_area_host_code_2641\.py|tests/test_mcp_authored_host_bodies_2676\.py|tests/test_load_ticket_bodies_2675\.py|tests/test_334_reviewed_name_substitution\.py|backends/python/setup\.sh|\.github/workflows/ci\.yml)'
+          # The MCP and swap suites themselves, ANY name in the family: the
+          # bare `tests/test_mcp.py` / `tests/test_swap.py` as well as the
+          # suffixed ones. This is the SELECTION glob, not the run list:
+          # `swap_tests` names the changed files and the job adds them to the
+          # eleven. A suite added under a new name is selected the day it
+          # lands; one renamed out of this pattern fails the tree-wide pin in
+          # tests/test_ci_pr_queue_split_1678.py.
+          SWAP_TEST_RE: '^tests/test_(mcp|swap)(_[A-Za-z0-9_]*)?\.py$'
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "swap=true" >> "$GITHUB_OUTPUT"
+            echo "swap_tests=" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): swap=true"
             exit 0
           fi
           git fetch --no-tags --depth=1 origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
           changed=$(git diff --name-only "origin/${BASE_REF}" HEAD)
+          # The suites that still EXIST at HEAD: a deleted suite is a change
+          # to the family, but there is nothing to run, and pytest exits 4 on
+          # a missing path (the receipt would then red the job). Renames are
+          # reported as their new path, which is present.
+          changed_suites=$(git diff --name-only --diff-filter=ACMR \
+            "origin/${BASE_REF}" HEAD)
+          # `|| true`: grep exits 1 when nothing matches, which is the ordinary
+          # answer here, and this step runs under `pipefail`.
+          swap_tests=$(printf '%s\n' "$changed_suites" | grep -E "$SWAP_TEST_RE" \
+            | tr '\n' ' ' || true)
+          swap_tests=${swap_tests% }
+          echo "swap_tests=${swap_tests}" >> "$GITHUB_OUTPUT"
+          # `swap` is the SOURCE answer only. `swap_tests` selects the job on
+          # its own (the job's `if:` ORs the two), but it must not make `swap`
+          # true as well: that would run the eleven PLUS the changed file for
+          # a one-file test-only diff (issue #2860 review).
           if printf '%s\n' "$changed" | grep -Eq "$SWAP_RE"; then
             echo "swap=true" >> "$GITHUB_OUTPUT"
-            echo "PR touches a swap/authoring file: swap=true"
+            echo "PR touches a swap/authoring file or suite: swap=true swap_tests=[$swap_tests]"
           else
             echo "swap=false" >> "$GITHUB_OUTPUT"
-            echo "PR touches no swap/authoring file: swap=false"
+            echo "PR touches no swap/authoring file or suite: swap=false"
           fi
 
   # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
@@ -1172,10 +1230,16 @@ jobs:
   # test is; naming them here is what makes those assertions PR-visible. It is
   # ADVISORY: no required context is changed and branch protection is untouched.
   # It runs only when `changes` reports that one of the files these suites
-  # observe moved (the `swap` output above), failing open.
+  # observe moved (the `swap` output above) or that a changed MCP/swap test
+  # suite names it (the `swap_tests` output above), failing open. Which of the
+  # two answers arrived also picks the selection: the eleven named suites for a
+  # source-side change, plus every changed suite that named the job. A
+  # test-only change to a suite outside the explicit list runs just that suite
+  # under the pinned runtime rather than all eleven; a change to one of the
+  # eleven still runs the eleven, exactly as before.
   swap-template-cordis:
     needs: [changes]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.changes.outputs.swap != 'false' }}
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.outputs.swap != 'false' || needs.changes.outputs.swap_tests != '') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1190,15 +1254,42 @@ jobs:
       - name: swap and authoring suites under the pinned runtime
         env:
           SUITES: "tests/test_mcp_swap_template_2423.py tests/test_self_extending_334.py tests/test_mcp_authoring_loop_1704.py tests/test_swap_author_flag_2518.py tests/test_handoff_realm_2510.py tests/test_mcp_declared_instance_capture_2673.py tests/test_mcp_declared_consumer_2679.py tests/test_swap_transactional_1446.py tests/test_load_export_area_host_code_2641.py tests/test_mcp_authored_host_bodies_2676.py tests/test_load_ticket_bodies_2675.py"
+          # The changed MCP/swap test suites that selected this job, and the
+          # source-side answer. `SWAP` empty (the selector step crashed) fails
+          # OPEN to the eleven, exactly as the job's `if:` does; `SWAP_TESTS`
+          # is space-joined by `changes` and admits only `[A-Za-z0-9_]` names.
+          SWAP: ${{ needs.changes.outputs.swap }}
+          SWAP_TESTS: ${{ needs.changes.outputs.swap_tests }}
         run: |
           set -euo pipefail
+          # The selection: the eleven named suites when the source side
+          # selected this job, plus every changed suite that named it (deduped,
+          # so a suite on the explicit list is not passed twice). Unquoted on
+          # purpose: one word per path, and the selector's class admits neither
+          # spaces nor shell metacharacters.
+          selection=""
+          if [ "${SWAP:-}" != "false" ]; then
+            selection="$SUITES"
+          fi
+          for f in ${SWAP_TESTS:-}; do
+            case " $selection " in
+              *" $f "*) ;;
+              *) selection="${selection:+$selection }$f" ;;
+            esac
+          done
+          # Unreachable through the job's `if:`, and a bare `pytest` here would
+          # run the whole suite: fall back to the eleven rather than that.
+          if [ -z "$selection" ]; then
+            echo "::warning::no named selection reached this step; running the eleven suites"
+            selection="$SUITES"
+          fi
           log=$(mktemp)
           rc=0
           set +e
-          backends/python/.venv/bin/python -m pytest tests/test_mcp_swap_template_2423.py tests/test_self_extending_334.py tests/test_mcp_authoring_loop_1704.py tests/test_swap_author_flag_2518.py tests/test_handoff_realm_2510.py tests/test_mcp_declared_instance_capture_2673.py tests/test_mcp_declared_consumer_2679.py tests/test_swap_transactional_1446.py tests/test_load_export_area_host_code_2641.py tests/test_mcp_authored_host_bodies_2676.py tests/test_load_ticket_bodies_2675.py -q 2>&1 | tee "$log"
+          backends/python/.venv/bin/python -m pytest $selection -q 2>&1 | tee "$log"
           rc=${PIPESTATUS[0]}
           set -e
-          python3 tools/affected_pytest_receipt.py --log "$log" --pytest-exit "$rc" --selection "$SUITES"
+          python3 tools/affected_pytest_receipt.py --log "$log" --pytest-exit "$rc" --selection "$selection"
 
   # Issue #2642, option B: the affected selection under the cordis-py runtime,
   # on the pull request. `root-suite-affected` runs the same selection on an
