@@ -20,30 +20,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "STATUS.md",
-      "line": 3,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "STATUS.md",
-      "line": 5,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "STATUS.md",
-      "line": 78,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "STATUS.md",
-      "line": 116,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "__main__.py",
       "line": 139,
       "kind": "missing",
@@ -94,12 +70,6 @@
     {
       "path": "_paths.py",
       "line": 19,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "_process_runner.py",
-      "line": 94,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -172,12 +142,6 @@
     {
       "path": "admission.py",
       "line": 102,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "admission.py",
-      "line": 109,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -393,12 +357,6 @@
     },
     {
       "path": "attest.py",
-      "line": 117,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "attest.py",
       "line": 206,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -560,18 +518,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "bridge.ts",
-      "line": 223,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "bridge.ts",
-      "line": 338,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "bundle.py",
       "line": 23,
       "kind": "missing",
@@ -616,18 +562,6 @@
     {
       "path": "canonical.py",
       "line": 640,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "canonical.py",
-      "line": 685,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "canonical.py",
-      "line": 781,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -856,12 +790,6 @@
     {
       "path": "compiler.py",
       "line": 770,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "compiler.py",
-      "line": 1660,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -1143,12 +1071,6 @@
     },
     {
       "path": "diagnostics.py",
-      "line": 26,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "diagnostics.py",
       "line": 135,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -1162,18 +1084,6 @@
     {
       "path": "diagnostics.py",
       "line": 204,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "diff_corpus.py",
-      "line": 109,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "diff_corpus.py",
-      "line": 364,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -1502,12 +1412,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "durable_sessions.rvl",
-      "line": 103,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "emission_analysis.py",
       "line": 18,
       "kind": "missing",
@@ -1581,12 +1485,6 @@
     },
     {
       "path": "emission_analysis.py",
-      "line": 315,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emission_analysis.py",
       "line": 366,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -1611,12 +1509,6 @@
     },
     {
       "path": "emit.py",
-      "line": 97,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
       "line": 196,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -1624,12 +1516,6 @@
     {
       "path": "emit.py",
       "line": 278,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 413,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -1725,12 +1611,6 @@
     },
     {
       "path": "emit.py",
-      "line": 1040,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
       "line": 1049,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -1743,12 +1623,6 @@
     },
     {
       "path": "emit.py",
-      "line": 1088,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
       "line": 1105,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -1756,12 +1630,6 @@
     {
       "path": "emit.py",
       "line": 1148,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 1160,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -1953,18 +1821,6 @@
     },
     {
       "path": "emit.py",
-      "line": 4086,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 4192,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
       "line": 4696,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -1982,92 +1838,8 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "emit.py",
-      "line": 5884,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 5918,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 5944,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 5964,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 5985,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 5998,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 6091,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 6109,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 6133,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 6154,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 6157,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit.py",
-      "line": 6194,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "emit_py.rvl",
       "line": 690,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit_py.rvl",
-      "line": 1539,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "emit_rust.rvl",
-      "line": 1884,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -2128,12 +1900,6 @@
     {
       "path": "f0.rvl",
       "line": 1,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "fault.py",
-      "line": 44,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -2362,12 +2128,6 @@
     {
       "path": "go/.../bridge.go",
       "line": 199,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "go/emit.py",
-      "line": 1638,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -2606,18 +2366,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "least_authority.py",
-      "line": 156,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "least_authority.py",
-      "line": 209,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "lexer.py",
       "line": 35,
       "kind": "missing",
@@ -2848,12 +2596,6 @@
     {
       "path": "lower.py",
       "line": 1813,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "lower.py",
-      "line": 1865,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -3459,12 +3201,6 @@
     },
     {
       "path": "lower.py",
-      "line": 4878,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "lower.py",
       "line": 4907,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -3627,19 +3363,7 @@
     },
     {
       "path": "lower.py",
-      "line": 9273,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "lower.py",
       "line": 9344,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "lower.py",
-      "line": 9364,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -3814,12 +3538,6 @@
     {
       "path": "mcp/session.py",
       "line": 37,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "mem.rvl",
-      "line": 7,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -4725,18 +4443,6 @@
     },
     {
       "path": "policy.py",
-      "line": 1332,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "policy.py",
-      "line": 1413,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "policy.py",
       "line": 1445,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
@@ -4762,12 +4468,6 @@
     {
       "path": "policy.py",
       "line": 2414,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "probe.rvl",
-      "line": 3,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -4870,12 +4570,6 @@
     {
       "path": "recovery.py",
       "line": 934,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "recovery.py",
-      "line": 1191,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -4984,12 +4678,6 @@
     {
       "path": "run.py",
       "line": 52,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "run.py",
-      "line": 151,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -5138,18 +4826,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "run_go.py",
-      "line": 63,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "run_java.py",
-      "line": 64,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "run_ts.py",
       "line": 136,
       "kind": "missing",
@@ -5158,18 +4834,6 @@
     {
       "path": "run_ts.py",
       "line": 172,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "run_wasm.py",
-      "line": 57,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "run_wasm.py",
-      "line": 243,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -5230,12 +4894,6 @@
     {
       "path": "runtime.py",
       "line": 770,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "runtime.py",
-      "line": 1096,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
@@ -5870,26 +5528,8 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "show_module.py",
-      "line": 45,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "src/fiber.ts",
       "line": 224,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "src/revl/__main__.py",
-      "line": 1681,
-      "kind": "stale",
-      "reason": "line past end of file: anchor shifted or file shortened; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "src/services.rvl",
-      "line": 103,
       "kind": "missing",
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },

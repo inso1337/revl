@@ -184,6 +184,22 @@ def test_a_vendored_or_hidden_checkout_is_not_scanned(tmp_path):
         ("missing", ".../cordis/loader.py")]
 
 
+def test_an_archived_document_is_a_frozen_quote_not_a_claim(tmp_path):
+    root = _tree(tmp_path)
+    # docs/roadmap-archive/ records what a file said at the time an item was
+    # closed. A later change to the cited file must not turn the quote into a
+    # red or an obsolete ledger entry, so archive documents are neither scanned
+    # nor resolved; the same reference in live prose is still a finding.
+    _write(root, "src/thing.py", "one = 1\n")
+    quote = _ref("src/thing.py", 99)
+    _write(root, "docs/roadmap-archive/11-old-item.md",
+           f"then the file said `{quote}`\n")
+    _write(root, "docs/live.md", f"see `{quote}` for the contract\n")
+    references, findings = _findings(root)
+    assert [r.source for r in references] == ["docs/live.md"]
+    assert [(f.kind, f.cited) for f in findings] == [("stale", "src/thing.py")]
+
+
 def test_the_committed_ledger_covers_the_real_tree():
     tool = _tool()
     report = tool.build_report(ROOT, tool.LEDGER)

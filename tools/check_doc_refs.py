@@ -76,6 +76,13 @@ LEDGER = REPO_ROOT / "tools" / "doc_refs_ledger.json"
 MARKDOWN_ROOTS = ("docs",)
 PYTHON_ROOTS = ("src", "tests")
 
+#: Historical records, not current prose. `docs/roadmap-archive/` quotes old
+#: line anchors on purpose (a closed item records what a file said then), so a
+#: later change that moves or restores those lines must not turn a frozen quote
+#: into a red. Archived documents are neither scanned as citing files nor
+#: resolved as cited ones.
+ARCHIVE_ROOTS = ("docs/roadmap-archive",)
+
 #: One reference: a repo-relative path with a known source extension and a
 #: 1-based line. The path alphabet excludes spaces and backticks on purpose so
 #: a reference inside a sentence stops at the punctuation that ends it.
@@ -217,13 +224,24 @@ def _hidden(rel: str) -> bool:
                for part in rel.split("/"))
 
 
+def _archived(rel: str) -> bool:
+    """True when a path is inside a historical archive (ARCHIVE_ROOTS).
+
+    An archive records what the tree said at the time, so its references are
+    frozen quotes, not claims that must still resolve.
+    """
+    return any(rel == archive or rel.startswith(archive + "/")
+               for archive in ARCHIVE_ROOTS)
+
+
 def scan(root: pathlib.Path = REPO_ROOT) -> tuple:
     """`(files, references)` for the tree under `root`, in a stable order."""
     files = []
     for base in MARKDOWN_ROOTS:
         if (root / base).is_dir():
             files.extend(("markdown", p) for p in sorted((root / base).rglob("*.md"))
-                         if not _hidden(p.relative_to(root).as_posix()))
+                         if not _hidden(p.relative_to(root).as_posix())
+                         and not _archived(p.relative_to(root).as_posix()))
     for base in PYTHON_ROOTS:
         if (root / base).is_dir():
             files.extend(("python", p) for p in sorted((root / base).rglob("*.py"))
