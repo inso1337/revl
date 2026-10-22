@@ -56,9 +56,11 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these-2", "pure_stmt", 1, 1]
 
-["reason", "declared-out-of-every-self-host-slice-realm", "declared out of every self-host slice: realm placements, routers, spawn/instances."]
+["reason", "declared-out-of-every-self-host-slice-realm", "Declared out of every self-host slice: realm placements, routers, spawn/instances. Issue #2796 adds a named refusal for routed Rust requirements to `emit_rust_src`. The reference emits this case, so it cannot be a reference-refusal fixture, and the port marker intentionally differs from the reference bytes, so it cannot be in the byte-agreement corpus. `test_a_routed_require_is_named_until_the_router_is_ported` asserts the marker; its one marker-append statement is budgeted here until router emission reaches parity."]
 
 ["function", "declared-out-of-every-self-host-slice-realm", "collect_realm_labels", 3, 3]
+
+["function", "declared-out-of-every-self-host-slice-realm", "emit_rust_src", 1, 1]
 
 ["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test sections, marked rather than emitted (issue #1123): `deferred_test_markers` names each `lifecycle test` with an `<<UNSUPPORTED-TEST:...>>` marker and each `fault test` with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block in. A plain `test` is EMITTED since item 391 (`emit_v3_tests`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl); the two sections still marked drive a live composition or are a reference refusal, so no byte-agreement corpus document can carry either, and the marker is what keeps them loud rather than silently skipped, as all six emitters did before #1123."]
 

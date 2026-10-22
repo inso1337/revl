@@ -288,15 +288,3 @@ def test_imported_module_body_file_resolves_under_profile(tmp_path):
     # lib's extern lowered with its file body resolved.
     names = {e["name"] for e in ir.get("externs") or []}
     assert "libadd" in names
-
-
-# -- bundle interim refusal (stage 4 follow-up) -----------------------------
-
-def test_bundle_refuses_file_form(tmp_path):
-    from revl.bundle import build_bundle
-    _write(tmp_path / "body.py", _INNER_PY + "\n")
-    m = _write(tmp_path / "m.rvl",
-               _py_file("body.py") + "component C { }\n")
-    with pytest.raises(RevlError) as excinfo:
-        build_bundle([str(m)], str(tmp_path / "out.revlbundle"))
-    assert "host-body file" in str(excinfo.value)

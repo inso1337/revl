@@ -67,8 +67,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, replace
+from xml.etree import ElementTree as ET
 
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
@@ -836,6 +840,74 @@ def _provider_files(providers: dict) -> dict[str, str]:
             for path in providers}
 
 
+def _provider_use_closure(providers: dict) -> dict[str, tuple[str, str]]:
+    """Issue #2778: every file the providers' own text `use`s, by realpath.
+
+    The displacement refusal below compared the agent's modules with the
+    provider FILES themselves. A provider's `use` imports are ordinary files
+    on disk, not registered providers, and the composition compile resolves a
+    provider's `use` through the in-memory sources map first, so an agent
+    module keyed at a dependency's path still composes in the place of the
+    file the provider depends on: the provider's text is unchanged and its
+    behaviour changes.
+
+    Resolution mirrors the operator compile exactly. Each module is walked
+    from the absolute path the loader keys it by, and a nested `use` resolves
+    relative to that path's directory first, then the search path
+    (`REVL_IMPORT_PATH`, then the stdlib). The realpath is only the comparison
+    key, so every spelling of one file collides with the same agent module
+    while a symlinked dependency is still walked from the directory the
+    compiler reads it through. A source that does not parse and a `use` that
+    does not resolve are skipped: the provider compile owns those errors and
+    refuses them before anything runs.
+    """
+    from ..compiler import _default_search_path  # noqa: PLC0415 - same package
+    from ..parser import parse_text  # noqa: PLC0415 - avoids a parser import here
+
+    def resolve(importer: str, use_path: str) -> str:
+        target = os.path.join(os.path.dirname(importer), use_path)
+        if os.path.isfile(target):
+            return target
+        for base in _default_search_path():
+            candidate = os.path.join(base, use_path)
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    closure: dict[str, tuple[str, str]] = {}
+    seen = {os.path.realpath(path) for path in providers}
+    for registered, text in providers.items():
+        # the frontier carries the path the compiler would LOAD the module by,
+        # and the realpath is used only to compare one file against another
+        frontier = [registered]
+        sources = {registered: text}
+        while frontier:
+            importer = frontier.pop()
+            try:
+                program = parse_text(sources.pop(importer), importer)
+            except (RevlError, RecursionError):
+                # the provider compile reports an unparseable module itself
+                continue
+            for use in program.uses:
+                target = resolve(importer, use.path)
+                if not target:
+                    continue
+                real = os.path.realpath(target)
+                if real in seen:
+                    continue
+                seen.add(real)
+                closure[real] = (registered, use.path)
+                loaded = os.path.abspath(target)
+                try:
+                    with open(loaded, encoding="utf-8") as handle:
+                        sources[loaded] = handle.read()
+                except (OSError, UnicodeDecodeError):
+                    # the provider compile owns a dependency it cannot read
+                    continue
+                frontier.append(loaded)
+    return closure
+
+
 def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     """Issue #2763: refuse a candidate whose in-memory module names a file the
     operator registered as a `--provider`, under any spelling of that path.
@@ -848,23 +920,44 @@ def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     the agent's text compiled in the provider's place. A refusal, not a silent
     drop: the reason names the module as the caller sent it and the provider
     it collided with, a path inside the roots the jail refusal already shows,
-    and nothing is compiled."""
+    and nothing is compiled.
+
+    Issue #2778: the same rule covers the files a provider's own text `use`s.
+    Those are not registered providers, but the composition compile resolves a
+    provider's `use` through the in-memory map first, so a module keyed at a
+    dependency's path would compose in the place of the file the provider
+    depends on."""
     taken = _provider_files(providers)
+    dependencies = _provider_use_closure(providers)
     for key in modules:
-        registered = taken.get(os.path.realpath(os.path.abspath(key)))
-        if registered is None:
+        real = os.path.realpath(os.path.abspath(key))
+        registered = taken.get(real)
+        if registered is not None:
+            raise RevlError(
+                key, 1,
+                f"admission refused: module `{key}` names the operator-sanctioned "
+                f"provider `{registered}`; an agent-supplied module may not take "
+                f"a granted provider's place",
+                hint="a `--provider` module is the operator's own host code and "
+                     "is composed under the path the operator registered; it "
+                     "cannot be replaced from the transport under any spelling "
+                     "of that path. Send your module under a path of its own and "
+                     "compose the provider's service through `use` of the "
+                     "registered path, or ask the operator to change the provider",
+                category="admission")
+        owner = dependencies.get(real)
+        if owner is None:
             continue
+        dependency_provider, use_path = owner
         raise RevlError(
             key, 1,
-            f"admission refused: module `{key}` names the operator-sanctioned "
-            f"provider `{registered}`; an agent-supplied module may not take "
-            f"a granted provider's place",
-            hint="a `--provider` module is the operator's own host code and "
-                 "is composed under the path the operator registered; it "
-                 "cannot be replaced from the transport under any spelling "
-                 "of that path. Send your module under a path of its own and "
-                 "compose the provider's service through `use` of the "
-                 "registered path, or ask the operator to change the provider",
+            f"admission refused: module `{key}` names `{use_path}`, a file the "
+            f"operator-sanctioned provider `{dependency_provider}` uses; an "
+            f"agent-supplied module may not take a provider's dependency's place",
+            hint="the provider's own `use` resolves through the composition's "
+                 "in-memory sources first, so a module sent under a path the "
+                 "provider imports would compose in place of the file the "
+                 "operator sanctioned. Send your module under a path of its own",
             category="admission")
 
 
@@ -2628,11 +2721,64 @@ def _tool_export(arguments: dict) -> dict:
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
+    copied = _copied_not_adopted(held)
+    if copied:
+        payload["note"] = _copied_note(copied)
+        payload["adopt"] = copied
     if skipped:
         payload["skipped"] = skipped
     if damaged:
         payload["exportRecordDamaged"] = damaged
     return payload
+
+
+def _copied_not_adopted(held: dict) -> list[dict]:
+    """The loaded files whose bytes are not the held text, each with the copy
+    that holds it (issue #2766).
+
+    A files-loaded composition exports each changed file to its copy under
+    `.revl/export/`, never over the loaded file (issue #2524). The success
+    payload nevertheless said the held source was "written to disk" and
+    `disk.inSync` was true, so a client read the export as adopted and stopped
+    with the loaded file still holding the old bytes. This names the difference
+    in the payload; the divergence block keeps comparing against the copy, as
+    issue #2524 defined it.
+
+    Decided from state, not from what this call wrote: a second export writes
+    nothing (the copy already holds the text) and still leaves the loaded file
+    alone, and a revert can rewrite the copy so the loaded file already equals
+    the held text, which must not be reported as waiting for a copy-out."""
+    if not held.get("files"):
+        return []
+    texts = held.get("files_content") or {}
+    roots = _file_roots()
+    out = []
+    for path in held["files"]:
+        text = texts.get(path)
+        copy = _export_jail.export_copy(path, roots)
+        if copy != path and text is not None and _edit._read_disk(path) != text:
+            out.append({"file": path, "export": copy})
+    return out
+
+
+def _copied_note(copied: list[dict]) -> str:
+    """The export note when a loaded file is not the held text (issue #2766):
+    name the copy that holds the text and the file that still holds the old
+    bytes, and say that adopting the export means copying it over. It names a
+    copy, not a tool: the server does not know which file tool the client has
+    (#2524 leaves the copy-out to whoever asked for the export)."""
+    if len(copied) == 1:
+        one = copied[0]
+        return (f"the held source is at the export copy "
+                f"{one['export']}; the loaded file {one['file']} still holds "
+                "the previous bytes. An export never writes over a loaded file "
+                "outside the export directory: adopt it by copying the copy "
+                "over that file")
+    pairs = "; ".join(f"{i['file']} (copy {i['export']})" for i in copied)
+    return ("the held source is at export copies; these loaded files "
+            f"still hold the previous bytes: {pairs}. An export never writes "
+            "over a loaded file outside the export directory: adopt it by "
+            "copying each copy over its file")
 
 
 def _write_records(records) -> tuple | None:
@@ -3483,6 +3629,199 @@ def _tool_gauntlet(arguments: dict) -> dict:
     if hasattr(SESSION, "record_gauntlet"):
         SESSION.record_gauntlet(dossier)
     return dossier
+
+
+# -- selected test runs (issue #2843) ---------------------------------------
+
+#: One failing test's message is bounded: a pytest traceback can be tens of
+#: kilobytes and there is one per failing test, so an unbounded answer would be
+#: the runner's stdout under another name.
+_TEST_MESSAGE_LIMIT = 500
+
+#: The default wall-clock budget of one `revl_test_run` call, in seconds.
+_TEST_RUN_TIMEOUT = 300.0
+
+
+def _test_message(text: str | None) -> str | None:
+    """One test's message, whitespace-collapsed and bounded."""
+    if not text:
+        return None
+    text = " ".join(text.split())
+    if len(text) <= _TEST_MESSAGE_LIMIT:
+        return text
+    return text[: _TEST_MESSAGE_LIMIT - 4].rstrip() + " ..."
+
+
+def _test_node_id(case) -> str:
+    """The node id pytest would report for one junit `<testcase>`.
+
+    junit carries `file`, `classname` and `name`, and no node id, so the three
+    are reconstructed (`tests/test_a.py::TestX::test_y`) with no plugin.
+    """
+    file = case.get("file") or ""
+    name = case.get("name") or ""
+    cls = case.get("classname") or ""
+    if not file:
+        return f"{cls}::{name}" if cls else name
+    module = file[:-3].replace("/", ".") if file.endswith(".py") else file
+    inner = cls[len(module) + 1:] if cls.startswith(module + ".") else ""
+    prefix = file + ("::" + inner.replace(".", "::") if inner else "")
+    return f"{prefix}::{name}"
+
+
+def _test_entry(case) -> dict:
+    """One junit `<testcase>` as the answer's per-test entry."""
+    outcome = "passed"
+    node = None
+    for tag, mapped in (("failure", "failed"), ("error", "error"),
+                        ("skipped", "skipped")):
+        found = case.find(tag)
+        if found is not None:
+            outcome, node = mapped, found
+            break
+    try:
+        duration = round(float(case.get("time") or 0.0), 3)
+    except ValueError:
+        duration = 0.0
+    return {"nodeId": _test_node_id(case), "outcome": outcome,
+            "duration": duration,
+            "message": None if node is None else _test_message(
+                node.get("message") or node.text)}
+
+
+def _parse_junit(path: str) -> list[dict]:
+    """Every per-test entry in a junit report, or [] when it cannot be read."""
+    try:
+        tree = ET.parse(path)
+    except (OSError, ET.ParseError):
+        return []
+    return [_test_entry(case) for case in tree.getroot().iter("testcase")]
+
+
+def _test_run_refusal(message: str, code: str, **extra) -> dict:
+    """A named refusal from `revl_test_run`, with the run's receipt when it has
+    one. The verdict vocabulary is shared with a completed run, so a caller
+    reads `verdict` first and `code` when it is `refused`."""
+    return _session_error(message, category="usage", code=code, refused=True,
+                          verdict="refused", **extra)
+
+
+def _tool_test_run(arguments: dict) -> dict:
+    """Run a selected test suite under this server's interpreter and answer
+    with structured per-test results (issue #2843).
+
+    pytest runs as a subprocess with `--junitxml` into a temp file, which is
+    parsed and deleted; the runner's stdout is never read or echoed. `ok`
+    reports that the run produced an answer and the result is in `verdict`
+    (`passed` | `failed`), so a failing test is a result, not a tool fault. An
+    empty selection, a selection that collected no test and one where every
+    test skipped are named refusals, so a vacuous run cannot read green.
+    """
+    selection = arguments.get("selection")
+    if selection is None or selection == []:
+        return _test_run_refusal(
+            "`selection` is required: the test paths or pytest node ids to run, "
+            "e.g. [\"tests/test_mcp.py\"]. An empty selection is refused, so a "
+            "run over nothing cannot read as green", "EMPTY_SELECTION")
+    if not isinstance(selection, list) or not selection:
+        return _test_run_refusal(
+            "`selection` must be a non-empty array of test paths or node ids",
+            "BAD_SELECTION")
+    if not all(isinstance(item, str) and item.strip() for item in selection):
+        return _test_run_refusal(
+            "every `selection` entry must be a non-empty test path or node id",
+            "BAD_SELECTION")
+    for item in selection:
+        if item.startswith("-"):
+            return _test_run_refusal(
+                f"`selection` entry `{item}` looks like a pytest option; this "
+                "verb takes test paths and node ids, not options",
+                "BAD_SELECTION")
+        if not item.split("::", 1)[0].strip():
+            return _test_run_refusal(
+                f"`selection` entry `{item}` names no path before `::`",
+                "BAD_SELECTION")
+    cwd = arguments.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return _test_run_refusal(
+            "`cwd` is required: the working directory pytest runs in",
+            "BAD_CWD")
+    cwd = os.path.realpath(os.path.abspath(cwd))
+    if not os.path.isdir(cwd):
+        return _test_run_refusal(f"`cwd` {cwd} is not a directory", "BAD_CWD")
+    timeout = arguments.get("timeout", _TEST_RUN_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or not timeout > 0:
+        return _test_run_refusal(
+            f"`timeout` must be a positive number of seconds, not {timeout!r}",
+            "BAD_TIMEOUT")
+    # a test selection is a path argument like any other: the tree it can run
+    # and the directory it runs in stay inside the operator-sanctioned roots
+    roots = _file_roots()
+    outside: list[str] = []
+    if not _within_roots(cwd, roots):
+        outside.append(cwd)
+    for item in selection:
+        path = item.split("::", 1)[0]
+        if not path or not _within_roots(os.path.join(cwd, path), roots):
+            outside.append(path or item)
+    if outside:
+        allowed = ", ".join(f"`{root}`" for root in roots)
+        named = ", ".join(f"`{path}`" for path in sorted(set(outside)))
+        return _test_run_refusal(
+            f"refused: {named} is outside the operator-sanctioned root(s) "
+            f"[{allowed}]; a selection and its working directory are confined "
+            "like every other path argument", "OUTSIDE_ROOT")
+    fd, report = tempfile.mkstemp(prefix="revl-test-run-", suffix=".xml")
+    os.close(fd)
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               "-o", "junit_family=xunit1", f"--junitxml={report}", *selection]
+    started = time.monotonic()
+    try:
+        try:
+            proc = subprocess.run(
+                command, cwd=cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=float(timeout), check=False)
+        except subprocess.TimeoutExpired:
+            return _test_run_refusal(
+                f"the selection did not finish within {timeout:g} s; raise "
+                "`timeout` or narrow the selection", "TIMEOUT",
+                receipt={"command": command, "cwd": cwd, "exitCode": None,
+                         "durationSeconds": round(time.monotonic() - started, 3),
+                         "timeoutSeconds": float(timeout), "timedOut": True})
+        except OSError as error:
+            return _test_run_refusal(
+                f"pytest could not be started: {error}", "TEST_RUN_FAILED")
+        exit_code = proc.returncode
+        elapsed = round(time.monotonic() - started, 3)
+        tests = _parse_junit(report)
+    finally:
+        try:
+            os.unlink(report)
+        except OSError:
+            pass
+    receipt = {"command": command, "cwd": cwd, "exitCode": exit_code,
+               "durationSeconds": elapsed, "timeoutSeconds": float(timeout)}
+    if not tests:
+        return _test_run_refusal(
+            f"the selection collected no test: pytest exited {exit_code} and "
+            "reported no test case. Check the paths and node ids",
+            "NO_TESTS_COLLECTED", receipt=receipt, selection=list(selection))
+    counts = {"total": len(tests), "passed": 0, "failed": 0, "skipped": 0,
+              "errors": 0}
+    for entry in tests:
+        key = "errors" if entry["outcome"] == "error" else entry["outcome"]
+        counts[key] += 1
+    if counts["skipped"] == counts["total"]:
+        return _test_run_refusal(
+            f"all {counts['total']} selected test(s) were skipped; a skipped "
+            "run is not a passing run", "ALL_SKIPPED", receipt=receipt,
+            counts=counts)
+    verdict = "failed" if (counts["failed"] or counts["errors"]
+                           or exit_code != 0) else "passed"
+    return {"ok": True, "verdict": verdict, "selection": list(selection),
+            "tests": tests, "counts": counts, "receipt": receipt}
 
 
 def _tool_quarantine(arguments: dict) -> dict:
@@ -5441,6 +5780,43 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_gauntlet,
+    },
+    {
+        "name": "revl_test_run",
+        "description": "Run a selected test suite under this server's own "
+                       "interpreter and return per-test results instead of "
+                       "runner text: one entry per test with the node id, the "
+                       "outcome (passed | failed | skipped | error), the duration "
+                       "in seconds and the test's message (bounded), plus the "
+                       "summary counts, the verdict and a receipt with the exact "
+                       "command. pytest writes a junit report to a temp file, "
+                       "which is parsed and deleted; the runner's stdout is never "
+                       "returned. `ok` reports that a run produced an answer and "
+                       "the result is in `verdict` (passed | failed), so a failing "
+                       "test is a result, not a tool fault. An empty selection, a "
+                       "selection that collected no test and one where every test "
+                       "skipped are named refusals (EMPTY_SELECTION, "
+                       "NO_TESTS_COLLECTED, ALL_SKIPPED), so a vacuous run cannot "
+                       "read green. The selection and `cwd` are confined to the "
+                       "operator-sanctioned root(s), like every other path "
+                       "argument. See docs/mcp-reference.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "selection": {"type": "array", "items": {"type": "string"},
+                              "description": "the test paths or pytest node ids "
+                                             "to run (`path::Class::test`)"},
+                "cwd": {"type": "string",
+                        "description": "the working directory pytest runs in; "
+                                       "relative selections resolve against it"},
+                "timeout": {"type": "number",
+                            "description": "wall-clock budget in seconds "
+                                           "(default 300)"},
+            },
+            "required": ["selection", "cwd"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_test_run,
     },
     {
         "name": "revl_quarantine",

@@ -84,9 +84,12 @@ import copy
 import hashlib
 import json
 import os
+import posixpath
 import shutil
+import stat
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from ._paths import stdlib_root
@@ -126,6 +129,10 @@ ONEFILE_SUFFIX = ".revlbundle1"
 REFUSED_EXIT = 4
 
 RUNTIME_MANIFEST = "runtime-manifest.json"
+#: The runtime-manifest member recording every host file that travels in the
+#: bundle's `source/` tree (a spliced body file, a user module a `ref` points
+#: at), each with the sha256 of its bytes (issue #2700).
+HOST_FILES_KEY = "hostFiles"
 LOCK_NAME = "components.lock"
 POLICY_NAME = "policy.json"
 ATTESTATION_NAME = "attestation.json"
@@ -370,6 +377,252 @@ def _gauntlet_dossier(paths: list[str]) -> dict | None:
         return None
 
 
+# --------------------------------------------------------------- host files
+#
+# An extern body can be spliced from a file (`= @py file "helpers.py"`) or point
+# at a user host module (`= @py ref sym from "host/engine.py"`). The IR pins the
+# sha256 of each file's bytes. A bundle carries the file under `source/`, at the
+# path the declaring module resolves it from, and `revl verify` re-hashes it
+# against that pin (issue #2700).
+#
+# Stricter than the compiler on purpose: the compiler lets a module ref a file
+# anywhere in the root tree. A bundle flattens its sources into one `source/`
+# directory, so only a file inside the declaring module's own directory tree can
+# keep the path it resolves from. Anything else is refused at bundle time.
+
+
+def _host_pins_of(ir: dict) -> list[dict]:
+    """Every file pin a USER-origin extern body carries in an IR, as
+    `[{"extern", "tier", "kind", "path", "sha256"}, ...]`, sorted. `kind` is
+    `body` for a spliced file and `ref` for a user module. A stdlib-kind ref is
+    excluded: the verifier re-resolves it from its own install.
+
+    The IR may be a bundle's own text, so its shape is not trusted: an extern,
+    a `body_files` or `refs` map, or one of their entries that is not the
+    expected kind of JSON value raises `RevlError` (verify turns that into a
+    MISMATCH), never an `AttributeError`."""
+    def _bad(what: str) -> RevlError:
+        return RevlError("<bundle>", 0, f"malformed host-file pins: {what}")
+
+    if not isinstance(ir, dict):
+        raise _bad("the IR is not an object")
+    externs = ir.get("externs") or []
+    if not isinstance(externs, list):
+        raise _bad("`externs` is not a list")
+    pins: list[dict] = []
+    for ext in externs:
+        if not isinstance(ext, dict):
+            raise _bad("an extern entry is not an object")
+        name = ext.get("name")
+        for field, kind in (("body_files", "body"), ("refs", "ref")):
+            entries = ext.get(field) or {}
+            if not isinstance(entries, dict):
+                raise _bad(f"`{field}` of extern {name!r} is not an object")
+            for tier, rec in entries.items():
+                if not isinstance(rec, dict):
+                    raise _bad(f"`{field}` entry {tier!r} of extern {name!r} "
+                               "is not an object")
+                if kind == "ref" and rec.get("root") == "stdlib":
+                    continue
+                pins.append({"extern": name, "tier": tier, "kind": kind,
+                             "path": rec.get("path"),
+                             "sha256": rec.get("sha256")})
+    return sorted(pins, key=lambda p: (str(p["extern"]), str(p["tier"]),
+                                       p["kind"]))
+
+
+def _clean_pin_path(path) -> str:
+    """The pinned path as a normalized POSIX string (a `./x.py` spelling is the
+    same file as `x.py`). Anything that is not text stays as is and fails the
+    comparisons that follow."""
+    if not isinstance(path, str):
+        return str(path)
+    return posixpath.normpath(path.replace("\\", "/"))
+
+
+def _declared_host_files(sources: list[str]) -> dict[tuple, list[tuple[str, str]]]:
+    """`{(extern, tier, kind): [(module_dir, path as written), ...]}` read off
+    the bundled sources' own declarations. The IR records the pin but not the
+    directory it resolves from, and that directory is the jail."""
+    from .parser import HostBodyFile, HostRef, parse_text  # noqa: PLC0415
+
+    declared: dict[tuple, list[tuple[str, str]]] = {}
+    for path in sources:
+        program = parse_text(Path(path).read_text(encoding="utf-8"), path)
+        module_dir = os.path.dirname(os.path.abspath(path))
+        for ext in program.externs:
+            for body in ext.bodies:
+                if isinstance(body, HostBodyFile):
+                    kind = "body"
+                elif isinstance(body, HostRef):
+                    kind = "ref"
+                else:
+                    continue
+                declared.setdefault((ext.name, body.backend, kind), []).append(
+                    (module_dir, body.path))
+    return declared
+
+
+def _read_host_file(module_dir: str, written: str, extern: str) -> tuple[str, bytes]:
+    """Read one host file for the bundle: `(path relative to module_dir, bytes)`.
+
+    The file must sit inside `module_dir`. The text is checked first (no
+    absolute path, no NUL, no `..`), then the file is opened once and the
+    containment is checked against the real path of that opened handle, so a
+    symlink out of the directory is refused and the file checked is the file
+    read."""
+    from .hostfile import _read_all, _real_path_of_fd  # noqa: PLC0415
+
+    where = "<bundle>"
+    parts = written.replace("\\", "/").split("/")
+    if (not written or os.path.isabs(written) or "\x00" in written
+            or ".." in parts):
+        raise RevlError(
+            where, 0,
+            f"cannot bundle extern `{extern}`: host file {written!r} is empty, "
+            "absolute, or leaves its module's directory",
+            hint="a bundled host file must sit inside the directory of the "
+                 ".rvl file that names it.")
+    rel = posixpath.normpath("/".join(parts))
+    root_real = os.path.realpath(module_dir)
+    candidate = os.path.join(module_dir, rel)
+    try:
+        # O_NONBLOCK: opening a named pipe must not wait for a writer; the
+        # regular-file check below then refuses it.
+        fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except (OSError, ValueError) as error:
+        raise RevlError(where, 0,
+                        f"cannot bundle extern `{extern}`: host file "
+                        f"{written!r} cannot be opened: {error}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RevlError(where, 0,
+                            f"cannot bundle extern `{extern}`: host file "
+                            f"{written!r} is not a regular file")
+        if not _contained(_real_path_of_fd(fd, candidate), root_real):
+            raise RevlError(
+                where, 0,
+                f"cannot bundle extern `{extern}`: host file {written!r} "
+                "resolves outside its module's directory",
+                hint="a bundle never reads a host file from outside the "
+                     "directory of the .rvl file that names it.")
+        return rel, _read_all(fd)
+    finally:
+        os.close(fd)
+
+
+def _path_key(rel: str) -> str:
+    """The spelling two paths are compared under for a collision: Unicode
+    normalized and case folded, because a bundle can be unpacked on a file
+    system that treats `Helpers.py` and `helpers.py` as one file."""
+    return unicodedata.normalize("NFC", rel).casefold()
+
+
+def _check_layout(pairs: set[tuple[str, bytes]], source_names: set[str],
+                  where: str) -> None:
+    """Refuse a set of distinct `(path, bytes)` host files that cannot all live
+    in the flat `source/` tree next to the bundled sources: one path with
+    different bytes, two spellings of one path, a file with the name of a
+    bundled source, or a file that is also another file's directory. Runs
+    before the output directory is touched."""
+    taken: dict[str, tuple[str, bool]] = {
+        _path_key(name): (name, True) for name in source_names}
+    dirs: dict[str, str] = {}
+    for rel, _data in sorted(pairs):
+        key = _path_key(rel)
+        other = taken.get(key)
+        if other is not None:
+            what = ("has the name of a bundled source" if other[1]
+                    else "is named by another module with different contents"
+                    if other[0] == rel else
+                    f"has the same path as {other[0]!r} on a case-folding or "
+                    "normalizing file system")
+            raise RevlError(where, 0,
+                            f"cannot bundle host file {rel!r}: it {what}")
+        taken[key] = (rel, False)
+        parts = key.split("/")
+        for i in range(1, len(parts)):
+            dirs.setdefault("/".join(parts[:i]), rel)
+    for key, (rel, _is_source) in taken.items():
+        if key in dirs:
+            raise RevlError(
+                where, 0,
+                f"cannot bundle host file {rel!r}: it is also the directory "
+                f"of {dirs[key]!r} in the bundle's `source/` tree")
+
+
+def _collect_host_files(ir: dict, sources: list[str]) -> list[dict]:
+    """Read every file the IR pins for a USER extern body, checked against the
+    pin. Returns one `{"rel", "data", "extern", "tier", "kind", "sha256"}` per
+    pin, so a file shared by two externs is recorded once per extern. Raises
+    `RevlError` when a pinned file is not declared by a bundled source, changed
+    since the compile, would lose its resolved path in the flat `source/` tree,
+    or cannot share that tree with the other files."""
+    pins = _host_pins_of(ir)
+    if not pins:
+        return []
+    declared = _declared_host_files(sources)
+    items: list[dict] = []
+    for pin in pins:
+        label = f"`{pin['extern']}` ({pin['tier']})"
+        candidates = declared.get((pin["extern"], pin["tier"], pin["kind"]))
+        if not candidates:
+            raise RevlError(
+                sources[0], 0,
+                f"cannot bundle extern {label}: its host file "
+                f"{pin['path']!r} is declared by a module that is not among "
+                "the bundled sources",
+                hint="list every module that declares a host file on the "
+                     "`revl bundle` command line.")
+        found = None
+        for module_dir, written in candidates:
+            rel, data = _read_host_file(module_dir, written, pin["extern"])
+            if hashlib.sha256(data).hexdigest() == pin["sha256"]:
+                found = (rel, data)
+                break
+        if found is None:
+            raise RevlError(
+                sources[0], 0,
+                f"cannot bundle extern {label}: host file {pin['path']!r} "
+                "changed since it was compiled")
+        rel, data = found
+        if rel != _clean_pin_path(pin["path"]):
+            raise RevlError(
+                sources[0], 0,
+                f"cannot bundle extern {label}: host file {pin['path']!r} "
+                f"would resolve as {rel!r} from the flat bundle `source/` tree",
+                hint="keep the file inside the directory of the .rvl file that "
+                     "names it, and that file in the compile root.")
+        items.append({"rel": rel, "data": data, "extern": pin["extern"],
+                     "tier": pin["tier"], "kind": pin["kind"],
+                     "sha256": pin["sha256"]})
+    _check_layout({(item["rel"], item["data"]) for item in items},
+                  {os.path.basename(p) for p in sources}, sources[0])
+    return items
+
+
+def _write_host_files(source_dir: Path, host_files: list[dict]) -> list[dict]:
+    """Write the collected host files under `source_dir`, byte for byte (a file
+    shared by several externs once), and return one runtime-manifest record per
+    pin."""
+    records: list[dict] = []
+    root_real = os.path.realpath(str(source_dir))
+    written: set[str] = set()
+    for item in host_files:
+        if item["rel"] not in written:
+            dest = source_dir / item["rel"]
+            if not _contained(os.path.realpath(str(dest)), root_real):
+                raise RevlError("<bundle>", 0,
+                                f"host file {item['rel']!r} escapes the bundle")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(item["data"])
+            written.add(item["rel"])
+        records.append({"path": f"source/{item['rel']}",
+                        "sha256": item["sha256"], "extern": item["extern"],
+                        "tier": item["tier"], "kind": item["kind"]})
+    return records
+
+
 def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
                  topology: str | None = None, force: bool = False, env=None) -> str:
     """Assemble a `.revlbundle` directory from `sources` and return its path.
@@ -409,52 +662,14 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
             sources[0], 0,
             f"composition has {len(holes)} open hole(s), it is a draft, not "
             "admitted, and cannot be bundled (fill the holes, docs/holes.md)")
-    # item 396 stage 4 (interim clean refusal): `revl bundle` copies sources
-    # flat by basename (below) and `revl verify` recompiles the bundled source,
-    # so a root-relative external host-body file would not travel with the
-    # bundle and verify could not reproduce it. Refuse cleanly, naming the gap,
-    # rather than emit a bundle that cannot verify. Full body-file bundle
-    # support (carrying the files under their root-relative paths and
-    # re-hashing them in verify) is the follow-up.
-    file_externs = sorted(
-        e.get("name") for e in (ir.get("externs") or []) if e.get("body_files"))
-    if file_externs:
-        raise RevlError(
-            sources[0], 0,
-            "cannot bundle a composition whose extern splices an external "
-            "host-body file (`= @backend file \"path\"`): "
-            f"{', '.join(file_externs)}",
-            hint="`revl bundle` copies sources flat by basename, so a "
-                 "root-relative body file would not travel with the bundle and "
-                 "`revl verify` could not reproduce it. Inline the body "
-                 "(`= @backend { ... }`) to bundle for now; carrying body files "
-                 "through the bundle is the item 396 stage 4 follow-up.")
-    # item 396 option B / 410: a USER host-module ref names a root-relative file
-    # that the flat basename copy would not carry, so a bundled user-ref program
-    # could not resolve or re-hash the module at verify. Refuse it cleanly (396's
-    # stage-4 gap, still open). A STDLIB-kind ref is different: its helper is a
-    # versioned FIRST-PARTY install dependency the verifier resolves from ITS OWN
-    # install (re-resolve, carry nothing), exactly as verify already re-resolves
-    # the bundled `stdlib/fs.rvl` source itself — so a stdlib ref bundles, and the
-    # `stdlib refs` verify tier re-hashes it against the pin on the verifier.
-    user_ref_externs = sorted(
-        e.get("name") for e in (ir.get("externs") or [])
-        if any(r.get("root") != "stdlib"
-               for r in (e.get("refs") or {}).values()))
-    if user_ref_externs:
-        raise RevlError(
-            sources[0], 0,
-            "cannot bundle a composition whose extern references a USER external "
-            "host module (`= @backend ref sym from \"path\"`): "
-            f"{', '.join(user_ref_externs)}",
-            hint="`revl bundle` copies sources flat by basename, so a "
-                 "root-relative user ref'd module would not travel with the "
-                 "bundle and `revl verify` could not reproduce it. Inline the "
-                 "body (`= @backend { ... }`) to bundle for now; carrying user "
-                 "ref files through the bundle is the item 396 stage 4 follow-up. "
-                 "A STDLIB ref (a shipped module referencing a shipped helper) "
-                 "bundles fine — the verifier re-resolves it from its own install "
-                 "(item 410).")
+    # issue #2700: a file-spliced body and a USER host-module ref name files
+    # that must travel with the bundle, under their declaring module's
+    # directory, so `revl verify` can recompile from the bundle alone and
+    # re-hash them against the pins in the IR. Everything is read and checked
+    # here, before the output directory is touched, so a refusal leaves an
+    # existing bundle exactly as it was. A STDLIB-kind ref carries nothing: the
+    # verifier re-resolves it from its own install (item 410).
+    host_files = _collect_host_files(ir, sources)
 
     norm_ir = _canonical_ir(ir)
     ir_text = _ir_text(norm_ir)
@@ -491,6 +706,7 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         (out_dir / "source" / name).write_text(text, encoding="utf-8")
         source_records.append({"name": name, "sha256": _sha256(text)})
         combined_source += text
+    host_file_records = _write_host_files(out_dir / "source", host_files)
 
     # ir/, the compiled IR and the audit/interchange manifest.
     (out_dir / "ir" / "ir.json").write_text(ir_text, encoding="utf-8")
@@ -596,6 +812,9 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         "policy": policy,
         "evidence": {"attestation": attested, "gauntlet": gauntlet_verdict},
         "topology": has_topology,
+        # additive: present only when a body file or user module ref travels,
+        # so every other bundle's manifest is byte-identical (issue #2700).
+        **({HOST_FILES_KEY: host_file_records} if host_file_records else {}),
     }
     (out_dir / RUNTIME_MANIFEST).write_text(
         json.dumps(manifest_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -637,7 +856,7 @@ def _pack_document(bundle_dir: Path) -> dict:
     the map is emitted sorted, so the same directory packs to the same bytes."""
     files: dict[str, str] = {}
     for path in sorted(p for p in bundle_dir.rglob("*") if p.is_file()):
-        files[_relposix(bundle_dir, path)] = path.read_text(encoding="utf-8")
+        files[_relposix(bundle_dir, path)] = path.read_bytes().decode("utf-8")
     return {"kind": ONEFILE_KIND, "version": ONEFILE_VERSION, "files": files}
 
 
@@ -697,7 +916,9 @@ def unpack_bundle(one_file: str, out_dir: str) -> str:
             raise RevlError(one_file, 0,
                             f"one-file bundle entry {rel!r} is not text")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        # bytes, not write_text: a carried host file is pinned by the hash of
+        # its exact bytes, which a newline translation would change.
+        target.write_bytes(text.encode("utf-8"))
     return out_dir
 
 
@@ -719,12 +940,18 @@ def is_onefile(path: str) -> bool:
 def _stdlib_refs_of(ir: dict) -> list[dict]:
     """Every stdlib-kind host-module ref in an IR, as
     `[{"extern", "tier", "path", "sha256"}, ...]`. A user ref (no `"root"`) is
-    excluded — those never bundle (build-time refusal), so only stdlib refs reach
-    the verify tier below."""
+    excluded, those carry their file in `source/` and are checked by
+    `_check_host_files`, so only stdlib refs reach the verify tier below."""
     out: list[dict] = []
-    for ext in ir.get("externs") or []:
-        for tier, ref in (ext.get("refs") or {}).items():
-            if ref.get("root") == "stdlib":
+    # The IR is the bundle's own text. A malformed shape is skipped here and
+    # reported as a MISMATCH by `_check_host_files`, which reads the same IR.
+    externs = ir.get("externs") if isinstance(ir, dict) else None
+    for ext in externs if isinstance(externs, list) else []:
+        refs = ext.get("refs") if isinstance(ext, dict) else None
+        for tier, ref in (refs.items() if isinstance(refs, dict) else []):
+            if (isinstance(ref, dict) and ref.get("root") == "stdlib"
+                    and isinstance(ref.get("path"), str)
+                    and isinstance(ref.get("sha256"), str)):
                 out.append({"extern": ext.get("name"), "tier": tier,
                             "path": ref["path"], "sha256": ref["sha256"]})
     return out
@@ -798,6 +1025,80 @@ def _check_stdlib_refs(bundle: Path) -> list[Check]:
                 label, OK,
                 f"{ref['path']} for extern `{ref['extern']}` re-resolves and "
                 f"matches the pin"))
+    return checks
+
+
+def _check_host_files(bundle: Path, manifest: dict) -> list[Check]:
+    """issue #2700 verify tier `host file`: every file a user extern body pins
+    in the RECORDED `ir/ir.json` (a spliced body file, a user module a `ref`
+    names) is read from the bundle's own `source/` tree and re-hashed against
+    that pin. One Check per file: OK, or MISMATCH naming the file (missing,
+    outside `source/`, or bytes that differ). A second Check compares the
+    manifest's `hostFiles` record with those pins, so a record that was dropped
+    or edited is not a pass. Empty when the bundle pins no file, so every other
+    bundle's report is byte-identical.
+
+    The pins and the manifest are the bundle's own text, so each path is
+    treated as hostile: it is jailed to the realpath of `source/` before any
+    read."""
+    recorded_ir = _read_json(bundle / "ir" / "ir.json")
+    try:
+        pins = _host_pins_of(recorded_ir)
+    except RevlError as error:
+        return [Check("host files", MISMATCH, error.message)]
+    recorded = manifest.get(HOST_FILES_KEY)
+    if not pins and not recorded:
+        return []
+    checks: list[Check] = []
+    source_real = os.path.realpath(str(bundle / "source"))
+
+    def _entry(p: dict) -> tuple:
+        return (p.get("extern"), p.get("tier"), p.get("kind"),
+                p.get("path"), p.get("sha256"))
+
+    want = sorted((_entry({**p, "path": f"source/{_clean_pin_path(p['path'])}"})
+                   for p in pins), key=repr)
+    have = sorted((_entry(r) for r in recorded if isinstance(r, dict)),
+                  key=repr) \
+        if isinstance(recorded, list) else None
+    if have != want:
+        checks.append(Check(
+            "host files", MISMATCH,
+            "the runtime-manifest's host-file record differs from the file "
+            "pins in ir/ir.json"))
+    for pin in pins:
+        raw = pin["path"]
+        label = f"host file {raw}"
+        who = f"extern `{pin['extern']}` ({pin['tier']})"
+        if (not isinstance(raw, str) or not raw or os.path.isabs(raw)
+                or "\x00" in raw or not isinstance(pin["sha256"], str)):
+            checks.append(Check(
+                label, MISMATCH,
+                f"the pinned path {raw!r} for {who} is not a relative path; a "
+                "forged or tampered bundle"))
+            continue
+        target = bundle / "source" / _clean_pin_path(raw)
+        if not _contained(os.path.realpath(str(target)), source_real):
+            checks.append(Check(
+                label, MISMATCH,
+                f"the pinned path {raw!r} for {who} escapes the bundle's "
+                "source tree; a forged or tampered bundle"))
+            continue
+        try:
+            got = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError:
+            checks.append(Check(
+                label, MISMATCH,
+                f"{raw} for {who} is missing from the bundle"))
+            continue
+        if got != pin["sha256"]:
+            checks.append(Check(
+                label, MISMATCH,
+                f"{raw} for {who} hashes differently than the bundle pinned",
+                pin["sha256"], got))
+        else:
+            checks.append(Check(label, OK,
+                                f"{raw} for {who} matches the pin"))
     return checks
 
 
@@ -1125,6 +1426,11 @@ def _verify_bundle_dir(path: str, *, env=None) -> "VerifyReport":
     # rather than a recompile crash. Empty (no line) for a bundle with no stdlib
     # ref, keeping a ref-free report byte-identical.
     report.checks.extend(_check_stdlib_refs(bundle))
+
+    # issue #2700: re-hash each spliced body file and user module the IR pins
+    # against the copy carried in `source/`, before the recompile, so a changed
+    # file reads as "this file changed" and names it.
+    report.checks.extend(_check_host_files(bundle, manifest))
 
     # recompile from the committed source, in the recorded order.
     source_paths = [str(bundle / "source" / n) for n in names if n]

@@ -34,7 +34,7 @@ A second claim concerns retries: because the budget is a static multiplier on on
 |---|---|---|
 | Outlines, Guidance, LMQL, llama.cpp GBNF (citation to be checked) | constrain decoding with regex, CFG or JSON schema | revl derives the constraint from the language's own type and keeps the validator authoritative; claim is audited |
 | XGrammar and similar fast grammar engines (citation to be checked) | efficient grammar-constrained decode | not competing on engine speed; revl states a grammar and a provider performs it |
-| Instructor, Pydantic AI, BAML (citation to be checked) | library-level schema from a class, validate and retry | retry is a declared static budget folded into a language-level cardinality bound; no loop |
+| Instructor, Pydantic AI, BAML (see the [related-work table](../related-work.md)) | library-level schema from a class, validate and retry | retry is a declared static budget folded into a language-level cardinality bound; no loop |
 | OpenAI Structured Outputs, Anthropic tool use, Gemini responseSchema | provider-enforced schema | revl treats these as providers of one of two dialects and notes, per adapter, what is exact or approximated (`docs/model-providers.md:203-238`) |
 | Grammar-constrained decoding results (e.g. Geng et al.) (citation to be checked) | analysis of quality effects of constraint | no quality claim here; revl reports a member-order effect for one provider |
 | Typed LLM function-calling in languages (e.g. TypeChat) (citation to be checked) | TypeScript types as schema | revl adds the shared null predicate, claim protocol and cardinality integration |

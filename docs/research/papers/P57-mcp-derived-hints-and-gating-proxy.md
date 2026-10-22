@@ -36,7 +36,7 @@ The formal development proves the checker's G4 classification (`formal/STATUS.md
 | OpenAPI and gRPC reflection | Describe a surface; safety of GET vs POST is convention | The effect class is a checked property of the implementation, not of the verb name |
 | Envoy filters, OPA / Gatekeeper | Policy over requests at a proxy | Policy input is a classified effect with a trust direction and a read-only-honesty protocol, plus witnessed undo and abort |
 | LangChain and similar tool annotations | Free-form metadata | Annotations are outputs of the type and effect checker |
-| Effect systems (Koka, Eff) (citation to be checked) | Effects tracked in types | Applied to a wire protocol's safety hints, with a fail-closed import for code that is not tracked |
+| Effect systems (Koka, Eff; see the [related-work table](../related-work.md)) | Effects tracked in types | Applied to a wire protocol's safety hints, with a fail-closed import for code that is not tracked |
 
 ## Evidence on main
 | Claim | path:line or test | Status | Note |

@@ -37,11 +37,11 @@ The paper also carries a methodological claim that is checkable: a proof about a
 
 | Prior system or line of work | What it does | What revl does differently |
 |---|---|---|
-| CompCert, CakeML, seL4 (citation to be checked) | Verified compiler, verified language runtime, verified kernel; proof about the artifact itself | Models are small and abstract; the proof is tied to a shipped Python runtime by running it, not by extraction or refinement to code |
+| CompCert, CakeML, seL4 (see the [related-work table](../related-work.md)) | Verified compiler, verified language runtime, verified kernel; proof about the artifact itself | Models are small and abstract; the proof is tied to a shipped Python runtime by running it, not by extraction or refinement to code |
 | FSCQ, Yggdrasil, Crash Hoare Logic and Perennial (verified crash consistency) (citation to be checked) | Proofs that a file system or storage layer recovers correctly after a crash | Recovery is a WAL replay for application effects with three entry kinds and a commit decision marker; proves a crash-cut convergence and at-most-once fences, not full crash refinement |
 | Iris and separation-logic frameworks (citation to be checked) | General program logics for verified systems | Not used; revl uses a bespoke small-step semantics plus an enumeration oracle |
 | Type-and-effect soundness (Wright and Felleisen progress/preservation) (citation to be checked) | Soundness of a type system against an operational semantics | The statements are not progress and preservation; they are properties of a derived teardown order and of recovery outcomes |
-| Eff metatheory (citation to be checked) | Semantics and soundness for algebraic effects and handlers | revl has no handlers; the theorem subject is reversibility bookkeeping |
+| Eff metatheory (see the [related-work table](../related-work.md)) | Semantics and soundness for algebraic effects and handlers | revl has no handlers; the theorem subject is reversibility bookkeeping |
 | Sagas and compensation (Garcia-Molina and Salem) (citation to be checked) | Compensating transactions as a pattern, rarely mechanized | A compensation is a third entry kind with a defined phase and a discharge rule on commit, proved against the runtime |
 | Cordis paper (Thm. 16, derived LIFO) | Proves derived teardown on paper under hypotheses | Mechanizes a version that is relative to entry kind and verdict, because the project's own earlier one-kind model contradicted the runtime in the transactional case (`formal/RevL/Theorems/G7_LifoComplete.lean:11-20`); whether the paper statement itself needs the same refinement is not checked here |
 

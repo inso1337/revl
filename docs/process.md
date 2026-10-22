@@ -1,7 +1,8 @@
 # How work moves
 
 The short version: **agents run targeted tests, push a branch, and open a PR.
-GitHub CI runs the full matrix. The orchestrator merges on green.**
+GitHub CI runs the PR jobs, and the heavy jobs run after merge (or on the
+merge queue when it is enabled). The orchestrator merges on green.**
 
 ## Why this exists
 
@@ -14,8 +15,8 @@ fixed ports 39555-39561 and `tests/test_network_gate_path.py` spawns a real node
 over loopback, so two agents running suites at the same time produce reds that
 belong to neither of them. Everyone waited, and the result was not even reliable.
 
-CI runs the same matrix on clean, isolated runners. That is where the full suite
-belongs.
+CI runs the same jobs on clean, isolated runners. That is where the full suite
+belongs: the PR jobs on the PR, the heavy jobs after merge.
 
 ## What an agent does
 
@@ -89,7 +90,8 @@ belongs.
 
 ## What an agent does not do
 
-- Do not run the full suite locally. That is CI's job now.
+- Do not run the full suite locally. That is left to CI: the PR jobs on the PR,
+  the heavy jobs after merge.
 - Do not block waiting on a background suite. Report and stop.
 - Do not fix a red you did not cause. A pre-existing failing test or a red CI on
   main belongs to the orchestrator. Say you saw it and leave it alone.
@@ -351,8 +353,9 @@ shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
 The heavy jobs never run on a pull request (issue #1678): `frontend` (the
 3.11/3.12/3.13 matrix), `frontend-cordis`, `conformance`, `formal`,
 `temporal-exit`, `sandbox-container` and `sandbox-microvm`. They run on the
-merge queue (`merge_group`), against the merged result that lands, and on push
-to main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
+merge queue (`merge_group`), against the merged result that lands, when the
+queue is enabled in branch protection. Without the queue, they run on push to
+main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
 as a `workflow_call`, so the PyPI publish gates on the full matrix too.
 `tests/test_ci_pr_queue_split_1678.py` pins the split.
 

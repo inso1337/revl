@@ -29,7 +29,7 @@ The claim: because the language makes the boundary surface a computed, proved-en
 ## Related work
 | Prior system or line of work | What it does | What revl does differently |
 |---|---|---|
-| Open Policy Agent, Cedar (citation to be checked) | Evaluate policy over a request or resource description | The policy input is a compiler-computed, proved-enumerable surface of the code; the policy cannot be bypassed by omitting a declaration |
+| Open Policy Agent, Cedar (see the [related-work table](../related-work.md)) | Evaluate policy over a request or resource description | The policy input is a compiler-computed, proved-enumerable surface of the code; the policy cannot be bypassed by omitting a declaration |
 | Terraform plan and policy checks (citation to be checked) | Diff a planned infrastructure state and run policy | Diff is over code reach, with a narrowing-always-passes rule and acknowledgement tokens copied from the failure output |
 | Android manifest permissions, Deno permission flags (citation to be checked) | Author or user declares permissions up front | Reach is computed from code; the profile tool reports declared-but-unused authority and proposes the narrow declaration |
 | Fuchsia capability routing audit (citation to be checked) | Component manifests route capabilities | Single table including host-code externs and per-backend bodies |

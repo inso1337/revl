@@ -173,6 +173,16 @@ TYPES = [
     "{a: Int}", "{a: Int, b: Str}", "{b: Str, a: Int}", "{}",
     "{a: Int, h: Str}", "{h: Str, a: Int}", "{v: ?T}",
     "{p: {q: Int}}", "List[{a: Int}]", "Opt[{a: Int, b: Str}]",
+    # The second spelling of a function type (#2544). `parse_type` normalises
+    # the arrow to `FN_HEAD` and keeps `Fn[...]` as its own head, and the
+    # reference's `compatible` treats both heads as one function type in either
+    # direction. Without an `Fn` spelling the corpus never reached that branch,
+    # so the selfhost mirror could test one head and disagree silently.
+    # `Fn[Float, Str]` is the parameter-contravariance pair: an Int argument
+    # widens into the Float the value accepts, so `Fn[Int, Str]` accepts it
+    # while the covariant same-head rule the branch replaces would not.
+    "Fn[Int, Str]", "Fn[Int, Int]", "Fn[Float, Str]", "Fn[Int, Str, Bool]",
+    "Fn",
 ]
 
 # Structural spellings whose canonical (sorted, Any-defaulted) form is the point.

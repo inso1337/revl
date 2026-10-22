@@ -36,13 +36,13 @@ The accurate description of the determinism protection is: the refusal happens w
 
 | prior system or line of work | what it does | what revl does differently |
 |---|---|---|
-| Temporal and Cadence (workflow-as-code) | Determinism is enforced at runtime by a replay sandbox and replay-time non-determinism detection; sagas are written by the author or with a helper from the SDK samples (citation to be checked) | The split and the compensation order are derived from checked declarations; nonconforming constructs are refused before any run |
-| Temporal TypeScript SDK workflow bundle sandbox | Isolates workflow code and flags forbidden APIs at bundle or run time (citation to be checked) | revl refuses at emit time from IR node kinds, so there is no path to render inline IO |
+| Temporal (workflow-as-code; see the [related-work table](../related-work.md)) | Its workflows replay recorded history and use a deterministic TypeScript sandbox; external I/O runs in Activities | The split and the compensation order are derived from checked declarations; nonconforming constructs are refused before any run |
+| Temporal TypeScript SDK workflow bundle and sandbox (see the [related-work table](../related-work.md)) | Isolates workflow code and restricts nondeterministic APIs | revl refuses at emit time from IR node kinds, so there is no path to render inline IO |
 | AWS Step Functions (Catch and compensation states) | Compensation is a hand-drawn state machine | Order derived from source order |
 | Azure Durable Functions | Orchestrator determinism constraints documented; an analyzer exists for some rules (citation to be checked) | Same: derived, not linted |
 | Restate | Durable execution with journaled side effects in handler code | revl is a source-to-source generator for an external engine; it does not provide the journal |
 | Saga pattern libraries (Axon, Eventuate Tram, MassTransit sagas) (citation to be checked) | Libraries for orchestrated compensation | Order and idempotence evidence come from the language, not the library user |
-| Temporal workflow determinism checkers (replayer tooling, static linters) (citation to be checked) | Detect or replay-test non-determinism | Different point in the pipeline; revl's is conservative by closed allowlist |
+| Temporal workflow replay and testing tools (see the [related-work table](../related-work.md)) | Detect or replay-test non-determinism | Different point in the pipeline; revl's is conservative by closed allowlist |
 | Long-running transactions and sagas (Garcia-Molina and Salem 1987) (citation to be checked) | Original saga model | Gives the vocabulary; revl's contribution is derivation from a compiler-checked effect system |
 
 ## Evidence on main

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hmac
 import itertools
 import json
 import os
@@ -1149,7 +1150,7 @@ class _Driver:
                  root_dirs: list | None = None, secrets: dict | None = None,
                  secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
-                 ambient_check=None):
+                 ambient_check=None, run_header: dict | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1253,6 +1254,10 @@ class _Driver:
         self.trace_path = trace_path
         self.withdraw = withdraw
         self.tracing = trace_path is not None or withdraw is not None
+        # issue #2730 slice 1: the attested-run header (composition hash, key id,
+        # ruleset digest), recorded on the FIRST trace event only. Empty for a
+        # run with no attestation, so no event carries the key at all.
+        self._run_header = dict(run_header or {})
         self._events: list[dict] = []
         self._seq = 0
         # while non-None, `_on_fiber` records the transitions it observes into
@@ -1348,12 +1353,21 @@ class _Driver:
 
     # -- causal trace ------------------------------------------------------
 
+    def _stamp_header(self, record: dict) -> dict:
+        """Issue #2730 slice 1: the attested-run header rides the FIRST recorded
+        event only, so a reader finds it once and a later event cannot claim a
+        different admission. No header configured -> the record is unchanged
+        (no key), which is the unattested run."""
+        if self._seq == 0 and getattr(self, "_run_header", None):
+            record["run"] = dict(self._run_header)
+        return record
+
     def _record(self, event: str, component: str, transition: str,
                 cause: dict) -> None:
         # ts (v2): a monotonic reading, meaningful for durations within the run.
-        self._events.append(why_runtime.make_event(
+        self._events.append(self._stamp_header(why_runtime.make_event(
             self._seq, self.generation, event, component, transition, cause,
-            ts=time.monotonic()))
+            ts=time.monotonic())))
         self._seq += 1
 
     def _record_emit(self, component: str, capability: str, key: str,
@@ -1367,14 +1381,15 @@ class _Driver:
         :meth:`_model_crossing_payload`. A non-model crossing passes neither, so
         its record is byte-identical to a pre-121 v2 emit — the same additive
         discipline `make_emit_event` already documents."""
-        self._events.append(why_runtime.make_emit_event(
+        self._events.append(self._stamp_header(why_runtime.make_emit_event(
             self._seq, self.generation, component, capability, key, cause,
-            ts=time.monotonic(), llm=llm, activation_id=activation_id))
+            ts=time.monotonic(), llm=llm, activation_id=activation_id)))
         self._seq += 1
 
     def _model_crossing_payload(self, *, args=None, arg_origins=None,
                                 taint_engaged: bool = False,
-                                verified_by=None, crossing=None) -> dict | None:
+                                verified_by=None, crossing=None,
+                                contract=None) -> dict | None:
         """Item 121: assemble the `llm` payload for a model-completion crossing,
         or ``None`` when this crossing is not one.
 
@@ -1411,7 +1426,14 @@ class _Driver:
         emission it produced, and that emission has not been recorded yet at this
         point — its trace seq does not exist. The edge is back-patched by
         :meth:`_link_produced` once the emission it names crosses (item 121
-        Slice 2); a hop nothing derives from keeps the field absent."""
+        Slice 2); a hop nothing derives from keeps the field absent.
+
+        `contract` (issue #2694) carries the crossing's `schemaDigest`,
+        `grammarDigest` and `residence`, resolved from the driver's IR by
+        :meth:`_crossing_contract`. It is a plain dict because a crossing may
+        have any subset of them: an unvalidated crossing has no schema or
+        grammar, and a crossing with no declared `model.<role>` token has no
+        residence. An absent key stays absent in the payload, never empty."""
         take = getattr(self.runtime, "revl_take_model_call", None)
         if take is None:
             obs = None
@@ -1425,10 +1447,97 @@ class _Driver:
         if args is not None:
             digest = self.runtime.revl_prompt_digest(
                 args, arg_origins, taint_engaged)
+        contract = contract or {}
         return self.runtime.revl_model_hop(
             model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
             latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
-            verified_by=verified_by or [], prompt_digest=digest)
+            verified_by=verified_by or [], prompt_digest=digest,
+            schema_digest=contract.get("schemaDigest"),
+            grammar_digest=contract.get("grammarDigest"),
+            residence=contract.get("residence"))
+
+    def _crossing_contract(self, component: str, service: str | None,
+                           method: str | None) -> dict:
+        """Issue #2694: the contract and placement facts the compiled IR
+        already carries for one crossing.
+
+        Returns a dict holding any of ``schemaDigest``, ``grammarDigest`` and
+        ``residence``; every one is a function of the IR, never of the host
+        return, which is why the record tags all three `revl-controlled`.
+
+        * A service crossing is ``ir.services[service].methods[method]``; a
+          direct host-extern crossing (no receiver, so ``service`` is None) is
+          the ``ir.externs`` entry named ``method``.
+        * `schemaDigest` is :func:`decode_grammar.schema_digest` over the
+          operation's ``response_schema``. Item 257 binds the schema into the
+          IR; the digest is derived from that value, not from a second
+          derivation of the surface type.
+        * `grammarDigest` is the ``digest`` item 513 pinned beside the grammar
+          text, copied verbatim.
+        * `residence` is read off the ``manifest.model_reach`` row whose
+          ``crossing`` (a `model.<role>` capability token) names the role this
+          operation's ``capabilities`` carry, for the component recording the
+          crossing. No role, no row, or no manifest leaves it absent.
+
+        Anything unreadable (no IR, an unknown operation, an older document
+        without one of the keys) yields no field rather than a guess, so a
+        reader can tell "not recorded" from "recorded as empty"."""
+        ir = getattr(self, "ir", None)
+        if not isinstance(ir, dict):
+            return {}
+        spec = None
+        if service:
+            methods = (ir.get("services") or {}).get(service)
+            spec = (methods or {}).get("methods", {}).get(method)
+        else:
+            spec = next((entry for entry in ir.get("externs") or []
+                         if entry.get("name") == method), None)
+        if not isinstance(spec, dict):
+            return {}
+        contract: dict = {}
+        schema = spec.get("response_schema")
+        if isinstance(schema, dict):
+            from .decode_grammar import schema_digest  # noqa: PLC0415
+            contract["schemaDigest"] = schema_digest(schema)
+        grammar = spec.get("response_grammar")
+        if isinstance(grammar, dict) and grammar.get("digest"):
+            contract["grammarDigest"] = grammar["digest"]
+        residence = self._crossing_residence(ir, component, spec)
+        if residence is not None:
+            contract["residence"] = residence
+        return contract
+
+    @staticmethod
+    def _crossing_residence(ir: dict, component: str,
+                            spec: dict) -> str | None:
+        """The declared residence of the model role this operation names, or
+        None when it names none (issue #2694).
+
+        A crossing placed on a role carries a ``model.<role>`` capability
+        token; `_check_model_attenuation` records that placement as a
+        ``manifest.model_reach`` row for the component, with the role's
+        declared residence on it. The token is the join key: an operation with
+        no ``model.`` token, or a component with no matching row, has no
+        declared placement to report."""
+        capabilities = spec.get("capabilities") or []
+        rows = (ir.get("manifest") or {}).get("model_reach") or []
+        for capability in capabilities:
+            if not isinstance(capability, str) \
+                    or not capability.startswith("model."):
+                continue
+            role = capability.split(".", 1)[1]
+            matching = [row for row in rows
+                        if row.get("component") == component
+                        and row.get("role") == role
+                        and isinstance(row.get("residence"), str)]
+            # a crossing row names the token exactly; prefer it over a
+            # component-level attenuation row for the same role
+            exact = [row for row in matching
+                     if row.get("crossing") == capability]
+            chosen = (exact or matching)
+            if chosen:
+                return chosen[-1]["residence"]
+        return None
 
     @staticmethod
     def _link_produced(crossing: dict, hop_event: dict | None,
@@ -2414,11 +2523,20 @@ class _Driver:
                     # is suppressed.
                     arg_origins, taint_engaged = self._crossing_taint(
                         timeline.component)
+                    # issue #2694: the contract the completion was held to
+                    # (schema digest, grammar digest, declared residence) is
+                    # read off the compiled IR for THIS crossing, so the trace
+                    # records which output contract the answer was validated
+                    # against rather than only that it validated.
+                    contract = self._crossing_contract(
+                        timeline.component, detail.get("service"),
+                        detail.get("method"))
                     llm = self._model_crossing_payload(
                         args=detail.get("args"),
                         arg_origins=arg_origins,
                         taint_engaged=taint_engaged,
-                        crossing=(timeline.component, step.get("index")))
+                        crossing=(timeline.component, step.get("index")),
+                        contract=contract)
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",
@@ -2678,6 +2796,55 @@ def _is_model_refusal(exc: BaseException) -> bool:
                             ProvisionRefused, ProviderError))
 
 
+def _load_run_attestation(path, ir: dict) -> dict:
+    """Issue #2730 slice 1: the trace header an `--attestation` file stands for.
+
+    The document must be an admitted item-127 attestation, and its
+    `composition_hash` must be the canonical hash of the IR about to boot: an
+    attestation for a DIFFERENT composition would make the trace claim an
+    admission that never covered this run, so it is refused before anything
+    loads. The check is a consistency check, not proof — the signature is not
+    verified here because a run holds no attestation key. A consumer that wants
+    proof runs `revl attest --verify`.
+
+    The header is built by :func:`revl.why_runtime.run_header`, which omits a
+    value the document does not carry (an older attestation with no checker
+    identity records no ruleset digest rather than a placeholder)."""
+    from . import attest as _attest  # noqa: PLC0415 - lazy
+
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RevlError(str(path), 0, f"cannot read the attestation: {exc}")
+    if not isinstance(document, dict):
+        raise RevlError(str(path), 0,
+                        "the attestation is not a JSON object")
+    if document.get("kind") != _attest.ATTEST_KIND:
+        raise RevlError(
+            str(path), 0,
+            f"not a revl attestation: kind is {document.get('kind')!r}, "
+            f"expected {_attest.ATTEST_KIND!r}")
+    if document.get("verdict") != _attest.VERDICT_ADMITTED:
+        raise RevlError(
+            str(path), 0,
+            f"the attestation is not an admission: verdict is "
+            f"{document.get('verdict')!r}")
+    bound = document.get("composition_hash")
+    computed = _attest.canonical_hash(ir)
+    if not isinstance(bound, str) or not hmac.compare_digest(bound, computed):
+        raise RevlError(
+            str(path), 0,
+            "the attestation is for a different composition: it binds "
+            f"{str(bound)[:12]}..., and this run's IR hashes to "
+            f"{computed[:12]}... . An attestation is evidence about the "
+            "artifact it ran over, so it cannot label another one.")
+    checker = document.get("checker")
+    checker = checker if isinstance(checker, dict) else {}
+    return why_runtime.run_header(composition_hash=computed,
+                                  attestation_key_id=document.get("key_id"),
+                                  ruleset_digest=checker.get("ruleset"))
+
+
 def run_command(args, hold_once: bool = False) -> int:
     if getattr(args, "allow_unsynced_wal", False):
         if (not getattr(args, "wal", None) or getattr(args, "placement", None)
@@ -2704,6 +2871,16 @@ def run_command(args, hold_once: bool = False) -> int:
                   file=sys.stderr)
             return 1
     if getattr(args, "placement", None):
+        # issue #2730 slice 1: an attested-run header belongs to ONE causal
+        # trace, and a placement run has no single trace to carry it. Refuse
+        # the pair rather than accept a flag that would silently record
+        # nothing.
+        if getattr(args, "attestation", None):
+            print("error: --attestation records the admitted composition on the "
+                  "py tier's causal trace, and a --placement run has no single "
+                  "trace to carry that header; drop one of the two or run "
+                  "without --placement", file=sys.stderr)
+            return 2
         # `--placement` splits the composition across processes, each with its
         # own tier; a top-level `--backend` would name one tier for the whole
         # composition, which the placement contradicts. Refuse loudly instead
@@ -2741,6 +2918,25 @@ def run_command(args, hold_once: bool = False) -> int:
         refuse_admission(ir)
     except RevlError as exc:
         return _fail(str(exc), lifecycle.ADMISSION)
+    # issue #2730 slice 1: an attestation supplied for the record must bind THIS
+    # composition, checked before a runtime is imported or anything loads. The
+    # header it yields is written on the trace's first event and every OTel
+    # span; a run without one records no header at all.
+    run_header = None
+    attestation_path = getattr(args, "attestation", None)
+    if attestation_path:
+        if backend != "py":
+            return _fail(
+                f"--attestation records the trace header on the py tier only; "
+                f"--backend {backend} has no causal trace to carry it",
+                lifecycle.CONFIG)
+        try:
+            run_header = _load_run_attestation(attestation_path, ir)
+        except RevlError as exc:
+            return _fail(str(exc), lifecycle.ADMISSION)
+        if not (getattr(args, "trace", None) or getattr(args, "withdraw", None)):
+            print("note: --attestation writes the run header only to a causal "
+                  "trace; add --trace FILE to record it", file=sys.stderr)
     try:
         config = _load_config(getattr(args, "config", None))
         env = _load_env(getattr(args, "env", None))
@@ -2898,7 +3094,8 @@ def run_command(args, hold_once: bool = False) -> int:
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
                          ambient=ambient,
-                         ambient_check=_model_host_check(args, model_hosts))
+                         ambient_check=_model_host_check(args, model_hosts),
+                         run_header=run_header)
     except UnsettledWalError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
