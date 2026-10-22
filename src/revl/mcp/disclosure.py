@@ -53,9 +53,10 @@ CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
 
 #: `{topic: (what it is for, verbs)}`, in docs/mcp-reference.md's order.
 TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "author": ("check, admit, plan and ship a candidate; grammar, scaffold, "
+    "author": ("check, admit, plan, select tests and ship a candidate; grammar, scaffold, "
                "format and explain", (
-        "revl_check", "revl_admit", "revl_plan", "revl_ship", "revl_deploy",
+        "revl_check", "revl_admit", "revl_plan", "revl_affected_tests",
+        "revl_ship", "revl_deploy",
         "revl_audit", "revl_tools", "revl_grammar", "revl_scaffold",
         "revl_fmt", "revl_explain", "revl_idiom")),
     "session": ("load, call, change and tear down the running composition; "

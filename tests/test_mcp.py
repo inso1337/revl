@@ -278,6 +278,8 @@ def test_initialize_and_tools_list(all_mcp_tools):
                           "revl_resolve",
                           # verified canary (docs/verified-canary.md, item 59)
                           "revl_canary",
+                          # shared fail-safe pre-merge test selection (issue #2799)
+                          "revl_affected_tests",
                           # approval distillation operator surface (item 251)
                           "revl_distillation_offers", "revl_apply_distillation",
                           "revl_revoke_distillation",

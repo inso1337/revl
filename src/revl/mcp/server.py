@@ -64,11 +64,15 @@ layout and resolve unchanged.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import secrets
+import subprocess
 import sys
 from dataclasses import dataclass, replace
+from functools import lru_cache
+from pathlib import Path
 
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
@@ -4836,6 +4840,133 @@ def _tool_explain(arguments: dict) -> dict:
     return explain(code)
 
 
+@lru_cache(maxsize=4)
+def _load_affected_tests_selector(script: str):
+    spec = importlib.util.spec_from_file_location("revl_affected_tests", script)
+    if spec is None or spec.loader is None:
+        raise ImportError("the affected-test selector could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _affected_tests_answer(selection: dict, base: str | None, selector=None) -> dict:
+    reason = str(selection.get("reason", "selection unavailable"))
+    selection = {**selection, "reason": reason.replace("\r", " ").replace("\n", " ")}
+    machine = (
+        selector._emit(selection, base or "unavailable", "machine")
+        if selector is not None else
+        "\n".join((
+            f"FULL {1 if selection.get('full') else 0}",
+            f"REASON {selection['reason']}",
+            f"PYTEST {' '.join(selection.get('pytest', []))}",
+            f"BACKENDS {' '.join(selection.get('backends', []))}",
+            f"GATES {' '.join(selection.get('gates', []))}",
+        ))
+    )
+    return {"ok": True, "base": base, "selection": selection, "machine": machine}
+
+
+def _affected_tests_full(reason: str, base: str | None = None, selector=None) -> dict:
+    if selector is not None:
+        selection = selector._full(reason)
+    else:
+        selection = {
+            "full": True,
+            "reason": reason,
+            "pytest": ["tests/"],
+            "backends": ["python", "go", "rust", "wasm", "java"],
+            "gates": ["conformance", "site-wheel", "ruff", "formal", "docs",
+                      "vocabulary", "census"],
+        }
+    return _affected_tests_answer(selection, base, selector)
+
+
+def _tool_affected_tests(arguments: dict) -> dict:
+    """The MCP form of `tools/affected_tests.py` for changed repo-relative paths.
+
+    This is deliberately read-only and fail-safe: when the current directory is
+    not a revl worktree, no merge base exists, or the selector cannot run, the
+    caller receives the FULL gate and a reason instead of an empty answer.
+    """
+    paths = arguments.get("paths")
+    if not isinstance(paths, list) or any(not isinstance(item, str) or not item.strip()
+                                          for item in paths):
+        return _session_error("`paths` must be an array of non-empty changed paths")
+
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=os.getcwd(), capture_output=True, text=True, check=False)
+    except OSError:
+        return _affected_tests_full("git is unavailable -> full (fail safe)")
+    if top.returncode != 0 or not top.stdout.strip():
+        return _affected_tests_full("not inside a git worktree -> full (fail safe)")
+    root = Path(top.stdout.strip()).resolve()
+    selector_root = Path(__file__).resolve().parents[3]
+    script = selector_root / "tools" / "affected_tests.py"
+    if not script.is_file():
+        return _affected_tests_full(
+            "the installed revl checkout has no tools/affected_tests.py -> full (fail safe)")
+    if not (root / "src" / "revl").is_dir():
+        return _affected_tests_full(
+            "the current worktree is not a revl checkout -> full (fail safe)")
+    worktree_selector = root / "tools" / "affected_tests.py"
+    if not worktree_selector.is_file():
+        return _affected_tests_full(
+            "the current worktree has no tools/affected_tests.py -> full (fail safe)")
+    if (script.resolve() != worktree_selector.resolve() and
+            script.read_bytes() != worktree_selector.read_bytes()):
+        return _affected_tests_full(
+            "the installed selector differs from the worktree selector -> full (fail safe)")
+    try:
+        selector = _load_affected_tests_selector(str(script))
+    except Exception as error:
+        return _affected_tests_full(
+            f"could not load tools/affected_tests.py ({type(error).__name__}) -> full (fail safe)")
+
+    base = None
+    for ref in ("origin/main", "main"):
+        try:
+            merged = subprocess.run(
+                ["git", "merge-base", ref, "HEAD"], cwd=root,
+                capture_output=True, text=True, check=False)
+        except OSError:
+            continue
+        if merged.returncode == 0 and merged.stdout.strip():
+            base = merged.stdout.strip()
+            break
+    if base is None:
+        return _affected_tests_full(
+            "no merge base with origin/main or main -> full (fail safe)", selector=selector)
+
+    changed = []
+    for raw in paths:
+        candidate = Path(raw.replace("\\", "/"))
+        absolute = candidate if candidate.is_absolute() else root / candidate
+        try:
+            relative = absolute.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return _affected_tests_full(
+                f"changed path {raw!r} is outside the worktree -> full (fail safe)",
+                base, selector)
+        name = relative.as_posix()
+        if (name.startswith("tests/") and relative.name.startswith("test_")
+                and relative.suffix == ".py" and not absolute.exists()):
+            return _affected_tests_full(
+                f"test file {name} is missing (possibly deleted) -> full (fail safe)",
+                base, selector)
+        changed.append(name)
+
+    try:
+        selection = selector.select(sorted(set(changed)), root)
+    except Exception as error:
+        return _affected_tests_full(
+            f"affected-test selector failed ({type(error).__name__}) -> full (fail safe)",
+            base, selector)
+    return _affected_tests_answer(selection, base, selector)
+
+
 _SOURCE_INPUT = {
     "source": {"type": "string",
                "description": "inline .rvl source (use this for a generated component; "
@@ -5159,6 +5290,25 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_counterfactual,
+    },
+    {
+        "name": "revl_affected_tests",
+        "description": "Map changed repository paths to the same fail-safe test selection "
+                       "as `tools/affected_tests.py --format machine`. Pass repo-relative "
+                       "paths. The answer includes `base` and `machine` (`FULL`, `REASON`, "
+                       "`PYTEST`, `BACKENDS`, `GATES`); when a worktree, merge base or "
+                       "selector is unavailable, it returns FULL with a reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"},
+                          "description": "changed repo-relative paths; pass every path "
+                                         "touched by the proposed change"},
+            },
+            "required": ["paths"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_affected_tests,
     },
     {
         "name": "revl_swap",
