@@ -432,6 +432,8 @@ UNGATED = {
     "revl_canary": "compares two generations' recorded timelines; swaps nothing",
     "revl_gauntlet": "grades a candidate in a throwaway session",
     "revl_quarantine": "proves a candidate in the wasm substrate",
+    "revl_test_run": "runs the selected test files in a subprocess; reaches no "
+                     "session operation and edits no session state (#2843)",
     "revl_resolve": "registry resolution",
     "revl_scaffold": "emits source text",
     "revl_fmt": "formats source text",

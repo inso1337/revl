@@ -250,6 +250,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | - (source) |
 | `revl_gauntlet` | yes | no | - (source) |
+| `revl_test_run` | yes | no | `selection`, `cwd` |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
 | `revl_rollback` | no | yes | - |
@@ -351,12 +352,13 @@ hundred. The core tier is `CORE` in `src/revl/mcp/disclosure.py`.
 ### `revl_verbs`
 
 The discovery verb, and the escape hatch. With no arguments it returns every
-verb grouped by topic (`author`, `session`, `approve`, `grade`, `replay`,
-`query`, the sections of this page), one sentence each and no schemas, plus the
-names `tools/list` currently shows. With `topic` it returns the exact schemas of
-that topic's verbs; with `names` it returns those verbs' exact schemas. The
-schemas are the same objects the full list carries under `--all-tools`. An
-unknown topic or name is refused with `next` set to the no-argument call.
+verb grouped by topic (`author`, `session`, `approve`, `grade`, `test`,
+`replay`, `query`, the sections of this page), one sentence each and no
+schemas, plus the names `tools/list` currently shows. With `topic` it returns
+the exact schemas of that topic's verbs; with `names` it returns those verbs'
+exact schemas. The schemas are the same objects the full list carries under
+`--all-tools`. An unknown topic or name is refused with `next` set to the
+no-argument call.
 
 With `name` and `args` it **calls** the verb `name` with the arguments `args` -
 the same handler, the same jail, authoring, operator and runtime gates, the
@@ -371,7 +373,7 @@ A hatch that cannot name the verb it means refuses by name rather than
 answering the lookup: an unknown `name`, a missing `args`, or an `args` that is
 not an object is a diagnostic, not a silent index.
 
-- Inputs: `topic` (one of the six); `names` (verb names); `name` (a verb to
+- Inputs: `topic` (one of the seven); `names` (verb names); `name` (a verb to
   call) with `args` (that verb's arguments). All optional, and the two forms are
   mutually exclusive.
 
@@ -2002,6 +2004,66 @@ Pass `manifest` to upgrade the answer from "compatible somewhere" to
 - Inputs: `need` (required); `manifest` (the running composition's IR);
   `limit` (max candidates, default 5); `registry` (dir, default
   `$REVL_REGISTRY` or the repo's `registry/`).
+
+---
+
+## Run tests
+
+### `revl_test_run`
+
+Run a selected test suite and read the result as data instead of scraping the
+runner's text. It runs `pytest` as a subprocess under this server's own
+interpreter (the one serving MCP), in the working directory you name, writes a
+junit XML report to a temporary file, parses it with the standard library and
+deletes it. The runner's stdout is never returned, so the answer's size is what
+the tests say, not what pytest printed.
+
+`ok` reports that the run produced an answer; the result is in `verdict`
+(`passed` | `failed`, or `refused` on a refusal), so a failing test is a result
+and not a tool fault. Each per-test entry carries `nodeId` (as pytest reports
+it), `outcome` (`passed` | `failed` | `skipped` | `error`), `duration` in
+seconds, and `message` (null when there is none; otherwise the test's own
+message, bounded to 500 characters). `counts` is the summary over the entries,
+and `receipt` names the command, the working directory, the exit code and the
+run's duration.
+
+An empty selection, a selection that collects no test and one where every test
+skipped are REFUSED with a named `code` (`EMPTY_SELECTION`,
+`NO_TESTS_COLLECTED`, `ALL_SKIPPED`), so a vacuous run cannot read green. The
+selection and `cwd` are confined to the operator-sanctioned root(s), like every
+other path argument.
+
+- Inputs: `selection` (required; test paths or pytest node ids); `cwd`
+  (required; the working directory pytest runs in); `timeout` (seconds,
+  default 300; a run that outlasts it is refused with `code: TIMEOUT`).
+
+The example runs one passing and one failing test, so `verdict` is `failed`
+and both per-test entries are present:
+
+```json
+{
+  "ok": true,
+  "verdict": "failed",
+  "selection": ["tests/test_example.py::test_ok", "tests/test_example.py::test_bad"],
+  "tests": [
+    {"nodeId": "tests/test_example.py::test_ok", "outcome": "passed",
+     "duration": 0.001, "message": null},
+    {"nodeId": "tests/test_example.py::test_bad", "outcome": "failed",
+     "duration": 0.001, "message": "assert 1 == 2"}
+  ],
+  "counts": {"total": 2, "passed": 1, "failed": 1, "skipped": 0, "errors": 0},
+  "receipt": {
+    "command": ["/usr/local/bin/python3", "-m", "pytest", "-q",
+                "-p", "no:cacheprovider", "-o", "junit_family=xunit1",
+                "--junitxml=/tmp/revl-test-run-abcd.xml",
+                "tests/test_example.py::test_ok", "tests/test_example.py::test_bad"],
+    "cwd": "/work/repo",
+    "exitCode": 1,
+    "durationSeconds": 0.42,
+    "timeoutSeconds": 300.0
+  }
+}
+```
 
 ---
 
