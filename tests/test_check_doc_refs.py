@@ -151,11 +151,12 @@ def test_a_ledger_entry_without_a_reason_is_a_red(tmp_path):
 
 def test_a_vendored_or_hidden_checkout_is_not_scanned(tmp_path):
     root = _tree(tmp_path)
-    # A vendored checkout is not part of the documented tree. `backends/python/
-    # setup.sh` creates `.cordis-py` in the cordis CI job and not in the other
-    # jobs, so a reference into it must be neither ok nor a finding: otherwise
-    # the verdict, and the ledger entry that records it, depend on which job
-    # ran. The same absent path under a normal directory is still a finding.
+    # A vendored checkout is not part of the documented tree. The CI jobs that
+    # run `backends/python/setup.sh` check `.cordis-py` out and the jobs that
+    # do not run it do not, so a reference into it must be neither ok nor a
+    # finding: otherwise the verdict, and the ledger entry that records it,
+    # depend on which job ran. The same absent path under a normal directory
+    # is still a finding.
     vendored = _ref("backends/python/.cordis-py/src/cordis/context.py", 74)
     plain = _ref("backends/python/src/cordis/context.py", 74)
     _write(root, "docs/page.md", f"vendored `{vendored}` and plain `{plain}`\n")
