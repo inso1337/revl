@@ -250,7 +250,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | - (source) |
 | `revl_gauntlet` | yes | no | - (source) |
-| `revl_test_run` | yes | no | `selection`, `cwd` |
+| `revl_test_run` | no | no | `selection`, `cwd` |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
 | `revl_rollback` | no | yes | - |

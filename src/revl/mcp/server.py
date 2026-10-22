@@ -5782,7 +5782,7 @@ TOOLS = [
             },
             "required": ["selection", "cwd"],
         },
-        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_test_run,
     },
     {
