@@ -14,7 +14,10 @@ cross-references) and comments and docstrings in Python under `src/` and
 `tests/`, where the scan is cheap and the anchors are dense. Other comment
 syntaxes are deliberately out of scope for this slice; the reference regex
 already accepts targets in six languages, so widening the sources later is a
-constant, not a redesign.
+constant, not a redesign. Vendored and hidden checkouts (`.cordis-py`,
+`.venv`) are not part of the documented tree: they are skipped as citing
+files and as cited paths, so whether one exists locally or in a CI job
+cannot change the verdict or the ledger.
 
 THREE CLASSES. Every reference is one of:
   * ok       -- the path resolves and the cited line exists;
@@ -197,15 +200,33 @@ def _python_refs(path: pathlib.Path) -> list:
     return out
 
 
+def _vendored(rel: str) -> bool:
+    """True when a repo-relative path has a hidden segment such as `.venv` or
+    `.cordis-py`.
+
+    Such a path is a vendored or local checkout, not part of the documented
+    tree: `backends/python/setup.sh` creates `.cordis-py`, and a local `.venv`
+    may exist too. A checkout that exists in one job and not in another must
+    not change the verdict, so it is neither scanned as a citing file nor
+    resolved as a cited one. A segment made only of dots is a relative step
+    (`../src/x.py`) or an ellipsis shorthand (`.../x.py`), not a hidden name,
+    so it is scanned as before.
+    """
+    return any(part.startswith(".") and part.strip(".")
+               for part in rel.split("/"))
+
+
 def scan(root: pathlib.Path = REPO_ROOT) -> tuple:
     """`(files, references)` for the tree under `root`, in a stable order."""
     files = []
     for base in MARKDOWN_ROOTS:
         if (root / base).is_dir():
-            files.extend(("markdown", p) for p in sorted((root / base).rglob("*.md")))
+            files.extend(("markdown", p) for p in sorted((root / base).rglob("*.md"))
+                         if not _vendored(p.relative_to(root).as_posix()))
     for base in PYTHON_ROOTS:
         if (root / base).is_dir():
-            files.extend(("python", p) for p in sorted((root / base).rglob("*.py")))
+            files.extend(("python", p) for p in sorted((root / base).rglob("*.py"))
+                         if not _vendored(p.relative_to(root).as_posix()))
     references = []
     for kind, path in files:
         rel = path.relative_to(root).as_posix()
@@ -215,7 +236,10 @@ def scan(root: pathlib.Path = REPO_ROOT) -> tuple:
             match = REF_SHAPE.match(raw)
             if match is None:
                 continue
-            ref = Reference(rel, match.group("path"), int(match.group("line")))
+            cited = match.group("path")
+            if _vendored(cited):
+                continue
+            ref = Reference(rel, cited, int(match.group("line")))
             key = (ref.cited, ref.line)
             if key in seen:
                 continue

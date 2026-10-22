@@ -149,6 +149,40 @@ def test_a_ledger_entry_without_a_reason_is_a_red(tmp_path):
                       "--check"]) == 2
 
 
+def test_a_vendored_or_hidden_checkout_is_not_scanned(tmp_path):
+    root = _tree(tmp_path)
+    # A vendored checkout is not part of the documented tree. `backends/python/
+    # setup.sh` creates `.cordis-py` in the cordis CI job and not in the other
+    # jobs, so a reference into it must be neither ok nor a finding: otherwise
+    # the verdict, and the ledger entry that records it, depend on which job
+    # ran. The same absent path under a normal directory is still a finding.
+    vendored = _ref("backends/python/.cordis-py/src/cordis/context.py", 74)
+    plain = _ref("backends/python/src/cordis/context.py", 74)
+    _write(root, "docs/page.md", f"vendored `{vendored}` and plain `{plain}`\n")
+    # Nor is a file inside one scanned: its references are not the tree's.
+    _write(root, "src/.venv/lib/parse.py", f"# sees {_ref('src/gone.py', 3)}\n")
+    references, findings = _findings(root)
+    assert [r.cited for r in references] == [
+        "backends/python/src/cordis/context.py"]
+    assert [(f.kind, f.cited) for f in findings] == [
+        ("missing", "backends/python/src/cordis/context.py")]
+    # A checkout that happens to exist does not turn the reference into an
+    # anchor either, so the verdict stays the same either way.
+    _write(root, "backends/python/.cordis-py/src/cordis/context.py",
+           "one = 1\ntwo = 2\n" * 40)
+    references, findings = _findings(root)
+    assert [r.cited for r in references] == [
+        "backends/python/src/cordis/context.py"]
+    assert [(f.kind, f.cited) for f in findings] == [
+        ("missing", "backends/python/src/cordis/context.py")]
+    # A segment made only of dots is a relative step or an ellipsis shorthand,
+    # not a hidden directory, and stays in the scan.
+    _write(root, "docs/page.md", f"shorthand `{_ref('.../cordis/loader.py', 508)}`\n")
+    references, findings = _findings(root)
+    assert [(f.kind, f.cited) for f in findings] == [
+        ("missing", ".../cordis/loader.py")]
+
+
 def test_the_committed_ledger_covers_the_real_tree():
     tool = _tool()
     report = tool.build_report(ROOT, tool.LEDGER)

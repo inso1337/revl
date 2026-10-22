@@ -464,18 +464,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "backends/python/.cordis-py/src/cordis/context.py",
-      "line": 74,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
-      "path": "backends/python/.cordis-py/src/cordis/loader.py",
-      "line": 538,
-      "kind": "missing",
-      "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
-    },
-    {
       "path": "backends/rust/test_emit_rust.py",
       "line": 3806,
       "kind": "stale",
