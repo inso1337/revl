@@ -138,6 +138,43 @@ def test_the_ledger_suppresses_exactly_what_it_records(tmp_path):
     assert gone["reason"].startswith("line past end of file")
 
 
+def test_obsolete_ledger_entries_warn_but_do_not_red_and_are_pruned(
+        tmp_path, capsys):
+    root = _tree(tmp_path)
+    source = _write(root, "src/thing.py", "one = 1\ntwo = 2\n")
+    docs = _write(root, "docs/page.md",
+                  f"see `{_ref('src/thing.py', 5)}`\n")
+    tool = _tool()
+    ledger = tmp_path / "tools" / "doc_refs_ledger.json"
+    ledger.parent.mkdir()
+
+    # Establish a recorded finding, then simulate an unrelated insertion that
+    # makes its old line valid again.
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--write-ledger"]) == 0
+    source.write_text("one = 1\ntwo = 2\nthree = 3\nfour = 4\nfive = 5\n",
+                      encoding="utf-8")
+
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--check"]) == 0
+    output = capsys.readouterr().out
+    assert "ledger entries that no longer match a finding: 1" in output
+    assert "src/thing.py:5" in output
+
+    # The maintenance command removes the obsolete exception from the file.
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--write-ledger"]) == 0
+    assert json.loads(ledger.read_text(encoding="utf-8"))["findings"] == []
+
+    # A genuinely new finding remains a failing check after the old entry is
+    # gone, so pruning never weakens the gate for newly introduced problems.
+    docs.write_text(
+        f"new `{_ref('src/thing.py', 99)}`\n", encoding="utf-8")
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--check"]) == 1
+    assert "not in the ledger: 1" in capsys.readouterr().out
+
+
 def test_a_ledger_entry_without_a_reason_is_a_red(tmp_path):
     root = _tree(tmp_path)
     _write(root, "docs/page.md", f"see `{_ref('src/gone.py', 3)}`\n")
@@ -212,6 +249,5 @@ def test_the_committed_ledger_covers_the_real_tree():
     assert any(r.source.endswith(".py") for r in report.references)
     assert any(r.source.endswith(".md") for r in report.references)
     assert report.new_findings == []
-    assert report.obsolete == []
     assert {e.get("kind") for e in report.ledger} <= {"missing", "stale"}
     assert all(e["reason"].strip() for e in report.ledger)

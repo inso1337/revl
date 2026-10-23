@@ -1917,7 +1917,8 @@ def host_family_check(family: str, method: str, arg_types: list,
 
 def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int,
-                  types: dict | None = None) -> str | None:
+                  types: dict | None = None,
+                  receiver_name: str | None = None) -> str | None:
     """Type a stdlib method call; raises on definite mismatches.
 
     `types` is the declared-type table, passed through to `compatible` so a
@@ -1969,8 +1970,18 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     thead, targs = parse_type(target_type)
     if filename and target_type is not None:
         if family == "sized" and thead not in _SIZED_HEADS:
+            hint = fix = None
+            fn_head, fn_args = parse_type(target_type)
+            if (receiver_name and fn_head == FN_HEAD and len(fn_args) == 1
+                    and parse_type(fn_args[0])[0] in _SIZED_HEADS):
+                hint = (f"`{receiver_name}` is a zero-argument function returning "
+                        f"`{render_type(fn_args[0])}`; call `{receiver_name}()` "
+                        "to use its result as the receiver")
+                fix = (f"write `{receiver_name}()` before `.{method}` to use the "
+                       "function's returned value as the receiver")
             raise RevlError(filename, line,
-                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
+                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`",
+                            hint=hint, fix=fix)
         if family in ("List", "Str", "Int", "Int32", "Map", "Value") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
@@ -2684,8 +2695,10 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     and target_t not in _HOST_FAMILIES):
                 return infer_ast(desugar_list_transform(expr), tenv, types,
                                  filename)
+            receiver_name = (expr.callee.target.name
+                             if isinstance(expr.callee.target, ExprVar) else None)
             return builtin_check(expr.callee.name, target_t, arg_types, filename,
-                                 line, types)
+                                 line, types, receiver_name=receiver_name)
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
         callee_t = infer_ast(expr.callee, tenv, types, filename)

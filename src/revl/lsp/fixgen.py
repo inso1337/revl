@@ -26,9 +26,9 @@ the rejection is gone.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 
-from ..parser import Parser, Program
+from ..parser import ExprCall, ExprField, ExprVar, Parser, Program
 from ..errors import RevlError
 from .analysis import compute_diagnostics
 from .document import find_symbol_column, line_text, lines_of
@@ -193,6 +193,81 @@ def _fix_a9_provide_key(text: str, diagnostic: dict, filename: str) -> Fix | Non
     return Fix("A9", f"Rename provide block to the declared key `{declared}`", [edit])
 
 
+_ZERO_ARG_SIZED_RECEIVER = re.compile(
+    r"^builtin `(?P<method>[A-Za-z_]\w*)` needs a Str/Bytes/List receiver, "
+    r"got `\(\) -> [^`]+`$"
+)
+
+
+def _fix_zero_arg_sized_receiver(text: str, diagnostic: dict,
+                                 filename: str) -> Fix | None:
+    """Call a bare zero-argument function used as a sized builtin receiver.
+
+    The typechecker only emits this refusal for a known function value and its
+    hint only names the fix when the function returns Str, Bytes or List. Keep
+    the edit narrower still: parse the source and require the receiver to be a
+    bare identifier in a method call on the diagnostic line. `_resolves` then
+    checks the candidate against the actual program before returning it.
+    """
+    message = (diagnostic.get("message", "").splitlines() or [""])[0]
+    match = _ZERO_ARG_SIZED_RECEIVER.match(message)
+    if match is None:
+        return None
+    line0 = diagnostic["range"]["start"]["line"]
+    method = match.group("method")
+    program = _parse(text, filename)
+    if program is None:
+        return None
+    receivers = []
+    for node in _walk_nodes(program):
+        if (isinstance(node, ExprCall) and node.line == line0 + 1
+                and isinstance(node.callee, ExprField)
+                and node.callee.name == method
+                and isinstance(node.callee.target, ExprVar)):
+            receivers.append(node.callee.target.name)
+    if len(receivers) != 1:
+        return None
+
+    receiver = receivers[0]
+    row = line_text(text, line0)
+    receiver_before_method = re.compile(
+        rf"(?<![A-Za-z0-9_])({re.escape(receiver)})"
+        rf"(?=\s*\.\s*{re.escape(method)}\b)"
+    )
+    matches = list(receiver_before_method.finditer(row))
+    if len(matches) != 1:
+        return None
+    end = matches[0].end(1)
+    edit = _replace_edit(line0, end, end, "()")
+    return Fix(
+        diagnostic.get("code", "REVL"),
+        f"Call `{receiver}()` to use its returned value as the receiver",
+        [edit],
+    )
+
+
+def _walk_nodes(value, seen: set[int] | None = None):
+    """Yield dataclass nodes in the parser tree without following cycles."""
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return
+    seen.add(identity)
+    if is_dataclass(value):
+        yield value
+        for descriptor in fields(value):
+            yield from _walk_nodes(getattr(value, descriptor.name), seen)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_nodes(item, seen)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _walk_nodes(item, seen)
+
+
 def _sole_provides_key(text: str, filename: str, comp_name: str) -> str | None:
     """The single key a named component's ``provides`` clause declares, or None
     when it declares none or several (nothing unambiguous to rename to)."""
@@ -219,6 +294,7 @@ def _parse(text: str, filename: str) -> Program | None:
 _GENERATORS = {
     "T2": _fix_t2_null,
     "A9": _fix_a9_provide_key,
+    "REVL": _fix_zero_arg_sized_receiver,
 }
 
 

@@ -34,9 +34,12 @@ THE LEDGER IS A BASELINE, NOT AN ALLOWLIST. `tools/doc_refs_ledger.json`
 records the findings this tree already has, so the check can be green on the
 day it is adopted and fail only on a finding that is not recorded. Every
 entry carries a `reason`; an entry without one is a malformed ledger, not a
-suppression. `--write-ledger` (alias `--baseline`) writes the current
-findings, keeping any reason already on file, and DROPS entries that no
-longer match a finding, so the ledger shrinks as anchors are repaired. The
+suppression. An entry that no longer matches a finding is reported as
+obsolete, but does not make `--check` fail; this can happen when an unrelated
+edit shifts a cited line. Run `python3 tools/check_doc_refs.py --write-ledger`
+to drop obsolete entries and keep the ledger current. That command writes the
+current findings, keeping any reason already on file, and drops entries that
+no longer match a finding, so the ledger shrinks as anchors are repaired. The
 reason it writes for a new entry is a class-level triage label -- missing or
 stale -- not an individual justification, and the PR that adopts it says so.
 
@@ -100,8 +103,10 @@ LEDGER_HEADER = (
     "tools/check_doc_refs.py --write-ledger`, which no routine regeneration "
     "command calls; widening it is an edit a reviewer reads. Every entry "
     "carries a reason. One entry per distinct `path:line` spelling, however "
-    "many citing files use it. Shrink-only: repair an anchor and the next "
-    "--write-ledger drops its entry. The reasons are class-level triage "
+    "many citing files use it. Obsolete entries are warnings under `--check`; "
+    "run `python3 tools/check_doc_refs.py --write-ledger` to prune them. "
+    "Shrink-only: repair an anchor and the next `--write-ledger` drops its "
+    "entry. The reasons are class-level triage "
     "labels written at adoption, not per-reference justifications, and the "
     "adopting PR says so."
 )
