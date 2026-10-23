@@ -1224,9 +1224,9 @@ def _session_error(message: str | BaseException, category: str | None = None,
     `SessionError` with a code and a minimal edit, e.g. STATE_UNDISCLOSED)
     hands it to the payload here, beside the diagnosis. It is additive, and
     the prose message is untouched."""
+    refused_error = message if isinstance(message, BaseException) else None
+    carried = getattr(refused_error, "repair", None) if refused_error is not None else None
     message, remedy = _remedy.resolve(message, extra)
-    carried = (getattr(message, "repair", None)
-               if isinstance(message, BaseException) else None)
     if refusal_code is not None:
         category = _answer.define(refusal_code).category
     diagnostic = {"severity": "error", "code": "REVL",
