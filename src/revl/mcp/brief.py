@@ -45,6 +45,7 @@ caller can read the answer without checking each value.
 from __future__ import annotations
 
 import json
+import weakref
 
 from . import ambient
 from . import draft as _draft
@@ -70,10 +71,13 @@ _VERDICTS = {"revl_check": "checked", "revl_admit": "admitted"}
 # definition and this module is a consumer of it, so the two cannot drift.
 _NEW_UNIT = _undo_record.GENERATION_VERBS
 
-#: The key that holds the recorded answer on the session. An underscore name,
-#: because it is an index into answers the session already gave, not part of
-#: the session's own model.
-_STORE = "_brief_last"
+#: The recorded answer per session. It is deliberately NOT an attribute on the
+#: session: a swap-residue check compares the session's own state before and
+#: after a generation move, and a warning index the brief keeps must not look
+#: like session state. A weak table keeps it beside the session without becoming
+#: part of it, and a session that cannot be weakly referenced simply records
+#: nothing (the brief then reports no `last`).
+_STORES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 #: The trims, in the order they are applied when the block is over `CAP`.
 #: Names go before the action: `next` is the last thing an answer may lose.
@@ -104,18 +108,13 @@ def observe(session, verb: str, payload) -> None:
 
 
 def _store(session) -> dict:
-    """The session's recorded answer. A frozen or slotted stand-in (a test
-    double) that takes no attribute still answers; it simply keeps no record,
-    and the brief then reports no `last`."""
-    store = getattr(session, _STORE, None)
-    if store is not None:
-        return store
-    store = {}
+    """The session's recorded answer, or a throwaway dict for a session that
+    cannot be weakly referenced (a frozen or slotted stand-in): it still answers,
+    it simply keeps no record, and the brief then reports no `last`."""
     try:
-        setattr(session, _STORE, store)
-    except (AttributeError, TypeError):  # a stand-in that takes no attribute
-        return store
-    return store
+        return _STORES.setdefault(session, {})
+    except TypeError:  # a stand-in that cannot be weakly referenced
+        return {}
 
 
 def _remember(session, entry: dict) -> None:
@@ -132,9 +131,10 @@ def _forget(session) -> None:
 
 
 def recorded(session) -> dict | None:
-    """The recorded verdict, or None. The one field the projection reads that
-    is not a session model field, kept here so the test can compare it."""
-    return getattr(session, _STORE, None) or None
+    """The recorded verdict, or None. The one piece of state the projection
+    reads that is not a session model field, kept here so the test can compare
+    it."""
+    return _STORES.get(session) or None
 
 
 def _refusal(verb: str, payload: dict) -> dict:
