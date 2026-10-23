@@ -1596,7 +1596,10 @@ def probe_host_fallback(candidate: Candidate) -> Verdict:
             if not isinstance(before, dict) or "error" in before:
                 # A case the base did not compile is not a baseline: a tier
                 # refusing it now is not "lost a construct", there is nothing
-                # to have lost. Count it as unmeasured, not as a fallback.
+                # to have lost. The head artifacts are still work the suite
+                # did, so they are counted as walked and skipped as
+                # unmeasured, not as absent.
+                walked += len(tiers)
                 skipped.append(f"{label} (no measurement at {candidate.base})")
                 continue
             # The head's corpus module names the tiers it walks, so a tier the
