@@ -271,9 +271,14 @@ def _draft_pending(draft: dict) -> dict:
 
 def _draft_holes(vs) -> int | None:
     """The draft's open holes, read the same way `revl_state` reads them. A
-    draft that cannot be compiled reports `None` rather than a made-up zero."""
+    draft that cannot be compiled reports `None` rather than a made-up zero.
+
+    The compile records the dependency buffers it read on the working set it
+    is handed, so it gets a copy: a projection may not write to the draft."""
+    if not isinstance(vs, dict):
+        return None
     try:
-        return len(_draft.collect_holes(_edit.compile_virtual(vs)))
+        return len(_draft.collect_holes(_edit.compile_virtual(dict(vs))))
     except RevlError:
         return None
 

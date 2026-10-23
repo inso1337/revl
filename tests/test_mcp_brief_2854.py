@@ -12,6 +12,7 @@ makes are the real ones, so the file runs on an interpreter without the
 cordis-py runtime.
 """
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -161,6 +162,21 @@ def test_reading_the_brief_adds_no_state_of_its_own(held):
 
     assert not hasattr(held, "proposals")
     assert brief.recorded(held) is None
+
+
+def test_the_brief_does_not_write_to_the_held_draft(held):
+    """The draft's hole count needs a compile, and the compile records the
+    dependency buffers it read on the working set it is given. The brief hands
+    it a copy, so the draft is byte-identical after two reads."""
+    held.loaded = False
+    held.pending_draft = {"vs": {"source": HOLED, "modules": {}},
+                          "config": None, "record": False}
+    before = copy.deepcopy(held.pending_draft["vs"])
+
+    _brief()
+    _brief()
+
+    assert held.pending_draft["vs"] == before
 
 
 # ---------------------------------------------------------------- populated
