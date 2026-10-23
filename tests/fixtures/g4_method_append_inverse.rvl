@@ -1,0 +1,24 @@
+// issue #2640: pushing onto a stored list has a bounded inverse that reads
+// the current list and removes only the appended item. The prior presence
+// check distinguishes an existing empty list from an absent key.
+fn drop_last(xs: List[Str]) -> List[Str] {
+  return xs.slice(0, xs.length() - 1)
+}
+
+service Ledger {
+  fn append(id: Str, msg: Str) -> Str
+  fn contents(id: Str) -> List[Str]
+}
+
+component LedgerStore provides ledger: Ledger {
+  let store = effect Map.new() undo store.drop()
+  provide ledger {
+    fn append(id, msg) {
+      let known = store.get(id) != None
+      effect store.insert(id, (store.get(id) ?? []).push(msg))
+      undo known ? store.insert(id, drop_last(store.get(id) ?? [])) : store.remove(id)
+      return msg
+    }
+    fn contents(id) = store.get(id) ?? []
+  }
+}
