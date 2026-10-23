@@ -39,7 +39,7 @@ its receipt and shard behaviour, so it is left alone here. To drive this tool
 from the selector:
 
     python3 tools/affected_tests.py --format machine > selection.txt
-    python3 tools/test_result_cache.py --selection selection.txt \
+    python3 tools/result_cache.py --selection selection.txt \
         --cache-dir .revl-test-cache
 
 `--selection` also takes test targets directly. A single non-`.py` file is read

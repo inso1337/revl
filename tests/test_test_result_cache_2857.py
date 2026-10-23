@@ -31,11 +31,11 @@ import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOL = ROOT / "tools" / "test_result_cache.py"
+TOOL = ROOT / "tools" / "result_cache.py"
 
 # This module observes the tool it drives, so a change to the tool invalidates
 # its own cached result as well.
-CACHE_INPUTS = ("tools/test_result_cache.py",)
+CACHE_INPUTS = ("tools/result_cache.py",)
 
 
 def _write(path: Path, text: str) -> None:
