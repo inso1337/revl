@@ -646,6 +646,10 @@ def _authoring_refusal(arguments: dict) -> dict | None:
                                "agent may compose granted services but may not "
                                "author host code (`revl mcp serve "
                                "--author-trust`, --provider, --grant)")
+            provider_note = _restore_provider_dependency_refusal_note(
+                arguments.get("snapshot"))
+            if provider_note is not None:
+                payload["note"] = provider_note
             return payload
     return None
 
@@ -4022,7 +4026,38 @@ def _tool_snapshot(_arguments: dict) -> dict:
         return _session_error(error)
 
 
-def _restore_authoring_refusal(error: RevlError) -> dict:
+def _restore_has_provider_dependency(snap: dict | None) -> bool:
+    """Whether a snapshot's captured dependency buffers name a live provider.
+
+    Restore re-admits the snapshot itself and does not merge `AUTHORING`
+    providers. A matching path therefore explains why a caller may mistake a
+    dependency buffer for operator-authored provider code, but it cannot confer
+    that trust on bytes carried by the snapshot.
+    """
+    sources = snap.get("sources") if isinstance(snap, dict) else None
+    dependencies = sources.get(ORIGIN_DEPENDENCIES) if isinstance(sources, dict) else None
+    if not isinstance(dependencies, dict):
+        return False
+    provider_paths = _provider_files(AUTHORING.providers or {})
+    return any(
+        os.path.realpath(os.path.abspath(path)) in provider_paths
+        for path in dependencies
+        if isinstance(path, str)
+    )
+
+
+def _restore_provider_dependency_refusal_note(snap: dict | None) -> str | None:
+    if not _restore_has_provider_dependency(snap):
+        return None
+    return (
+        "nothing was restored — this snapshot includes a dependency path also "
+        "configured as an operator `--provider`. `revl_restore` re-admits "
+        "snapshot bytes and does not merge the live provider map, so the "
+        "matching path does not make those agent-supplied bytes "
+        "operator-authored")
+
+
+def _restore_authoring_refusal(error: RevlError, snap: dict | None = None) -> dict:
     """The answer to a `revl_restore` whose snapshot does not admit under the
     session's untrusted authoring trust: the same report `revl_load` gives.
 
@@ -4037,9 +4072,10 @@ def _restore_authoring_refusal(error: RevlError) -> dict:
     payload["restored"] = False
     payload["reAdmitted"] = False
     payload["authoringTrust"] = "untrusted"
-    payload["note"] = ("nothing was restored — a snapshot is agent-supplied "
-                       "source and admits under the same authoring trust "
-                       "`revl_load` does")
+    payload["note"] = (
+        _restore_provider_dependency_refusal_note(snap)
+        or ("nothing was restored — a snapshot is agent-supplied source and "
+            "admits under the same authoring trust `revl_load` does"))
     return payload
 
 
@@ -4055,7 +4091,11 @@ def _tool_restore(arguments: dict) -> dict:
     trust: a snapshot may no more smuggle a host body past it than `revl_load`
     may. That compile is the one whose IR is loaded (`persist.restore`), so
     the text admitted is the text that runs, `dependencies` included. (The operator's own
-    `revl mcp serve --restore` path is not agent-supplied and is unaffected.)"""
+    `revl mcp serve --restore` path is not agent-supplied and is unaffected.)
+
+    Snapshot dependency buffers remain agent-supplied even when their path
+    matches an operator `--provider`: restore re-admits the captured buffers and
+    does not merge the live provider map."""
     snap = arguments.get("snapshot")
     if snap is None:
         return _session_error("`snapshot` (a document from revl_snapshot) is required")
@@ -4082,7 +4122,7 @@ def _tool_restore(arguments: dict) -> dict:
         return _approval_required(error, host_bodies=authored)
     except RestoreError as error:
         if profile is not None and error.revl_error is not None:
-            return _restore_authoring_refusal(error.revl_error)
+            return _restore_authoring_refusal(error.revl_error, snap)
         # a rejected re-admission is a *result*: surface the diagnostic, and
         # make clear nothing was loaded
         payload = {"ok": False, "restored": False, "reAdmitted": False,
