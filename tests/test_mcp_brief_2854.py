@@ -197,10 +197,49 @@ def test_a_check_verdict_is_reported_when_it_is_the_last_judgement(held):
 
     assert answer["last"] == {"outcome": "ok", "verb": "revl_check",
                               "verdict": "checked"}
-    # the working source is the running source, so there is nothing to swap:
-    # the next call is the loop's commit step and says what it needs
+    # the candidate the caller sent is not the source the session holds, so
+    # the commit step is named but not offered as ready
     assert answer["next"]["tool"] == "revl_swap"
     assert answer["next"]["ready"] is False
+
+
+def test_a_green_check_of_the_held_source_can_be_swapped_as_ready(held):
+    """A check of the held source (what `revl_swap {}` re-admits) is the one
+    green verdict whose next call is ready to send, and it is marked `held` so
+    the projection can tell the two apart."""
+    held.loaded = True
+    held.origin = {"source": BAD, "modules": {}}
+    held.ir = compile_source(GOOD)
+    held.draft = {"source": GOOD, "modules": {}}
+    checked = _call("revl_check", {"session": True})
+    assert checked["ok"] is True
+
+    answer = _brief()
+
+    assert answer["last"] == {"outcome": "ok", "verb": "revl_check",
+                              "verdict": "checked", "held": True}
+    assert answer["next"] == {"tool": "revl_swap", "arguments": {},
+                              "ready": True}
+
+
+def test_a_green_check_of_a_sent_candidate_does_not_offer_the_working_source(held):
+    """The mirror of the case above: the working source is dirty, but the
+    verdict judged a candidate the caller sent, so swapping the held source
+    would apply something else. The brief names the step and says what it
+    needs instead of offering the wrong call as ready."""
+    held.loaded = True
+    held.origin = {"source": BAD, "modules": {}}
+    held.ir = compile_source(GOOD)
+    held.draft = {"source": GOOD, "modules": {}}
+    checked = _call("revl_check", {"source": GOOD + "\n// sent\n"})
+    assert checked["ok"] is True
+
+    answer = _brief()
+
+    assert "held" not in answer["last"]
+    assert answer["next"]["tool"] == "revl_swap"
+    assert answer["next"]["ready"] is False
+    assert answer["next"]["arguments"] == {}
 
 
 def test_a_check_verdict_with_holes_carries_the_hole_count(held):

@@ -163,10 +163,13 @@ def _location(diagnostic: dict) -> str | None:
 
 
 def _verdict(verb: str, payload: dict) -> dict:
-    """A green verdict: which verb judged the work, and the fact that can
-    change the next step (a check's open holes)."""
+    """A green verdict: which verb judged the work, and the facts that can
+    change the next step (a check's open holes, and whether it judged the
+    source the session holds rather than a candidate the caller sent)."""
     entry = {"outcome": "ok", "verb": verb, "verdict": _VERDICTS[verb]}
     if verb == "revl_check":
+        if payload.get("checked") == "session":
+            entry["held"] = True
         holes = len(payload.get("holes") or [])
         if holes:
             entry["holes"] = holes
@@ -266,15 +269,19 @@ def _next(session, brief: dict, footer: dict, held, draft, last) -> dict:
             return dict(action)
         return _remedy.call("revl_check", {"session": True})
     verdict = last.get("verdict") if last else None
-    if brief["state"] == "loaded" and footer.get("dirty"):
-        if verdict in ("checked", "admitted"):
-            return _remedy.call("revl_swap", {})
-        return _remedy.call("revl_check", {"session": True})
     if verdict in ("checked", "admitted"):
+        # only a verdict on the source the session HOLDS can be swapped with
+        # `revl_swap {}`; a green verdict on a candidate the caller sent names
+        # the swap step without pretending the brief carries that source
+        if brief["state"] == "loaded" and footer.get("dirty") \
+                and last.get("held"):
+            return _remedy.call("revl_swap", {})
         return _remedy.call(
             "revl_swap", {}, ready=False,
-            needs="the candidate that was checked or admitted; the source the "
-                  "session holds is what already runs")
+            needs="the candidate that was checked or admitted; the brief does "
+                  "not carry its source")
+    if brief["state"] == "loaded" and footer.get("dirty"):
+        return _remedy.call("revl_check", {"session": True})
     if brief["state"] == EMPTY:
         return _load_next(session)
     return _remedy.call("revl_check", {"session": True})

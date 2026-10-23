@@ -398,15 +398,18 @@ holds, so it cannot disagree with `revl_state`:
   `outcome: "refused"`, the `verb`, the `code`, the `location` (`file:line`
   when the diagnostic names one) and the `repair` (the diagnostic's `fix` or
   `hint`) when it has one. A green `revl_check` or `revl_admit` carries
-  `outcome: "ok"`, the `verb` and the `verdict`, plus the open `holes` count
-  when a check leaves any.
+  `outcome: "ok"`, the `verb` and the `verdict`, plus `held: true` when a
+  check judged the source the session holds rather than a candidate the
+  caller sent, and the open `holes` count when a check leaves any.
 - `pending`: the held proposal (`kind`, its `generation`, the components it
   replaces, `stale: true` when the running composition moved under it) or the
   held draft (`kind: "draft"`).
 - `next`: exactly one call, in the same `{tool, arguments, ready}` shape a
   refusal's `next` uses, chosen from the state: commit a proposal, discard a
-  stale one, check a held draft, take the refusal's own remedy, swap a dirty
-  working source that checked green, or check the held source.
+  stale one, check a held draft, take the refusal's own remedy, swap the held
+  working source when a green check judged it, or check the held source. A
+  green verdict on a candidate the caller sent names `revl_swap` as not
+  ready, because the brief does not carry that candidate's source.
 
 **It is bounded.** The brief block's compact JSON is at most 1200 characters
 (`brief.CAP` in `src/revl/mcp/brief.py`). When a projection is over that, the
