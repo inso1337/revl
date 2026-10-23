@@ -150,6 +150,19 @@ def test_calling_the_brief_does_not_change_what_it_reads(held):
     assert _brief() == _brief()
 
 
+def test_reading_the_brief_adds_no_state_of_its_own(held):
+    """A projection that created state on every read would not be one. In
+    particular the proposal store is read without its lazily-creating
+    accessor, so an empty session stays empty."""
+    assert not hasattr(held, "proposals")
+
+    _brief()
+    _brief()
+
+    assert not hasattr(held, "proposals")
+    assert brief.recorded(held) is None
+
+
 # ---------------------------------------------------------------- populated
 
 

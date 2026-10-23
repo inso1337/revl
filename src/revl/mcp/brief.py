@@ -183,7 +183,7 @@ def project(session) -> dict:
     """The brief, as a pure function of `session`'s state. Every field is
     recomputed here; nothing is cached and nothing is written."""
     footer = ambient.footer(session)
-    held = _proposal.held(session)
+    held = _held_proposal(session)
     draft = _draft.pending(session)
     last = recorded(session)
     brief = {"state": _state(footer, draft)}
@@ -209,6 +209,21 @@ def project(session) -> dict:
         brief["pending"] = {"kind": "draft"}
     brief["next"] = _next(session, brief, footer, held, draft, last)
     return _bounded(brief)
+
+
+def _held_proposal(session) -> dict | None:
+    """The calling operator's proposal, or None.
+
+    Read without the proposal module's lazily-creating accessor: a projection
+    that CREATED the empty store on every read would be a write, which is the
+    one thing this module may not do. The holder key is the leases module's own,
+    so the read can never disagree with `revl_change` over whose proposal it
+    is."""
+    from .leases import holder_identity  # noqa: PLC0415 - no import cycle
+    store = getattr(session, "proposals", None)
+    if not isinstance(store, dict):
+        return None
+    return store.get(holder_identity(session))
 
 
 def _state(footer: dict, draft) -> str:
