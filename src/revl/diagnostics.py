@@ -272,6 +272,25 @@ OTHER_CODES = {
         "fix": "admit the turn again against the live generation to get a "
                "handle onto it",
     },
+    "STALE_ARTIFACT": {
+        "category": "session",
+        "guarantee": "a content handle names text minted in the current unit "
+                     "of work",
+        "meaning": "the handle was minted before a load, swap, rollback or "
+                   "undo moved the session's unit, so the text it names no "
+                   "longer belongs to this one",
+        "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint a "
+               "handle for the current unit, or pass the text as `source`",
+    },
+    "UNKNOWN_ARTIFACT": {
+        "category": "session",
+        "guarantee": "a content handle names text the session actually holds",
+        "meaning": "the id names no text this session holds: it was never "
+                   "minted here, or it has been dropped to keep the store "
+                   "bounded",
+        "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint "
+               "one, or pass the text as `source`",
+    },
     "MCP-IDENTITY": {
         "category": "identity",
         "guarantee": "every answer comes from the revision the client pinned",

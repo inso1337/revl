@@ -926,6 +926,12 @@ class Session:
         # unit of work and a reload starts it again even when the generation
         # number restarts at 1.
         self._load_epoch = 0
+        # issue #2852: the content handles a producing verb minted, keyed by
+        # the content's digest and holding the text plus the unit of work it
+        # was minted in (mcp/artifacts.py). In memory only: a handle names
+        # bytes the session already holds, so there is nothing to persist and
+        # nothing a restart should re-admit.
+        self.artifacts: dict = {}
         # issue #1708: the receipts `act` records, one per proposed action, in
         # order. The commit manifest lists them; teardown drops them
         self._actions: list = []

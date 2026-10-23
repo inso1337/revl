@@ -81,6 +81,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
 from . import unknownargs as _unknownargs
+from . import artifacts as _artifacts
 from . import fillspec
 from . import draft as _draft
 from . import knowledge_index as _knowledge
@@ -1204,6 +1205,63 @@ def _session_error(message: str | BaseException, category: str = "session",
                   "message": message, **_fix_field(fix)}
     return _remedy.attach({"ok": False, "diagnostics": [diagnostic], **extra},
                           remedy)
+
+
+# -- content handles (issue #2852) -------------------------------------------
+#
+# Output tokens cost several times what input tokens cost (issue #1700), and an
+# answer that returns text the session already holds spends them on a copy. A
+# producing verb can mint an `artifactId` for that text instead of returning it
+# (`revl_fmt` with `handle: true`), and a verb that consumes the text accepts
+# the id in place of `source`. The bytes stay in the session
+# (`mcp/artifacts.py`), so nothing is re-sent and nothing is written.
+#
+# One consumer in this slice. `revl_check` is the verb that turns a candidate
+# into a verdict, so a handle minted by `revl_fmt` saves the resend exactly
+# where the authoring loop used to pay it, and the check itself stays
+# read-only.
+_HANDLE_CONSUMERS = frozenset({"revl_check"})
+
+
+def _resolve_handle(name: str, arguments: dict) -> tuple[dict, dict | None]:
+    """`(arguments, refusal)` for a call that carries a content handle.
+
+    A consumer verb gets the text the handle names as its `source`, so
+    everything below this point in the dispatch (the path jail and the
+    authoring gate included) reads the same call it would have read had the
+    caller sent the text. A handle for an id the session cannot resolve is
+    refused here, before anything is read or compiled, and the refusal names
+    the id and the reason. A verb that takes no handle, or a call that carries
+    none, is returned unchanged."""
+    if (name not in _HANDLE_CONSUMERS
+            or arguments.get(_artifacts.ARTIFACT_KEY) is None):
+        return arguments, None
+    if arguments.get("session") is True:
+        return arguments, _session_error(
+            "`session: true` checks the composition the session holds, and "
+            f"`{_artifacts.ARTIFACT_KEY}` names a candidate of its own: pass "
+            "the handle alone, or check the held set alone",
+            category="usage",
+            fix=f"drop `session` to check the text the handle names, or drop "
+                f"`{_artifacts.ARTIFACT_KEY}` to check the held composition")
+    if arguments.get("source") is not None or arguments.get("files"):
+        artifact_id = arguments[_artifacts.ARTIFACT_KEY]
+        return arguments, _session_error(
+            f"`{_artifacts.ARTIFACT_KEY}` {artifact_id} names text the "
+            "session holds, so it takes no `source`/`files` of its own: pass "
+            "the handle, or pass the text",
+            category="usage",
+            fix=f"drop `source`/`files` to use the handle, or drop "
+                f"`{_artifacts.ARTIFACT_KEY}` to send the text")
+    try:
+        text = _artifacts.resolve(SESSION, arguments[_artifacts.ARTIFACT_KEY])
+    except _artifacts.ArtifactError as error:
+        return arguments, _session_error(error, category="usage",
+                                         **_refusal_code(error))
+    resolved = {key: value for key, value in arguments.items()
+                if key != _artifacts.ARTIFACT_KEY}
+    resolved["source"] = text
+    return resolved, None
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -5029,7 +5087,11 @@ def _tool_fmt(arguments: dict) -> dict:
     interpolation rewrite) over inline source — the MCP twin of `revl fmt`,
     taking text in and text out instead of touching the filesystem. Gated by
     the same IR-equivalence proof the CLI runs: a rewrite that would change
-    what the compiler sees is refused, never silently written."""
+    what the compiler sees is refused, never silently written.
+
+    With `handle: true` the answer names the formatted text (`artifactId`)
+    instead of returning it, for a caller that hands it to `revl_check`
+    without reading it (issue #2852)."""
     from ..fmt import migrate_source
     from ..formatter import FormatError, format_admitted, ir_equivalent
 
@@ -5055,8 +5117,18 @@ def _tool_fmt(arguments: dict) -> dict:
     if not gate.admitted:
         return {"ok": False, "admitted": False, "reason": gate.reason,
                 "note": "refused — the rewrite would change what the compiler sees"}
-    result = {"ok": True, "admitted": True, "formatted": rewritten,
-              "changed": rewritten != source, "proof": gate.proof}
+    # issue #2852: a caller that hands the formatted text straight to the next
+    # verb does not need the text itself back. `handle: true` answers with a
+    # content handle for the held text in place of the copy (artifacts.py),
+    # and `revl_check` accepts the id in place of `source`. The text form is
+    # unchanged, so an answer that does want the bytes still carries them.
+    if arguments.get("handle") is True:
+        result = {"ok": True, "admitted": True,
+                  "artifactId": _artifacts.mint(SESSION, rewritten),
+                  "changed": rewritten != source, "proof": gate.proof}
+    else:
+        result = {"ok": True, "admitted": True, "formatted": rewritten,
+                  "changed": rewritten != source, "proof": gate.proof}
     # a check the gate could not run to completion travels with the result, so
     # a weakened proof is as visible to an agent as it is on the CLI.
     if gate.warning:
@@ -5113,7 +5185,11 @@ TOOLS = [
                        "that carries neither a candidate nor anything held is a "
                        "`category: \"usage\"` refusal, not a composition "
                        "verdict: `ok: false` means the composition has a "
-                       "problem.",
+                       "problem. `artifactId` names a candidate the session "
+                       "already holds (a content handle from `revl_fmt` with "
+                       "`handle: true`) and is checked in place of `source`, "
+                       "so the text is not sent again; a stale or unknown "
+                       "handle is refused by name.",
         "inputSchema": {"type": "object", "properties": {
             **_SOURCE_INPUT,
             "session": {"type": "boolean",
@@ -5123,6 +5199,14 @@ TOOLS = [
                                        "candidate — the form the bare "
                                        "`revl_check {}` already takes. Carries "
                                        "no `source`/`files` of its own"},
+            "artifactId": {"type": "string",
+                           "description": "a content handle minted by "
+                                          "`revl_fmt` with `handle: true`: "
+                                          "check the text it names instead of "
+                                          "sending it again. Session scoped; a "
+                                          "stale or unknown handle is refused "
+                                          "by name. Takes no `source`/`files` "
+                                          "of its own"},
             **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
@@ -6908,7 +6992,10 @@ TOOLS.extend([
                        "touches disk. The rewrite is proven against the same "
                        "IR-equivalence gate the CLI runs: `admitted: false` means "
                        "the rewrite would change what the compiler sees, and "
-                       "`formatted` is NOT returned.",
+                       "`formatted` is NOT returned. With `handle: true` the "
+                       "answer names the formatted text (`artifactId`) instead "
+                       "of returning it, for a caller that hands it to "
+                       "`revl_check` without reading it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -6920,6 +7007,12 @@ TOOLS.extend([
                             "description": "rewrite 1.x `$` interpolation to "
                                            "backtick templates instead of "
                                            "canonical formatting"},
+                "handle": {"type": "boolean",
+                           "description": "true: return an `artifactId` for the "
+                                          "formatted text instead of the text "
+                                          "itself (`formatted` is omitted), for "
+                                          "a `revl_check` call that takes the "
+                                          "handle. The text form is unchanged"},
             },
             "required": ["source"],
         },
@@ -7407,6 +7500,13 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
                                                       arguments)
     if wrong:
         return _session_error(wrong, category="usage")
+    # issue #2852: a content handle is resolved to the text it names HERE, so
+    # the gates below, the handler and the recorders all read the call the
+    # caller would have sent with the text, and an unknown or stale handle is
+    # refused before anything is read or compiled.
+    arguments, handle_refusal = _resolve_handle(name, arguments)
+    if handle_refusal is not None:
+        return _canonicalised(handle_refusal, canonicalised)
     # the path jail and the authoring gate run BEFORE the operator gate and
     # before any handler: a refusal here has read nothing, compiled nothing
     # and run nothing, so neither can be used as an oracle.

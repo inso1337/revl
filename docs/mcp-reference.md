@@ -415,8 +415,19 @@ guarantee:
   warning, or why rows are `unchecked`.
 
 - Inputs: `source` / `files` / `modules`, or none at all (see below);
-  `session: true` asks for the held form explicitly; `returnCanonical` adds the
-  canonical text.
+  `artifactId` names text the session already holds in place of `source` (see
+  below); `session: true` asks for the held form explicitly; `returnCanonical`
+  adds the canonical text.
+
+**A candidate the session already holds can be named instead of sent (issue
+#2852).** `revl_check {artifactId}` takes a content handle minted by `revl_fmt`
+with `handle: true` and checks the formatted text it names. It is the
+supplied-source form: the answer is what the same text would get as `source`
+(`canonicalSource` included), and the handle is bound to the unit of work it
+was minted in, so a load, swap, rollback or undo makes it stale. An unknown or
+stale handle is a `category: "usage"` refusal that names the id and the
+reason; a handle takes no `source`/`files` of its own. The text form is
+unchanged.
 
 **With no candidate, it checks the composition the session holds.** Pass no
 `source` and no `files` (or pass `session: true`) and `revl_check` compiles the
@@ -660,7 +671,15 @@ text out, nothing touches disk. The rewrite is proven against the same
 IR-equivalence gate the CLI runs, so `admitted: false` means the rewrite would
 change what the compiler sees and `formatted` is NOT returned ([fmt.md](fmt.md)).
 
-- Inputs: `source` (required); `filename`; `migrate`.
+With `handle: true` the answer names the formatted text instead of returning
+a copy of it: `artifactId` is a session-scoped content handle and `formatted`
+is omitted, so the caller can hand the text to `revl_check` without reading
+or re-sending it (issue #2852). The text form is unchanged, and the ledger
+still measures it; `changed` and `proof` ride on both forms, so the handle
+form is still a verdict on the rewrite.
+
+- Inputs: `source` (required); `filename`; `migrate`; `handle` (true: answer
+  with `artifactId` instead of `formatted`).
 
 ### `revl_explain`
 

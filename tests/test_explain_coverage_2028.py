@@ -190,10 +190,11 @@ def test_a_case_pair_is_two_different_codes():
 def test_an_emitted_code_names_the_rewrite_that_satisfies_it():
     """The point of the fix: an author who meets one of these has a command to
     run, not a roster of codes that do not include theirs. Every code that is
-    answered for and is not already a guarantee code is one of these — the 26
-    that answered "no diagnostic code" before #2028."""
+    answered for and is not already a guarantee code is one of these, the 26
+    that answered "no diagnostic code" before #2028 plus every code a later
+    slice adds to the roster (`UNKNOWN_ARTIFACT` and `STALE_ARTIFACT`, #2852)."""
     newly = sorted(COVERED - set(dg.GUARANTEES))
-    assert len(newly) == 26, newly
+    assert len(newly) == 28, newly
     for code in newly:
         if code == "REVL":
             continue        # the fallback: its guarantee is the honest "unknown"
