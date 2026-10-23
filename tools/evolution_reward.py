@@ -1605,12 +1605,14 @@ def probe_host_fallback(candidate: Candidate) -> Verdict:
             findings += [f"{label} on {tier}: measured at {candidate.base}, "
                          "not walked at head" for tier in gone]
             for tier, now in sorted(tiers.items()):
+                # A head artifact that was produced at all is work the suite
+                # did; a missing baseline makes it unmeasured, not absent.
+                walked += 1
                 if tier not in before:
                     # A tier the corpus added at head has no baseline either;
                     # its first measurement is not a lost construct.
                     skipped.append(f"{label} on {tier}")
                     continue
-                walked += 1
                 scanned += 1
                 then = before[tier]
                 extra = Counter(now["markers"]) - Counter(then["markers"])
