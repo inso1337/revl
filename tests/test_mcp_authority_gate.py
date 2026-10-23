@@ -434,6 +434,9 @@ UNGATED = {
     "revl_quarantine": "proves a candidate in the wasm substrate",
     "revl_test_run": "runs the selected test files in a subprocess; reaches no "
                      "session operation and edits no session state (#2843)",
+    "revl_brief": "projects the footer, the proposal store, the held draft and "
+                  "the recorded verdict; loads, admits and swaps nothing "
+                  "(#2854)",
     "revl_resolve": "registry resolution",
     "revl_scaffold": "emits source text",
     "revl_fmt": "formats source text",

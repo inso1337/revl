@@ -112,6 +112,7 @@ from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from . import ambient as _ambient
+from . import brief as _brief
 from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
@@ -3608,6 +3609,14 @@ def _tool_estop_report(_arguments: dict) -> dict:
         return _session_error(error)
 
 
+def _tool_brief(_arguments: dict) -> dict:
+    """The compact next-step answer (issue #2854): a projection of the
+    session's own fields, never a second state. `brief.project` recomputes
+    every field, so this handler is the projection plus the `ok` flag the
+    response shape carries."""
+    return {"ok": True, **_brief.project(SESSION)}
+
+
 def _tool_state(_arguments: dict) -> dict:
     state = {"ok": True, **SESSION.state(drain=True)}
     if SESSION.loaded:
@@ -6585,6 +6594,28 @@ TOOLS = [
         "handler": _tool_revoke_distillation,
     },
     {
+        "name": "revl_brief",
+        "description": "One compact next-step answer for the authoring loop, "
+                       "instead of a state dump: `state` (`loaded`, `draft` or "
+                       "the named `empty`), the generation and component names, "
+                       "the source the working set came from, `last` (the code, "
+                       "location and repair of the last refusal, or the verdict "
+                       "of the last `revl_check`/`revl_admit`), `pending` (a "
+                       "held proposal or draft) and `next`, the one call to make. "
+                       "It is a STRICT PROJECTION of state the session already "
+                       "holds: every field is recomputed from the ambient "
+                       "footer, the proposal store, the held draft and the "
+                       "recorded verdict, so it cannot disagree with `revl_state`. "
+                       "The answer is bounded: at most 1200 characters of "
+                       "compact JSON, with names dropped before `next` (a "
+                       "`trimmed` list names what was dropped). An empty session "
+                       "answers `state: \"empty\"` with a `why` line and a `next` "
+                       "call, never nulls. See docs/mcp-reference.md.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_brief,
+    },
+    {
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
                        "a rollback is available, and the trace since the last call. "
@@ -7330,6 +7361,14 @@ def handle(message: dict) -> dict | None:
         state = _ambient.footer(SESSION)
         payload = _attempt_fields(name, payload)
         payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
+        # issue #2854: the one record `revl_brief` reads. It indexes the
+        # verdict of the answer just built (the refusal's code, location and
+        # repair, or a check/admit verdict) so the brief can report it without
+        # keeping a second copy of session state. Recording changes nothing in
+        # the payload. The hatch records the verb it called, so a call through
+        # `revl_verbs` is indistinguishable from a direct one here too.
+        _brief.observe(SESSION, _called_verb(name, params.get("arguments") or {}),
+                       payload)
         payload = _ambient.stamp(payload, state)
         result = {
             "content": [{"type": "text", "text": json.dumps(_actionable_first(payload), indent=2)}],
@@ -7348,6 +7387,16 @@ def handle(message: dict) -> dict | None:
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _called_verb(name: str, arguments: dict) -> str:
+    """The verb an answer belongs to. A `revl_verbs` hatch call answers as the
+    verb it names, so the brief records that verb and not the lookup."""
+    if name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
+        verb, _args, _reason, _next = _disclosure.hatch(arguments)
+        if verb:
+            return verb
+    return name
 
 
 def _hatch_call(arguments: dict) -> dict:

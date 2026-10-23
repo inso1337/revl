@@ -37,6 +37,9 @@ order, and each verb on it opens its description with "Authoring loop step N of
 6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
    `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
+Between steps, `revl_brief` answers where the loop stands and what to call next
+in one small answer, instead of re-reading `revl_state` (issue #2854).
+
 ## How to read this
 
 **Source input.** Every verb that takes a candidate composition accepts the
@@ -271,6 +274,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_distillation_offers` | yes | no | - |
 | `revl_apply_distillation` | no | no | `offerId` |
 | `revl_revoke_distillation` | no | no | `rule` |
+| `revl_brief` | yes | no | - |
 | `revl_state` | yes | no | - |
 | `revl_lease` | no | no | `component` |
 | `revl_snapshot` | yes | no | - |
@@ -378,6 +382,52 @@ not an object is a diagnostic, not a silent index.
   mutually exclusive.
 
 ## Author and admit
+
+### `revl_brief`
+
+One compact next-step answer for the loop, instead of a state dump (issue
+#2854). It is a strict projection of state the session already holds, so it
+cannot disagree with `revl_state`:
+
+- `state`: `loaded`, `draft` (a hole-bearing draft is held and nothing is
+  loaded) or `empty`.
+- `generation`, `components` and `source`: what is running, at which
+  generation, and where it came from (the file names, or `inline source`). A
+  held draft reports its own source.
+- `last`: the verdict of the last answer that judged work. A refusal carries
+  `outcome: "refused"`, the `verb`, the `code`, the `location` (`file:line`
+  when the diagnostic names one) and the `repair` (the diagnostic's `fix` or
+  `hint`) when it has one. A green `revl_check` or `revl_admit` carries
+  `outcome: "ok"`, the `verb` and the `verdict`, plus the open `holes` count
+  when a check leaves any.
+- `pending`: the held proposal (`kind`, its `generation`, the components it
+  replaces, `stale: true` when the running composition moved under it) or the
+  held draft (`kind: "draft"`).
+- `next`: exactly one call, in the same `{tool, arguments, ready}` shape a
+  refusal's `next` uses, chosen from the state: commit a proposal, discard a
+  stale one, check a held draft, take the refusal's own remedy, swap a dirty
+  working source that checked green, or check the held source.
+
+**It is bounded.** The brief block's compact JSON is at most 1200 characters
+(`brief.CAP` in `src/revl/mcp/brief.py`). When a projection is over that, the
+trims run in a fixed order and names go before the action: the next call's
+arguments first (the `tool`, its `ready` and its `needs` stay), then the
+component names (a `componentCount` replaces them), then the proposal's
+replaced names, the refusal's `repair`, its `location` and the source name.
+`trimmed` lists what was dropped, so a short answer never hides that it is
+short.
+
+**An empty session is a named answer, not nulls.** With nothing loaded, no
+draft held and no proposal pending, the answer is `state: "empty"`, a `why`
+line and a `next` call (`revl_load`, with the origin this session still holds
+when it has one). No field is null, so a caller reads it without checking
+each value.
+
+The brief keeps no state of its own. Every field is recomputed from the
+ambient footer, the proposal store, the held draft and a verdict recorded
+where every answer already passes. That record is an index of an answer the
+session already gave, never an input to admission, planning or a swap, and the
+brief's own call is never recorded, so reading it cannot change what it says.
 
 ### `revl_check`
 

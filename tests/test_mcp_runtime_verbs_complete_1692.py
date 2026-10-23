@@ -68,6 +68,7 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_gauntlet": ({"source": SOURCE2}, None),
     "revl_test_run": ({"selection": ["tests/no_such_2843_run.py"],
                        "cwd": "."}, None),
+    "revl_brief": ({}, None),
     "revl_quarantine": ({"source": SOURCE2}, None),
     "revl_repair": ({"component": "C"}, None),
     "revl_rollback": ({}, None),

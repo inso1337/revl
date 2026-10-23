@@ -310,6 +310,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | verb(s) | use | detail |
 |---|---|---|
 | `revl_verbs` | find a verb `tools/list` does not show: every verb by topic, then the schemas of a topic or of named verbs | [mcp-reference.md](mcp-reference.md#revl_verbs) |
+| `revl_brief` | between loop steps: one compact answer with what is loaded and at which generation, the last refusal (code, `file:line`, repair) or check verdict, any pending proposal or draft, and the one call to make next, capped at 1200 characters and derived from session state so it cannot drift from `revl_state` | [mcp-reference.md](mcp-reference.md#revl_brief) |
 | `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
 | `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not; with no candidate it checks the composition the session holds | [mcp-reference.md](mcp-reference.md#revl_check) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
