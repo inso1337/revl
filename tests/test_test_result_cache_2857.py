@@ -15,7 +15,11 @@ marker, not by a mock.
 The end-to-end cases are the acceptance cases: first run executes and writes,
 second unchanged run executes nothing and says so, a changed test file reruns
 exactly that entry, a changed declared input reruns exactly that entry, a
-failure is never cached as green, and an unhashable input reruns.
+failure is never cached as green, and an unhashable input reruns. Three more
+cases pin the conservative edges the first review found: a PYTEST_* control
+must not produce a green entry for a file whose other tests fail, a nested
+redeclaration of CACHE_INPUTS is unknown, and a pytest config above --root
+makes the target uncacheable.
 """
 from __future__ import annotations
 
@@ -56,6 +60,49 @@ def test_runs():
     with marker.open("a", encoding="utf-8") as handle:
         handle.write("run\\n")
     assert os.environ.get("REVL_TEST_CACHE_FAIL") != "1"
+'''
+
+
+def _mixed_source(marker: str) -> str:
+    """One passing and one failing test, both recording an execution."""
+    return f'''\
+from pathlib import Path
+
+CACHE_INPUTS = ()
+
+
+def _record():
+    marker = Path(__file__).with_name({marker!r})
+    with marker.open("a", encoding="utf-8") as handle:
+        handle.write("run\\n")
+
+
+def test_ok():
+    _record()
+    assert True
+
+
+def test_bad():
+    _record()
+    assert False
+'''
+
+
+def _nested_source(marker: str) -> str:
+    """A top-level literal plus a nested reassignment the parser must reject."""
+    return f'''\
+from pathlib import Path
+
+CACHE_INPUTS = ()
+
+
+def test_runs():
+    marker = Path(__file__).with_name({marker!r})
+    with marker.open("a", encoding="utf-8") as handle:
+        handle.write("run\\n")
+    if False:
+        CACHE_INPUTS = ("data/missing.txt",)
+    assert True
 '''
 
 
@@ -217,3 +264,60 @@ def test_a_test_without_a_declaration_always_reruns(tmp_path):
     assert _entries(cache) == []
     assert "uncacheable=1" in first.stdout
     assert "executed=1" in second.stdout
+
+
+def test_pytest_control_environment_cannot_cache_a_deselected_failure(tmp_path):
+    tests = tmp_path / "tests"
+    _write(tests / "test_a.py", _mixed_source("a.runs"))
+    cache = tmp_path / "cache"
+
+    first = _run(tmp_path, cache, ["tests/test_a.py"],
+                 env={"PYTEST_ADDOPTS": "-k test_ok"})
+    assert first.returncode != 0, first.stdout + first.stderr
+    assert _runs(tests / "a.runs") == 2
+    assert _entries(cache) == []
+
+    second = _run(tmp_path, cache, ["tests/test_a.py"])
+    assert second.returncode != 0, second.stdout + second.stderr
+    assert _runs(tests / "a.runs") == 4
+    assert _entries(cache) == []
+
+
+def test_a_nested_redeclaration_is_unknown_and_reruns(tmp_path):
+    tests = tmp_path / "tests"
+    _write(tests / "test_a.py", _nested_source("a.runs"))
+    cache = tmp_path / "cache"
+
+    first = _run(tmp_path, cache, ["tests/test_a.py"])
+    _assert_ok(first)
+    second = _run(tmp_path, cache, ["tests/test_a.py"])
+    _assert_ok(second)
+
+    assert _runs(tests / "a.runs") == 2
+    assert _entries(cache) == []
+    assert "uncacheable=1" in first.stdout
+    assert "uncacheable=1" in second.stdout
+
+
+def test_a_pytest_config_above_root_is_uncacheable(tmp_path):
+    root = tmp_path / "root"
+    tests = root / "tests"
+    # A parent pyproject can still supply addopts when --rootdir is pinned:
+    # pytest finds it as the inifile above the root. The tool must refuse to
+    # cache rather than write a green entry under a deselecting option.
+    _write(tmp_path / "pyproject.toml", """\
+[tool.pytest.ini_options]
+addopts = "-k test_ok"
+""")
+    _write(tests / "test_a.py", _mixed_source("a.runs"))
+    cache = tmp_path / "cache"
+
+    first = _run(root, cache, ["tests/test_a.py"])
+    _assert_ok(first)
+    second = _run(root, cache, ["tests/test_a.py"])
+    _assert_ok(second)
+
+    assert _runs(tests / "a.runs") == 2
+    assert _entries(cache) == []
+    assert "pytest config above root" in first.stdout
+    assert "uncacheable=1" in second.stdout

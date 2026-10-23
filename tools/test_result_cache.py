@@ -14,9 +14,10 @@ DECLARING INPUTS. A test module opts in with a module-level assignment:
 Paths are repository-relative regular files. `CACHE_INPUTS = ()` declares that
 the module observes nothing beyond its own source. A module with no declaration
 has UNKNOWN inputs and always reruns; so does a module whose declaration is not
-a literal tuple/list of strings, or names a missing, absolute, escaping,
-symlinked, directory, or unreadable input. That is the acceptance-critical
-direction: if an input cannot be hashed, rerun.
+a single literal tuple/list of strings, has any other static binding of the
+name anywhere in the module, or names a missing, absolute, escaping, symlinked,
+directory, or unreadable input. That is the acceptance-critical direction: if
+an input cannot be hashed, rerun.
 
 THE KEY. The digest covers the test file's content hash, the declared input
 hashes, the pytest configuration and conftest/__init__ files pytest loads for
@@ -25,6 +26,12 @@ is served only when its stored key material still matches the freshly computed
 one; an entry whose input hash changed cannot be served. Failures write no
 entry, and an entry for a target that fails is removed. A target that collected
 no test, or whose every collected test skipped, is not green and is not cached.
+
+The child pytest process drops every PYTEST_* environment control, so an option
+that deselects a failing test cannot produce a green entry for the file. A
+checkout with a pytest config or conftest above --root is not cacheable at all:
+pytest can load that file and it is outside the checkout's key, so the tool
+reruns rather than guess.
 
 SCOPE. This slice is a standalone tool. `tools/pre_merge.sh --affected` still
 calls pytest directly; wiring the cache into that gate would also have to carry
@@ -117,6 +124,32 @@ def _inside_root(path: Path, root: Path) -> Path | None:
         return None
 
 
+def _binding_count(tree: ast.Module) -> int:
+    """How many static bindings of CACHE_INPUTS the module contains."""
+    count = 0
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id == DECLARATION
+                and isinstance(node.ctx, (ast.Store, ast.Del))):
+            count += 1
+        elif isinstance(node, ast.arg) and node.arg == DECLARATION:
+            count += 1
+        elif isinstance(node, ast.alias) and (
+                node.asname == DECLARATION
+                or (node.asname is None and node.name == DECLARATION)):
+            count += 1
+        elif (isinstance(node, ast.ExceptHandler)
+              and node.name == DECLARATION):
+            count += 1
+        elif (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef))
+              and node.name == DECLARATION):
+            count += 1
+        elif (isinstance(node, ast.ImportFrom)
+              and any(alias.name == "*" for alias in node.names)):
+            count += 1
+    return count
+
+
 def declared_inputs(test_path: Path) -> tuple[str, ...] | None:
     """The test module's `CACHE_INPUTS`, or None when the declaration is unknown.
 
@@ -144,7 +177,12 @@ def declared_inputs(test_path: Path) -> tuple[str, ...] | None:
                     and node.target.id == DECLARATION
                     and node.value is not None):
                 values.append(node.value)
-    if len(values) != 1:
+    # The name must have exactly one static binding in the whole module: the
+    # top-level assignment above. A nested reassignment, a parameter, an import
+    # alias, a function or class name, a destructuring target or a star import
+    # can change what the module actually observes, and none of them is visible
+    # in tree.body alone.
+    if len(values) != 1 or _binding_count(tree) != 1:
         return None
     value = values[0]
     if not isinstance(value, (ast.Tuple, ast.List)):
@@ -191,14 +229,32 @@ def runner_inputs(root: Path, test_rel: Path) -> tuple[str, ...]:
     found: set[str] = set()
     for name in CONFIG_FILES:
         path = root / name
-        if path.exists():
+        if path.is_symlink() or path.exists():
             found.add(name)
     for directory in _ancestor_dirs(root, test_rel):
         for name in ANCESTOR_FILES:
             path = directory / name
-            if path.exists():
+            if path.is_symlink() or path.exists():
                 found.add(path.relative_to(root).as_posix())
     return tuple(sorted(found))
+
+
+def external_runner_config(root: Path) -> Path | None:
+    """A pytest config or conftest above `root`, or None when there is none.
+
+    Pytest loads conftest files from the ancestors of a test path, and can pick
+    up an inifile there too. Those files are outside the checkout root, so the
+    key does not cover them. Refusing to cache is the conservative answer.
+    """
+    current = root.parent
+    while True:
+        for name in (*CONFIG_FILES, "conftest.py"):
+            candidate = current / name
+            if candidate.is_symlink() or candidate.exists():
+                return candidate
+        if current.parent == current:
+            return None
+        current = current.parent
 
 
 def _pytest_version() -> str:
@@ -210,6 +266,9 @@ def _pytest_version() -> str:
 
 def build_key(rel: str, root: Path) -> tuple[CacheKey | None, str]:
     """The content key for one test file, or (None, reason) when it is unknown."""
+    external = external_runner_config(root)
+    if external is not None:
+        return None, f"pytest config above root: {external}"
     test_path = root / rel
     test_digest = hash_regular_file(test_path)
     if test_digest is None:
@@ -354,7 +413,11 @@ def expand_selection(values: list[str]) -> list[str]:
 
 
 def _pytest_env(root: Path) -> dict[str, str]:
-    env = os.environ.copy()
+    # PYTEST_ADDOPTS can deselect a failing test, PYTEST_PLUGINS can change
+    # collection, and the rest can change the runner. Dropping every control
+    # keeps one command line behind every green entry.
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith("PYTEST_")}
     source = root / "src"
     if source.is_dir():
         existing = env.get("PYTHONPATH", "")
@@ -450,7 +513,8 @@ def run(selection: list[str], root: Path, cache_dir: Path) -> int:
         xml = Path(temporary) / "results.xml"
         command = [
             sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-            "-o", "junit_family=xunit1", f"--junitxml={xml}",
+            f"--rootdir={root}", "-o", "junit_family=xunit1",
+            f"--junitxml={xml}",
             *[plan.rel if plan.rel is not None else plan.raw
               for plan in execute],
         ]
