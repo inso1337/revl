@@ -14,7 +14,7 @@ class RevlError(Exception):
                  code: str | None = None, category: str | None = None,
                  expected: str | None = None, actual: str | None = None,
                  why: WhyTrace | None = None, navigate: dict | None = None,
-                 fix: str | None = None):
+                 fix: str | None = None, repair: dict | None = None):
         self.filename = filename
         self.line = line
         self.message = message
@@ -35,6 +35,11 @@ class RevlError(Exception):
         # per-code `diagnostics.FIXES` entry (a corrected line, say). A
         # structured field only, like `navigate`: not rendered below.
         self.fix = fix
+        # issue #2845: the minimal repair for THIS refusal, where the
+        # constructing check already knows it (target, edit, reason), or an
+        # explicit `known: False` when it knows none. Also a structured field
+        # only, so every rendered message stays byte-identical.
+        self.repair = repair
         # the derivation behind the verdict, where the check ran a search
         # (G4's fixed point, G3's cycle, G2's provider table) — see why.py.
         # It is appended *after* the message and hint so the first line of
@@ -72,7 +77,7 @@ class RevlErrors(RevlError):
         super().__init__(first.filename, first.line, first.message,
                          hint=first.hint, code=first.code, category=first.category,
                          expected=first.expected, actual=first.actual, why=first.why,
-                         navigate=first.navigate)
+                         navigate=first.navigate, repair=first.repair)
 
     def __str__(self) -> str:
         # A single refusal renders exactly as a plain `RevlError` would: no

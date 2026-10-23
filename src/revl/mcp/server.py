@@ -1188,6 +1188,17 @@ def _refusal_code(error: BaseException) -> dict:
     return {"code": code} if code else {}
 
 
+def _repair_field(repair: dict | None) -> dict:
+    """The refusal's structured repair (issue #2845), or nothing at all.
+
+    Spelled here, like `_fix_field`, because the envelope's copies
+    (`http_face._err`, `query_tools._require`, `query_tools._run` and
+    `_session_error` itself) share one recorded vocabulary
+    (`tools/check_vocabulary_mirrors.py`): adding the field in a helper keeps
+    that literal at the six fields those copies spell."""
+    return {} if repair is None else {"repair": repair}
+
+
 def _session_error(message: str | BaseException, category: str = "session",
                    fix: str | None = None, **extra) -> dict:
     """A session refusal. `message` is the prose, or the exception that
@@ -1198,12 +1209,21 @@ def _session_error(message: str | BaseException, category: str = "session",
     the arguments that makes this same call work — and rides on the diagnostic
     when the refusal has one (issue #2035). It is deliberately not the `next`
     call: a next call is a *different* call to make, where `fix` is this call
-    with one argument dropped."""
+    with one argument dropped.
+
+    Issue #2845: a refusal exception that carries a structured `repair` (a
+    `SessionError` with a code and a minimal edit, e.g. STATE_UNDISCLOSED)
+    hands it to the payload here, beside the diagnosis. It is additive, and
+    the prose message is untouched."""
+    carried = (getattr(message, "repair", None)
+               if isinstance(message, BaseException) else None)
     message, remedy = _remedy.resolve(message, extra)
     diagnostic = {"severity": "error", "code": "REVL", "category": category,
                   "message": message, **_fix_field(fix)}
-    return _remedy.attach({"ok": False, "diagnostics": [diagnostic], **extra},
-                          remedy)
+    payload = {"ok": False, "diagnostics": [diagnostic], **extra}
+    if carried is not None and "repair" not in payload:
+        payload.update(_repair_field(carried))
+    return _remedy.attach(payload, remedy)
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---

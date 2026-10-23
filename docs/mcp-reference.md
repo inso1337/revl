@@ -93,6 +93,36 @@ A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
 load remedy.
 
+**Refusals carry their repair.** A refusal whose class the compiler already
+knows how to repair returns the minimal repair as data in `repair`, beside the
+diagnostics (issue #2845):
+
+```json
+"repair": {"target": "<candidate>.rvl:2 record literal for `Point`",
+           "edit": "add the field `y` in the literal checked against `Point`",
+           "reason": "T1: a record literal must carry exactly the fields its declared record type declares"}
+```
+
+`target` names the smallest thing to change: a `file:line` locator plus what
+sits there, a template name, or a handoff key. `edit` is the one edit that
+closes the refusal; where the repair is a call rather than an edit, `command`
+plays that role. `reason` is the rule that refused, in one sentence. A class
+the compiler knows, but a shape whose minimal edit it cannot name, still
+carries `repair`: no `edit` or `command`, and `"known": false`, so a caller
+reads "checked, nothing known" rather than a missing field. `repair` is
+additive, and the diagnostics beside it keep every field and every message
+they carried before.
+
+Repairs today:
+
+| Refusal | `repair` |
+| ------- | -------- |
+| a type mismatch of a shape the checker can repair (`typecheck.mismatch`, used by the typecheck and the lower stages) | `target` the position, `edit` the unwrap of an `Opt[...]`, or the `Auth.validate` step that mints the `Principal` |
+| a record literal that does not match its declared record (the checker's check position and the lowered IR check) | `target` the literal's `file:line`, `edit` the fields to add or drop |
+| any other definite type mismatch | `target` the position, no `edit`, `known: false` |
+| `STATE_UNDISCLOSED` on a changed live template | `target` the template name, `edit` re-declare it with the text gen N runs, or quiesce the live instances with `revl_unload` |
+| `STATE_UNDISCLOSED` on an incompatible `handoff` accept type | `target` the handoff key, `edit` declare an accept type that holds the running export, or drop the handoff so the successor starts cold |
+
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
 only `revl_load` can boot one, which needs `cordis`. If the server's interpreter

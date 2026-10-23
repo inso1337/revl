@@ -659,9 +659,24 @@ def report(error: RevlError) -> dict:
     `.errors` holds every collected refusal; map `classify` over the list. A
     single `RevlError` (no `.errors`) still yields a one-element list, so every
     existing single-error consumer is unchanged.
+
+    Issue #2845: the refusal carries the repair the constructing check already
+    knows, in preference to the diagnosis alone. `repair` is additive at the
+    payload's top level, beside `diagnostics`, and it is the first one the
+    refusal carries in diagnostic order. A refusal whose class has no repair
+    known to the compiler carries `{"target": ..., "reason": ..., "known":
+    False}` from its own constructor rather than omitting the field, so a
+    caller can tell "checked, nothing known" from "this server predates the
+    field".
     """
     errors = getattr(error, "errors", None) or [error]
-    return {"ok": False, "diagnostics": [classify(e) for e in errors]}
+    payload = {"ok": False, "diagnostics": [classify(e) for e in errors]}
+    for one in errors:
+        repair = getattr(one, "repair", None)
+        if repair is not None:
+            payload["repair"] = repair
+            break
+    return payload
 
 
 def ok(**payload) -> dict:
