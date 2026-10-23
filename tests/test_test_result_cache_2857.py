@@ -15,11 +15,12 @@ marker, not by a mock.
 The end-to-end cases are the acceptance cases: first run executes and writes,
 second unchanged run executes nothing and says so, a changed test file reruns
 exactly that entry, a changed declared input reruns exactly that entry, a
-failure is never cached as green, and an unhashable input reruns. Three more
-cases pin the conservative edges the first review found: a PYTEST_* control
-must not produce a green entry for a file whose other tests fail, a nested
-redeclaration of CACHE_INPUTS is unknown, and a pytest config above --root
-makes the target uncacheable.
+failure is never cached as green, and an unhashable input reruns. Five more
+cases pin the conservative edges review found: a PYTEST_* control must not
+produce a green entry for a file whose other tests fail, a nested redeclaration
+of CACHE_INPUTS is unknown, a pytest config above --root makes the target
+uncacheable, and both a pytest.toml at the root and a config between the root
+and the test are part of the key.
 """
 from __future__ import annotations
 
@@ -321,3 +322,47 @@ addopts = "-k test_ok"
     assert _entries(cache) == []
     assert "pytest config above root" in first.stdout
     assert "uncacheable=1" in second.stdout
+
+
+def test_a_pytest_toml_config_is_part_of_the_key(tmp_path):
+    tests = tmp_path / "tests"
+    config = tmp_path / "pytest.toml"
+    _write(config, """\
+[pytest]
+addopts = ["-k", "test_ok"]
+""")
+    _write(tests / "test_a.py", _mixed_source("a.runs"))
+    cache = tmp_path / "cache"
+
+    first = _run(tmp_path, cache, ["tests/test_a.py"])
+    _assert_ok(first)
+    assert "wrote=1" in first.stdout
+    assert _runs(tests / "a.runs") == 1
+
+    config.unlink()
+    second = _run(tmp_path, cache, ["tests/test_a.py"])
+    assert second.returncode != 0, second.stdout + second.stderr
+    assert "reused=0" in second.stdout
+    assert _runs(tests / "a.runs") == 3
+
+
+def test_a_config_between_root_and_test_is_part_of_the_key(tmp_path):
+    tests = tmp_path / "tests"
+    config = tests / "pytest.ini"
+    _write(config, """\
+[pytest]
+addopts = -k test_ok
+""")
+    _write(tests / "test_a.py", _mixed_source("a.runs"))
+    cache = tmp_path / "cache"
+
+    first = _run(tmp_path, cache, ["tests/test_a.py"])
+    _assert_ok(first)
+    assert "wrote=1" in first.stdout
+    assert _runs(tests / "a.runs") == 1
+
+    config.unlink()
+    second = _run(tmp_path, cache, ["tests/test_a.py"])
+    assert second.returncode != 0, second.stdout + second.stderr
+    assert "reused=0" in second.stdout
+    assert _runs(tests / "a.runs") == 3

@@ -71,7 +71,10 @@ DECLARATION = "CACHE_INPUTS"
 EMPTY = "test-result-cache:"
 
 #: Files at the checkout root that change how pytest collects or runs a module.
-CONFIG_FILES = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
+CONFIG_FILES = (
+    "pyproject.toml", "pytest.ini", "pytest.toml", ".pytest.toml", ".pytest.ini",
+    "setup.cfg", "tox.ini",
+)
 #: Pytest loads both of these from every ancestor directory of a test.
 ANCESTOR_FILES = ("conftest.py", "__init__.py")
 
@@ -221,17 +224,20 @@ def _ancestor_dirs(root: Path, test_rel: Path) -> list[Path]:
 def runner_inputs(root: Path, test_rel: Path) -> tuple[str, ...]:
     """Files pytest loads around a test besides the test and its declared inputs.
 
-    These are not declared by the test author: pytest reads the root config and
-    every ancestor conftest/__init__ file. Hashing them means an edit there
-    invalidates the entries it can affect. A file that exists but cannot be
-    hashed makes the whole key unknown, which reruns.
+    These are not declared by the test author: pytest can read a config and a
+    conftest/__init__ file from any ancestor of the test. Hashing every one
+    means an edit there invalidates the entries it can affect. A file that
+    exists but cannot be hashed makes the whole key unknown, which reruns.
     """
     found: set[str] = set()
-    for name in CONFIG_FILES:
-        path = root / name
-        if path.is_symlink() or path.exists():
-            found.add(name)
     for directory in _ancestor_dirs(root, test_rel):
+        # Pytest can select an inifile in any ancestor of the test, not only at
+        # the checkout root, so every accepted config name is hashed at every
+        # level between the test and the root.
+        for name in CONFIG_FILES:
+            path = directory / name
+            if path.is_symlink() or path.exists():
+                found.add(path.relative_to(root).as_posix())
         for name in ANCESTOR_FILES:
             path = directory / name
             if path.is_symlink() or path.exists():
