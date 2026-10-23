@@ -389,42 +389,49 @@ One compact next-step answer for the loop, instead of a state dump (issue
 #2854). No inputs. It is a strict projection of state the session already
 holds, so it cannot disagree with `revl_state`:
 
-- `state`: `loaded`, `draft` (a hole-bearing draft is held and nothing is
-  loaded) or `empty`.
+- `state`: `loaded`, `draft` (a draft is held and nothing is loaded) or
+  `empty`.
 - `generation`, `components` and `source`: what is running, at which
   generation, and where it came from (the file names, or `inline source`). A
   held draft reports its own source.
-- `last`: the verdict of the last answer that judged work. A refusal carries
-  `outcome: "refused"`, the `verb`, the `code`, the `location` (`file:line`
-  when the diagnostic names one) and the `repair` (the diagnostic's `fix` or
-  `hint`) when it has one. A green `revl_check` or `revl_admit` carries
-  `outcome: "ok"`, the `verb` and the `verdict`, plus `held: true` when a
-  check judged the source the session holds rather than a candidate the
-  caller sent, and the open `holes` count when a check leaves any.
+- `last`: the verdict of the last answer that judged work, and only that one:
+  a green verdict or a refusal replaces the previous record, it never merges
+  with it. A refusal carries `outcome: "refused"`, the `verb`, the `code`, the
+  `location` (`file:line` when the diagnostic names one) and the `repair` (the
+  diagnostic's `fix` or `hint`) when it has one. A green `revl_check` or
+  `revl_admit` carries `outcome: "ok"`, the `verb` and the `verdict`, plus
+  `held: true` when a check judged the source the session holds rather than a
+  candidate the caller sent, and the open `holes` count when a check leaves
+  any.
 - `pending`: the held proposal (`kind`, its `generation`, the components it
   replaces, `stale: true` when the running composition moved under it) or the
-  held draft (`kind: "draft"`).
+  held draft (`kind: "draft"` and its open `holes` count).
 - `next`: exactly one call, in the same `{tool, arguments, ready}` shape a
-  refusal's `next` uses, chosen from the state: commit a proposal, discard a
-  stale one, check a held draft, take the refusal's own remedy, swap the held
-  working source when a green check judged it, or check the held source. A
-  green verdict on a candidate the caller sent names `revl_swap` as not
-  ready, because the brief does not carry that candidate's source.
+  refusal's `next` uses. A refusal's own remedy comes first, whatever the
+  state. Otherwise the state decides: on an empty session `revl_load`, then
+  commit a proposal (discard a stale one), then boot a draft with no holes
+  (`revl_load`) or edit one that has holes (`revl_edit`), then a green
+  verdict: swap the held working source when the check judged it, fill the
+  holes when the check left any, and otherwise name `revl_swap` as not ready
+  because the brief does not carry the checked candidate's source.
 
 **It is bounded.** The brief block's compact JSON is at most 1200 characters
 (`brief.CAP` in `src/revl/mcp/brief.py`). When a projection is over that, the
 trims run in a fixed order and names go before the action: the next call's
-arguments first (the `tool`, its `ready` and its `needs` stay), then the
-component names (a `componentCount` replaces them), then the proposal's
-replaced names, the refusal's `repair`, its `location` and the source name.
-`trimmed` lists what was dropped, so a short answer never hides that it is
-short.
+arguments first (the `tool` and any `needs` stay, and `ready` becomes false),
+then the component names (a `componentCount` replaces them), then the
+proposal's replaced names, the refusal's `repair`, its `location`, the source
+name, and finally the whole `last` block. `trimmed` lists what was dropped, so
+a short answer never hides that it is short. A value no trim can shorten (a
+hatch's verb name is the one caller-supplied name recorded) is clipped at the
+source, and a final floor keeps the state and the next call if every trim is
+spent.
 
-**An empty session is a named answer, not nulls.** With nothing loaded, no
-draft held and no proposal pending, the answer is `state: "empty"`, a `why`
-line and a `next` call (`revl_load`, with the origin this session still holds
-when it has one). No field is null, so a caller reads it without checking
-each value.
+**An empty session is a named answer, not nulls.** With nothing loaded and no
+draft held, the answer is `state: "empty"`, a `why` line and a `next` call:
+the last refusal's own remedy when it offered one, else `revl_load` with the
+origin this session still holds when it has one. No field is null, so a caller
+reads it without checking each value.
 
 The brief keeps no state of its own. Every field is recomputed from the
 ambient footer, the proposal store, the held draft and a verdict recorded

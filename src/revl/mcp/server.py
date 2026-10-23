@@ -6606,11 +6606,13 @@ TOOLS = [
                        "holds: every field is recomputed from the ambient "
                        "footer, the proposal store, the held draft and the "
                        "recorded verdict, so it cannot disagree with `revl_state`. "
-                       "The answer is bounded: at most 1200 characters of "
+                       "The BRIEF BLOCK is bounded: at most 1200 characters of "
                        "compact JSON, with names dropped before `next` (a "
-                       "`trimmed` list names what was dropped). An empty session "
-                       "answers `state: \"empty\"` with a `why` line and a `next` "
-                       "call, never nulls. See docs/mcp-reference.md.",
+                       "`trimmed` list names what was dropped). The session "
+                       "footer every response carries is outside that bound. An "
+                       "empty session answers `state: \"empty\"` with a `why` "
+                       "line and a `next` call, never nulls. See "
+                       "docs/mcp-reference.md.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_brief,
@@ -7391,10 +7393,13 @@ def handle(message: dict) -> dict | None:
 
 def _called_verb(name: str, arguments: dict) -> str:
     """The verb an answer belongs to. A `revl_verbs` hatch call answers as the
-    verb it names, so the brief records that verb and not the lookup."""
+    verb it names, so the brief records that verb and not the lookup. A hatch
+    that names no verb this server has records the discovery call: the name
+    came from the caller and can be any length, and the brief's answer is
+    bounded."""
     if name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
         verb, _args, _reason, _next = _disclosure.hatch(arguments)
-        if verb:
+        if verb in _HANDLERS:
             return verb
     return name
 

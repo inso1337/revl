@@ -30,13 +30,16 @@ session footer and `ok` flag beside it. When a projection is over the cap the
 trims are applied in a fixed order that drops NAMES before the action: the
 next call's arguments first (the call and its `tool` stay), then the component
 names (a `componentCount` replaces them), then the proposal's replaced names,
-then the last refusal's repair, then its location, then the source name. Every
-trim is reported in `trimmed`, so a short answer never silently hides that it
-is short.
+then the last refusal's repair, then its location, then the source name, then
+the whole `last` block. Every trim is reported in `trimmed`, so a short answer
+never silently hides that it is short. The one caller-supplied name this
+records (a hatch's verb name) is clipped at the source, and a final floor
+keeps the state and the next call if every trim is spent, so the cap is
+enforced by construction rather than by enumeration.
 
-An empty session - nothing loaded, no draft held, no proposal pending - is a
-NAMED answer, `"state": "empty"`, with a `why` line and a `next` call. No
-field is null: a caller can read the answer without checking each value.
+An empty session - nothing loaded and no draft held - is a NAMED answer,
+`"state": "empty"`, with a `why` line and a `next` call. No field is null: a
+caller can read the answer without checking each value.
 """
 
 from __future__ import annotations
@@ -45,8 +48,10 @@ import json
 
 from . import ambient
 from . import draft as _draft
+from . import edit as _edit
 from . import proposal as _proposal
 from . import remedy as _remedy
+from ..errors import RevlError
 
 #: The documented cap: the compact JSON of the brief block, in characters.
 CAP = 1200
@@ -73,7 +78,7 @@ _STORE = "_brief_last"
 #: The trims, in the order they are applied when the block is over `CAP`.
 #: Names go before the action: `next` is the last thing an answer may lose.
 _TRIM_ORDER = ("next.arguments", "components", "pending.replacing",
-               "last.repair", "last.location", "source")
+               "last.repair", "last.location", "source", "last")
 
 
 # ------------------------------------------------------------------ recording
@@ -114,7 +119,12 @@ def _store(session) -> dict:
 
 
 def _remember(session, entry: dict) -> None:
-    _store(session).update(entry)
+    """Replace the record with `entry`. It is one verdict, not a set of
+    fields: merging would leave a refusal's code beside a later check's
+    `verdict`, and `last` would report two answers at once."""
+    store = _store(session)
+    store.clear()
+    store.update(entry)
 
 
 def _forget(session) -> None:
@@ -132,8 +142,8 @@ def _refusal(verb: str, payload: dict) -> dict:
     mechanical repair and the call the refusal already offers."""
     diagnostic = next((d for d in payload.get("diagnostics") or []
                        if isinstance(d, dict)), {})
-    entry = {"outcome": "refused", "verb": verb,
-             "code": diagnostic.get("code") or "REVL"}
+    entry = {"outcome": "refused", "verb": _clip(verb, 80),
+             "code": _clip(diagnostic.get("code") or "REVL", 40)}
     location = _location(diagnostic)
     if location:
         entry["location"] = location
@@ -166,7 +176,8 @@ def _verdict(verb: str, payload: dict) -> dict:
     """A green verdict: which verb judged the work, and the facts that can
     change the next step (a check's open holes, and whether it judged the
     source the session holds rather than a candidate the caller sent)."""
-    entry = {"outcome": "ok", "verb": verb, "verdict": _VERDICTS[verb]}
+    entry = {"outcome": "ok", "verb": _clip(verb, 80),
+             "verdict": _VERDICTS[verb]}
     if verb == "revl_check":
         if payload.get("checked") == "session":
             entry["held"] = True
@@ -206,7 +217,7 @@ def project(session) -> dict:
     if held is not None:
         brief["pending"] = _pending(session, held)
     elif draft is not None:
-        brief["pending"] = {"kind": "draft"}
+        brief["pending"] = _draft_pending(draft)
     brief["next"] = _next(session, brief, footer, held, draft, last)
     return _bounded(brief)
 
@@ -247,6 +258,34 @@ def _pending(session, held: dict) -> dict:
     return pending
 
 
+def _draft_pending(draft: dict) -> dict:
+    """The held draft, with its open hole count when the draft compiles (it
+    always does: a patch that does not compile leaves the draft unchanged).
+    The count is what tells the loop whether to fill or to boot."""
+    pending = {"kind": "draft"}
+    holes = _draft_holes(draft.get("vs"))
+    if holes is not None:
+        pending["holes"] = holes
+    return pending
+
+
+def _draft_holes(vs) -> int | None:
+    """The draft's open holes, read the same way `revl_state` reads them. A
+    draft that cannot be compiled reports `None` rather than a made-up zero."""
+    try:
+        return len(_draft.collect_holes(_edit.compile_virtual(vs)))
+    except RevlError:
+        return None
+
+
+def _clip(text, limit: int) -> str:
+    """`text` as a string no longer than `limit` characters. Only a safety
+    bound for a field whose value is a name handed in by a caller (a hatch's
+    verb name), never a normal path."""
+    value = str(text)
+    return value if len(value) <= limit else value[:limit]
+
+
 def _source(vs) -> str | None:
     """The identity of a working set: the files it came from, or the fact that
     it is inline text. `None` when there is no source to name."""
@@ -269,36 +308,49 @@ def _basename(path) -> str:
 
 
 def _next(session, brief: dict, footer: dict, held, draft, last) -> dict:
-    """The one call to make next, in `remedy`'s call shape. State first, then
-    what the last verdict leaves to do."""
-    if held is not None:
-        if _proposal.stale(session) is not None:
-            return _remedy.call("revl_change", {"discard": True})
-        return _remedy.call("revl_change", {"commit": True})
-    if draft is not None:
-        return _remedy.call("revl_check", {"session": True})
+    """The one call to make next, in `remedy`'s call shape.
+
+    A refusal's own remedy comes first, whatever the state: it names what the
+    refused call needs, and a session with nothing loaded can only be told to
+    load, so a check or a swap here would necessarily be refused too. After
+    that the state decides, then the last verdict."""
     refused = last if last and last.get("outcome") == "refused" else None
     if refused is not None:
         action = refused.get("_next")
         if isinstance(action, dict) and "tool" in action:
             return dict(action)
+        if brief["state"] == EMPTY:
+            return _load_next(session)
         return _remedy.call("revl_check", {"session": True})
+    if brief["state"] == EMPTY:
+        return _load_next(session)
+    if held is not None:
+        if _proposal.stale(session) is not None:
+            return _remedy.call("revl_change", {"discard": True})
+        return _remedy.call("revl_change", {"commit": True})
+    if draft is not None:
+        holes = (brief.get("pending") or {}).get("holes")
+        if holes == 0:
+            return _remedy.call("revl_load", {})
+        return _remedy.call(
+            "revl_edit", {}, ready=False,
+            needs="an edit that fills one of the draft's holes; each fillSpec "
+                  "names the line and the expected type")
     verdict = last.get("verdict") if last else None
     if verdict in ("checked", "admitted"):
+        if last.get("holes"):
+            return _remedy.call(
+                "revl_edit", {}, ready=False,
+                needs="edits that fill the holes the last check listed")
         # only a verdict on the source the session HOLDS can be swapped with
         # `revl_swap {}`; a green verdict on a candidate the caller sent names
         # the swap step without pretending the brief carries that source
-        if brief["state"] == "loaded" and footer.get("dirty") \
-                and last.get("held"):
+        if footer.get("dirty") and last.get("held"):
             return _remedy.call("revl_swap", {})
         return _remedy.call(
             "revl_swap", {}, ready=False,
             needs="the candidate that was checked or admitted; the brief does "
                   "not carry its source")
-    if brief["state"] == "loaded" and footer.get("dirty"):
-        return _remedy.call("revl_check", {"session": True})
-    if brief["state"] == EMPTY:
-        return _load_next(session)
     return _remedy.call("revl_check", {"session": True})
 
 
@@ -339,7 +391,31 @@ def _bounded(brief: dict) -> dict:
             break
         if _trim(out, trim):
             out["trimmed"].append(trim)
+    if size(out) > CAP:
+        # every named trim is spent and the block still does not fit: return
+        # the smallest answer this verb may give rather than an unbounded one.
+        # The next call stays, because it is the answer's whole point.
+        out = _floor(out)
     return out
+
+
+def _floor(brief: dict) -> dict:
+    """The smallest answer `revl_brief` may return: the state, one next call
+    with its strings clipped, and nothing else. It is a backstop for a value a
+    caller supplied (a hatch's verb name) or an unusually long refusal field,
+    never the normal shape, and it is small by construction."""
+    action = brief.get("next") if isinstance(brief.get("next"), dict) else {}
+    trimmed = list(brief.get("trimmed") or [])
+    trimmed.append("all but the state and the next call")
+    floor = {"state": _clip(brief.get("state") or EMPTY, 20),
+             "next": {"tool": _clip(action.get("tool") or "", 80),
+                      "arguments": {}, "ready": False},
+             "trimmed": trimmed}
+    if brief.get("why"):
+        floor["why"] = _clip(brief["why"], 200)
+    if brief.get("generation") is not None:
+        floor["generation"] = brief["generation"]
+    return floor
 
 
 def _trim(brief: dict, trim: str) -> bool:
@@ -370,6 +446,11 @@ def _trim(brief: dict, trim: str) -> bool:
         pending = dict(pending)
         pending["replacingCount"] = len(pending.pop("replacing"))
         brief["pending"] = pending
+        return True
+    if trim == "last":
+        if "last" not in brief:
+            return False
+        del brief["last"]
         return True
     if trim.startswith("last."):
         field = trim.split(".", 1)[1]

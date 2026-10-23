@@ -267,9 +267,90 @@ def test_a_check_verdict_with_holes_carries_the_hole_count(held):
     assert answer["state"] == "draft"
     assert answer["last"]["verdict"] == "checked"
     assert answer["last"]["holes"] == 1
-    assert answer["pending"] == {"kind": "draft"}
-    assert answer["next"] == {"tool": "revl_check", "arguments": {"session": True},
+    # the draft's own hole count is part of the state, not a second compile
+    # nobody can see
+    assert answer["pending"] == {"kind": "draft", "holes": 1}
+    # a holed draft cannot boot, so the next step is the edit, not a check
+    assert answer["next"]["tool"] == "revl_edit"
+    assert answer["next"]["ready"] is False
+
+
+def test_a_draft_with_no_holes_is_booted_next(held):
+    held.loaded = False
+    held.pending_draft = {"vs": {"source": GOOD, "modules": {}},
+                          "config": None, "record": False}
+
+    answer = _brief()
+
+    assert answer["state"] == "draft"
+    assert answer["pending"] == {"kind": "draft", "holes": 0}
+    assert answer["next"] == {"tool": "revl_load", "arguments": {},
                               "ready": True}
+
+
+def test_a_green_check_that_left_holes_does_not_offer_a_ready_swap(held):
+    """`ok: true` with holes is not admissible, so a ready `revl_swap {}`
+    would be refused. The brief names the edit instead."""
+    held.loaded = True
+    held.origin = {"source": BAD, "modules": {}}
+    held.ir = compile_source(GOOD)
+    held.draft = {"source": HOLED, "modules": {}}
+    checked = _call("revl_check", {"session": True})
+    assert checked["ok"] is True and checked["holes"]
+
+    answer = _brief()
+
+    assert answer["last"]["held"] is True
+    assert answer["last"]["holes"]
+    assert answer["next"]["tool"] == "revl_edit"
+    assert answer["next"]["ready"] is False
+
+
+def test_a_second_verdict_replaces_the_first(held):
+    """`last` is one answer, not a field soup: a green check after a refusal
+    must not keep the refusal's code, and a refusal after a check must not
+    keep the check's verdict."""
+    held.loaded = True
+    held.ir = compile_source(GOOD)
+    _call("revl_check", {"source": BAD})
+    assert _brief()["last"]["outcome"] == "refused"
+
+    _call("revl_check", {"source": GOOD})
+    last = _brief()["last"]
+    assert last == {"outcome": "ok", "verb": "revl_check", "verdict": "checked"}
+    assert "code" not in last and "repair" not in last
+
+    _call("revl_check", {"source": BAD})
+    last = _brief()["last"]
+    assert last["outcome"] == "refused"
+    assert "verdict" not in last and "held" not in last and "holes" not in last
+
+
+def test_an_empty_session_after_a_verdict_still_offers_a_load(held):
+    """Nothing is loaded, so no other next call can succeed: the verdict is
+    reported, but the action is the load."""
+    _call("revl_check", {"source": GOOD})
+
+    answer = _brief()
+
+    assert answer["state"] == brief.EMPTY
+    assert answer["last"]["verdict"] == "checked"
+    assert answer["next"]["tool"] == "revl_load"
+
+
+def test_a_hatch_name_cannot_stretch_the_brief_past_the_cap(held):
+    """The one caller-supplied name the brief records is a hatch's verb name.
+    A name the server does not have is not recorded, so the answer stays
+    bounded."""
+    held.loaded = True
+    held.ir = compile_source(GOOD)
+    _call("revl_verbs", {"name": "x" * 5000, "args": {}})
+
+    answer = _brief()
+
+    assert answer["last"]["verb"] == "revl_verbs"
+    assert brief.size({k: v for k, v in answer.items()
+                       if k != "sessionState"}) <= brief.CAP
 
 
 def test_a_pending_proposal_is_reported_and_committing_it_is_next(held):
@@ -292,29 +373,40 @@ def test_a_pending_proposal_is_reported_and_committing_it_is_next(held):
 
 
 def test_the_answer_is_the_projection_of_the_session_fields(held):
-    """The drift guard: the verb's answer is exactly `brief.project` of the
-    session, and each projected field equals the state it projects. A field
-    that stopped being derived would fail here."""
+    """The drift guard, written as a hand projection rather than as
+    `answer == brief.project(session)`: the expected block is built here from
+    the same sources the brief reads, so a brief that dropped, renamed or
+    stopped deriving a field reddens this test even if `project` changed with
+    it."""
     held.loaded = True
     held.origin = {"source": GOOD, "modules": {}}
     held.ir = compile_source(GOOD)
     held._generation = 4
-    _call("revl_check", {"source": BAD})
+    refused = _call("revl_check", {"source": BAD})
+    diagnostic = refused["diagnostics"][0]
 
-    answer = _brief()
+    answer = {k: v for k, v in _brief().items() if k != "sessionState"}
 
-    assert answer == {"ok": True, **brief.project(held),
-                      "sessionState": ambient.footer(held)}
     footer = ambient.footer(held)
-    assert answer["state"] == "loaded"
-    assert answer["generation"] == held._generation == footer["generation"]
-    assert answer["components"] == footer["components"]
-    assert answer["source"] == "inline source"
-    assert answer["last"] == brief.recorded(held)
+    expected = {
+        "ok": True,
+        "state": "loaded",
+        "generation": footer["generation"],
+        "components": footer["components"],
+        "source": "inline source",
+        "last": {"outcome": "refused", "verb": "revl_check",
+                 "code": diagnostic["code"],
+                 "location": f"{diagnostic['file']}:{diagnostic['line']}",
+                 "repair": diagnostic["fix"]},
+        "next": {"tool": "revl_check", "arguments": {"session": True},
+                 "ready": True},
+    }
 
-    # a field the state does not hold cannot appear in the answer
-    assert set(answer) == {"ok", "state", "generation", "components", "source",
-                           "last", "next", "sessionState"}
+    assert footer["generation"] == held._generation == 4
+    assert answer == expected
+    # the recorded verdict is the one `last` projects, field for field
+    assert answer["last"] == {k: v for k, v in brief.recorded(held).items()
+                              if not k.startswith("_")}
 
 
 def test_each_projected_field_follows_its_own_state(held):
@@ -382,3 +474,32 @@ def test_a_next_call_too_large_to_carry_keeps_the_action(held, monkeypatch):
 def test_the_cap_is_documented_and_bounded():
     assert isinstance(brief.CAP, int) and brief.CAP == 1200
     assert brief.CAP <= 2000, "a brief that costs a state read is not a brief"
+
+
+def test_the_cap_is_enforced_by_construction():
+    """Every trim spent and still over: the floor returns the state and the
+    next call, clipped. Values no code path produces are used on purpose, so
+    the bound does not rest on the enumeration being complete."""
+    big = "x" * 5000
+    cases = [
+        {"state": "loaded", "generation": 9, "components": [big] * 10,
+         "source": big,
+         "last": {"outcome": "refused", "verb": big, "code": big,
+                  "location": big, "repair": big},
+         "pending": {"kind": "proposal", "replacing": [big] * 5},
+         "next": {"tool": big, "arguments": {"source": big}, "ready": True}},
+        {"state": brief.EMPTY, "why": big,
+         "next": {"tool": big, "arguments": {}, "ready": False,
+                  "needs": big}},
+        {"state": big, "why": big, "trimmed": [big] * 20,
+         "next": {"tool": big, "arguments": {"a": big}, "ready": True,
+                  "needs": big}},
+    ]
+
+    for case in cases:
+        answer = brief._bounded(case)
+        assert brief.size(answer) <= brief.CAP, case
+        # the action survives even when everything else does not
+        assert answer["next"]["tool"]
+        assert answer["state"]
+        assert answer["trimmed"]
