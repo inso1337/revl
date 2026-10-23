@@ -43,6 +43,10 @@ recommend a destination while revl still decides whether the destination is
 allowed. Because it is a permission and not a selection, it contributes nothing
 to the IR and no emitter changes.
 
+Model output may choose an allowed pathway, but it cannot lower an
+operator-authored `requires approval` floor on any capability that pathway
+reaches.
+
 ---
 
 ## 1. The gap
