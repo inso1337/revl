@@ -318,6 +318,26 @@ def _g_codes(codes) -> list[str]:
     return [c for c in codes if re.fullmatch(r"G\d+", c)]
 
 
+def refusal_registry() -> dict:
+    from revl.answer import REFUSALS
+    return dict(REFUSALS)
+
+
+def block_mcp_refusal_codes(current: str) -> str:
+    """docs/mcp-reference.md's refusal-code table, wholly from the registry.
+
+    The code, its category and its meaning all live in `revl.answer.REFUSALS`,
+    the same mapping the handlers draw from, so the table cannot list a code the
+    server does not emit or miss one it does.
+    """
+    out = ["| code | category | meaning |", "| ---- | -------- | ------- |"]
+    registry = refusal_registry()
+    for code in sorted(registry):
+        entry = registry[code]
+        out.append(f"| `{code}` | {entry.category} | {entry.meaning} |")
+    return "\n".join(out)
+
+
 def block_guarantees_rejections(current: str) -> str:
     """docs/rejections.md's family table. The `guarantee` column is verbatim the
     `GUARANTEES` value, so a plain equality check is the whole gate. `refused
@@ -765,6 +785,8 @@ BLOCKS: list[tuple[str, str, str, object]] = [
     ("doc-status", "docs/DOC-STATUS.md", "docs/*.md", block_doc_status),
     ("mcp-verbs", "docs/mcp-reference.md", "revl.mcp.server.TOOLS", block_mcp_verbs),
     ("mcp-verb-count", "docs/mcp-reference.md", "revl.mcp.server.TOOLS", block_mcp_count),
+    ("mcp-refusal-codes", "docs/mcp-reference.md", "revl.answer.REFUSALS",
+     block_mcp_refusal_codes),
     ("agents-mcp-count", "docs/guide-ai-agents.md", "revl.mcp.server.TOOLS",
      block_agents_mcp_count),
     ("authoring-mcp-count", "docs/authoring-for-agents.md", "revl.mcp.server.TOOLS",

@@ -93,6 +93,59 @@ A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
 load remedy.
 
+**The answer envelope (revl_check, revl_test_run).** The two verbs converted by
+issue #2858 answer in one envelope, additive to every key they returned before:
+
+| field | meaning |
+| ----- | ------- |
+| `ok` | did the call answer at all (this one is on every verb) |
+| `verdict` | `passed`, `failed` or `refused` |
+| `payloadKey` | the key in the same answer that carries the verb's substance: `selfCheck` for `revl_check`, `tests` for `revl_test_run` |
+| `refusal` | present when `verdict` is `refused`: `code`, `category`, `message`, `location`, `repair` |
+
+`failed` is a verdict about what was checked: the call ran, and the composition
+did not compile (so `diagnostics` and `selfCheck` explain it) or the suite had a
+failing test (so `tests` and `counts` explain it). `refused` is about the call
+itself: it did not run, and `refusal` names the argument to change (`location`)
+and how to change it (`repair`), so nothing has to parse the message. A
+refusal's `code` and `category` come from one registry,
+`revl.answer.REFUSALS`, and a converted handler can emit no code the registry
+does not hold: an unregistered code raises when the refusal is built, rather
+than reaching an answer.
+
+**Refusal codes.** The stable contract across the converted verbs. Message text
+stays free to improve; a script or an agent branches on the code and its
+category. This table is generated from the registry by
+`python3 tools/docgen.py --write`, so it cannot drift from what the handlers
+emit.
+
+<!-- docgen:mcp-refusal-codes begin -->
+| code | category | meaning |
+| ---- | -------- | ------- |
+| `ADMISSION_REFUSED` | admission | a path argument or an import left what the operator sanctioned |
+| `ALL_SKIPPED` | usage | every selected test was skipped, and a skipped run is not a passing run |
+| `AUTHORING_REFUSED` | admission | the candidate carried host code the session's authoring trust does not admit |
+| `BAD_CWD` | usage | the working directory was missing, was not a string, or is not a directory |
+| `BAD_SELECTION` | usage | the test selection was not a non-empty array of test paths or node ids, or one of its entries named nothing runnable |
+| `BAD_TIMEOUT` | usage | the timeout was not a positive number of seconds |
+| `DRAFT_HELD` | usage | a candidate was sent while an edit draft is held; checking it would replace the working set the draft is filling |
+| `EMPTY_SELECTION` | usage | the test selection was empty, so a run over nothing would read as green |
+| `INTERNAL_REFUSED` | internal | the verb failed while answering |
+| `LEASE_REFUSED` | lease | another operator holds a lease on a component this call would replace |
+| `MODULES_WITHOUT_CANDIDATE` | usage | `modules` are the in-memory `use` imports of a candidate and do not name a candidate by themselves |
+| `NOTHING_TO_CHECK` | session | the held composition carries no source text that could be recompiled, so there is no check to make |
+| `NO_CANDIDATE` | usage | the call named no candidate and the session held no composition to check instead |
+| `NO_TESTS_COLLECTED` | usage | the selection collected no test, so there is no result to report |
+| `OPERATOR_REFUSED` | operator | the bound operator profile does not allow this management action |
+| `OUTSIDE_ROOT` | admission | the test selection or its working directory leaves the operator-sanctioned root(s), and a selection is confined like every other path argument |
+| `RUNTIME_REFUSED` | runtime | the verb's runtime could not do what the call asked |
+| `SESSION_REFUSED` | session | the call did not fit the state the session held |
+| `SESSION_TAKES_NO_CANDIDATE` | usage | `session: true` asks to check the composition the session holds, so the call may not carry a `source`/`files` candidate of its own |
+| `TEST_RUN_FAILED` | runtime | the test runner could not be started by this server's interpreter |
+| `TIMEOUT` | runtime | the selected tests did not finish inside the timeout |
+| `USAGE` | usage | the call's arguments did not satisfy the verb's input contract |
+<!-- docgen:mcp-refusal-codes end -->
+
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
 only `revl_load` can boot one, which needs `cordis`. If the server's interpreter
@@ -464,6 +517,31 @@ verdict. A verdict always carries `selfCheck`; a usage error never does, so a
 caller can branch on that alone. The draft refusal above is the same kind of
 usage error, and carries no `selfCheck` for the same reason: nothing about the
 caller's composition was judged.
+
+The answer also carries the shared envelope (issue #2858): `verdict` is
+`passed` on a compiling candidate, `failed` when the candidate did not compile
+(the `diagnostics` and `selfCheck` rows explain why), and `refused` when the
+call itself did not run, in which case `refusal` names a registered `code`,
+its `category`, the `location` to change and a `repair`. The `revl_check`
+refusal codes are:
+
+| code | when |
+| ---- | ---- |
+| `SESSION_TAKES_NO_CANDIDATE` | `session: true` arrived with a `source`/`files` candidate |
+| `DRAFT_HELD` | a candidate arrived while an edit draft is held |
+| `MODULES_WITHOUT_CANDIDATE` | `modules` arrived with no `source`/`files` |
+| `NO_CANDIDATE` | no candidate was sent and the session holds no composition |
+| `NOTHING_TO_CHECK` | the held composition carries no source text to recompile |
+| `USAGE` | an argument the verb does not declare (shared fallback) |
+| `ADMISSION_REFUSED` | a `files` path or a `use` import outside the sanctioned roots (shared fallback) |
+| `AUTHORING_REFUSED` | the source carries host code the authoring trust does not admit (shared fallback) |
+| `SESSION_REFUSED` | a session error the handler raised while answering (shared fallback) |
+| `INTERNAL_REFUSED` | the handler raised while answering (shared fallback) |
+
+`payloadKey` is `selfCheck`. No key this verb answered with before moved. The
+last five rows are the shared fallbacks a refusal made before or around the
+handler carries; the generated table above gives every code's category and
+meaning.
 
 ### `revl_admit`
 
@@ -2040,6 +2118,31 @@ skipped are REFUSED with a named `code` (`EMPTY_SELECTION`,
 `NO_TESTS_COLLECTED`, `ALL_SKIPPED`), so a vacuous run cannot read green. The
 selection and `cwd` are confined to the operator-sanctioned root(s), like every
 other path argument.
+
+The answer carries the shared envelope (issue #2858): `payloadKey` is `tests`,
+`verdict` is `passed` or `failed` for a completed run and `refused` when the
+call did not run, and a refusal adds `refusal` with the registered `code`, its
+`category`, the argument to change in `location` and a `repair`. The existing
+`code` field is unchanged. The refusal codes are:
+
+| code | category | when |
+| ---- | -------- | ---- |
+| `EMPTY_SELECTION` | usage | `selection` was missing or empty |
+| `BAD_SELECTION` | usage | `selection` was not a non-empty array of test paths or node ids |
+| `BAD_CWD` | usage | `cwd` was missing or is not a directory |
+| `BAD_TIMEOUT` | usage | `timeout` was not a positive number of seconds |
+| `OUTSIDE_ROOT` | admission | the selection or `cwd` leaves the sanctioned root(s) |
+| `TIMEOUT` | runtime | the run outlasted `timeout` |
+| `TEST_RUN_FAILED` | runtime | pytest could not be started |
+| `NO_TESTS_COLLECTED` | usage | the selection collected no test |
+| `ALL_SKIPPED` | usage | every selected test was skipped |
+| `USAGE` | usage | an argument the verb does not declare (shared fallback) |
+| `SESSION_REFUSED` | session | a session error the handler raised while answering (shared fallback) |
+| `INTERNAL_REFUSED` | internal | the handler raised while answering (shared fallback) |
+
+The last three rows are the shared fallbacks a refusal made before or around
+the handler carries; the generated table above gives every code's category and
+meaning.
 
 - Inputs: `selection` (required; test paths or pytest node ids); `cwd`
   (required; the working directory pytest runs in); `timeout` (seconds,

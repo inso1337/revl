@@ -11,17 +11,17 @@ receives, so it can be reviewed in a diff and re-run in CI.
 | call | verb | component | answer bytes | est. tokens | echoed chars |
 |---|---|---|---:|---:|---:|
 | `state-idle` | `revl_state` | - | 1079 | 338 | 0 |
-| `check-pulse` | `revl_check` | pulse.rvl | 2882 | 910 | 0 |
+| `check-pulse` | `revl_check` | pulse.rvl | 2934 | 928 | 0 |
 | `plan-counter-pair` | `revl_plan` | counter_pair.rvl | 3499 | 1081 | 0 |
 | `audit-beacon` | `revl_audit` | beacon.rvl | 3282 | 1011 | 233 |
 | `source-counter` | `revl_source` | counter_pair.rvl | 801 | 270 | 510 |
 | `explain-g4` | `revl_explain` | - | 397 | 135 | 0 |
 | `fmt-pulse` | `revl_fmt` | pulse.rvl | 759 | 269 | 531 |
 | `refusal-ship-no-manifest` | `revl_ship` | pulse.rvl | 823 | 270 | 0 |
-| **total (8 calls)** | | | **13522** | **4284** | **1274** |
+| **total (8 calls)** | | | **13574** | **4302** | **1274** |
 
 Echoed source and IR is 1274 compact-serialised characters
-against 13522 answer bytes (9.4%): the part of the
+against 13574 answer bytes (9.4%): the part of the
 spend that repeats content the caller or the session already holds. The
 figure is a lower bound, because the answer is indented and the echoed
 values are counted without indentation. Everything else is a verdict, a
