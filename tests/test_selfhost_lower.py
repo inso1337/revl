@@ -2358,6 +2358,29 @@ component C provides s: S {
   provide s { fn go() { let f = tick   return 0 } }
 }
 """, "G4"),
+    # Issue #2834: values reaching a declared emission ceiling cannot bypass
+    # the named extern seam inside an emission service method. Test all three
+    # source shapes the reference lowering now fences with the marker demand.
+    ("g4 budgeted emission extern bound as a value", """extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn m() }
+component C provides ops: Ops {
+  provide ops { fn m() { let f = call return f("a") } }
+}
+""", "G4"),
+    ("g4 helper reaching budgeted emission bound as a value", """extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn h(x: Str) -> Int { return call(x) }
+service Ops { emission fn m() }
+component C provides ops: Ops {
+  provide ops { fn m() { let g = h return g("a") } }
+}
+""", "G4"),
+    ("g4 budgeted emission passed to a function-typed argument", """extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn m() }
+component C provides ops: Ops {
+  provide ops { fn m() { let r = apply(call, "a") return r } }
+}
+""", "G4"),
     # PRELUDE: an `isolate` after a setup effect is refused (fixture).
     ("prelude isolate after effect", _fixture("v2_isolate_after_effect"),
      "PRELUDE"),

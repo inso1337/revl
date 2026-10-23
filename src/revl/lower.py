@@ -831,6 +831,11 @@ class Env:
         # the same relation refined to *which* boundaries each one reaches:
         # name -> capability set (docs/capabilities.md)
         self.emitting_caps: dict[str, set] = {}
+        # Names whose function values must stay at a named `emit` call site:
+        # dispatching one indirectly would bypass the host seam's declared
+        # capability ceilings. This is narrower than `emitting_fns`; budget-
+        # free emission values keep their existing behavior.
+        self.budgeted_emission_callables: set[str] = set()
         # why-trace support for the above (why.py); None when unavailable,
         # in which case rejections carry no derivation but are unchanged
         self.emission_evidence: "_EmissionEvidence | None" = None
@@ -8976,6 +8981,20 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     emission_evidence = _EmissionEvidence(program)
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
+    # A ceiling is enforced at the named host-extern seam. If a caller can
+    # obtain the extern (or a local function reaching it) as a value, the
+    # eventual dispatch has no statically attributable seam call. Seed a
+    # second closure only from ceilinged emission externs; budget-free emission
+    # values and other extern classes retain their existing behavior.
+    budgeted_emission_externs = [
+        ext for ext in externs
+        if ext.get("class") == "emission"
+        and any(_cap_order.split_ceilings(
+            _cap_order.parse_stored_cap(cap))[1]
+                for cap in ext.get("capabilities") or [])
+    ]
+    budgeted_emission_callables = set(_emitting_capabilities(
+        fns, budgeted_emission_externs))
     # issue #1912: the same closure under the `emission` seed ALONE — the names
     # whose reach includes a crossing that cannot be reverted, as against
     # `emitting_fns`, which counts a `witnessed` extern's reach too (item 243).
@@ -9153,6 +9172,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                                 if e.get("class") == "acquire"
                                                 and _callee_name(e.get("undo"))},
                                             irreversible_fns=irreversible_fns,
+                                            budgeted_emission_callables=(
+                                                budgeted_emission_callables),
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -10095,6 +10116,13 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 and not str(info.get("adt", "")).startswith(("Result", "Opt")):
             return {"kind": "adt", "type": info["adt"], "case": name, "args": []}
         if name in callables:
+            if name in env.budgeted_emission_callables:
+                # A direct call has a named seam to meter; a function value
+                # does not. Use the same G4 diagnostic as the direct-call
+                # carrier so ceilinged emissions cannot escape through a
+                # local alias or a function-typed argument.
+                _refuse_unmarked_emission_call(
+                    {"kind": "fn", "name": name}, name, env, filename, line)
             return {"kind": "var", "name": name}
         if name in getattr(env, "stream_requires", {}):
             # item 130: the key IS declared — it is a required stream, and a
@@ -13809,12 +13837,14 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      extern_undo: dict | None = None,
                      extern_inverse: dict | None = None,
                      irreversible_fns: set | None = None,
+                     budgeted_emission_callables: set | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
     env.untrusted = untrusted
     env.emitting_fns = emitting_fns or set()
     env.extern_class = extern_class or {}
+    env.budgeted_emission_callables = budgeted_emission_callables or set()
     env.extern_undo = extern_undo or {}
     env.extern_inverse = extern_inverse or {}
     env.emitting_caps = emitting_caps or {}

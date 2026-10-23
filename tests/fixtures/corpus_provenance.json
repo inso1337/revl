@@ -1,6 +1,6 @@
 {
  "note": "Which generation authored each scoring document (roadmap item 542, issue #1221). Generation 0 is PRE-LOOP: it predates the self-improvement loop, which is what the floors are about. It is not a claim that a person typed it, and issue #1397 measured why not. A name absent from every list is UNDECLARED, which counts as loop-authored at every threshold and is an error under `python3 tools/corpus_provenance.py --check`: an unknown provenance must never read as pre-loop, or a document dropped into a globbed corpus would raise the measured independence. `human_authored` is the second, orthogonal axis: the case ids a person typed, which a person names one at a time. It is fail-closed the same way, a document not named there reads as model-authored, and it carries no floor. Names only, no counts and no fractions, for the same reason tests/fixtures/oracle_construct_reach_ledger.json records names only: a derived number in a recorded artifact rots against what it was derived from. `floors` is the minimum percent of each scoring corpus that must remain independent of generation 1 and up; it is an operator decision and the tool holds whatever is written here.",
- "current_generation": 1,
+ "current_generation": 2,
  "floors": {
   "census": 80,
   "emit_go_corpus": 75,
@@ -1364,6 +1364,11 @@
    "tests/fixtures/model_reach_spawn/ok_net_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/ok_role_within_the_spawner.rvl",
    "tests/fixtures/model_reach_spawn/ok_spawner_holds_the_role_reach.rvl"
+  ],
+  "2": [
+   "oracle-reject:g4 budgeted emission extern bound as a value",
+   "oracle-reject:g4 budgeted emission passed to a function-typed argument",
+   "oracle-reject:g4 helper reaching budgeted emission bound as a value"
   ]
  }
 }

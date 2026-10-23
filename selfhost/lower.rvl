@@ -6064,8 +6064,32 @@ fn witnessed_value_msg(name: Str) -> Str {
 //     exactly the position a component reaches for its authority.
 // An emitting/colored name is always a callable (it is a declared fn/extern),
 // so it is `bare_declared` and never trips the G1 branch.
+fn cap_has_ceiling(token: Str) -> Bool {
+  let params = cap_parse(token).ps
+  var i = 0
+  while (i < params.length()) {
+    if (params[i].ord == "ceil") { return true }
+    i += 1
+  }
+  return false
+}
+
+fn reaches_budgeted_emission(name: Str, cx: Ctx) -> Bool {
+  let reached = caps_of(cx.caps, name)
+  var i = 0
+  while (i < reached.length()) {
+    if (cap_has_ceiling(reached[i])) { return true }
+    i += 1
+  }
+  return false
+}
+
 fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
   var na = a
+  if (contains(cx.emittingNames, name) && reaches_budgeted_emission(name, cx)) {
+    return ac_refuse(a, "G4", "call to emission `".concat(name)
+      .concat("` must be marked `emit` (G4)"))
+  }
   if (contains(cx.emittingNames, name)) {
     na = { msg: "", tag: "",
            labels: union_into(na.labels,

@@ -13118,8 +13118,35 @@ fn witnessed_value_msg(name: &str) -> String {
     return (String::from("witnessed extern `").revl_concat(&name)).revl_concat("` cannot be called in a value position — a witnessed mutation is only valid in effect position (G4)");
 }
 
+fn cap_has_ceiling(token: String) -> bool {
+    let params = cap_parse(token.clone()).ps;
+    let mut i = 0i64;
+    while (i < params.revl_length()) {
+        if ((params)[(i) as usize].ord == "ceil") {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn reaches_budgeted_emission(name: String, cx: Ctx__m2) -> bool {
+    let reached = caps_of(cx.caps, name.clone());
+    let mut i = 0i64;
+    while (i < reached.revl_length()) {
+        if cap_has_ceiling((reached)[(i) as usize].clone()) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
 fn var_check(name: String, cx: Ctx__m2, a: Ac) -> Ac {
-    let mut na = a;
+    let mut na = a.clone();
+    if (contains__m2(&cx.emittingNames, &name) && reaches_budgeted_emission(name.clone(), cx.clone())) {
+        return ac_refuse(a.clone(), String::from("G4"), (String::from("call to emission `").revl_concat(&name)).revl_concat("` must be marked `emit` (G4)"));
+    }
     if contains__m2(&cx.emittingNames, &name) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), vec![name.revl_concat(" (passed as a function value)")]), ecaps: union_into(na.ecaps.clone(), union_into(caps_of(cx.caps.clone(), name.clone()), vec![String::from("*")])), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
     }
