@@ -6730,8 +6730,12 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             actual_declared = infer_ast(stmt.value, type_env, types, None)
         else:
             inferred = infer_ast(stmt.value, type_env, types, filename)
-            if inferred is not None:
-                type_env[stmt.name] = inferred
+            # Keep the lexical binding in the type environment even when its
+            # type is unknown.  `infer_ast` consults this map before the
+            # project-wide module-function table; omitting the `None` entry
+            # would let a private same-named function from another file type
+            # this local instead (issue #2590).
+            type_env[stmt.name] = inferred
             actual_declared = None
         lowered_value = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
@@ -6858,8 +6862,10 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         inner_scope[stmt.bind] = False
         iter_type = _expr_static_type(stmt.iterable, type_env, types)
         element_type = _type_arg(iter_type, "List")
-        if element_type is not None:
-            inner_type_env[stmt.bind] = element_type
+        # The loop name is in scope even when the iterable's element type is
+        # unknown.  Preserve that binding so inference cannot fall through to
+        # a same-named project-wide module function (issue #2590).
+        inner_type_env[stmt.bind] = element_type
         inner_body = []
         for s in stmt.body:
             _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types, expected_return)
