@@ -51,6 +51,7 @@ from . import draft as _draft
 from . import edit as _edit
 from . import proposal as _proposal
 from . import remedy as _remedy
+from . import undo_record as _undo_record
 from ..errors import RevlError
 
 #: The documented cap: the compact JSON of the brief block, in characters.
@@ -65,10 +66,9 @@ _VERDICTS = {"revl_check": "checked", "revl_admit": "admitted"}
 
 #: Verbs that, on success, move the unit of work or the working source, so a
 #: refusal about the old one is retired rather than reported as current.
-_NEW_UNIT = frozenset({
-    "revl_load", "revl_swap", "revl_edit", "revl_change", "revl_rollback",
-    "revl_undo", "revl_unload", "revl_restore", "revl_repair", "revl_ship",
-})
+# The generation verbs are one closed vocabulary: `undo_record` owns the
+# definition and this module is a consumer of it, so the two cannot drift.
+_NEW_UNIT = _undo_record.GENERATION_VERBS
 
 #: The key that holds the recorded answer on the session. An underscore name,
 #: because it is an index into answers the session already gave, not part of
