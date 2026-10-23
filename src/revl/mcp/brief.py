@@ -303,19 +303,20 @@ def size(brief: dict) -> int:
 
 def _bounded(brief: dict) -> dict:
     """`brief` with the `_TRIM_ORDER` trims applied until it fits `CAP`, and
-    `trimmed` naming what was dropped."""
+    `trimmed` naming what was dropped.
+
+    The marker is part of the block from the first trim on, so the bound is
+    measured over the answer the caller actually receives and every drop is
+    reported: a trimmed answer that did not say it was trimmed is the one
+    answer this may not return."""
     if size(brief) <= CAP:
         return brief
-    out = dict(brief)
-    trimmed: list[str] = []
+    out = {**brief, "trimmed": []}
     for trim in _TRIM_ORDER:
         if size(out) <= CAP:
             break
         if _trim(out, trim):
-            trimmed.append(trim)
-    if trimmed and "trimmed" not in out:
-        with_trimmed = {**out, "trimmed": trimmed}
-        out = with_trimmed if size(with_trimmed) <= CAP else out
+            out["trimmed"].append(trim)
     return out
 
 

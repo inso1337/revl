@@ -386,8 +386,8 @@ not an object is a diagnostic, not a silent index.
 ### `revl_brief`
 
 One compact next-step answer for the loop, instead of a state dump (issue
-#2854). It is a strict projection of state the session already holds, so it
-cannot disagree with `revl_state`:
+#2854). No inputs. It is a strict projection of state the session already
+holds, so it cannot disagree with `revl_state`:
 
 - `state`: `loaded`, `draft` (a hole-bearing draft is held and nothing is
   loaded) or `empty`.
