@@ -70,6 +70,7 @@ import dataclasses
 import math
 
 from . import model_answer as _model_answer
+from ._paths import relpath_or_abs
 from .errors import RevlError, foreign_increment_refusal
 
 # reserved keys carried inside the `types` table (type names never start
@@ -1293,6 +1294,34 @@ _UNRESOLVED_HINT = (
 )
 
 
+def record_repair(filename: str, line: int, expected: str,
+                  missing: list, extra: list) -> dict:
+    """The repair a record-literal shape refusal carries (issue #2845).
+
+    Both check positions that construct this refusal -- the checker's AST
+    check (`check_ast`) and the lowering's IR check (`check_ir`, called from
+    `lower`) -- know the declared record's exact field set, so the difference
+    is not only a diagnosis: it is the edit. The field names are the ones the
+    message names, so the two cannot disagree."""
+    edits = []
+    if missing:
+        noun = "field" if len(missing) == 1 else "fields"
+        edits.append(f"add the {noun} "
+                     + ", ".join(f"`{name}`" for name in missing))
+    if extra:
+        noun = "field" if len(extra) == 1 else "fields"
+        edits.append(f"drop the unknown {noun} "
+                     + ", ".join(f"`{name}`" for name in extra))
+    return {
+        "target": f"{relpath_or_abs(filename)}:{line} record literal for "
+                  f"`{expected}`",
+        "edit": "; ".join(edits)
+                + f" in the literal checked against `{expected}`",
+        "reason": "T1: a record literal must carry exactly the fields its "
+                  "declared record type declares",
+    }
+
+
 def mismatch(filename: str, line: int, where: str,
              expected: str | None, actual: str | None,
              *, why: str | None = None) -> RevlError:
@@ -1301,13 +1330,28 @@ def mismatch(filename: str, line: int, where: str,
     `why` is the exception: it reports a case the checker could not decide
     rather than one it decided against, so it carries its own code
     (`T-UNRESOLVED`) and its own fix. The default keeps every other caller on
-    `T1`/`type-mismatch`, byte for byte."""
+    `T1`/`type-mismatch`, byte for byte.
+
+    Issue #2845: the refusal carries the repair the checker knows, when it
+    knows one: the two shapes below name the exact next edit. Any other
+    mismatch knows the required and the actual type but not the minimal edit,
+    so it carries an explicit `known: False` repair instead of omitting the
+    field."""
     hint = None
+    target = f"{relpath_or_abs(filename)}:{line} {where}"
+    repair = None
     ahead, _ = parse_type(actual)
     ehead, _ = parse_type(expected)
     if ahead == "Opt" and ehead != "Opt":
         hint = ("unwrap the optional first: `match` on it, or use `??` "
                 "to supply a fallback (syntax-2.0 §2)")
+        repair = {
+            "target": target,
+            "edit": "unwrap the optional at this position: `match` on it, or "
+                    "use `??` to supply the fallback",
+            "reason": f"T1: the position requires `{render_type(expected)}`, "
+                      f"and an `Opt[...]` is not that value",
+        }
     elif ehead == PRINCIPAL and ahead != PRINCIPAL:
         # item 457 S2, the authorization admission refusal
         # (docs/design/457-endpoint-one-definition.md, "Authorization"): a
@@ -1320,6 +1364,13 @@ def mismatch(filename: str, line: int, where: str,
         # only the auth service mints, so DELETING the `auth.validate` step
         # cannot type-check — it does not merely fail closed at runtime.
         hint = PRINCIPAL_PRODUCER_HINT
+        repair = {
+            "target": target,
+            "edit": "mint the value with `Auth.validate` and pass the "
+                    "`Principal` it returns",
+            "reason": "T1: a `Principal` is the only key to user-scoped data, "
+                      "and `Auth.validate` is its sole producer",
+        }
     expected, actual = render_type(expected), render_type(actual)
     if why is not None:
         return RevlError(filename, line,
@@ -1327,10 +1378,19 @@ def mismatch(filename: str, line: int, where: str,
                          _UNRESOLVED_HINT,
                          code="T-UNRESOLVED", category="unresolved-type",
                          expected=expected, actual=actual)
+    if repair is None:
+        repair = {
+            "target": target,
+            "reason": f"no minimal edit is known: the position requires "
+                      f"`{expected or 'an unknown type'}` and the value is "
+                      f"`{actual or 'of unknown type'}`, but the compiler "
+                      f"cannot tell which side the author meant to change",
+            "known": False,
+        }
     return RevlError(filename, line,
                      f"{where} expects `{expected}`, got `{actual}`", hint,
                      code="T1", category="type-mismatch",
-                     expected=expected, actual=actual)
+                     expected=expected, actual=actual, repair=repair)
 
 
 def incomparable(filename: str, line: int, op: str,
@@ -3345,7 +3405,9 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
             if extra:
                 parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
             raise RevlError(filename, line,
-                            f"record literal for `{expected}` has {'; '.join(parts)}")
+                            f"record literal for `{expected}` has {'; '.join(parts)}",
+                            repair=record_repair(filename, line, expected,
+                                                 missing, extra))
         for name, value in expr.fields:
             check_ast(value, declared.get(name), tenv, types, filename,
                       f"field `{name}` of `{expected}`")
@@ -3951,7 +4013,9 @@ def check_ir(node, expected: str | None, tenv: dict, types: dict,
             if extra:
                 parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
             raise RevlError(filename, line,
-                            f"record literal for `{expected}` has {'; '.join(parts)}")
+                            f"record literal for `{expected}` has {'; '.join(parts)}",
+                            repair=record_repair(filename, line, expected,
+                                                 missing, extra))
         for name, value in node.get("fields") or []:
             check_ir(value, declared.get(name), tenv, types, services, filename,
                      line, f"field `{name}` of `{expected}`")

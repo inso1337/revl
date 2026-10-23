@@ -82,11 +82,19 @@ class SessionError(RuntimeError):
     An optional `code` carries a machine-readable classification (e.g.
     ``STATE_UNDISCLOSED``, item 334) for a caller that must branch on the
     refusal rather than parse its prose; it defaults to None so every existing
-    single-string raise is unchanged."""
+    single-string raise is unchanged.
 
-    def __init__(self, *args: object, code: str | None = None) -> None:
+    An optional `repair` carries the structured minimal edit the raising check
+    already knows (issue #2845): `target` (what to change), `edit` (the one
+    edit), and `reason` (the rule that refused). It rides the MCP refusal
+    payload through `server._session_error`, and it is structured only, so a
+    refusal's prose is unchanged."""
+
+    def __init__(self, *args: object, code: str | None = None,
+                 repair: dict | None = None) -> None:
         super().__init__(*args)
         self.code = code
+        self.repair = repair
 
 
 class NothingLoaded(SessionError):
@@ -2237,7 +2245,19 @@ class Session:
                 f"across the trust boundary. Quiesce the instances (or use a "
                 f"trusted operator swap) before swapping. Nothing was swapped; "
                 f"gen N is intact and still serving.",
-                code="STATE_UNDISCLOSED")
+                code="STATE_UNDISCLOSED",
+                repair={
+                    "target": f"template `{name}`",
+                    "edit": f"re-declare `{name}` with the exact text gen N is "
+                            f"running and keep the components that hold or "
+                            f"reach it unchanged; or quiesce the live "
+                            f"instances with `revl_unload` before proposing",
+                    "reason": "an agent-authored successor cannot inherit a "
+                              "running instance's operator state: the "
+                              "instance channel matches old and new by "
+                              "template name and host class alone, with no "
+                              "declared hand-off type",
+                })
         running = self._declared_handoffs(old_ir)
         accepts = self._declared_handoffs(new_ir)
         for key, exported in running.items():
@@ -2253,7 +2273,18 @@ class Session:
                     f"agent-authored successor (the item-53 accept-vs-export "
                     f"gate never ran on the standalone decision compile). "
                     f"Nothing was swapped; gen N is intact.",
-                    code="STATE_UNDISCLOSED")
+                    code="STATE_UNDISCLOSED",
+                    repair={
+                        "target": f"handoff `{key}`",
+                        "edit": f"declare the successor's `handoff accept "
+                                f"{key}` as a type that holds `{exported}`, or "
+                                f"drop the handoff on `{key}` so the successor "
+                                f"starts cold",
+                        "reason": f"the declared hand-off types must be "
+                                  f"compatible: the successor accepts "
+                                  f"`{accepted}` but the running provider "
+                                  f"exports `{exported}`",
+                    })
 
     @staticmethod
     def _declared_handoffs(ir: dict) -> dict:

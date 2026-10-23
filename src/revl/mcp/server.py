@@ -1189,6 +1189,17 @@ def _refusal_code(error: BaseException) -> dict:
     return {"code": code} if code else {}
 
 
+def _repair_field(repair: dict | None) -> dict:
+    """The refusal's structured repair (issue #2845), or nothing at all.
+
+    Spelled here, like `_fix_field`, because the envelope's copies
+    (`http_face._err`, `query_tools._require`, `query_tools._run` and
+    `_session_error` itself) share one recorded vocabulary
+    (`tools/check_vocabulary_mirrors.py`): adding the field in a helper keeps
+    that literal at the six fields those copies spell."""
+    return {} if repair is None else {"repair": repair}
+
+
 def _session_error(message: str | BaseException, category: str | None = None,
                    fix: str | None = None, refusal_code: str | None = None,
                    **extra) -> dict:
@@ -1196,8 +1207,8 @@ def _session_error(message: str | BaseException, category: str | None = None,
     refused. Its next call, when it has one (issue #1691), is resolved and
     attached by `remedy`, which also names it at the end of the message.
 
-    `fix` is the mechanical remedy in the caller's own terms — the one edit to
-    the arguments that makes this same call work — and rides on the diagnostic
+    `fix` is the mechanical remedy in the caller's own terms, the one edit to
+    the arguments that makes this same call work, and rides on the diagnostic
     when the refusal has one (issue #2035). It is deliberately not the `next`
     call: a next call is a *different* call to make, where `fix` is this call
     with one argument dropped.
@@ -1207,15 +1218,24 @@ def _session_error(message: str | BaseException, category: str | None = None,
     category cannot disagree. The structured `refusal` rides the answer and
     keeps `message` free to change. A `code` arriving in `extra` (a
     `SessionError`'s own) stays what it was: a carried classification, not a
-    registered one."""
+    registered one.
+
+    Issue #2845: a refusal exception that carries a structured `repair` (a
+    `SessionError` with a code and a minimal edit, e.g. STATE_UNDISCLOSED)
+    hands it to the payload here, beside the diagnosis. It is additive, and
+    the prose message is untouched."""
     message, remedy = _remedy.resolve(message, extra)
+    carried = (getattr(message, "repair", None)
+               if isinstance(message, BaseException) else None)
     if refusal_code is not None:
         category = _answer.define(refusal_code).category
     diagnostic = {"severity": "error", "code": "REVL",
                   "category": category or "session",
                   "message": message, **_fix_field(fix)}
-    payload = _remedy.attach({"ok": False, "diagnostics": [diagnostic],
-                              **extra}, remedy)
+    payload = {"ok": False, "diagnostics": [diagnostic], **extra}
+    if carried is not None and "repair" not in payload:
+        payload.update(_repair_field(carried))
+    payload = _remedy.attach(payload, remedy)
     if refusal_code is not None:
         payload["code"] = refusal_code
         payload = _answer.attach_refusal(payload, refusal_code, message, fix)
