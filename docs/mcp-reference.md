@@ -106,12 +106,11 @@ diagnostics (issue #2845):
 `target` names the smallest thing to change: a `file:line` locator plus what
 sits there, a template name, or a handoff key. `edit` is the one edit that
 closes the refusal; where the repair is a call rather than an edit, `command`
-plays that role. `reason` is the rule that refused, in one sentence. A class
-the compiler knows, but a shape whose minimal edit it cannot name, still
-carries `repair`: no `edit` or `command`, and `"known": false`, so a caller
-reads "checked, nothing known" rather than a missing field. `repair` is
-additive, and the diagnostics beside it keep every field and every message
-they carried before.
+plays that role. `reason` is the rule that refused, in one sentence. A definite
+mismatch whose minimal edit the compiler cannot name still carries `repair`: no
+`edit` or `command`, and `"known": false`, so a caller reads "checked, nothing
+known" rather than a missing field. `repair` is additive, and the diagnostics
+beside it keep every field and every message they carried before.
 
 Repairs today:
 

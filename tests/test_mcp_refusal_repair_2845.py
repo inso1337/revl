@@ -53,6 +53,10 @@ EXTRA_FIELD = ("type Point = { x: Int, y: Int }\n"
 #: author meant to change
 PLAIN_MISMATCH = "fn g(x: Str) -> Int { return x }\n"
 
+#: an `Opt[...]` where the plain type is required: the checker's known shape,
+#: whose repair is the unwrap
+OPT_MISMATCH = "fn f(x: Opt[Str]) -> Str { return x }\n"
+
 
 def _call(tool: str, arguments: dict) -> dict:
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -151,6 +155,31 @@ def test_the_lowering_ir_check_constructs_the_same_repair():
     assert repair["target"] == "app.rvl:7 record literal for `Point`"
     assert "add the field `y`" in repair["edit"]
     assert "record literal" in repair["reason"]
+
+
+def test_an_optional_mismatch_carries_the_unwrap(_fresh_server_session):
+    """The mismatch constructor's other known shape: an `Opt[...]` where the
+    plain type is required, and the repair is the unwrap."""
+    refused = _call("revl_check", {"source": OPT_MISMATCH})
+
+    assert refused["ok"] is False
+    repair = refused["repair"]
+    assert repair["target"] == "<candidate>.rvl:1 this function's return"
+    assert "unwrap the optional" in repair["edit"]
+    assert "`Str`" in repair["reason"] and "Opt" in repair["reason"]
+    assert repair.get("known", True) is True
+
+
+def test_the_principal_mismatch_names_its_producer():
+    """A `Principal` position reached with a non-Principal value is refused by
+    the same constructor, and its repair names the sole producer."""
+    from revl.typecheck import mismatch
+
+    error = mismatch("app.rvl", 3, "this argument", "Principal", "Str")
+
+    assert error.repair["target"] == "app.rvl:3 this argument"
+    assert "Auth.validate" in error.repair["edit"]
+    assert "sole producer" in error.repair["reason"]
 
 
 def test_a_mismatch_with_no_known_repair_says_so(_fresh_server_session):

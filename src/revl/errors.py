@@ -74,10 +74,15 @@ class RevlErrors(RevlError):
             raise ValueError("RevlErrors requires at least one error")
         self.errors: list[RevlError] = list(errors)
         first = self.errors[0]
+        # the repair, like `diagnostics.report`, is the first one the refusal
+        # carries: the primary diagnostic when it has one, else the first that
+        # does. The payload and the carrier then agree (issue #2845).
+        repair = next((one.repair for one in self.errors
+                       if one.repair is not None), None)
         super().__init__(first.filename, first.line, first.message,
                          hint=first.hint, code=first.code, category=first.category,
                          expected=first.expected, actual=first.actual, why=first.why,
-                         navigate=first.navigate, repair=first.repair)
+                         navigate=first.navigate, repair=repair)
 
     def __str__(self) -> str:
         # A single refusal renders exactly as a plain `RevlError` would: no
