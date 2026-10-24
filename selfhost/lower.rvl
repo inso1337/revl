@@ -27757,6 +27757,14 @@ fn timer_scan_calls(ts: List[Token], lo: Int, hi: Int,
   return timer_scan_calls(ts, nx, hi, sl, acc2)
 }
 
+// A failed `cir_body` names the step it stopped on: `js` carries the source line
+// of the step's first token, so `ir_component` can refuse the component with it
+// (issue #2594) rather than withholding the body without a word. `js` is read
+// only on a failure; a successful result is the step list as before.
+fn cir_fail(ts: List[Token], i: Int) -> IrRes {
+  return mk_irres(false, tkc(ts, i).line.to_str())
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -27766,19 +27774,19 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   if (atw(ts, i, "config") && atk(ts, i + 1, "{")) {
     let ce = close_brace(ts, i + 1)
-    if (ce == 0 - 1) { return mk_irres(false, "") }
+    if (ce == 0 - 1) { return cir_fail(ts, i) }
     return cir_body(ts, ce, end, cx, provs, sc, hostSc, acc)
   }
   if (atw(ts, i, "provide")) {
     let kl = qkey_len(ts, i + 1)
     let key = qkey_text(ts, i + 1)
-    if (!atk(ts, i + 1 + kl, "{")) { return mk_irres(false, "") }
+    if (!atk(ts, i + 1 + kl, "{")) { return cir_fail(ts, i) }
     let pend = close_brace(ts, i + 1 + kl)
-    if (pend == 0 - 1) { return mk_irres(false, "") }
+    if (pend == 0 - 1) { return cir_fail(ts, i) }
     let svc = bind_lookup(provs, key, 0)
     let ms = cir_prov_methods(ts, i + 2 + kl, pend - 1, cx, sc, hostSc, svc,
                               cu_names(ts), "")
-    if (!ms.ok) { return mk_irres(false, "") }
+    if (!ms.ok) { return cir_fail(ts, i) }
     let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
       .concat(", \"service\": ").concat(jstr(svc))
       .concat(", \"methods\": [").concat(ms.js).concat("]}")
@@ -27794,16 +27802,16 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       && atw(ts, i + 4, "spawn")) {
     let name = tkc(ts, i + 1).text
     let sp = cir_spawn(ts, i + 4, sc, hostSc, cx_at(cx, tkc(ts, i + 4).line))
-    if (!sp.ok) { return mk_irres(false, "") }
-    if (!atw(ts, sp.i, "undo")) { return mk_irres(false, "") }
+    if (!sp.ok) { return cir_fail(ts, i) }
+    if (!atw(ts, sp.i, "undo")) { return cir_fail(ts, i) }
     // the handle's INSTANCE provenance (the reference's `env.type_env[h] =
     // "Instance[C]"`): a later `<h>.<key>` is the target component's provision
     // and not a record field, and only a key that component PROVIDES resolves.
     let sc2 = sc.push({ name: name, ty: instance_ty(sp.comp) })
     let und = expr_at(ts, sp.i + 1)
-    if (is_bad(und.e)) { return mk_irres(false, "") }
+    if (is_bad(und.e)) { return cir_fail(ts, i) }
     let ue = cir_expr(und.e, sc2, hostSc, cx_at(cx, tkc(ts, sp.i + 1).line))
-    if (!ue.ok) { return mk_irres(false, "") }
+    if (!ue.ok) { return cir_fail(ts, i) }
     // issue #1859: a spawn's `undo` is the author's own disposer call — no
     // table proves it reverts — so the step records `asserted` rather than
     // tearing down behind a bare `noResidue: true`.
@@ -27825,14 +27833,14 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let aq0 = isAsync ? i + 5 : i + 4
     // `effect await spawn …` is not a surface, and the plain spelling was
     // handled above, so any `spawn` still reaching here keeps refusing.
-    if (atw(ts, aq0, "spawn")) { return mk_irres(false, "") }
+    if (atw(ts, aq0, "spawn")) { return cir_fail(ts, i) }
     // the effect BLOCK form: pure setup runs before the acquisition, and the
     // acquisition is the block's tail expression
     if (!isAsync && atk(ts, i + 4, "{")) {
       let bend = close_brace(ts, i + 4)
-      if (bend == 0 - 1) { return mk_irres(false, "") }
+      if (bend == 0 - 1) { return cir_fail(ts, i) }
       let blk = cir_effect_block(ts, i + 5, bend - 1, cx, sc, hostSc)
-      if (!blk.ok) { return mk_irres(false, "") }
+      if (!blk.ok) { return cir_fail(ts, i) }
       // typed by the tail acquisition over the OUTER scope: the reference
       // infers it after dropping the block's setup-let types (issue #2198)
       let bsc = sc.push({ name: name, ty: value_ty(blk.acqE, cenv_ir(cx, sc)) })
@@ -27844,14 +27852,14 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       var binv = ""
       if (atw(ts, bend, "undo")) {
         let bund = expr_at(ts, bend + 1)
-        if (is_bad(bund.e)) { return mk_irres(false, "") }
+        if (is_bad(bund.e)) { return cir_fail(ts, i) }
         let bue = cir_expr(bund.e, bsc, hostSc, cx)
-        if (!bue.ok) { return mk_irres(false, "") }
+        if (!bue.ok) { return cir_fail(ts, i) }
         bstep = bstep.concat(", \"undo\": ").concat(bue.js)
         binv = site_effect_inverse(blk.acqE, blk.acq, bund.e, bue.js, hostSc, cx)
         bnext = bund.i
       } else {
-        if (!blk.wit) { return mk_irres(false, "") }
+        if (!blk.wit) { return cir_fail(ts, i) }
       }
       bstep = bstep.concat(", \"bind\": ").concat(jstr(name))
       if (blk.setup != "") {
@@ -27862,10 +27870,10 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       return cir_body(ts, bnext, end, cx, provs, bsc, hostSc, bacc)
     }
     let acq = expr_at(ts, aq0)
-    if (is_bad(acq.e)) { return mk_irres(false, "") }
+    if (is_bad(acq.e)) { return cir_fail(ts, i) }
     let ae = cir_expr(acq.e, sc, hostSc, cx_at(cx, tkc(ts, aq0).line))
-    if (!ae.ok) { return mk_irres(false, "") }
-    if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
+    if (!ae.ok) { return cir_fail(ts, i) }
+    if (!atw(ts, acq.i, "undo")) { return cir_fail(ts, i) }
     let sc2 = sc.push({ name: name, ty: value_ty(acq.e, cenv_ir(cx, sc)) })
     // host provenance (the reference's `env.host_locals`): a bind whose
     // acquisition lowered to a host node keeps the host verb surface, so every
@@ -27873,9 +27881,9 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let hostSc2 = starts_with(ae.js, "{\"kind\": \"host\"")
       ? hostSc.push(name) : hostSc
     let und = expr_at(ts, acq.i + 1)
-    if (is_bad(und.e)) { return mk_irres(false, "") }
+    if (is_bad(und.e)) { return cir_fail(ts, i) }
     let ue = cir_expr(und.e, sc2, hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line))
-    if (!ue.ok) { return mk_irres(false, "") }
+    if (!ue.ok) { return cir_fail(ts, i) }
     let step0 = "{\"step\": \"let-effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}")
     let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
@@ -27887,22 +27895,22 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   if (atw(ts, i, "effect")) {
     let isAsync = atw(ts, i + 1, "await")
     let aq0 = isAsync ? i + 2 : i + 1
-    if (atw(ts, aq0, "spawn")) { return mk_irres(false, "") }
+    if (atw(ts, aq0, "spawn")) { return cir_fail(ts, i) }
     let acq = expr_at(ts, aq0)
-    if (is_bad(acq.e)) { return mk_irres(false, "") }
+    if (is_bad(acq.e)) { return cir_fail(ts, i) }
     let ae = cir_expr(acq.e, sc, hostSc, cx_at(cx, tkc(ts, aq0).line))
-    if (!ae.ok) { return mk_irres(false, "") }
+    if (!ae.ok) { return cir_fail(ts, i) }
     if (!atw(ts, acq.i, "undo")) {
-      if (!is_witnessed_acq(acq.e, cx)) { return mk_irres(false, "") }
+      if (!is_witnessed_acq(acq.e, cx)) { return cir_fail(ts, i) }
       let wstep0 = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js).concat("}")
       let wstep = isAsync ? step_async(wstep0) : wstep0
       let wacc = acc == "" ? wstep : acc.concat(", ").concat(wstep)
       return cir_body(ts, acq.i, end, cx, provs, sc, hostSc, wacc)
     }
     let und = expr_at(ts, acq.i + 1)
-    if (is_bad(und.e)) { return mk_irres(false, "") }
+    if (is_bad(und.e)) { return cir_fail(ts, i) }
     let ue = cir_expr(und.e, sc, hostSc, cx_at(cx, tkc(ts, acq.i + 1).line))
-    if (!ue.ok) { return mk_irres(false, "") }
+    if (!ue.ok) { return cir_fail(ts, i) }
     let step0 = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
     let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
@@ -27913,22 +27921,22 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   }
   if (atw(ts, i, "if")) {
     let g = cir_if_step(ts, i, cx, sc, hostSc)
-    if (!g.ok) { return mk_irres(false, "") }
+    if (!g.ok) { return cir_fail(ts, i) }
     let nacc = acc == "" ? g.js : acc.concat(", ").concat(g.js)
     return cir_body(ts, g.i, end, cx, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "fail")) {
     let r = expr_at(ts, i + 1)
-    if (is_bad(r.e)) { return mk_irres(false, "") }
+    if (is_bad(r.e)) { return cir_fail(ts, i) }
     let m = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, i + 1).line))
-    if (!m.ok) { return mk_irres(false, "") }
+    if (!m.ok) { return cir_fail(ts, i) }
     let step = "{\"step\": \"fail\", \"message\": ".concat(m.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, r.i, end, cx, provs, sc, hostSc, nacc)
   }
   if (atw(ts, i, "emit")) {
     let em = cir_emit_step(ts, i, cx, sc, hostSc)
-    if (!em.ok) { return mk_irres(false, "") }
+    if (!em.ok) { return cir_fail(ts, i) }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
     return cir_body(ts, em.i, end, cx, provs, sc, hostSc, nacc)
   }
@@ -27944,15 +27952,15 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     // carrying `"async": true` (item 131 §2).
     if (atw(ts, i + 1, "emit")) {
       let em = cir_emit_step(ts, i + 1, cx, sc, hostSc)
-      if (!em.ok) { return mk_irres(false, "") }
+      if (!em.ok) { return cir_fail(ts, i) }
       let js = step_async(em.js)
       let eacc = acc == "" ? js : acc.concat(", ").concat(js)
       return cir_body(ts, em.i, end, cx, provs, sc, hostSc, eacc)
     }
     let r = expr_at(ts, i + 1)
-    if (is_bad(r.e) || r.i <= i + 1) { return mk_irres(false, "") }
+    if (is_bad(r.e) || r.i <= i + 1) { return cir_fail(ts, i) }
     let ae = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, i + 1).line))
-    if (!ae.ok) { return mk_irres(false, "") }
+    if (!ae.ok) { return cir_fail(ts, i) }
     let step = "{\"step\": \"await\", \"expr\": ".concat(ae.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, r.i, end, cx, provs, sc, hostSc, nacc)
@@ -27973,17 +27981,17 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     }
     if (atw(ts, i + 1 + kl, "in") && ati(ts, i + 2 + kl, "realms")) {
       let rp = p_route_clause(ts, i + 2 + kl)
-      if (!rp.ok) { return mk_irres(false, "") }
+      if (!rp.ok) { return cir_fail(ts, i) }
       return cir_body(ts, rp.i, end, cx, provs, sc, hostSc, acc)
     }
-    return mk_irres(false, "")
+    return cir_fail(ts, i)
   }
   if (atw(ts, i, "intercept")) {
     var k = i + qkey_len(ts, i + 1)
     while (k < end && !atk(ts, k, "{")) { k += 1 }
-    if (!atk(ts, k, "{")) { return mk_irres(false, "") }
+    if (!atk(ts, k, "{")) { return cir_fail(ts, i) }
     let ce = close_brace(ts, k)
-    if (ce == 0 - 1) { return mk_irres(false, "") }
+    if (ce == 0 - 1) { return cir_fail(ts, i) }
     return cir_body(ts, ce, end, cx, provs, sc, hostSc, acc)
   }
   // `let <h> = subscribe <stream> [.<combinator>(…)]… [policy P] [buffer N]
@@ -27997,11 +28005,11 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "subscribe")) {
     let name = tkc(ts, i + 1).text
     let head = cir_sub_src(ts, i + 4, sc, hostSc, cx)
-    if (!head.ok) { return mk_irres(false, "") }
+    if (!head.ok) { return cir_fail(ts, i) }
     let stg = cir_sub_stages(ts, head.at, sc, hostSc, cx, "")
-    if (!stg.ok) { return mk_irres(false, "") }
+    if (!stg.ok) { return cir_fail(ts, i) }
     let q = cir_sub_quals(ts, stg.at, "", "", "")
-    if (!q.ok) { return mk_irres(false, "") }
+    if (!q.ok) { return cir_fail(ts, i) }
     let pol = q.pol == "" ? "error" : q.pol
     // The `undo` is required by the surface (rule 3.2) and is read
     // STRUCTURALLY: the reference shape-checks the lowered expression against
@@ -28010,7 +28018,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (!atw(ts, q.at, "undo") || !ati(ts, q.at + 1, name)
         || !atk(ts, q.at + 2, ".") || !ati(ts, q.at + 3, "close")
         || !atk(ts, q.at + 4, "(") || !atk(ts, q.at + 5, ")")) {
-      return mk_irres(false, "")
+      return cir_fail(ts, i)
     }
     let safe = safe_name(name, sc, hostSc)
     let sc2 = sc.push({ name: name, ty: "Subscription" })
@@ -28037,15 +28045,15 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   // timer's next token is a duration's int, an iteration's is its item name.
   if (atw(ts, i, "every") && atk(ts, i + 1, "ident") && atw(ts, i + 2, "in")) {
     let subj = cir_sub_src(ts, i + 3, sc, hostSc, cx)
-    if (!subj.ok || !atk(ts, subj.at, "{")) { return mk_irres(false, "") }
+    if (!subj.ok || !atk(ts, subj.at, "{")) { return cir_fail(ts, i) }
     let bend = close_brace(ts, subj.at)
-    if (bend == 0 - 1) { return mk_irres(false, "") }
+    if (bend == 0 - 1) { return cir_fail(ts, i) }
     let item = tkc(ts, i + 1).text
     let safe = safe_name(item, sc, hostSc)
     let isc = sc.push({ name: item, ty: "" })
       .push({ name: "rename ".concat(item), ty: safe })
     let bodyR = cir_emit_steps(ts, subj.at + 1, bend - 1, cx, isc, hostSc, "")
-    if (!bodyR.ok) { return mk_irres(false, "") }
+    if (!bodyR.ok) { return cir_fail(ts, i) }
     let step = "{\"step\": \"stream-iter\", \"bind\": ".concat(jstr(safe))
       .concat(", \"subject\": ").concat(subj.sub)
       .concat(", \"body\": [").concat(bodyR.js).concat("]}")
@@ -28072,7 +28080,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     var pre = ""
     if (atw(ts, j, "in")) {
       let subj = cir_sub_src(ts, j + 1, sc, hostSc, cx)
-      if (!subj.ok) { return mk_irres(false, "") }
+      if (!subj.ok) { return cir_fail(ts, i) }
       // one read of the field into a local: two reads of `subj.sub` would
       // move the `Str` out twice in the rust mirror (E0382).
       let sub = subj.sub
@@ -28081,7 +28089,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       j = subj.at
     } else {
       let key = ev_req_key(cx.strreqs, 0, evn, "")
-      if (key == "") { return mk_irres(false, "") }
+      if (key == "") { return cir_fail(ts, i) }
       let safe = safe_name("sub_".concat(key), sc, hostSc)
       headJs = "{\"kind\": \"req\", \"name\": ".concat(jstr(key)).concat("}")
       // the iteration reads the BRACKET the desugaring synthesized, not the
@@ -28097,11 +28105,11 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
         .concat(jstr(safe)).concat("}, \"method\": \"close\", \"args\": []}")
         .concat(", \"bind\": ").concat(jstr(safe)).concat("}, ")
     }
-    if (!atk(ts, j, "{")) { return mk_irres(false, "") }
+    if (!atk(ts, j, "{")) { return cir_fail(ts, i) }
     let bend = close_brace(ts, j)
-    if (bend == 0 - 1) { return mk_irres(false, "") }
+    if (bend == 0 - 1) { return cir_fail(ts, i) }
     let evc = ev_contract(ts, evn, cx.al)
-    if (!evc.ok) { return mk_irres(false, "") }
+    if (!evc.ok) { return cir_fail(ts, i) }
     let isafe = safe_name(item, sc2, hostSc2)
     // under `on <Event> as <x>` the item has the event's record type for the
     // body, as the reference binds it; a plain `every` item stays untyped
@@ -28109,7 +28117,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let isc = sc2.push({ name: item, ty: evn })
       .push({ name: "rename ".concat(item), ty: isafe })
     let bodyR = cir_emit_steps(ts, j + 1, bend - 1, cx, isc, hostSc2, "")
-    if (!bodyR.ok) { return mk_irres(false, "") }
+    if (!bodyR.ok) { return cir_fail(ts, i) }
     let step = pre.concat("{\"step\": \"stream-iter\", \"bind\": ").concat(jstr(isafe))
       .concat(", \"subject\": ").concat(subjJs)
       .concat(", \"body\": [").concat(bodyR.js).concat("]")
@@ -28119,16 +28127,16 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
   }
   if (atw(ts, i, "every") || atw(ts, i, "after")) {
     let mode = tkc(ts, i).text
-    if (!atk(ts, i + 1, "int")) { return mk_irres(false, "") }
+    if (!atk(ts, i + 1, "int")) { return cir_fail(ts, i) }
     let numText = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "ident")) { return mk_irres(false, "") }
+    if (!atk(ts, i + 2, "ident")) { return cir_fail(ts, i) }
     let ims = duration_ms_str(numText, tkc(ts, i + 2).text)
-    if (ims == "") { return mk_irres(false, "") }
-    if (!atk(ts, i + 3, "{")) { return mk_irres(false, "") }
+    if (ims == "") { return cir_fail(ts, i) }
+    if (!atk(ts, i + 3, "{")) { return cir_fail(ts, i) }
     let bend = close_brace(ts, i + 3)
-    if (bend == 0 - 1) { return mk_irres(false, "") }
+    if (bend == 0 - 1) { return cir_fail(ts, i) }
     let bodyR = cir_emit_steps(ts, i + 4, bend - 1, cx, sc, hostSc, "")
-    if (!bodyR.ok) { return mk_irres(false, "") }
+    if (!bodyR.ok) { return cir_fail(ts, i) }
     var step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
       .concat(", \"interval_ms\": ").concat(ims)
       .concat(", \"body\": [").concat(bodyR.js).concat("]}")
@@ -28140,7 +28148,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, bend, end, cx, provs, sc, hostSc, nacc)
   }
-  return mk_irres(false, "")
+  return cir_fail(ts, i)
 }
 
 // ---------------------------------------------------------------- components IR
@@ -28389,6 +28397,17 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
   // fact it would emit WITHOUT — so the body is withheld with it, rather than
   // handing an emitter a component that silently lost its interception.
   if (bodyRes.ok && iceptRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  // ...and withheld LOUDLY (issue #2594). The reference always lowers a
+  // `body`, so a component without one is a program that lost its provide
+  // methods, effects and handlers. `unlowered` names what stopped the
+  // producer, and the driver refuses the component with it before any emitter
+  // can run (`compile.rvl::unlowered_refusal`).
+  if (!bodyRes.ok) {
+    js = js.concat(", \"unlowered\": ")
+      .concat(jstr("the body step starting at line ".concat(bodyRes.js)))
+  } else {
+    if (!iceptRes.ok) { js = js.concat(", \"unlowered\": ").concat(jstr("its `intercept` metadata")) }
+  }
   // the realm-placement prelude, in the reference's key order (after `body`):
   // `isolate` then `intercept` (`src/revl/lower.py::_lower_component`).
   if (isoJs != "") { js = js.concat(", \"isolate\": {").concat(isoJs).concat("}") }
