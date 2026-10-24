@@ -44,7 +44,8 @@ def _program(name: str) -> str:
         f"  let a = {name}.set(k, 7)\n"
         f"  let b = a.remove(\"x\")\n"
         f"  let d = {name}.set(\"x\", {name}.size())\n"
-        f"  return b.size() * 100 + d.size() * 10 + {name}.size()\n"
+        f"  let e = {name}.remove(\"y\")\n"
+        f"  return b.size() * 1000 + d.size() * 100 + e.size() * 10 + {name}.size()\n"
         f"}}\n"
     )
 
@@ -71,5 +72,27 @@ def test_map_named_like_a_helper_temporary_runs(name, tmp_path):
     proc = subprocess.run(["node", str(harness)], capture_output=True, text=True,
                           cwd=str(tmp_path))
     assert proc.returncode == 0, proc.stderr
-    # a = {x,y,z}; b = {y,z} (size 2); d = {x,y} (size 2); base untouched (2)
-    assert proc.stdout == "222 2"
+    # a = {x,y,z}; b = {y,z} (2); d = {x,y} (2); e = {x} (1); base untouched (2)
+    assert proc.stdout == "2212 2"
+
+
+@needs_node
+def test_remove_alone_on_a_map_named_c_runs(tmp_path):
+    """`remove` is exercised with no `set` on `c`, so it is covered by its own run."""
+    src = ("fn probe(c: Map[Str, Int]) -> Int {\n"
+           "  let e = c.remove(\"y\")\n"
+           "  return e.size() * 10 + c.size()\n"
+           "}\n")
+    mod = tmp_path / "m.ts"
+    mod.write_text(_emit(src, str(BACKEND / "runtime.ts")), encoding="utf-8")
+    harness = tmp_path / "h.ts"
+    harness.write_text(
+        "import { probe } from './m.ts'\n"
+        "const base = new Map<string, bigint>([['x', 1n], ['y', 2n]])\n"
+        "process.stdout.write(String(probe(base)))\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(["node", str(harness)], capture_output=True, text=True,
+                          cwd=str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "12"
