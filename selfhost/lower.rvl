@@ -7697,8 +7697,8 @@ fn value_method_head(h: Str) -> Bool {
 // (a `let`, a provide-method parameter, a match arm's binder) writes an empty
 // row, which shadows it. An arrow's parameter does NOT: the reference judges
 // `(pool) => pool.length()` as a verb on the component's `pool` (measured).
-// A `subscribe` head is not judged at all (`hv_off`): its stages are not verb
-// calls, and a host-verb call inside a stage's arrow goes unjudged with them.
+// A `subscribe` head's stages are not verb calls (`ct_sub_head`), but a verb
+// inside a stage's arrow is judged as anywhere else.
 // A subscription local (the `Subscription` family) is not tracked.
 fn hv_family(s: Stmt) -> Str {
   if (s.kind != "effect" || s.bind == "" || s.edge == "subscribe") { return "" }
@@ -7731,14 +7731,24 @@ fn hv_shadow(env: List[Bind], names: List[Str]) -> List[Bind] {
   return out
 }
 
-// The family of the host local `v` names, or "" (no row, a shadowing row, or
-// a `subscribe` head's statement, which `hv_off` marks).
+// The family of the host local `v` names, or "" (no row, or a shadowing row).
 fn hv_fam(env: List[Bind], v: Str) -> Str {
-  if (tenv_get(env, "host-off") == "1") { return "" }
   return tenv_get(env, "host ".concat(v))
 }
 
-fn hv_off(env: List[Bind]) -> List[Bind] { return tenv_put(env, "host-off", "1") }
+// A `subscribe` head (`parser.py::_stream_chain`): past a bare stream name,
+// every `.<stage>(<arg>)` link is a `StreamStage`, so the link itself is no
+// call to judge, while its argument (a `map`/`filter` arrow) is lowered like
+// any expression, in source order.
+fn ct_sub_head(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
+  return match e {
+    Call(c) => match c.target {
+      Field(f) => ct_first(ct_sub_head(f.target, cx, env), ct_exprs(c.args, 0, cx, env)),
+      _ => ct_scan(e, cx, env),
+    },
+    _ => ct_scan(e, cx, env),
+  }
+}
 
 // The verdict on the call node itself, its arguments already judged. Only the
 // FIRST verb off the host local is judged: a host verb's result is opaque, so
@@ -7933,7 +7943,7 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
   // `ct_scan` runs over all of them.
   let r = ct_swept(s) ? tk_infer(s.e, env) : tk_ok("")
   if (r.v != "") { return mk_verd(r.v, ln) }
-  let rq = ct_scan(s.e, cx, s.edge == "subscribe" ? hv_off(env) : env)
+  let rq = s.edge == "subscribe" ? ct_sub_head(s.e, cx, env) : ct_scan(s.e, cx, env)
   if (rq != "") { return mk_verd(rq, ln) }
   var next = env
   if (s.bind != "") {
@@ -21518,6 +21528,49 @@ fn sg_provide(ts: List[Token], i: Int) -> SgR {
   return sg_ok(j + 1)
 }
 
+// A timer `every <n><unit> { emit* }` / `after …` at `i` (`parser.py::timer`):
+// each body statement is read as an activation body's, and one that is not an
+// `emit` (or `await emit`) is refused before anything in it is lowered. A
+// header with a malformed delay is left unread.
+fn sg_timer(ts: List[Token], i: Int) -> SgR {
+  let mode = tkc(ts, i).text
+  if (!atk(ts, i + 1, "int") || !atk(ts, i + 2, "ident")) { return sg_unk() }
+  let ims = duration_ms_str(tkc(ts, i + 1).text, tkc(ts, i + 2).text)
+  if (ims == "") { return sg_unk() }
+  if (ims == "0") {
+    return sg_err("a `".concat(mode).concat("` delay must be positive (found 0)"), tkc(ts, i + 1).line)
+  }
+  if (!atk(ts, i + 3, "{")) { return sg_expected(ts, i + 3, "{") }
+  var j = i + 4
+  var count = 0
+  while (true) {
+    while (atk(ts, j, ";")) { j += 1 }
+    if (atk(ts, j, "}")) {
+      if (count == 0) {
+        return sg_err("an `".concat(mode).concat("` timer body is empty"), tkc(ts, i).line)
+      }
+      return sg_ok(j + 1)
+    }
+    if (atk(ts, j, "eof")) { return sg_unk() }
+    let ln = tkc(ts, j).line
+    let s = sg_stmt(ts, j, false, false, 0)
+    if (s.i < 0) { return s }
+    var start = 0 - 1
+    if (atw(ts, j, "emit")) { start = j + 1 }
+    if (atw(ts, j, "await") && atw(ts, j + 1, "emit")) { start = j + 2 }
+    if (start < 0) {
+      return sg_err("a `".concat(mode).concat("` timer body records emissions only"), ln)
+    }
+    let e = sg_expr(ts, start)
+    if (e.i >= 0 && atw(ts, e.i, "compensate")) {
+      return sg_err("a timer-body `emit` cannot declare `compensate`", ln)
+    }
+    count += 1
+    j = s.i
+  }
+  return sg_unk()
+}
+
 // One statement at `i` (`parser.py::stmt`): a provide method's when
 // `in_method`, else an activation body's. `loops` is the method loop depth.
 fn sg_stmt(ts: List[Token], i: Int, in_method: Bool, in_async: Bool, loops: Int) -> SgR {
@@ -21547,7 +21600,8 @@ fn sg_stmt(ts: List[Token], i: Int, in_method: Bool, in_async: Bool, loops: Int)
     if (in_method) {
       return sg_err("`".concat(t.text).concat("` timers are only allowed in a component activation body"), ln)
     }
-    return sg_unk()
+    if (atw(ts, i, "every") && atk(ts, i + 1, "ident") && atw(ts, i + 2, "in")) { return sg_unk() }
+    return sg_timer(ts, i)
   }
   if (atw(ts, i, "fail")) {
     if (in_method) { return sg_err("`fail` is only allowed in a component activation body (A8)", ln) }

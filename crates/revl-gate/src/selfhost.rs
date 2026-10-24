@@ -14460,14 +14460,17 @@ fn hv_shadow(env: Vec<Bind>, names: Vec<String>) -> Vec<Bind> {
 }
 
 fn hv_fam(env: &[Bind], v: &str) -> String {
-    if (tenv_get(env, "host-off") == "1") {
-        return String::from("");
-    }
     return tenv_get(env, &(String::from("host ").revl_concat(&v)));
 }
 
-fn hv_off(env: &[Bind]) -> Vec<Bind> {
-    return tenv_put(env, String::from("host-off"), String::from("1"));
+fn ct_sub_head(e: Expr, cx: Ctx__m2, env: Vec<Bind>) -> String {
+    return match e.clone() {
+    Expr::Call(c) => { let c = *c; match c.target.clone() {
+    Expr::Field(f) => { let f = *f; ct_first(ct_sub_head(f.target, cx.clone(), env.clone()), ct_exprs(c.args.clone(), 0i64, cx.clone(), env.clone())) },
+    _ => ct_scan(e.clone(), cx.clone(), env.clone()),
+} },
+    _ => ct_scan(e.clone(), cx.clone(), env.clone()),
+};
 }
 
 fn hv_node(c: CallN, env: Vec<Bind>) -> String {
@@ -14603,7 +14606,7 @@ fn mth_type_verdict(body: Vec<Stmt>, i: i64, env: Vec<Bind>, cx: Ctx__m2, ret: S
     if (r.v != "") {
         return mk_verd(r.v.clone(), ln.clone());
     }
-    let rq = ct_scan(s.e.clone(), cx.clone(), if (s.edge == "subscribe") { hv_off(&env) } else { env.clone() });
+    let rq = if (s.edge == "subscribe") { ct_sub_head(s.e.clone(), cx.clone(), env.clone()) } else { ct_scan(s.e.clone(), cx.clone(), env.clone()) };
     if (rq != "") {
         return mk_verd(rq.clone(), ln.clone());
     }
@@ -26678,6 +26681,61 @@ fn sg_provide(ts: Vec<Token>, i: i64) -> SgR {
     return sg_ok((j).checked_add(1i64).expect("revl: Int overflow"));
 }
 
+fn sg_timer(ts: Vec<Token>, i: i64) -> SgR {
+    let mode = tkc(&ts, i).text;
+    if ((!atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "int")) || (!atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident"))) {
+        return sg_unk();
+    }
+    let ims = duration_ms_str(&tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, &tkc(&ts, (i).checked_add(2i64).expect("revl: Int overflow")).text);
+    if (ims == "") {
+        return sg_unk();
+    }
+    if (ims == "0") {
+        return sg_err((String::from("a `").revl_concat(&mode)).revl_concat("` delay must be positive (found 0)"), tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).line);
+    }
+    if (!atk(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "{")) {
+        return sg_expected(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "{");
+    }
+    let mut j = (i).checked_add(4i64).expect("revl: Int overflow");
+    let mut count = 0i64;
+    while true {
+        while atk(&ts, j.clone(), ";") {
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if atk(&ts, j.clone(), "}") {
+            if (count == 0i64) {
+                return sg_err((String::from("an `").revl_concat(&mode)).revl_concat("` timer body is empty"), tkc(&ts, i).line);
+            }
+            return sg_ok((j).checked_add(1i64).expect("revl: Int overflow"));
+        }
+        if atk(&ts, j.clone(), "eof") {
+            return sg_unk();
+        }
+        let ln = tkc(&ts, j.clone()).line;
+        let s = sg_stmt(ts.clone(), j.clone(), false, false, 0i64);
+        if (s.i < 0i64) {
+            return s;
+        }
+        let mut start = (0i64).checked_sub(1i64).expect("revl: Int overflow");
+        if atw(&ts, j.clone(), "emit") {
+            start = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (atw(&ts, j.clone(), "await") && atw(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "emit")) {
+            start = (j).checked_add(2i64).expect("revl: Int overflow");
+        }
+        if (start < 0i64) {
+            return sg_err((String::from("a `").revl_concat(&mode)).revl_concat("` timer body records emissions only"), ln);
+        }
+        let e = sg_expr(ts.clone(), start.clone());
+        if ((e.i >= 0i64) && atw(&ts, e.i, "compensate")) {
+            return sg_err(String::from("a timer-body `emit` cannot declare `compensate`"), ln);
+        }
+        count = (count).checked_add(1i64).expect("revl: Int overflow");
+        j = s.i;
+    }
+    return sg_unk();
+}
+
 fn sg_stmt(ts: Vec<Token>, i: i64, in_method: bool, in_async: bool, loops: i64) -> SgR {
     let t = tkc(&ts, i);
     let ln = t.line;
@@ -26715,7 +26773,10 @@ fn sg_stmt(ts: Vec<Token>, i: i64, in_method: bool, in_async: bool, loops: i64) 
         if in_method {
             return sg_err((String::from("`").revl_concat(&t.text)).revl_concat("` timers are only allowed in a component activation body"), ln);
         }
-        return sg_unk();
+        if ((atw(&ts, i, "every") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) {
+            return sg_unk();
+        }
+        return sg_timer(ts.clone(), i);
     }
     if atw(&ts, i, "fail") {
         if in_method {

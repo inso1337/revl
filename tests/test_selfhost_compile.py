@@ -4181,3 +4181,90 @@ def test_native_gate_checks_a_verb_on_a_host_local_as_the_reference(
         assert got == "REFUSED|" + want, got[:200]
     else:
         assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
+
+
+# Issue #2569, continued. A timer body (`every 30s { … }`) records emissions
+# only: the reference's parser refuses any other statement there before a host
+# verb in it is lowered, where the self-host statement grammar left the timer
+# unread and the type layer gave HOST-METHOD. And a verb inside a `subscribe`
+# stage's arrow is judged as anywhere else; only the stage links themselves
+# are not verb calls. Each case is (source, the reference's code, "BAD" for a
+# parse refusal, or "" where it admits).
+_LOG_POOL = ("service Log { emission[log] fn write(msg: Str) }\n"
+             "component C requires log: Log {\n  " + _POOL + "\n")
+_SUB_POOL = ("service Sink { emission fn write(v: Str) }\n"
+             "component C requires sink: Sink {\n  " + _POOL + "\n"
+             "  let src = effect Stream.source() undo src.close()\n")
+_SUB_TAIL = "              undo sub.close()\n  every o in sub {\n    emit sink.write(o)\n  }\n}\n"
+_TIMER_AND_STAGE_VERBS = {
+    "every_effect_off_surface": (
+        _LOG_POOL + "  every 30s {\n    effect pool.frob()\n    undo pool.close()\n  }\n}\n",
+        "BAD"),
+    "after_effect_off_surface": (
+        _LOG_POOL + "  after 5m {\n    effect pool.frob()\n    undo pool.close()\n  }\n}\n",
+        "BAD"),
+    "every_effect_after_an_emit": (
+        _LOG_POOL + '  every 30s {\n    emit log.write("a")\n    effect pool.frob()\n'
+        "    undo pool.close()\n  }\n}\n", "BAD"),
+    "every_effect_on_surface": (
+        _LOG_POOL + '  every 30s {\n    effect pool.query("x")\n    undo pool.close()\n  }\n}\n',
+        "BAD"),
+    # the statement's own rule is met before the timer's
+    "every_plain_let": (
+        _LOG_POOL + "  every 30s {\n    let x = pool.frob()\n    emit log.write(x)\n  }\n}\n",
+        "BAD"),
+    "every_guard": (
+        _LOG_POOL + '  every 3s {\n    if (true) { emit log.write("a") }\n  }\n}\n', "BAD"),
+    "every_empty": (_LOG_POOL + "  every 30s {\n  }\n}\n", "BAD"),
+    "every_zero_delay": (_LOG_POOL + '  every 0s {\n    emit log.write("a")\n  }\n}\n', "BAD"),
+    "every_emit_compensate": (
+        _LOG_POOL + '  every 3s {\n    emit log.write("a") compensate log.write("b")\n  }\n}\n',
+        "BAD"),
+    # the statements after a timer are read too
+    "plain_let_after_a_timer": (
+        _LOG_POOL + '  every 3s {\n    emit log.write("a")\n  }\n  let y = 2\n}\n', "BAD"),
+    # a verb in an emission's argument is still the type layer's
+    "every_emit_off_surface": (
+        _LOG_POOL + "  every 30s {\n    emit log.write(pool.frob())\n  }\n}\n", "HOST-METHOD"),
+    "timers_admitted": (
+        _LOG_POOL + '  every 30s {\n    emit log.write(pool.query("x"))\n  }\n'
+        '  after 1s { emit log.write("y") }\n}\n', ""),
+    "every_await_emit": (_LOG_POOL + '  every 30s {\n    await emit log.write("a")\n  }\n}\n', ""),
+    "stage_arrow_off_surface": (
+        _SUB_POOL + "  let sub = subscribe src.map(x => pool.frob(x))\n" + _SUB_TAIL,
+        "HOST-METHOD"),
+    "stage_arrow_wrong_type": (
+        _SUB_POOL + "  let sub = subscribe src.filter(x => pool.query(1) > 0)\n" + _SUB_TAIL,
+        "T1"),
+    "second_stage_arrow": (
+        _SUB_POOL + "  let sub = subscribe src.take(2).map(x => pool.frob())\n" + _SUB_TAIL,
+        "HOST-METHOD"),
+    "merge_stage_arrow": (
+        _SUB_POOL + "  let s2 = effect Stream.source() undo s2.close()\n"
+        "  let sub = subscribe merge(src, s2).map(x => pool.frob(x))\n" + _SUB_TAIL,
+        "HOST-METHOD"),
+}
+
+# Admitted as the reference admits it, but the native producer does not yet
+# emit an `await emit` timer step as the reference does.
+_TIMER_VERDICT_ONLY = {"every_await_emit"}
+
+
+@pytest.mark.parametrize("case", sorted(_TIMER_AND_STAGE_VERBS))
+def test_native_gate_refuses_a_timer_body_and_a_stage_arrow_as_the_reference(
+        admit, compile_to, reference_emit, case):
+    source, code = _TIMER_AND_STAGE_VERBS[case]
+    try:
+        compile_source(source, "doc.rvl")
+        want = ""
+    except RevlError as e:
+        want = f"{e.code or 'BAD'}|{e.message}"
+    assert want.split("|")[0] == code
+    assert admit(source) == want
+    if case in _TIMER_VERDICT_ONLY:
+        return
+    got = compile_to(source, "py")
+    if code:
+        assert got == "REFUSED|" + want, got[:200]
+    else:
+        assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
