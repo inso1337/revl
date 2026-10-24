@@ -105,7 +105,7 @@ export function newTable(): Map<string, bigint> {
 }
 
 export function put(m: Map<string, bigint>, k: string, v: bigint): Map<string, bigint> {
-    return (() => { const c = new Map(m); c.set(k, v); return c })()
+    return (<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(m, k, v)
 }
 
 export function get(m: Map<string, bigint>, k: string): bigint {
@@ -120,7 +120,7 @@ export function build(pairs: string[]): Map<string, bigint> {
     let m = new Map()
     let i = 0n
     while ((i < revlLen(pairs))) {
-      m = (() => { const c = new Map(m); c.set(revlIndex(pairs, Number(i)), revlLen(revlIndex(pairs, Number(i)))); return c })()
+      m = (<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(m, revlIndex(pairs, Number(i)), revlLen(revlIndex(pairs, Number(i))))
       i = revlI64(i + 1n)
     }
     return m

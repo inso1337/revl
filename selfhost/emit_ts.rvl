@@ -714,7 +714,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
     return { text: `((_rc: string) => _rc === " " || _rc === "\t" || _rc === "\n" || _rc === "\r")(${target})`, counter: counter }
   }
   if (method == "set") {
-    return { text: `(() => { const c = new Map(${target}); c.set(${args[0]}, ${args[1]}); return c })()`, counter: counter }
+    return { text: `(<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(${target}, ${args[0]}, ${args[1]})`, counter: counter }
   }
   if (method == "lookup") { return { text: `${target}.get(${args[0]})`, counter: counter } }
   if (method == "has") { return { text: `${target}.has(${args[0]})`, counter: counter } }
@@ -723,7 +723,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
     return { text: `[...${target}.keys()].sort(revlStrCmp)`, counter: counter }
   }
   if (method == "remove") {
-    return { text: `(() => { const c = new Map(${target}); c.delete(${args[0]}); return c })()`, counter: counter }
+    return { text: `(<K, V>(_m: Map<K, V>, _k: K) => { const _c = new Map(_m); _c.delete(_k); return _c })(${target}, ${args[0]})`, counter: counter }
   }
   if (method == "to_str") { return { text: `${target}.toString()`, counter: counter } }
   return { text: `<<UNSUPPORTED-BUILTIN:${method}>>`, counter: counter }
