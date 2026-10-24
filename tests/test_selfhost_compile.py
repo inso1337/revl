@@ -998,14 +998,21 @@ def test_a_bodyless_component_refusal_names_the_inner_statement(
     source, _ = arity.REFUSED["provide_block_body"]
     with pytest.raises(RevlError) as refused:
         compile_source(source)
-    line = refused.value.line
-    assert line == 7
+    assert refused.value.line == 7
     native = json.loads(lower_to_ir(source))["components"][0]
-    assert native["unlowered"] == f"the body statement at line {line}"
-    assert f"at line {line} " in compile_to(source, "py")
+    assert _refused_line(native["unlowered"]) == refused.value.line
+    assert _refused_line(compile_to(source, "py")) == refused.value.line
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
-    assert native["unlowered"] == "the body statement at line 6"
+    assert _refused_line(native["unlowered"]) == 6
+
+
+def _refused_line(text: str) -> int:
+    """The one line number a bodyless-component refusal names; the test reads
+    only the number, so a change of wording around it does not move it."""
+    found = re.findall(r"\bline (\d+)\b", text)
+    assert len(found) == 1, text[:200]
+    return int(found[0])
 
 
 _PURE_CLOSURE_MODULES = {

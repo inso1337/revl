@@ -27011,6 +27011,7 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     if (bend == 0 - 1) { return cir_fail(ts, head) }
     if (cir_has_control(ts, h + 1, bend - 1)
         && cir_method_rebinds(ts, h + 1, bend - 1, concat_binds(sc, pbinds))) {
+      // a method-wide refusal, no one statement stops it: name the `fn` line
       return cir_fail(ts, head)
     }
     let br = cir_method_stmts(ts, h + 1, bend - 1, cx,
