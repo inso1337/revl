@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { Context } from 'cordis'
+import { pythonInterpreter } from '../scripts/emit-fixtures'
 import { Guarded, Memory } from './generated/conformance.ts'
 import { resetHost } from '../runtime.ts'
 
@@ -166,7 +167,7 @@ describe('the emitted module type-checks', () => {
 
 function emitIr(ir: unknown) {
   // `-`, not `/dev/stdin`: the latter is unopenable on a GitHub runner.
-  return spawnSync('python3', ['emit.py', '-'], {
+  return spawnSync(pythonInterpreter(), ['emit.py', '-'], {
     cwd: backend,
     encoding: 'utf-8',
     input: JSON.stringify(ir),

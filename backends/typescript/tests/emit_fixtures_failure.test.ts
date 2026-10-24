@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { describeEmitFailure, emitFixture } from '../scripts/emit-fixtures'
+import { describeEmitFailure, emitFixture, pythonInterpreter } from '../scripts/emit-fixtures'
 
 describe('emit-fixtures failure message', () => {
   it('names the spawn error when the interpreter cannot be spawned', () => {
@@ -37,5 +37,26 @@ describe('emit-fixtures failure message', () => {
       { encoding: 'utf-8' },
     )
     expect(describeEmitFailure('x.ir.json', result)).toContain('SIGTERM')
+  })
+})
+
+describe('pythonInterpreter', () => {
+  it('uses REVL_PYTHON when set, on any platform', () => {
+    expect(pythonInterpreter({ REVL_PYTHON: '/opt/py/bin/py' }, 'linux')).toBe('/opt/py/bin/py')
+    expect(pythonInterpreter({ REVL_PYTHON: 'C:\\py\\python.exe' }, 'win32')).toBe('C:\\py\\python.exe')
+  })
+
+  it('defaults to python on win32', () => {
+    expect(pythonInterpreter({}, 'win32')).toBe('python')
+  })
+
+  it('defaults to python3 on posix', () => {
+    expect(pythonInterpreter({}, 'linux')).toBe('python3')
+    expect(pythonInterpreter({}, 'darwin')).toBe('python3')
+  })
+
+  it('treats an empty REVL_PYTHON as unset', () => {
+    expect(pythonInterpreter({ REVL_PYTHON: '' }, 'win32')).toBe('python')
+    expect(pythonInterpreter({ REVL_PYTHON: '' }, 'linux')).toBe('python3')
   })
 })
