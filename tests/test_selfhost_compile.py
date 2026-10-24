@@ -972,7 +972,7 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
     assert "body" in ref["components"][0]
 
     refusal = (
-        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 3 "
+        "REFUSED|UNSUPPORTED|component `C`: the body statement at line 6 "
         "is not supported by the self-host compiler, which would emit the "
         "component without its body.")
     got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
@@ -983,7 +983,29 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert "body" not in native
-    assert native["unlowered"] == "the body step starting at line 3"
+    assert native["unlowered"] == "the body statement at line 6"
+
+
+def test_a_bodyless_component_refusal_names_the_inner_statement(
+        compile_to, lower_to_ir):
+    """The refusal names the statement inside the provide method that stopped
+    the producer, not the `provide` step around it. Where the reference refuses
+    that statement itself (the case-arity document `provide_block_body`), the
+    native refusal carries the reference's own line; where the reference lowers
+    it (the one-line block arm), the line is the `let` holding that arm."""
+    arity = load_by_path("test_case_call_arity",
+                         ROOT / "tests" / "test_case_call_arity.py")
+    source, _ = arity.REFUSED["provide_block_body"]
+    with pytest.raises(RevlError) as refused:
+        compile_source(source)
+    line = refused.value.line
+    assert line == 7
+    native = json.loads(lower_to_ir(source))["components"][0]
+    assert native["unlowered"] == f"the body statement at line {line}"
+    assert f"at line {line} " in compile_to(source, "py")
+
+    native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
+    assert native["unlowered"] == "the body statement at line 6"
 
 
 _PURE_CLOSURE_MODULES = {
@@ -3979,7 +4001,7 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
     # issue #2594: the producer cannot lower this provide step, and the
     # bodyless component it used to emit is now refused by name.
     "provide_block_body":
-        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 4 "
+        "REFUSED|UNSUPPORTED|component `C`: the body statement at line 7 "
         "is not supported by the self-host compiler, which would emit the "
         "component without its body.",
     "provide_expression_body": "EMITS",
