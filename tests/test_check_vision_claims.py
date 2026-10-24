@@ -48,6 +48,20 @@ _FILES = {
     "demo/bridge_pypy.py": "print(1)\n",
     "docs/conformance.md": "# c\n",
     "docs/vision.md": "# v\n",
+    "formal/STATUS.md": """## What the layer covers, and what it does not
+
+| Code | Formal status | Theorems | Oracle | Gap |
+|---|---|---|---|---|
+| **G1** declared access | partial | 1 | no | gap |
+| **G2** disjointness | full | 1 | no | gap |
+| **G3** acyclic | full | 1 | no | gap |
+| **G4** inverse | full over the lattice | 1 | no | gap |
+| **G5** teardown | full over the lattice | 1 | no | gap |
+| **G6** confinement | full at head granularity | 1 | no | gap |
+| **G7** teardown order | full | 1 | no | gap |
+| **G8** boundary | full over the lattice | 1 | no | gap |
+| **G9** taint | full | 1 | no | gap |
+""",
 }
 
 
@@ -171,8 +185,8 @@ def test_an_anchor_is_stripped_before_resolving(tree):
 # (path) Backticked paths, abbreviations and globs.
 # --------------------------------------------------------------------------
 def test_a_backticked_path_the_tree_does_not_have_bites(tree):
-    verdict = _one("the ledger `formal/STATUS.md` names each gap", tree, "path")
-    assert "formal/STATUS.md" in verdict
+    verdict = _one("the ledger `formal/MISSING.md` names each gap", tree, "path")
+    assert "formal/MISSING.md" in verdict
 
 
 def test_an_abbreviated_filename_resolves_by_suffix(tree):
@@ -197,6 +211,33 @@ def test_a_glob_that_matches_passes(tree):
 
 def test_a_bare_extension_is_not_read_as_a_file(tree):
     _silent("One `.rvl` source, one IR, six emitters.", tree, "path")
+
+
+# --------------------------------------------------------------------------
+# (formal-status) Explicit proof-status prose against formal/STATUS.md.
+# --------------------------------------------------------------------------
+def test_a_stale_formal_status_claim_bites(tree):
+    verdict = _one("G6 is `partial`.", tree, "formal-status")
+    assert "G6" in verdict
+    assert "formal/STATUS.md" in verdict
+    assert "`full`" in verdict
+
+
+def test_a_formal_status_claim_that_matches_the_ledger_passes(tree):
+    _silent("G6 is `full` at head granularity.", tree, "formal-status")
+    _silent("G1 is `partial`.", tree, "formal-status")
+
+
+def test_lists_and_ranges_check_each_guarantee_status(tree):
+    _silent("G2, G3 and G7 are `full`.", tree, "formal-status")
+    _silent("G2 through G9 are `full`.", tree, "formal-status")
+
+
+def test_a_mixed_list_reports_only_the_guarantee_with_stale_status(tree):
+    findings = _findings("G1 and G6 are `partial`.", tree, "formal-status")
+    assert len(findings) == 1, findings
+    assert findings[0][0].key == "G6=partial"
+    assert "records `full`" in findings[0][1]
 
 
 # --------------------------------------------------------------------------
@@ -375,9 +416,10 @@ def test_the_cli_reports_and_exits_zero_on_the_real_document():
         capture_output=True, text=True, cwd=str(ROOT),
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "claims checked over 4 rules" in proc.stdout
+    assert "claims checked over 5 rules" in proc.stdout
     assert "docs/vision.md:" in proc.stdout
     assert "docs/substrate-boundary.md:" in proc.stdout
+    assert "README.md:" in proc.stdout
 
 
 def test_the_cli_reports_zero_claims_and_scope_for_an_empty_document(
@@ -395,5 +437,5 @@ def test_the_cli_reports_zero_claims_and_scope_for_an_empty_document(
     ]) == 0
 
     output = capsys.readouterr().out
-    assert "empty.md: 0 claims checked over 4 rules" in output
-    assert "It did not run them" in output
+    assert "empty.md: 0 claims checked over 5 rules" in output
+    assert "It did not run commands" in output

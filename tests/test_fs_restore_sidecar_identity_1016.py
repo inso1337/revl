@@ -28,8 +28,10 @@ The failure direction is the point, and both halves are pinned here:
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import os
+import stat
 import sys
 import types
 from pathlib import Path
@@ -236,6 +238,46 @@ def test_a_sidecar_replaced_by_a_directory_is_refused(workspace):
         mod.restore(witness)
     assert ei.value.code == "EOUTSIDE"
     assert open(target, encoding="utf-8").read() == "v2"
+
+
+def test_a_repermissioned_sidecar_is_refused_on_the_mode_field(workspace):
+    """The fifth #2652 B1 tamper id (issue #2770): the snapshot is
+    re-permissioned after the capture and before the inverse runs. A `chmod`
+    leaves the bytes, the inode, the size, the type and the link count alone,
+    so the stat comparison is the only one that can refuse it, and `mode` is
+    the field it must name (chmod also bumps ctime); the recorded content
+    digest still matches. The drift is refused on the
+    PRE-INSTALL pass, before the target is touched, so the forward mutation is
+    kept and the sidecar is not consumed.
+
+    The mode is derived from the sidecar's own rather than fixed at 0o640: a
+    literal would be the very mode the workspace happened to create under some
+    umasks, and the test would then skip instead of covering the vector. It is
+    skipped only when the chmod cannot move a permission bit (Windows carries
+    the read-only attribute alone)."""
+    mod = _fs_module()
+    witness, target, sidecar = _written(mod, workspace)
+    before = os.stat(sidecar)
+    os.chmod(sidecar, stat.S_IMODE(before.st_mode) ^ 0o040)
+    after = os.stat(sidecar)
+    if stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode):
+        pytest.skip("this filesystem did not carry the chmod in st_mode "
+                    "(Windows carries the read-only attribute only)")
+    assert after.st_size == before.st_size
+    assert open(sidecar, encoding="utf-8").read() == "v1"
+    # The bytes are honest, so the digest comparison has nothing to say. A
+    # restore that dropped the stat comparison would install the sidecar; a
+    # comparison without `mode` could not name why it refused.
+    assert witness["capture"]["sha256"] == \
+        hashlib.sha256(b"v1").hexdigest()
+
+    with pytest.raises(ws.FsOpError) as ei:
+        mod.restore(witness)
+    assert ei.value.code == "EIDENTITY"
+    assert "mode" in ei.value.message
+
+    assert open(target, encoding="utf-8").read() == "v2"
+    assert os.path.exists(sidecar), "the refused sidecar was consumed"
 
 
 def test_the_installed_result_is_rechecked_after_the_rename(workspace, monkeypatch):

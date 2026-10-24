@@ -2033,6 +2033,13 @@ _CARRIED_THROUGH_IMPORT = {
         "= store.put({ i: { a: 1 } })", "emit"),
     "own_type_and_carried_case": (
         "type In = { z: Str }\n\n", "= store.draw(Box(mk_n()))", "emit"),
+    # Issue #2449: a document case that REUSES a carried case's name. The
+    # reference's merged case table holds `Dot` twice, drops it as ambiguous,
+    # and the component body's bare `Dot` then resolves to no requirement, so
+    # the reference refuses G1. The document read alone knows only its own
+    # `Dot`, so the native gate used to admit it.
+    "own_case_shares_a_carried_name": (
+        "type Mine = Dot | Other\n\n", "= store.draw(Dot)", "refuse"),
     "own_public_type": ("pub type In = { z: Str }\n\n", "= store.put({ i: { a: 1 } })",
                         "refuse"),
     # The reference renames a private type in functions, types and test bodies,
@@ -2137,6 +2144,51 @@ def test_native_driver_types_a_generic_carried_record_literal(
         assert got == "REFUSED|T1|" + want, got[:200]
         return
     assert got == reference_emit[tier](compile_files([str(doc)])), got[:200]
+
+
+# Issue #2449: the exact refusal for a document case that shares a carried
+# case's name, pinned to the reference's tag and sentence (the generic table
+# above only says "refuse").
+def test_a_document_case_sharing_a_carried_name_is_refused(compile_rvl, tmp_path):
+    (tmp_path / "lib.rvl").write_text(_CARRIED_LIB, encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text(
+        'use "./lib.rvl" { Store }\n\n'
+        "type Mine = Dot | Other\n\n" + _CALL_SITE_COMPONENT % "= store.draw(Dot)",
+        encoding="utf-8")
+    with pytest.raises(RevlError) as refused:
+        compile_files([str(doc)])
+    assert "not a declared requirement of App" in refused.value.message
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got == "REFUSED|G1|" + refused.value.message
+
+
+# Issue #2450: a carried variant's NULLARY case built in a module function. The
+# document's own read has no `Dot` case, so the native producer lowered the name
+# as a variable and the py tier wrote `return Dot`, the class, not an instance.
+# The carried declarations are now spliced into the LOWERING text as well, so the
+# name lowers as the tagged `adt` the reference builds.
+_CARRIED_CASE_IN_FN = (
+    'use "./lib.rvl" { Store }\n\n'
+    "fn mk() -> Shape { return Dot }\n\n"
+    "service Front { fn go() -> Str }\n\n"
+    "component App requires store: Store provides front: Front {\n"
+    "  provide front {\n"
+    "    fn go() = store.draw(mk())\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_a_carried_nullary_case_is_constructed(
+        compile_rvl, reference_emit, tmp_path, tier):
+    (tmp_path / "lib.rvl").write_text(_CARRIED_LIB, encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text(_CARRIED_CASE_IN_FN, encoding="utf-8")
+    want = reference_emit[tier](compile_files([str(doc)]))
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), tier, str(doc))
+    assert got == want, got[:400]
 
 
 def test_six_way_composition_co_compiles(compile_rvl):
@@ -3486,7 +3538,35 @@ _ISSUE_2397_UNSUPPORTED = {
                            "test \"t\" {\n  assert f(1) == 3\n}\n"),
     "fn_value": ("fn f(a: Int, b: Int = 2) -> Int { return a + b }\n"
                  "fn k() -> Int {\n  let g = f\n  return 1\n}\n"),
+    # Issue #2461: the token scan for uses of a defaulted fn cannot see the body
+    # of a backtick `${...}`, which is one opaque lexer token. The call is still
+    # refused by name, through `tk_named` on the template's operand walk; this
+    # case is what holds that path.
+    "template_omits_default": (
+        "fn f(a: Int, b: Int = 2) -> Int { return a + b }\n"
+        "fn k() -> Str { return `${f(1)}` }\n"),
 }
+
+# Issue #2461: names a defaulted fn shares with a BINDING (a parameter, a lambda
+# parameter, a record field, a field read) used to be refused as "a use of `f`
+# other than a call", and a trailing comma in a full call made its argument
+# count read as one too many. The reference admits all of them, so these are
+# byte-for-byte cases, not recorded refusals.
+_ISSUE_2397_COMPILED.update({
+    "parameter_named_f": ("fn f(x: Int = 1) -> Int { return x }\n"
+                          "fn g(f: Int) -> Int { return f }\n"),
+    "lambda_parameter_named_f": (
+        "fn f(x: Int = 1) -> Int { return x }\n"
+        "fn g() -> Int {\n  let h = (f: Int) => f\n  return h(1)\n}\n"),
+    "record_field_named_f": (
+        "fn f(x: Int = 1) -> Int { return x }\n"
+        "type P = { f: Int }\nfn g(p: P) -> Int { return p.f }\n"),
+    "record_literal_field_named_f": (
+        "fn f(x: Int = 1) -> Int { return x }\n"
+        "type P = { f: Int }\nfn g() -> Int {\n  let p = { f: 3 }\n  return p.f\n}\n"),
+    "trailing_comma_call": ("fn f(a: Int, b: Int = 2) -> Int { return a + b }\n"
+                            "fn k() -> Int { return f(1, 3,) }\n"),
+})
 
 
 @pytest.mark.parametrize("tier", ["py", "go", "rust"])
@@ -3652,6 +3732,179 @@ def test_the_well_typed_generic_record_forms_are_admitted(admit, name):
     text = _ISSUE_2405_REMAINING_CONTROLS[name]
     assert _reference_refusal(text) == ""
     assert admit(text) == ""
+
+
+# Issue #2460: an `if` whose branches join `Int` and `Float` is a `Float` in the
+# reference (`join`) and the native annotation engine answered unknown, so a
+# NESTED one fell back to `Int` on the outer join and the return-position widen
+# marker was stamped: the py tier wrote `return float(r)` where the reference
+# writes `return r`. The verdict matched, the bytes did not, and nothing was
+# refused.
+_NESTED_IF_FLOAT = (
+    "fn pick(c: Bool, d: Bool) -> Float {\n"
+    "  let r = if (c) { if (d) { 1 } else { 2.5 } } else { 3 }\n"
+    "  return r\n}\n"
+)
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_a_nested_if_joining_int_and_float_emits_the_reference_bytes(
+        compile_rvl, reference_emit, tmp_path, tier):
+    doc = tmp_path / "nested_if.rvl"
+    doc.write_text(_NESTED_IF_FLOAT, encoding="utf-8")
+    want = reference_emit[tier](compile_files([str(doc)]))
+    got = compile_rvl["compile_to_at"](_NESTED_IF_FLOAT, tier, str(doc))
+    assert got == want, got[:300]
+
+
+# Issue #2446: a block-bodied provide method is outside the native java
+# emitter's subset and the go emitter has no component tier at all. Both used to
+# answer with target source in which the component had been DROPPED behind a
+# `<<UNSUPPORTED-...>>` marker: a successful result whose bytes differ from the
+# reference's, with no refusal. The self-host rule allows a loud named refusal
+# there, so the driver now returns one.
+_BLOCK_BODY_PROVIDE = (
+    "service Front { fn go() -> Str }\n\n"
+    "component App provides front: Front {\n"
+    "  provide front {\n"
+    "    fn go() {\n"
+    '      let s = "a"\n'
+    "      return s\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize("tier", ["go", "java"])
+def test_a_dropped_component_is_a_named_refusal(compile_to, tier):
+    assert compile_source(_BLOCK_BODY_PROVIDE)  # the reference emits it
+    got = compile_to(_BLOCK_BODY_PROVIDE, tier)
+    assert got.startswith("REFUSED|UNSUPPORTED|"), got[:160]
+    assert "component" in got.lower(), got[:200]
+    assert "self-host compiler" in got, got[:200]
+
+
+def test_the_block_body_provide_still_compiles_on_py(compile_to, reference_emit):
+    """NON-VACUITY: the refusal names the two tiers that cannot emit the shape;
+    the py tier still reproduces the reference's bytes."""
+    assert compile_to(_BLOCK_BODY_PROVIDE, "py") == reference_emit["py"](
+        compile_source(_BLOCK_BODY_PROVIDE))
+
+
+# Issue #2448: the reference refuses a variant case call whose payload has the
+# wrong type, and the native gate ADMITTED it on every tier: a silent admit of
+# an ill-typed program, not a difference in spelling. `selfhost/checker.rvl`
+# already refuses it, but the driver's gate is `lower.rvl`'s `tk_call`, which
+# resolved a case constructor as "unchecked" and never compared the payload.
+# The assertion is the reference's own verdict, message and tag.
+_WRONG_TYPED_PAYLOAD = (
+    "type Shape = Dot | Box(Int)\n\n"
+    'fn mk() -> Shape { return Box("x") }\n'
+)
+
+
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_a_wrong_typed_variant_payload_is_refused(compile_rvl, tier):
+    message = _reference_refusal(_WRONG_TYPED_PAYLOAD)
+    assert message == "`Box(...)` payload expects `Int`, got `Str`"
+    got = compile_rvl["compile_to_at"](_WRONG_TYPED_PAYLOAD, tier, "payload.rvl")
+    assert got == "REFUSED|T1|" + message
+
+
+# Issue #2459: the reference refuses a `${...}` whose static type is compound
+# (`src/revl/lower.py`'s `_interp_refusal`); the native gate inferred the
+# operand and emitted it anyway, so `${f}` for a plain fn came out as `str(f)`.
+# One case per reason the reference names, so the sentence is pinned too.
+_INTERP_COMPOUND = {
+    "fn_value": ("fn f(x: Int) -> Int { return x }\n"
+                 "fn show() -> Str { return `${f}` }\n",
+                 "a compound value"),
+    "list": ("fn show(xs: List[Int]) -> Str { return `${xs}` }\n",
+             "a compound value"),
+    "opt": ("fn show(o: Opt[Int]) -> Str { return `${o}` }\n",
+            "a compound value"),
+    "record": ("type P = { x: Int }\n"
+               "fn show(p: P) -> Str { return `${p}` }\n",
+               "a record"),
+    "variant": ("type S = A(Int) | B\n"
+                "fn show(s: S) -> Str { return `${s}` }\n",
+                "a variant"),
+    "structural_record": ("fn show() -> Str {\n  let a = { h: 1 }\n"
+                          "  return `${a}`\n}\n",
+                          "a record"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_INTERP_COMPOUND))
+def test_a_compound_template_operand_is_refused(compile_rvl, tmp_path, name):
+    source, reason = _INTERP_COMPOUND[name]
+    message = _reference_refusal(source)
+    assert message.startswith(f"`${{...}}` cannot interpolate {reason} ("), message
+    got = compile_rvl["compile_to_at"](source, "py", str(tmp_path / "t.rvl"))
+    assert got == "REFUSED|T1|" + message
+
+
+def test_a_scalar_template_operand_still_compiles(compile_to):
+    """NON-VACUITY: the refusal names what it can prove compound, not every
+    template."""
+    source = ('fn show(s: Str, n: Int, x: Float, b: Bool) -> Str '
+              '{ return `${s}${n}${x}${b}` }\n')
+    assert not compile_to(source, "py").startswith("REFUSED|")
+
+
+def test_a_component_template_may_interpolate_a_compound_value(
+        compile_to, reference_emit):
+    """NON-VACUITY, the other direction: the reference reaches
+    `_mark_interp_type` from module-fn lowering only, and a component body
+    never goes through it: a provide method interpolating a `List` or a call
+    returning one is ADMITTED. Refusing there was a false rejection (the
+    gate/reference census caught it: `emit_go_corpus/comp_provide_builtins.rvl`
+    moved from agree-admit to false-reject)."""
+    source = (
+        "fn anyText(x: List[Int]) -> List[Int] { return x }\n"
+        "service S { fn f(xs: List[Int]) -> Str }\n\n"
+        "component C provides s: S {\n"
+        "  provide s {\n"
+        "    fn f(xs) = `xs=${anyText(xs)} ${xs}`\n"
+        "  }\n"
+        "}\n")
+    assert not compile_to(source, "py").startswith("REFUSED|")
+    assert compile_to(source, "py") == reference_emit["py"](compile_source(source))
+
+
+# Issue #2459 review: an APPLIED generic is not answered by the reference's
+# `_interp_refusal` (its `types.get(inferred)` lookup misses `S[Int]`/`R[Int]`),
+# so it is admitted. Dispatching on the head name refused it.
+_APPLIED_GENERIC_INTERP = {
+    "variant": "type S[T] = A(T) | B\nfn show(s: S[Int]) -> Str { return `${s}` }\n",
+    "record": "type R[T] = { x: T }\nfn show(r: R[Int]) -> Str { return `${r}` }\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_APPLIED_GENERIC_INTERP))
+def test_an_applied_generic_template_operand_is_admitted(
+        compile_to, reference_emit, name):
+    source = _APPLIED_GENERIC_INTERP[name]
+    assert not compile_to(source, "py").startswith("REFUSED|")
+    assert compile_to(source, "py") == reference_emit["py"](compile_source(source))
+
+
+# Issue #2446 review: `<<UNSUPPORTED-COMPONENT:parallel-emit>>` is the py
+# porter's marker for ONE fan-out statement inside an otherwise emitted
+# component, not a dropped component. The whole-shape refusal must not match it.
+_PARALLEL_EMIT = (
+    "extern emission async fn send(msg: Str) -> Int\n"
+    "  = @py { return 1 } = @ts { return 1; } = @rs { 1 } = @go { return 1 }"
+    " = @java { return 1; }\n\n"
+    "component C {\n  await emit send(\"a\")\n  await emit send(\"b\")\n}\n"
+)
+
+
+def test_a_component_section_marker_is_not_a_dropped_component(compile_to):
+    got = compile_to(_PARALLEL_EMIT, "py")
+    assert not got.startswith("REFUSED|"), got[:160]
+    assert "<<UNSUPPORTED-COMPONENT:parallel-emit>>" in got, got[:300]
 
 
 # Issue #2447: the reference refuses a variant case call with the wrong number

@@ -15,7 +15,7 @@ source-derived blocks in six documents are byte-compared against a fresh
 generation (`tools/docgen.py --check`). The vision half carried two
 hand-written tables and nothing watched either one (issue #1204).
 
-WHAT IS CHECKED. Four rules, in the shape `check_roadmap_claims.py` uses: a
+WHAT IS CHECKED. Five rules, in the shape `check_roadmap_claims.py` uses: a
 claim is judged only where the sentence names the artifact that makes it
 falsifiable.
 
@@ -52,6 +52,10 @@ falsifiable.
 
   tier     The six-tier table equals a fresh derivation from the conformance
            register. See the next section.
+
+  formal-status  Every explicit G<n> full/partial/unproved claim in
+                 docs/vision.md and README.md agrees with the normalized status
+                 in formal/STATUS.md, read by the certificate parser.
 
 THE TIER TABLE IS GENERATED, NOT CHECKED. The table's per-tier column is a
 `docgen` block (`vision-tiers`), rendered by `tools/docgen.py` from the per-tier
@@ -107,16 +111,19 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT / "src"))
 
 import check_roadmap_claims as claims  # noqa: E402
 import docgen  # noqa: E402
+from revl import cert  # noqa: E402
 
 DEFAULT_DOC = ROOT / "docs" / "vision.md"
 DEFAULT_DOC_RELS = (
     str(DEFAULT_DOC.relative_to(ROOT)),
     "docs/substrate-boundary.md",
 )
-RULES = ("command", "link", "path", "tier")
+FORMAL_STATUS_DOC_RELS = frozenset(("docs/vision.md", "README.md"))
+RULES = ("command", "link", "path", "tier", "formal-status")
 
 # The block `tools/docgen.py` owns in this document. Named here as well so the
 # `tier` rule and the generator cannot drift apart on which block they mean.
@@ -146,6 +153,26 @@ LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
 # A backticked span. Nested backticks do not occur in this document.
 SPAN_RE = re.compile(r"`([^`\n]+)`")
+
+# A prose status claim has one or more guarantee codes followed by a status
+# word. Lists and numeric ranges are both common in the reader-facing docs.
+_FORMAL_CODE = r"`?G\d+`?"
+_FORMAL_CODE_GROUP = (
+    _FORMAL_CODE
+    + r"(?:(?:\s*,\s*|\s+(?:and|to|through)\s+|[-–—]\s*)"
+    + _FORMAL_CODE
+    + r")*"
+)
+FORMAL_STATUS_RE = re.compile(
+    r"(?P<codes>" + _FORMAL_CODE_GROUP + r")"
+    r"\s+(?:(?:are|is|remain|remains|stay|stays|also|all|still|currently)\s+)*"
+    r"(?P<status>`?(?:full|partial|unproved))`?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+FORMAL_RANGE_RE = re.compile(
+    r"`?G(\d+)`?\s*(?:to|through|[-–—])\s*`?G?(\d+)`?",
+    re.IGNORECASE,
+)
 
 
 # --------------------------------------------------------------------------
@@ -265,11 +292,35 @@ def collect_tier_claims(source: str) -> List["claims.Claim"]:
     return [_claim("tier", TIER_BLOCK, source, source.index(marker), marker)]
 
 
+def _codes_in_formal_group(group: str) -> List[str]:
+    def expand(match: re.Match[str]) -> str:
+        first, last = (int(value) for value in match.groups())
+        step = 1 if first <= last else -1
+        return " ".join("G%d" % number for number in range(first, last + step, step))
+
+    expanded = FORMAL_RANGE_RE.sub(expand, group)
+    return list(dict.fromkeys(re.findall(r"G\d+", expanded, re.IGNORECASE)))
+
+
+def collect_formal_status_claims(source: str) -> List["claims.Claim"]:
+    """One claim per code in each explicit formal-status assertion."""
+    out: List["claims.Claim"] = []
+    for match in FORMAL_STATUS_RE.finditer(source):
+        status = match.group("status").strip("`").lower()
+        for code in _codes_in_formal_group(match.group("codes")):
+            out.append(_claim(
+                "formal-status", "%s=%s" % (code, status),
+                source, match.start(), match.group(0),
+            ))
+    return out
+
+
 COLLECTORS = {
     "command": collect_command_claims,
     "link": collect_link_claims,
     "path": collect_path_claims,
     "tier": collect_tier_claims,
+    "formal-status": collect_formal_status_claims,
 }
 
 
@@ -411,11 +462,36 @@ def judge_tier(claim: "claims.Claim", tree: "claims.Tree") -> Optional[str]:
     )
 
 
+def judge_formal_status(claim: "claims.Claim", tree: "claims.Tree") -> Optional[str]:
+    code, claimed = claim.key.split("=", 1)
+    if "formal/STATUS.md" not in tree.files:
+        return "the tree has no tracked `formal/STATUS.md` status ledger"
+    try:
+        rows = cert.guarantee_map(
+            tree.text("formal/STATUS.md"), source="formal/STATUS.md")
+        row = rows.get(code)
+        if row is None:
+            return "`formal/STATUS.md` has no status row for %s" % code
+        recorded = cert.status_of(
+            row["status_cell"], source="formal/STATUS.md", code=code)
+    except cert.CertError as exc:
+        return "cannot read the status in `formal/STATUS.md`: %s" % exc
+
+    claimed_status = cert.PROVED if claimed == "full" else claimed
+    recorded_label = "full" if recorded == cert.PROVED else recorded
+    if claimed_status == recorded:
+        return None
+    return "claims %s is `%s`, but `formal/STATUS.md` records `%s`" % (
+        code, claimed, recorded_label,
+    )
+
+
 JUDGES = {
     "command": judge_command,
     "link": judge_link,
     "path": judge_path,
     "tier": judge_tier,
+    "formal-status": judge_formal_status,
 }
 
 
@@ -433,6 +509,9 @@ def run(
     denominator: Dict[str, int] = {}
     findings: List[Tuple["claims.Claim", str]] = []
     for rule in rules:
+        if rule == "formal-status" and doc_rel not in FORMAL_STATUS_DOC_RELS:
+            denominator[rule] = 0
+            continue
         collected = COLLECTORS[rule](source)
         denominator[rule] = len(collected)
         for claim in collected:
@@ -455,6 +534,12 @@ _SELF_TEST_FILES = {
     "backends/typescript/package.json": '{"devDependencies": {"vitest": "4.1.11"}}\n',
     "demo/bridge_pypy.py": "print(1)\n",
     "docs/conformance.md": "# c\n",
+    "formal/STATUS.md": """## What the layer covers, and what it does not
+
+| Code | Formal status | Theorems | Oracle | Gap |
+|---|---|---|---|---|
+| **G6** confinement | full | 1 | no | none |
+""",
 }
 
 _SELF_TEST_DOC = """# fixture
@@ -467,6 +552,7 @@ See [conformance.md](conformance.md) and `demo/bridge_*`.
 | ts | `cd backends/typescript && npm ci && npx vitest run` |
 | go | `pytest backends/go/test_emit_go.py -q` |
 | formal | `make formal` (`sh formal/scripts/run_gate.sh`) |
+G6 is `full`.
 """
 
 # One breakage per rule, each the shape a rename or a move actually takes.
@@ -476,6 +562,7 @@ _SELF_TEST_BREAKS = {
     "link": ("[conformance.md](conformance.md)",
              "[conformance.md](conformance-matrix.md)"),
     "path": ("`demo/bridge_*`", "`demo/span_*`"),
+    "formal-status": ("G6 is `full`", "G6 is `partial`"),
 }
 
 
@@ -499,7 +586,7 @@ def self_test(root: Path) -> int:
         tree = claims.Tree(base, sorted(_SELF_TEST_FILES))
 
         rules = sorted(_SELF_TEST_BREAKS)
-        _, clean = run(_SELF_TEST_DOC, tree, rules, doc_rel="docs/fixture.md")
+        _, clean = run(_SELF_TEST_DOC, tree, rules, doc_rel="docs/vision.md")
         if clean:
             failures.append(
                 "the UNBROKEN fixture reported %d finding(s): %s"
@@ -508,7 +595,7 @@ def self_test(root: Path) -> int:
         for rule, (before, after) in _SELF_TEST_BREAKS.items():
             assert before in _SELF_TEST_DOC, rule
             broken = _SELF_TEST_DOC.replace(before, after)
-            _, found = run(broken, tree, [rule], doc_rel="docs/fixture.md")
+            _, found = run(broken, tree, [rule], doc_rel="docs/vision.md")
             if not found:
                 failures.append(
                     "[%s] renaming %s to %s was NOT reported" % (rule, before, after)
@@ -546,19 +633,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rules = args.rules or list(RULES)
     tree = claims.Tree.from_git(args.root)
-    docs = [args.doc] if args.doc is not None else [
-        args.root / rel for rel in DEFAULT_DOC_RELS
-    ]
+    if args.doc is not None:
+        docs = [(args.doc, rules)]
+    else:
+        docs = [(args.root / rel, rules) for rel in DEFAULT_DOC_RELS]
+        if "formal-status" in rules:
+            docs.append((args.root / "README.md", ["formal-status"]))
     all_findings = []
-    for doc in docs:
+    for doc, doc_rules in docs:
         doc_rel = str(doc.resolve().relative_to(args.root.resolve()))
         source = doc.read_text(encoding="utf-8")
-        denominator, findings = run(source, tree, rules, doc_rel)
+        denominator, findings = run(source, tree, doc_rules, doc_rel)
         all_findings.extend(findings)
 
         print("%s: %d claims checked over %d rules"
-              % (doc_rel, sum(denominator.values()), len(rules)))
-        for rule in rules:
+              % (doc_rel, sum(denominator.values()), len(doc_rules)))
+        for rule in doc_rules:
             stale = sum(1 for c, _ in findings if c.rule == rule)
             print("  %-7s %3d claims, %d stale" % (rule, denominator[rule], stale))
 
@@ -567,7 +657,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print("\n%s:%d  [%s]\n  %s\n  %s"
                       % (doc_rel, claim.line, claim.rule, claim.text.strip(), verdict))
 
-    print("\nThis gate RESOLVED the commands. It did not run them: the suites "
+    print("\nThis gate RESOLVED the documented claims. It did not run commands: the suites "
           "they name are the per-backend CI jobs, which are required checks.")
     if all_findings and not args.check:
         print("Advisory run: %d finding(s), exit 0. Use --check for the CI mode."

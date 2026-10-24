@@ -103,6 +103,10 @@ BENCH_DEPENDENT_TESTS = (
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
+    # Issue #2859: the answer ledger's committed table is
+    # `bench/results/answer-ledger.md`, and the module checks that the
+    # committed table reproduces, so a bench change must re-run it.
+    "tests/test_answer_ledger_2859.py",
     # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
     # loaders and checks they leave one `revl` in the process.
     "tests/test_bench_compiler_reload_keeps_one_revl.py",
@@ -116,6 +120,9 @@ BENCH_DEPENDENT_TESTS = (
     # server.
     "tests/test_constrained_decoding_1462.py",
     "tests/test_demand_ranking.py",
+    # Issue #2709: measures a host extern call on the Python tier by running
+    # `bench/extern_call_cost.py`'s arms, so a bench change must re-run it.
+    "tests/test_extern_call_cost_2709.py",
     # FRAMEWORK-BENCH-1. It reads `bench/hosts.json` and the committed report,
     # survey and injection artifacts, and it is the gate that catches a
     # committed artifact drifting from the ledgers it was recomputed from, so a
@@ -1657,6 +1664,10 @@ def select(changed, root) -> dict:
         if f == "tools/affected_tests.py":
             pytest_nodes.add("tests/test_affected_tests.py")
             reasons.append("tools/affected_tests.py (selector self-test)")
+            continue
+        if f in ("tools/pre_pr.sh", "tools/pre_pr_merge_ref.py"):
+            pytest_nodes.add("tests/test_pre_pr_merge_ref_2848.py")
+            reasons.append(f"{f} (pre-PR merge-ref check)")
             continue
         if f in ("tools/conformance.py", "tools/conformance_cert.py"):
             gates.add("conformance")

@@ -152,6 +152,60 @@ fn emit_ir(ir: Any, tier: Str) -> Str {
   return emit_rust_src(ir)
 }
 
+// ================================================= dropped-shape refusal tail
+// Issue #2446. An emitter with no channel to raise still says which shape it
+// cannot render, with a `<<UNSUPPORTED-...>>` marker. For the markers below the
+// marker is not a missing DETAIL: the emitter answers without the component, or
+// without the whole live tier's body: a successful result whose bytes differ
+// from the reference and from which a caller cannot tell that code was
+// dropped. The self-host rule allows a loud NAMED refusal there, so the driver
+// turns exactly those markers into `REFUSED|UNSUPPORTED|...` and the caller
+// never sees a partial program as success.
+//
+// Only whole-shape drops are listed. A marker that names one deferred SECTION
+// beside emitted code (a test driver, a host stub, a namespaced key) keeps its
+// in-bytes marker: that is the convention `tools/selfhost_differential_survey.py`
+// reads as a port refusal, and the emitted program is otherwise the reference's.
+// `<<UNSUPPORTED-COMPONENT:parallel-emit>>` is one such SECTION marker (the py
+// porter's fan-out statement), not a dropped component, so it is excluded by
+// its payload. The chosen marker is the EARLIEST in the output, which is the
+// first shape the emitter could not render.
+fn marker_from(out: Str, p: Str, from: Int) -> Int {
+  let rest = out.slice(from, out.length())
+  let k = rest.indexOf(p)
+  return k < 0 ? 0 - 1 : from + k
+}
+
+fn dropped_shape_marker(out: Str) -> Str {
+  var best = ""
+  var bestat = 0 - 1
+  for (p of ["<<UNSUPPORTED-LIVE-TIER:", "<<UNSUPPORTED-COMPONENT:",
+             "<<UNSUPPORTED-component-nonsimple:"]) {
+    var at = marker_from(out, p, 0)
+    while (at >= 0) {
+      let rest = out.slice(at, out.length())
+      let close = rest.indexOf(">>")
+      let mark = close < 0 ? p : rest.slice(0, close + 2)
+      if ((mark != "<<UNSUPPORTED-COMPONENT:parallel-emit>>")
+          && ((bestat < 0) || (at < bestat))) {
+        best = mark
+        bestat = at
+      }
+      at = marker_from(out, p, at + 1)
+    }
+  }
+  return best
+}
+
+fn dropped_shape_refusal(out: Str, tier: Str) -> Str {
+  let mark = dropped_shape_marker(out)
+  if (mark == "") { return "" }
+  return "UNSUPPORTED|".concat(mark)
+    .concat(" is not supported by the self-host compiler on `").concat(tier)
+    .concat("`: the emitter drops that component (or the document's live ")
+    .concat("tier) and would return a program that differs from the reference's.")
+}
+
 // ============================================================ use resolution
 // Issue #2093. The driver above resolved no `use`: it handed `lower_to_ir` the
 // ONE document text it was given, so a document that imports a component from a
@@ -2529,25 +2583,35 @@ fn ad_module_key(path: Str) -> Str {
   return key == "" ? path : key
 }
 
-// Issue #2374. The admission of a document whose own verdict is `verdict`:
-// the names of the carried types its lowering takes as declaration text
-// (`ul_with_carried_text`), and the refusal ("" for none). A G1 refusal of the
-// document read alone yields when the document, with the carried
-// declarations appended, is admitted; any other verdict stands, through
-// `tc_import_first`.
+// Issue #2374. The admission of the document `source` whose own verdict is
+// `verdict`, once `full` (the document with every carried type declaration
+// spliced in) is known: the carried names its lowering takes as declaration
+// text, and the refusal ("" for none).
+//
+// `full.text` is the MERGED program the reference admits, and the reference
+// admits it in every case, not only when the document read alone draws G1:
+//   * a G1 refusal of the document read alone yields when the merged text is
+//     admitted (issue #2374: a carried case used in a component body);
+//   * an ADMITTED document stays admitted, UNLESS splicing a carried
+//     declaration changes a resolution the reference also sees differently
+//     (issue #2449: the document declares its own `Dot` and the carried type
+//     declares `Dot` too, so the reference's merged case table drops both as
+//     ambiguous and a bare `Dot` in a component body resolves to no
+//     requirement, a G1 refusal). Adopting the merged verdict is what makes the
+//     gate draw the reference's refusal.
+// Any other verdict stands, through `tc_import_first`.
 type TcCarriedAdmission = { names: List[Str], refusal: Str }
 
-fn tc_carried_admission(source: Str, path: Str, verdict: Str) -> TcCarriedAdmission {
+fn tc_carried_admission(source: Str, path: Str, verdict: Str,
+                        full: UlCarriedText) -> TcCarriedAdmission {
   var none: List[Str] = []
-  if (verdict == "") { return { names: none, refusal: "" } }
-  if ((path != "") && (verdict.slice(0, 3) == "G1|")) {
-    let named = ul_rename_apart(source, path, lower_to_ir_refs(source, rf_ref_rows(source, path)))
-    let full = ul_with_carried_text(named, path)
-    if (full.names.length() > 0) {
-      let again = admit_src(full.text)
-      if (again == "") { return { names: full.names, refusal: "" } }
-      return { names: none, refusal: tc_import_first(source, path, again) }
-    }
+  if ((path == "") || (full.names.length() == 0)) {
+    return { names: none, refusal: tc_import_first(source, path, verdict) }
+  }
+  let again = admit_src(full.text)
+  if ((verdict == "") || (verdict.slice(0, 3) == "G1|")) {
+    if (again == "") { return { names: full.names, refusal: "" } }
+    return { names: none, refusal: tc_import_first(source, path, again) }
   }
   return { names: none, refusal: tc_import_first(source, path, verdict) }
 }
@@ -2565,13 +2629,6 @@ fn tc_carried_admission(source: Str, path: Str, verdict: Str) -> TcCarriedAdmiss
 pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_src(source)
-  // Issue #2374: a variant case carried from an imported service's module
-  // (`store.put(Dot)`) is unknown to the document read alone, which refuses it
-  // as a requirement (G1). The reference resolves it through the carried
-  // type, so the document is admitted, and lowered, with the carried
-  // declarations in scope.
-  let carried = tc_carried_admission(source, path, verdict)
-  if (carried.refusal != "") { return "REFUSED|".concat(carried.refusal) }
   let unlexed = rl_lex_refusal(source)
   if (unlexed != "") { return "REFUSED|BAD|".concat(unlexed) }
   // Issue #2332: every used module reads whole, or nothing is linked.
@@ -2588,19 +2645,40 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // renamed apart first, as the reference's privacy pass does.
   let alone = lower_to_ir_refs(source, rf_ref_rows(source, path))
   let named = ul_rename_apart(source, path, alone)
-  let lowered = carried.names.length() > 0 ? ul_with_carried_text(named, path).text : named
+  // Issue #2450: the carried declarations are not only an ADMISSION input. A
+  // document the gate admits on its own read can still BUILD a carried variant
+  // case (`fn mk() -> Shape { return Dot }`), and the reference's merged
+  // program lowers that name as an `adt` because the carried type is in its
+  // table. The document read alone has no such case, so the name lowered as a
+  // variable and the py tier wrote `return Dot` where the reference writes
+  // `return Dot()`. Splice the carried declarations into the lowering text too,
+  // always; `ul_link_types` then takes the names as already lowered (`pre`) and
+  // does not append them a second time.
+  let full = ul_with_carried_text(named, path)
+  // Issue #2374 / #2449: and admit what the reference admits, the merged
+  // text with every carried declaration spliced in, so a document case that
+  // reuses a carried case's name draws the reference's ambiguity refusal.
+  let carried = tc_carried_admission(source, path, verdict, full)
+  if (carried.refusal != "") { return "REFUSED|".concat(carried.refusal) }
+  let pre = carried.names.length() > 0 ? carried.names : full.names
+  let lowered = carried.names.length() > 0 ? full.text : named
   let own = lowered == source ? alone : lower_to_ir_refs(lowered, rf_ref_rows(lowered, path))
   let linked = ul_link_externs(ul_link_uses(own, source, path), source, path)
   if (linked.refusal != "") { return "REFUSED|".concat(linked.refusal) }
   // Issue #2308: then the types every imported service carries.
-  let typed = ul_link_types(linked.ir, source, path, carried.names)
+  let typed = ul_link_types(linked.ir, source, path, pre)
   if (typed.refusal != "") { return "REFUSED|".concat(typed.refusal) }
   // Issue #2329: last, the document's calls to an imported service's
   // operations are typed against its declaration. A link refusal above wins,
   // so a type the native link cannot carry is reported as that.
   let calls = tc_admit_imports(named, path, own)
   if (calls != "") { return "REFUSED|".concat(calls) }
-  return emit_ir(json_parse(typed.ir), tier)
+  let out = emit_ir(json_parse(typed.ir), tier)
+  // Issue #2446: a whole component (or the whole live tier's body) the emitter
+  // dropped is a refusal, not a partial program.
+  let dropped = dropped_shape_refusal(out, tier)
+  if (dropped != "") { return "REFUSED|".concat(dropped) }
+  return out
 }
 
 pub fn compile_to(source: Str, tier: Str) -> Str {
@@ -2660,7 +2738,11 @@ pub fn compile_to_into(source: Str, tier: Str, manifest: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_ambient(source, manifest)
   if (verdict != "") { return "REFUSED|".concat(verdict) }
-  return emit_ir(json_parse(lower_to_ir(source)), tier)
+  let out = emit_ir(json_parse(lower_to_ir(source)), tier)
+  // Issue #2446: same dropped-shape rule as `compile_to_at`.
+  let dropped = dropped_shape_refusal(out, tier)
+  if (dropped != "") { return "REFUSED|".concat(dropped) }
+  return out
 }
 
 // ============================================================ component wrap

@@ -7075,14 +7075,24 @@ pub fn emit_rust_src(ir: Any) -> Str {
   var refusals = deferred_emission_markers(ir).concat(validated_markers(ir))
   refusals = refusals.concat(host_key_collision_markers(ir)).concat(deferred_test_markers(ir))
   refusals = refusals.concat(required_stream_markers(ir))
+  // A routed require needs a per-realm router struct and live-worker lookup.
+  // This port does not emit those yet; do not leave the plain require above
+  // looking complete (issue #2796). These markers are the port's own, after
+  // the reference-order refusals, so they are not part of the byte-agreement
+  // ordering.
+  for (comp of components) {
+    let routes = value_field(comp, "routes")
+    for (key of value_keys(routes)) {
+      refusals = refusals.push(`<<UNSUPPORTED-ROUTED-REQUIRE:${value_str(value_field(comp, "name"))}.${key}>>`)
+    }
+  }
   // Issue #2394: a namespaced key's host spelling is PROVEN only when the port
   // emits the whole document, because only then are its bytes comparable with
-  // the reference's. A document that already hit a refusal above, or that
-  // carries a routed requirement this port drops without one (issue #2796),
-  // reaches those bytes nowhere, so it names the namespaced keys it could not
-  // verify instead of letting that difference stay silent. A document the port
-  // emits whole draws no such marker: byte parity proves its keys.
-  if (refusals.length() > 0 || drops_routed_requirement(ir)) {
+  // the reference's. A document that already hit a refusal above reaches
+  // those bytes nowhere, so it names the namespaced keys it could not verify
+  // instead of letting that difference stay silent. A document the port emits
+  // whole draws no such marker: byte parity proves its keys.
+  if (refusals.length() > 0) {
     refusals = refusals.concat(namespaced_key_markers(ir))
   }
   out = out.concat(refusals)
@@ -7185,7 +7195,7 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
 // as a mangled host identifier, and the port now mangles it too (issue #2394).
 // The marker below is not a claim that the key is unported; it names a key the
 // port could NOT prove against the reference bytes because the document was
-// refused elsewhere or drops a routed requirement. See the call site.
+// refused elsewhere, a routed requirement included. See the call site.
 fn namespaced_key_markers(ir: Any) -> List[Str] {
   var out = []
   for (c of value_list(value_field(ir, "components"))) {
@@ -7198,16 +7208,6 @@ fn namespaced_key_markers(ir: Any) -> List[Str] {
     }
   }
   return out
-}
-
-// A routed requirement this port drops on the floor: it emits no router struct
-// and no marker of its own (issue #2796), so a document carrying one can never
-// reach the reference bytes.
-fn drops_routed_requirement(ir: Any) -> Bool {
-  for (c of value_list(value_field(ir, "components"))) {
-    if (value_keys(value_field(c, "routes")).length() > 0) { return true }
-  }
-  return false
 }
 
 fn deferred_emission_markers(ir: Any) -> List[Str] {

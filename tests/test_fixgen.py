@@ -67,6 +67,35 @@ A9_AMBIGUOUS = (
 # binding? a requirement?) is not mechanical, so the engine offers nothing.
 G1_UNDECLARED = "fn add(a: Int, b: Int) -> Int {\n  return a + c\n}\n"
 
+# Issue #2874: an expression-position `else if` currently fails at the `if`
+# token without naming the block-bodied statement form that can express it.
+ISSUE_2874_ELSE_IF = (
+    "service P { fn f(x: Int) -> Int }\n"
+    "component C provides p: P {\n"
+    "  provide p {\n"
+    "    fn f(x) = if (x > 0) { 1 } else if (x < 0) { 2 } else { 0 }\n"
+    "  }\n"
+    "}\n"
+)
+
+# Issue #2874: the missing call turns the function value into its List result,
+# making the builtin receiver both clear and mechanically fixable.
+ISSUE_2874_CALLABLE_RECEIVER = (
+    "fn STRUCTURAL() -> List[Str] {\n"
+    "  return [\"a\"]\n"
+    "}\n"
+    "fn f(p: Str) -> Bool {\n"
+    "  return STRUCTURAL.indexOf(p) >= 0\n"
+    "}\n"
+)
+
+# The same spelling is not a safe fix when invoking the function would still
+# return a non-sized value; the verified quick-fix engine must withhold it.
+ISSUE_2874_BAD_RECEIVER_RESULT = (
+    "fn NOT_A_LIST() -> Int { return 1 }\n"
+    "fn f(p: Str) -> Bool { return NOT_A_LIST.indexOf(p) >= 0 }\n"
+)
+
 
 def _only_diag(text: str) -> dict:
     diags = compute_diagnostics(text)
@@ -82,6 +111,53 @@ def _rejection(text: str, filename: str = "<lsp>.rvl") -> dict:
     except RevlError as error:
         return classify(error)
     raise AssertionError("expected a rejection")
+
+
+def test_issue_2874_else_if_expression_body_names_block_repair():
+    rejection = _rejection(ISSUE_2874_ELSE_IF, "else-if.rvl")
+
+    assert rejection["code"] == "SYNTAX"
+    assert rejection["message"] == "expected {, found 'if'"
+    assert "block-bodied function" in rejection["hint"]
+    assert "fn f(x) {" in rejection["hint"]
+    assert "else if (x < 0)" in rejection["hint"]
+
+
+def test_issue_2874_callable_receiver_has_a_verified_applyable_fix():
+    rejection = _rejection(ISSUE_2874_CALLABLE_RECEIVER, "callable.rvl")
+
+    assert rejection["code"] == "REVL"
+    assert rejection["message"] == (
+        "builtin `indexOf` needs a Str/Bytes/List receiver, got "
+        "`() -> List[Str]`"
+    )
+    assert "STRUCTURAL()" in rejection["hint"]
+    assert "STRUCTURAL()" in rejection["fix"]
+
+    diag = _only_diag(ISSUE_2874_CALLABLE_RECEIVER)
+    fix = generate_fix(ISSUE_2874_CALLABLE_RECEIVER, diag)
+    assert fix is not None
+    patched = apply_edits(ISSUE_2874_CALLABLE_RECEIVER, fix.edits)
+    assert "STRUCTURAL().indexOf(p)" in patched
+    assert compute_diagnostics(patched) == []
+
+    actions = compute_code_actions(
+        ISSUE_2874_CALLABLE_RECEIVER, "file:///callable.rvl", diag["range"])
+    assert len(actions) == 1
+    assert actions[0]["kind"] == "quickfix"
+    action_edits = actions[0]["edit"]["changes"]["file:///callable.rvl"]
+    assert action_edits == fix.edits
+
+    agent_fix = fix_code(rejection, ISSUE_2874_CALLABLE_RECEIVER,
+                         "callable.rvl")
+    assert agent_fix["ok"] is True
+    assert agent_fix["edits"] == fix.edits
+
+
+def test_issue_2874_withholds_callable_fix_when_return_does_not_fit():
+    diag = _only_diag(ISSUE_2874_BAD_RECEIVER_RESULT)
+    assert diag["code"] == "REVL"
+    assert generate_fix(ISSUE_2874_BAD_RECEIVER_RESULT, diag) is None
 
 
 # ------------------------------------------------------------ T2: null -> None

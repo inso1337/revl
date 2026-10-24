@@ -56,9 +56,11 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these-2", "pure_stmt", 1, 1]
 
-["reason", "declared-out-of-every-self-host-slice-realm", "declared out of every self-host slice: realm placements, routers, spawn/instances."]
+["reason", "declared-out-of-every-self-host-slice-realm", "Declared out of every self-host slice: realm placements, routers, spawn/instances. Issue #2796 adds a named refusal for routed Rust requirements to `emit_rust_src`. The reference emits this case, so it cannot be a reference-refusal fixture, and the port marker intentionally differs from the reference bytes, so it cannot be in the byte-agreement corpus. `test_a_routed_require_is_named_until_the_router_is_ported` asserts the marker; its one marker-append statement is budgeted here until router emission reaches parity."]
 
 ["function", "declared-out-of-every-self-host-slice-realm", "collect_realm_labels", 3, 3]
+
+["function", "declared-out-of-every-self-host-slice-realm", "emit_rust_src", 1, 1]
 
 ["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test sections, marked rather than emitted (issue #1123): `deferred_test_markers` names each `lifecycle test` with an `<<UNSUPPORTED-TEST:...>>` marker and each `fault test` with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block in. A plain `test` is EMITTED since item 391 (`emit_v3_tests`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl); the two sections still marked drive a live composition or are a reference refusal, so no byte-agreement corpus document can carry either, and the marker is what keeps them loud rather than silently skipped, as all six emitters did before #1123."]
 
@@ -169,10 +171,6 @@
 ["reason", "selfhost-emit-rust-rvl-borrow-list-arg-the", "selfhost/emit_rust.rvl::borrow_list_arg: the self-host mirror of the reference _borrow_list_arg (item 437d) list-slice borrow. As on the reference tier the already-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual is the List-index place-borrow arm (`&xs[i]` via strip_index_clone), which no corpus document reaches, matching strip_index_clone."]
 
 ["function", "selfhost-emit-rust-rvl-borrow-list-arg-the", "borrow_list_arg", 1, 1]
-
-["reason", "selfhost-emit-rust-rvl-drops-routed-requirement-the", "selfhost/emit_rust.rvl::drops_routed_requirement: The true return fires only on a component that carries a routed requirement (`routes`, issue #2796), which this port drops without the router struct the reference emits. Those bytes diverge by construction, so no byte-agreement document can reach the line. The refusal route does not apply either: the reference EMITS a routed requirement, so a document in tests/fixtures/emit_rust_refusals/ that carried one would not be refused for it, and reaching this line from a refusal the reference states for something else is the unrelated-refusal pairing the ledger forbids. Recorded until issue #2796 ports the router struct."]
-
-["function", "selfhost-emit-rust-rvl-drops-routed-requirement-the", "drops_routed_requirement", 1, 1]
 
 ["reason", "selfhost-emit-rust-rvl-strip-index-clone-the", "selfhost/emit_rust.rvl::strip_index_clone: the self-host mirror of the reference _v3_strip_index_clone (item 437d) read-only clone elision. As on the reference tier the bare index place is covered and the residual is the field-off-index shape reached by no corpus document."]
 

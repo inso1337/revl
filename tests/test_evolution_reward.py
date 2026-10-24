@@ -532,7 +532,8 @@ def test_an_unreadable_base_fails_rather_than_scoring_nothing(reward, tiny_repo)
 
 
 _BASE_READERS = ("probe_no_new_false_admits", "probe_scope", "probe_tests",
-                 "probe_conformance", "probe_formal")
+                 "probe_conformance", "probe_formal", "probe_reach",
+                 "probe_resource", "probe_host_fallback")
 
 
 @pytest.mark.parametrize("probe", _BASE_READERS)
@@ -1715,3 +1716,459 @@ def test_the_progress_probe_leaves_the_interpreter_as_it_found_it(
     assert not replaced, replaced
     added = set(sys.modules) - set(modules_before)
     assert added <= {"evolution_progress"}, added
+
+
+# --------------------------------------------------------------------------
+# reach, resource and host-fallback (issue #2706): the three entries of item
+# 536's negative promotion bar that no other component reads.
+#
+# Each fixture changes ONE thing at head and then scores all three components,
+# so "fails X only" is asserted and not assumed. The change is made to the
+# fixture's compiler (`widen`), because the corpus the scorer measures is the
+# BASE's: what a candidate writes into its own CASES is not what is judged.
+# --------------------------------------------------------------------------
+
+_NEW_COMPONENTS = ("reach", "resource", "host-fallback")
+
+_LOOP_HEAD = """
+service Model { emission[model] fn complete(m: List[Str]) -> Str }
+service Loop { emission[model] fn run(s: Str) -> Str }
+fn run_loop(msgs: List[Str], step: (List[Str]) -> Str, n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let r = step(msgs)
+  return run_loop(msgs, step, %s)
+}
+component Agent requires model: Model provides agent: Loop {
+  provide agent { fn run(s) -> Str {
+    let msgs = [s]
+    return run_loop(msgs, msgs2 => %s, 5)
+  } }
+}
+"""
+#: Crosses the `model` capability 5 times: a proved bound.
+_BOUNDED = _LOOP_HEAD % ("n - 1", "emit model.complete(msgs2)")
+#: The same crossing, but a larger proved bound.
+_BOUNDED_9 = _BOUNDED.replace("(msgs2), 5)", "(msgs2), 9)")
+#: The same crossing, but the fuel no longer decreases: no bound can be proved.
+_UNBOUNDED = _LOOP_HEAD % ("n", "emit model.complete(msgs2)")
+#: The same component with the emission taken out: it crosses nothing.
+_NO_CROSSING = _LOOP_HEAD % ("n - 1", "msgs2[0]")
+
+_SCOPED = """
+service Mail { emission[%s] fn send(s: Str) -> Int }
+service Svc { emission[%s, m] fn run(s: Str) -> Int }
+component C requires m: Mail provides svc: Svc {
+  provide svc { fn run(s: Str) -> Int { return emit m.send(s) } }
+}
+"""
+#: One capability scope, then the same crossing with a wider one.
+_NARROW_SCOPE = _SCOPED % ("mail", "mail")
+_WIDE_SCOPE = _SCOPED % ("mail, net", "mail, net")
+
+_CORPUS_STUB = """\
+from revl import compile_source as _compile
+
+TIERS = @TIERS@
+CASES = @CASES@
+_WIDEN = @WIDEN@
+_BROKEN = @BROKEN@
+_REFUSE = @REFUSE@
+_MARKER = @MARKER@
+
+
+def compile_source(source, *args, **kwargs):
+    if _BROKEN:
+        raise ValueError("this compiler refuses everything")
+    if _WIDEN and source == _WIDEN[0]:
+        source = _WIDEN[1]
+    return _compile(source, *args, **kwargs)
+
+
+class _Tier:
+    def emit(self, ir, **kwargs):
+        if _REFUSE:
+            raise RuntimeError("this tier refuses everything")
+        return "fn main() {}\\n" + _MARKER
+
+
+def emitter(tier):
+    return _Tier()
+
+
+def _emit_kwargs(tier, index):
+    return {}
+"""
+
+
+def _write_corpus(tree, cases, *, marker="", widen=None, broken=False,
+                  refuse=False, tiers=("python", "rust")):
+    """`tools/conformance.py` for the fixture. `widen` is `(source, other)`: the
+    compiler compiles `other` wherever it is handed `source`, which is how a
+    fixture changes what the compiler does to one case."""
+    (tree / "tools").mkdir(exist_ok=True)
+    text = _CORPUS_STUB
+    for key, value in (("TIERS", tuple(tiers)),
+                       ("CASES", [("t", n, src) for n, src in cases]),
+                       ("WIDEN", widen), ("BROKEN", broken),
+                       ("REFUSE", refuse), ("MARKER", marker)):
+        text = text.replace(f"@{key}@", repr(value))
+    (tree / "tools" / "conformance.py").write_text(text)
+
+
+@pytest.fixture
+def evidence_repo(tiny_repo, monkeypatch):
+    """A real repository whose committed corpus is the `_BOUNDED` case, with a
+    stub emitter. `revl` is found through `PYTHONPATH`."""
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "src"))
+    _write_corpus(tiny_repo, [("loop", _BOUNDED)])
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "corpus")
+    return tiny_repo
+
+
+def _rebase(tree, cases, **kwargs):
+    """Commit a different corpus as the new base."""
+    _write_corpus(tree, cases, **kwargs)
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", "base")
+
+
+def _score_new(reward, tree):
+    candidate = _candidate(reward, tree, base="HEAD", scope=("**",))
+    return {n: reward.PROBES[n](candidate) for n in _NEW_COMPONENTS}
+
+
+def _failing(verdicts):
+    return {n for n, v in verdicts.items() if not v.verified}
+
+
+def _reasons(verdicts):
+    return {n: v.reason for n, v in verdicts.items()}
+
+
+def test_the_three_missing_entries_are_registered_components(reward):
+    for name in _NEW_COMPONENTS:
+        assert name in reward.COMPONENTS
+    assert reward.PROBES["reach"] is reward.probe_reach
+    assert reward.PROBES["resource"] is reward.probe_resource
+    assert reward.PROBES["host-fallback"] is reward.probe_host_fallback
+
+
+def test_an_unchanged_corpus_verifies_all_three(reward, evidence_repo):
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == set(), _reasons(verdicts)
+
+
+def test_a_candidate_that_adds_a_crossing_fails_reach_only(
+        reward, evidence_repo):
+    """The `loop` case keeps the resource comparison non-empty; the `quiet` case
+    crosses nothing at base and crosses at head."""
+    _rebase(evidence_repo, [("loop", _BOUNDED), ("quiet", _NO_CROSSING)])
+    _write_corpus(evidence_repo, [("loop", _BOUNDED), ("quiet", _NO_CROSSING)],
+                  widen=(_NO_CROSSING, _BOUNDED))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"reach"}, _reasons(verdicts)
+    assert "emit:Agent:model.complete" in verdicts["reach"].reason
+
+
+def test_a_scope_widened_on_a_stable_crossing_fails_reach_only(
+        reward, evidence_repo):
+    """`emit:C:m.send` is the same token on both sides, so the crossing diff is
+    blind to it; `diff_capability_scopes` is not."""
+    _rebase(evidence_repo, [("loop", _BOUNDED), ("mail", _NARROW_SCOPE)])
+    _write_corpus(evidence_repo, [("loop", _BOUNDED), ("mail", _NARROW_SCOPE)],
+                  widen=(_NARROW_SCOPE, _WIDE_SCOPE))
+    verdicts = _score_new(reward, evidence_repo)
+    assert "reach" in _failing(verdicts), _reasons(verdicts)
+    assert "scope:C:m.send" in verdicts["reach"].reason
+    assert _failing(verdicts) == {"reach"}, _reasons(verdicts)
+
+
+def test_a_candidate_that_gives_up_a_crossing_passes_reach(
+        reward, evidence_repo):
+    """The ratchet has a direction: giving up authority is never gated by
+    `reach`. `resource` reads the verdict going away and says so."""
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)],
+                  widen=(_BOUNDED, _NO_CROSSING))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"resource"}, _reasons(verdicts)
+    assert "are missing" in verdicts["resource"].reason
+
+
+def test_a_bounded_loop_turned_unbounded_fails_resource_only(
+        reward, evidence_repo):
+    """The crossing set is identical (reach reads none of it); only the proved
+    bound on the `model` capability goes away."""
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)],
+                  widen=(_BOUNDED, _UNBOUNDED))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"resource"}, _reasons(verdicts)
+    assert "cardinality:Agent:model" in verdicts["resource"].reason
+
+
+def test_a_bound_moving_to_a_larger_bound_fails_resource_only(
+        reward, evidence_repo):
+    assert _BOUNDED_9 != _BOUNDED
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)],
+                  widen=(_BOUNDED, _BOUNDED_9))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"resource"}, _reasons(verdicts)
+    assert "widened" in verdicts["resource"].reason
+
+
+def test_an_unbounded_path_made_bounded_passes_resource(reward, evidence_repo):
+    _rebase(evidence_repo, [("loop", _UNBOUNDED)])
+    _write_corpus(evidence_repo, [("loop", _UNBOUNDED)],
+                  widen=(_UNBOUNDED, _BOUNDED))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == set(), _reasons(verdicts)
+
+
+def test_a_comparison_that_compared_no_verdict_is_not_a_pass(
+        reward, evidence_repo):
+    """A corpus with no cardinality verdict at all measures nothing."""
+    _rebase(evidence_repo, [("quiet", _NO_CROSSING)])
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"resource"}, _reasons(verdicts)
+    assert "nothing was compared" in verdicts["resource"].reason
+
+
+def test_a_new_fallback_marker_fails_host_fallback_only(reward, evidence_repo):
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)],
+                  marker="<<UNSUPPORTED-EXPR:host-call>>")
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"host-fallback"}, _reasons(verdicts)
+    assert "<<UNSUPPORTED-EXPR:host-call>>" in verdicts["host-fallback"].reason
+
+
+def test_a_marker_the_base_already_carried_is_not_new_but_a_copy_is(
+        reward, evidence_repo):
+    marker = "<<UNSUPPORTED-EXPR:host-call>>"
+    _rebase(evidence_repo, [("loop", _BOUNDED)], marker=marker)
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], marker=marker)
+    assert _failing(_score_new(reward, evidence_repo)) == set()
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], marker=marker * 2)
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"host-fallback"}, _reasons(verdicts)
+    assert "2 fallback finding(s)" in verdicts["host-fallback"].reason
+
+
+def test_two_markers_side_by_side_are_two_markers(reward):
+    """The pattern is non-greedy: `<<UNSUPPORTED-A>>` and `<<UNSUPPORTED-B>>`
+    on one line are two findings, not one match spanning both."""
+    evidence = _load("promotion_evidence",
+                     ROOT / "tools" / "promotion_evidence.py")
+    found = evidence.MARKER.findall(
+        "x <<UNSUPPORTED-A:1>> y <<UNSUPPORTED-B:2>>")
+    assert found == ["<<UNSUPPORTED-A:1>>", "<<UNSUPPORTED-B:2>>"]
+
+
+def test_a_tier_that_emitted_at_base_and_refuses_now_fails_host_fallback_only(
+        reward, evidence_repo):
+    """The reference emitters never print the marker; they raise. A tier that
+    lost a construct is how a fallback shows in them."""
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], refuse=True)
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"host-fallback"}, _reasons(verdicts)
+    assert "refused now" in verdicts["host-fallback"].reason
+
+
+def test_a_tier_that_already_refused_at_base_is_not_new(reward, evidence_repo):
+    _rebase(evidence_repo, [("loop", _BOUNDED)], refuse=True)
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], refuse=True)
+    assert _failing(_score_new(reward, evidence_repo)) == set()
+
+
+def test_a_tier_the_candidate_drops_from_its_corpus_fails_host_fallback_only(
+        reward, evidence_repo):
+    """The head's corpus module names the tiers it walks. A candidate that drops
+    one from `TIERS` leaves nothing at head to scan on it; the base's tiers are
+    walked too."""
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], tiers=("python",))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"host-fallback"}, _reasons(verdicts)
+    assert "t/loop on rust: measured at HEAD, not walked at head" \
+        in verdicts["host-fallback"].reason
+
+
+def test_a_tier_added_at_head_is_not_measured_rather_than_a_fallback(
+        reward, evidence_repo):
+    """A tier the corpus starts walking at head has no baseline. Its first
+    measurement is not a construct the candidate lost, so it must be counted
+    as unmeasured instead of failing host-fallback (issue #2706)."""
+    marker = "<<UNSUPPORTED-EXPR:host-call>>"
+    _rebase(evidence_repo, [("loop", _BOUNDED)], marker=marker,
+            tiers=("python",))
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], marker=marker,
+                  tiers=("python", "rust"))
+    verdicts = _score_new(reward, evidence_repo)
+    assert verdicts["host-fallback"].verified, verdicts["host-fallback"].reason
+    assert "had no measurement" in verdicts["host-fallback"].reason
+
+
+def test_a_case_that_did_not_compile_at_base_is_not_a_fallback(
+        reward, evidence_repo):
+    """With no base measurement there is nothing the candidate could have
+    lost; a tier refusing the case at head is unmeasured, not a fallback."""
+    _rebase(evidence_repo, [("loop", _BOUNDED)], broken=True)
+    # At head the case compiles and the tier prints a marker: with no base
+    # measurement the old code called that marker a new fallback. The new code
+    # counts the case as unmeasured instead.
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)],
+                  marker="<<UNSUPPORTED-EXPR:host-call>>")
+    verdicts = _score_new(reward, evidence_repo)
+    assert verdicts["host-fallback"].verified, verdicts["host-fallback"].reason
+    assert "had no measurement" in verdicts["host-fallback"].reason
+
+
+def test_cases_new_at_head_are_counted_as_not_measured(reward, evidence_repo):
+    _write_corpus(evidence_repo, [("loop", _BOUNDED), ("extra", _NO_CROSSING)])
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == set(), _reasons(verdicts)
+    for name in ("reach", "resource"):
+        assert "1 case(s) new at head were not measured" in verdicts[name].reason
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)])
+    assert "not measured" not in _score_new(reward, evidence_repo)["reach"].reason
+
+
+class _Proc:
+    def __init__(self, returncode, stdout=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, ""
+
+
+def _fake_runs(reward, monkeypatch, codes):
+    calls = []
+
+    def fake(cmd, **kwargs):
+        calls.append(cmd)
+        code = codes[min(len(calls), len(codes)) - 1]
+        return _Proc(code, '{"ok": 1}' if code == 0 else "")
+
+    monkeypatch.setattr(reward.subprocess, "run", fake)
+    return calls
+
+
+def test_a_signalled_base_side_run_is_retried_up_to_three_times(
+        reward, monkeypatch, tmp_path):
+    calls = _fake_runs(reward, monkeypatch, [-15, -15, 0])
+    ok, data = reward._evidence_run(["measure"], pythonpath=tmp_path,
+                                    cwd=tmp_path, retry=True)
+    assert ok is True and data == {"ok": 1} and len(calls) == 3
+
+
+def test_a_base_side_run_killed_every_time_fails_after_three(
+        reward, monkeypatch, tmp_path):
+    calls = _fake_runs(reward, monkeypatch, [-15])
+    ok, why = reward._evidence_run(["measure"], pythonpath=tmp_path,
+                                   cwd=tmp_path, retry=True)
+    assert ok is False and "exited -15" in why and len(calls) == 3
+
+
+def test_a_signalled_head_side_run_fails_at_once(reward, monkeypatch, tmp_path):
+    """A candidate whose compiler crashes now and then must not pass on one
+    clean run in three."""
+    calls = _fake_runs(reward, monkeypatch, [-15, 0, 0])
+    ok, why = reward._evidence_run(["measure"], pythonpath=tmp_path,
+                                   cwd=tmp_path)
+    assert ok is False and "exited -15" in why and len(calls) == 1
+
+
+def test_only_the_candidates_own_measurement_runs_without_a_retry(
+        reward, evidence_repo, monkeypatch):
+    seen = []
+
+    def record(argv, *, pythonpath, cwd, retry=False):
+        seen.append((str(cwd), retry))
+        if argv[0] == "measure" and "cases" in argv:
+            return True, {"cases": [["t", "loop", "s"]]}
+        return True, {"cases": {"t/loop": {}}}
+
+    monkeypatch.setattr(reward, "_evidence_run", record)
+    import tempfile  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as raw:
+        candidate = _candidate(reward, evidence_repo, base="HEAD")
+        why, *_ = reward._paired_evidence(candidate, "audit", Path(raw))
+    assert why is None
+    head = [r for cwd, r in seen if cwd == str(evidence_repo)]
+    base = [r for cwd, r in seen if cwd != str(evidence_repo)]
+    assert head and base
+    assert not any(head), "a run of the candidate's own tree was retried"
+    assert all(base), "a base-side run was not retried"
+
+
+def test_editing_a_case_while_widening_the_compiler_is_still_caught(
+        reward, evidence_repo):
+    """The attack the base's corpus closes. The candidate widens what the
+    compiler does to `quiet` and, in the same change, edits the case so that the
+    new compiler no longer shows it. Measured on the candidate's own sources
+    that is a pass; measured on the base's it is a new crossing."""
+    _rebase(evidence_repo, [("loop", _BOUNDED), ("quiet", _NO_CROSSING)])
+    _write_corpus(evidence_repo,
+                  [("loop", _BOUNDED), ("quiet", _NO_CROSSING + "\n\n")],
+                  widen=(_NO_CROSSING, _BOUNDED))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"reach"}, _reasons(verdicts)
+    assert "quiet" in verdicts["reach"].reason
+
+
+def test_dropping_a_case_from_the_candidates_corpus_hides_nothing(
+        reward, evidence_repo):
+    _write_corpus(evidence_repo, [("other", _NO_CROSSING)],
+                  widen=(_BOUNDED, _UNBOUNDED))
+    verdicts = _score_new(reward, evidence_repo)
+    assert _failing(verdicts) == {"resource"}, _reasons(verdicts)
+    assert "t/loop" in verdicts["resource"].reason
+
+
+@pytest.mark.parametrize("component", _NEW_COMPONENTS)
+def test_a_case_the_compiler_stops_accepting_fails_by_name(
+        reward, evidence_repo, component):
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], broken=True)
+    verdict = _score_new(reward, evidence_repo)[component]
+    assert verdict.verified is False
+    assert "t/loop: no longer compiles" in verdict.reason
+
+
+@pytest.mark.parametrize("component", _NEW_COMPONENTS)
+def test_a_corpus_nothing_compiles_in_is_no_evidence(
+        reward, evidence_repo, component):
+    """Every case errors on both sides: nothing was compared, and none of the
+    three may read that as a pass."""
+    _rebase(evidence_repo, [("loop", _BOUNDED)], broken=True)
+    _write_corpus(evidence_repo, [("loop", _BOUNDED)], broken=True)
+    verdict = _score_new(reward, evidence_repo)[component]
+    assert verdict.verified is False, verdict.reason
+
+
+def test_the_real_emitters_report_their_refusals(reward):
+    """Positive control on the real tree: the reference emitters raise, so the
+    instrument has to SEE a refusal on them or `host-fallback` is a no-op there.
+    This tree's corpus has deliberate tier limits, so some (case, tier) must read
+    `refused` and some must not."""
+    ok, cases = reward._evidence_run(
+        ["measure", "--tree", ROOT, "--kind", "cases"],
+        pythonpath=ROOT / "src", cwd=ROOT)
+    assert ok, cases
+    sample = {"cases": [c for c in cases["cases"]
+                        if c[1] in ("emission op", "plain op", "async op")]}
+    assert sample["cases"], "the corpus no longer has the sampled cases"
+    import tempfile  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "cases.json"
+        path.write_text(json.dumps(sample))
+        ok, data = reward._evidence_run(
+            ["measure", "--tree", ROOT, "--kind", "markers", "--cases", path],
+            pythonpath=ROOT / "src", cwd=ROOT)
+    assert ok, data
+    cells = [cell for tiers in data["cases"].values() for cell in tiers.values()]
+    assert cells and all("refused" in c and "markers" in c for c in cells)
+    assert any(c["refused"] is False for c in cells)
+
+
+@pytest.mark.timeout(600)
+def test_reach_resource_and_host_fallback_verify_on_this_tree(
+        reward, real_candidate):
+    """The real corpus, the real emitters, this tree against its own HEAD."""
+    for name in _NEW_COMPONENTS:
+        verdict = reward.PROBES[name](real_candidate)
+        assert verdict.verified is True, f"{name}: {verdict.reason}"

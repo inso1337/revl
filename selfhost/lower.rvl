@@ -885,19 +885,34 @@ fn collect_ctors(ts: List[Token], start: Int, end: Int, multi: Bool,
   return out
 }
 
+// The ADT case names the document declares, as a set of RESOLVABLE
+// constructors. A name two type declarations both use is dropped, not unioned:
+// the reference's `_case_table` records the second declaration of a `CASE_KEY`
+// as ambiguous and leaves the name unbound (`type A = X | Y`, `type B = X | Z`
+// then refuses a bare `X`, with "`X` is not declared in this function"). A union
+// here made every such name resolve in the component gate, so a component body
+// using one was admitted where the reference refuses (issue #2449, whose
+// document declares its own `Dot` beside the carried `Shape = Dot | Box(Int)`).
 fn type_ctors(ts: List[Token]) -> List[Str] {
   var out: List[Str] = []
+  var amb: List[Str] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (atw(ts, i, "type")) {
       let end = type_decl_end(ts, i + 1)
-      out = collect_ctors(ts, i + 1, end, has_top_bar(ts, i + 1, end), out)
+      let mine = collect_ctors(ts, i + 1, end, has_top_bar(ts, i + 1, end), [])
+      for (n of mine) {
+        if (contains(out, n) || contains(amb, n)) { amb = union_into(amb, [n]) }
+        else { out = out.push(n) }
+      }
       i = end
     } else {
       i += 1
     }
   }
-  return out
+  var resolvable: List[Str] = []
+  for (n of out) { if (!contains(amb, n)) { resolvable = resolvable.push(n) } }
+  return resolvable
 }
 
 fn join_comma(xs: List[Str], i: Int, acc: Str) -> Str {
@@ -2778,22 +2793,93 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
 // defaulted `fn` other than a call passing all of its arguments is a named
 // refusal, wherever it sits (a component body or a test as much as a `fn`).
 // The signature-table check in `tk_named` answers the same for the calls it
-// reaches; this scan is the one that cannot be bypassed.
+// reaches; this scan covers the ones it does not.
+//
+// Issue #2461: the scan reads TOKENS, and the body of a backtick `${...}` is
+// one opaque lexer token, so a call written only inside a template is not seen
+// here. That case is still refused by name, through the `tk_named` check the
+// template's operand walk reaches, so the refusal holds, but this scan is not
+// what delivers it.
+//
+// A mention is skipped where the name RESOLVES to a binding rather than to the
+// fn: the declaration's own name, a member read (`r.f`), and any mention inside
+// a `fn` or `test` body that binds the name itself: a parameter, a lambda
+// parameter, a record-literal field (`f:`) or a `let` (issue #2461). The
+// reference resolves the nearest binding first and admits all of these; they
+// used to draw this refusal. The body scope tracks its own bindings only, so a
+// genuine use of the fn in another function still refuses.
+type DpScope = { end: Int, names: List[Str] }
+
+fn dp_in_scope(scopes: List[DpScope], name: Str) -> Bool {
+  for (s of scopes) {
+    if (contains(s.names, name)) { return true }
+  }
+  return false
+}
+
+// Add `name` to the innermost open scope, if any. The walk is linear, so a
+// binding is visible from the next token to the end of its body; a mention
+// BEFORE a later `let` of the same name is skipped too, which is the silent
+// direction (the reference would resolve it to the fn).
+fn dp_bind(scopes: List[DpScope], name: Str) -> List[DpScope] {
+  if (scopes.length() == 0) { return scopes }
+  let last = scopes[scopes.length() - 1]
+  var names = last.names
+  if (!contains(names, name)) { names = names.push(name) }
+  let grown = { end: last.end, names: names }
+  return scopes.slice(0, scopes.length() - 1).push(grown)
+}
+
+fn dp_drop_ended(scopes: List[DpScope], j: Int) -> List[DpScope] {
+  var out = scopes
+  while (out.length() > 0 && j > out[out.length() - 1].end) {
+    out = out.slice(0, out.length() - 1)
+  }
+  return out
+}
+
 fn dp_call_refusal(ts: List[Token]) -> Verd {
   let fs = dp_defaulted_fns(ts)
   if (fs.size() == 0) { return no_verd() }
+  var scopes: List[DpScope] = []
   var j = 0
   while (j < ts.length() && !atk(ts, j, "eof")) {
+    scopes = dp_drop_ended(scopes, j)
+    if (atw(ts, j, "fn")) {
+      let ps = fn_params_i(ts, j)
+      if (ps > 0) {
+        let brace = ret_at(ts, close_paren(ts, ps - 1))
+        if (atk(ts, brace, "{")) {
+          let bend = close_brace(ts, brace)
+          if (bend > 0) { scopes = scopes.push({ end: bend - 1, names: [] }) }
+        }
+      }
+    }
+    if (atw(ts, j, "test") && atk(ts, j + 2, "{")) {
+      let bend = close_brace(ts, j + 2)
+      if (bend > 0) { scopes = scopes.push({ end: bend - 1, names: [] }) }
+    }
     let t = tkc(ts, j)
     let decl = j > 0 && atw(ts, j - 1, "fn")
     let member = j > 0 && atk(ts, j - 1, ".")
-    if (t.kind == "ident" && fs.has(t.text) && !decl && !member) {
+    let binding = atk(ts, j + 1, ":")
+    if (t.kind == "ident" && fs.has(t.text) && !binding
+        && j > 0 && atw(ts, j - 1, "let")) {
+      scopes = dp_bind(scopes, t.text)
+    }
+    if (t.kind == "ident" && fs.has(t.text) && !decl && !member && !binding
+        && !dp_in_scope(scopes, t.text)) {
       let n = match fs.lookup(t.text) { Some(v) => v, None => 0 }
       if (!atk(ts, j + 1, "(") || dp_arg_count(ts, j + 2) != n) {
         return mk_verd(tagged("UNSUPPORTED", "a use of `".concat(t.text)
           .concat("` other than a call passing every argument, its defaulted ones")
           .concat(" included, is not supported by the self-host compiler")), t.line)
       }
+    }
+    // A `f:` binding shadows from the next token on (a parameter's annotation,
+    // a lambda parameter, a record-literal field).
+    if (binding && t.kind == "ident" && fs.has(t.text)) {
+      scopes = dp_bind(scopes, t.text)
     }
     j += 1
   }
@@ -2815,7 +2901,10 @@ fn dp_defaulted_fns(ts: List[Token]) -> Map[Str, Int] {
 }
 
 // The arguments of a call whose `(` sits just before `j`: commas at depth 0
-// plus one, or 0 for `()`; -1 when the list never closes.
+// plus one, or 0 for `()`; -1 when the list never closes. A trailing comma
+// (`f(1, 3,)`, which the parser reads as two arguments) leaves the last slot
+// empty, so the count is the commas alone in that case; `n + 1` would make the
+// call look like it passes one argument too many (issue #2461).
 fn dp_arg_count(ts: List[Token], j0: Int) -> Int {
   var j = j0
   var depth = 0
@@ -2824,7 +2913,7 @@ fn dp_arg_count(ts: List[Token], j0: Int) -> Int {
   while (j < ts.length() && !atk(ts, j, "eof")) {
     let up = atk(ts, j, "(") || atk(ts, j, "[") || atk(ts, j, "{")
     let down = atk(ts, j, ")") || atk(ts, j, "]") || atk(ts, j, "}")
-    if (down && depth == 0) { return any ? n + 1 : 0 }
+    if (down && depth == 0) { return any ? n + 1 : n }
     if (atk(ts, j, ",") && depth == 0) {
       n += 1
       any = false
@@ -14374,6 +14463,61 @@ fn tk_index(target: Expr, idx: Expr, env: List[Bind]) -> TInf {
   return tk_ok(infer_index(tgt.ty))
 }
 
+// Issue #2448: the payload rule at a variant case constructor (the reference's
+// `ExprCall` arm, `typecheck.py:2371-2376`; ported as `case_call_ty` in
+// `selfhost/checker.rvl`). It answers only where both sides are known and the
+// name really is a case of a declared ORED variant: `Some`/`None` belong to
+// `Opt` and keep their builtin parametric result, and a name the body rebinds
+// reads as that binding first, exactly as `infer_ctor` and the bare-read arm
+// do. A payload mismatch is the reference's message, tag and all.
+fn tk_case_payload(c: CallN, env: List[Bind], argTys: List[Str]) -> TInf {
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return tk_ok("") }
+  if (tenv_get(env, n) != "") { return tk_ok("") }
+  let adt = tagged_case_adt(env, n)
+  if (adt == "") { return tk_ok("") }
+  let pl = tenv_get(env, "payload ".concat(n))
+  if (pl == "" || argTys.length() == 0 || argTys[0] == "") { return tk_ok("") }
+  // A GENERIC case (`type Mb[T] = Jj(T)`) unifies its payload against the
+  // argument, so `Jj(1)` and `Jj("s")` are both admitted. The case row holds
+  // the parameter's own spelling, which is not a concrete type to compare
+  // against; refusing there would be a false refusal with the wrong sentence,
+  // the one direction the gate may not err in (the wider `Mb[Int]` vs `Mb`
+  // readings are recorded elsewhere). An argument that still carries a type
+  // parameter is the same silence.
+  if (tk_ty_has_tparam(pl, env) || tk_ty_has_tparam(argTys[0], env)) {
+    return tk_ok("")
+  }
+  if (!tk_compat_env(pl, argTys[0], env)) {
+    return tk_mismatch("`".concat(n).concat("(...)` payload"), pl, argTys[0])
+  }
+  return tk_ok("")
+}
+
+// Whether a type spelling still mentions an UNSUBSTITUTED type parameter: a
+// bare head that no `type` declares and that is not a builtin head, at the top
+// or in any argument. A declared type (record, variant, generic record) is
+// concrete and recurses, so `Mb[T]` reports its argument and `Row` does not.
+// The reading is deliberately permissive about an undeclared head: a type the
+// walk cannot name is exactly where the reference's payload rule makes no
+// claim, and the gate may not invent one.
+fn tk_ty_has_tparam(t: Str, env: List[Bind]) -> Bool {
+  let s = ty_trim(t)
+  if (s == "" || s.startsWith("{") || tk_is_fn_ty(s)) { return false }
+  let h = tkp_head(s)
+  if (tk_builtin_head(h) || tenv_get(env, "decl ".concat(h)) != ""
+      || tk_record_base(h, env) || ty_variant_decl(h, env)) {
+    let args = tkp_args(s)
+    var i = 0
+    while (i < args.length()) {
+      if (tk_ty_has_tparam(args[i], env)) { return true }
+      i += 1
+    }
+    return false
+  }
+  return true
+}
+
 // A call: every argument is walked for the refusals inside it. Argument-vs-
 // signature checking is T2b's slice, so the call's own type comes from the
 // annotation engine.
@@ -14405,6 +14549,16 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }
+  // Issue #2448: a variant CASE CONSTRUCTOR call checks its payload against the
+  // case's declared type (`typecheck.infer_ast`'s ExprCall arm; the counterpart
+  // is `selfhost/checker.rvl`'s `case_call_ty`). This walk resolved a case name
+  // as "unchecked" and never compared the payload, so `Box("x")` for
+  // `type Shape = Dot | Box(Int)` was ADMITTED and emitted on every tier: a
+  // silent admit, not a spelling difference. Nothing is said where either side
+  // is unknown or a body-rebound name shadows the constructor, which is the
+  // reference's own gradual silence.
+  let cpl = tk_case_payload(c, env, a.tys)
+  if (cpl.v != "") { return cpl }
   // docs/design/457 T2b: a bare-name callee against the signature table, and a
   // method callee against the host stub surface / `_BUILTIN_SIG`. Both MISS
   // rather than guess where the premise they need is not proven, and the
@@ -14602,13 +14756,59 @@ fn tk_if_join(a: Str, b: Str, env: List[Bind]) -> TInf {
 // two walks below tested for `"expr"`, which no part carries, so every
 // `${...}` body went untyped and unlowered — the reference infers and lowers
 // each of them like any other expression.
+//
+// Issue #2459: the reference also REFUSES an operand whose static type is
+// compound (`_interp_refusal` in `src/revl/lower.py`'s `_mark_interp_type`): a
+// template renders Str/Int/Float/Bool, no two hosts agree on a compound value,
+// and `${f}` for a plain fn was emitted as `str(f)` here while the reference
+// refused it by name. The refusal is the reference's sentence; the type
+// spelling is rendered the way `tk_mismatch` renders one.
+//
+// It runs in the PURE stratum only. `_mark_interp_type` is reached from the
+// module-fn lowering, and a component body never goes through it: the
+// reference admits a provide method interpolating a compound value
+// (`fn loose(xs) = \`xs=${anyText(xs)}\`` in the go corpus fixture
+// `comp_provide_builtins.rvl`, and a direct `${xs}` too). Refusing there was a
+// false rejection, which the gate/reference census caught as a moved case.
 fn tk_parts(parts: List[PartN], i: Int, env: List[Bind]) -> TInf {
   if (i >= parts.length()) { return tk_ok("Str") }
   if (parts[i].kind == "e") {
     let r = tk_infer(parts[i].e, env)
     if (r.v != "") { return r }
+    if (!ir_stratum(env)) {
+      let why = tk_interp_reason(r.ty, env)
+      if (why != "") {
+        return tk_no("T1", "`${...}` cannot interpolate ".concat(why)
+          .concat(" (`").concat(tk_render(r.ty)).concat("`)"))
+      }
+    }
   }
   return tk_parts(parts, i + 1, env)
+}
+
+// The reference's `_interp_refusal` answer for one operand type, "" when the
+// operand may be interpolated. Answered only for types this walk can PROVE
+// compound: an unknown, `Any`, a generic parameter and every scalar pass
+// through, which is the reference's own gradual silence.
+//
+// A NOMINAL record or variant is answered only for its BARE spelling: the
+// reference looks the type up exactly (`types.get(inferred)`), so an applied
+// generic (`R[Int]`, `S[Int]`) misses the table and is ADMITTED (issue #2459
+// review). Dispatching on the head name refused it, a false rejection.
+fn tk_interp_reason(t: Str, env: List[Bind]) -> Str {
+  if (t == "" || t == "Any" || t == "Value") { return "" }
+  if (t.startsWith("{")) { return "a record" }
+  if (tk_is_fn_ty(t)) { return "a compound value" }
+  let h = tkp_head(t)
+  if (h == "List" || h == "Map" || h == "Set" || h == "Opt" || h == "Result") {
+    return "a compound value"
+  }
+  if (tkp_args(t).length() > 0) { return "" }
+  if (ty_variant_decl(h, env)) { return "a variant" }
+  if (tk_record_base(h, env) || tenv_get(env, "grec ".concat(h)) != "") {
+    return "a record"
+  }
+  return ""
 }
 
 // ------------------------------------------------ the Float literal's own range
@@ -24430,6 +24630,30 @@ fn scope_has(sc: List[Bind], n: Str) -> Bool {
   return false
 }
 
+// The declared type of the INNERMOST binding of `n` ("" when it has none).
+// `scope_has` is the membership test (a lexical binder may be untyped) and
+// `bind_lookup` is the header-row read (where "" means absent); this is the
+// type read a scope binder needs.
+fn scope_ty(sc: List[Bind], n: Str) -> Str {
+  var i = sc.length() - 1
+  while (i >= 0) {
+    if (sc[i].name == n) { return sc[i].ty }
+    i -= 1
+  }
+  return ""
+}
+
+// Is this declared type a callable VALUE the binder can be called as? The
+// arrows `(Int) -> Int` and `Fn[Int, Int]`, plus the heads the reference's
+// #2544 guard leaves open: `Any`/`Value` (erased dynamic types that can hold a
+// function) and `Never` (the uninhabited bottom, whose call is vacuous).
+// Mirrors `is_function_type` + `_OPEN_CALLABLE_HEADS` in src/revl/typecheck.py.
+fn is_callable_value_ty(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  let h = ty_parse(ty).head
+  return h == "->" || h == "Fn" || h == "Any" || h == "Value" || h == "Never"
+}
+
 fn concat_binds(a: List[Bind], b: List[Bind]) -> List[Bind] {
   var out = a
   var i = 0
@@ -25941,8 +26165,17 @@ fn cir_nullary_case(n: Str, cx: CCtx) -> Bool {
 // generic tail's `call` on a `name` node (issue #1823). A scoped name that
 // spells a built-in constructor is the value, not the constructor, in a
 // component position as in a `fn` body (issue #2490).
+//
+// A CALLABLE-VALUED binder is the callee even when a module `fn`/extern shares
+// its name: that is issue #1823's owner ruling on #2544, and the reference now
+// applies it in `_component_scope_value_is_callee` (src/revl/lower.py). Before
+// it, `fn go(f, n) = f(n)` with a module `fn f` lowered to the module fn and
+// dropped the parameter. A binder whose type the producer does not hold keeps
+// the old answer (the module callable), exactly as the reference does.
 fn cir_calls_a_value(nm: Str, sc: List[Bind], cx: CCtx) -> Bool {
-  return scope_has(sc, nm) && bind_lookup(cx.fns, nm, 0) == ""
+  if (!scope_has(sc, nm)) { return false }
+  if (is_callable_value_ty(scope_ty(sc, nm))) { return true }
+  return bind_lookup(cx.fns, nm, 0) == ""
 }
 
 // `f(a)` where `f` is a scoped value: the reference's generic call tail,
@@ -28264,10 +28497,26 @@ fn binop_ty(op: Str, lt: Str, rt: Str) -> Str {
   return ""
 }
 
+// The reference's `join`, restricted to the spellings this annotation engine
+// names: identical types meet at themselves, and the NUMERIC widening pairs
+// meet where `compatible` allows the flow (`Float` accepts `Int` and `Int32`,
+// `Int` accepts `Int32`), so `join(Int, Float)` is `Float`, not unknown.
+//
+// Issue #2460: answering "" for `Int`/`Float` made a NESTED `if` lose the
+// widening entirely, because the outer join then met `("", Int)` and the
+// pass-through below answered `Int`. The return-position widen marker is
+// computed from this inference, so the py tier wrote `return float(r)` where
+// the reference writes `return r`: same verdict, different bytes, no refusal.
+// The "" pass-throughs are kept: they are the gradual silence the annotations
+// already rest on, and narrowing them is a separate ratchet.
 fn join_ty(a: Str, b: Str) -> Str {
   if (a == b) { return a }
   if (a == "") { return b }
   if (b == "") { return a }
+  if (b == "Float" && (a == "Int" || a == "Int32")) { return "Float" }
+  if (a == "Float" && (b == "Int" || b == "Int32")) { return "Float" }
+  if (a == "Int" && b == "Int32") { return "Int" }
+  if (b == "Int" && a == "Int32") { return "Int" }
   return ""
 }
 

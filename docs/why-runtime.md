@@ -109,6 +109,55 @@ A reader treats each new field as optional — a v1 event (no `ts`, no `code`, n
   unaffected. The OTel export maps it to a plain span (unset status) carrying
   the capability/key as attributes.
 
+### Schema v3 (additive; a v1 or v2 event still parses and behaves identically)
+
+`SCHEMA_VERSION` is **3** (issue #2694). Every field v1 and v2 defined is
+unchanged; v3 only *adds*. A reader treats each new field as optional, and a
+v1/v2 event is still a valid, fully-handled record.
+
+* **the model crossing's contract** (issue #2694): an `emit` that carries an
+  `llm` payload (a model completion, `docs/design/121-revl-trace.md`) may also
+  carry the contract the completion was held to and the role's declared
+  placement:
+
+  ```json
+  "llm": {
+    "...": "...",
+    "schemaDigest":  {"digest": "e3b0c4...", "provenance": "revl-controlled"},
+    "grammarDigest": {"digest": "9f86d0...", "provenance": "revl-controlled"},
+    "residence":     {"value": "on_device",   "provenance": "revl-controlled"}
+  }
+  ```
+
+  `schemaDigest` identifies the response schema item 257 derived and bound in
+  the crossing's IR; `grammarDigest` is the digest item 513 pinned over the
+  decoding grammar; `residence` is the declared device placement of the `model
+  role` the crossing names. All three are compile-time facts, so they are
+  `revl-controlled`. A crossing with no grammar (an unvalidated emission) or no
+  declared role **omits** the field rather than writing an empty value.
+
+* **the attested-run header** (issue #2730): `revl run --trace FILE
+  --attestation ATTESTATION.json` records the admission's identity on the
+  **first** trace event, and on no other:
+
+  ```json
+  {"v":3,"seq":0,"gen":1,"event":"load","component":"PgDatabase",
+   "transition":"PENDING -> ACTIVE","cause":{"kind":"boot"},"ts":1234.5,
+   "run":{"compositionHash":"a1b2c3...","attestationKeyId":"0123456789abcdef",
+          "rulesetDigest":"d4e5f6..."}}
+  ```
+
+  `compositionHash` is `attest.canonical_hash` over the IR, `attestationKeyId`
+  the key's non-secret fingerprint and `rulesetDigest` the frontend ruleset
+  digest from the attestation's signed body. The attestation must bind THIS
+  composition (same hash) or the run refuses to boot; its signature is not
+  checked, because a run holds no key. These are **labels, not proof**: a
+  consumer that wants proof runs `revl attest --verify` itself. A value the
+  attestation does not carry is omitted, and a run with no `--attestation` has
+  no `run` key at all. `revl metrics` copies the header into an optional `run`
+  block, and the OTel export copies it to every span as
+  `revl.composition_hash`, `revl.attestation_key_id` and `revl.ruleset_digest`.
+
 Only **settled** transitions are recorded — a fiber coming to rest in `ACTIVE`,
 `DISPOSED`, `PENDING`, or `FAILED`. An in-flight `LOADING`/`UNLOADING` waypoint
 collapses into the single move the trace shows (`ACTIVE -> PENDING`), so the

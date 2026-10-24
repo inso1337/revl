@@ -101,10 +101,10 @@ def paths(tmp_path):
             "shout": str(tmp_path / "shout.log")}
 
 
-def _act(method, args):
+def _act(method, args, **extra):
+    arguments = {"key": "ops", "method": method, "args": args, **extra}
     return server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                          "params": {"name": "revl_act", "arguments": {
-                              "key": "ops", "method": method, "args": args}}}
+                          "params": {"name": "revl_act", "arguments": arguments}}
                          )["result"]["structuredContent"]
 
 
@@ -140,6 +140,23 @@ def test_a_deferred_action_appears_in_the_commit_manifest(gated, paths):
     manifest = server._tool_commit({})["manifest"]
     assert [d["group"] for d in manifest["deferred"]] == ["deliver.deliver"]
     assert manifest["actions"][0]["outcome"] == "deferred"
+
+
+@needs_cordis
+def test_unreadable_reasoning_is_refused_without_changing_the_bare_act(gated, paths):
+    args = [paths["queue"], "m"]
+    refused = _act("enqueue", args, reasoning="private model reasoning")
+    assert refused["ok"] is False
+    [diagnostic] = refused["diagnostics"]
+    assert diagnostic["category"] == "usage"
+    assert "unknown argument for `revl_act`" in diagnostic["message"]
+    assert "`reasoning`" in diagnostic["message"]
+    assert "private model reasoning" not in json.dumps(refused)
+
+    bare = _act("enqueue", args)
+    assert bare["ok"] is True, bare
+    assert (bare["class"], bare["outcome"]) == ("b", "deferred")
+    assert len(gated.commit()["actions"]) == 1, "only the bare call reached the session"
 
 
 @needs_cordis

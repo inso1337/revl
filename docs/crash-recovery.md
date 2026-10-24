@@ -373,6 +373,24 @@ behaviour) made every steady-state crossing after activation invisible, so a
 sat unrecorded — the log now carries them, and their `run-complete`-less tail is
 what recovery reads as a steady-state crash.
 
+The append is also a window (issue #2728). An ordinary effect's record is
+written when the effect yields its inverse, AFTER the effect body has run, so a
+process killed between the two leaves the effect in the world and no record of
+it in the log. Recovery cannot name, invert or fence an effect it has no record
+of: it reports `rolled-back` over the records it has, and an effect whose record
+never landed is UNKNOWN to it, so it must be reconciled by hand. That clean
+verdict is bounded by the log, but the residue proof's closing sentence is not:
+`_residue_proof` says "The world holds only what was deliberately committed"
+(`src/revl/recovery.py:2637-2640`), and in this window the world still holds the
+unrecorded effect. The sentence overclaims here; the proof covers the records,
+not the world. The window is deterministic and pinned:
+`REVL_CRASH_BEFORE_RECORD` (a step label, or `any`) exits the process in
+`Timeline._wal_append` before the append, and
+`tests/test_wal_effect_record_window_2728.py` asserts the verdict and records
+that the proof's world sentence is the overclaim. A plain emission does not have this window:
+its record is written before the host body runs. The other named unresolved
+outcome is `fenced-before-attempt, outcome unknown` in section 4c.
+
 ---
 
 ## 4d. "Verified, not merely claimed", for a local mutating inverse

@@ -1,7 +1,8 @@
 # How work moves
 
 The short version: **agents run targeted tests, push a branch, and open a PR.
-GitHub CI runs the full matrix. The orchestrator merges on green.**
+GitHub CI runs the PR jobs, and the heavy jobs run after merge (or on the
+merge queue when it is enabled). The orchestrator merges on green.**
 
 ## Why this exists
 
@@ -14,8 +15,8 @@ fixed ports 39555-39561 and `tests/test_network_gate_path.py` spawns a real node
 over loopback, so two agents running suites at the same time produce reds that
 belong to neither of them. Everyone waited, and the result was not even reliable.
 
-CI runs the same matrix on clean, isolated runners. That is where the full suite
-belongs.
+CI runs the same jobs on clean, isolated runners. That is where the full suite
+belongs: the PR jobs on the PR, the heavy jobs after merge.
 
 ## What an agent does
 
@@ -24,14 +25,24 @@ belongs.
 2. Run **only the tests covering what you changed.** If you touched
    `backends/rust/emit.py`, run the rust emit suite and the rust golden tests.
    Do not run the root `tests/` tree. Do not run the cordis suite.
-3. Commit and push the branch.
-4. Run the cheap pre-PR checks. They take seconds and catch most `lint` reds:
+3. Commit the branch.
+4. Before the first push and again before merge, run the branch and merge-tree
+   checks:
 
    ```
-   ./tools/pre_pr.sh
+   ./tools/pre_pr.sh --merge-ref
    ```
 
-   Eleven checks: ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
+   This fetches the current `origin/main`, checks the clean branch tree, then
+   creates a disposable worktree and merges `origin/main` into it. If the
+   branch checks pass but the merged-tree checks fail, the command reports only
+   output added by the merged-tree run. It does not update the branch. A dirty
+   or detached worktree is refused so the check describes the commit you will
+   push.
+
+   The branch-only checks can still be run while editing with
+   `./tools/pre_pr.sh`. The merge-ref mode runs these same checks on both trees:
+   ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
    is newer, so 3.12+ syntax passes locally and reds CI); the workflow
    permission gate (`tools/check_workflow_permissions.py`, self-test then
    `--strict`); the runtime seam check (`tools/check_runtime_seams.py`); the
@@ -43,7 +54,13 @@ belongs.
    (`tools/regen_goldens.py --check --strict python typescript rust java
    wasm`, through `tools/pre_pr_artifacts.py`); and the committed census
    records (`tools/census_artifact.py --check`, through the same helper). It
-   does not run any suite.
+   does not run any suite in branch-only mode.
+
+   Merge-ref mode also runs the tree-wide read-text/open encoding guards,
+   `tools/census_artifact.py --verify --strict` for the recorded reproduction,
+   and `tests/test_affected_tests.py` for selector mapping pins on both trees.
+   These focused checks may take longer than the branch-only pre-PR loop; the
+   full root suite and backend suites remain CI's job.
 
    A red on either gate-crate check is yours to fix before the PR, not the
    orchestrator's at merge: run the matching builder without `--check` and
@@ -72,7 +89,7 @@ belongs.
    a branch that touches no census input pays only that comparison. When that
    filter cannot decide, the check runs anyway.
 
-5. Open a PR that closes the issue:
+5. Push the branch and open a PR that closes the issue:
 
    ```
    gh pr create --repo inso1337/revl --fill --body "Closes #<issue>"
@@ -89,7 +106,8 @@ belongs.
 
 ## What an agent does not do
 
-- Do not run the full suite locally. That is CI's job now.
+- Do not run the full suite locally. That is left to CI: the PR jobs on the PR,
+  the heavy jobs after merge.
 - Do not block waiting on a background suite. Report and stop.
 - Do not fix a red you did not cause. A pre-existing failing test or a red CI on
   main belongs to the orchestrator. Say you saw it and leave it alone.
@@ -351,8 +369,9 @@ shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
 The heavy jobs never run on a pull request (issue #1678): `frontend` (the
 3.11/3.12/3.13 matrix), `frontend-cordis`, `conformance`, `formal`,
 `temporal-exit`, `sandbox-container` and `sandbox-microvm`. They run on the
-merge queue (`merge_group`), against the merged result that lands, and on push
-to main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
+merge queue (`merge_group`), against the merged result that lands, when the
+queue is enabled in branch protection. Without the queue, they run on push to
+main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
 as a `workflow_call`, so the PyPI publish gates on the full matrix too.
 `tests/test_ci_pr_queue_split_1678.py` pins the split.
 

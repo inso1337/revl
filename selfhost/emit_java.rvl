@@ -3877,20 +3877,32 @@ fn req_bindings(comp: Any) -> Map[Str, Str] {
   return out
 }
 
-// `_check_host_keys`: the one collision the mangling cannot represent, a flat
-// key beside a namespaced one whose host spellings agree. The reference refuses
-// the document; the port names the pair loudly instead.
+// Issue #2458: `_check_host_keys` is the FIRST statement of the reference
+// `emit`, ahead of the holes, deferred, validated and fault-test refusals,
+// and it refuses the one collision the mangling cannot represent: a flat key
+// that already spells a mangled qualified key (`acme__ops` beside `acme::ops`).
+// The port had no marker for it, so the first refusal it named was a later one.
+// One marker per colliding pair, first seen key first, across exactly the five
+// wiring tables the reference reads.
 fn host_key_collision_markers(ir: Any) -> List[Str] {
-  var seen: Map[Str, Str] = Map.empty()
+  var seen_hosts = []
+  var seen_keys = []
   var out = []
   for (c of value_list(value_field(ir, "components"))) {
     for (table of ["provides", "requires", "routes", "isolate", "intercept"]) {
       for (k of value_keys(value_field(c, table))) {
         let host = host_key(k)
-        let prior = match seen.lookup(host) { Some(v) => v, None => "" }
-        if (prior != "") {
-          if (prior != k) { out = out.push(`<<UNSUPPORTED-HOST-KEY-COLLISION:${k}>>`) }
-        } else { seen = seen.set(host, k) }
+        let at = list_index_of(seen_hosts, host)
+        if (at < 0) {
+          seen_hosts = seen_hosts.push(host)
+          seen_keys = seen_keys.push(k)
+        } else {
+          let first = seen_keys[at]
+          if (first != k) {
+            let mark = `<<UNSUPPORTED-HOST-KEY-COLLISION:${first} / ${k}>>`
+            if (!list_contains(out, mark)) { out = out.push(mark) }
+          }
+        }
       }
     }
   }
@@ -3904,6 +3916,18 @@ fn has_nonsimple_component(ir: Any) -> Bool {
     if (!component_simple_ok(c) && !(modern_supported(c) && needs_modern_subset(c))) { return true }
   }
   return false
+}
+
+// Named `list_index_of` rather than `index_of`: that name is the language's
+// string builtin, and a same-named helper compiles to a mangled form whose
+// coverage is attributed to the builtin's unexecuted shim.
+fn list_index_of(xs: List[Str], x: Str) -> Int {
+  var i = 0
+  while (i < xs.length()) {
+    if (xs[i] == x) { return i }
+    i += 1
+  }
+  return 0 - 1
 }
 
 // Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
@@ -4041,7 +4065,11 @@ pub fn emit_java_src(ir: Any) -> Str {
   // before the deferred in-file test section (one named marker per test
   // instead of silence, issue #1123), and a required stream, refused only while
   // the components are emitted, comes after it.
-  var refusals = deferred_emission_markers(ir).concat(validated_markers(ir))
+  // Issue #2458: the host-key collision is the reference's FIRST refusal in
+  // `emit` (`_check_host_keys` is its first statement), so its marker opens
+  // the refusal section. The comment below keeps the order of the rest.
+  var refusals = host_key_collision_markers(ir)
+  refusals = refusals.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
   // issue #2492: an extern with no `@java` body. The reference raises this one
   // from inside the extern block, and that block is emitted while the class
   // body is built, which the reference reaches BEFORE it renders components.
@@ -4051,7 +4079,6 @@ pub fn emit_java_src(ir: Any) -> Str {
   refusals = refusals.concat(extern_no_java_body_markers(ir))
   refusals = refusals.concat(deferred_test_markers(ir))
   refusals = refusals.concat(required_stream_markers(ir))
-  refusals = refusals.concat(host_key_collision_markers(ir))
   // Issue #2394: a namespaced key's host spelling is PROVEN only when the port
   // emits the whole document, because only then are its bytes comparable with
   // the reference's. A document that already hit a refusal above, or that the

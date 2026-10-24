@@ -29,17 +29,23 @@ a Cordis-paper definition or theorem, made a compile-time guarantee by revl. G9
 is the one revl-original member: the roadmap and threat model both note it has
 no paper anchor.
 
-| Code | Guarantee (one line) | Enforced at | Origin |
-| ---- | -------------------- | ----------- | ------ |
-| [G1](rejections.md#g1--declared-access) | declared access: a component reads only what it requires | lower (name-scoped) | Cordis paradigm (paper Def. 25) |
-| [G2](rejections.md#g2--provision-disjointness) | provision disjointness: one provider per key (per realm) | linker | Cordis paradigm (paper Def. 43) |
-| [G3](rejections.md#g3--acyclic-dependencies) | acyclic dependencies: a cycle can never activate | linker | Cordis paradigm (paper section 6.5) |
-| [G4](rejections.md#g4--inverse-or-emit) | every mutation carries an inverse, or admits irreversibility with `emit` | lower (emission fixed point) | Cordis paradigm (paper Def. 8, section 6.1) |
-| [G5](rejections.md#g5--teardown-cannot-register-effects) | teardown cannot register effects | by construction (grammar) | Cordis paradigm lifecycle-reentrancy hardening (DESIGN.md anchor "DS mod 6 / PR #39") |
-| [G6](rejections.md#g6--purity-outside-effect-forms) | purity outside effect forms | parser / checker | Cordis paradigm (paper Def. 48, confinement) |
-| [G7](rejections.md#g7--derived-lifo-teardown) | derived LIFO teardown | by lowering (+ totality check) | Cordis paradigm (paper Thm. 16) |
-| [G8](rejections.md#g8--the-boundary-surface-is-enumerable) | the boundary surface is enumerable | parser (extern classification) + `revl audit` | Cordis paradigm (paper section 6.1) |
-| G9 | untrusted data cannot create authority without a declared declassification | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) |
+Formal status is generated from [formal/STATUS.md](../formal/STATUS.md). The
+ledger gives each row's precise scope, proof artifacts, oracle coverage, and
+remaining gaps.
+
+<!-- docgen:formal-guarantees begin -->
+| Code | Guarantee (one line) | Enforced at | Origin | Formal status |
+| ---- | -------------------- | ----------- | ------ | ------------- |
+| [G1](rejections.md#g1--declared-access) | declared access: a component reads only what it requires | lower (name-scoped) | Cordis paradigm (paper Def. 25) | partial |
+| [G2](rejections.md#g2--provision-disjointness) | provision disjointness: one provider per key (per realm) | linker | Cordis paradigm (paper Def. 43) | full |
+| [G3](rejections.md#g3--acyclic-dependencies) | acyclic dependencies: a cycle can never activate | linker | Cordis paradigm (paper section 6.5) | full |
+| [G4](rejections.md#g4--inverse-or-emit) | every mutation carries an inverse, or admits irreversibility with `emit` | lower (emission fixed point) | Cordis paradigm (paper Def. 8, section 6.1) | full |
+| [G5](rejections.md#g5--teardown-cannot-register-effects) | teardown cannot register effects | by construction (grammar) | Cordis paradigm lifecycle-reentrancy hardening (DESIGN.md anchor "DS mod 6 / PR #39") | full |
+| [G6](rejections.md#g6--purity-outside-effect-forms) | purity outside effect forms | parser / checker | Cordis paradigm (paper Def. 48, confinement) | full |
+| [G7](rejections.md#g7--derived-lifo-teardown) | derived LIFO teardown | by lowering (+ totality check) | Cordis paradigm (paper Thm. 16) | full |
+| [G8](rejections.md#g8--the-boundary-surface-is-enumerable) | the boundary surface is enumerable | parser (extern classification) + `revl audit` | Cordis paradigm (paper section 6.1) | full |
+| G9 | untrusted data cannot create authority without a declared declassification | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) | full |
+<!-- docgen:formal-guarantees end -->
 
 ## Ordering and async rules (the A family)
 

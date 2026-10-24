@@ -53,6 +53,8 @@ from . import edit as _edit
 from . import remedy as _remedy
 
 INTENTS = ("edit", "replace", "withdraw", "add")
+EDIT_CONTEXT = ("files", "source", "modules", "config")
+CHANGE_CONTEXT = (*EDIT_CONTEXT, "gauntlet")
 
 
 class ChangeError(ValueError):
@@ -88,8 +90,20 @@ def _cascade_names(plan: dict | None) -> list[str]:
     return [entry["component"] for entry in (plan or {}).get("cascade") or []]
 
 
+def read_only_components(vs: dict) -> dict[str, str]:
+    """Component declarations held only in read-only `use` buffers."""
+    return {
+        name: buffer["buffer"]
+        for buffer in _edit.held_buffers(vs)
+        if buffer["origin"] == "dependency"
+        for name, kind in buffer["symbols"].items()
+        if kind == "component"
+    }
+
+
 def cascade_refusal(arguments: dict, plan: dict | None, *,
-                    cold: bool = False) -> dict | None:
+                    cold: bool = False,
+                    read_only: dict[str, str] | None = None) -> dict | None:
     """A withdrawal that would strand dependents, asked for without
     `cascade: true`: refused from the plan, before anything is applied. On a
     `cold` call the plan came from the composition the call carries (issue
@@ -99,14 +113,50 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
     if cascade or not stranded:
         return None
     lost = "; ".join(f"{entry['component']} {entry['reason']}" for entry in stranded)
-    # issue #2536: the remedy is the same call with `cascade: true`, so it is
-    # data (#1691) beside the prose; nothing is missing, hence ready. It never
-    # commits: the cascade withdraws more than the caller named, so a client
-    # that follows a ready `next` as-is gets the plan of the cascade, and
-    # committing it is a separate, chosen call
-    carried = {k: v for k, v in arguments.items() if k != "commit"}
-    nxt = _remedy.call("revl_change", {**carried, "withdraw": {
+    # issue #2536: the first preference is the same call with `cascade: true`,
+    # so it is data (#1691) beside the prose; nothing is missing, hence ready.
+    # It never commits: the cascade withdraws more than the caller named, so a
+    # client that follows it as-is gets the plan of the cascade, and committing
+    # it is a separate, chosen call.
+    carried = {k: v for k, v in arguments.items()
+               if k != "commit" and (cold or k not in ("source", "files"))}
+    cascade_next = _remedy.call("revl_change", {**carried, "withdraw": {
         "component": component, "cascade": True}})
+    # The plan tells us which dependents lose a provider, but not the source
+    # they should be replaced with. Offer a second, explicitly unready edit
+    # template with each affected symbol pre-filled.
+    replacement_context = {
+        key: arguments[key] for key in CHANGE_CONTEXT
+        if key in arguments and (cold or key not in ("source", "files"))
+    }
+    dependent_names = [entry["component"] for entry in stranded]
+    read_only_dependents = {
+        name: read_only[name] for name in dependent_names
+        if read_only and name in read_only
+    }
+    if read_only_dependents:
+        nxt = [cascade_next]
+        replacement_hint = (
+            "; the replacement option is unavailable because "
+            + ", ".join(f"`{name}` is in read-only buffer `{path}`"
+                         for name, path in read_only_dependents.items())
+            + "; update those dependency sources and reload before retrying")
+    else:
+        replacement_next = _remedy.call(
+            "revl_change",
+            {**replacement_context,
+             "edit": {"edits": [{"symbol": name} for name in dependent_names]}},
+            ready=False,
+            needs=("a `replacement` declaration for each dependent in `edit.edits` "
+                   "that no longer requires any provision lost in this withdrawal: "
+                   + ", ".join(f"`{name}`" for name in dependent_names)),
+        )
+        nxt = [cascade_next, replacement_next]
+        replacement_hint = (
+            ", or use the second `next` option after supplying a replacement "
+            "declaration for each stranded dependent that no longer requires a "
+            "provision lost in this withdrawal. Send and commit that replacement "
+            "change first, then retry the withdrawal")
     return {"ok": False, "admitted": False, "swapped": False,
             "diagnostics": [{"severity": "error", "code": "REVL",
                              "category": "admission",
@@ -115,9 +165,13 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
                                         f"provider: {lost}. "
                                         f"{_remedy.describe(nxt)}"}],
             "hint": "pass {withdraw: {component, cascade: true}} to withdraw the "
-                    "whole cascade together, or replace the dependents first"
-                    + (". `next` leaves out `commit`: it answers with the plan "
-                       "of the cascade, and committing it is a call of its own"
+                    "whole cascade together" + replacement_hint
+            + ((". The `next` option does not carry `commit`: it returns the "
+                "cascade plan, which must be committed separately"
+                if read_only_dependents else
+                ". Neither `next` option carries `commit`: the cascade option "
+                "returns the plan, and the replacement change must be committed "
+                "before retrying the withdrawal")
                        if "commit" in arguments else ""),
             "next": nxt,
             **({"loaded": False} if cold else {}),
@@ -128,8 +182,7 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
 
 def edit_arguments(intent: str, arguments: dict, plan: dict | None) -> dict:
     """The `revl_edit` call an intent amounts to."""
-    carried = {k: arguments[k] for k in ("files", "source", "modules", "config",
-                                         "record") if k in arguments}
+    carried = {k: arguments[k] for k in EDIT_CONTEXT if k in arguments}
     value = arguments[intent]
     if intent == "edit":
         if not isinstance(value, dict) or not isinstance(value.get("edits"), list):

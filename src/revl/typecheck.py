@@ -70,6 +70,7 @@ import dataclasses
 import math
 
 from . import model_answer as _model_answer
+from ._paths import relpath_or_abs
 from .errors import RevlError, foreign_increment_refusal
 
 # reserved keys carried inside the `types` table (type names never start
@@ -222,6 +223,29 @@ def parse_type(name: str | None) -> tuple[str | None, list[str]]:
         return name, []
     head, _, rest = name.partition("[")
     return head, _split_top_level(rest[:-1])
+
+
+#: The heads that spell a function type. `parse_type` normalises the arrow
+#: spelling to `FN_HEAD`; the generic `Fn[...]` spelling keeps its own head,
+#: and taint.py already treats that head as a function type when it decides
+#: whether a closure carries a secret. Both spellings name a callable VALUE,
+#: so a binder of either must not be judged a call that fell through to a
+#: same-named module callable (#1823).
+_FUNCTION_TYPE_HEADS = frozenset((FN_HEAD, "Fn"))
+
+
+def is_function_type(name: str | None) -> bool:
+    """True if `name` is a function type in either spelling.
+
+    `Fn[Int, Int]` compiles on origin/main and the wasm tier's fixtures use
+    it, so the two spellings are one type for every decision that asks
+    "is this binder the callee?" -- the #2544 guard included.
+
+    `Never` is NOT one of these heads. It is the uninhabited bottom, not a
+    function type; the call guards admit it through `_OPEN_CALLABLE_HEADS`
+    instead, because a call on a `Never` binder is vacuous and must not be
+    read as a fall-through to a module callable."""
+    return parse_type(name)[0] in _FUNCTION_TYPE_HEADS
 
 
 # ------------------------------------------------- structural record types
@@ -1118,14 +1142,25 @@ def compatible(expected: str | None, actual: str | None,
         # generic same-head rule at the tail of this function.
         if ahead != "Async":
             return compatible(eargs[0] if eargs else None, actual, types)
-    if ehead == FN_HEAD:
+    if ehead in _FUNCTION_TYPE_HEADS and ahead in _FUNCTION_TYPE_HEADS:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
         # the position can use: parameters contravariant, result covariant.
         # The generic elementwise rule below would make parameters covariant,
         # which accepts `(Int) -> X` where `(Float) -> X` is required and then
-        # hands the callee a Float.
-        if ehead != ahead or len(eargs) != len(aargs):
+        # hands the callee a Float. Both spellings of a function type are one
+        # type here: `(Int) -> Str` and `Fn[Int, Str]` parse to the same
+        # `[param..., return]` shape and meet each other (#2544).
+        #
+        # BOTH sides have to be function types for this rule to own the pair.
+        # A one-sided pair is not a function flow: an expected `Opt[?T]` with a
+        # function actual is the ordinary `T -> Opt[T]` injection, and a
+        # function expected with a non-function actual is not a function value
+        # at all. Owning either here refused the injection direction that the
+        # `Opt` rule below admits, so those pairs fall through to it. Because
+        # the test names both heads, the two spellings of one function type
+        # still meet each other in either direction.
+        if len(eargs) != len(aargs):
             return False
         return (all(compatible(a, e, types) for e, a in zip(eargs[:-1], aargs[:-1]))
                 and compatible(eargs[-1], aargs[-1], types))
@@ -1259,6 +1294,34 @@ _UNRESOLVED_HINT = (
 )
 
 
+def record_repair(filename: str, line: int, expected: str,
+                  missing: list, extra: list) -> dict:
+    """The repair a record-literal shape refusal carries (issue #2845).
+
+    Both check positions that construct this refusal -- the checker's AST
+    check (`check_ast`) and the lowering's IR check (`check_ir`, called from
+    `lower`) -- know the declared record's exact field set, so the difference
+    is not only a diagnosis: it is the edit. The field names are the ones the
+    message names, so the two cannot disagree."""
+    edits = []
+    if missing:
+        noun = "field" if len(missing) == 1 else "fields"
+        edits.append(f"add the {noun} "
+                     + ", ".join(f"`{name}`" for name in missing))
+    if extra:
+        noun = "field" if len(extra) == 1 else "fields"
+        edits.append(f"drop the unknown {noun} "
+                     + ", ".join(f"`{name}`" for name in extra))
+    return {
+        "target": f"{relpath_or_abs(filename)}:{line} record literal for "
+                  f"`{expected}`",
+        "edit": "; ".join(edits)
+                + f" in the literal checked against `{expected}`",
+        "reason": "T1: a record literal must carry exactly the fields its "
+                  "declared record type declares",
+    }
+
+
 def mismatch(filename: str, line: int, where: str,
              expected: str | None, actual: str | None,
              *, why: str | None = None) -> RevlError:
@@ -1267,13 +1330,28 @@ def mismatch(filename: str, line: int, where: str,
     `why` is the exception: it reports a case the checker could not decide
     rather than one it decided against, so it carries its own code
     (`T-UNRESOLVED`) and its own fix. The default keeps every other caller on
-    `T1`/`type-mismatch`, byte for byte."""
+    `T1`/`type-mismatch`, byte for byte.
+
+    Issue #2845: the refusal carries the repair the checker knows, when it
+    knows one: the two shapes below name the exact next edit. Any other
+    mismatch knows the required and the actual type but not the minimal edit,
+    so it carries an explicit `known: False` repair instead of omitting the
+    field."""
     hint = None
+    target = f"{relpath_or_abs(filename)}:{line} {where}"
+    repair = None
     ahead, _ = parse_type(actual)
     ehead, _ = parse_type(expected)
     if ahead == "Opt" and ehead != "Opt":
         hint = ("unwrap the optional first: `match` on it, or use `??` "
                 "to supply a fallback (syntax-2.0 §2)")
+        repair = {
+            "target": target,
+            "edit": "unwrap the optional at this position: `match` on it, or "
+                    "use `??` to supply the fallback",
+            "reason": f"T1: the position requires `{render_type(expected)}`, "
+                      f"and an `Opt[...]` is not that value",
+        }
     elif ehead == PRINCIPAL and ahead != PRINCIPAL:
         # item 457 S2, the authorization admission refusal
         # (docs/design/457-endpoint-one-definition.md, "Authorization"): a
@@ -1286,6 +1364,13 @@ def mismatch(filename: str, line: int, where: str,
         # only the auth service mints, so DELETING the `auth.validate` step
         # cannot type-check — it does not merely fail closed at runtime.
         hint = PRINCIPAL_PRODUCER_HINT
+        repair = {
+            "target": target,
+            "edit": "mint the value with `Auth.validate` and pass the "
+                    "`Principal` it returns",
+            "reason": "T1: a `Principal` is the only key to user-scoped data, "
+                      "and `Auth.validate` is its sole producer",
+        }
     expected, actual = render_type(expected), render_type(actual)
     if why is not None:
         return RevlError(filename, line,
@@ -1293,10 +1378,19 @@ def mismatch(filename: str, line: int, where: str,
                          _UNRESOLVED_HINT,
                          code="T-UNRESOLVED", category="unresolved-type",
                          expected=expected, actual=actual)
+    if repair is None:
+        repair = {
+            "target": target,
+            "reason": f"no minimal edit is known: the position requires "
+                      f"`{expected or 'an unknown type'}` and the value is "
+                      f"`{actual or 'of unknown type'}`, but the compiler "
+                      f"cannot tell which side the author meant to change",
+            "known": False,
+        }
     return RevlError(filename, line,
                      f"{where} expects `{expected}`, got `{actual}`", hint,
                      code="T1", category="type-mismatch",
-                     expected=expected, actual=actual)
+                     expected=expected, actual=actual, repair=repair)
 
 
 def incomparable(filename: str, line: int, op: str,
@@ -1823,7 +1917,8 @@ def host_family_check(family: str, method: str, arg_types: list,
 
 def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int,
-                  types: dict | None = None) -> str | None:
+                  types: dict | None = None,
+                  receiver_name: str | None = None) -> str | None:
     """Type a stdlib method call; raises on definite mismatches.
 
     `types` is the declared-type table, passed through to `compatible` so a
@@ -1875,8 +1970,18 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     thead, targs = parse_type(target_type)
     if filename and target_type is not None:
         if family == "sized" and thead not in _SIZED_HEADS:
+            hint = fix = None
+            fn_head, fn_args = parse_type(target_type)
+            if (receiver_name and fn_head == FN_HEAD and len(fn_args) == 1
+                    and parse_type(fn_args[0])[0] in _SIZED_HEADS):
+                hint = (f"`{receiver_name}` is a zero-argument function returning "
+                        f"`{render_type(fn_args[0])}`; call `{receiver_name}()` "
+                        "to use its result as the receiver")
+                fix = (f"write `{receiver_name}()` before `.{method}` to use the "
+                       "function's returned value as the receiver")
             raise RevlError(filename, line,
-                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
+                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`",
+                            hint=hint, fix=fix)
         if family in ("List", "Str", "Int", "Int32", "Map", "Value") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
@@ -2434,11 +2539,31 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             name = expr.callee.name
             # a local of function type shadows everything else: `let g = ...`
             # / a `(Int) -> Int` parameter is the callee, not a same-named
-            # top-level fn or ADT case
+            # top-level fn or ADT case. Both spellings of a function type are
+            # the callee and both are CHECKED by `call_function_value` here:
+            # `is_function_type` covers `->` and `Fn[...]`, so admitting the
+            # generic spelling cannot leave a call unchecked (issue #2544).
             local = tenv.get(name)
-            if parse_type(local)[0] == FN_HEAD:
+            head = parse_type(local)[0]
+            if is_function_type(local):
                 return call_function_value(expr, local, f"`{name}`", arg_types,
                                            tenv, types, filename, line)
+            # issue #2544: a binder whose type is NOT a function cannot be the
+            # callee, so this call names the same-named module `fn`/`extern`/
+            # case and silently drops the binding. Refuse it by type, but only
+            # when such a callable actually EXISTS: with none there is no
+            # fall-through to refuse, and the ordinary checks own the call.
+            # A function-typed binder never reaches this guard: both spellings
+            # return at the arm above.
+            # `Any`/`Value` are erased dynamic types that may hold a function,
+            # `Never` is the uninhabited bottom (a call on it is vacuous), and
+            # a still-unknown binder is ⊥, so none of them is "definitely not
+            # a function".
+            if (filename and local is not None
+                    and not is_function_type(local)
+                    and head not in _OPEN_CALLABLE_HEADS
+                    and names_a_module_callee(name, types)):
+                refuse_call_on_non_function(name, local, filename, line)
             check_case_call_arity(expr, tenv, types, filename)
             case = (types.get(CASES_KEY) or {}).get(name)
             params = generic_variant_params(case and case["adt"], types)
@@ -2570,12 +2695,14 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     and target_t not in _HOST_FAMILIES):
                 return infer_ast(desugar_list_transform(expr), tenv, types,
                                  filename)
+            receiver_name = (expr.callee.target.name
+                             if isinstance(expr.callee.target, ExprVar) else None)
             return builtin_check(expr.callee.name, target_t, arg_types, filename,
-                                 line, types)
+                                 line, types, receiver_name=receiver_name)
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
         callee_t = infer_ast(expr.callee, tenv, types, filename)
-        if parse_type(callee_t)[0] == FN_HEAD:
+        if is_function_type(callee_t):
             return call_function_value(expr, callee_t, IN_PLACE_CALLEE,
                                        arg_types, tenv, types, filename, line)
         return None
@@ -2818,7 +2945,7 @@ def _check_arrow_args(args, params, tenv: dict, types: dict,
         return
     for i, (arg, param) in enumerate(zip(args, params)):
         phead, pargs = parse_type(param)
-        if isinstance(arg, ExprArrow) and phead == FN_HEAD:
+        if isinstance(arg, ExprArrow) and is_function_type(param):
             check_ast(arg, param, tenv, types, filename,
                       f"argument {i + 1} of {what}")
         elif not isinstance(arg, ExprArrow) and phead == FN_HEAD and pargs \
@@ -2863,7 +2990,7 @@ def check_case_call_arity(expr, tenv: dict, types: dict,
             or not isinstance(expr.callee, ExprVar):
         return
     name = expr.callee.name
-    if parse_type(tenv.get(name))[0] == FN_HEAD:
+    if is_function_type(tenv.get(name)):
         return
     case = (types.get(CASES_KEY) or {}).get(name)
     if case is not None:
@@ -2933,12 +3060,95 @@ def check_case_arity(name: str, case: dict, given: int, filename: str,
     )
 
 
+#: Binder types that must not be judged "definitely not a function": a call on
+#: one is left to the ordinary checks. `Any`/`Value` are erased dynamic types
+#: that can hold a function value. `Never` is the uninhabited bottom: nothing
+#: inhabits it, so a call on a `Never` binder is vacuous rather than a
+#: fall-through to a module callable, and refusing it is a false refusal. A
+#: binder of no known type (⊥, absent from the environment) takes the same
+#: lenient path.
+_OPEN_CALLABLE_HEADS = frozenset(("Any", "Value", "Never"))
+
+
+def names_a_module_callee(name: str, types: dict) -> bool:
+    """True if a bare `name(...)` could be a same-named module `fn`/extern
+    (`FNS_KEY`) or ADT case constructor (`CASES_KEY`).
+
+    Issue #2544: these are the callables a call on a non-function binder falls
+    through to, dropping the binding. With neither, there is no fall-through:
+    the call reaches the binder (or nothing) and the ordinary checks judge it,
+    so the #2544 refusal would be a false statement about a callable that does
+    not exist. `_signature_table` puts fns and externs in one table, so the
+    extern half needs no second lookup; the built-in constructors are always
+    in the case table."""
+    return (name in (types.get(FNS_KEY) or {})
+            or name in (types.get(CASES_KEY) or {}))
+
+
+def refuse_call_on_non_function(name: str, local: str, filename: str,
+                                line: int) -> None:
+    """Issue #2544: a call on a binder whose type is not a function.
+
+    `tag: Str` can never be the callee of `tag("x")`, so that call names the
+    same-named module `fn`/`extern`/case instead and the binding is silently
+    dropped. This guard is deliberately keyed on the TYPE ENVIRONMENT rather
+    than on a list of binder forms: the lowering that establishes a binder
+    (`let`, `for`, arrow, match arm, provide-method parameter, effect/approval
+    `let`) records its type there, so a typed form added later is covered
+    without a second edit.
+
+    It fires only when `names_a_module_callee` finds the module `fn`/extern or
+    case the binding would be dropped for. A call on a non-function binder
+    with no same-named callable names no fall-through at all, so the refusal
+    (whose message is about that module callable) would be false; the ordinary
+    checks own that call.
+
+    One binder form has NO type in this environment: the `every … in` item of a
+    plain iteration. The guard cannot judge it and leaves it to the lowering's
+    `_binder_names` scan instead: a call on it is admitted here, the component
+    scan refuses it when a same-named module callable exists, and with none the
+    call lowers as a call on the binder's `name` node.
+
+    A component `let <x> = effect <acquire>` used to be the second such form
+    because a host acquisition typed to nothing (`Map.new()`). It no longer is:
+    lowering records the acquisition's family as the binder's type (a host
+    `Map` is `Map[Any, Any]`, the key and value types being the resource's
+    own), so the guard judges it here. The item-445 scan still refuses the
+    module `fn`/extern pairing first, at its own site; the case fall-through
+    the scan does not see is refused here. A call on such a binder with no
+    same-named callable names no fall-through and is admitted, as pinned by
+    `test_2544_provide_param_shadows_module_fn.py`.
+
+    A local of function type never reaches here (the call is on the value,
+    #1823), in either spelling: `is_function_type` covers `(Int) -> Str` and
+    `Fn[Int, Int]`. `Any`/`Value` (erased dynamic types), `Never` (the
+    uninhabited bottom) and a still-unknown binder (⊥) are left to the
+    ordinary checks so an open, uninhabited or untyped callable stays admitted.
+    """
+    rendered = render_type(local) or local
+    raise RevlError(
+        filename, line,
+        f"`{name}` is bound here as `{rendered}`, which is not a function, "
+        f"so it cannot be called",
+        hint=f"a call on `{name}` would reach the module callable of that name "
+             "and drop this binding; rename the binding, or give it a function "
+             "type (`(Int) -> Str`)",
+        code="T1", category="type-mismatch",
+        expected="a function type", actual=rendered,
+    )
+
+
 def call_function_value(expr, fn_type: str, what: str, arg_types: list,
                         tenv: dict, types: dict,
                         filename: str | None, line: int) -> str | None:
     """Type a call through a value of function type (a `let`-bound arrow, a
     parameter, a record field read into a `let` …)."""
     _, parts = parse_type(fn_type)
+    if not parts or parts == [""]:
+        # a bare `Fn` (or `Fn[]`) is accepted as a function-typed spelling but
+        # names no signature, so a call on it has nothing to be held to. Stay
+        # untyped, as before the value path admitted the generic spelling.
+        return None
     params, returns = parts[:-1], parts[-1]
     check_function_value_arity(what, fn_type, params, len(expr.args),
                                filename, line)
@@ -2954,7 +3164,9 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
     a `name` node a component position writes for a parameter or `let`-bound
     arrow (`g(1)` in a provide method), as `infer_ast` types the same call
     through `call_function_value`: the arity and every argument are held to
-    the function type, and the result is its return.
+    the function type, and the result is its return. Both spellings of a
+    function type, `(Int) -> Str` and `Fn[Int, Str]`, take this path and are
+    checked; admitting the generic spelling must not leave a call unjudged.
 
     Issue #2490: a provide-method parameter named `Some` is the callee of
     `Some(1)` as it is in a `fn` body, and this arm gives that call the type
@@ -2967,7 +3179,23 @@ def local_function_call_type(node: dict, tenv: dict, types: dict,
     name = callee.get("id")
     fn_type = tenv.get(name)
     head, parts = parse_type(fn_type)
-    if head != FN_HEAD:
+    if not is_function_type(fn_type):
+        # issue #2544, the case-constructor half: a call on a local lowers to
+        # this `call`/`name` shape, while a case call lowers to a `var`, so a
+        # non-function local here is the same dropped binding the AST guard
+        # refuses -- only when the module `fn`/extern or case it would be
+        # dropped for exists (the AST guard's `names_a_module_callee`).
+        # `Any`/`Value`/`Never` and a still-unknown binder stay admitted too.
+        if (filename and fn_type is not None
+                and not is_function_type(fn_type)
+                and head not in _OPEN_CALLABLE_HEADS
+                and names_a_module_callee(name, types)):
+            refuse_call_on_non_function(surface_name(name), fn_type, filename,
+                                        line)
+        return None
+    if not parts or parts == [""]:
+        # a bare `Fn`/`Fn[]` spelling has no signature to check the call
+        # against; leave it untyped rather than index past an empty list
         return None
     params, returns = parts[:-1], parts[-1]
     args = node.get("args") or []
@@ -3052,7 +3280,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
     if _is_wildcard(expected):
         infer_ast(expr, tenv, types, filename)
         return
-    if ehead != FN_HEAD:
+    if ehead not in _FUNCTION_TYPE_HEADS:
         raise RevlError(
             filename, line,
             f"{where} expects `{render_type(expected)}`, got an arrow",
@@ -3061,6 +3289,12 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
             code="T1", category="type-mismatch",
             expected=render_type(expected), actual="a function value",
         )
+    if not eargs:
+        # a bare `Fn` names a function type with no signature. The checker
+        # accepts the spelling elsewhere, so there is nothing here to hold the
+        # arrow to; infer it rather than indexing past an empty argument list.
+        infer_ast(expr, tenv, types, filename)
+        return
     want_params, want_return = eargs[:-1], eargs[-1]
     if len(expr.params) != len(want_params):
         rendered = ", ".join(render_type(p) or "_" for p in want_params) or "no parameters"
@@ -3124,7 +3358,7 @@ def _check_generic_case(expr, ehead: str | None, eargs: list[str], tenv: dict,
     from .parser import ExprVar
     callee = expr.callee
     if not isinstance(callee, ExprVar) \
-            or parse_type(tenv.get(callee.name))[0] == FN_HEAD:
+            or is_function_type(tenv.get(callee.name)):
         return False
     case = (types.get(CASES_KEY) or {}).get(callee.name)
     params = generic_variant_params(case and case["adt"], types)
@@ -3171,7 +3405,9 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
             if extra:
                 parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
             raise RevlError(filename, line,
-                            f"record literal for `{expected}` has {'; '.join(parts)}")
+                            f"record literal for `{expected}` has {'; '.join(parts)}",
+                            repair=record_repair(filename, line, expected,
+                                                 missing, extra))
         for name, value in expr.fields:
             check_ast(value, declared.get(name), tenv, types, filename,
                       f"field `{name}` of `{expected}`")
@@ -3376,6 +3612,20 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return None
     if kind == "fn":
         name = node.get("name")
+        # issue #2544, the provide-method half: a `fn` node names the module
+        # callable, but if the type environment holds a binder of that name
+        # that is NOT a function, the call was the same silent fall-through
+        # `infer_ast` above refuses -- again only when a `fn`/extern of that
+        # name exists, the callable this node would have named. A
+        # function-typed binder is the #1823 carve-out and stays admitted in
+        # either spelling; an open (`Any`/`Value`), uninhabited (`Never`) or
+        # unknown (⊥) binder stays lenient.
+        local = tenv.get(name)
+        head = parse_type(local)[0]
+        if (filename and local is not None and not is_function_type(local)
+                and head not in _OPEN_CALLABLE_HEADS
+                and names_a_module_callee(name, types)):
+            refuse_call_on_non_function(name, local, filename, line)
         sig = (types.get(FNS_KEY) or {}).get(name)
         if sig is None:
             return None
@@ -3763,7 +4013,9 @@ def check_ir(node, expected: str | None, tenv: dict, types: dict,
             if extra:
                 parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
             raise RevlError(filename, line,
-                            f"record literal for `{expected}` has {'; '.join(parts)}")
+                            f"record literal for `{expected}` has {'; '.join(parts)}",
+                            repair=record_repair(filename, line, expected,
+                                                 missing, extra))
         for name, value in node.get("fields") or []:
             check_ir(value, declared.get(name), tenv, types, services, filename,
                      line, f"field `{name}` of `{expected}`")

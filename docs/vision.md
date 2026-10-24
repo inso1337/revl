@@ -65,7 +65,7 @@ a command or it gets softened:
 | cordis-wasm | `pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q` | executes on real `wasmtime`; skips without it |
 | cordis-rs, cordis4j | `pytest backends/rust/test_emit_rust.py backends/java/test_emit_java.py -q` | needs cargo + a JDK; skips loudly otherwise |
 | cordis-go | `pytest backends/go/test_emit_go.py -q` | emitted code executes on real stc-go under `go test`; skips loudly otherwise |
-| the formal backbone | `make formal` (`sh formal/scripts/run_gate.sh`) | Lean 4: `formal/`, a layering gate plus an axioms gate (no `sorry`, no project-defined axiom). G2, G3 and G7 are `full` and oracle-checked against the shipped checker; G1 and G6 are `partial`, and G9's coverage is the one UNPROVED row. `formal/STATUS.md` is the per-theorem ledger, and it names each gap. Runs as CI's `formal` job |
+| the formal backbone | `make formal` (`sh formal/scripts/run_gate.sh`) | Lean 4: `formal/`, a layering gate plus an axioms gate (no `sorry`, no project-defined axiom). G2, G3 and G7 are `full`; G4, G5, G6, G8 and G9 are also `full`, at the granularity `formal/STATUS.md` states per row (the G4 and G8 shape-level statements are marked weak, and G6 is head-granularity); G1 is `partial`. `formal/STATUS.md` is the per-theorem ledger, and it names each gap. Runs as CI's `formal` job |
 
 Those commands are themselves resolved against the tree, by
 `python3 tools/check_vision_claims.py` in CI's required `lint` job: the
@@ -88,6 +88,23 @@ transport-safety verdict is (`tests/test_distribute.py`).
 
 ## The honest scope - what this does *not* claim
 
+`revl_act` accepts only declared arguments, and its effect gate acts on the
+checked operation rather than the model's reasoning. Whether reasoning is
+visible to the host, hidden in unreadable tokens, or unreadable at all does not
+change that decision. This does not block information in an allowed argument
+or establish that an explanation is true. `tests/test_tool_loop_act_1708.py`
+shows that an undeclared `reasoning` argument is refused by name while the
+bare call keeps its effect class and outcome.
+
+Admission applies before a candidate is activated, but revl does not re-admit
+prompt, memory, or skill text whenever a harness rewrites it in place. A
+checked revertible effect must have a well-shaped inverse; the checker does
+not prove that every inverse is semantically correct. `tests/test_admit_approval_gate.py`
+exercises the admission boundary, and `tests/test_verified_effect.py` tests
+selected inverse round trips and names their limit. Prompt text and memory
+content remain outside revl's checks; versioning and reviewing those artifacts
+belong to the harness built on revl.
+
 - **Not a general-purpose application language.** revl writes *components*;
   a host application assembles compiled components. Stratum 1 is a
   TypeScript *subset*, chosen to make a model's strongest priors correct,
@@ -105,11 +122,13 @@ transport-safety verdict is (`tests/test_distribute.py`).
   re-proved here.** The research claim is a *surface language whose every
   well-typed program satisfies the calculus's hypotheses* (DESIGN.md §5), not
   new type theory. What IS proved here, in Lean, is part of revl's own
-  admission judgment: G2 (provision disjointness) and G3 (acyclicity) are `full`
-  in `formal/`, axiom-gated, with non-vacuity witnesses and a differential
-  oracle against `src/revl`. G1 and G6 are `partial` and G9's coverage is
-  unproved, each for a named modelling reason. `formal/STATUS.md` is the ledger,
-  and it is written to be read gap-first.
+  admission judgment: G2, G3 and G7 are `full` in `formal/`, and so are G4,
+  G5, G6, G8 and G9 at the granularity their ledger rows state (the G4 and G8
+  shape-level statements are marked weak, and G6 is head-granularity). Every
+  full row is axiom-gated, with non-vacuity witnesses and, where the ledger
+  records one, a differential oracle against `src/revl`; G1 is `partial`, for a
+  named modelling reason. `formal/STATUS.md` is the ledger, and it is written
+  to be read gap-first.
 
 The pitch, kept honest: **Cordis has revertible effects as a discipline; revl
 makes them a type system.** Everything beyond that is roadmap, not claim.

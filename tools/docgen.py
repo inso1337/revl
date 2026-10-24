@@ -318,6 +318,26 @@ def _g_codes(codes) -> list[str]:
     return [c for c in codes if re.fullmatch(r"G\d+", c)]
 
 
+def refusal_registry() -> dict:
+    from revl.answer import REFUSALS
+    return dict(REFUSALS)
+
+
+def block_mcp_refusal_codes(current: str) -> str:
+    """docs/mcp-reference.md's refusal-code table, wholly from the registry.
+
+    The code, its category and its meaning all live in `revl.answer.REFUSALS`,
+    the same mapping the handlers draw from, so the table cannot list a code the
+    server does not emit or miss one it does.
+    """
+    out = ["| code | category | meaning |", "| ---- | -------- | ------- |"]
+    registry = refusal_registry()
+    for code in sorted(registry):
+        entry = registry[code]
+        out.append(f"| `{code}` | {entry.category} | {entry.meaning} |")
+    return "\n".join(out)
+
+
 def block_guarantees_rejections(current: str) -> str:
     """docs/rejections.md's family table. The `guarantee` column is verbatim the
     `GUARANTEES` value, so a plain equality check is the whole gate. `refused
@@ -365,6 +385,70 @@ def block_guarantees_humans(current: str) -> str:
         "suite in [`examples/rejections/`](../examples/rejections/) is the\n"
         "executable spec, and [rejections.md](rejections.md) is the full table."
     )
+    return "\n".join(out)
+
+
+class FormalGuaranteeStatusError(SystemExit):
+    """The formal-status column cannot be rendered from its source ledger."""
+
+
+def block_formal_guarantees(current: str, root: Path | None = None) -> str:
+    """docs/guarantees.md's G-rule table with formal status from the ledger.
+
+    The explanatory columns remain curated in the current table. Formal status
+    is normalized with the same parser used by component certificates, so the
+    glossary cannot quietly disagree with formal/STATUS.md.
+    """
+    from revl import cert
+
+    base = root if root is not None else ROOT
+    status_path = base / "formal" / "STATUS.md"
+    if not status_path.is_file():
+        raise FormalGuaranteeStatusError(
+            "docgen: formal/STATUS.md is missing; cannot generate guarantee statuses"
+        )
+    try:
+        status_rows = cert.guarantee_map(
+            status_path.read_text(encoding="utf-8"), source="formal/STATUS.md")
+    except cert.CertError as exc:
+        raise FormalGuaranteeStatusError(
+            "docgen: cannot read formal guarantee statuses: %s" % exc
+        ) from exc
+
+    current_rows: dict[str, list[str]] = {}
+    for line in current.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or set(line) <= set("|- "):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        match = re.search(r"\bG\d+\b", cells[0])
+        if match:
+            current_rows[match.group(0)] = cells
+
+    out = [
+        "| Code | Guarantee (one line) | Enforced at | Origin | Formal status |",
+        "| ---- | -------------------- | ----------- | ------ | ------------- |",
+    ]
+    for code in sorted(status_rows, key=lambda value: int(value[1:])):
+        row = current_rows.get(code, [])
+        try:
+            status = cert.status_of(
+                status_rows[code]["status_cell"],
+                source="formal/STATUS.md", code=code)
+        except cert.CertError as exc:
+            raise FormalGuaranteeStatusError(
+                "docgen: cannot read formal status for %s: %s" % (code, exc)
+            ) from exc
+        label = "full" if status == cert.PROVED else status
+        code_label = row[0] if row else code
+        guarantee = row[1] if len(row) > 1 else "TODO: describe the guarantee"
+        enforced = row[2] if len(row) > 2 else "TODO: name enforcement site"
+        origin = row[3] if len(row) > 3 else "TODO: identify origin"
+        out.append(
+            f"| {code_label} | {guarantee} | {enforced} | {origin} | {label} |"
+        )
     return "\n".join(out)
 
 
@@ -765,6 +849,8 @@ BLOCKS: list[tuple[str, str, str, object]] = [
     ("doc-status", "docs/DOC-STATUS.md", "docs/*.md", block_doc_status),
     ("mcp-verbs", "docs/mcp-reference.md", "revl.mcp.server.TOOLS", block_mcp_verbs),
     ("mcp-verb-count", "docs/mcp-reference.md", "revl.mcp.server.TOOLS", block_mcp_count),
+    ("mcp-refusal-codes", "docs/mcp-reference.md", "revl.answer.REFUSALS",
+     block_mcp_refusal_codes),
     ("agents-mcp-count", "docs/guide-ai-agents.md", "revl.mcp.server.TOOLS",
      block_agents_mcp_count),
     ("authoring-mcp-count", "docs/authoring-for-agents.md", "revl.mcp.server.TOOLS",
@@ -777,6 +863,9 @@ BLOCKS: list[tuple[str, str, str, object]] = [
      block_guarantees_design),
     ("guarantees-humans", "docs/guide-humans.md", "revl.diagnostics.GUARANTEES",
      block_guarantees_humans),
+    ("formal-guarantees", "docs/guarantees.md",
+     "formal/STATUS.md via revl.cert.guarantee_map/status_of",
+     block_formal_guarantees),
     ("mcp-test-count", "docs/guide-humans.md", "tests/test_mcp.py", block_mcp_test_count),
     ("suite-size", "CONTRIBUTING.md", "tests/**/test_*.py + tests/shard_weights.json",
      block_suite_size),

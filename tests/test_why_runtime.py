@@ -280,7 +280,7 @@ def _v1_trace() -> list[dict]:
 def test_make_event_stamps_ts_additively():
     with_ts = wr.make_event(0, 1, wr.LOAD, "A", "PENDING -> ACTIVE",
                             wr.cause_boot(), ts=12.5)
-    assert with_ts["v"] == 2 and with_ts["ts"] == 12.5
+    assert with_ts["v"] == wr.SCHEMA_VERSION and with_ts["ts"] == 12.5
     # omitting ts yields a v1-shaped record: the field is simply absent
     without = wr.make_event(0, 1, wr.LOAD, "A", "PENDING -> ACTIVE",
                             wr.cause_boot())
@@ -337,7 +337,7 @@ def test_emit_event_shape():
     ev = wr.make_emit_event(5, 1, "Ledger", "Audit", "audit.write",
                             wr.cause_trigger("crossed by step-back to 2"),
                             ts=9.0)
-    assert ev["event"] == wr.EMIT and ev["v"] == 2
+    assert ev["event"] == wr.EMIT and ev["v"] == wr.SCHEMA_VERSION
     assert ev["capability"] == "Audit" and ev["key"] == "audit.write"
     assert ev["ts"] == 9.0
     assert "transition" not in ev  # an emit settles nothing
@@ -410,7 +410,7 @@ def test_run_withdraw_stamps_ts_on_every_recorded_event(tmp_path):
                    "--trace", str(trace_path)])
     assert result.returncode == 0, result.stderr + result.stdout
     events = wr.read_trace(str(trace_path))
-    assert events and all(e["v"] == 2 for e in events)
+    assert events and all(e["v"] == wr.SCHEMA_VERSION for e in events)
     # every recorded load/withdraw carries a monotonic ts (v2, item 122)
     for e in events:
         assert isinstance(e.get("ts"), (int, float))
