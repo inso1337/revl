@@ -940,6 +940,52 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
         f"IR surface lower.rvl does not cover yet): {opened}")
 
 
+# Issue #2594. A component whose body holds one step the native IR producer
+# cannot lower. The block arm written on one line (`{ let z = v + 1; z }`, issue
+# #1699) is admitted by both gates and lowered by the reference, but
+# `cir_method_stmts` in selfhost/lower.rvl has no arm for it, so the `provide`
+# step that holds it fails. If that arm lands, swap in another construct the
+# producer still refuses inside a component body.
+_BODYLESS_COMPONENT_SRC = (
+    "service S { fn go(n: Int) -> Int }\n"
+    "component C provides s: S {\n"
+    "  provide s {\n"
+    "    fn go(n: Int) {\n"
+    "      let o = Some(n)\n"
+    "      let x = match o { Some(v) => { let z = v + 1; z }, None => 0 }\n"
+    "      return x\n"
+    "    }\n"
+    "  }\n"
+    "}\n")
+
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
+        compile_rvl, compile_to, lower_to_ir, tier):
+    """The native producer withholds the whole `body` of a component when a
+    step in it cannot be lowered. It used to say nothing, so every tier emitted
+    the component with its provide methods, effects and handlers absent and the
+    program built with the capability gone. The reference lowers the body, so
+    the native chain must refuse the component by name, with the step that
+    stopped it, and never return that partial program."""
+    ref = compile_source(_BODYLESS_COMPONENT_SRC)
+    assert "body" in ref["components"][0]
+
+    refusal = (
+        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 3 "
+        "is not supported by the self-host compiler, which would emit the "
+        "component without its body.")
+    got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
+    assert got == refusal, got[:200]
+    # the manifest-aware driver runs its own emit, so it carries its own guard
+    into = compile_rvl["compile_to_into"](_BODYLESS_COMPONENT_SRC, tier, "")
+    assert into == refusal, into[:200]
+
+    native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
+    assert "body" not in native
+    assert native["unlowered"] == "the body step starting at line 3"
+
+
 _PURE_CLOSURE_MODULES = {
     # Declared z before a, so a path-sorted closure and a declaration-order one
     # disagree; `Store` is a service-only import, so `s_hidden` must not travel.
@@ -1927,7 +1973,6 @@ _CALL_SITE_RULES = {
 # In one document the native gate does not type a record literal against a
 # generic record parameter; it refuses by name instead of emitting.
 _CALL_SITE_NAMED_IN_ONE_DOC = {
-    "generic_param": "TYPE|`store.put` argument `r`",
     "record_deep_field": "TYPE|`store.put` argument `r`: a record literal nested",
 }
 
@@ -2095,6 +2140,56 @@ def test_native_driver_admits_types_carried_through_an_import(
     with pytest.raises(RevlError):
         compile_files([str(doc)])
     assert got.startswith("REFUSED|"), got[:200]
+
+
+# Issue #2374, third case: a record literal for a generic carried record
+# (`store.put({ v: 1 })` against `Cell[Int]`) was refused with T1 through an
+# import, and by name in one document, where the reference admits it. The
+# record's shape is instantiated from its type arguments first.
+_GENERIC_CARRIED_LIB = (
+    "pub type Cell[T] = { v: T }\n"
+    "pub service Store { fn put(r: Cell[Int]) -> Str }\n")
+
+_GENERIC_CARRIED = {
+    "literal": "= store.put({ v: 1 })",
+    "literal_in_let": "{\n      let s = store.put({ v: 1 })\n      return s\n    }",
+    "wrong_field": '= store.put({ v: "x" })',
+}
+
+_GENERIC_CARRIED_TIERS = {"literal_in_let": ("py", "ts", "rust")}
+
+
+def _write_generic_carried(tmp_path, body, through_import):
+    service = _GENERIC_CARRIED_LIB
+    prefix = ""
+    if through_import:
+        (tmp_path / "lib.rvl").write_text(service, encoding="utf-8")
+        prefix = 'use "./lib.rvl" { Store }\n\n'
+        service = ""
+    doc = tmp_path / "doc.rvl"
+    doc.write_text(prefix + service + _CALL_SITE_COMPONENT % body, encoding="utf-8")
+    return doc
+
+
+@pytest.mark.parametrize("through_import", [False, True], ids=["one_document", "import"])
+@pytest.mark.parametrize("case", sorted(_GENERIC_CARRIED))
+@pytest.mark.parametrize("tier", ["py", "ts", "go", "java", "rust"])
+def test_native_driver_types_a_generic_carried_record_literal(
+        compile_rvl, reference_emit, tmp_path, through_import, case, tier):
+    """Issue #2374: the generic record literal is typed against the record's
+    instantiated shape, one document and through an import, so the native chain
+    emits the reference's bytes where it admits and the reference's T1 message
+    where the field type is wrong."""
+    if case in _GENERIC_CARRIED_TIERS and tier not in _GENERIC_CARRIED_TIERS[case]:
+        pytest.skip("the go and java emitters do not cover a `let` in a provide body")
+    doc = _write_generic_carried(tmp_path, _GENERIC_CARRIED[case], through_import)
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), tier, str(doc))
+    if case == "wrong_field":
+        want = _reference_message(lambda: compile_files([str(doc)]))
+        assert want != ""
+        assert got == "REFUSED|T1|" + want, got[:200]
+        return
+    assert got == reference_emit[tier](compile_files([str(doc)])), got[:200]
 
 
 # Issue #2449: the exact refusal for a document case that shares a carried
@@ -3599,6 +3694,92 @@ def test_a_well_typed_var_or_if_is_admitted_on_both_sides(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2405, remaining gaps: a nominal record field declared as an applied
+# generic record given a literal of the wrong type argument (gap 5), and a
+# record update on an applied generic record (gap 9). The reference names both
+# exactly, and the native gate now gives the same verdict and message. A record
+# literal for a BARE generic record (gap 3) is a named refusal: the reference
+# expands the declaration (`field `v` of `Box` expects `T`, got `Int``) and the
+# native gate does not instantiate a bare parameter, so it says so instead of
+# admitting the document.
+_ISSUE_2405_REMAINING_EXACT = {
+    "nominal_generic_field": (
+        "type Box[T] = { v: T }\ntype R = { b: Box[Int] }\nfn f() -> Int {\n"
+        "  let r: R = { b: { v: \"s\" } }\n  return 1\n}\n"),
+    "record_update_on_generic": (
+        "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box[Int] = { v: 1 }\n"
+        "  let c = { b | v = 2 }\n  return 1\n}\n"),
+}
+
+# The fn-typed `let` position is a T1 mismatch in the gate's vocabulary, like
+# the reference's own message for it; the record field and update refusals are
+# TYPE-tagged.
+_ISSUE_2405_REMAINING_T1 = {
+    "fn_type_let": (
+        "type Box[T] = { v: T }\nfn h(b: Box[Str]) -> Str { return b.v }\n"
+        "fn f() -> Int {\n  let g: (Box[Int]) -> Str = h\n  return 1\n}\n"),
+}
+
+_ISSUE_2405_REMAINING_NAMED = {
+    "bare_generic_literal": (
+        "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box = { v: 1 }\n"
+        "  return 1\n}\n"),
+    "bare_generic_literal_call": (
+        "type Box[T] = { v: T }\nfn g(b: Box[Int]) -> Int { return b.v }\n"
+        "fn f() -> Int {\n  let b: Box = { v: 1 }\n  return g(b)\n}\n"),
+}
+
+_ISSUE_2405_REMAINING_CONTROLS = {
+    "bare_generic_annotation": "type Box[T] = { v: T }\nfn f(b: Box) -> Int { return 1 }\n",
+    "record_update_plain": (
+        "type Row = { a: Int }\nfn f() -> Int {\n  let r: Row = { a: 1 }\n"
+        "  let s = { r | a = 2 }\n  return s.a\n}\n"),
+    "generic_literal": (
+        "type Box[T] = { v: T }\nfn f() -> Int {\n  let b: Box[Int] = { v: 1 }\n"
+        "  return b.v\n}\n"),
+}
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_EXACT))
+def test_a_generic_record_mistype_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text = _ISSUE_2405_REMAINING_EXACT[name]
+    want = _reference_refusal(text)
+    assert want != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|TYPE|" + want, got[:160]
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_T1))
+def test_a_function_type_let_mismatch_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text = _ISSUE_2405_REMAINING_T1[name]
+    want = _reference_refusal(text)
+    assert want != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + want, got[:160]
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_NAMED))
+def test_a_bare_generic_record_literal_is_a_named_refusal(
+        compile_rvl, name, tier):
+    text = _ISSUE_2405_REMAINING_NAMED[name]
+    assert _reference_refusal(text) != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got.startswith("REFUSED|TYPE|a record literal for the bare generic record `Box` ")
+    assert "issue #2405" in got
+
+
+@pytest.mark.parametrize("name", sorted(_ISSUE_2405_REMAINING_CONTROLS))
+def test_the_well_typed_generic_record_forms_are_admitted(admit, name):
+    text = _ISSUE_2405_REMAINING_CONTROLS[name]
+    assert _reference_refusal(text) == ""
+    assert admit(text) == ""
+
+
 # Issue #2460: an `if` whose branches join `Int` and `Float` is a `Float` in the
 # reference (`join`) and the native annotation engine answered unknown, so a
 # NESTED one fell back to `Int` on the outer join and the return-position widen
@@ -3795,7 +3976,12 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
         "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
-    "provide_block_body": "EMITS",
+    # issue #2594: the producer cannot lower this provide step, and the
+    # bodyless component it used to emit is now refused by name.
+    "provide_block_body":
+        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 4 "
+        "is not supported by the self-host compiler, which would emit the "
+        "component without its body.",
     "provide_expression_body": "EMITS",
     "ok_extra": "EMITS",
     "some_extra": "EMITS",
@@ -3929,3 +4115,120 @@ def test_local_callee_refusal_native_agrees(compile_to, name):
     reference = _reference_refusal(source)
     assert message in reference
     assert compile_to(source, "py") == f"REFUSED|T1|{reference}"
+
+
+# Issue #2569: a verb call on a host local in a component body (a name bound by
+# `let pool = effect Pool.open(..)`) is held to the family's stub surface by
+# the reference's `_check_host_verb` (item 401, issue #2491): T1 for a wrong
+# argument type, HOST-ARITY for a wrong count, HOST-METHOD for a verb off the
+# surface. The self-host gate had no copy of it and admitted all three. Each
+# case is (source, the reference's code, or "" where it admits).
+_POOL = 'let pool = effect Pool.open("db", 4) undo pool.close()'
+_STORE = "let store = effect Map.new() undo store.drop()"
+_JOBS_PROVIDER = ("service Jobs { fn run(sql: Str) -> Int }\n"
+                  "component C provides jobs: Jobs {\n  " + _POOL + "\n"
+                  "  provide jobs {\n    fn run(sql) %s\n  }\n}\n")
+_HOST_LOCAL_VERBS = {
+    "activation_wrong_type": (
+        "component C {\n  " + _POOL + "\n  effect pool.query(1)\n"
+        '  undo   pool.execute("rollback")\n}\n', "T1"),
+    "method_wrong_type": (_JOBS_PROVIDER % "= pool.query(true)", "T1"),
+    "activation_wrong_count": (
+        "component C {\n  " + _POOL + '\n  effect pool.query("a", "b")\n'
+        '  undo   pool.execute("rollback")\n}\n', "HOST-ARITY"),
+    "activation_off_surface": (
+        "component C {\n  " + _POOL + '\n  effect pool.frob("a")\n'
+        '  undo   pool.execute("rollback")\n}\n', "HOST-METHOD"),
+    "undo_off_surface": (
+        "component C {\n  " + _POOL + '\n  effect pool.execute("begin")\n'
+        '  undo   pool.frob("rollback")\n}\n', "HOST-METHOD"),
+    # a host Map's surface also names its iteration verbs
+    "map_off_surface": (
+        "component C {\n  " + _STORE + '\n  effect store.lookup("k")\n'
+        '  undo   store.remove("k")\n}\n', "HOST-METHOD"),
+    "map_iteration_count": (
+        "service Cnt { fn count() -> Int }\n"
+        "component C provides cnt: Cnt {\n  " + _STORE + "\n"
+        "  provide cnt {\n    fn count() = store.size(1)\n  }\n}\n", "HOST-ARITY"),
+    # an arrow's parameter does not shadow the host local in the reference
+    "arrow_param_same_name": (
+        _JOBS_PROVIDER % "{\n      let g = (pool) => pool.length()\n      return 1\n    }",
+        "HOST-METHOD"),
+    # the reference lowers left to right: a requirement call's argument rule
+    # and the host verb rule are met in source order
+    "requirement_call_first": (
+        "service R { fn get(k: Int) -> Int }\nservice J { fn run() -> Int }\n"
+        "component C requires r: R provides j: J {\n  " + _POOL + "\n"
+        '  provide j {\n    fn run() {\n      return r.get("a") + pool.frob()\n'
+        "    }\n  }\n}\n", "T1"),
+    "host_verb_first": (
+        "service R { fn get(k: Int) -> Int }\nservice J { fn run() -> Int }\n"
+        "component C requires r: R provides j: J {\n  " + _POOL + "\n"
+        '  provide j {\n    fn run() {\n      return pool.frob() + r.get("a")\n'
+        "    }\n  }\n}\n", "HOST-METHOD"),
+    # an A1 acquisition on an earlier line is raised first
+    "earlier_a1_wins": (
+        'component C {\n  let pool = effect await Pool.open("db", 4) undo pool.close()\n'
+        "  effect pool.frob()\n  undo pool.close()\n}\n", "A1"),
+    # positive controls
+    "right_types": (_JOBS_PROVIDER % "= pool.query(sql)", ""),
+    # `Map.empty()` is a value, not a host acquisition
+    "map_empty_is_not_a_host_local": (
+        "component C {\n  let m = effect Map.empty() undo m.drop()\n"
+        '  effect m.frob("k")\n  undo m.drop()\n}\n', ""),
+    # a provide-method parameter shadows the host local
+    "method_param_shadows": (
+        "service J { fn run(pool: Str) -> Int }\n"
+        "component C provides j: J {\n  " + _POOL + "\n"
+        "  provide j {\n    fn run(pool) = pool.length()\n  }\n}\n", ""),
+    # a `subscribe` head's `.filter(f).map(g)` chain is stream stages in the
+    # reference, not verbs on the `Stream` host local
+    "subscribe_stage_chain": (
+        "service Sink { emission fn write(v: Str) }\n"
+        "component C requires sink: Sink {\n"
+        "  let src = effect Stream.source() undo src.close()\n"
+        '  let sub = subscribe src.filter(x => x != "skip").map(x => x + "!").take(2)\n'
+        "              undo sub.close()\n"
+        "  every o in sub {\n    emit sink.write(o)\n  }\n}\n", ""),
+    "map_args_not_compared": (
+        "component C {\n  " + _STORE + "\n  effect store.insert(0, 1)\n"
+        "  undo   store.remove(0)\n}\n", ""),
+    "uninferable_arg_not_compared": (
+        "service Shows { fn show(w: Int32) -> Int }\n"
+        "component C provides shows: Shows {\n  " + _POOL + "\n"
+        "  provide shows {\n    fn show(w) = pool.query(w.to_str())\n  }\n}\n", ""),
+    "match_binder_shadows": (
+        _JOBS_PROVIDER % ("{\n      let o: Opt[Str] = Some(sql)\n"
+                          "      let n = match o { Some(pool) => pool.length(), None => 0 }\n"
+                          "      return n\n    }"), ""),
+}
+
+
+# Admitted by the gate as the reference admits it, but the native producer
+# does not yet emit these documents as the reference does, so only the verdict
+# is compared: it drops the activation body beside a match in a provide method,
+# it lowers `pool.length()` on a parameter that shadows the host local `pool`
+# as a host verb call instead of the `length` builtin, and it drops the
+# activation body of a `Map.empty()` bracket.
+_HOST_LOCAL_VERDICT_ONLY = {"match_binder_shadows", "method_param_shadows",
+                            "map_empty_is_not_a_host_local"}
+
+
+@pytest.mark.parametrize("case", sorted(_HOST_LOCAL_VERBS))
+def test_native_gate_checks_a_verb_on_a_host_local_as_the_reference(
+        admit, compile_to, reference_emit, case):
+    source, code = _HOST_LOCAL_VERBS[case]
+    try:
+        compile_source(source, "doc.rvl")
+        want = ""
+    except RevlError as e:
+        want = f"{e.code}|{e.message}"
+    assert want.split("|")[0] == code
+    assert admit(source) == want
+    if case in _HOST_LOCAL_VERDICT_ONLY:
+        return
+    got = compile_to(source, "py")
+    if code:
+        assert got == "REFUSED|" + want, got[:200]
+    else:
+        assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]

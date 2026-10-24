@@ -60,6 +60,10 @@
 
 ["function", "selfhost-emit-java-rvl-exact-method-the-python", "exact_method", 5, 5]
 
+["reason", "selfhost-emit-java-rvl-has-nonsimple-component-the", "selfhost/emit_java.rvl::has_nonsimple_component: The true return fires only on a component the port answers with `<<UNSUPPORTED-component-nonsimple>>` instead of emitting it (a required service on the legacy path, a config block, a setup block, or a method-body let). The port's bytes for such a document diverge from the reference by construction, so no byte-agreement document can reach it. The natural fix, a document in tests/fixtures/emit_java_refusals/ (the reference refuses a component-level timer by name, `unsupported component step in Java backend`), is also the right one, but it executes two reference statements the ledger records as uncovered and lowers reference/java `_emit_component` from 18 to 16. Issue #2651 refuses a fall recorded only in a branch, so that document and its fall land on origin/main first, and this record retires once that merge is here."]
+
+["function", "selfhost-emit-java-rvl-has-nonsimple-component-the", "has_nonsimple_component", 1, 1]
+
 ["reason", "selfhost-emit-java-rvl-host-method-the-emitted", "selfhost/emit_java.rvl::host_method: The emitted Python definition has zero Name-call sites; the backend inlines the new-to-create mapping into production callers. Map creation and ordinary host method names are covered there."]
 
 ["function", "selfhost-emit-java-rvl-host-method-the-emitted", "host_method", 3, 3]

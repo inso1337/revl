@@ -96,6 +96,7 @@ use "./emit_go.rvl" { emit_go_src }
 use "./emit_java.rvl" { emit_java_src }
 use "./emit_wasm.rvl" { emit_wasm_src }
 use "../stdlib/json.rvl" { json_parse }
+use "../stdlib/value.rvl" { value_field, value_has, value_list, value_str }
 use "../stdlib/str.rvl" { str_newline, str_tab }
 
 // The tiers whose self-host emitter is byte-exact against its reference on this
@@ -195,6 +196,23 @@ fn dropped_shape_marker(out: Str) -> Str {
     }
   }
   return best
+}
+
+// Issue #2594. A component the native IR producer could not lower carries an
+// `unlowered` reason in place of its `body` (`lower.rvl::ir_component`). The
+// reference always lowers a body, so emitting that component would return a
+// program whose provide methods, effects and handlers are simply absent. It is
+// refused by name, before any emitter runs.
+fn unlowered_refusal(ir: Any) -> Str {
+  for (c of value_list(value_field(ir, "components"))) {
+    if (value_has(c, "unlowered")) {
+      return "UNSUPPORTED|component `".concat(value_str(value_field(c, "name")))
+        .concat("`: ").concat(value_str(value_field(c, "unlowered")))
+        .concat(" is not supported by the self-host compiler, which would emit ")
+        .concat("the component without its body.")
+    }
+  }
+  return ""
 }
 
 fn dropped_shape_refusal(out: Str, tier: Str) -> Str {
@@ -1890,13 +1908,35 @@ fn tc_str_value(obj: Str, key: Str) -> Str {
 }
 
 // `type <name> = { f: T, ... }` for a record entry of the native `types`
-// table, `type <name> = A | B(T)` for a variant one, or "" for a generic type
-// or any other kind, which is left out (the gate then reads the name as one
-// it cannot resolve, as before).
+// table, `type <name> = A | B(T)` for a variant one, or "" for a kind this
+// link does not carry (the gate then reads the name as one it cannot resolve,
+// as before). Issue #2374 adds the GENERIC RECORD spelling
+// (`type Cell[T] = { v: T }`) so the gate can instantiate its fields; a
+// generic variant keeps the previous "" and is only carried in the type table.
+// `tc_params_text` reads a `"params": ["T"]` row as `T` or `A, B`.
+fn tc_params_text(raw: Str) -> Str {
+  let s = ul_trim(raw)
+  if (s == "[]") { return "" }
+  if (s.slice(0, 1) != "[") { return "" }
+  let inner = ul_trim(s.slice(1, s.length() - 1))
+  if (inner == "") { return "" }
+  var out: List[Str] = []
+  for (part of inner.split(",")) {
+    let q = ul_trim(part)
+    if ((q.length() < 2) || (q.slice(0, 1) != "\"")) { return "" }
+    out = out.push(q.slice(1, q.length() - 1))
+  }
+  return out.join(", ")
+}
+
 fn tc_type_text(name: Str, decl: Str) -> Str {
-  if (ul_trim(ul_key_value(decl, "params")) != "[]") { return "" }
   let kind = tc_str_value(decl, "kind")
-  let head = "type ".concat(name).concat(" = ")
+  let raw_params = ul_trim(ul_key_value(decl, "params"))
+  let params = tc_params_text(raw_params)
+  if (raw_params != "[]" && (params == "" || kind != "record")) { return "" }
+  let head = "type ".concat(name)
+    .concat(params == "" ? "" : "[".concat(params).concat("]"))
+    .concat(" = ")
   if (kind == "record") {
     let fields = ul_key_value(decl, "fields")
     let keys = ul_top_keys(fields)
@@ -2651,7 +2691,10 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // so a type the native link cannot carry is reported as that.
   let calls = tc_admit_imports(named, path, own)
   if (calls != "") { return "REFUSED|".concat(calls) }
-  let out = emit_ir(json_parse(typed.ir), tier)
+  let ir = json_parse(typed.ir)
+  let unlowered = unlowered_refusal(ir)
+  if (unlowered != "") { return "REFUSED|".concat(unlowered) }
+  let out = emit_ir(ir, tier)
   // Issue #2446: a whole component (or the whole live tier's body) the emitter
   // dropped is a refusal, not a partial program.
   let dropped = dropped_shape_refusal(out, tier)
@@ -2716,7 +2759,10 @@ pub fn compile_to_into(source: Str, tier: Str, manifest: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_ambient(source, manifest)
   if (verdict != "") { return "REFUSED|".concat(verdict) }
-  let out = emit_ir(json_parse(lower_to_ir(source)), tier)
+  let ir = json_parse(lower_to_ir(source))
+  let unlowered = unlowered_refusal(ir)
+  if (unlowered != "") { return "REFUSED|".concat(unlowered) }
+  let out = emit_ir(ir, tier)
   // Issue #2446: same dropped-shape rule as `compile_to_at`.
   let dropped = dropped_shape_refusal(out, tier)
   if (dropped != "") { return "REFUSED|".concat(dropped) }

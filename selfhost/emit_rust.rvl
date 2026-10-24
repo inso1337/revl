@@ -5265,9 +5265,10 @@ fn require_ty(svc: Str) -> Str {
 fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
   let pad = ind(indent)
   var out = []
-  for (local of value_keys(reqs)) {
-    let svc = require_ty(value_str(value_field(reqs, local)))
-    out = out.push(`${pad}let ${mangle(local)} = ctx.require::<Box<dyn ${svc}>>(${string_lit(local)})?;`)
+  for (key of value_keys(reqs)) {
+    let local = key_binding(key)
+    let svc = require_ty(value_str(value_field(reqs, key)))
+    out = out.push(`${pad}let ${mangle(host_key(key))} = ctx.require::<Box<dyn ${svc}>>(${string_lit(key)})?;`)
   }
   return out
 }
@@ -5350,14 +5351,16 @@ fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
     if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
     else { rn = rn.set(b, `self.${mangle(b)}`) }
   }
-  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${mangle(req)}`) }
+  for (raw of value_keys(value_field(comp, "requires"))) {
+    rn = rn.set(key_binding(raw), `self.${mangle(host_key(raw))}`)
+  }
   if (has_config(comp)) { rn = rn.set("config", "self.config") }
   return rn
 }
 fn method_undo_rename(comp: Any, method: Any) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
   for (b of binds(comp)) { rn = rn.set(b, `${b}_undo`) }
-  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `${req}_undo`) }
+  for (raw of value_keys(value_field(comp, "requires"))) { let req = key_binding(raw) rn = rn.set(req, `${req}_undo`) }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) rn = rn.set(pn, `${pn}_undo`) }
   return rn
 }
@@ -5365,7 +5368,10 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   let pad = ind(indent)
   var out = []
   for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${mangle(b)}.clone();`) }
-  for (req of value_keys(value_field(comp, "requires"))) { out = out.push(`${pad}let ${req}_undo = self.${mangle(req)}.clone();`) }
+  for (raw of value_keys(value_field(comp, "requires"))) {
+    let req = key_binding(raw)
+    out = out.push(`${pad}let ${req}_undo = self.${mangle(host_key(raw))}.clone();`)
+  }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
@@ -5472,11 +5478,12 @@ fn provide_let_type(value: Any, ctx: Ctx, comp: Any, services: Any) -> Str {
   }
   return ""
 }
-// The `requires` map as Str->Str (key -> service name).
+// The `requires` map keyed by the BINDING a `req` node carries (issue #2394;
+// the raw wiring key is only the runtime string).
 fn reqs_map(comp: Any) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
   let rq = value_field(comp, "requires")
-  for (k of value_keys(rq)) { m = m.set(k, value_str(value_field(rq, k))) }
+  for (k of value_keys(rq)) { m = m.set(key_binding(k), value_str(value_field(rq, k))) }
   return m
 }
 
@@ -5606,8 +5613,11 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
   var out = []
   for (method of provide_methods(body, key)) {
     let orig = value_str(value_field(method, "name"))
-    var mn = mangle(orig)
-    if (use_mname) { mn = mangle(mname(orig)) }
+    // `_method_ident`: the rust spelling of a service method is its `_mname`
+    // spelling then the identifier ladder, on BOTH component paths. The simple
+    // path used to skip `_mname`, so a method named `drop` emitted `fn drop`
+    // (the destructor) where the reference emits `drop_` (issue #2391).
+    let mn = mangle(mname(orig))
     let svc_method = value_field(svc_methods, orig)
     var ps = []
     var vt: Map[Str, Str] = Map.empty()
@@ -5649,15 +5659,16 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   let name = value_str(value_field(comp, "name"))
   let key = value_str(value_field(step, "name"))
   let svc = value_str(value_field(step, "service"))
-  let struct = `${name}${camel(key)}`
+  let struct = `${name}${camel(host_key(key))}`
+  let plocal = key.indexOf("::") < 0 ? key : host_key(key)
   var fields = []
   for (b of binds(comp)) { fields = fields.push(`${mangle(b)}: ${mangle(b)}.clone()`) }
-  for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${mangle(local)}: ${mangle(local)}.clone()`) }
+  for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${mangle(host_key(local))}: ${mangle(host_key(local))}.clone()`) }
   fields = fields.concat(config_ctor_field(comp, key))
   if (effectful) { fields = fields.push("ctx: Arc::new(ctx.clone())") }
   var out = []
-  out = out.push(`${pad}let ${key}_box: Box<dyn ${svc_ident(svc)}> = Box::new(${struct} { ${fields.join(", ")} });`)
-  out = out.push(`${pad}ctx.provide(${string_lit(key)}, ${key}_box)?;`)
+  out = out.push(`${pad}let ${plocal}_box: Box<dyn ${svc_ident(svc)}> = Box::new(${struct} { ${fields.join(", ")} });`)
+  out = out.push(`${pad}ctx.provide(${string_lit(key)}, ${plocal}_box)?;`)
   return out
 }
 
@@ -5904,8 +5915,9 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
   var undoR: Map[Str, Str] = Map.empty()
   undoR = undoR.set(raw_bind, undo_name)
-  for (req of value_keys(value_field(comp, "requires"))) {
-    out = out.push(`${pad}let ${req}_undo = ${mangle(req)}.clone();`)
+  for (raw of value_keys(value_field(comp, "requires"))) {
+    let req = key_binding(raw)
+    out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(raw))}.clone();`)
     undoR = undoR.set(req, `${req}_undo`)
   }
   let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -5984,8 +5996,9 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     }
     let acq_src = render_expr(value_field(step, "acquire"), ctx)
     var undoR: Map[Str, Str] = Map.empty()
-    for (req of value_keys(value_field(comp, "requires"))) {
-      out = out.push(`${pad}let ${req}_undo = ${mangle(req)}.clone();`)
+    for (raw of value_keys(value_field(comp, "requires"))) {
+      let req = key_binding(raw)
+      out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(raw))}.clone();`)
       undoR = undoR.set(req, `${req}_undo`)
     }
     let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -6036,8 +6049,9 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     // timer (or a later step) can still use the original (no E0382). Mirrors
     // how `effect`/`let-effect` clone reqs into their undo closures.
     var tR: Map[Str, Str] = Map.empty()
-    for (req of value_keys(value_field(comp, "requires"))) {
-      out = out.push(`${pad}let ${req}_t${n} = ${mangle(req)}.clone();`)
+    for (raw of value_keys(value_field(comp, "requires"))) {
+      let req = key_binding(raw)
+      out = out.push(`${pad}let ${req}_t${n} = ${mangle(host_key(raw))}.clone();`)
       tR = tR.set(req, `${req}_t${n}`)
     }
     out = out.push(`${pad}let _revl_timer_${n} = ${schedule}(${interval}, move || {`)
@@ -6169,8 +6183,9 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
       // every prior activation bind the compensate reads, so the `move`
       // closure owns copies the forward emit cannot have moved.
       var cR: Map[Str, Str] = Map.empty()
-      for (req of value_keys(value_field(comp, "requires"))) {
-        out = out.push(`${pad}let ${req}_comp = ${req}.clone();`)
+      for (raw of value_keys(value_field(comp, "requires"))) {
+        let req = key_binding(raw)
+        out = out.push(`${pad}let ${req}_comp = ${mangle(host_key(raw))}.clone();`)
         cR = cR.set(req, `${req}_comp`)
       }
       for (local of sorted_common(expr_var_names(cnode, Map.empty()).keys(), abinds)) {
@@ -6235,10 +6250,10 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
-    for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${mangle(host_key(local))}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
@@ -6315,10 +6330,10 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
-    for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${mangle(host_key(local))}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
@@ -6471,16 +6486,16 @@ fn intercept_inject(comp: Any, cname: Str) -> InjectR {
   if (value_keys(itc).length() == 0) { return { inject: rust_inject(value_keys(reqs)), defs: [] } }
   var inject = "Inject::none()"
   var defs = []
-  for (local of value_keys(reqs)) {
-    if (str_in(value_keys(itc), local)) {
-      let base = `${cname}${camel(local)}`
+  for (key of value_keys(reqs)) {
+    if (str_in(value_keys(itc), key)) {
+      let base = `${cname}${camel(host_key(key))}`
       let empty: IcSt = { defs: [], names: Map.empty(), counter: 0 }
-      let t = ic_type(value_field(itc, local), base, "", empty)
-      let l = ic_lit(value_field(itc, local), base, "", t.st)
+      let t = ic_type(value_field(itc, key), base, "", empty)
+      let l = ic_lit(value_field(itc, key), base, "", t.st)
       defs = defs.concat(l.st.defs)
-      inject = inject.concat(`.require_with(${string_lit(local)}, ${l.text})`)
+      inject = inject.concat(`.require_with(${string_lit(key)}, ${l.text})`)
     } else {
-      inject = inject.concat(`.require(${string_lit(local)})`)
+      inject = inject.concat(`.require(${string_lit(key)})`)
     }
   }
   return { inject: inject, defs: defs }
@@ -6695,7 +6710,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       let r = value_field(method, "returns")
       if (!value_is_null(r)) { ret = rust_type_t(r, tnames) }
       let deser = bridge_ret_deser("_v", ret)
-      out = out.push(`    fn ${mname(mn)}(&self, ${plist.join(", ")}) -> ${ret} {`)
+      out = out.push(`    fn ${mangle(mname(mn))}(&self, ${plist.join(", ")}) -> ${ret} {`)
       if (deser == "<<NONE>>") {
         out = out.push(`        panic!("bridge proxy: unsupported return type for ${sname}.${mn}");`)
       } else {
@@ -6726,7 +6741,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       if (any_none) {
         out = out.push(`        "${mn}" => Err("${sname}.${mn} cannot be called across a seam: a parameter type has no wire form".to_string()),`)
       } else {
-        out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mname(mn)}(${extracts.join(", ")})`, ret)}),`)
+        out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mangle(mname(mn))}(${extracts.join(", ")})`, ret)}),`)
       }
     }
     out = out.push(`        _ => Err(format!("method '{method}' is not exported for service ${sname}")),`)
@@ -6990,25 +7005,6 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
   return out
 }
 
-// Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
-// as a mangled host identifier (`_host_key`, issue #1914), and this port does
-// not port that mangling yet, so it would write the raw `::` key into host
-// names. Until it does, the port names every namespaced key it meets instead
-// of emitting a silent difference.
-fn namespaced_key_markers(ir: Any) -> List[Str] {
-  var out = []
-  for (c of value_list(value_field(ir, "components"))) {
-    let cname = value_str(value_field(c, "name"))
-    for (table of ["requires", "provides"]) {
-      for (k of value_keys(value_field(c, table))) {
-        let mark = `<<UNSUPPORTED-NAMESPACED-KEY:${cname}.${k}>>`
-        if (k.indexOf("::") >= 0 && !list_contains(out, mark)) { out = out.push(mark) }
-      }
-    }
-  }
-  return out
-}
-
 pub fn emit_rust_src(ir: Any) -> Str {
   let types = value_field(ir, "types")
   let tables = build_type_tables(types)
@@ -7076,21 +7072,30 @@ pub fn emit_rust_src(ir: Any) -> Str {
   // test section (one named marker per test instead of silence, issue #1123),
   // and a required stream, refused only while the components are emitted,
   // comes after it.
-  out = out.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
-  out = out.concat(host_key_collision_markers(ir)).concat(deferred_test_markers(ir))
-  out = out.concat(required_stream_markers(ir))
-  out = out.concat(namespaced_key_markers(ir))
+  var refusals = deferred_emission_markers(ir).concat(validated_markers(ir))
+  refusals = refusals.concat(host_key_collision_markers(ir)).concat(deferred_test_markers(ir))
+  refusals = refusals.concat(required_stream_markers(ir))
   // A routed require needs a per-realm router struct and live-worker lookup.
   // This port does not emit those yet; do not leave the plain require above
-  // looking complete (issue #2796). The marker sits outside the reference-order
-  // block above (the reference emitter's ordering of emitted items), so it is
-  // not part of the byte-agreement ordering.
+  // looking complete (issue #2796). These markers are the port's own, after
+  // the reference-order refusals, so they are not part of the byte-agreement
+  // ordering.
   for (comp of components) {
     let routes = value_field(comp, "routes")
     for (key of value_keys(routes)) {
-      out = out.push(`<<UNSUPPORTED-ROUTED-REQUIRE:${value_str(value_field(comp, "name"))}.${key}>>`)
+      refusals = refusals.push(`<<UNSUPPORTED-ROUTED-REQUIRE:${value_str(value_field(comp, "name"))}.${key}>>`)
     }
   }
+  // Issue #2394: a namespaced key's host spelling is PROVEN only when the port
+  // emits the whole document, because only then are its bytes comparable with
+  // the reference's. A document that already hit a refusal above reaches
+  // those bytes nowhere, so it names the namespaced keys it could not verify
+  // instead of letting that difference stay silent. A document the port emits
+  // whole draws no such marker: byte parity proves its keys.
+  if (refusals.length() > 0) {
+    refusals = refusals.concat(namespaced_key_markers(ir))
+  }
+  out = out.concat(refusals)
   return rstrip(out.join(newline())).concat(newline())
 }
 
@@ -7162,6 +7167,14 @@ fn host_key(key: Str) -> Str {
   return parts.join("__")
 }
 
+// `_key_binding`: the local a qualified key introduces, its trailing segment
+// (`acme::greeter` -> `greeter`). A `req` IR node and the isolate/intercept/
+// route tables name a key by this binding, not by the wiring identity.
+fn key_binding(key: Str) -> Str {
+  let parts = key.split("::")
+  return parts[parts.length() - 1]
+}
+
 fn host_key_collision_markers(ir: Any) -> List[Str] {
   var seen: Map[Str, Str] = Map.empty()
   var out = []
@@ -7172,6 +7185,25 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
         if (seen.has(host)) {
           if (map_get(seen, host) != k) { out = out.push(`<<UNSUPPORTED-HOST-KEY-COLLISION:${k}>>`) }
         } else { seen = seen.set(host, k) }
+      }
+    }
+  }
+  return out
+}
+
+// Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
+// as a mangled host identifier, and the port now mangles it too (issue #2394).
+// The marker below is not a claim that the key is unported; it names a key the
+// port could NOT prove against the reference bytes because the document was
+// refused elsewhere, a routed requirement included. See the call site.
+fn namespaced_key_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (c of value_list(value_field(ir, "components"))) {
+    let cname = value_str(value_field(c, "name"))
+    for (table of ["requires", "provides"]) {
+      for (k of value_keys(value_field(c, table))) {
+        let mark = `<<UNSUPPORTED-NAMESPACED-KEY:${cname}.${k}>>`
+        if (k.indexOf("::") >= 0 && !list_contains(out, mark)) { out = out.push(mark) }
       }
     }
   }
