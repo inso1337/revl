@@ -34,13 +34,15 @@ export function describeEmitFailure(
   return `emit.py failed for ${fixture} (${how}):\n${result.stderr ?? ''}`
 }
 
-function emitFixture(fixture: string, outName: string): void {
+// `python` is a parameter only so a test can name an interpreter that does
+// not exist; every caller uses the default.
+export function emitFixture(fixture: string, outName: string, python = 'python3'): void {
   const result = spawnSync(
-    'python3',
+    python,
     ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
     { cwd: backend, encoding: 'utf-8' },
   )
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     throw new Error(describeEmitFailure(fixture, result))
   }
   mkdirSync(join(backend, 'tests', 'generated'), { recursive: true })
