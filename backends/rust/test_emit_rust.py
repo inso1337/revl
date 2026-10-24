@@ -538,11 +538,12 @@ pub fn classify(source: Str, i: Int) -> Tok {
 def test_reused_uninferred_string_clones_each_move_but_not_copies():
     src = emit.emit(compile_source(_REUSED_VALUE_RVL))
     body = src.split("pub fn classify")[1].split("\n}")[0]
-    # every by-value use of the un-inferred `c` is cloned: the two `tag` calls,
-    # the `if`-expression else-branch tail, and the record field.
+    # every by-value use of the reused `c` is cloned: the two `tag` calls and
+    # the `if`-expression else-branch tail. Its last read, the record field in
+    # the `return`, moves (issue #2905).
     assert body.count("tag(c.clone())") == 2, body
     assert 'else { c.clone() }' in body, body
-    assert "text: c.clone()" in body, body
+    assert "return Tok { kind: kind, text: c };" in body, body
     # the Copy `Int` param reused across two moves is never cloned.
     assert "i.clone()" not in body, body
 
@@ -2466,10 +2467,10 @@ def test_user_ctx_field_and_local_emit_consistently():
         "fn mk_ctx() -> Ctx { return { n: 0 } }\n"
     ))
     assert "    ctx_: Ctx," in src                       # struct field decl
-    assert "return Ck { ctx_: x.clone(), msg:" in src    # construction
+    assert "return Ck { ctx_: x, msg:" in src           # construction (moves, #2905)
     assert "return ck.ctx_;" in src                      # field access
     assert "let ctx_ = mk_ctx();" in src                 # local binding decl
-    assert "Ck { ctx_: ctx_.clone()" in src              # local used as field value
+    assert "return Ck { ctx_: ctx_, msg:" in src        # local used as field value
     assert "pub struct Ctx {" in src                     # type name untouched
 
 

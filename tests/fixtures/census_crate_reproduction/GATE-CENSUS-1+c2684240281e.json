@@ -1040,6 +1040,7 @@
   "tests/fixtures/emit_rust_corpus/requires.rvl",
   "tests/fixtures/emit_rust_corpus/reserved_names.rvl",
   "tests/fixtures/emit_rust_corpus/reserved_type_names.rvl",
+  "tests/fixtures/emit_rust_corpus/return_moves.rvl",
   "tests/fixtures/emit_rust_corpus/service.rvl",
   "tests/fixtures/emit_rust_corpus/services_multi.rvl",
   "tests/fixtures/emit_rust_corpus/smart_ptr_methods.rvl",

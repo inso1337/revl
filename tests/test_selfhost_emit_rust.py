@@ -138,6 +138,8 @@ CORPUS = [
                     #   (owned `&xs` and already-borrowed pass-through)
     "list_borrow_per_param.rvl",  # issue #2906: an escaping List param stays
                     #   owned while its read-only sibling is still lent
+    "return_moves.rvl",  # issue #2905: a name read once in a `return` moves;
+                    #   a second read or an arrow capture still clones
     "branch_edges.rvl",  # conditional targets, explicit widening, escape/void branches
     "component_edges.rvl",  # pure blocks, idempotence, scalar config/Option bridge
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
@@ -465,7 +467,7 @@ def test_str_borrow_fixpoint_and_owned_boundaries(emitted, reference):
     for fragment in (
         "fn forward(s: &str)", "fn own_forward(s: String)",
         "pub fn public_count(s: String)", "return forward(&s);",
-        "return middle(s);", "return own_middle(s.clone());",
+        "return middle(s);", "return own_middle(s);",
     ):
         assert fragment in src
     assert "forward(&local)" in src
@@ -533,7 +535,7 @@ def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backe
     ir = compile_files([str(CORPUS_DIR / rel) for rel in
                         ("borrow_boundaries.rvl", "borrow_shadowing.rvl",
                          "lengths.rvl", "branch_edges.rvl",
-                         "list_borrow_per_param.rvl")])
+                         "list_borrow_per_param.rvl", "return_moves.rvl")])
     src = (reference.emit(ir) if backend == "reference"
            else emitted["emit_rust_src"](ir))
     bench = _load_bench_rust()
@@ -565,6 +567,7 @@ fn main() {
     assert_eq!(scan_all(vec![10, 20, 30]), 60);
     assert_eq!(probe_literal(), 5);
     assert_eq!(scalar_text(-12), "-12");
+    assert_eq!(tally_report(vec!["a".into()]), 11);
     assert_eq!(count_until_blank(vec!["a".into(), "".into(), "b".into()], vec!["s".into()]), 1);
     assert_eq!(edge_wide(3), 3.0);
     assert_eq!(edge_wider(4), 4);
@@ -757,7 +760,8 @@ def test_selfhosted_emitter_typed_core_scaffold(emitted):
     rec = emitted["emit_rust_src"](compile_files([str(CORPUS_DIR / "records.rvl")]))
     assert "pub struct Point {" in rec
     assert "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]" in rec
-    assert "Named { label: s.clone(), at: p.clone() }" in rec
+    # issue #2905: a name the `return` reads once moves into its field
+    assert "Named { label: s, at: p }" in rec
     var = emitted["emit_rust_src"](compile_files([str(CORPUS_DIR / "variants.rvl")]))
     assert '#[serde(tag = "$kind", content = "$value")]' in var
     assert "pub enum Tree {" in var
@@ -788,7 +792,10 @@ def test_selfhosted_emitter_extern_section(emitted):
     assert src.index("fn shout(") < src.index("fn relabel(")
     # the extern-seeded `let` inference (the E0382 half of 275)
     assert "let moved = nudge(p.clone(), 1i64);" in src
-    assert "return shout(up.clone());" in src
+    # the extern-typed `up` clones where it is reused, and moves on its
+    # last read in the `return` (issue #2905)
+    assert "let _ = noop(up.clone());" in src
+    assert "return shout(up);" in src
     assert "<<UNSUPPORTED" not in src and "EXTERN-NO-RS-BODY" not in src
 
 

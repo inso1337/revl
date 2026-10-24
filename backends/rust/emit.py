@@ -327,6 +327,36 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+def _return_move_names(expr: object) -> frozenset:
+    """The names a `return` expression may MOVE rather than clone (issue #2905).
+
+    The function returns once the expression is evaluated, so a name the
+    expression reads exactly once is never read again: cloning it into a
+    by-value slot only copies a value that is dropped right after. A read
+    inside an arrow counts twice, because the closure may run more than once
+    and a `move` closure cannot give up what it captured, so a captured name
+    still clones. revl values are immutable, so a move cannot be observed, and
+    rustc refuses a wrong one at build time (E0382).
+    """
+    counts: dict[str, int] = {}
+
+    def walk(node: object, in_arrow: bool) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident is not None:
+                    counts[ident] = counts.get(ident, 0) + (2 if in_arrow else 1)
+            inner = in_arrow or node.get("kind") == "arrow"
+            for value in node.values():
+                walk(value, inner)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, in_arrow)
+
+    walk(expr, False)
+    return frozenset(n for n, c in counts.items() if c == 1)
+
+
 def _body_assigned_names(body: object) -> set[str]:
     """Every name a function body ASSIGNS (`x = Some(1)`) after its
     declaration. `_body_multi_use` counts reads only, so a `var` the body
@@ -611,6 +641,9 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     the body is cloned at each by-value move, while a single-use name is left
     untouched. That keeps a lone move byte-identical to before and clones only
     the reused shape that would otherwise fail to build.
+
+    Inside a `return` expression, a known non-Copy name the expression reads
+    only once moves instead (`ctx.return_moves`, issue #2905).
     """
     field_clone = _by_value_field_clone(arg_node, rendered, ctx)
     if field_clone is not None:
@@ -630,6 +663,8 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
         if _is_fn_type(ty):
             return f"&{rendered}"
         if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+            return rendered
+        if name in ctx.return_moves:
             return rendered
         return f"{rendered}.clone()"
     if name in ctx.multi_use:
@@ -7274,6 +7309,10 @@ class _V3Ctx:
         # reset per fn by `_emit_v3_functions`, empty everywhere the reuse
         # context is not established.
         self.multi_use: set[str] = set()
+        # issue #2905: while a `return` expression renders, the names it reads
+        # exactly once outside any arrow (`_return_move_names`); a by-value use
+        # of one moves instead of cloning. Empty everywhere else.
+        self.return_moves: frozenset = frozenset()
         # issue #2497: reads per name in the body being rendered, so a `let`
         # nothing reads again can be typed (or refused) where rustc has no
         # later use to infer from
@@ -8939,8 +8978,13 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if node.get("expr") is None:
             out.append(f"{pad}return;")
         else:
-            rendered = _render_expr(node['expr'], ctx,
-                                    expected=ctx.current_return)
+            saved_moves = ctx.return_moves
+            ctx.return_moves = _return_move_names(node['expr'])
+            try:
+                rendered = _render_expr(node['expr'], ctx,
+                                        expected=ctx.current_return)
+            finally:
+                ctx.return_moves = saved_moves
             # The RETURN half of the `Any`-boxing coercion (`_coerce_any_arg`):
             # a declared `-> Any` erases to the opaque `Value`, so returning a
             # concrete `Str`/`Int`/… from such a function is E0308 exactly as
