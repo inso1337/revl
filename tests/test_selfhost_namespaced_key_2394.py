@@ -19,8 +19,9 @@ py, rust and java, with no marker". py covers all four of the issue's sources.
 rust and java do not: neither ports a `lifecycle test` section, which keeps
 ISSUE_REPRODUCER, TWO_NAMESPACES and KEYWORD_PARTS off both tiers; rust also
 names a routed requirement with its own marker instead of porting the router
-(issue #2796), which keeps ROUTED_NAMESPACED off rust; and java's legacy component path carries no `requires`, which keeps
-TWO_NAMESPACES and ROUTED_NAMESPACED off java. On those pairs the document
+(issue #2796), which keeps ROUTED_NAMESPACED off rust; and java's legacy
+component path carries no `requires`, which keeps TWO_NAMESPACES and
+ROUTED_NAMESPACED off java. On those pairs the document
 carries `<<UNSUPPORTED-NAMESPACED-KEY:...>>` for every key the tier could not
 verify, beside the marker naming the actual unported construct, so the
 difference is loud rather than silent. Every other source is byte-compared on
@@ -234,7 +235,8 @@ def test_a_host_identifier_collision_is_named_not_emitted(emitted, tier):
     got = emitted[tier]["emit_%s_src" % tier](ir)
     # java names the pair, first seen key first (issue #2458); py and rust
     # name the later key.
-    want = COLLISION_MARKER.get(tier, "<<UNSUPPORTED-HOST-KEY-COLLISION:acme__greeter>>")
+    want = COLLISION_MARKER.get(
+        tier, "<<UNSUPPORTED-HOST-KEY-COLLISION:acme__greeter>>")
     assert want in got
 
 
@@ -246,7 +248,21 @@ def test_a_routed_namespaced_requirement_names_each_marker_once(emitted):
     ir = _source_ir(namespaced.ROUTED_NAMESPACED)
     got = emitted["rust"]["emit_rust_src"](ir)
     markers = MARKERS.findall(got)
-    assert markers.count("<<UNSUPPORTED-ROUTED-REQUIRE:Router.acme::worker>>") == 1, markers
-    assert markers.count("<<UNSUPPORTED-NAMESPACED-KEY:Router.acme::worker>>") == 1, markers
+    routed = "<<UNSUPPORTED-ROUTED-REQUIRE:Router.acme::worker>>"
+    key = "<<UNSUPPORTED-NAMESPACED-KEY:Router.acme::worker>>"
+    assert markers.count(routed) == 1, markers
+    assert markers.count(key) == 1, markers
     assert len([m for m in markers if "ROUTED-REQUIRE" in m]) == 1, markers
     assert len(markers) == len(set(markers)), markers
+
+
+@pytest.mark.parametrize("source", ["requires", "provides"])
+def test_a_namespaced_key_with_no_refusal_draws_no_key_marker_on_rust(
+        emitted, source):
+    """The other half of the gate: a namespaced requirement (WASM_PAIR) or
+    provision (PROVIDE_ONLY) with no routed requirement and no other refusal
+    is emitted whole, so it draws no `<<UNSUPPORTED-NAMESPACED-KEY` marker."""
+    text = namespaced.WASM_PAIR if source == "requires" else PROVIDE_ONLY
+    got = emitted["rust"]["emit_rust_src"](_source_ir(text))
+    assert "<<UNSUPPORTED-NAMESPACED-KEY:" not in got, MARKERS.findall(got)
+    assert not MARKERS.findall(got), MARKERS.findall(got)
