@@ -1233,6 +1233,9 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         if node.get("op") in _TS_EQUALITY_OPS:
             left = _expr(node["left"], ctx)
             right = _expr(node["right"], ctx)
+            if _ts_strict_equality(node, ctx):
+                op = "===" if node["op"] in ("==", "===") else "!=="
+                return f"({left} {op} {right})"
             call = f"revlEq({left}, {right})"
             return call if node["op"] in ("==", "===") else f"(!{call})"
         op = _TS_V3_BIN_OPS.get(node.get("op"))
@@ -3274,6 +3277,11 @@ class _Ctx:
             if mspec.get("async")
         }
         self.function_names = {fn.get("name") for fn in functions or []}
+        # issue #2901: names introduced as `const <name> = <literal>`. TypeScript
+        # types such a binding as the literal itself (`1n`, `"a"`), so `===`
+        # against a different literal is a TS2367 "no overlap" error even
+        # though it is a sound comparison; those names keep `revlEq`.
+        self.literal_consts: set = set()
         self.extern_names = {ext.get("name") for ext in externs or []}
         # issue #1369: the computer-use externs and the provide methods that
         # run in a call scope (`_ui_transaction_facts`), set on the document
@@ -3355,6 +3363,7 @@ class _Ctx:
         view = _Ctx.__new__(_Ctx)
         view.types = self.types
         view.function_names = self.function_names
+        view.literal_consts = self.literal_consts
         view.extern_names = self.extern_names
         view.ui_externs = self.ui_externs
         view.ui_scopes = self.ui_scopes
@@ -4068,6 +4077,8 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
         value = _expr(node.get("value"), ctx)
         if step == "let":
             keyword = "let" if node.get("mutable") else "const"
+            if keyword == "const" and _plain_primitive_literal(node.get("value")):
+                ctx.literal_consts.add(node.get("name"))
             # issue #273: `[]` alone has no element type; annotate it.
             ann = ""
             if _v3_is_empty_list(node.get("value")):
@@ -4623,6 +4634,42 @@ def _uses_assert(node) -> bool:
 
 
 _TS_EQUALITY_OPS = ("==", "===", "!=", "!==")
+
+
+def _plain_primitive_literal(node: object) -> bool:
+    """A Str, Int or Bool literal that renders as itself (issue #2901).
+
+    A literal carrying a `widen` marker renders as a conversion (`Number(3n)`,
+    see #2715), and a Float or `None` literal is not one of the three kinds, so
+    none of those qualify.
+    """
+    if not isinstance(node, dict) or node.get("kind") != "lit" or "widen" in node:
+        return False
+    return isinstance(node.get("value"), (str, int))
+
+
+def _ts_strict_equality(node: dict, ctx: "_Ctx") -> bool:
+    """Whether this `==`/`!=` may be written with `===`/`!==` (issue #2901).
+
+    `revlEq` opens with `a === b` and answers false for any pair where either
+    side is not an object, so when one operand is a Str, Int or Bool literal
+    the two forms agree on every value of the other operand, a Float
+    included: `1n === 1` is false either way (#2715). The literal is rendered
+    by `_literal`, an Int as a bigint like every other Int on this tier.
+
+    Two cases keep `revlEq` because `tsc` would reject the `===`: both sides
+    literals (`1n === 2n` is TS2367), and a variable bound to a literal by an
+    immutable `let` (its TS type is the literal).
+    """
+    left, right = node["left"], node["right"]
+    lit_l, lit_r = _plain_primitive_literal(left), _plain_primitive_literal(right)
+    if lit_l == lit_r:
+        return False
+    other = right if lit_l else left
+    if isinstance(other, dict) and other.get("kind") == "var" \
+            and other.get("name") in ctx.literal_consts:
+        return False
+    return True
 
 # Structural equality, matching python's `==` on dicts/lists and java's
 # `Objects.equals`. Key order is irrelevant (as in python), arrays and objects

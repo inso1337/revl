@@ -113,7 +113,7 @@ export function NeedTool(value: ToolReq): Step {
 
 
 export function decode_response(resp: string): Step {
-    if (revlEq(revlSlice(resp, 0n, 6n), "FINAL ")) {
+    if ((revlSlice(resp, 0n, 6n) === "FINAL ")) {
       return { kind: "Final", value: revlSlice(resp, 6n, revlLen(resp)) }
     }
     return { kind: "NeedTool", value: {name: revlSlice(resp, 0n, 10n), args: ""} }
