@@ -961,7 +961,7 @@ _BODYLESS_COMPONENT_SRC = (
 
 @pytest.mark.parametrize("tier", TIERS)
 def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
-        compile_to, lower_to_ir, tier):
+        compile_rvl, compile_to, lower_to_ir, tier):
     """The native producer withholds the whole `body` of a component when a
     step in it cannot be lowered. It used to say nothing, so every tier emitted
     the component with its provide methods, effects and handlers absent and the
@@ -971,11 +971,15 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
     ref = compile_source(_BODYLESS_COMPONENT_SRC)
     assert "body" in ref["components"][0]
 
-    got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
-    assert got == (
+    refusal = (
         "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 3 "
         "is not supported by the self-host compiler, which would emit the "
-        "component without its body."), got[:200]
+        "component without its body.")
+    got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
+    assert got == refusal, got[:200]
+    # the manifest-aware driver runs its own emit, so it carries its own guard
+    into = compile_rvl["compile_to_into"](_BODYLESS_COMPONENT_SRC, tier, "")
+    assert into == refusal, into[:200]
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert "body" not in native
