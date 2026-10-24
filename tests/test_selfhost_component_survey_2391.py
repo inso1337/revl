@@ -44,10 +44,7 @@ def _load_survey():
 
 #: The silent divergences the survey still finds, each on file. Emptying this
 #: table is the goal; adding to it needs an issue number in the comment.
-KNOWN_SILENT = {
-    # a routed require on rust has no router struct and no marker (issue #2796)
-    ("tests/fixtures/emit_py_placement.rvl", "rust"),
-}
+KNOWN_SILENT: set = set()
 
 
 def _component_documents() -> list[str]:
@@ -73,7 +70,7 @@ def surveyed():
 def test_no_component_document_diverges_silently(surveyed):
     """Every difference between the self-host rust/java component output and
     the reference is either byte agreement, a reference refusal, or a NAMED
-    port refusal, except the one on file."""
+    port refusal, except any on file."""
     report, counts = surveyed
     silent = sorted((row["document"], row["tier"]) for row in report["results"]
                     if row["status"] == "byte_divergence")
