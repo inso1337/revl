@@ -1486,8 +1486,15 @@ def _crossing_ref(timeline: "Timeline", step: Step) -> dict:
 
 
 def _record_emission_outcome(ref: dict, outcome: str,
-                             error: Optional[BaseException] = None) -> None:
-    """Persist the outcome of a plain emission without changing its seq."""
+                             error: Optional[BaseException] = None,
+                             observed: Optional[dict] = None) -> None:
+    """Persist the outcome of a plain emission without changing its seq.
+
+    `observed` is the runtime meter's counts (`calls`, `bytes`, `elapsed`) for
+    a declared-ceiling crossing (issue #2688). It rides the record as `ceiling`,
+    next to the static spelling the audit document carries, so the WAL says
+    what the run actually spent. Absent for an undeclared crossing, so every
+    pre-#2688 record stays byte-identical."""
     timeline = ref.get("_timeline")
     step = ref.get("_step")
     wal = getattr(timeline, "_wal", None)
@@ -1496,7 +1503,14 @@ def _record_emission_outcome(ref: dict, outcome: str,
     detail = None
     if error is not None:
         detail = {"type": type(error).__name__, "message": _describe(str(error))}
-    wal.record_emission_outcome(step.wal_seq, outcome, detail=detail)
+        # A ceiling fault carries the token, kind, limit and observed count;
+        # name them individually so a reader does not parse the message.
+        for field in ("capability", "kind", "limit", "observed"):
+            value = getattr(error, field, None)
+            if value is not None:
+                detail[field] = value
+    wal.record_emission_outcome(step.wal_seq, outcome, detail=detail,
+                                ceiling=observed)
 
 
 def _call_within(ref: dict, fn: Callable, args: tuple, kwargs: dict) -> Any:
@@ -1634,10 +1648,11 @@ class _RecordingContext:
             object.__getattribute__(self, "_revl_services"))
 
     def _revl_record_extern_outcome(self, step: Optional[Step], outcome: str,
-                                    error: Optional[BaseException] = None) -> None:
+                                    error: Optional[BaseException] = None,
+                                    observed: Optional[dict] = None) -> None:
         timeline = object.__getattribute__(self, "_revl_timeline")
         _record_emission_outcome({"_timeline": timeline, "_step": step},
-                                 outcome, error)
+                                 outcome, error, observed=observed)
 
     def _revl_record_extern(self, name: str, args: tuple) -> Step:
         """Record a DIRECT free host-extern emission (`emit announce(msg)`, a
@@ -2428,13 +2443,22 @@ class WriteAheadLog:
                 raise ReplayError("write-ahead log fsync failed") from error
 
     def record_emission_outcome(self, seq: Optional[int], outcome: str,
-                                 *, detail: Optional[dict] = None) -> None:
-        """Record completion or failure for a previously journalled emission."""
+                                 *, detail: Optional[dict] = None,
+                                 ceiling: Optional[dict] = None) -> None:
+        """Record completion, failure or refusal for a previously journalled
+        emission.
+
+        `ceiling` is the runtime meter's observed counts (`{token: {calls,
+        bytes, elapsed}}`) for a declared-ceiling crossing (issue #2688), the
+        durable half of "the audit JSON shows the observed count". Absent for
+        an undeclared crossing, so its record is byte-identical."""
         if seq is None:
             return
         record = {"record": outcome, "seq": seq}
         if detail:
             record["error"] = detail
+        if ceiling:
+            record["ceiling"] = ceiling
         self._write(record)
 
     def append_step(self, step: "Step", component: str) -> dict:

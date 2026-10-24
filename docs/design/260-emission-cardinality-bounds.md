@@ -446,6 +446,82 @@ The attestation (the audit `--json` externs/boundary surface) carries every
 declared budget verbatim as the capability's valuation, so a consumer reads the
 enforced ceiling off the same document as the reach.
 
+**Enforcement status (issue #2688).** The Python tier's host-extern crossing
+seam (`backends/python/runtime.py`, `extern_emit`) is the runtime meter. It
+checks every declaration BEFORE the WAL record and the host body, and refuses
+with the named `CeilingExceeded`:
+
+| kind    | observed                                        | fault                            |
+|---------|-------------------------------------------------|----------------------------------|
+| `calls` | per-activation crossing count, per capability   | `CeilingExceeded(kind="calls")`  |
+| `size`  | per-activation canonical payload-byte count     | `CeilingExceeded(kind="size")`   |
+| `time`  | deadline from the first crossing, monotonic clock, checked before each crossing and again on its return | `CeilingExceeded(kind="time")` |
+
+The unit is per ACTIVATION, as §3 specifies, and that is intended: one
+component activation may spend the declared budget, and a re-activation is a
+new spend. The counters live on `Frame`, so they do not leak across
+activations.
+
+A metered crossing writes a `ceiling <token> <kind>=<observed>/<limit>` run
+trace event, and the refusal writes the same line with `refused` after it
+(never-reached is the absence of either). The static `audit --json`
+boundary/extern surface carries the ceiling spelling; the runtime AUDIT RECORD
+for a metered crossing (the WAL's `emission-complete` / `emission-refused` JSON)
+carries the observed counts under `ceiling`, `{token: {calls, bytes, elapsed}}`,
+so a reader sees what the run spent as well as what the declaration allows.
+The `time` check runs BEFORE the completion record: an overrun is journalled as
+`emission-refused`, never as `emission-complete`, so a receipt cannot claim a
+crossing completed under a spent deadline.
+
+Two fail-closed backstops sit at the same seam. A budgeted crossing that
+reaches it with no activation frame is refused (`CeilingUnmetered`), and a
+callee the emitter tagged as declaring a ceiling but whose arrived `caps=` is
+empty is refused by name (`CeilingCapsMissing`) rather than fired unmetered.
+That second backstop exists because of the wrapper bypass found in security
+review: `extern emission[net(calls=1)] fn call(...)`, `fn go(x) = call(x)`,
+`emit go(x)` names the wrapper, so a direct declaration lookup found no
+ceiling and both host calls fired. The emitter now resolves the callee through
+the document's local functions (`_function_ceiling_caps`, recursive with a
+cycle guard) and sends the reached extern's declarations; the emitted extern
+and wrapper functions also carry `_revl_declared_caps`, which is what the
+runtime backstop compares against.
+
+An emission whose callee reaches a budgeted extern through a shape the meter
+cannot attribute exactly is REFUSED at emit time. The meter charges one crossing
+with the arguments it is handed, so the emitter classifies the callee and refuses
+any other shape with the named `CeilingUnattributable`, naming the capability and
+the shape: a value-position wrapper (it never reaches the seam at all), a
+payload-transforming wrapper (the meter would charge the outer arguments, not the
+extern's payload), a wrapper that crosses the extern more than once in one
+invocation, including inside a loop or a conditional, or a wrapper that holds the
+budgeted extern as a function VALUE (`let f = call return f(x)`,
+`apply(call)`), which hides the callee the meter would charge behind a binding or
+a parameter. Emitting those would leave the declaration silently unenforced, so a
+declared budget is a compile-time contract rather than a runtime promise. In
+statement form the exact pass-through wrapper (`emit go(x)` where
+`fn go(x) = call(x)`) is the one wrapper shape that stays metered; the same
+wrapper in value position is refused like any other value-position emission.
+The compile-time contract now covers the named call, the statement-form identity
+wrapper and a wrapper function value: the first two are metered, the third is
+refused, and every other wrapper shape is refused rather than emitted. This
+contract is about wrapper (module function) bodies; a component method that binds
+an emission extern to a value is a different layer, listed below.
+
+Not enforced by this slice, tracked rather than implied:
+
+* a `size`/`time` ceiling on a direct REQUIRED-SERVICE method crossing (the
+  statically-counted `calls` case is a compile refusal already);
+* a `deferred` extern (enqueued and fired at session commit) and a
+  spawn-handle emission (`s.inner.method()`), which do not pass this seam;
+* an emission extern, or a local function that reaches one, bound to a value
+  inside a COMPONENT METHOD body: the checker's emit requirement does not follow
+  a value binding there, so the crossing does not reach the seam and its declared
+  ceiling is unenforced. This is pre-existing on main and tracked in #2834; the
+  fix belongs in the checker, not in this slice;
+* the other five tiers.
+
+Tier list: Python only, so far; the above are the Slice 3 follow-up.
+
 ### 3.3 Attenuation on delegation
 
 **Correction (HIGH finding).** A prior draft claimed this composes "for free"
