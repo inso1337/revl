@@ -302,3 +302,153 @@ def test_the_committed_block_matches_a_fresh_generation():
 def test_generation_is_deterministic():
     """Two generations byte-identical, or the staleness gate flaps."""
     assert _fresh_block() == _fresh_block()
+
+
+# -------------------------------------------------------- per-tier support
+
+def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
+    """Every positive cell is derived from an existing measurement source.
+
+    Mutating each source changes its cell; adding no source never leaves a
+    literal `ok` behind. This is the support table's anti-opinion gate.
+    """
+    import copy
+
+    report = conformance.run()
+    selfhost = conformance.selfhost_column()
+    tests_root = ROOT / "tests"
+    ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    data = tg.support_matrix(report=report, selfhost=selfhost,
+                             tests_root=tests_root, ci_text=ci_text)
+
+    assert data["tiers"] == [tg._short(tier) for tier in conformance.TIERS]
+    assert {row["tier"] for row in data["rows"]} == set(data["tiers"])
+    for row in data["rows"]:
+        statuses = {row[key]["status"] for key in
+                    ("emits", "executes", "durable_recovery", "selfhost_agreement")}
+        assert statuses <= {tg.PROVED, tg.DIVERGENCE, tg.UNMEASURED}
+        for key in ("emits", "executes", "durable_recovery", "selfhost_agreement"):
+            if row[key]["status"] != tg.UNMEASURED:
+                assert row[key]["evidence"], (row["tier"], key)
+
+    tiers = {row["tier"]: row for row in data["rows"]}
+    assert tiers["py"]["durable_recovery"]["status"] == tg.PROVED
+    assert ("test_a_crash_mid_activation_rolls_back" in
+            tiers["py"]["durable_recovery"]["detail"])
+    assert tiers["ts"]["durable_recovery"]["status"] == tg.UNMEASURED
+    assert "no crash-recovery test" in tiers["ts"]["durable_recovery"]["detail"]
+    revl_summary = next(row for row in conformance._summary_rows(report, selfhost)
+                        if row[0] == f"{tg.SELFHOST_TIER} (self-host)")
+    _, exact, frontier, gaps = revl_summary
+    expected_shared = (f"shared revl measure: {exact}/{exact + frontier + gaps} "
+                       f"byte-identical; {frontier} frontier limits; {gaps} gaps")
+    assert tiers["py"]["selfhost_agreement"]["detail"] == expected_shared
+    assert len({row["selfhost_agreement"]["detail"] for row in data["rows"]}) == 1
+
+    # A measured emitter gap changes the cell, rather than leaving an authored
+    # success status behind.
+    changed_report = copy.deepcopy(report)
+    changed_report["cases"][0]["emit_kind"]["python"] = "gap"
+    changed = tg.support_matrix(report=changed_report, selfhost=selfhost,
+                                tests_root=tests_root, ci_text=ci_text)
+    py_emits = next(row for row in changed["rows"] if row["tier"] == "py")["emits"]
+    assert py_emits["status"] == tg.DIVERGENCE
+    assert "1 gap" in py_emits["detail"]
+
+    # The executed column follows the existing executor registry.
+    import validate
+    executors = dict(validate.EXECUTORS)
+    executors.pop("typescript")
+    monkeypatch.setattr(validate, "EXECUTORS", executors)
+    changed = tg.support_matrix(report=report, selfhost=selfhost,
+                                tests_root=tests_root, ci_text=ci_text)
+    ts = next(row for row in changed["rows"] if row["tier"] == "ts")
+    assert ts["executes"]["status"] == tg.UNMEASURED
+
+    # A CI command is evidence too. Removing the validator step removes the
+    # compile claim even though the validator class still exists.
+    ci_without_validator = ci_text.replace(
+        "pytest tests/test_conformance_validate.py -q", "")
+    changed = tg.support_matrix(report=report, selfhost=selfhost,
+                                tests_root=tests_root,
+                                ci_text=ci_without_validator)
+    assert all(row["emits"]["status"] == tg.UNMEASURED for row in changed["rows"])
+
+    # A self-host result is the existing `revl` column measurement, not a
+    # repeated literal in the new table.
+    changed_selfhost = dict(selfhost)
+    first_case = report["cases"][0]["case"]
+    changed_selfhost[first_case] = "limit"
+    changed = tg.support_matrix(report=report, selfhost=changed_selfhost,
+                                tests_root=tests_root, ci_text=ci_text)
+    changed_summary = next(
+        row for row in conformance._summary_rows(report, changed_selfhost)
+        if row[0] == f"{tg.SELFHOST_TIER} (self-host)")
+    _, exact, frontier, gaps = changed_summary
+    changed_expected = (f"shared revl measure: {exact}/{exact + frontier + gaps} "
+                        f"byte-identical; {frontier} frontier limits; {gaps} gaps")
+    changed_py = next(row for row in changed["rows"] if row["tier"] == "py")
+    assert changed_py["selfhost_agreement"]["detail"] == changed_expected
+
+
+def test_support_table_marks_a_recovery_test_unmeasured_until_ci_collects_it(
+        tmp_path):
+    """The durable column follows a crash test plus a CI collection path."""
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    (tests_root / "test_conformance_validate.py").write_text(
+        "KNOWN_FAILURES: dict[str, set[str]] = {}\n", encoding="utf-8")
+    (tests_root / "test_crash_recovery.py").write_text(
+        "def test_a_crash_mid_activation_rolls_back(): pass\n", encoding="utf-8")
+
+    report = conformance.run()
+    selfhost = conformance.selfhost_column()
+    ci = """jobs:
+  support:
+    steps:
+      - run: |
+          pytest tests/test_conformance_validate.py -q
+          python3 tools/conformance.py --execute --require-execution
+          pytest tests/ -q
+"""
+    baseline = tg.support_matrix(report=report, selfhost=selfhost,
+                                 tests_root=tests_root, ci_text=ci)
+    by_tier = {row["tier"]: row for row in baseline["rows"]}
+    assert by_tier["py"]["durable_recovery"]["status"] == tg.PROVED
+    assert by_tier["ts"]["durable_recovery"]["status"] == tg.UNMEASURED
+
+    no_execute = ci.replace(
+        "          python3 tools/conformance.py --execute --require-execution\n", "")
+    no_exec = tg.support_matrix(report=report, selfhost=selfhost,
+                                tests_root=tests_root, ci_text=no_execute)
+    assert all(row["executes"]["status"] == tg.UNMEASURED for row in no_exec["rows"])
+
+    # A test file alone is not enough if CI never collects it.
+    (tests_root / "test_ts_crash_recovery.py").write_text(
+        "def test_a_ts_process_crash_rolls_back(): pass\n", encoding="utf-8")
+    ci_without_test_collection = ci.replace("          pytest tests/ -q\n", "")
+    still_unmeasured = tg.support_matrix(report=report, selfhost=selfhost,
+                                         tests_root=tests_root,
+                                         ci_text=ci_without_test_collection)
+    assert next(row for row in still_unmeasured["rows"] if row["tier"] == "ts")\
+        ["durable_recovery"]["status"] == tg.UNMEASURED
+
+    ci_with_ts = ci_without_test_collection.replace(
+        "          python3 tools/conformance.py --execute --require-execution\n",
+        "          python3 tools/conformance.py --execute --require-execution\n"
+        "          pytest tests/test_ts_crash_recovery.py -q\n")
+    measured = tg.support_matrix(
+        report=report, selfhost=selfhost, tests_root=tests_root,
+        ci_text=ci_with_ts)
+    assert next(row for row in measured["rows"] if row["tier"] == "ts")\
+        ["durable_recovery"]["status"] == tg.PROVED
+
+
+def test_the_committed_support_block_matches_a_fresh_generation():
+    doc = (ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
+    assert tg.SUPPORT_START in doc and tg.SUPPORT_END in doc
+    committed = doc[doc.index(tg.SUPPORT_START):
+                    doc.index(tg.SUPPORT_END) + len(tg.SUPPORT_END)]
+    assert committed == tg.support_block(), (
+        "docs/conformance.md's per-tier support matrix is stale; run "
+        "`python3 tools/conformance.py --write-readme`")

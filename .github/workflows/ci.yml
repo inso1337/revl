@@ -2179,7 +2179,11 @@ jobs:
       # collecting it here is what makes those tests real in CI instead of
       # skips. Its other tests build the component framing by hand and run
       # everywhere.
-      - run: pytest backends/wasm/ tests/test_wasm_backend.py tests/test_wasm_confined_default_2729.py -q --junitxml=/tmp/wasm-junit.xml
+      - name: wasm tests, including durable crash recovery
+        run: >-
+          pytest backends/wasm/ tests/test_wasm_backend.py
+          tests/test_wasm_confined_default_2729.py
+          tests/test_wasm_crash_recovery.py -q --junitxml=/tmp/wasm-junit.xml
         env:
           # turns "wasmtime not installed" from a silent skip into a failure;
           # unset locally, so offline dev still skips cleanly
