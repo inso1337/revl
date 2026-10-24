@@ -18,8 +18,8 @@ The issue's exit test is "each namespaced source matches the reference bytes on
 py, rust and java, with no marker". py covers all four of the issue's sources.
 rust and java do not: neither ports a `lifecycle test` section, which keeps
 ISSUE_REPRODUCER, TWO_NAMESPACES and KEYWORD_PARTS off both tiers; rust also
-drops a routed requirement (issue #2796), which keeps ROUTED_NAMESPACED off
-rust; and java's legacy component path carries no `requires`, which keeps
+names a routed requirement with its own marker instead of porting the router
+(issue #2796), which keeps ROUTED_NAMESPACED off rust; and java's legacy component path carries no `requires`, which keeps
 TWO_NAMESPACES and ROUTED_NAMESPACED off java. On those pairs the document
 carries `<<UNSUPPORTED-NAMESPACED-KEY:...>>` for every key the tier could not
 verify, beside the marker naming the actual unported construct, so the
@@ -78,6 +78,12 @@ component B provides acme__greeter: Greeter {
   provide acme__greeter { fn hello(name) = name }
 }
 """
+
+#: The collision marker each tier names for COLLISION, where it differs from
+#: the later-key form.
+COLLISION_MARKER = {
+    "java": "<<UNSUPPORTED-HOST-KEY-COLLISION:acme::greeter / acme__greeter>>",
+}
 
 #: A `validated` emission reached through a namespaced requirement. Its whole
 #: module import list is scanned over the UNREWRITTEN body, so the requirement
@@ -226,4 +232,21 @@ def test_a_host_identifier_collision_is_named_not_emitted(emitted, tier):
         _load_reference(tier).emit(ir)
     assert "rename one" in str(refused.value)
     got = emitted[tier]["emit_%s_src" % tier](ir)
-    assert "<<UNSUPPORTED-HOST-KEY-COLLISION:acme__greeter>>" in got
+    # java names the pair, first seen key first (issue #2458); py and rust
+    # name the later key.
+    want = COLLISION_MARKER.get(tier, "<<UNSUPPORTED-HOST-KEY-COLLISION:acme__greeter>>")
+    assert want in got
+
+
+def test_a_routed_namespaced_requirement_names_each_marker_once(emitted):
+    """Review of #2394 after #2796: a component with a routed requirement on a
+    namespaced key draws the routed-require marker, and that marker counts as
+    a refusal, so every namespaced key it could not verify is named beside it.
+    Each marker appears exactly once."""
+    ir = _source_ir(namespaced.ROUTED_NAMESPACED)
+    got = emitted["rust"]["emit_rust_src"](ir)
+    markers = MARKERS.findall(got)
+    assert markers.count("<<UNSUPPORTED-ROUTED-REQUIRE:Router.acme::worker>>") == 1, markers
+    assert markers.count("<<UNSUPPORTED-NAMESPACED-KEY:Router.acme::worker>>") == 1, markers
+    assert len([m for m in markers if "ROUTED-REQUIRE" in m]) == 1, markers
+    assert len(markers) == len(set(markers)), markers
