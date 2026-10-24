@@ -23,13 +23,15 @@ function launch(env: Record<string, string>, ...args: string[]) {
 }
 
 describe('scripts/run-python.ts', () => {
-  it('runs the interpreter REVL_PYTHON names, with the remaining args', () => {
+  // The stand-in interpreter is a #!/bin/sh script, which Windows cannot run.
+  it.skipIf(process.platform === 'win32')('runs the interpreter REVL_PYTHON names, with the remaining args', () => {
     const result = launch({ REVL_PYTHON: fakePython() }, 'regen.py', '--flag')
     expect(result.status).toBe(0)
     expect(result.stdout).toBe('fakepy regen.py --flag\n')
   })
 
-  it('exits with the status the child exited with', () => {
+  // Same stand-in interpreter as above.
+  it.skipIf(process.platform === 'win32')('exits with the status the child exited with', () => {
     const result = launch({ REVL_PYTHON: fakePython(), FAKE_STATUS: '7' }, 'regen.py')
     expect(result.status).toBe(7)
   })
