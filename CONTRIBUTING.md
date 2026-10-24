@@ -74,11 +74,15 @@ whole suite: it runs a defined core subset (`CORE_TESTS` in
 wall-clock ceiling (`REVL_HOOK_FULL_BUDGET`, default 60s), and says the full
 suite did not run. If that subset fails, passes no test, or exceeds the
 ceiling, the commit is refused with the selector's reason and the
-`--no-verify` instruction. An affected selection whose every test skips (a
-machine without a backend's toolchain) does not block the commit, but the step
-prints `SKIPPED` and the hook ends with "ok, but the affected tests verified
-nothing". The full suite is CI's job, sharded there. For the fast inner-loop
-gate over the same selection, `make pre-merge-affected`.
+`--no-verify` instruction. The hook never escalates to the whole suite. An
+affected selection whose every test skips (a machine without a backend's
+toolchain) does not block the commit, but the step prints `SKIPPED` and the
+hook ends with "ok, but the affected tests verified nothing". The full suite
+is CI's job, sharded there. For the fast inner-loop gate over the same
+selection, run `make pre-merge-affected`; it prints the selector receipt and
+stops before the full gate when the selector reports `FULL` or is unavailable.
+Read the receipt, then run `make pre-merge` only when you deliberately want the
+full gate.
 
 **Where the code lives (a two-minute map).** The compiler is `src/revl/`
 (`parser.py` → `typecheck.py` → `lower.py` → `apply.py`). The **emitters are

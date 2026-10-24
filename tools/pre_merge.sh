@@ -130,7 +130,7 @@ fi
 # origin/main by default; override with --base=<ref>). This is NOT a replacement
 # for the full `make pre-merge` — that stays the release/CI gate. The selector
 # fails SAFE: any change to a core/compile-reachable frontend file, or any file
-# it cannot map, falls back to the full gate here.
+# it cannot map, requires an explicit escalation to the full gate.
 AFF=0
 AFF_BASE=""
 PLAN=0
@@ -175,27 +175,62 @@ SEL_GATES="conformance site-wheel ruff"
 if [ "$AFF" -eq 1 ]; then
     PY=$(command -v python3 || command -v python || true)
     if [ -z "$PY" ]; then
-        echo "pre-merge --affected: no python3 to run the selector -> running FULL gate."
+        echo "pre-merge --affected: selector unavailable (no python3 or python on PATH)."
+        echo "pre-merge --affected: no full gate was run."
+        echo "pre-merge --affected: to explicitly escalate, review the change and run 'make pre-merge'."
+        exit 2
     else
         base_arg=""
         [ -n "$AFF_BASE" ] && base_arg="--base $AFF_BASE"
-        SEL_OUT=$("$PY" tools/affected_tests.py --root "$root" --format machine $base_arg 2>/dev/null)
+        if SEL_OUT=$("$PY" tools/affected_tests.py --root "$root" --format machine $base_arg 2>&1); then
+            SEL_RC=0
+        else
+            SEL_RC=$?
+        fi
         SEL_FULL=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^FULL //p')
         SEL_REASON=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^REASON //p')
-        if [ -z "$SEL_OUT" ] || [ -z "$SEL_FULL" ]; then
-            echo "pre-merge --affected: selector produced no usable output -> running FULL gate."
-        elif [ "$SEL_FULL" = "1" ]; then
-            echo "pre-merge --affected: ${SEL_REASON:-full}"
-            echo "pre-merge --affected: selection is the FULL gate (nothing skipped)."
+        echo "pre-merge --affected: selector receipt:"
+        if [ -n "$SEL_OUT" ]; then
+            printf '%s\n' "$SEL_OUT" | sed 's/^/  /'
         else
-            RUN_ALL=0
-            SEL_PYTEST=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^PYTEST //p')
-            SEL_BACKENDS=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^BACKENDS //p')
-            SEL_GATES=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^GATES //p')
-            echo "pre-merge --affected: ${SEL_REASON:-targeted}"
-            echo "pre-merge --affected: pytest $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s) | backends [${SEL_BACKENDS:-none}] | gates [${SEL_GATES:-none}]"
-            echo "pre-merge --affected: inner-loop gate only; full \`make pre-merge\` still required at release/CI."
+            echo "  (no output)"
         fi
+        if [ "$SEL_RC" -ne 0 ]; then
+            echo "pre-merge --affected: selector exited with status $SEL_RC; refusing to run the FULL gate automatically."
+            echo "pre-merge --affected: no full gate was run."
+            echo "pre-merge --affected: to explicitly escalate, review the change and run 'make pre-merge'."
+            exit 2
+        fi
+        if [ -z "$SEL_FULL" ]; then
+            echo "pre-merge --affected: selector produced no usable FULL line; refusing to run the FULL gate automatically."
+            echo "pre-merge --affected: no full gate was run."
+            echo "pre-merge --affected: to explicitly escalate, review the change and run 'make pre-merge'."
+            exit 2
+        fi
+        case "$SEL_FULL" in
+            1)
+                echo "pre-merge --affected: ${SEL_REASON:-selection requires the FULL gate}."
+                echo "pre-merge --affected: refusing to run the FULL gate automatically."
+                echo "pre-merge --affected: no full gate was run."
+                echo "pre-merge --affected: to explicitly escalate, review the receipt and run 'make pre-merge'."
+                exit 2
+                ;;
+            0)
+                RUN_ALL=0
+                SEL_PYTEST=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^PYTEST //p')
+                SEL_BACKENDS=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^BACKENDS //p')
+                SEL_GATES=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^GATES //p')
+                echo "pre-merge --affected: ${SEL_REASON:-targeted}"
+                echo "pre-merge --affected: pytest $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s) | backends [${SEL_BACKENDS:-none}] | gates [${SEL_GATES:-none}]"
+                echo "pre-merge --affected: inner-loop gate only; full \`make pre-merge\` still required at release/CI."
+                ;;
+            *)
+                echo "pre-merge --affected: selector produced invalid FULL value '$SEL_FULL'; refusing to run the FULL gate automatically."
+                echo "pre-merge --affected: no full gate was run."
+                echo "pre-merge --affected: to explicitly escalate, review the receipt and run 'make pre-merge'."
+                exit 2
+                ;;
+        esac
     fi
 fi
 

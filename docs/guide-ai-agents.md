@@ -14,7 +14,10 @@ and around the mistakes you actually make.
 > `EXPR_REFUSED` tables in each emit.py in step (the conformance test
 > `tests/test_expr_dispatcher_conformance.py` makes "did you patch both paths"
 > a red test). Run `pytest tests/test_frontend.py tests/test_doc_examples.py`
-> for the fast frontend loop; the full suite (~60s) before committing.
+> for the fast frontend loop; run `make pre-merge-affected` for the lane gate
+> and selector receipt. If it reports `FULL` or the selector is unavailable,
+> it stops without starting the full gate. Review the receipt before explicitly
+> escalating with `make pre-merge`; CI runs the full suite.
 
 If you are changing RevL itself, follow [CONTRIBUTING.md](../CONTRIBUTING.md)
 and [the agent workflow](process.md). Run `./tools/pre_pr.sh --merge-ref`
