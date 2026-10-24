@@ -1323,7 +1323,12 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
 
 
 def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
-    """Find internal List parameters used only by read-only operations."""
+    """Find internal List parameters used only by read-only operations.
+
+    The fixpoint drops only the parameters that escape (issue #2906): one
+    `return acc` no longer makes a read-only `ts` in the same function owned,
+    so its callers lend the list instead of copying it.
+    """
     names = frozenset(fn.get("name") for fn in functions if fn.get("name"))
     borrow = {
         fn.get("name"): frozenset(
@@ -1332,26 +1337,35 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
         for fn in functions
     }
 
-    def escapes(node, candidates, safe):
+    def escapes(node, candidates, safe, out):
+        """Add to `out` every candidate that reaches a consuming position."""
         if isinstance(node, dict):
             kind = node.get("kind")
             if kind in ("var", "name", "req"):
-                return (node.get("id") or node.get("name")) in candidates and not safe
+                ident = node.get("id") or node.get("name")
+                if ident in candidates and not safe:
+                    out.add(ident)
+                return
             if kind in ("len", "index"):
-                return escapes(node.get("target"), candidates, True)
+                escapes(node.get("target"), candidates, True, out)
+                return
             if kind == "builtin":
                 read = node.get("method") in ("length", "at")
-                return (escapes(node.get("target"), candidates, True) or
-                        any(escapes(a, candidates, read) for a in node.get("args") or []))
+                escapes(node.get("target"), candidates, True, out)
+                for a in node.get("args") or []:
+                    escapes(a, candidates, read, out)
+                return
             cname, args = _free_fn_call(node, names)
             if cname is not None:
                 allowed = borrow.get(cname, frozenset())
-                return any(escapes(a, candidates, i in allowed)
-                           for i, a in enumerate(args))
-            return any(escapes(v, candidates, False) for v in node.values())
-        if isinstance(node, list):
-            return any(escapes(v, candidates, safe) for v in node)
-        return False
+                for i, a in enumerate(args):
+                    escapes(a, candidates, i in allowed, out)
+                return
+            for v in node.values():
+                escapes(v, candidates, False, out)
+        elif isinstance(node, list):
+            for v in node:
+                escapes(v, candidates, safe, out)
 
     changed = True
     while changed:
@@ -1360,8 +1374,10 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
             current = borrow.get(fn.get("name"), frozenset())
             params = fn.get("params") or []
             candidates = {params[i].get("name") for i in current}
-            if escapes(fn.get("body") or [], candidates, False):
-                kept = frozenset(i for i in current if params[i].get("name") not in candidates)
+            escaped: set = set()
+            escapes(fn.get("body") or [], candidates, False, escaped)
+            if escaped:
+                kept = frozenset(i for i in current if params[i].get("name") not in escaped)
                 if kept != current:
                     borrow[fn.get("name")] = kept
                     changed = True

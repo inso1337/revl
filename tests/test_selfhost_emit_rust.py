@@ -136,6 +136,8 @@ CORPUS = [
     "lengths.rvl",  # property length and scalar to_str, not just method length;
                     #   read-only List param borrow (`&[T]`) + call-site threading
                     #   (owned `&xs` and already-borrowed pass-through)
+    "list_borrow_per_param.rvl",  # issue #2906: an escaping List param stays
+                    #   owned while its read-only sibling is still lent
     "branch_edges.rvl",  # conditional targets, explicit widening, escape/void branches
     "component_edges.rvl",  # pure blocks, idempotence, scalar config/Option bridge
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
@@ -530,7 +532,8 @@ def test_str_borrow_callback_and_capture_boundaries(emitted, reference):
 def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backend):
     ir = compile_files([str(CORPUS_DIR / rel) for rel in
                         ("borrow_boundaries.rvl", "borrow_shadowing.rvl",
-                         "lengths.rvl", "branch_edges.rvl")])
+                         "lengths.rvl", "branch_edges.rvl",
+                         "list_borrow_per_param.rvl")])
     src = (reference.emit(ir) if backend == "reference"
            else emitted["emit_rust_src"](ir))
     bench = _load_bench_rust()
@@ -562,6 +565,7 @@ fn main() {
     assert_eq!(scan_all(vec![10, 20, 30]), 60);
     assert_eq!(probe_literal(), 5);
     assert_eq!(scalar_text(-12), "-12");
+    assert_eq!(count_until_blank(vec!["a".into(), "".into(), "b".into()], vec!["s".into()]), 1);
     assert_eq!(edge_wide(3), 3.0);
     assert_eq!(edge_wider(4), 4);
     assert_eq!(edge_bytes(vec![1, 2]), vec![1, 2]);

@@ -1449,37 +1449,37 @@ fn compute_str_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
   return borrow
 }
 
-// `_compute_list_param_borrows`'s `escapes`: does any candidate LIST parameter
-// reach a position that consumes (rather than reads) it? Indexing, `len`, and
-// the read-only `length`/`at` builtins only read; a free-function call reads a
-// slot the callee itself lends; every other slot moves the value. Mirrors the
-// reference's nested `escapes`.
-fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: Map[Str, List[Int]], names: Map[Str, Str]) -> Bool {
+// `_compute_list_param_borrows`'s `escapes`: the candidate LIST parameters
+// that reach a position that consumes (rather than reads) them, added to `acc`.
+// Indexing, `len`, and the read-only `length`/`at` builtins only read; a
+// free-function call reads a slot the callee itself lends; every other slot
+// moves the value. Mirrors the reference's nested `escapes`.
+fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: Map[Str, List[Int]], names: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
   let vk = value_kind(node)
+  var out = acc
   if (vk == "list") {
-    for (item of value_list(node)) {
-      if (list_param_escapes(item, candidates, safe, borrow, names)) { return true }
-    }
-    return false
+    for (item of value_list(node)) { out = list_param_escapes(item, candidates, safe, borrow, names, out) }
+    return out
   }
-  if (vk != "record") { return false }
+  if (vk != "record") { return out }
   let k = node_kind(node)
   if (k == "var" || k == "name" || k == "req") {
     var ident = value_str(value_field(node, "id"))
     if (ident == "") { ident = value_str(value_field(node, "name")) }
-    return candidates.has(ident) && !safe
+    if (candidates.has(ident) && !safe) { out = out.set(ident, "1") }
+    return out
   }
   if (k == "len" || k == "index") {
-    return list_param_escapes(value_field(node, "target"), candidates, true, borrow, names)
+    return list_param_escapes(value_field(node, "target"), candidates, true, borrow, names, out)
   }
   if (k == "builtin") {
     let method = value_str(value_field(node, "method"))
     let read = method == "length" || method == "at"
-    if (list_param_escapes(value_field(node, "target"), candidates, true, borrow, names)) { return true }
+    out = list_param_escapes(value_field(node, "target"), candidates, true, borrow, names, out)
     for (a of value_list(value_field(node, "args"))) {
-      if (list_param_escapes(a, candidates, read, borrow, names)) { return true }
+      out = list_param_escapes(a, candidates, read, borrow, names, out)
     }
-    return false
+    return out
   }
   var callee_name = ""
   if (k == "fn") { callee_name = value_str(value_field(node, "name")) }
@@ -1491,23 +1491,23 @@ fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: 
     let args = value_list(value_field(node, "args"))
     var i = 0
     while (i < args.length()) {
-      if (list_param_escapes(args[i], candidates, borrow_slot(borrow, callee_name, i), borrow, names)) { return true }
+      out = list_param_escapes(args[i], candidates, borrow_slot(borrow, callee_name, i), borrow, names, out)
       i = i + 1
     }
-    return false
+    return out
   }
   for (key of value_keys(node)) {
-    if (list_param_escapes(value_field(node, key), candidates, false, borrow, names)) { return true }
+    out = list_param_escapes(value_field(node, key), candidates, false, borrow, names, out)
   }
-  return false
+  return out
 }
 
 // `_compute_list_param_borrows`: internal `List` parameters used only by
 // read-only operations lower to a `&[..]` slice instead of an owned `Vec`, so
 // the token stream threaded through a self-host scan chain is lent, not cloned,
 // at every call. Start with every non-`pub` `List` parameter a candidate and
-// drop a whole function's set the moment one candidate escapes (the reference's
-// all-or-nothing per-function fixpoint), settling because the set only shrinks.
+// drop only the candidates that escape (issue #2906), so one `return acc` does
+// not make a read-only sibling owned; it settles because the set only shrinks.
 fn compute_list_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
   var names: Map[Str, Str] = Map.empty()
   for (f of functions) { names = names.set(value_str(value_field(f, "name")), "1") }
@@ -1533,9 +1533,16 @@ fn compute_list_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
       let params = value_list(value_field(f, "params"))
       var candidates: Map[Str, Str] = Map.empty()
       for (i of slots) { candidates = candidates.set(value_str(value_field(params[i], "name")), "1") }
-      if (slots.length() > 0 && list_param_escapes(value_field(f, "body"), candidates, false, borrow, names)) {
-        borrow = borrow.set(fname, [])
-        changed = true
+      if (slots.length() > 0) {
+        let escaped = list_param_escapes(value_field(f, "body"), candidates, false, borrow, names, Map.empty())
+        var kept: List[Int] = []
+        for (i of slots) {
+          if (!escaped.has(value_str(value_field(params[i], "name")))) { kept = kept.push(i) }
+        }
+        if (kept.length() != slots.length()) {
+          borrow = borrow.set(fname, kept)
+          changed = true
+        }
       }
     }
   }
