@@ -7078,7 +7078,8 @@ def _is_empty_list(node) -> bool:
 
 def _push_evidence(body, hints, infer, scratch) -> None:
     """Record in `hints.pushed` what each `acc = acc.push(x)` pushes: a List
-    of `x`'s type. The body's locals are typed forward in document order (a
+    of `x`'s type; and offer the type of any other value assigned to a
+    binding (`out = xs`) as one of its declared targets. The body's locals are typed forward in document order (a
     loop variable from its iterable, a `let` from its value) into `scratch`,
     a copy of the parameter types that `infer` reads, the same forward pass
     the ts tier runs. An empty-list `let` is skipped: its type is the
@@ -7102,6 +7103,14 @@ def _push_evidence(body, hints, infer, scratch) -> None:
             elem = infer(value["args"][0])
             if isinstance(elem, str) and not _v3_has_any(elem):
                 hints.pushed.setdefault(node.get("name"), f"List[{elem}]")
+        elif (isinstance(value, dict) and not _is_empty_list(value)
+                and isinstance(node.get("name"), str)):
+            # `out = xs`: Go assigns only between identical types, so the
+            # source's type is a declared target of `out` like a return is
+            t = infer(value)
+            if (isinstance(t, str) and t.startswith("List[") and t.endswith("]")
+                    and not _v3_has_any(t)):
+                hints.offer(node["name"], t)
 
 
 def _local_ref(node):
@@ -8789,10 +8798,24 @@ def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
 def _only_sized_or_appended(name, body, appends: bool) -> bool:
     """Whether every read of local `name` in `body` is a `.length()`, or, with
     `appends`, the receiver of its own unique `name = name.push(x)` (lowered
-    to `append`, which takes any element). Such a binding builds whatever
-    its element type, so an unhinted one keeps the type main gave it."""
+    to `append`, which takes any element), and every write is that push or
+    another `[]`. Such a binding builds whatever its element type, so an
+    unhinted one keeps the slice main gave it (`[]any{}` on the pure tier,
+    the tier's `List[Int]` slice in a provide method: `[]int64{}` on
+    ir_version 3, `[]int{}` before). Any other write (`out = xs`) fixes a
+    type that guess could contradict."""
     refs, allowed = set(), set()
     for node in _v3_walk_nodes(body):
+        if (node.get("step") == "assign" and node.get("name") == name
+                and not _is_empty_list(node.get("value"))):
+            value = node.get("value")
+            self_push = (appends and node.get("unique") is True
+                         and isinstance(value, dict)
+                         and value.get("kind") == "builtin"
+                         and value.get("method") == "push"
+                         and _local_ref(value.get("target")) == name)
+            if not self_push:
+                return False
         if _local_ref(node) == name:
             refs.add(id(node))
         if (node.get("kind") == "builtin" and node.get("method") == "length"
@@ -8814,7 +8837,7 @@ def _empty_list_type(name, hints, body, fallback, appends) -> str:
     into), else from what is pushed into it. Go fixes a composite literal's
     element type at the literal and never from a later `append` (issue
     #2898). Two disagreeing targets are refused. With no evidence at all, a
-    binding only sized or appended to keeps `fallback`, the type main gave
+    binding only sized or appended to keeps `fallback`, the slice main gave
     it; any other read is refused, as the wasm tier refuses it, rather than
     emitted as a list `go build` then rejects where it is used."""
     def is_list(t):

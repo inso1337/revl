@@ -1,8 +1,8 @@
 """An untyped empty list builds on the go tier, or is refused (issue #2898).
 
 WHAT WAS WRONG. `var out = []` carries no element type in the IR, and the go
-emitter guessed one: `[]any{}` on the pure tier, `[]int64{}` in a provide
-method. Go fixes a composite literal's element type at the literal, never
+emitter guessed one: `[]any{}` on the pure tier, the tier's `List[Int]`
+slice in a provide method (`[]int64{}` on ir_version 3, `[]int{}` before). Go fixes a composite literal's element type at the literal, never
 from a later `append`, so a list of strings returned as `List[Str]` failed
 `go build` (`cannot use out (variable of type []any) as []string`). The same
 gap broke `list_sort` and `list_dedup` from stdlib/list.rvl on go.
@@ -12,8 +12,8 @@ declared return (`return out`), a declared parameter (`f(out)`), or another
 binding it is assigned to (`out = res`, the `list_sort` shape), a record
 field, an element of another list, or else the type of what is pushed into
 it. Two disagreeing targets are refused by name. With no evidence at all,
-a binding that is only sized (or appended to) keeps main's `[]any{}`, which
-builds whatever the element type; any other read is refused by name, as the wasm tier does, instead of
+a binding that is only sized (or appended to) and never assigned anything
+else keeps the slice main gave it, which builds whatever the element type; any other read is refused by name, as the wasm tier does, instead of
 printing a module that does not build.
 
 The run tests execute the program's `test` blocks on py and on go and assert
@@ -118,6 +118,33 @@ pub fn unused() -> Int {
 test "unhinted" {
   assert sized() == 0
   assert unused() == 1
+}
+"""
+
+# assigned another list, then only sized: the assignment fixes the type
+ASSIGNED = """\
+pub fn a() -> Int {
+  var out = []
+  let xs = ["a"]
+  out = xs
+  return out.length()
+}
+test "assigned" {
+  assert a() == 1
+}
+"""
+
+ASSIGNED_METHOD = """\
+service Cnt { fn count(n: Int) -> Int }
+component C provides cnt: Cnt {
+  provide cnt {
+    fn count(n) {
+      var out = []
+      let xs = ["a"]
+      out = xs
+      return out.length()
+    }
+  }
 }
 """
 
@@ -271,4 +298,29 @@ def test_go_builds_the_provide_method_counter():
         pytest.skip("go toolchain unavailable: %s" % reason)
     src = go_emit.emit(compile_source(COUNTER, "counter_2898.rvl"), "probe")
     status, detail = validator.check([("cnt", src)])["cnt"]
+    assert status == validate.OK, detail
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
+def test_an_assigned_list_takes_the_source_type_and_runs_like_py():
+    ir = compile_source(ASSIGNED, "assigned_2898.rvl")
+    assert "out := []string{}" in go_emit.emit(ir)
+    py_status, py_message = RUNNERS["py"](ir)
+    assert py_status == "pass", py_message
+    status, message = RUNNERS["go"](compile_source(ASSIGNED, "assigned_2898.rvl"))
+    if status == "skip":
+        pytest.skip(message)
+    assert status == "pass", message
+
+
+def test_go_builds_a_provide_method_list_assigned_another_list():
+    import validate  # noqa: PLC0415
+
+    validator = validate.VALIDATORS["go"]
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip("go toolchain unavailable: %s" % reason)
+    src = go_emit.emit(compile_source(ASSIGNED_METHOD, "assigned_m_2898.rvl"), "probe")
+    assert "out := []string{}" in src, src
+    status, detail = validator.check([("assigned", src)])["assigned"]
     assert status == validate.OK, detail
