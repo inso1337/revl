@@ -2050,7 +2050,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
   if (kind == "call") {
     let target = value_field(node, "target")
     if (value_str(value_field(target, "kind")) == "req") {
-      let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(target, "name"))))
+      let sname = req_service_of(comp, value_str(value_field(target, "name")))
       if (sname != "") {
         let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(node, "method")))
         return value_str(value_field(decl, "returns"))
@@ -2060,7 +2060,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
     if (value_str(value_field(callee, "kind")) == "field") {
       let ct = value_field(callee, "target")
       if (value_str(value_field(ct, "kind")) == "req") {
-        let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(ct, "name"))))
+        let sname = req_service_of(comp, value_str(value_field(ct, "name")))
         if (sname != "") {
           let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(callee, "name")))
           return value_str(value_field(decl, "returns"))
@@ -3170,7 +3170,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
     if (kind == "provide") {
       let svc = value_str(value_field(step, "service"))
       let pkey = value_str(value_field(step, "name"))
-      let struct = `${cname}${camel(pkey)}`
+      let struct = `${cname}${camel(host_key(pkey))}`
       var cargs = ["ctx", "fx"]
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
@@ -3561,8 +3561,9 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // phase loop; a bracket-only component keeps emitting exactly as before.
   let needs_frame = component_needs_frame(comp, wnames)
   let provider_cfg = provider_config_fields(comp)
+  let req_map = req_bindings(comp)
   var req_locals = []
-  if (!value_is_null(reqs_m)) { req_locals = value_keys(reqs_m) }
+  for (local of req_map.keys()) { req_locals = req_locals.push(mangle(local)) }
   let bind_names = binds(comp)
   // FR-4 (item 238): bind -> revl surface value type for each host Map binding,
   // so provider fields, ctor params and the apply() local all pin `Map<V>`.
@@ -3571,7 +3572,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // `this.<name>` field (item 238 adds the binds).
   var rn: Map[Str, Str] = Map.empty()
   for (b of bind_names) { rn = rn.set(b, `this.${b}`) }
-  for (local of req_locals) { rn = rn.set(local, `this.${local}`) }
+  for (local of req_map.keys()) { rn = rn.set(local, `this.${mangle(local)}`) }
   let mctx = set_rn(base_ctx, rn)
   // `has_await` (a top-level `await` body step) colors the plugin async: the
   // interface widens to `AsyncPlugin` and `apply` gains `throws Exception`.
@@ -3583,13 +3584,13 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   var counter = 0
   for (key of value_keys(provs_m)) {
     let srv = value_str(value_field(provs_m, key))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push("    private final Context ctx;")
     out = out.push("    private final Context.EffectScope fx;")
     if (needs_frame) { out = out.push("    private final RevlFrame frame;") }
-    for (local of req_locals) {
-      out = out.push(`    private final ${value_str(value_field(reqs_m, local))} ${local};`)
+    for (b of req_map.keys()) {
+      out = out.push(`    private final ${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)};`)
     }
     for (b of bind_names) {
       out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
@@ -3601,8 +3602,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     }
     var cparams = ["Context ctx", "Context.EffectScope fx"]
     if (needs_frame) { cparams = cparams.push("RevlFrame frame") }
-    for (local of req_locals) {
-      cparams = cparams.push(`${value_str(value_field(reqs_m, local))} ${local}`)
+    for (b of req_map.keys()) {
+      cparams = cparams.push(`${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)}`)
     }
     for (b of bind_names) {
       cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
@@ -3614,8 +3615,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     out = out.push("        this.ctx = ctx;")
     out = out.push("        this.fx = fx;")
     if (needs_frame) { out = out.push("        this.frame = frame;") }
-    for (local of req_locals) {
-      out = out.push(`        this.${local} = ${local};`)
+    for (b of req_map.keys()) {
+      out = out.push(`        this.${mangle(b)} = ${mangle(b)};`)
     }
     for (b of bind_names) {
       out = out.push(`        this.${b} = ${b};`)
@@ -3681,9 +3682,10 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // any step runs so every bracket/transactional/compensation registration
   // below shares the same commit/abort discriminator.
   if (needs_frame) { out = out.push("        RevlFrame frame = new RevlFrame();") }
-  for (local of req_locals) {
-    let srvn = value_str(value_field(reqs_m, local))
-    out = out.push(`        ${srvn} ${local} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(local)}));`)
+  for (b of req_map.keys()) {
+    let raw = map_get(req_map, b)
+    let srvn = value_str(value_field(reqs_m, raw))
+    out = out.push(`        ${srvn} ${mangle(b)} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(raw)}));`)
   }
   out = out.push("        try {")
   // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
@@ -3743,7 +3745,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
   var out = []
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push(`    ${struct}() {`)
     out = out.push("    }")
@@ -3775,7 +3777,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
   for (step of body) {
     let key = value_str(value_field(step, "name"))
     let srv = value_str(value_field(step, "service"))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class, ${json_dumps(key)}), new ${struct}()));`)
   }
   if (body.length() > 0) {
@@ -3837,16 +3839,42 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
   return out
 }
 
-// `_host_key` (issue #1914): a namespaced wiring key (`acme::greeter`) mangles
-// to one Java identifier (`__`-joined, each part's `_` escaped to `_u`); an
-// unqualified key is returned unchanged. Used only by the collision marker
-// below: the port still refuses to EMIT a namespaced key (issue #2389).
-fn java_host_key(k: Str) -> Str {
-  if (k.indexOf("::") < 0) { return k }
-  var parts = k.split("::")
-  var escaped = []
-  for (p of parts) { escaped = escaped.push(p.split("_").join("_u")) }
-  return escaped.join("__")
+// `_host_key` (issue #1914): a qualified provision key (`acme::greeter`) is a
+// legal wiring identity but never a legal Java identifier, so it is mangled
+// into one here, and only here. An unqualified key is returned unchanged, so a
+// document that uses no namespacing emits exactly as before:
+//
+//   _host_key(k) = k                                    if "::" not in k
+//                = "__".join(p.replace("_", "_u") for p in k.split("::"))
+//
+// The rule is injective (see backends/java/emit.py), and the collision check
+// refuses the one residual pair (issue #2394).
+fn host_key(key: Str) -> Str {
+  if (key.indexOf("::") < 0) { return key }
+  var parts = []
+  for (part of key.split("::")) { parts = parts.push(part.split("_").join("_u")) }
+  return parts.join("__")
+}
+
+// `_key_binding`: the local a qualified key introduces, its trailing segment
+// (`acme::greeter` -> `greeter`). A `req` IR node names a key by this binding.
+fn key_binding(key: Str) -> Str {
+  let parts = key.split("::")
+  return parts[parts.length() - 1]
+}
+
+// The service a `req` node names: its BINDING in the component's raw-keyed
+// requirement table (issue #2394).
+fn req_service_of(comp: Any, name: Str) -> Str {
+  let raw = map_get(req_bindings(comp), name)
+  return raw == "" ? "" : value_str(value_field(value_field(comp, "requires"), raw))
+}
+
+// binding -> raw wiring key for a component's requirements.
+fn req_bindings(comp: Any) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  for (k of value_keys(value_field(comp, "requires"))) { out = out.set(key_binding(k), k) }
+  return out
 }
 
 // Issue #2458: `_check_host_keys` is the FIRST statement of the reference
@@ -3863,7 +3891,7 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
   for (c of value_list(value_field(ir, "components"))) {
     for (table of ["provides", "requires", "routes", "isolate", "intercept"]) {
       for (k of value_keys(value_field(c, table))) {
-        let host = java_host_key(k)
+        let host = host_key(k)
         let at = list_index_of(seen_hosts, host)
         if (at < 0) {
           seen_hosts = seen_hosts.push(host)
@@ -3881,6 +3909,15 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
   return out
 }
 
+// A component the emitter answers with a named `<<UNSUPPORTED-component-nonsimple>>`
+// marker: neither the simple path nor the modern subset takes it.
+fn has_nonsimple_component(ir: Any) -> Bool {
+  for (c of value_list(value_field(ir, "components"))) {
+    if (!component_simple_ok(c) && !(modern_supported(c) && needs_modern_subset(c))) { return true }
+  }
+  return false
+}
+
 // Named `list_index_of` rather than `index_of`: that name is the language's
 // string builtin, and a same-named helper compiles to a mangled form whose
 // coverage is attributed to the builtin's unexecuted shim.
@@ -3894,10 +3931,10 @@ fn list_index_of(xs: List[Str], x: Str) -> Int {
 }
 
 // Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
-// as a mangled host identifier (`_host_key`, issue #1914), and this port does
-// not port that mangling yet, so it would write the raw `::` key into host
-// names. Until it does, the port names every namespaced key it meets instead
-// of emitting a silent difference.
+// as a mangled host identifier, and the port now mangles it too (issue #2394).
+// The marker below is not a claim that the key is unported; it names a key the
+// port could NOT prove against the reference bytes because the document was
+// refused elsewhere. See the call site.
 fn namespaced_key_markers(ir: Any) -> List[Str] {
   var out = []
   for (c of value_list(value_field(ir, "components"))) {
@@ -4031,18 +4068,29 @@ pub fn emit_java_src(ir: Any) -> Str {
   // Issue #2458: the host-key collision is the reference's FIRST refusal in
   // `emit` (`_check_host_keys` is its first statement), so its marker opens
   // the refusal section. The comment below keeps the order of the rest.
-  out = out.concat(host_key_collision_markers(ir))
-  out = out.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
+  var refusals = host_key_collision_markers(ir)
+  refusals = refusals.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
   // issue #2492: an extern with no `@java` body. The reference raises this one
   // from inside the extern block, and that block is emitted while the class
   // body is built, which the reference reaches BEFORE it renders components.
   // So this marker belongs with the two whole-document refusals above rather
   // than after them: it precedes the deferred in-file test section and the
   // required-stream refusal, both of which the reference reaches later.
-  out = out.concat(extern_no_java_body_markers(ir))
-  out = out.concat(deferred_test_markers(ir))
-  out = out.concat(required_stream_markers(ir))
-  out = out.concat(namespaced_key_markers(ir))
+  refusals = refusals.concat(extern_no_java_body_markers(ir))
+  refusals = refusals.concat(deferred_test_markers(ir))
+  refusals = refusals.concat(required_stream_markers(ir))
+  // Issue #2394: a namespaced key's host spelling is PROVEN only when the port
+  // emits the whole document, because only then are its bytes comparable with
+  // the reference's. A document that already hit a refusal above, or that the
+  // legacy component path answers with `<<UNSUPPORTED-component-nonsimple>>`
+  // (no `requires` support among others), reaches those bytes nowhere, so it
+  // names the namespaced keys it could not verify instead of letting that
+  // difference stay silent. A document the port emits whole draws no such
+  // marker: byte parity proves its keys.
+  if (refusals.length() > 0 || has_nonsimple_component(ir)) {
+    refusals = refusals.concat(namespaced_key_markers(ir))
+  }
+  out = out.concat(refusals)
   return rstrip(out.join(newline())).concat(newline())
 }
 

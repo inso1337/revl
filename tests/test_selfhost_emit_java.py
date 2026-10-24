@@ -653,7 +653,9 @@ def test_an_extern_with_a_java_body_emits_no_refusal(emitted, reference, tmp_pat
 
 
 # The reference refuses a deferred emission before it looks at host keys, so a
-# document with both must surface the DEFERRED marker first on the port.
+# document with both must surface the DEFERRED marker first on the port. The
+# namespaced key keeps its marker too: the reference bytes are unreachable here,
+# so the port names the key it could not verify (issue #2394).
 NAMESPACED_AND_DEFERRED = """extern emission deferred fn deliver(sink: Str, msg: Str)
   = @py { return } = @ts { return; } = @rs { () } = @go { return } = @java { return; }
 service Ops { emission fn enqueue(sink: Str, msg: Str) }
