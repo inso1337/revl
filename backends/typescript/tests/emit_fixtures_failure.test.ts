@@ -58,5 +58,7 @@ describe('pythonInterpreter', () => {
   it('treats an empty REVL_PYTHON as unset', () => {
     expect(pythonInterpreter({ REVL_PYTHON: '' }, 'win32')).toBe('python')
     expect(pythonInterpreter({ REVL_PYTHON: '' }, 'linux')).toBe('python3')
+    expect(pythonInterpreter({ REVL_PYTHON: '  ' }, 'win32')).toBe('python')
+    expect(pythonInterpreter({ REVL_PYTHON: '  ' }, 'linux')).toBe('python3')
   })
 })

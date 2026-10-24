@@ -41,7 +41,7 @@ export function pythonInterpreter(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const explicit = env.REVL_PYTHON
+  const explicit = env.REVL_PYTHON?.trim()
   if (explicit) return explicit
   return platform === 'win32' ? 'python' : 'python3'
 }
