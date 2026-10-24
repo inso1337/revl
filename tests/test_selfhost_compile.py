@@ -940,6 +940,48 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
         f"IR surface lower.rvl does not cover yet): {opened}")
 
 
+# Issue #2594. A component whose body holds one step the native IR producer
+# cannot lower. The block arm written on one line (`{ let z = v + 1; z }`, issue
+# #1699) is admitted by both gates and lowered by the reference, but
+# `cir_method_stmts` in selfhost/lower.rvl has no arm for it, so the `provide`
+# step that holds it fails. If that arm lands, swap in another construct the
+# producer still refuses inside a component body.
+_BODYLESS_COMPONENT_SRC = (
+    "service S { fn go(n: Int) -> Int }\n"
+    "component C provides s: S {\n"
+    "  provide s {\n"
+    "    fn go(n: Int) {\n"
+    "      let o = Some(n)\n"
+    "      let x = match o { Some(v) => { let z = v + 1; z }, None => 0 }\n"
+    "      return x\n"
+    "    }\n"
+    "  }\n"
+    "}\n")
+
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
+        compile_to, lower_to_ir, tier):
+    """The native producer withholds the whole `body` of a component when a
+    step in it cannot be lowered. It used to say nothing, so every tier emitted
+    the component with its provide methods, effects and handlers absent and the
+    program built with the capability gone. The reference lowers the body, so
+    the native chain must refuse the component by name, with the step that
+    stopped it, and never return that partial program."""
+    ref = compile_source(_BODYLESS_COMPONENT_SRC)
+    assert "body" in ref["components"][0]
+
+    got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
+    assert got == (
+        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 3 "
+        "is not supported by the self-host compiler, which would emit the "
+        "component without its body."), got[:200]
+
+    native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
+    assert "body" not in native
+    assert native["unlowered"] == "the body step starting at line 3"
+
+
 _PURE_CLOSURE_MODULES = {
     # Declared z before a, so a path-sorted closure and a declaration-order one
     # disagree; `Store` is a service-only import, so `s_hidden` must not travel.
@@ -3930,7 +3972,12 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
         "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
-    "provide_block_body": "EMITS",
+    # issue #2594: the producer cannot lower this provide step, and the
+    # bodyless component it used to emit is now refused by name.
+    "provide_block_body":
+        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 4 "
+        "is not supported by the self-host compiler, which would emit the "
+        "component without its body.",
     "provide_expression_body": "EMITS",
     "ok_extra": "EMITS",
     "some_extra": "EMITS",
