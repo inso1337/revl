@@ -7,6 +7,9 @@ code emits (`process-name`, `peer-pool-unavailable`, `remote-shape`).
 
 The rule set is read from the source with `ast` (the second argument of each
 `_map_refusal` call), so a new refusal rule with no documented row fails here.
+The scan finds only rule names written as a string literal in that call: a rule
+built through a variable or emitted by another helper is not seen.
+`UNREACHABLE_RULES` is kept by hand.
 """
 
 from __future__ import annotations
