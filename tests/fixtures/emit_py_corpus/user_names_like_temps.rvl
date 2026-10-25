@@ -19,6 +19,8 @@ pub fn temps(x: Int) -> Int {
   let _fv = 7
   let _ov0 = 7
   let _revl_rem = 7
-  let _TEMPS_CONFIG = bump(_fv) - 8
-  return _TEMPS_CONFIG + a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1)
+  let _TEMPS_CONFIG = 1
+  return _TEMPS_CONFIG - 1 + a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1)
 }
+
+pub fn bumped(x: Int) -> Int { return bump(x) }

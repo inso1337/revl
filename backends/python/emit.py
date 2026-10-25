@@ -450,6 +450,22 @@ def _emitter_temp(name: str) -> bool:
     return name in _EMITTER_TEMPS or _EMITTER_TEMP_RE.match(name) is not None
 
 
+def _refuse_public_temp_names(ir: dict) -> None:
+    """A `pub fn` is called by the host under its own spelling, so the rename
+    that lifts a user name off an emitter temporary would hide it (issue
+    #2913): refuse one whose name only that rename would change. No temporary
+    ends in `_`, so the root the ladder matched is the name without its
+    trailing `_`."""
+    for fn in ir.get("functions") or []:
+        name = fn.get("name")
+        if (fn.get("public") and isinstance(name, str)
+                and _mangle(name) != _mangle_escaping(name, _EMITTED_BUILTINS)):
+            raise EmitError(
+                f"pub fn {name!r} is spelled like the python emitter temporary "
+                f"{name.rstrip('_')!r}; a host calls a pub fn by name, so the "
+                "emitter cannot rename it: give it another name")
+
+
 def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
     reserved word, so a valid revl identifier that happens to be a Python
@@ -1215,19 +1231,6 @@ def _annotated_un(node: dict, render) -> str | None:
 # `_BOUNDED_TMP`: the walrus sits in a condition python evaluates first, so a
 # nested read has finished with the name before the outer read rebinds it.
 _FIELD_TMP = "_fv"
-
-# Every name the expression renderer may spell as a walrus target of its own:
-# the bounded-arithmetic temp, the field-read temp, the char-class temp, and
-# the `?.`/`??` chain temps (`_ov<height>`). `_match_expr` needs the set because
-# python refuses an assignment expression that rebinds the iteration variable of
-# the comprehension it sits in, so a payload bound under one of these names has
-# to keep the older walrus binder.
-_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc"})
-_OPT_TMP_RE = re.compile(r"_ov\d+\Z")
-
-
-def _walrus_temp(name: str) -> bool:
-    return name in _WALRUS_TEMPS or _OPT_TMP_RE.match(name) is not None
 
 
 def _field_read(target: str, name: str, opt: bool = False,
@@ -4029,19 +4032,13 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
             return payload
         if not _arm_body_mentions(node, bind):
             return body
+        # The body reads the bind through `_mangle`, so the binder is spelled
+        # the same way (issue #2913: a payload bound as `_bi` is read as `_bi_`).
+        bind = _mangle(bind)
         # `await`-free arm -> the classic one-shot lambda; an awaited arm ->
         # a one-element comprehension, whose iteration variable is a scope the
         # `await` in the body can still be spelled inside.
         if awaited:
-            if _walrus_temp(bind):
-                # Python refuses a walrus that rebinds a comprehension's
-                # iteration variable, and a body reaching one of the emitter's
-                # own walrus temps (`_bi` and friends) does exactly that when
-                # the payload is bound under that name. Such a bind is already
-                # clobbered by the scaffolding that owns the name, with or
-                # without a match, so keep the pre-item-163 spelling rather
-                # than turn a wrong value into a `SyntaxError`.
-                return f"(({bind} := {payload}), {body})[1]"
             return f"[{body} for {bind} in ({payload},)][0]"
         return f"(lambda {bind}: {body})({payload})"
 
@@ -4613,22 +4610,6 @@ def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
     return out
 
 
-def _refuse_public_temp_name(fn: dict) -> None:
-    """A `pub fn` is called by the host under its own spelling, so the rename
-    that lifts a user name off an emitter temporary would hide it (issue
-    #2913): refuse one whose name only that rename would change."""
-    name = fn["name"]
-    if not fn.get("public") or _mangle(name) == _mangle_escaping(name, _EMITTED_BUILTINS):
-        return
-    # no temporary ends in `_`, so the one root the ladder matched is the name
-    # with its trailing `_` dropped
-    raise EmitError(
-        f"pub fn {name!r} is spelled like the python emitter temporary "
-        f"{name.rstrip('_')!r}; "
-        "a host calls a pub fn by name, so the emitter cannot rename it: give it "
-        "another name")
-
-
 def _emit_functions(functions: list) -> "_Lines":
     global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
@@ -4638,7 +4619,6 @@ def _emit_functions(functions: list) -> "_Lines":
     try:
         for fn in functions:
             name = _ident(fn["name"], "function name")
-            _refuse_public_temp_name(fn)
             params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
             # item 92: a phase-2 async-colored fn emits `async def`; its body renders
             # in an async context with its async-typed parameters as the await-locals
@@ -4802,14 +4782,14 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         out.add(0)
     for ext in externs:
         name = _ident(ext["name"], "extern name")
-        bodies = ext.get("bodies") or {}
-        refs = ext.get("refs") or {}
         # An inline host body names its parameters itself, so they keep their
         # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
         # lifts one off an emitter temporary (issue #2913).
-        thunk_params = "py" in refs and "py" not in bodies
-        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk_params)
+        thunk = "py" in (ext.get("refs") or {}) and "py" not in (ext.get("bodies") or {})
+        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk)
                            for p in ext["params"])
+        bodies = ext.get("bodies") or {}
+        refs = ext.get("refs") or {}
         # item 421 F6: the extern's declared return carried `Secret[T]`, so its
         # result is where a confidential value ENTERS the value world (item 256
         # §7a). A decorator marks it there, the narrowest place: one wrapper per
@@ -6037,6 +6017,7 @@ def emit(ir: dict) -> str:
     _refuse_holes(ir)
     _refuse_validated_externs(ir)
     _check_host_keys(ir)
+    _refuse_public_temp_names(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 

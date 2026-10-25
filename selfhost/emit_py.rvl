@@ -910,33 +910,18 @@ fn as_async_block() -> List[Str] {
   return o
 }
 
-// The emitter's own walrus temporaries (`_bi`, `_fv`, `_rc`, `_ov<N>`): an
-// awaited payload bound under one of these keeps the tuple spelling, since a
-// comprehension may not rebind a walrus target.
-fn walrus_temp(name: Str) -> Bool {
-  if (name == "_bi" || name == "_fv" || name == "_rc") { return true }
-  if (name.length() > 3 && name.slice(0, 3) == "_ov") {
-    var i = 3
-    while (i < name.length()) {
-      let ch = name.charAt(i)
-      if (ch < "0" || ch > "9") { return false }
-      i = i + 1
-    }
-    return true
-  }
-  return false
-}
-
 fn bind_payload(bind: Str, body: Str, payload: Str, node: Any, aw: Bool) -> Str {
   if (arm_body_is_bind(node, bind)) { return payload }
   if (!arm_body_mentions(node, bind)) { return body }
+  // The body reads the bind through `mangle`, so the binder is spelled the
+  // same way (issue #2913).
+  let py = mangle(bind)
   // An awaited arm cannot use the one-shot lambda (a sync frame): a
   // one-element comprehension is a scope that still admits `await`.
   if (aw) {
-    if (walrus_temp(bind)) { return `((${bind} := ${payload}), ${body})[1]` }
-    return `[${body} for ${bind} in (${payload},)][0]`
+    return `[${body} for ${py} in (${payload},)][0]`
   }
-  return `(lambda ${bind}: ${body})(${payload})`
+  return `(lambda ${py}: ${body})(${payload})`
 }
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.

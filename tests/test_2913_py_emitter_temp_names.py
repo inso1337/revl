@@ -302,7 +302,7 @@ def test_fn_spelled_like_a_component_config_table_is_renamed():
     """`_<NAME>_CONFIG` is the module-scope config schema a component with a
     config emits; a top-level fn of that spelling used to be a second binding
     of the same module name."""
-    source = ((CORPUS_DIR / "keyword_config_value_field.rvl").read_text()
+    source = ((CORPUS_DIR / "keyword_config_value_field.rvl").read_text(encoding="utf-8")
               + "\nfn _HELLO_CONFIG(x: Int) -> Int { return x }\n"
               "pub fn probe2913(x: Int) -> Int { return _HELLO_CONFIG(x) }\n")
     text = _emitted(source)
