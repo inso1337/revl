@@ -26,6 +26,8 @@ What it deliberately leaves alone:
 - A declaration that reuses a builtin head's name (`type Opt = A | B`): the
   checker reads `Opt[Int]` as the builtin there, so the builtin's own check
   (or none) still decides it.
+- An alias that declares parameters (`type A[T] = Box[T]`): alias resolution
+  refuses the declaration itself, which names the real fault.
 - A name that a declaration in scope binds as a type parameter
   (`type W[Mb] = { v: Mb[Int] }`, `fn f[Mb](..)`): inside that declaration
   the name is the parameter, not the top-level type.
@@ -52,10 +54,16 @@ def declared_type_arity(program: Program) -> dict[str, int]:
     """Each type the program declares, by name, with its parameter count.
     A duplicate declaration is refused by the lowering pass; the first one
     wins here so this pass never raises on its behalf."""
+    from .lower import _alias_target  # lazily, as in the walk below
+
+    declared = {d.name for d in program.type_decls}
     arity: dict[str, int] = {}
     for decl in program.type_decls:
-        if decl.name not in _BUILTIN_HEADS:
-            arity.setdefault(decl.name, len(decl.params or ()))
+        if decl.name in _BUILTIN_HEADS:
+            continue
+        if decl.params and _alias_target(decl, declared) is not None:
+            continue
+        arity.setdefault(decl.name, len(decl.params or ()))
     return arity
 
 
@@ -114,21 +122,26 @@ def check_declared_type_arity(program: Program, filename: str) -> None:
 
     seen: set[int] = set()
 
-    def walk(node, table: dict[str, int], line: int) -> None:
+    def walk(node, table: dict[str, int], file: str, line: int) -> None:
         if node is None or isinstance(node, (str, bytes, int, float, bool)):
             return
         if isinstance(node, (list, tuple, set, frozenset)):
             for item in node:
-                walk(item, table, line)
+                walk(item, table, file, line)
             return
         if isinstance(node, dict):
             for item in node.values():
-                walk(item, table, line)
+                walk(item, table, file, line)
             return
         if not dataclasses.is_dataclass(node) or id(node) in seen:
             return
         seen.add(id(node))
         line = getattr(node, "line", None) or line
+        # a declaration carried in from an imported module names its own
+        # file, not the importer's (the provenance issue #1904 records)
+        file = program.decl_files.get(id(node)) or (
+            getattr(node, "source", None) if isinstance(node, FnDecl)
+            else None) or file
         if isinstance(node, TypeDecl):
             table = _scoped(table, node.params)
             # an alias keeps its right-hand side as the name of its one case
@@ -137,7 +150,7 @@ def check_declared_type_arity(program: Program, filename: str) -> None:
             if (not node.fields and len(node.cases) == 1
                     and node.cases[0].payload is None
                     and "[" in (node.cases[0].name or "")):
-                check_type_text(filename, line, node.cases[0].name, table)
+                check_type_text(file, line, node.cases[0].name, table)
         elif isinstance(node, (FnDecl, ExternDecl)):
             table = _scoped(table, node.type_params)
         annotated = next((names for kind, names in _ANNOTATION_FIELDS.items()
@@ -146,19 +159,19 @@ def check_declared_type_arity(program: Program, filename: str) -> None:
             value = getattr(node, name)
             for written in (value if isinstance(value, list) else [value]):
                 if isinstance(written, str):
-                    check_type_text(filename, line, written, table)
+                    check_type_text(file, line, written, table)
         if isinstance(node, MethodDecl):
             for _, ptype in node.params:
-                check_type_text(filename, line, ptype, table)
+                check_type_text(file, line, ptype, table)
         for fld in dataclasses.fields(node):
             if fld.name not in annotated:
-                walk(getattr(node, fld.name), table, line)
+                walk(getattr(node, fld.name), table, file, line)
 
     # the same stack the parser gave itself to accept the tree (issue #310).
     # A tree deeper than that is refused by `check_and_lower` with its own
     # nesting diagnostic, so this pass steps aside rather than crash.
     with recursion_headroom():
         try:
-            walk(program, arity, 0)
+            walk(program, arity, filename, 0)
         except RecursionError:
             return

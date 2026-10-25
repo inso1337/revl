@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError  # noqa: E402
-from revl.compiler import compile_source  # noqa: E402
+from revl.compiler import compile_files, compile_source  # noqa: E402
 from revl.parser import parse_text  # noqa: E402
 from revl.type_arity import check_declared_type_arity  # noqa: E402
 
@@ -97,6 +97,11 @@ def test_zero_parameter_hint_says_it_takes_none():
 
 
 ADMITTED = {
+    # a declared generic written bare is read by the checker today; whether
+    # it is a type is a separate design question, left as it is
+    "generic written bare": BOX + """
+pub fn f(b: Box) -> Int { return 1 }
+""",
     "zero-parameter type written bare": MB + """
 pub fn f(m: Mb) -> Int {
   return match m { Jj(x) => x, Nn => 0 }
@@ -127,6 +132,36 @@ fn g[Mb](x: Mb[Str]) -> Int { return 1 }
         check_declared_type_arity(
             parse_text(MB + "type V[T] = { v: Mb[T] }\n", "arity.rvl"),
             "arity.rvl")
+
+
+def test_imported_declaration_is_refused_in_its_own_file(tmp_path):
+    # the multi-file path (`compile_files`), with the annotation in the
+    # imported module: the refusal names lib.rvl and its line, not the root
+    (tmp_path / "lib.rvl").write_text(
+        "pub type Pb[T] = { v: T }\n"
+        "\n"
+        "pub fn bad(p: Pb[Int, Int]) -> Int {\n"
+        "  return 1\n"
+        "}\n")
+    root = tmp_path / "root.rvl"
+    root.write_text('use "./lib.rvl" { Pb, bad }\n'
+                    "\n"
+                    "pub fn f() -> Int { return 1 }\n")
+    with pytest.raises(RevlError) as info:
+        compile_files([str(root)])
+    first = str(info.value).splitlines()[0]
+    assert "`Pb` takes 1 type argument(s), got 2 (`Pb[Int, Int]`)" in first
+    assert "lib.rvl:3:" in first
+
+
+def test_parameterised_alias_keeps_its_own_refusal():
+    # an alias may not declare parameters; that refusal names the real fault,
+    # so its uses are not counted against the parameters it wrongly declares
+    with pytest.raises(RevlError) as info:
+        compile_source(BOX + "type A[T] = Box[T]\n"
+                       "pub fn f(a: A[Int, Int]) -> Int { return 1 }\n",
+                       "arity.rvl")
+    assert "type alias `A` cannot declare type parameters" in str(info.value)
 
 
 def test_builtin_head_left_to_its_own_check():
