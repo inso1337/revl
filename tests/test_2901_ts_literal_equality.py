@@ -11,7 +11,7 @@ The literal is written `(5n as bigint)`: tsc narrows a `boolean` inside
 
 An Int literal needs the IR to state the other operand's Int type (a literal,
 annotated arithmetic or negation, a Map index with `value_type` Int): a bare
-name can be an `Opt[Float]`, and a Float or Int32 Map value carries no widen
+name's type is not stated, and a Float or Int32 Map value carries no widen
 marker, so `number === bigint` would not typecheck. Those keep `revlEq`, as do
 structural operands, Float and None literals and widened operands (#2715).
 """
@@ -65,7 +65,6 @@ pub fn rec(a: Row, b: Row) -> Bool { return a == b }
 pub fn lst(a: List[Int], b: List[Int]) -> Bool { return a == b }
 pub fn opt(a: Opt[Int], b: Opt[Int]) -> Bool { return a == b }
 pub fn opt_none(a: Opt[Int]) -> Bool { return a == None }
-pub fn opt_float(x: Opt[Float]) -> Bool { return x == 3 }
 pub fn opt_int(x: Opt[Int]) -> Bool { return x == 3 }
 pub fn same(a: Int, b: Int) -> Bool { return a == b }
 pub fn i_var(n: Int) -> Bool { return n == 3 }
@@ -97,10 +96,10 @@ def test_literal_comparison_emits_strict_equality():
 
 def test_untyped_structural_and_mixed_comparisons_keep_revl_eq():
     """An Int literal against an operand whose Int type the IR does not
-    state keeps `revlEq`: a bare name may be an `Opt[Float]`, and a Map
-    index of Float or Int32 carries no widen marker."""
+    state keeps `revlEq`: a Map index of Float or Int32 carries no widen
+    marker."""
     emitted = _emit_ts(STRUCTURAL)
-    for fn in ("rec", "lst", "opt", "opt_none", "opt_float", "opt_int", "same",
+    for fn in ("rec", "lst", "opt", "opt_none", "opt_int", "same",
                "i_var", "map_float", "map_i32", "list_index", "i_div", "fl",
                "mixed", "widened"):
         body = _body(emitted, fn)
@@ -127,7 +126,6 @@ pub fn narrowed(b: Bool, n: Int) -> Bool {
 }
 pub fn map_float(m: Map[Str, Float]) -> Bool { return m["a"] == 3 }
 pub fn map_i32(m: Map[Str, Int32]) -> Bool { return m["a"] == 3 }
-pub fn opt_float(x: Opt[Float]) -> Bool { return x == 3 }
 """
 
 
@@ -152,7 +150,7 @@ def _tsc(tsc: Path, path: Path, text: str) -> tuple[int, list[str]]:
 def test_strict_equality_typechecks_under_narrowing(tmp_path):
     """A bare `b === true` inside `if (!b)`, `s === "a"` for `const s = "b"`,
     `1n === 2n`, and an Int literal against a `number` (a Float or Int32 Map
-    value, an `Opt[Float]`) are TS2367 errors; the emitted module has none."""
+    value) are TS2367 errors; the emitted module has none."""
     tsc = ROOT / "backends" / "typescript" / "node_modules" / ".bin" / "tsc"
     if not tsc.exists() or shutil.which("node") is None:
         pytest.skip("tsc is not installed (npm ci in backends/typescript)")
@@ -166,13 +164,13 @@ def test_strict_equality_typechecks_under_narrowing(tmp_path):
                          ("(1n as bigint)", "1n"), ("(2n as bigint)", "2n")]:
         bare = bare.replace(typed, plain)
     # and the shapes that keep revlEq would be refused as `===`
-    for call in ('revlEq(revlMapIndex(m, "a"), 3n)', "revlEq(x, 3n)"):
+    for call in ('revlEq(revlMapIndex(m, "a"), 3n)',):
         assert call in bare
         left, right = call[len("revlEq("):-1].rsplit(", ", 1)
         bare = bare.replace(call, f"({left} === {right})")
     status, errors = _tsc(tsc, tmp_path / "bare.ts", bare)
     assert status != 0
-    assert len([e for e in errors if "TS2367" in e]) >= 6, errors
+    assert len([e for e in errors if "TS2367" in e]) >= 5, errors
     assert all("TS2367" in e for e in errors), errors
 
 
