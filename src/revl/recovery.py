@@ -2636,8 +2636,11 @@ def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                     f"is never rolled back).")
         return (f"no residue: {ran_n} reconstructed boundary inverse(s) ran and "
                 f"cleared every referent they owed; {len(moot)} in-process "
-                f"inverse(s) were moot (memory gone).{bound}{note}{dropped_note} The "
-                f"world holds only what was deliberately committed.")
+                f"inverse(s) were moot (memory gone).{bound}{note}{dropped_note} This "
+                f"covers only the effects the log recorded; an effect whose "
+                f"record never landed (a crash between the effect and its "
+                f"record) is not covered and must be reconciled by hand (see "
+                f"docs/crash-recovery.md section 4c).")
     kinds: dict = {}
     for rec in outstanding:
         kinds[rec["kind"]] = kinds.get(rec["kind"], 0) + 1
