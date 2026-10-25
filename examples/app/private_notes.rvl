@@ -27,7 +27,7 @@
 // Limitation: reading the owner of a `Principal` needs the py-only extern
 // `subject_of` below, because stdlib/auth.rvl has no accessor for it. The
 // untrusted-author profile refuses every extern, so this file is refused there
-// and runs on the py tier only (#SUBJECT_ISSUE).
+// and runs on the py tier only (#2951).
 //
 // Not in this file: a second persistence driver and the audit view (issue
 // #2703 slices 2 and 3), and the ts binding of `Auth` (item 457 Slice 3).
@@ -46,7 +46,7 @@ type OwnedNote = { id: Str, owner: Str, title: Str, body: Str }
 // stores a principal (a record with a `subject` member). The untrusted-author
 // profile refuses every extern, so this file is refused there, and no other
 // tier can run it. A first-party accessor in stdlib/auth.rvl would remove both
-// limits; that is a separate decision, tracked in #SUBJECT_ISSUE.
+// limits; that is a separate decision, tracked in #2951.
 extern pure fn subject_of(who: Principal) -> Str = @py {
     subject = who.get("subject") if isinstance(who, dict) else None
     if not isinstance(subject, str) or not subject.strip():
