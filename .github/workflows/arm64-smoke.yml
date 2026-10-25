@@ -14,6 +14,42 @@ name: arm64-smoke
 on:
   push:
     branches: [main]
+    # Issue #2872: only a push that can change what the job below runs. The
+    # job installs the package (`pyproject.toml`, `hatch_build.py`) and runs
+    # three test files against the compiler, which reads `stdlib/` and
+    # `backends/` off the checkout at run time and compiles `selfhost/`. The
+    # tests import helpers from `tests/_*.py` and one case table from a sibling
+    # test, and read corpora under `tests/fixtures/`, `tests/noncensus_corpus/`,
+    # `examples/` and three `bench/` documents. A push touching none of these
+    # (docs, crates, formal, the rest of bench and tools, other tests) runs the
+    # same tests on the same inputs, so it only queues. The nightly schedule
+    # below still runs the lane on every tree.
+    # `tests/test_workflow_path_filters_2872.py` derives these inputs from the
+    # job and the test files and reds when one is missing here: add an input
+    # to the job, add it here.
+    paths:
+      - "src/**"
+      - "stdlib/**"
+      - "selfhost/**"
+      - "backends/**"
+      - "tests/fixtures/**"
+      - "tests/noncensus_corpus/**"
+      # the corpus lists reach these with `../../../` names
+      - "examples/**"
+      - "bench/codegen/go/probe2.rvl"
+      - "bench/codegen/python/programs/maps.rvl"
+      - "bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl"
+      - "tests/_*.py"
+      - "tests/conftest.py"
+      - "tests/test_v2_emit.py"
+      - "tests/test_selfhost_lower_ir.py"
+      - "tests/test_selfhost_emit_py.py"
+      # imported by test_selfhost_emit_py.py for its cases
+      - "tests/test_py_comment_only_blocks_2284.py"
+      - "conftest.py"
+      - "pyproject.toml"
+      - "hatch_build.py"
+      - ".github/workflows/arm64-smoke.yml"
   schedule:
     - cron: '30 3 * * *'
   workflow_dispatch:

@@ -62,6 +62,15 @@ on:
   # wheel the only thing that ever refreshed the published compiler. The job is
   # a checkout plus a stdlib zip build, and the `pages` concurrency group below
   # collapses a burst of merges into one deployment.
+  #
+  # Issue #2872 re-weighed this and kept it. A source-only push changes the
+  # deployed playground wheel, so a docs/site-only filter would publish a stale
+  # compiler, which is the defect described above. The census step widens the
+  # input set further: `--verify --strict` hydrates the census records against
+  # whatever pinned inputs they name (the reference classifier in
+  # `tests/test_selfhost_lower.py` among them), so the job's inputs are not a
+  # short, stable list. Cancel-in-progress already bounds it to one queued
+  # deployment.
   push:
     branches: [main]
   workflow_dispatch:
