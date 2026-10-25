@@ -17,8 +17,11 @@ this file reads both:
   * a program per temporary that a function body can reach runs on the python
     tier and gives the answer the program means (these fail on main);
   * every `_`-prefixed name the emitter binds itself across the emit_py corpus
-    is either in a table or derived from a user name, so a new temporary
-    cannot be added without this file noticing.
+    (and one `@py ref` thunk module, a shape no corpus document has) is in a
+    table, derived from a user name, or internal to an emitter helper. That
+    catches a new temporary only in a shape this scan emits;
+  * host-spelled names keep their spelling: a ref symbol, an inline extern
+    body's parameters; a `pub fn` spelled like a temporary is refused.
 """
 
 import ast
@@ -48,7 +51,7 @@ FIXED = ("_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run")
 PATTERN_SAMPLES = (
     "_ov0", "_ov12", "_effect_3", "_timer_1", "_timer_2_h", "_timer_1_inflight",
     "_timer_4_cancel", "_revl_i", "_revl_i64", "_revl_div", "_REVL_I64_MAX",
-    "__revl_destructure_0", "_RevlThing",
+    "__revl_destructure_0", "_RevlThing", "_COUNTER_CONFIG", "_HELLO_CONFIG",
 )
 
 
@@ -176,10 +179,9 @@ def test_top_level_fn_named_like_the_inspect_import(tmp_path, monkeypatch):
 
 # `_`-prefixed names the emitter binds that are not temporaries: dunders,
 # python's own `_` wildcard, and names DERIVED from a user name (a component's
-# `_<snake>_apply`, a provision class `_<Pascal>`, a `_<NAME>_CONFIG` table, a
-# timer's companions), which cannot equal a user identifier's spelling of a
+# `_<snake>_apply`, a provision class `_<Pascal>`), which cannot equal a user identifier's spelling of a
 # temporary because they carry the user's own name.
-_DERIVED = re.compile(r"__\w+__\Z|_\Z|_[a-z0-9_]+_apply\Z|_[A-Z][A-Za-z0-9]*\Z|_[A-Z0-9_]+_CONFIG\Z")
+_DERIVED = re.compile(r"__\w+__\Z|_\Z|_[a-z0-9_]+_apply\Z|_[A-Z][A-Za-z0-9]*\Z")
 
 
 def _bound_names(text: str) -> set:
@@ -233,3 +235,96 @@ def test_the_temp_names_corpus_document_runs():
     ns: dict = {}
     exec(compile(backend_emitter("python").emit(ir), "<corpus_2913>", "exec"), ns)
     assert ns["temps"](1) == 14 + 8 + 7 + 7
+
+
+# ------------------------------------------- host-spelled names keep theirs
+
+def _ref_module(tmp_path, monkeypatch, pkg: str, symbol: str, extra: str = ""):
+    host = tmp_path / pkg
+    host.mkdir()
+    (host / "__init__.py").write_text("")
+    (host / "engine.py").write_text(f"def {symbol}(x):\n    return x + '!'\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    rvl = tmp_path / "m.rvl"
+    rvl.write_text(
+        "extern pure fn eng(x: Str) -> Str\n"
+        f'    = @py ref {symbol} from "{pkg}/engine.py"\n'
+        f"pub fn f(x: Str) -> Str {{ return eng(x) }}\n{extra}")
+    return backend_emitter("python").emit(compile_files([str(rvl)]))
+
+
+@pytest.mark.parametrize("symbol", ["_run", "_f", "_r", "_bi", "_body", "_inspect"])
+def test_ref_symbol_is_imported_under_its_host_spelling(tmp_path, monkeypatch, symbol):
+    """A `@py ref` symbol is a host attribute name: it is imported as spelled
+    (under the thunk's `_f` alias), never lifted off a temporary."""
+    text = _ref_module(tmp_path, monkeypatch, f"host2913s{symbol.strip('_')}", symbol)
+    assert f" import {symbol} as _f" in text
+    ns: dict = {}
+    exec(compile(text, "<ref_symbol_2913>", "exec"), ns)
+    assert ns["f"]("a") == "a!"
+
+
+@pytest.mark.parametrize("param", ["_f", "_r", "_run", "_bi", "_body"])
+def test_inline_extern_body_keeps_its_parameter_names(param):
+    """An inline `@py { ... }` body is host code naming its parameters: they
+    keep their spelling (only the ref thunk binds temporaries beside them)."""
+    source = (f"extern pure fn g({param}: Int) -> Int = @py {{ return {param} + 1 }}\n"
+              "pub fn f(x: Int) -> Int { return g(x) }\n")
+    assert _run(source, "f", 1) == 2
+
+
+@pytest.mark.parametrize("name", ["_run", "_bi", "_bi_", "_ov3", "_COUNTER_CONFIG"])
+def test_pub_fn_spelled_like_a_temporary_is_refused_by_name(name):
+    """A host calls a `pub fn` by its own spelling, so it is refused rather
+    than renamed; the diagnostic names the fn and the temporary."""
+    with pytest.raises(EMIT.EmitError) as err:
+        _emitted(f"pub fn {name}(x: Int) -> Int {{ return x }}\n")
+    message = str(err.value)
+    assert f"pub fn {name!r}" in message
+    assert f"temporary {name.rstrip('_')!r}" in message
+
+
+def test_private_fn_spelled_like_a_temporary_is_renamed_and_runs():
+    source = ("fn _run(x: Int) -> Int { return x + 1 }\n"
+              "pub fn f(x: Int) -> Int { return _run(x) }\n")
+    text = _emitted(source)
+    assert "def _run_(" in text
+    assert _run(source, "f", 1) == 2
+
+
+def test_pub_fn_spelled_like_a_builtin_is_still_renamed():
+    """The builtin rung is unchanged (found, not fixed here: a host calling
+    `pub fn len` by name does not find it either)."""
+    assert "def len_(" in _emitted("pub fn len(x: Int) -> Int { return x }\n")
+
+
+def test_fn_spelled_like_a_component_config_table_is_renamed():
+    """`_<NAME>_CONFIG` is the module-scope config schema a component with a
+    config emits; a top-level fn of that spelling used to be a second binding
+    of the same module name."""
+    source = ((CORPUS_DIR / "keyword_config_value_field.rvl").read_text()
+              + "\nfn _HELLO_CONFIG(x: Int) -> Int { return x }\n"
+              "pub fn probe2913(x: Int) -> Int { return _HELLO_CONFIG(x) }\n")
+    text = _emitted(source)
+    module_bindings = []
+    for node in ast.parse(text).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            module_bindings.append(node.name)
+        elif isinstance(node, ast.Assign):
+            module_bindings += [t.id for t in node.targets if isinstance(t, ast.Name)]
+    assert module_bindings.count("_HELLO_CONFIG") == 1
+    assert "_HELLO_CONFIG_" in module_bindings
+
+
+def test_scan_sees_the_ref_thunk_temporaries(tmp_path, monkeypatch):
+    """No emit_py corpus document has a `@py ref` (the self-hosted emitter
+    does not emit one), so the corpus scan cannot see the thunk's `_f`/`_r`;
+    this runs the same check over a ref-thunk module."""
+    text = _ref_module(tmp_path, monkeypatch, "host2913scan", "engine_fn",
+                       extra="fn helper(_f: Int, _r: Int) -> Int { return _f + _r }\n")
+    bound = _bound_names(text)
+    assert {"_f", "_r", "_inspect"} <= bound
+    temp = getattr(EMIT, "_emitter_temp", lambda _n: False)
+    loose = {n for n in bound if not temp(n.rstrip("_")) and not _DERIVED.match(n)
+             and n not in _EMITTER_INTERNAL}
+    assert not loose, loose

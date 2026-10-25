@@ -1034,3 +1034,13 @@ def test_a_host_identifier_collision_is_refused_by_name(reference):
     with pytest.raises(reference.EmitError,
                        match="both mangle to the Python identifier"):
         reference.emit(ir)
+
+
+def test_a_pub_fn_spelled_like_an_emitter_temporary_is_refused_by_name(reference):
+    """A host calls a pub fn by its own name, so the rename that lifts a user
+    name off an emitter temporary cannot apply to it (issue #2913)."""
+    ir = compile_files([str(REFUSALS_DIR / "pub_fn_temp_name.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match="pub fn '_run' is spelled like the python emitter "
+                             "temporary '_run'"):
+        reference.emit(ir)

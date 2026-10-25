@@ -3,6 +3,9 @@
 // alike, so the function answers 36 for x = 1.
 type P = { a: Int }
 
+// an inline host body names its parameter itself, so `_f` keeps its spelling
+extern pure fn bump(_f: Int) -> Int = @py { return _f + 1 }
+
 fn mk(x: Int) -> P { return { a: x } }
 
 fn pick(x: Int) -> Int? {
@@ -16,5 +19,6 @@ pub fn temps(x: Int) -> Int {
   let _fv = 7
   let _ov0 = 7
   let _revl_rem = 7
-  return a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1)
+  let _TEMPS_CONFIG = bump(_fv) - 8
+  return _TEMPS_CONFIG + a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1)
 }

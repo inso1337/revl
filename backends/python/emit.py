@@ -431,6 +431,7 @@ _TYPE_RESERVED = frozenset({"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"})
 #   _f, _r             the `@py ref` extern thunk, beside the extern's params
 #   _inspect           the module-scope `import inspect as _inspect`
 #   _body, _run        the component apply's body def; the lifecycle harness
+#   _<NAME>_CONFIG     a component's module-scope config schema (by pattern)
 #
 # and, by pattern (`_EMITTER_TEMP_RE`), the numbered temps `_ov<N>` (`?.`/`??`
 # chains), `_effect_<N>`, `_timer_<N>` with its `_h`/`_inflight`/`_cancel`
@@ -441,7 +442,8 @@ _TYPE_RESERVED = frozenset({"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"})
 # `tests/test_2913_py_emitter_temp_names.py` reads both tables.
 _EMITTER_TEMPS = frozenset({"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"})
 _EMITTER_TEMP_RE = re.compile(
-    r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|(?i:_+revl\w*))\Z")
+    r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|_[A-Z0-9_]*_CONFIG"
+    r"|(?i:_+revl\w*))\Z")
 
 
 def _emitter_temp(name: str) -> bool:
@@ -599,7 +601,7 @@ def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     return f"lambda {bound}" if bound else "lambda"
 
 
-def _ident(name: Any, what: str, *, attr: bool = False) -> str:
+def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True) -> str:
     """Validate and rename one user identifier. `attr=True` marks a name emitted
     as an attribute the runtime dispatches by its contract spelling (a provide-
     method name) — it takes the keyword-only rung, since it cannot shadow a
@@ -622,7 +624,11 @@ def _ident(name: Any, what: str, *, attr: bool = False) -> str:
     if name in _RESERVED or (name.startswith("_") and name.lstrip("_").startswith("revl")):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
     extra = _TYPE_RESERVED if what == "type name" else frozenset()
-    return _mangle_kw(name) if attr else _mangle(name, extra)
+    # `temps=False`: a name host code spells itself (an inline extern body's
+    # parameter) shares no scope with an emitter temporary, so it takes only
+    # the builtin rung (issue #2913).
+    return (_mangle_kw(name) if attr else _mangle(name, extra) if temps
+            else _mangle_escaping(name, _EMITTED_BUILTINS | extra))
 
 
 # -- namespaced provision keys (issue #1914, docs/namespacing.md) ------------
@@ -4607,6 +4613,22 @@ def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
     return out
 
 
+def _refuse_public_temp_name(fn: dict) -> None:
+    """A `pub fn` is called by the host under its own spelling, so the rename
+    that lifts a user name off an emitter temporary would hide it (issue
+    #2913): refuse one whose name only that rename would change."""
+    name = fn["name"]
+    if not fn.get("public") or _mangle(name) == _mangle_escaping(name, _EMITTED_BUILTINS):
+        return
+    # no temporary ends in `_`, so the one root the ladder matched is the name
+    # with its trailing `_` dropped
+    raise EmitError(
+        f"pub fn {name!r} is spelled like the python emitter temporary "
+        f"{name.rstrip('_')!r}; "
+        "a host calls a pub fn by name, so the emitter cannot rename it: give it "
+        "another name")
+
+
 def _emit_functions(functions: list) -> "_Lines":
     global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
@@ -4616,6 +4638,7 @@ def _emit_functions(functions: list) -> "_Lines":
     try:
         for fn in functions:
             name = _ident(fn["name"], "function name")
+            _refuse_public_temp_name(fn)
             params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
             # item 92: a phase-2 async-colored fn emits `async def`; its body renders
             # in an async context with its async-typed parameters as the await-locals
@@ -4678,7 +4701,9 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
       silent — so the async direction stays awaited-by-name.
     """
     dotted = _ref_dotted(ref["path"])
-    symbol = _ident(ref["symbol"], "ref symbol")
+    # A host attribute name, imported under the `_f` alias, so it binds no
+    # local of its own spelling and is never lifted off a temporary (#2913).
+    symbol = _ident(ref["symbol"], "ref symbol", attr=True)
     where = f"{dotted}.{symbol}"
     out = _Lines()
     is_async = bool(ext.get("async"))
@@ -4777,9 +4802,14 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         out.add(0)
     for ext in externs:
         name = _ident(ext["name"], "extern name")
-        params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
+        # An inline host body names its parameters itself, so they keep their
+        # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
+        # lifts one off an emitter temporary (issue #2913).
+        thunk_params = "py" in refs and "py" not in bodies
+        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk_params)
+                           for p in ext["params"])
         # item 421 F6: the extern's declared return carried `Secret[T]`, so its
         # result is where a confidential value ENTERS the value world (item 256
         # §7a). A decorator marks it there, the narrowest place: one wrapper per

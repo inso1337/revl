@@ -1,0 +1,14 @@
+// A `pub fn` spelled like a python emitter temporary (issue #2913). A private
+// fn of that spelling is renamed off the temporary (`_run` -> `_run_`), but a
+// host calls a pub fn by its own name, so renaming it would hide it. This tier
+// refuses it by name instead:
+//
+//   pub fn '_run' is spelled like the python emitter temporary '_run'; a host
+//   calls a pub fn by name, so the emitter cannot rename it: give it another
+//   name
+//
+// The reference has no bytes to agree with, so this is not a byte-agreement
+// case and lives here, where `tools/selfhost_line_coverage.py` drives the
+// refusal arm of `backends/python/emit.py::_refuse_public_temp_name`. The
+// refusal text is pinned by tests/test_selfhost_emit_py.py.
+pub fn _run(x: Int) -> Int { return x + 1 }

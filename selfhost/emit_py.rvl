@@ -181,10 +181,10 @@ extern pure fn newline() -> Str = @py { return chr(10) }
 // method's `def` (dispatched by its service-contract name) and a record field
 // annotation. `mangle_type` adds the module-scope classes the emitter writes
 // itself (`Ok`/`Err`, the router's two classes) for a type-name position.
-// With `builtins`, a name the emitter binds itself (`_EMITTER_TEMPS` and
+// With `temps`, a name the emitter binds itself (`_EMITTER_TEMPS` and
 // `_EMITTER_TEMP_RE`: `_bi`, `_fv`, `_ov<N>`, the `_revl*` namespace, ...) is
 // lifted the same way, so a user local cannot rebind a temporary (issue #2913).
-extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py {
+extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool, temps: Bool) -> Str = @py {
     import keyword
     extra = set()
     if builtins:
@@ -198,11 +198,12 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py 
     if types:
         extra |= {"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"}
     import re
-    temps = {"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"}
+    temp_names = {"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"}
     temp_re = re.compile(
-        r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|(?i:_+revl\w*))\Z")
+        r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|_[A-Z0-9_]*_CONFIG"
+        r"|(?i:_+revl\w*))\Z")
     def temp(n):
-        return builtins and (n in temps or temp_re.match(n) is not None)
+        return temps and (n in temp_names or temp_re.match(n) is not None)
     root = name
     while root:
         if (keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra
@@ -213,9 +214,12 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py 
         root = root[:-1]
     return name
 }
-fn mangle(name: Str) -> Str { return mangle_with(name, true, false) }
-fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false) }
-fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true) }
+fn mangle(name: Str) -> Str { return mangle_with(name, true, false, true) }
+fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false, false) }
+fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true, true) }
+// an inline extern body's parameter: host code names it, no temporary shares
+// its scope, so only the builtin rung (`_ident(..., temps=False)`)
+fn mangle_host_param(name: Str) -> Str { return mangle_with(name, true, false, false) }
 // `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
 // fn name is `_<snake>_apply`, a provision class is `_<Pascal>`.
 extern pure fn snake(name: Str) -> Str = @py {
@@ -1763,7 +1767,7 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
     var ps = []
-    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle(value_str(value_field(p, "name")))) }
+    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle_host_param(value_str(value_field(p, "name")))) }
     var kw = "def"
     if (value_bool(value_field(ext, "async"))) { kw = "async def" }
     // item 421 F6 (ported per item 429(d)): the extern's declared return carried
