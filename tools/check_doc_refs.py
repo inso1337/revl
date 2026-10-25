@@ -44,13 +44,12 @@ reason it writes for a new entry is a class-level triage label -- missing or
 stale -- not an individual justification, and the PR that adopts it says so.
 
 REPAIR MODE. `--write` is deliberately conservative. For a stale reference
-whose file exists, it uses `git blame` on the citing line to identify the
-revision that introduced the citation, reads the cited line from that
-revision, and searches for that exact line near the old location in the
-working tree. It rewrites the citing `path:line` only when the match is
-unique. A weak anchor, a no-match result, an ambiguous match, an unavailable
-Git parent, or a missing file is reported with its distinct reason and left
-untouched. It
+whose file exists, it finds the earliest revision containing the citation
+token in the citing file, reads the cited line from that revision, and searches
+for that exact line near the old location in the working tree. It rewrites the
+citing `path:line` only when the match is unique. A weak anchor, a no-match
+result, an ambiguous match, or an unavailable Git revision is reported with
+its distinct reason and left untouched. It
 never renumbers from the line number alone. This gives mechanical line moves
 a repair path while making changed-content anchors a visible finding rather
 than silently blessing the wrong line.
@@ -425,28 +424,47 @@ def _citation_line(root: pathlib.Path, reference: Reference) -> int | None:
     """Return the physical line containing this unique citation."""
     source = _text(root / reference.source)
     token = f"{reference.cited}:{reference.line}"
-    if source.count(token) != 1:
+    matches = list(re.finditer(re.escape(token) + r"(?![0-9])", source))
+    if len(matches) != 1:
         return None
-    return source[:source.index(token)].count("\n") + 1
+    return source[:matches[0].start()].count("\n") + 1
 
 
-def _blamed_revision(root: pathlib.Path, source: str, line: int) -> str | None:
-    """Return the commit that last changed one citing line."""
+def _citation_origin_revision(root: pathlib.Path, source: str,
+                              token: str) -> str | None:
+    """Return the earliest revision containing this citation token.
+
+    `git blame` identifies the last edit of a citing line, which is not
+    necessarily the commit that introduced the citation. Using the earliest
+    revision containing the exact token preserves the cited-file snapshot
+    that the reference originally named, even when the prose line was edited
+    later.
+    """
+    token_pattern = re.compile(re.escape(token) + r"(?![0-9])")
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "blame", "-L", f"{line},{line}",
-             "--", source],
+        history = subprocess.run(
+            ["git", "-C", str(root), "log", "--reverse", "-G",
+             re.escape(token) + r"([^0-9]|$)", "--format=%H", "--", source],
             capture_output=True, text=True, check=True,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    fields = result.stdout.split(None, 1)
-    return fields[0].lstrip("^") if fields else None
+    for revision in history.stdout.split():
+        try:
+            snapshot = subprocess.run(
+                ["git", "-C", str(root), "show", f"{revision}:{source}"],
+                capture_output=True, text=True, check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if token_pattern.search(snapshot.stdout):
+            return revision
+    return None
 
 
 def _revision_line(root: pathlib.Path, revision: str, rel: str,
                    line: int) -> tuple[str | None, str | None]:
-    """Return `(line, reason)` from a cited file at a blamed revision."""
+    """Return `(line, reason)` from a cited file at the citation-origin revision."""
     try:
         result = subprocess.run(
             ["git", "-C", str(root), "show", f"{revision}:{rel}"],
@@ -497,14 +515,19 @@ def repair(root: pathlib.Path = REPO_ROOT, report: Report | None = None) -> tupl
         if key not in stale:
             continue
         _kind, _detail, rel = resolve(reference, root, line_counts)
-        if rel is None:
-            if (reference.cited, reference.line) in known:
-                continue
-            refused.append(f"missing-file: {reference.source} cites "
-                           f"{reference.cited}:{reference.line}")
-            continue
         citation_line = _citation_line(root, reference)
-        revision = (_blamed_revision(root, reference.source, citation_line)
+        token = f"{reference.cited}:{reference.line}"
+        if citation_line is None:
+            token_pattern = re.compile(re.escape(token) + r"(?![0-9])")
+            occurrences = len(list(token_pattern.finditer(
+                _text(root / reference.source))))
+            if occurrences > 1:
+                if (reference.cited, reference.line) in known:
+                    continue
+                refused.append(f"ambiguous-citation: {reference.source} cites "
+                               f"{token} ({occurrences} occurrences)")
+                continue
+        revision = (_citation_origin_revision(root, reference.source, token)
                     if citation_line is not None else None)
         if revision is None:
             if (reference.cited, reference.line) in known:
@@ -542,12 +565,16 @@ def repair(root: pathlib.Path = REPO_ROOT, report: Report | None = None) -> tupl
         source = _text(citing)
         token = f"{reference.cited}:{reference.line}"
         replacement = f"{reference.cited}:{new_line}"
-        occurrences = source.count(token)
+        token_pattern = re.compile(re.escape(token) + r"(?![0-9])")
+        occurrences = len(list(token_pattern.finditer(source)))
         if occurrences != 1:
-            refused.append(f"ambiguous citation: {reference.source} cites "
+            label = "ambiguous-citation"
+            if (reference.cited, reference.line) in known:
+                continue
+            refused.append(f"{label}: {reference.source} cites "
                            f"{token} ({occurrences} occurrences)")
             continue
-        citing.write_text(source.replace(token, replacement), encoding="utf-8")
+        citing.write_text(token_pattern.sub(replacement, source), encoding="utf-8")
         repaired.append(f"{reference.source}: {token} -> {replacement}")
     return repaired, refused
 
@@ -615,7 +642,7 @@ def main(argv: list | None = None) -> int:
     mode.add_argument("--check", action="store_true",
                      help="exit 1 if a finding is not in the ledger")
     mode.add_argument("--write", dest="repair", action="store_true",
-                     help="repair stale references whose pre-edit line moves uniquely")
+                     help="repair stale references using the citation-origin revision from Git history")
     mode.add_argument("--write-ledger", "--baseline", dest="write_ledger",
                      action="store_true",
                      help="record the current findings as the baseline")
