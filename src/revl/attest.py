@@ -443,6 +443,12 @@ def named_guarantees() -> list[str]:
 #: `tests/test_cli_export_profile_2547.py` holds both sides of that line. It
 #: cites no `(Gn)` tag, so it is a digest input and not a cited code.
 #:
+#: `type_arity` joined with issue #2942 on the same rule. `compiler` runs it
+#: over the parsed program before checking, and it raises a RevlError when a
+#: declared type is written with the wrong number of type arguments, so it
+#: originates a refusal and its bytes move the refusal set. It cites no `(Gn)`
+#: tag, so it is a digest input and not a cited code.
+#:
 #: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
 #: is a property of the bytes of this file: a module refuses only when the
 #: frontend reaches it on some program, which only a run settles. An import-time
@@ -463,7 +469,7 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
                    "cardinality", "decode_grammar", "model_profile",
                    "operator_text", "type_schema", "realm_placeholders",
-                   "gen_types", "export_area")
+                   "gen_types", "export_area", "type_arity")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
