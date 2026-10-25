@@ -270,6 +270,18 @@ def test_unknown_selector_keeps_the_raw_pattern():
     assert "<java.lang.Long> __revl" not in java
 
 
+def test_arm_bind_reusing_a_parameter_keeps_the_raw_pattern():
+    # Text only: javac already refuses an arm bind that shadows a parameter.
+    # Inside `Full(a)`, `a` is the outer payload, a `Box<String>`, so the
+    # inner pattern must not take the `a: Box[Int]` parameter's arguments.
+    java = _java_source(
+        "type Box[T] = Full(T) | Empty\n"
+        "pub fn f(b: Box[Box[Str]], a: Box[Int]) -> Int {\n"
+        "  return match b { Full(a) => match a { Full(s) => 1, Empty => 0 }, Empty => 0 }\n}\n")
+    assert "switch (a) {\n            case Box.Full __revl_case_" in java
+    assert "<java.lang.Long> __revl" not in java
+
+
 def test_plain_variant_match_has_no_type_arguments():
     java = _java_source(
         "type S = A | B(Int)\npub fn f(s: S) -> Int {\n"
