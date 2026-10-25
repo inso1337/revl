@@ -63,7 +63,6 @@ def program(text: str, filename: str):
         return Parser(text, filename).parse()
     entry = memo.setdefault((text, filename), _Entry())
     if not entry.parsed:
-        entry.parsed = True
         try:
             parser = Parser(text, filename)
         except Exception as error:  # noqa: BLE001 - shared, then re-raised
@@ -75,8 +74,10 @@ def program(text: str, filename: str):
                 entry.program = parser.parse()
             except Exception as error:  # noqa: BLE001 - shared, then re-raised
                 entry.parse_error = error
+        # only once an outcome is recorded: an interrupt leaves it unparsed
+        entry.parsed = True
     if entry.parse_error is not None:
-        raise entry.parse_error
+        raise entry.parse_error.with_traceback(None)
     return entry.program
 
 
@@ -95,5 +96,5 @@ def tokens(text: str, filename: str) -> list:
         except Exception as error:  # noqa: BLE001 - shared, then re-raised
             entry.lex_error = error
     if entry.lex_error is not None:
-        raise entry.lex_error
+        raise entry.lex_error.with_traceback(None)
     return entry.tokens

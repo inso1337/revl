@@ -11,6 +11,10 @@ The reuse is only sound where the check's compile is the compile the gate
 would make for itself: inline `source`, no `modules` (the gate compiles the
 main source without them) and no operator providers or realm bindings. The
 other shapes keep the plain path, and the report must be identical to it.
+
+The second half pins the lexer: inside one tool call the read-only readers of
+the sent text (path jail, authoring gate, completer, token gate) share one
+parse of it, so a check lexes 5 times instead of 8, with the same response.
 """
 
 import json
@@ -158,6 +162,12 @@ def test_the_profile_does_not_change_the_compiled_document():
 
 REFUSED = "component X { fn }"
 
+# parses, then the authoring gate refuses it: the gate reads the shared program
+GATE_REFUSED = ("extern pure fn rd(p: Str) -> Str\n"
+                "= @py { return open(p).read() }\n"
+                "service S { fn f(x: Str) -> Str }\n"
+                "component C provides s: S { provide s { fn f(x) = rd(x) } }\n")
+
 
 def _count_lexes(monkeypatch) -> list:
     """Every `lex` call, under whatever name a module bound it: the parser
@@ -245,7 +255,8 @@ print(json.dumps(response, sort_keys=True))
 '''
 
 
-@pytest.mark.parametrize("source", [TERSE, REFUSED], ids=["passing", "refused"])
+@pytest.mark.parametrize("source", [TERSE, REFUSED, GATE_REFUSED],
+                         ids=["passing", "refused", "gate-refused"])
 def test_the_full_response_is_byte_identical_without_the_share(source):
     """With the share switched off every reader parses for itself, which is the
     code path before it existed. Each side runs in a fresh process, so no
@@ -257,6 +268,8 @@ def test_the_full_response_is_byte_identical_without_the_share(source):
                               capture_output=True, text=True, env=env,
                               check=True)
         out[mode] = done.stdout
-    assert json.loads(out["shared"])["result"]["structuredContent"]["ok"] is \
-        (source == TERSE)
+    content = json.loads(out["shared"])["result"]["structuredContent"]
+    assert content["ok"] is (source == TERSE)
+    if source == GATE_REFUSED:
+        assert content["authoringTrust"] == "untrusted"
     assert out["shared"] == out["unshared"]
