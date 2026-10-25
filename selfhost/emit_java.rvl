@@ -346,7 +346,11 @@ fn is_relational(op: Str) -> Bool {
 type Ctx = {
   fns: Map[Str, Bool], ca: Map[Str, Str], cp: Map[Str, Str],
   rbf: Map[Str, Str], vcases: Map[Str, Str], rfields: Map[Str, Str],
-  rn: Map[Str, Str], tys: Map[Str, Bool]
+  rn: Map[Str, Str], tys: Map[Str, Bool],
+  // issue #2325: the generic record types (`gen`), the generic top-level fns
+  // (`gfns`) and the parameter names of the top-level fn being emitted (`pn`,
+  // empty in every other body); see `infers_exactly`.
+  gen: Map[Str, Bool], gfns: Map[Str, Bool], pn: Map[Str, Bool]
 }
 // A rendered expression: its text AND the running match-temp counter.
 type Rendered = { text: Str, counter: Int }
@@ -358,6 +362,9 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
 }
 fn has_fn(ctx: Ctx, name: Str) -> Bool {
   return match ctx.fns.lookup(name) { Some(v) => v, None => false }
+}
+fn bool_get(m: Map[Str, Bool], k: Str) -> Bool {
+  return match m.lookup(k) { Some(v) => v, None => false }
 }
 // A resolved (unique, non-ambiguous) lookup — an empty string OR the `<<AMBIG>>`
 // sentinel both mean "not a byte-exact target here".
@@ -838,7 +845,69 @@ fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   for (fname of split_top(map_get(ctx.rfields, tn), ",")) {
     out_args = out_args.push(map_get(by, fname))
   }
-  return { text: `new ${mangle(tn)}(${out_args.join(", ")})`, counter: c }
+  // issue #2325: a generic record is built with the diamond when javac infers
+  // its type arguments exactly from the values (`infers_exactly`).
+  var diamond = ""
+  if (bool_get(ctx.gen, tn)) {
+    diamond = "<>"
+    for (f of fields) { if (!infers_exactly(value_at(f, 1), ctx)) { diamond = "" } }
+  }
+  return { text: `new ${mangle(tn)}${diamond}(${out_args.join(", ")})`, counter: c }
+}
+
+// `_match_bind_names`: every name a `match` arm binds anywhere under *node* (a
+// record carrying a `pattern` key and a Str `bind`).
+fn match_bind_names(node: Any) -> List[Str] {
+  var out = []
+  let k = value_kind(node)
+  if (k == "record" && list_contains(value_keys(node), "pattern")
+      && value_kind(value_field(node, "bind")) == "str") {
+    out = out.push(value_str(value_field(node, "bind")))
+  }
+  if (k == "record" || k == "list") {
+    for (child of value_children(node)) { out = out.concat(match_bind_names(child)) }
+  }
+  return out
+}
+
+// `_infers_exactly`: javac, inferring from *node* alone, gets the revl type. A
+// diamond under `final var` has no target type, so only a non-null literal, a
+// parameter of the fn, arithmetic over those, a call to a non-generic top-level
+// fn, `Some` of one, a non-empty list of them and a record literal built from
+// them count; anything else keeps the literal raw.
+fn infers_exactly(node: Any, ctx: Ctx) -> Bool {
+  let kind = node_kind(node)
+  if (kind == "lit") { return !value_is_null(value_field(node, "value")) }
+  if (kind == "var") { return bool_get(ctx.pn, value_str(value_field(node, "name"))) }
+  if (kind == "bin" || kind == "un") {
+    let keys = value_keys(node)
+    for (sub of ["left", "right", "operand", "expr"]) {
+      if (list_contains(keys, sub) && !infers_exactly(value_field(node, sub), ctx)) { return false }
+    }
+    return true
+  }
+  if (kind == "list") {
+    let items = value_list(value_field(node, "items"))
+    if (items.length() == 0) { return false }
+    for (it of items) { if (!infers_exactly(it, ctx)) { return false } }
+    return true
+  }
+  if (kind == "record") {
+    for (f of value_list(value_field(node, "fields"))) {
+      if (!infers_exactly(value_at(f, 1), ctx)) { return false }
+    }
+    return true
+  }
+  if (kind == "call") {
+    let callee = value_field(node, "callee")
+    var name = ""
+    if (node_kind(callee) == "var") { name = value_str(value_field(callee, "name")) }
+    if (has_fn(ctx, name)) { return !bool_get(ctx.gfns, name) }
+    let args = value_list(value_field(node, "args"))
+    return name == "Some" && map_get(ctx.ca, name) == "" && args.length() == 1
+      && infers_exactly(args[0], ctx)
+  }
+  return false
 }
 
 // Component templates use positional $N substitutions and $$ dollar escapes.
@@ -1523,10 +1592,18 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
     let ret = java_v3_type(value_field(fnode, "returns"), false)
     lines = lines.push(`public static ${ret} ${name}(${ps.join(", ")}) {`)
     let body = value_list(value_field(fnode, "body"))
+    // issue #2325: a parameter name a match arm rebinds is not counted.
+    let binds = match_bind_names(value_field(fnode, "body"))
+    var pn: Map[Str, Bool] = Map.empty()
+    for (p of value_list(value_field(fnode, "params"))) {
+      let pname = value_str(value_field(p, "name"))
+      if (!list_contains(binds, pname)) { pn = pn.set(pname, true) }
+    }
+    let fctx = set_pn(ctx, pn)
     if (body.length() == 0) {
       lines = lines.push("    // (empty body)")
     } else {
-      let r = emit_stmts(body, ctx, 1, c)
+      let r = emit_stmts(body, fctx, 1, c)
       lines = lines.concat(r.lines)
       c = r.counter
     }
@@ -1583,9 +1660,14 @@ fn core_imports(ir: Any) -> List[Str] {
 // them `<<AMBIG>>` instead (outside the successful-byte oracle).
 fn build_ctx(ir: Any) -> Ctx {
   var fns: Map[Str, Bool] = Map.empty()
+  var gfns: Map[Str, Bool] = Map.empty()
   for (fnode of value_list(value_field(ir, "functions"))) {
     fns = fns.set(value_str(value_field(fnode, "name")), true)
+    if (value_list(value_field(fnode, "type_params")).length() > 0) {
+      gfns = gfns.set(value_str(value_field(fnode, "name")), true)
+    }
   }
+  var gen: Map[Str, Bool] = Map.empty()
   var ca: Map[Str, Str] = Map.empty()
   var cp: Map[Str, Str] = Map.empty()
   var rbf: Map[Str, Str] = Map.empty()
@@ -1604,6 +1686,7 @@ fn build_ctx(ir: Any) -> Ctx {
         rbf = rbf.set(key, name)
       }
       rfields = rfields.set(name, fnames.join(","))
+      if (value_list(value_field(spec, "params")).length() > 0) { gen = gen.set(name, true) }
     }
     if (kind == "variant") {
       var cnames = []
@@ -1624,13 +1707,21 @@ fn build_ctx(ir: Any) -> Ctx {
   }
   var tys: Map[Str, Bool] = Map.empty()
   for (name of value_keys(types)) { tys = tys.set(name, true) }
-  return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys }
+  return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys,
+           gen: gen, gfns: gfns, pn: Map.empty() }
 }
 
 // Swap in a fresh rename map (the component-capture scope for one render); the
 // modern provide-method path threads `{req -> this.req, bind -> this.bind}`.
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn, tys: ctx.tys }
+  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn, tys: ctx.tys,
+           gen: ctx.gen, gfns: ctx.gfns, pn: ctx.pn }
+}
+
+// Swap in the parameter names of the top-level fn being emitted (issue #2325).
+fn set_pn(ctx: Ctx, pn: Map[Str, Bool]) -> Ctx {
+  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: ctx.rn, tys: ctx.tys,
+           gen: ctx.gen, gfns: ctx.gfns, pn: pn }
 }
 
 // ============================================================ components/services

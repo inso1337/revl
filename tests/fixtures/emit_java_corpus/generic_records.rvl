@@ -1,0 +1,108 @@
+// issue #2325: a generic record literal is built with the diamond when javac
+// infers its type arguments exactly from the values alone (a literal, a fn
+// parameter, arithmetic over those, a call to a non-generic fn, `Some` of one,
+// a non-empty list of them, a record literal built from them), and raw
+// otherwise (an empty list, `None`, a variant case, a local, a field, a call to
+// a generic fn, a parameter name a match arm rebinds).
+type Bx[T] = { v: T }
+type Pair[A, B] = { first: A, second: B }
+type Pt = { x: Int, y: Int }
+type Box[T] = Full(T) | Empty
+fn twice(n: Int) -> Int { return n * 2 }
+fn wrap[U](x: U) -> Opt[U] { return Some(x) }
+fn lit() -> Int {
+  let b = { v: 1 }
+  return b.v
+}
+fn bump(n: Int) -> Int {
+  let b: Bx[Int] = { v: n }
+  return b.v + 1
+}
+fn neg(n: Int) -> Int {
+  let b = { v: -n }
+  return b.v
+}
+fn both(n: Int) -> Int {
+  let p = { first: "a", second: n }
+  return p.second * 2
+}
+fn many(n: Int) -> List[Bx[Int]] { return [{ v: n }, { v: n + 1 }] }
+fn nested(n: Int) -> Int {
+  let b = { v: { v: n } }
+  return b.v.v + 1
+}
+fn called(n: Int) -> Int {
+  let b = { v: twice(n) }
+  return b.v
+}
+fn some(n: Int) -> Opt[Int] {
+  let b = { v: Some(n) }
+  return b.v
+}
+fn listed(n: Int) -> List[Int] {
+  let b = { v: [n, 2] }
+  return b.v
+}
+fn plain(n: Int) -> Int {
+  let p = { x: n, y: 2 }
+  return p.x
+}
+fn empty() -> Bx[List[Int]] {
+  let b = { v: [] }
+  return b
+}
+fn none() -> Bx[Opt[Int]] {
+  let b = { v: None }
+  return b
+}
+fn cased(n: Int) -> Bx[Box[Int]] {
+  let b = { v: Full(n) }
+  return b
+}
+fn local(n: Int) -> Bx[Int] {
+  let x = n
+  let b = { v: x }
+  return b
+}
+fn field(n: Int) -> Bx[Int] {
+  let a = { v: n }
+  let b = { v: a.v }
+  return b
+}
+fn generic(n: Int) -> Bx[Opt[Int]] {
+  let b = { v: wrap(n) }
+  return b
+}
+fn rebound(n: Int, o: Opt[Int]) -> Int {
+  return match o {
+    Some(n) => n,
+    None => 0
+  }
+}
+fn rebound_box(n: Int, o: Opt[Int]) -> Bx[Int] {
+  let b = { v: n }
+  return match o {
+    Some(n) => b,
+    None => b
+  }
+}
+fn local_sum(n: Int) -> Bx[Int] {
+  let x = n
+  let b = { v: x + 1 }
+  return b
+}
+fn local_items(n: Int) -> Bx[List[Int]] {
+  let x = n
+  let b = { v: [n, x] }
+  return b
+}
+fn local_nested(n: Int) -> Bx[Bx[Int]] {
+  let x = n
+  let b = { v: { v: x } }
+  return b
+}
+fn local_some(n: Int) -> Bx[Opt[Int]] {
+  let x = n
+  let b = { v: Some(x) }
+  return b
+}

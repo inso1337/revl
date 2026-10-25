@@ -198,9 +198,9 @@
 
 ["function", "backends-java-emit-py-ident-only-invalid-reserved", "_ident", 2, 2]
 
-["reason", "backends-java-emit-py-infers-exactly-issue-2325", "backends/java/emit.py::_infers_exactly (issue #2325): a generic record literal is built with the diamond (`new Bx<>(n)`) only when every field value is one javac infers at its revl type (a literal, a parameter of the fn, arithmetic over those, a call to a non-generic top-level fn, `Some` of one, a non-empty list of them, a record literal built from them); anything else stays raw as before. Only a generic record literal reaches it. A corpus document cannot carry one yet: the self-host java port (selfhost/emit_java.rvl) still builds every record raw, so the byte-agreement oracle would disagree on the diamond, and mirroring it in the port is a separate change. It is reached by backends/java/test_signature_heads_java_2325.py, whose javac compile tests cover the diamond and the raw fallbacks. Measured 0 -> 22."]
+["reason", "backends-java-emit-py-infers-exactly-issue-2325", "backends/java/emit.py::_infers_exactly (issue #2325): a generic record literal is built with the diamond (`new Bx<>(n)`) only when every field value is one javac infers at its revl type (a literal, a parameter of the fn, arithmetic over those, a call to a non-generic top-level fn, `Some` of one, a non-empty list of them, a record literal built from them); anything else stays raw as before. tests/fixtures/emit_java_corpus/generic_records.rvl reaches every branch through the byte-agreement oracle, and selfhost/emit_java.rvl mirrors it as `infers_exactly`. The one statement left is the non-dict guard: every caller passes an IR node (a field value, an operand, a list item or a call argument), so no document reaches it. Measured 0 -> 22 -> 1."]
 
-["function", "backends-java-emit-py-infers-exactly-issue-2325", "_infers_exactly", 22, 22]
+["function", "backends-java-emit-py-infers-exactly-issue-2325", "_infers_exactly", 1, 1]
 
 ["reason", "backends-java-emit-py-inline-arrow-argument-multiplicity", "backends/java/emit.py::_inline_arrow: Argument multiplicity, generated temporaries and capture substitution implement arrow beta reduction, explicitly deferred in the port header."]
 
