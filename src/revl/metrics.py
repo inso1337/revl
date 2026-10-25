@@ -291,7 +291,7 @@ def render(metrics: dict) -> str:
         for code, count in by_code.items():
             lines.append(f"  {code.ljust(width)}  {count}")
 
-    # residue incidents (issue #2730 slice 2)
+    # 3. residue incidents (issue #2730 slice 2)
     residue = metrics.get("residue") or {}
     lines.append("")
     lines.append(f"residue incidents (total {residue.get('total', 0)}):")
