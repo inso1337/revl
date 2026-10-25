@@ -269,9 +269,9 @@ func disposeAwaited(ctx stdctx.Context, lf labeledFiber,
 // It exists because Go has no process-wide panic hook: `recover` covers only
 // the goroutine that runs it, so main's defer cannot see a panic anywhere else.
 // The runtime prints a panic it reaches the top of, VERBATIM, on stderr — and
-// the panic value quotes whatever the failing frame held. The frame that holds
-// a crossing's own arguments is `bridge.Serve`'s per-connection goroutine,
-// which is where a declared `Secret[T]` travels.
+// the panic value quotes whatever the failing frame held. A crossing's own
+// goroutine needs no guard: `bridge.Serve` recovers its handler's panic into
+// the error reply (issue #2481).
 //
 // The indirection is load-bearing: `recover` stops a panic only when the
 // DEFERRED FUNCTION calls it directly, so the closure returned here — never a
@@ -447,12 +447,11 @@ func main() {
 			listener = ln
 			surface := newExportedSurface(s.Serve)
 			go bridge.Serve(ln, func(key, method string, args []json.RawMessage) (any, error) {
-				// The crossing goroutine's own funnel. `bridge.Serve` answers
-				// each connection on a goroutine of its own, so a panic raised
-				// in a provider method reaches the top of THAT goroutine and
-				// never main's defer. `args` is where a declared `Secret[T]`
-				// travels, and a panicking frame's value quotes what it held.
-				defer guard(&name)()
+				// No `guard` here (issue #2481): `bridge.Serve` recovers a
+				// panic raised in a provider method into this crossing's error
+				// reply, scrubbed by `bridge.SeamFailure` like any returned
+				// error, and keeps serving, as the py, ts and java runners do.
+				// A guard deferred here would run first and halt the process.
 				if err := surface.check(key, method, sortedOps(s.Serve.Methods[key])); err != nil {
 					return nil, err
 				}
