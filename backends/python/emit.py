@@ -413,6 +413,40 @@ _EMITTED_BUILTINS = frozenset({
 # own spelling keeps the bare name.
 _TYPE_RESERVED = frozenset({"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"})
 
+# Every name the emitter binds ITSELF in a scope a user binding can share
+# (issue #2913). A user local, parameter or top-level fn of the same spelling
+# was emitted verbatim and the two bindings were one Python name: `let _bi = 7`
+# then `x + 1` rebound `_bi` through the bounded-arithmetic walrus and the
+# function returned the wrong value, with nothing failing. The emitter's own
+# spellings are literal text, so `_mangle` lifts the USER identifier off them,
+# at its declaration and every use alike, exactly as for `_EMITTED_BUILTINS`.
+# Renaming the user name rather than moving the temporaries into a scope of
+# their own (the ts fix for a Map helper, #2909) because a temporary sits in an
+# expression: a scope per temporary is a Python frame per `+` or field read,
+# which roadmap item 436 removed on purpose; and no prefix is unspellable,
+# since a revl identifier can spell any leading-underscore Python name.
+#
+#   _bi, _fv, _rc      expression walrus temps: bounded arithmetic
+#                      (`_BOUNDED_TMP`), field read (`_FIELD_TMP`), char class
+#   _f, _r             the `@py ref` extern thunk, beside the extern's params
+#   _inspect           the module-scope `import inspect as _inspect`
+#   _body, _run        the component apply's body def; the lifecycle harness
+#
+# and, by pattern (`_EMITTER_TEMP_RE`), the numbered temps `_ov<N>` (`?.`/`??`
+# chains), `_effect_<N>`, `_timer_<N>` with its `_h`/`_inflight`/`_cancel`
+# companions, and the whole `_revl*` scaffolding namespace in any case
+# (`_revl_i64`, `_revl_div`, `_REVL_I64_MAX`, `__revl_destructure_<N>`, the
+# list-index `_revl_i`). The component path (`_ident`) keeps REFUSING a
+# `_revl*` name, as before; everywhere else it is renamed. The test
+# `tests/test_2913_py_emitter_temp_names.py` reads both tables.
+_EMITTER_TEMPS = frozenset({"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"})
+_EMITTER_TEMP_RE = re.compile(
+    r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|(?i:_+revl\w*))\Z")
+
+
+def _emitter_temp(name: str) -> bool:
+    return name in _EMITTER_TEMPS or _EMITTER_TEMP_RE.match(name) is not None
+
 
 def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
@@ -475,7 +509,7 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     practice, since the builtins that are also `_CONTEXT_MEMBERS` are refused as
     provision keys upstream. Keyword escaping applies at every site regardless,
     since a Python keyword is illegal in any of them."""
-    return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
+    return _mangle_escaping(name, _EMITTED_BUILTINS | extra, temps=True)
 
 
 def _method_def_name(name: Any, what: str) -> str:
@@ -518,13 +552,18 @@ def _mangle_kw(name: str) -> str:
     return _mangle_escaping(name, frozenset())
 
 
-def _mangle_escaping(name: str, extra: "frozenset[str]") -> str:
+def _mangle_escaping(name: str, extra: "frozenset[str]",
+                     temps: bool = False) -> str:
     """The shared injective append-`_` rung: escape iff `name`, or any name
-    reachable from it by dropping trailing `_`, is a keyword or in `extra`."""
+    reachable from it by dropping trailing `_`, is a keyword or in `extra`, or,
+    with `temps`, an emitter temporary (`_emitter_temp`, issue #2913). No
+    fixed temporary or scaffolding name ends in `_`, so an escaped name is
+    never one (an escaped `_revl*` name stays in that namespace, ending in
+    `_`)."""
     root = name
     while root:
         if (keyword.iskeyword(root) or keyword.issoftkeyword(root)
-                or root in extra):
+                or root in extra or (temps and _emitter_temp(root))):
             return name + "_"
         if not root.endswith("_"):
             break

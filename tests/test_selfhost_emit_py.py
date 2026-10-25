@@ -125,6 +125,7 @@ CORPUS = [
     "records.rvl",     # record literal, functional record update, list literal
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
+    "emitter_temp_names.rvl",  # user locals spelled like emitter temporaries (issue #2913)
     # component/service documents (slice 2, item 185)
     "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses

@@ -181,6 +181,9 @@ extern pure fn newline() -> Str = @py { return chr(10) }
 // method's `def` (dispatched by its service-contract name) and a record field
 // annotation. `mangle_type` adds the module-scope classes the emitter writes
 // itself (`Ok`/`Err`, the router's two classes) for a type-name position.
+// With `builtins`, a name the emitter binds itself (`_EMITTER_TEMPS` and
+// `_EMITTER_TEMP_RE`: `_bi`, `_fv`, `_ov<N>`, the `_revl*` namespace, ...) is
+// lifted the same way, so a user local cannot rebind a temporary (issue #2913).
 extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py {
     import keyword
     extra = set()
@@ -194,9 +197,16 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py 
         }
     if types:
         extra |= {"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"}
+    import re
+    temps = {"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"}
+    temp_re = re.compile(
+        r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|(?i:_+revl\w*))\Z")
+    def temp(n):
+        return builtins and (n in temps or temp_re.match(n) is not None)
     root = name
     while root:
-        if keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra:
+        if (keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra
+                or temp(root)):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -2309,7 +2319,15 @@ fn cexpr(node: Any) -> Str {
     if (nm == "Some") { return "(lambda _v: _v)" }
     return mangle(nm)
   }
-  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (kind == "name") {
+    let id = value_str(value_field(node, "id"))
+    // `route_reqs` writes the proxy's final spelling into a `name` node; the
+    // reference renders it bare, and `mangle` would lift it off the `_revl*`
+    // namespace (issue #2913). No user name reaches here with that prefix: a
+    // component identifier in `_revl*` is refused.
+    if (id.startsWith("_revl_route_")) { return id }
+    return mangle(id)
+  }
   if (kind == "req") { return "_revl_ctx.".concat(value_str(value_field(node, "name"))) }
   // `config.<field>` (slice 4): a read of the resolved config dict. The field
   // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring

@@ -1,0 +1,20 @@
+// User locals spelled like python-emitter temporaries (issue #2913): each must
+// be renamed off the temporary, by the reference and the self-hosted emitter
+// alike, so the function answers 36 for x = 1.
+type P = { a: Int }
+
+fn mk(x: Int) -> P { return { a: x } }
+
+fn pick(x: Int) -> Int? {
+  if (x > 0) { return Some(x) }
+  return None
+}
+
+pub fn temps(x: Int) -> Int {
+  let _bi = 7
+  let a = x + 1
+  let _fv = 7
+  let _ov0 = 7
+  let _revl_rem = 7
+  return a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1)
+}
