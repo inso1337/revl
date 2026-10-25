@@ -17,6 +17,7 @@ the sent text (path jail, authoring gate, completer, token gate) share one
 parse of it, so a check lexes 5 times instead of 8, with the same response.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -255,8 +256,14 @@ print(json.dumps(response, sort_keys=True))
 '''
 
 
-@pytest.mark.parametrize("source", [TERSE, REFUSED, GATE_REFUSED],
-                         ids=["passing", "refused", "gate-refused"])
+# does not LEX: the jail's parse records the lex error, and the formatter's
+# token gate asks for the tokens of the same text and gets that error back
+LEX_REFUSED = "service S { fn f() -> Str { `never closed } }\n"
+
+
+@pytest.mark.parametrize("source", [TERSE, REFUSED, GATE_REFUSED, LEX_REFUSED],
+                         ids=["passing", "refused", "gate-refused",
+                              "lex-refused"])
 def test_the_full_response_is_byte_identical_without_the_share(source):
     """With the share switched off every reader parses for itself, which is the
     code path before it existed. Each side runs in a fresh process, so no
@@ -273,3 +280,118 @@ def test_the_full_response_is_byte_identical_without_the_share(source):
     if source == GATE_REFUSED:
         assert content["authoringTrust"] == "untrusted"
     assert out["shared"] == out["unshared"]
+
+
+# --- the readers really read the shared object, and only read it ------------
+
+def _entries() -> dict:
+    from revl import shared_parse  # noqa: PLC0415
+
+    return shared_parse._MEMO.get()
+
+
+def _dump(entry) -> bytes:
+    import pickle  # noqa: PLC0415
+
+    return pickle.dumps((entry.program, entry.tokens))
+
+
+def test_a_lex_failure_is_shared_with_the_token_gate(monkeypatch):
+    """`tokens()` re-raises the lex error that an earlier `program()` recorded
+    for the same text, without lexing again; the formatter's gate reads that as
+    "does not lex". The formatter's own scanner refuses such text before the
+    gate in a real check, so the gate's half is driven directly."""
+    from revl import formatter, shared_parse  # noqa: PLC0415
+
+    lexes = _count_lexes(monkeypatch)
+    with shared_parse.scope():
+        with pytest.raises(Exception) as jail:
+            shared_parse.program(LEX_REFUSED, "<candidate>.rvl")
+        assert lexes.count(LEX_REFUSED) == 1, len(lexes)
+        with pytest.raises(Exception) as gate:
+            shared_parse.tokens(LEX_REFUSED, "<candidate>.rvl")
+        assert gate.value is jail.value
+        assert formatter._token_signature(LEX_REFUSED, "<candidate>.rvl") is None
+        assert lexes.count(LEX_REFUSED) == 1, len(lexes)  # never lexed again
+
+
+@pytest.mark.parametrize("corrupt", ["program", "tokens"])
+def test_corrupting_the_shared_parse_changes_the_outcome(monkeypatch, corrupt):
+    """Positive control for the identity tests: if the readers did not read the
+    shared object, damaging it would change nothing. The first reader's result
+    is replaced in the memo; a later reader must see the damage."""
+    from revl import shared_parse  # noqa: PLC0415
+    from revl.parser import Parser  # noqa: PLC0415
+
+    source = GATE_REFUSED if corrupt == "program" else TERSE
+    clean = _call("revl_check", {"source": source})
+    benign = Parser("service Z { fn g() -> Int }\n", "z.rvl")
+    benign_program = benign.parse()
+    done = []
+    real = shared_parse.program
+
+    def corrupting(text, filename):
+        result = real(text, filename)
+        if not done:
+            done.append(True)
+            entry = _entries()[(text, filename)]
+            if corrupt == "program":
+                entry.program = benign_program
+            else:
+                entry.tokens = list(benign.toks)
+        return result
+
+    monkeypatch.setattr(shared_parse, "program", corrupting)
+    damaged = _call("revl_check", {"source": source})
+    assert done
+    assert damaged != clean, corrupt
+
+
+@pytest.mark.parametrize("source", [TERSE, REFUSED, GATE_REFUSED, LEX_REFUSED],
+                         ids=["passing", "refused", "gate-refused",
+                              "lex-refused"])
+def test_the_readers_leave_the_shared_parse_untouched(monkeypatch, source):
+    """"Read-only reader" is a convention of `shared_parse`; this enforces it.
+    A deep snapshot of each shared program and token list is taken when it is
+    first handed out and compared after every later read and at the end of the
+    call, so a reader that mutates what it was given fails here."""
+    from revl import shared_parse  # noqa: PLC0415
+
+    first: dict = {}
+    reads = []
+    real_program, real_tokens = shared_parse.program, shared_parse.tokens
+    real_scope = shared_parse.scope
+
+    def check(key):
+        entry = _entries().get(key)
+        if entry is None or not (entry.parsed or entry.tokens is not None):
+            return
+        dump = _dump(entry)
+        assert first.setdefault(key, dump) == dump, f"mutated: {key[1]}"
+        reads.append(key)
+
+    def program(text, filename):
+        try:
+            return real_program(text, filename)
+        finally:
+            check((text, filename))
+
+    def tokens(text, filename):
+        try:
+            return real_tokens(text, filename)
+        finally:
+            check((text, filename))
+
+    @contextlib.contextmanager
+    def scope():
+        with real_scope():
+            yield
+            for key in list(_entries()):
+                check(key)
+
+    monkeypatch.setattr(shared_parse, "program", program)
+    monkeypatch.setattr(shared_parse, "tokens", tokens)
+    monkeypatch.setattr(shared_parse, "scope", scope)
+    _call("revl_check", {"source": source})
+    # the sent text was read more than once, so the comparison compared something
+    assert reads.count((source, "<candidate>.rvl")) >= 2, reads

@@ -17,7 +17,8 @@ The rules that keep this an identity, not a cache:
 * Only readers that do not mutate what they are given may use it. A compile
   still makes its own parse: the compiler owns and rewrites its tree.
 * A failure is shared as well: a reader that would have raised raises the same
-  error.
+  error. Its traceback is dropped on the way out, so a later reader does not
+  see the frames of the first one.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ def scope():
 
 def program(text: str, filename: str):
     """`Parser(text, filename).parse()`, for a reader that does not mutate it.
-    Raises what that parse raises."""
+    Raises what that parse raises, without its traceback."""
     from .parser import Parser  # noqa: PLC0415 - lazy, like the readers' own imports
 
     memo = _MEMO.get()
@@ -83,7 +84,7 @@ def program(text: str, filename: str):
 
 def tokens(text: str, filename: str) -> list:
     """`lex(text, filename)`, for a reader that does not mutate the tokens.
-    Raises what that lex raises."""
+    Raises what that lex raises, without its traceback."""
     from . import lexer  # noqa: PLC0415 - looked up per call, as `lex` is
 
     memo = _MEMO.get()
