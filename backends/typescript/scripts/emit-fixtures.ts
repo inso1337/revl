@@ -9,21 +9,41 @@
 // at load time — which vitest evaluates before collection — so the file is on
 // disk in time.  See the timeout note in `vitest.config.ts` for the nested
 // `vitest run` that re-runs this.
-import { spawnSync } from 'node:child_process'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const backend = dirname(dirname(fileURLToPath(import.meta.url)))
 
-function emitFixture(fixture: string, outName: string): void {
+// Why `emit.py` did not produce a module. A failed spawn (no such interpreter)
+// has a null status and null stderr, so the spawn error is the only reason
+// there is; an `emit.py` that ran and failed has a status (or a signal) and its
+// stderr.
+export function describeEmitFailure(
+  fixture: string,
+  result: Pick<SpawnSyncReturns<string>, 'error' | 'status' | 'signal' | 'stderr'>,
+): string {
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code
+    return `could not run emit.py for ${fixture}: ${code ?? result.error.name}: ${result.error.message}`
+  }
+  const how = result.status !== null
+    ? `exit status ${result.status}`
+    : `signal ${result.signal}`
+  return `emit.py failed for ${fixture} (${how}):\n${result.stderr ?? ''}`
+}
+
+// `python` is a parameter only so a test can name an interpreter that does
+// not exist; every caller uses the default.
+export function emitFixture(fixture: string, outName: string, python = 'python3'): void {
   const result = spawnSync(
-    'python3',
+    python,
     ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
     { cwd: backend, encoding: 'utf-8' },
   )
-  if (result.status !== 0) {
-    throw new Error(`emit.py failed for ${fixture}:\n${result.stderr}`)
+  if (result.error || result.status !== 0) {
+    throw new Error(describeEmitFailure(fixture, result))
   }
   mkdirSync(join(backend, 'tests', 'generated'), { recursive: true })
   writeFileSync(join(backend, 'tests', 'generated', outName), result.stdout)
