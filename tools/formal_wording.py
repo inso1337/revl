@@ -43,7 +43,7 @@ from typing import Callable, Dict, List, Mapping, Sequence
 CODE = r"`?G\d+`?"
 CODE_GROUP = (
     CODE
-    + r"(?:(?:\s*,\s*|\s+(?:and|to|through)\s+|[-–—]\s*)"
+    + r"(?:(?:\s*,\s*(?:(?:and|to|through)\s+)?|\s+(?:and|to|through)\s+|[-–—]\s*)"
     + CODE
     + r")*"
 )
@@ -90,29 +90,58 @@ def ledger_summary(statuses: Statuses) -> str:
 # --------------------------------------------------------------------------
 # What makes a phrasing true. `codes` is what the match named (may be empty).
 # --------------------------------------------------------------------------
-def _every_named_code_is_full(codes: Sequence[str], statuses: Statuses) -> bool:
-    return bool(codes) and all(statuses.get(c) == "full" for c in codes)
+@dataclass(frozen=True)
+class Ledger:
+    """What the phrasings are judged against: the numbered rows' normalized
+    statuses, and whether any row at all (numbered or not) states UNPROVED.
+
+    The second field exists because a ledger can carry an UNPROVED row that is
+    not a numbered guarantee: before issue #2108 G9's path coverage was its own
+    row, while the numbered G9 row read `partial`."""
+    statuses: Statuses
+    unproved_row: bool = False
 
 
-def _all_numbered_rows_are_full(codes: Sequence[str], statuses: Statuses) -> bool:
-    return bool(statuses) and all(v == "full" for v in statuses.values())
+def unproved_row_in(ledger_text: str) -> bool:
+    """True when any table cell of the ledger starts with UNPROVED."""
+    for line in ledger_text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        for cell in line.strip().strip("|").split("|"):
+            if cell.strip().strip("*").strip().lower().startswith("unproved"):
+                return True
+    return False
+
+
+def _every_named_code_is_full(codes: Sequence[str], ledger: Ledger) -> bool:
+    return bool(codes) and all(ledger.statuses.get(c) == "full" for c in codes)
+
+
+def _all_numbered_rows_are_full(codes: Sequence[str], ledger: Ledger) -> bool:
+    return bool(ledger.statuses) and all(
+        v == "full" for v in ledger.statuses.values())
 
 
 def _named_codes_are_exactly_the_full_rows(
-    codes: Sequence[str], statuses: Statuses
+    codes: Sequence[str], ledger: Ledger
 ) -> bool:
-    return set(codes) == {c for c, v in statuses.items() if v == "full"}
+    return set(codes) == {c for c, v in ledger.statuses.items() if v == "full"}
 
 
-def _every_named_code_is_unproved(codes: Sequence[str], statuses: Statuses) -> bool:
-    return bool(codes) and all(statuses.get(c) == "unproved" for c in codes)
+def _every_named_code_is_not_full(codes: Sequence[str], ledger: Ledger) -> bool:
+    """A coverage-unproved sentence is true while the guarantee is not `full`:
+    its numbered row reads `partial` when the rule is proved and the coverage
+    is not, so `unproved` coverage never shows as an `unproved` numbered row."""
+    return bool(codes) and all(
+        c in ledger.statuses and ledger.statuses[c] != "full" for c in codes)
 
 
-def _some_row_is_unproved(codes: Sequence[str], statuses: Statuses) -> bool:
-    return any(v == "unproved" for v in statuses.values())
+def _some_row_is_unproved(codes: Sequence[str], ledger: Ledger) -> bool:
+    return ledger.unproved_row or any(
+        v == "unproved" for v in ledger.statuses.values())
 
 
-def _never(codes: Sequence[str], statuses: Statuses) -> bool:
+def _never(codes: Sequence[str], ledger: Ledger) -> bool:
     return False
 
 
@@ -120,15 +149,26 @@ def _never(codes: Sequence[str], statuses: Statuses) -> bool:
 class Phrasing:
     key: str
     pattern: "re.Pattern[str]"
-    holds: Callable[[Sequence[str], Statuses], bool]
+    holds: Callable[[Sequence[str], Ledger], bool]
     example: str          # a sentence this entry refuses (the "do not say")
     say_instead: str      # the wording to use instead
     refused_when: str     # one line: when the phrasing is wrong
 
 
+# "Proved" in the sense of a proof. Plain "verified" and "checked" are not
+# here: they also say "verified at compile time" or "checked by the checker",
+# which are claims about the compiler's own checks. "verified" counts only
+# after formally / mechanically / machine.
+_STRONG = r"(?:formally|mechanically|mechani[sz]ed|machine)[\s-]+"
 _PROVED_WORD = (
-    r"(?:(?:fully|formally|mechani[sz]ed|machine-checked)\s+)*"
-    r"(?:proved|proven|verified|machine-checked)"
+    r"(?:(?:fully|completely|rigorously|entirely|now|also)\s+)*"
+    r"(?:" + _STRONG + r"(?:proved|proven|verified|checked)"
+    r"|proved|proven|machine-checked|mechani[sz]ed)"
+)
+# The words between a subject and its predicate.
+_AUX = (
+    r"(?:(?:are|is|was|were|be|been|has|have|had|remain|remains|stay|stays|"
+    r"also|all|now|already|still|currently)\s+)*"
 )
 
 PHRASINGS: Sequence[Phrasing] = (
@@ -136,8 +176,7 @@ PHRASINGS: Sequence[Phrasing] = (
         key="proved-synonym",
         pattern=re.compile(
             r"(?P<codes>" + CODE_GROUP + r")"
-            r"\s+(?:(?:are|is|remain|remains|stay|stays|also|all|now|already|"
-            r"still)\s+)*" + _PROVED_WORD + r"(?![A-Za-z0-9_-])",
+            r"\s+" + _AUX + _PROVED_WORD + r"(?![A-Za-z0-9_-])",
             re.IGNORECASE),
         holds=_every_named_code_is_full,
         example="G1 is proved in Lean.",
@@ -150,10 +189,9 @@ PHRASINGS: Sequence[Phrasing] = (
     Phrasing(
         key="all-guarantees-proved",
         pattern=re.compile(
-            r"\b(?:all|every(?:\s+one\s+of)?)\s+(?:of\s+)?(?:the\s+)?"
-            r"(?:(?:nine|9)\s+)?(?:gate\s+)?guarantees?\s+"
-            r"(?:are|is|has\s+been|have\s+been)\s+(?:now\s+)?"
-            r"(?:`?full`?|" + _PROVED_WORD + r")(?![A-Za-z0-9_-])",
+            r"\b(?:all|every|each)(?:\s+one)?(?:\s+of)?\s+(?:the\s+)?"
+            r"(?:(?:nine|9)(?:\s+(?:gate\s+)?guarantees?)?|(?:gate\s+)?guarantees?)"
+            r"\s+" + _AUX + r"(?:`?full`?|" + _PROVED_WORD + r")(?![A-Za-z0-9_-])",
             re.IGNORECASE),
         holds=_all_numbered_rows_are_full,
         example="All nine guarantees are proved.",
@@ -165,7 +203,7 @@ PHRASINGS: Sequence[Phrasing] = (
     Phrasing(
         key="only-these-are-full",
         pattern=re.compile(
-            r"\bonly\s+(?P<codes>" + CODE_GROUP + r")\s+(?:are|is)\s+"
+            r"\bonly\s+(?P<codes>" + CODE_GROUP + r")\s+" + _AUX +
             r"(?:`?full`?|" + _PROVED_WORD + r")(?![A-Za-z0-9_-])",
             re.IGNORECASE),
         holds=_named_codes_are_exactly_the_full_rows,
@@ -178,16 +216,16 @@ PHRASINGS: Sequence[Phrasing] = (
     Phrasing(
         key="coverage-unproved",
         pattern=re.compile(
-            r"(?P<codes>G\d+)['’]s\s+(?:path\s+)?coverage\s+"
-            r"(?:is|remains|stays)\s+(?:still\s+)?(?:the\s+one\s+)?"
-            r"`?(?:unproved|not\s+proved)`?(?![A-Za-z0-9_-])",
+            r"(?P<codes>G\d+)(?:['’]s)?\s+(?:path\s+)?coverage\s+"
+            r"(?:is|remains|stays|was)\s+(?:still\s+)?(?:the\s+one\s+)?"
+            r"`?(?:unproved|not\s+(?:yet\s+)?proved)`?(?![A-Za-z0-9_-])",
             re.IGNORECASE),
-        holds=_every_named_code_is_unproved,
+        holds=_every_named_code_is_not_full,
         example="G9's coverage is unproved.",
         say_instead=(
             "State the row as the ledger does, including what the row covers "
             "(the rule, the coverage of the walk)."),
-        refused_when="the named guarantee is not `unproved` in formal/STATUS.md",
+        refused_when="the named guarantee is `full` in formal/STATUS.md",
     ),
     Phrasing(
         key="unproved-row",
@@ -199,15 +237,14 @@ PHRASINGS: Sequence[Phrasing] = (
         say_instead=(
             "Do not count unproved rows in prose; say which rows are `partial` "
             "(from the ledger) and point to formal/STATUS.md."),
-        refused_when="no numbered row is `unproved` in formal/STATUS.md",
+        refused_when="no row of formal/STATUS.md, numbered or not, is UNPROVED",
     ),
     Phrasing(
         key="compiler-verified",
         pattern=re.compile(
-            r"\b(?:the\s+(?:revl\s+)?compiler\s+(?:is|has\s+been)\s+"
-            r"(?:formally\s+|fully\s+|mechani[sz]ed\s+)?(?:proved|proven|verified)"
-            r"(?:\s+correct)?|formally\s+verified\s+compiler|"
-            r"(?:proved|proven|verified)[-\s]correct\s+compiler)"
+            r"\b(?:compiler\s+" + _AUX + _PROVED_WORD + r"(?:\s+correct)?"
+            r"|" + _STRONG + r"(?:proved|proven|verified)\s+compiler"
+            r"|(?:proved|proven|verified)[-\s]correct\s+compiler)"
             r"(?![A-Za-z0-9_-])",
             re.IGNORECASE),
         holds=_never,
@@ -217,6 +254,19 @@ PHRASINGS: Sequence[Phrasing] = (
             "judgment, and a differential oracle compares that model with the "
             "shipped checker on a corpus. Say that, and link formal/STATUS.md."),
         refused_when="always: no proof covers the compiler itself",
+    ),
+    Phrasing(
+        key="ledger-count-in-prose",
+        pattern=re.compile(
+            r"\b\d[\d,]*\s+(?:Lean\s+)?(?:theorems?|oracle\s+rows?|"
+            r"differential\s+rows?|corpus\s+rows?)\b",
+            re.IGNORECASE),
+        holds=_never,
+        example="The ledger records 182 oracle rows.",
+        say_instead=(
+            "Do not copy theorem or oracle-row totals into prose, they change "
+            "with every formal landing. Point to formal/STATUS.md."),
+        refused_when="always: the total belongs to the ledger, not to prose",
     ),
 )
 

@@ -64,9 +64,10 @@ does not support it.
 | "G1 is proved in Lean." | Use the status word the ledger records for that code, with the granularity its row states, and point to formal/STATUS.md for the row's scope. | a named guarantee is not `full` in formal/STATUS.md |
 | "All nine guarantees are proved." | Name the rows by status as the ledger records them (the Formal status column above), each at the granularity its row states. | any numbered row (G1 to G9) is not `full` |
 | "Only G2, G3 and G7 are full." | Say which rows are `full` and which are not, from the ledger, instead of an "only" list that drifts when a row lands. | the codes named are not exactly the `full` rows |
-| "G9's coverage is unproved." | State the row as the ledger does, including what the row covers (the rule, the coverage of the walk). | the named guarantee is not `unproved` in formal/STATUS.md |
-| "Path coverage is the one UNPROVED row." | Do not count unproved rows in prose; say which rows are `partial` (from the ledger) and point to formal/STATUS.md. | no numbered row is `unproved` in formal/STATUS.md |
+| "G9's coverage is unproved." | State the row as the ledger does, including what the row covers (the rule, the coverage of the walk). | the named guarantee is `full` in formal/STATUS.md |
+| "Path coverage is the one UNPROVED row." | Do not count unproved rows in prose; say which rows are `partial` (from the ledger) and point to formal/STATUS.md. | no row of formal/STATUS.md, numbered or not, is UNPROVED |
 | "The compiler is formally verified." | The Lean layer proves statements about a model of the admission judgment, and a differential oracle compares that model with the shipped checker on a corpus. Say that, and link formal/STATUS.md. | always: no proof covers the compiler itself |
+| "The ledger records 182 oracle rows." | Do not copy theorem or oracle-row totals into prose, they change with every formal landing. Point to formal/STATUS.md. | always: the total belongs to the ledger, not to prose |
 <!-- docgen:formal-wording end -->
 
 ## Ordering and async rules (the A family)

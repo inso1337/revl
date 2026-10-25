@@ -561,3 +561,123 @@ def test_the_rendered_table_is_the_docgen_block_and_is_current():
     text = (ROOT / "docs" / "guarantees.md").read_text(encoding="utf-8")
     assert docgen.extract(text, "formal-wording").strip("\n") == \
         formal_wording.render_table().strip("\n")
+
+
+# --------------------------------------------------------------------------
+# (formal-wording) Review follow-ups: history, list syntax, rewordings, and
+# the sentences that must keep passing.
+# --------------------------------------------------------------------------
+_HISTORICAL_LEDGER = """## What the layer covers, and what it does not
+
+| Code | Formal status | Theorems | Oracle | Gap |
+|---|---|---|---|---|
+| **G1** declared access | partial | 1 | no | gap |
+| **G2** disjointness | full | 1 | no | gap |
+| **G3** acyclic | full | 1 | no | gap |
+| **G4** inverse | full over the lattice | 1 | no | gap |
+| **G5** teardown | full over the lattice | 1 | no | gap |
+| **G6** confinement | full at head granularity | 1 | no | gap |
+| **G7** teardown order | full | 1 | no | gap |
+| **G8** boundary | full over the lattice | 1 | no | gap |
+| **G9** taint | rule proved; **coverage unproved and unstatable** | 18 | no | gap |
+
+## The guarantee set
+
+| Code | Attested | Status | Theorems | Note |
+|---|---|---|---|---|
+| **G9 \u2014 path coverage** | G9 | **UNPROVED, unstatable** | \u2014 | see G9 |
+"""
+
+_SENTENCES_TRUE_IN_HISTORY = (
+    "G9's coverage is the one UNPROVED row.",
+    "G9's coverage is unproved.",
+)
+
+
+def _history_tree(tree: claims.Tree, ledger: str) -> claims.Tree:
+    (tree.root / "formal/STATUS.md").write_text(ledger, encoding="utf-8")
+    return tree
+
+
+def test_the_then_true_unproved_sentences_pass_against_the_historical_ledger(tree):
+    """Before issue #2108 the numbered G9 row read `partial` and the coverage
+    was a separate UNPROVED row. Both sentences were true then."""
+    tree = _history_tree(tree, _HISTORICAL_LEDGER)
+    for sentence in _SENTENCES_TRUE_IN_HISTORY:
+        _silent(sentence, tree, "formal-wording")
+
+
+def test_the_same_sentences_are_refused_against_the_current_shape(tree):
+    for sentence in _SENTENCES_TRUE_IN_HISTORY:
+        assert _findings(sentence, tree, "formal-wording"), sentence
+
+
+def test_the_then_true_sentences_pass_against_the_real_historical_ledger(tmp_path):
+    """The same check against the actual file at the commit before the
+    coverage landed, when the repository history has it."""
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "show", "680ddc334^:formal/STATUS.md"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip("commit 680ddc334 is not in this clone")
+    (tmp_path / "formal").mkdir()
+    (tmp_path / "formal/STATUS.md").write_text(proc.stdout, encoding="utf-8")
+    historical = claims.Tree(tmp_path, ["formal/STATUS.md"])
+    for sentence in _SENTENCES_TRUE_IN_HISTORY:
+        _, findings = gate.run(sentence, historical, ["formal-wording"])
+        assert findings == [], (sentence, findings)
+
+
+def test_an_oxford_comma_list_is_still_one_group(tree):
+    """`Only G2, G3, and G7 are full.` named only G7 before the separator took
+    the optional `and`."""
+    findings = _findings("Only G2, G3, and G7 are full.", tree, "formal-wording")
+    assert [c.key for c, _ in findings] == ["only-these-are-full|G2,G3,G7"]
+
+
+def test_an_oxford_list_with_a_partial_member_reports_that_member(tree):
+    findings = _findings("G1, G6, and G9 are proved.", tree, "formal-wording")
+    assert [c.key for c, _ in findings] == ["proved-synonym|G1,G6,G9"]
+    assert "G1 partial" in findings[0][1]
+
+
+def test_formal_status_reads_an_oxford_comma_list(tree):
+    findings = _findings("G1, G6, and G9 are `partial`.", tree, "formal-status")
+    assert sorted(c.key for c, _ in findings) == ["G6=partial", "G9=partial"]
+
+
+@pytest.mark.parametrize("sentence, key", [
+    ("G1 has been proved.", "proved-synonym"),
+    ("G1 is mechanically proved.", "proved-synonym"),
+    ("G1 is now fully proven in Lean.", "proved-synonym"),
+    ("G1 is machine-checked.", "proved-synonym"),
+    ("All nine are proved.", "all-guarantees-proved"),
+    ("Each guarantee is proved.", "all-guarantees-proved"),
+    ("Every guarantee has been mechanically proved.", "all-guarantees-proved"),
+    ("G9 coverage is unproved.", "coverage-unproved"),
+    ("G9's coverage is not yet proved.", "coverage-unproved"),
+    ("G9 coverage remains unproved.", "coverage-unproved"),
+    ("revl's compiler is formally verified.", "compiler-verified"),
+    ("The revl compiler has been proved correct.", "compiler-verified"),
+    ("revl is a formally verified compiler.", "compiler-verified"),
+    ("The ledger has 182 oracle rows.", "ledger-count-in-prose"),
+    ("It carries 2,317 theorems.", "ledger-count-in-prose"),
+])
+def test_each_rewording_the_review_found_is_refused(tree, sentence, key):
+    findings = _findings(sentence, tree, "formal-wording")
+    assert [c.key.split("|")[0] for c, _ in findings] == [key], findings
+
+
+@pytest.mark.parametrize("sentence", [
+    "G1 is verified at compile time.",
+    "G1 is verified by the checker.",
+    "G1 is checked by a test.",
+    "G1 is verified by a test on every build.",
+    "The compiler is checked against the model by a differential oracle.",
+    "The compiler is verified by the conformance matrix.",
+    "Each guarantee is checked at compile time.",
+    "G1 is `partial`: see formal/STATUS.md for the theorem and oracle counts.",
+])
+def test_testing_sense_verified_and_checked_sentences_pass(tree, sentence):
+    _silent(sentence, tree, "formal-wording")

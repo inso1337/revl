@@ -522,7 +522,9 @@ def judge_formal_wording(claim: "claims.Claim", tree: "claims.Tree") -> Optional
             statuses[code] = "full" if recorded == cert.PROVED else recorded
     except cert.CertError as exc:
         return "cannot read the status in `formal/STATUS.md`: %s" % exc
-    if phrasing.holds(codes, statuses):
+    ledger = formal_wording.Ledger(
+        statuses, formal_wording.unproved_row_in(tree.text("formal/STATUS.md")))
+    if phrasing.holds(codes, ledger):
         return None
     return "do not say this (%s: refused when %s). Say instead: %s [ledger now: %s]" % (
         phrasing.key, phrasing.refused_when, phrasing.say_instead,
