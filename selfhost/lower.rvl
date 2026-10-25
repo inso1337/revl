@@ -1347,6 +1347,16 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // `await` marker (`aw`). Replaces the free-standing `await` marker statement:
 // the marker belongs to the acquisition/emission it pairs with, not the
 // position after it, so per-statement pairing can read it directly.
+// A statement carrying a `subscribe` head. Its `edge` (read only on an `emit`
+// otherwise) marks it, because the head reads as an ordinary expression here
+// while the reference reads its `.filter(f).map(g)` chain as `StreamStage`s,
+// never as verb calls on the stream's host local (issue #2569).
+fn sub_head_stmt(s: Stmt) -> Stmt {
+  return { kind: s.kind, e: s.e, bind: s.bind, spawnTarget: s.spawnTarget,
+           awaited: s.awaited, line: s.line, inTimer: s.inTimer,
+           bindTy: s.bindTy, edge: "subscribe" }
+}
+
 fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool, ty: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0,
            inTimer: false, bindTy: ty, edge: "" }
@@ -1660,10 +1670,10 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
         return mk_srun([mkstmt("skip", int_lit0())], hi)
       }
       let q = skip_sub_quals(ts, sh.i, hi)
-      var subs: List[Stmt] = [mkstmt_aw("effect", sh.es[0], bn, false, "")]
+      var subs: List[Stmt] = [sub_head_stmt(mkstmt_aw("effect", sh.es[0], bn, false, ""))]
       var si = 1
       while (si < sh.es.length()) {
-        subs = subs.push(mkstmt("expr", sh.es[si]))
+        subs = subs.push(sub_head_stmt(mkstmt("expr", sh.es[si])))
         si += 1
       }
       if (atw(ts, q, "undo")) {
@@ -4885,7 +4895,8 @@ fn release_msg_at(ss: List[Stmt], i: Int, cx: Ctx, seam: Bool) -> Str {
   // a verb the family does not have, or a wrong arity, on the bound handle:
   // the reference refuses it while it lowers the undo (HOST-METHOD /
   // HOST-ARITY), before this rule is reached, and this gate does not judge
-  // the host surface in a teardown slot, so it leaves that program alone
+  // the host surface in a teardown slot, so it leaves that program to the
+  // type layer's `hv_node` (issue #2569)
   if (off_surface_on(ss[i].e, bind, hf.slice(0, hf.indexOf(".")))) { return "" }
   return host_release_msg(bind, hf, release)
 }
@@ -7541,7 +7552,9 @@ fn ct_inits(xs: List[InitN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
 
 fn ct_arms(xs: List[ArmN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
   if (i >= xs.length()) { return "" }
-  let v = ct_scan(xs[i].body, cx, env)
+  // a binder shadows a same-named host local (issue #2569)
+  let inner = xs[i].bind == "" ? env : hv_shadow(env, [xs[i].bind])
+  let v = ct_scan(xs[i].body, cx, inner)
   if (v != "") { return v }
   return ct_arms(xs, i + 1, cx, env)
 }
@@ -7569,6 +7582,9 @@ fn ct_call(c: CallN, cx: Ctx, env: List[Bind]) -> Str {
                     env, 0)
     if (v != "") { return v }
   }
+  // issue #2569: a verb on a host local, judged at the same point
+  let hv = decl.name == "" ? hv_node(c, env) : ""
+  if (hv != "") { return hv }
   return ct_scan(c.target, cx, env)
 }
 
@@ -7660,6 +7676,113 @@ fn vm_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
 fn value_method_head(h: Str) -> Bool {
   return h == "List" || h == "Str" || h == "Bytes"
     || h == "Int" || h == "Int32" || h == "Float" || h == "Bool" || h == "Map"
+}
+
+// ---- a verb on a host local (item 401, issue #2491, issue #2569) ----------
+//
+// `lower._check_host_verb`: a verb call on a name bound to a host acquisition
+// (`let pool = effect Pool.open("db", 4) undo pool.close()`, then
+// `pool.query(1)` in the activation body or a provide method) is held to the
+// family's stub surface while the statement is lowered: HOST-METHOD for a verb
+// off the surface, HOST-ARITY for a wrong count, and the T1 `host_family_check`
+// gives a constructor-tracked receiver in a fn body for a wrong argument type.
+// The reference raises it from `_lower_postfix` and
+// `_lower_component_pure_expr` once the call's arguments are lowered, on every
+// statement kind, which is where it raises a requirement call's argument rule
+// (`_component_req_call`) too. So `ct_call` asks it, and the two interleave in
+// source order through the one `ct_scan` walk.
+//
+// The type env carries the host locals as `host <name>` rows naming the
+// family (the reference's `env.host_locals`); a later binder of the same name
+// (a `let`, a provide-method parameter, a match arm's binder) writes an empty
+// row, which shadows it. An arrow's parameter does NOT: the reference judges
+// `(pool) => pool.length()` as a verb on the component's `pool` (measured).
+// A `subscribe` head is not judged at all (`hv_off`): its stages are not verb
+// calls, and a host-verb call inside a stage's arrow goes unjudged with them.
+// A subscription local (the `Subscription` family) is not tracked.
+fn hv_family(s: Stmt) -> Str {
+  if (s.kind != "effect" || s.bind == "" || s.edge == "subscribe") { return "" }
+  return match s.e {
+    Call(c) => match c.target {
+      // a stub verb of the root's family: `Map.empty()` is a value literal
+      // (a `maplit`), never a host acquisition
+      Field(fl) => match fl.target {
+        Var(v) => is_host_root(v) && contains(tk_host_verbs(v), fl.name) ? v : "",
+        _ => "",
+      },
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+fn hv_bind(env: List[Bind], s: Stmt) -> List[Bind] {
+  if (s.bind == "") { return env }
+  return tenv_put(env, "host ".concat(s.bind), hv_family(s))
+}
+
+fn hv_shadow(env: List[Bind], names: List[Str]) -> List[Bind] {
+  var out = env
+  var i = 0
+  while (i < names.length()) {
+    out = tenv_put(out, "host ".concat(names[i]), "")
+    i += 1
+  }
+  return out
+}
+
+// The family of the host local `v` names, or "" (no row, a shadowing row, or
+// a `subscribe` head's statement, which `hv_off` marks).
+fn hv_fam(env: List[Bind], v: Str) -> Str {
+  if (tenv_get(env, "host-off") == "1") { return "" }
+  return tenv_get(env, "host ".concat(v))
+}
+
+fn hv_off(env: List[Bind]) -> List[Bind] { return tenv_put(env, "host-off", "1") }
+
+// The verdict on the call node itself, its arguments already judged. Only the
+// FIRST verb off the host local is judged: a host verb's result is opaque, so
+// a chained call reads no family.
+fn hv_node(c: CallN, env: List[Bind]) -> Str {
+  let fam = match c.target {
+    Field(f) => match f.target { Var(v) => hv_fam(env, v), _ => "", },
+    _ => "",
+  }
+  if (fam == "") { return "" }
+  let verb = match c.target { Field(f) => f.name, _ => "", }
+  return hv_check(fam, verb, hv_arg_tys(fam, c.args, 0, env, []))
+}
+
+// `_host_arg_types`: a host Map's arguments are not compared (its key and
+// value types are the resource's own), and an argument whose inference
+// refuses is left uncompared, as one whose type is unknown is.
+fn hv_arg_tys(fam: Str, args: List[Expr], i: Int, env: List[Bind],
+              acc: List[Str]) -> List[Str] {
+  if (i >= args.length()) { return acc }
+  let r = fam == "Map" ? tk_ok("") : tk_infer(args[i], env)
+  return hv_arg_tys(fam, args, i + 1, env, acc.push(r.v == "" ? r.ty : ""))
+}
+
+// `_check_host_verb` over `_HOST_MAP_ITER_VERBS`: a host Map also answers
+// `size` and `keys`, held to their count only, and its HOST-METHOD surface
+// lists them.
+fn hv_check(fam: Str, verb: Str, argTys: List[Str]) -> Str {
+  let iter = fam == "Map" ? ["keys", "size"] : []
+  if (contains(tk_host_verbs(fam), verb)) {
+    return tk_host_family_check(fam, verb, argTys).v
+  }
+  if (!contains(iter, verb)) {
+    let surface = fam == "Map"
+      ? ["drop", "get", "insert", "insert_if_absent", "keys", "new", "remove", "size"]
+      : tk_host_verbs(fam)
+    return tagged("HOST-METHOD", "`".concat(fam).concat("` has no method `")
+      .concat(verb).concat("` (its surface: ").concat(surface.join(", ")).concat(")"))
+  }
+  if (argTys.length() != 0) {
+    return tagged("HOST-ARITY", "host `".concat(fam).concat(".").concat(verb)
+      .concat("` takes 0 arguments, got ").concat(argTys.length().to_str()))
+  }
+  return ""
 }
 
 fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
@@ -7810,7 +7933,7 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
   // `ct_scan` runs over all of them.
   let r = ct_swept(s) ? tk_infer(s.e, env) : tk_ok("")
   if (r.v != "") { return mk_verd(r.v, ln) }
-  let rq = ct_scan(s.e, cx, env)
+  let rq = ct_scan(s.e, cx, s.edge == "subscribe" ? hv_off(env) : env)
   if (rq != "") { return mk_verd(rq, ln) }
   var next = env
   if (s.bind != "") {
@@ -7822,6 +7945,7 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
     if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
     if (bound == "" && !ct_crossing(s)) { bound = r.ty }
     if (bound != "") { next = tenv_put(env, s.bind, bound) }
+    next = hv_bind(next, s)
   }
   return mth_type_verdict(body, i + 1, next, cx, ret, mname, fallback)
 }
@@ -7899,7 +8023,7 @@ fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind
   if (bound == "") { bound = tk_solid(ct_stmt_req_ret(s.e, cx), env) }
   if (bound == "" && ct_swept(s)) { bound = tk_infer(s.e, env).ty }
   return mth_body_tys(body, i + 1,
-                      bound == "" ? env : tenv_put(env, s.bind, bound), cx)
+                      hv_bind(bound == "" ? env : tenv_put(env, s.bind, bound), s), cx)
 }
 
 // The method's parameters at the types the SERVICE declares, over the
@@ -8892,7 +9016,17 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // reference lowers setup first and restores to that map after each method.
   let setupTv = mth_type_verdict(comp.setup, 0, ir_stratum_env(gtys), scx,
                                  "", "", comp.line)
-  if (setupTv.v != "") { return setupTv }
+  if (setupTv.v != "") {
+    // the per-statement A1 rules below are raised while the statements are
+    // lowered too, so an A1 statement EARLIER than the type verdict wins
+    // (`let pool = effect await Pool.open(..)` ahead of `pool.frob()`)
+    let eA1 = stmt_a1_verdict(comp, comp.setup, 0, scx)
+    let eLn = stmt_a1_line(comp, comp.setup, 0, scx)
+    if (eA1 != "" && eLn != 0 && eLn < setupTv.line) {
+      return mk_verd(tagged("A1", eA1), eLn)
+    }
+    return setupTv
+  }
   let setupTys = mth_body_tys(comp.setup, 0, ir_stratum_env(gtys), scx)
   // rule C1 on the component lowering path (`_assert_colour_is_positional`): a
   // self-declared arrow colour in setup is refused as it is anywhere else.
@@ -8953,8 +9087,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // walk is the one that runs in statement order; a body carrying both a
       // wiring verdict and a type one reports the wiring verdict, which is the
       // under-refusing direction.
+      // a parameter shadows a same-named host local of the activation body
       let mtv = mth_type_verdict(arrow_typed_body(pm), 0,
-                                 ct_req_ret_rows(mcx, mth_param_tys(pm, decl, 0, setupTys)), mcx,
+                                 hv_shadow(ct_req_ret_rows(mcx, mth_param_tys(pm, decl, 0, setupTys)),
+                                           pm.params), mcx,
                                  tk_solid(taint_strip(decl.ret), gtys), pm.name,
                                  comp.line)
       if (mtv.v != "") { return mtv }
