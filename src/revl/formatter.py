@@ -653,10 +653,13 @@ def _token_signature(source: str, filename: str):
     Returns None when *source* does not lex, which the gate treats as a
     refusal rather than as an excuse to skip the check.
     """
-    from .lexer import lex
+    from . import shared_parse
 
     try:
-        return [(token.kind, token.value) for token in lex(source, filename)]
+        # issue #2194: inside one MCP tool call, the tokens a read-only reader
+        # of the same text already has; otherwise `lex(source, filename)`
+        return [(token.kind, token.value)
+                for token in shared_parse.tokens(source, filename)]
     except RevlError:
         return None
     except Exception:  # pragma: no cover - defensive

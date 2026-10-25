@@ -13,6 +13,9 @@ main source without them) and no operator providers or realm bindings. The
 other shapes keep the plain path, and the report must be identical to it.
 """
 
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -143,3 +146,117 @@ def test_the_profile_does_not_change_the_compiled_document():
         source, "<candidate>.rvl",
         profile=AdmissionProfile.untrusted_author((), ()))
     assert _canonical_ir(plain) == _canonical_ir(profiled)
+
+
+# --- the lexer: one parse per text for the call's read-only readers ---------
+#
+# Before compiling, a check parsed the text it was sent three times (the path
+# jail, the authoring gate and the completer), and the formatter's token gate
+# lexed it once more. Those four readers only look, so inside one tool call
+# they share one parse (`revl.shared_parse`). A compile still parses for
+# itself, and the formatted text is a different text.
+
+REFUSED = "component X { fn }"
+
+
+def _count_lexes(monkeypatch) -> list:
+    """Every `lex` call, under whatever name a module bound it: the parser
+    binds it at import, the formatter and `shared_parse` look it up per call."""
+    import revl.lexer as lexer  # noqa: PLC0415
+
+    calls = []
+    real = lexer.lex
+
+    def counting(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("source"))
+        return real(*args, **kwargs)
+
+    for name, module in list(sys.modules.items()):
+        if (name == "revl" or name.startswith("revl.")) and \
+                getattr(module, "lex", None) is real:
+            monkeypatch.setattr(module, "lex", counting)
+    return calls
+
+
+def test_a_passing_check_lexes_the_sent_text_three_times_not_six(monkeypatch):
+    formatted = canonical.canonicalise(TERSE).text
+    compiles = _count_compiles(monkeypatch)
+    lexes = _count_lexes(monkeypatch)
+    result = _call("revl_check", {"source": TERSE})
+    assert result["ok"] is True
+    assert len(compiles) == 2, compiles
+    # the shared read-only parse, the check's compile, the knowledge index
+    assert lexes.count(TERSE) == 3, len(lexes)     # was 6
+    # the token gate, the gate's compile
+    assert lexes.count(formatted) == 2, len(lexes)
+    assert len(lexes) == 5, len(lexes)             # was 8
+
+
+def test_a_refused_check_lexes_the_sent_text_four_times_not_seven(monkeypatch):
+    compiles = _count_compiles(monkeypatch)
+    lexes = _count_lexes(monkeypatch)
+    result = _call("revl_check", {"source": REFUSED})
+    assert result["ok"] is False
+    assert len(compiles) == 3, compiles
+    assert lexes.count(REFUSED) == 4, len(lexes)   # was 7
+    assert len(lexes) == 6, len(lexes)             # was 9
+
+
+def test_nothing_is_shared_across_calls(monkeypatch):
+    """The share ends with the call: the same text sent twice is lexed as
+    often the second time as the first."""
+    lexes = _count_lexes(monkeypatch)
+    _call("revl_check", {"source": TERSE})
+    first = len(lexes)
+    _call("revl_check", {"source": TERSE})
+    assert first == 5
+    assert len(lexes) == 2 * first
+
+
+def test_outside_a_tool_call_every_parse_is_fresh():
+    from revl import shared_parse  # noqa: PLC0415
+
+    assert shared_parse.program(TERSE, "x.rvl") is not \
+        shared_parse.program(TERSE, "x.rvl")
+    with shared_parse.scope():
+        once = shared_parse.program(TERSE, "x.rvl")
+        assert shared_parse.program(TERSE, "x.rvl") is once
+        assert shared_parse.program(TERSE, "y.rvl") is not once  # same text only
+        with pytest.raises(Exception) as first:
+            shared_parse.program(REFUSED, "x.rvl")
+        with pytest.raises(Exception) as again:
+            shared_parse.program(REFUSED, "x.rvl")
+        assert again.value is first.value         # the failure is shared too
+    assert shared_parse.program(TERSE, "x.rvl") is not once
+
+
+_RESPONSE = r'''
+import contextlib, json, os, sys, tempfile
+os.chdir(tempfile.mkdtemp())
+from revl import shared_parse
+if sys.argv[1] == "unshared":
+    shared_parse.scope = contextlib.nullcontext
+from revl.mcp import server
+server.set_authoring_trust(roots=(os.getcwd(),))
+response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "revl_check",
+                                     "arguments": {"source": sys.argv[2]}}})
+print(json.dumps(response, sort_keys=True))
+'''
+
+
+@pytest.mark.parametrize("source", [TERSE, REFUSED], ids=["passing", "refused"])
+def test_the_full_response_is_byte_identical_without_the_share(source):
+    """With the share switched off every reader parses for itself, which is the
+    code path before it existed. Each side runs in a fresh process, so no
+    session state from one reaches the other."""
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    out = {}
+    for mode in ("unshared", "shared"):
+        done = subprocess.run([sys.executable, "-c", _RESPONSE, mode, source],
+                              capture_output=True, text=True, env=env,
+                              check=True)
+        out[mode] = done.stdout
+    assert json.loads(out["shared"])["result"]["structuredContent"]["ok"] is \
+        (source == TERSE)
+    assert out["shared"] == out["unshared"]
