@@ -400,6 +400,8 @@ JAVA_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
     "lists.rvl", "maps.rvl", "records.rvl", "adts.rvl", "optmatch.rvl",
     "match_ignored.rvl", "float_numeric.rvl",
+    # issue #2325: the diamond on a generic record literal and its raw fallbacks
+    "generic_records.rvl",
     # item 391: the branch/value shapes `selfhost/lower.rvl` did not read — the
     # block-bodied `if` in value position, the empty template, the token-level
     # record-update as a `return` rvalue — so this document was a lower.rvl gap
@@ -972,7 +974,7 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
     assert "body" in ref["components"][0]
 
     refusal = (
-        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 3 "
+        "REFUSED|UNSUPPORTED|component `C`: the body statement at line 6 "
         "is not supported by the self-host compiler, which would emit the "
         "component without its body.")
     got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
@@ -983,7 +985,36 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert "body" not in native
-    assert native["unlowered"] == "the body step starting at line 3"
+    assert native["unlowered"] == "the body statement at line 6"
+
+
+def test_a_bodyless_component_refusal_names_the_inner_statement(
+        compile_to, lower_to_ir):
+    """The refusal names the statement inside the provide method that stopped
+    the producer, not the `provide` step around it. Where the reference refuses
+    that statement itself (the case-arity document `provide_block_body`), the
+    native refusal carries the reference's own line; where the reference lowers
+    it (the one-line block arm), the line is the `let` holding that arm."""
+    arity = load_by_path("test_case_call_arity",
+                         ROOT / "tests" / "test_case_call_arity.py")
+    source, _ = arity.REFUSED["provide_block_body"]
+    with pytest.raises(RevlError) as refused:
+        compile_source(source)
+    assert refused.value.line == 7
+    native = json.loads(lower_to_ir(source))["components"][0]
+    assert _refused_line(native["unlowered"]) == refused.value.line
+    assert _refused_line(compile_to(source, "py")) == refused.value.line
+
+    native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
+    assert _refused_line(native["unlowered"]) == 6
+
+
+def _refused_line(text: str) -> int:
+    """The one line number a bodyless-component refusal names; the test reads
+    only the number, so a change of wording around it does not move it."""
+    found = re.findall(r"\bline (\d+)\b", text)
+    assert len(found) == 1, text[:200]
+    return int(found[0])
 
 
 _PURE_CLOSURE_MODULES = {
@@ -3979,7 +4010,7 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
     # issue #2594: the producer cannot lower this provide step, and the
     # bodyless component it used to emit is now refused by name.
     "provide_block_body":
-        "REFUSED|UNSUPPORTED|component `C`: the body step starting at line 4 "
+        "REFUSED|UNSUPPORTED|component `C`: the body statement at line 7 "
         "is not supported by the self-host compiler, which would emit the "
         "component without its body.",
     "provide_expression_body": "EMITS",
@@ -4226,6 +4257,93 @@ def test_native_gate_checks_a_verb_on_a_host_local_as_the_reference(
     assert want.split("|")[0] == code
     assert admit(source) == want
     if case in _HOST_LOCAL_VERDICT_ONLY:
+        return
+    got = compile_to(source, "py")
+    if code:
+        assert got == "REFUSED|" + want, got[:200]
+    else:
+        assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
+
+
+# Issue #2569, continued. A timer body (`every 30s { … }`) records emissions
+# only: the reference's parser refuses any other statement there before a host
+# verb in it is lowered, where the self-host statement grammar left the timer
+# unread and the type layer gave HOST-METHOD. And a verb inside a `subscribe`
+# stage's arrow is judged as anywhere else; only the stage links themselves
+# are not verb calls. Each case is (source, the reference's code, "BAD" for a
+# parse refusal, or "" where it admits).
+_LOG_POOL = ("service Log { emission[log] fn write(msg: Str) }\n"
+             "component C requires log: Log {\n  " + _POOL + "\n")
+_SUB_POOL = ("service Sink { emission fn write(v: Str) }\n"
+             "component C requires sink: Sink {\n  " + _POOL + "\n"
+             "  let src = effect Stream.source() undo src.close()\n")
+_SUB_TAIL = "              undo sub.close()\n  every o in sub {\n    emit sink.write(o)\n  }\n}\n"
+_TIMER_AND_STAGE_VERBS = {
+    "every_effect_off_surface": (
+        _LOG_POOL + "  every 30s {\n    effect pool.frob()\n    undo pool.close()\n  }\n}\n",
+        "BAD"),
+    "after_effect_off_surface": (
+        _LOG_POOL + "  after 5m {\n    effect pool.frob()\n    undo pool.close()\n  }\n}\n",
+        "BAD"),
+    "every_effect_after_an_emit": (
+        _LOG_POOL + '  every 30s {\n    emit log.write("a")\n    effect pool.frob()\n'
+        "    undo pool.close()\n  }\n}\n", "BAD"),
+    "every_effect_on_surface": (
+        _LOG_POOL + '  every 30s {\n    effect pool.query("x")\n    undo pool.close()\n  }\n}\n',
+        "BAD"),
+    # the statement's own rule is met before the timer's
+    "every_plain_let": (
+        _LOG_POOL + "  every 30s {\n    let x = pool.frob()\n    emit log.write(x)\n  }\n}\n",
+        "BAD"),
+    "every_guard": (
+        _LOG_POOL + '  every 3s {\n    if (true) { emit log.write("a") }\n  }\n}\n', "BAD"),
+    "every_empty": (_LOG_POOL + "  every 30s {\n  }\n}\n", "BAD"),
+    "every_zero_delay": (_LOG_POOL + '  every 0s {\n    emit log.write("a")\n  }\n}\n', "BAD"),
+    "every_emit_compensate": (
+        _LOG_POOL + '  every 3s {\n    emit log.write("a") compensate log.write("b")\n  }\n}\n',
+        "BAD"),
+    # the statements after a timer are read too
+    "plain_let_after_a_timer": (
+        _LOG_POOL + '  every 3s {\n    emit log.write("a")\n  }\n  let y = 2\n}\n', "BAD"),
+    # a verb in an emission's argument is still the type layer's
+    "every_emit_off_surface": (
+        _LOG_POOL + "  every 30s {\n    emit log.write(pool.frob())\n  }\n}\n", "HOST-METHOD"),
+    "timers_admitted": (
+        _LOG_POOL + '  every 30s {\n    emit log.write(pool.query("x"))\n  }\n'
+        '  after 1s { emit log.write("y") }\n}\n', ""),
+    "every_await_emit": (_LOG_POOL + '  every 30s {\n    await emit log.write("a")\n  }\n}\n', ""),
+    "stage_arrow_off_surface": (
+        _SUB_POOL + "  let sub = subscribe src.map(x => pool.frob(x))\n" + _SUB_TAIL,
+        "HOST-METHOD"),
+    "stage_arrow_wrong_type": (
+        _SUB_POOL + "  let sub = subscribe src.filter(x => pool.query(1) > 0)\n" + _SUB_TAIL,
+        "T1"),
+    "second_stage_arrow": (
+        _SUB_POOL + "  let sub = subscribe src.take(2).map(x => pool.frob())\n" + _SUB_TAIL,
+        "HOST-METHOD"),
+    "merge_stage_arrow": (
+        _SUB_POOL + "  let s2 = effect Stream.source() undo s2.close()\n"
+        "  let sub = subscribe merge(src, s2).map(x => pool.frob(x))\n" + _SUB_TAIL,
+        "HOST-METHOD"),
+}
+
+# Admitted as the reference admits it, but the native producer does not yet
+# emit an `await emit` timer step as the reference does.
+_TIMER_VERDICT_ONLY = {"every_await_emit"}
+
+
+@pytest.mark.parametrize("case", sorted(_TIMER_AND_STAGE_VERBS))
+def test_native_gate_refuses_a_timer_body_and_a_stage_arrow_as_the_reference(
+        admit, compile_to, reference_emit, case):
+    source, code = _TIMER_AND_STAGE_VERBS[case]
+    try:
+        compile_source(source, "doc.rvl")
+        want = ""
+    except RevlError as e:
+        want = f"{e.code or 'BAD'}|{e.message}"
+    assert want.split("|")[0] == code
+    assert admit(source) == want
+    if case in _TIMER_VERDICT_ONLY:
         return
     got = compile_to(source, "py")
     if code:

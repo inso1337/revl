@@ -379,7 +379,25 @@ fn uses_true_division(n: Any) -> Bool {
   return false
 }
 
-// Does the IR read a List subscript `xs[i]` (routed through `_revl_index`)? A
+// A List subscript `xs[i]` with the #549 negative-index guard inlined: the
+// list, then the index, each evaluated once (see `_list_index` in
+// backends/python/emit.py, whose three index shapes this mirrors). The target is
+// parenthesized unless it renders as an atom: a variable, a subscript or a list
+// display.
+fn list_index(target: Any, target_src: Str, idx: Any, index_src: Str) -> Str {
+  let k = node_kind(target)
+  var t = target_src
+  if (k != "var" && k != "name" && k != "index" && k != "list") { t = `(${target_src})` }
+  let ik = node_kind(idx)
+  if (ik == "lit") {
+    let lv = value_field(idx, "value")
+    if (value_kind(lv) == "int" && value_int(lv) >= 0) { return `${t}[${index_src}]` }
+  }
+  if (ik == "var" || ik == "name") { return `${t}[${index_src} if ${index_src} >= 0 else _revl_neg_index()]` }
+  return `${t}[_revl_i if (_revl_i := ${index_src}) >= 0 else _revl_neg_index()]`
+}
+
+// Does the IR read a List subscript `xs[i]` (guarded inline)? A
 // string-LITERAL key is a host/`Any` property read, not a List subscript, so
 // it does not pull the helper in (#549).
 fn uses_index(n: Any) -> Bool {
@@ -397,8 +415,8 @@ fn uses_index(n: Any) -> Bool {
 
 // issue #957: a `Map` subscript (an `index` node the frontend stamps with the
 // map's `key_type`) reads by KEY through `_revl_map_index`, whose miss faults
-// with the cross-tier reason. It is not a List subscript, so it never pulls in
-// `_revl_index`, whose `i < 0` guard raises a TypeError on a `Str` key.
+// with the cross-tier reason. It is not a List subscript, so it never takes
+// the List subscript's `i >= 0` guard, which raises a TypeError on a `Str` key.
 fn uses_map_index(n: Any) -> Bool {
   if (node_kind(n) == "index" && !value_is_null(value_field(n, "key_type"))) { return true }
   for (c of value_children(n)) {
@@ -571,7 +589,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   // Character access routes through `_revl_str_at`, which faults for an index
   // outside `0 <= i < length()` — python's `s[i]` is END-RELATIVE, so a bare
   // `s[-1]` would read the LAST code point where go, rust, java and ts all
-  // fault. Same guard, same reason, as `_revl_index` on a List subscript.
+  // fault. Same guard, same reason, as the inline guard on a List subscript.
   if (method == "charAt") { return `_revl_str_at(${target}, ${args[0]})` }
   if (method == "charCodeAt") { return `ord(_revl_str_at(${target}, ${args[0]}))` }
   // Codepoint-at-index scan (item 276, item 391 self-host port): the Unicode
@@ -1180,12 +1198,12 @@ fn expr_inner(node: Any) -> Str {
       return `_revl_map_index(${expr(value_field(node, "target"))}, ${expr(idx)})`
     }
     // A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
-    // List subscript — bare `[...]`. A List subscript routes through
-    // `_revl_index`, which faults on a negative index (#549).
+    // List subscript — bare `[...]`. A List subscript carries the inline
+    // guard of `list_index`, which faults on a negative index (#549).
     if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
       return `${expr(value_field(node, "target"))}[${expr(idx)}]`
     }
-    return `_revl_index(${expr(value_field(node, "target"))}, ${expr(idx)})`
+    return list_index(value_field(node, "target"), expr(value_field(node, "target")), idx, expr(idx))
   }
   if (kind == "if") {
     return `(${expr(value_field(node, "then"))} if ${expr(value_field(node, "cond"))} else ${expr(value_field(node, "else"))})`
@@ -1904,15 +1922,13 @@ fn div_euclid_block() -> List[Str] {
 
 // A negative List index FAULTS on every tier (#549): python would otherwise
 // silently read from the end, so guard the read here. Mirrors the reference
-// `_revl_index` preamble def.
+// `_revl_neg_index` preamble def.
 fn index_block() -> List[Str] {
   var o = []
-  o = o.push("def _revl_index(xs, i):")
+  o = o.push("def _revl_neg_index():")
   o = o.push(`    """A negative List index faults on every tier (#549); python would"""`)
   o = o.push(`    """otherwise read from the end, so guard it here."""`)
-  o = o.push("    if i < 0:")
-  o = o.push(`        raise IndexError('revl: negative list index')`)
-  o = o.push("    return xs[i]")
+  o = o.push(`    raise IndexError('revl: negative list index')`)
   o = o.push("")
   return o
 }
@@ -2356,7 +2372,7 @@ fn cexpr(node: Any) -> Str {
     if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
       return `${cexpr(value_field(node, "target"))}[${cexpr(idx)}]`
     }
-    return `_revl_index(${cexpr(value_field(node, "target"))}, ${cexpr(idx)})`
+    return list_index(value_field(node, "target"), cexpr(value_field(node, "target")), idx, cexpr(idx))
   }
   if (kind == "bin") { return cbin(node) }
   if (kind == "un") { return cun(node) }

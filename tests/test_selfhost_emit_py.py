@@ -473,6 +473,7 @@ CORPUS = [
     # oracle modules say why in their own `CORPUS` comment.
     "ui_transaction_unit.rvl",
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
+    "list_index_guard.rvl",  # the inline List-index guard, every spelling (issue #2902)
 ]
 
 

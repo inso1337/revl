@@ -452,6 +452,17 @@ def block_formal_guarantees(current: str, root: Path | None = None) -> str:
     return "\n".join(out)
 
 
+def block_formal_wording(current: str) -> str:
+    """docs/guarantees.md's do-not-say / say-instead table for proof claims.
+
+    Rendered from `tools/formal_wording.py`, the same table
+    `tools/check_vision_claims.py` enforces in the front-door documents.
+    """
+    import formal_wording
+
+    return formal_wording.render_table()
+
+
 def block_mcp_test_count(current: str) -> str:
     """No count since issue #1768: it moved with every test added to the
     module. `--show mcp-test-count` prints it."""
@@ -866,6 +877,8 @@ BLOCKS: list[tuple[str, str, str, object]] = [
     ("formal-guarantees", "docs/guarantees.md",
      "formal/STATUS.md via revl.cert.guarantee_map/status_of",
      block_formal_guarantees),
+    ("formal-wording", "docs/guarantees.md",
+     "tools/formal_wording.py PHRASINGS", block_formal_wording),
     ("mcp-test-count", "docs/guide-humans.md", "tests/test_mcp.py", block_mcp_test_count),
     ("suite-size", "CONTRIBUTING.md", "tests/**/test_*.py + tests/shard_weights.json",
      block_suite_size),
