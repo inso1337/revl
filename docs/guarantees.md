@@ -47,6 +47,28 @@ remaining gaps.
 | G9 | untrusted data cannot create authority without a declared declassification | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) | full |
 <!-- docgen:formal-guarantees end -->
 
+### What to say about the proofs
+
+Describe the formal layer with the ledger's own words. The table below is the
+list of wordings the front-door documents (`docs/vision.md`, `README.md` and
+`docs/substrate-boundary.md`) may not use, each with what to write instead.
+It is generated from `tools/formal_wording.py`, and
+`tools/check_vision_claims.py` (rule `formal-wording`) refuses each phrasing
+there, so this page and the gate cannot disagree. Several entries are
+conditional: a sentence is refused only while [formal/STATUS.md](../formal/STATUS.md)
+does not support it.
+
+<!-- docgen:formal-wording begin -->
+| Do not say | Say instead | Refused when |
+| ---------- | ----------- | ------------ |
+| "G1 is proved in Lean." | Use the status word the ledger records for that code, with the granularity its row states, and point to formal/STATUS.md for the row's scope. | a named guarantee is not `full` in formal/STATUS.md |
+| "All nine guarantees are proved." | Name the rows by status as the ledger records them (the Formal status column above), each at the granularity its row states. | any numbered row (G1 to G9) is not `full` |
+| "Only G2, G3 and G7 are full." | Say which rows are `full` and which are not, from the ledger, instead of an "only" list that drifts when a row lands. | the codes named are not exactly the `full` rows |
+| "G9's coverage is unproved." | State the row as the ledger does, including what the row covers (the rule, the coverage of the walk). | the named guarantee is not `unproved` in formal/STATUS.md |
+| "Path coverage is the one UNPROVED row." | Do not count unproved rows in prose; say which rows are `partial` (from the ledger) and point to formal/STATUS.md. | no numbered row is `unproved` in formal/STATUS.md |
+| "The compiler is formally verified." | The Lean layer proves statements about a model of the admission judgment, and a differential oracle compares that model with the shipped checker on a corpus. Say that, and link formal/STATUS.md. | always: no proof covers the compiler itself |
+<!-- docgen:formal-wording end -->
+
 ## Ordering and async rules (the A family)
 
 The A family is the lifecycle discipline: `DESIGN.md` pillar 4 states the
