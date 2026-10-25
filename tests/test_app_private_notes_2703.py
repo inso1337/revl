@@ -12,13 +12,18 @@ its store operations take a `Principal`, so each handler has to call
 * a mutant that fabricates a principal is refused the same way;
 * on the real runtime, with the dev stub validator, the routes serve an owner
   their own notes, answer another owner's note exactly as an absent one, and
-  answer a missing credential 401; and
+  answer a missing credential 401;
+* the host read of a principal's subject raises on anything that is not a
+  principal with a subject, instead of reading as the owner "" (run on the
+  emitted python module in a subprocess); and
 * the public notes service still carries no principal, so it stays the control.
 """
 
 import importlib.util
 import json
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -57,6 +62,8 @@ def _mutant(tmp_path: Path, old: str, new: str) -> Path:
     out.write_text(source.replace(old, new), encoding="utf-8")
     return out
 
+
+PY_RUNTIME = ROOT / "backends" / "python"
 
 needs_runtime = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -162,3 +169,34 @@ def test_live_routes_scope_notes_to_the_validated_subject(dev_stub):
         assert _get(face, "/private/notes").status == 401
     finally:
         session.unload()
+
+
+def test_subject_of_raises_on_a_value_that_is_not_a_principal(tmp_path):
+    """`subject_of` is a host read of an opaque value. A malformed argument
+    cannot come from revl source (nothing but `Auth.validate` makes a
+    `Principal`), so the path is reached on the emitted python module: it must
+    raise, never read as the subject "" and so as the owner of a row."""
+    from revl.__main__ import main
+
+    out = tmp_path / "private_notes.py"
+    assert main(["emit", "--backend", "python", str(APP), str(AUTH),
+                 "-o", str(out)]) == 0
+    probe = textwrap.dedent("""
+        import importlib.util, sys
+        sys.path.insert(0, sys.argv[1])
+        spec = importlib.util.spec_from_file_location("pn", sys.argv[2])
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.subject_of({"subject": "alice"}) == "alice"
+        for bad in ("", "alice", None, {}, {"subject": ""}, {"subject": "  "},
+                    {"subject": 3}):
+            try:
+                mod.subject_of(bad)
+            except ValueError:
+                continue
+            raise SystemExit("did not raise for %r" % (bad,))
+    """)
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(PY_RUNTIME), str(out)],
+        capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr + done.stdout

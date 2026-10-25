@@ -24,6 +24,11 @@
 // On the py tier the validator is the HS256 JWT check documented in
 // stdlib/auth.rvl.
 //
+// Limitation: reading the owner of a `Principal` needs the py-only extern
+// `subject_of` below, because stdlib/auth.rvl has no accessor for it. The
+// untrusted-author profile refuses every extern, so this file is refused there
+// and runs on the py tier only (#SUBJECT_ISSUE).
+//
 // Not in this file: a second persistence driver and the audit view (issue
 // #2703 slices 2 and 3), and the ts binding of `Auth` (item 457 Slice 3).
 
@@ -33,10 +38,20 @@ use "stdlib/auth.rvl" { Auth, Bearer }
 type OwnedNote = { id: Str, owner: Str, title: Str, body: Str }
 
 // A `Principal` is opaque in revl source, so reading the subject of one is a
-// host read, the same shape stdlib/auth.rvl uses for its own validator. It
-// builds nothing: it can only report the subject of a principal it is given.
+// host read. It builds nothing: it only reports the subject of a principal it
+// is given, and it raises on anything that is not a principal with a subject,
+// so a malformed value can never read as an owner.
+//
+// Limitation: this is a py-only extern that relies on how stdlib/auth.rvl
+// stores a principal (a record with a `subject` member). The untrusted-author
+// profile refuses every extern, so this file is refused there, and no other
+// tier can run it. A first-party accessor in stdlib/auth.rvl would remove both
+// limits; that is a separate decision, tracked in #SUBJECT_ISSUE.
 extern pure fn subject_of(who: Principal) -> Str = @py {
-    return who.get("subject") if isinstance(who, dict) else ""
+    subject = who.get("subject") if isinstance(who, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("subject_of: not a principal with a subject")
+    return subject
 }
 
 // The user-scoped store. Every verb takes the `Principal`, so no note is
