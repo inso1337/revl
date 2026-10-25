@@ -140,25 +140,20 @@ markers (the first copy of a record that appears twice wins), re-measures every
 count and rewrites the files clean. It never writes a budget, so `--check` then
 names any budget the merged counts disagree with.
 
-WHAT `--check` TRUSTS, AND WHY (issue #2651). The gate used to read its
-"before" counts only from the ledger in the tree under test, so a branch could
-lower a record and be judged against its own lower number; commit e071d18ec did
-exactly that to `selfhost/rust` `callee_tparams` (1 uncovered on origin/main,
-0 in the branch ledger, and the branch also measured 0, so nothing differed).
-`--check` now reads the baseline ledger from git, at the merge base of
-origin/main and HEAD (origin/main's tip when a shallow checkout has no merge
-base), prints that provenance and whether the in-tree ledger differs, and
-fails any in-tree record that is LOWER than the baseline. That direction is the
-one that hides a regression, and no measurement can catch it when the record
-and the tree agree, so it is refused outright: a recorded fall counts only when
-the baseline already records it. A record ABOVE the baseline (a stale branch,
-or a rise the branch recorded with a hand-raised budget) is still held to the
-measurement as before. A consequence, stated because it changes the workflow:
-an improvement can no longer record its own fall in the same pull request; the
-fall has to land on origin/main first, and the branch keeps it once it merges
-main. If origin/main does not resolve, the check fails and says so; it never
-falls back to the in-tree ledger. `--write` and `--functions` are unchanged
-and read the tree's ledger.
+WHAT `--check` TRUSTS, AND WHY (issues #2651 and #2927). The gate used to
+read its "before" counts only from the ledger in the tree under test, and its
+output never said how that ledger differed from origin/main; commit e071d18ec
+lowered `selfhost/rust` `callee_tparams` from 1 uncovered to 0 in a branch
+ledger (origin/main records 1). `--check` now reads the baseline ledger from
+git, at the merge base of origin/main and HEAD (origin/main's tip when a
+shallow checkout has no merge base), and prints that provenance and how the
+in-tree ledger differs from it. The VERDICT is the measured-vs-recorded
+equality: every record must equal what this tree measures. The baseline
+explains a difference (a failure message names the baseline count when the
+in-tree record differs from it); it does not refuse a fall the tree measures.
+If origin/main does not resolve, the check fails and says so; it never falls
+back to the in-tree ledger. `--write` and `--functions` are unchanged and read
+the tree's ledger.
 
 Usage:
     python3 tools/selfhost_line_coverage.py            # the report
@@ -714,28 +709,42 @@ def _flatten(entry: dict) -> dict[str, int]:
 # WHY THE BASELINE COMES FROM GIT, NOT THE TREE (issue #2651). The measurement
 # is compared against the ledger recorded in the tree under test, so a branch
 # that edits a record changes the baseline it is judged against. Commit
-# e071d18ec lowered selfhost/rust `callee_tparams` from 1 uncovered to 0 in the
-# branch ledger, and that tree also measures 0, so a check reading only the tree
-# is silent: there is nothing to compare the 0 against. origin/main records 1,
-# and only a comparison with that record shows what the branch did. So the
-# baseline is the ledger at the merge base of origin/main and HEAD (or at
-# origin/main itself), read with `git show`, never from the working tree.
+# e071d18ec lowered selfhost/rust `callee_tparams` from 1 uncovered to 0 in a
+# branch ledger while origin/main records 1. So the baseline is the ledger at
+# the merge base of origin/main and HEAD (or at origin/main itself), read with
+# `git show`, never from the working tree, and `--check` prints how the in-tree
+# ledger differs from it.
 #
-# A DIFFERENCE IS NOT AUTOMATICALLY A FAILURE. A branch cut before a fall landed
-# on the baseline records the older, HIGHER count; the baseline records the
-# lower one, and that fall's provenance IS the baseline. Judging it against the
-# branch's stale record would demand a `--write` that re-raises a count main has
-# already lowered. The baseline is trusted for that direction. The direction
-# that hides a regression is the other one: an in-tree record LOWER than the
-# baseline, which makes the ratchet's "before" smaller than the truth. That is
-# the branch redefining its own baseline, and it fails, whatever the tree
-# measures, because a recorded fall counts only when the baseline already
-# records it. Recording a new uncovered count (a rise) is still allowed: the
-# measurement has to equal it and the budget has to be raised by hand, which is
-# the #1419 mechanism and is visible in the diff. The cost of the rule is
-# deliberate: an improvement cannot record its fall in its own pull request,
-# because that is the exact shape e071d18ec had. The fall lands on origin/main
-# first, and the branch keeps it after merging main.
+# THE BASELINE EXPLAINS, THE EQUALITY DECIDES (issue #2927). The first
+# version of this check also refused every in-tree record lower than the
+# baseline, whatever the tree measured. That made every improvement to an
+# existing record unlandable: recording the fall was refused by that rule,
+# keeping the baseline count was refused by the measured-vs-recorded equality
+# in `check` ("down to N from M, run --write"), and origin/main cannot record a
+# fall its own code does not have yet. The refusal also added nothing to the
+# verdict once a lowered record that the tree measures is accepted: a lowered
+# record that differs from the measurement already fails the equality, and an
+# unmeasured tier already fails as missing survey data. So the verdict is the
+# equality alone, and the baseline is provenance: `--check` prints it, prints
+# how the in-tree ledger differs from it, and an equality failure on a record
+# the branch moved away from the baseline names the baseline's count.
+#
+# WHY THAT IS SAFE AGAINST e071d18ec. Replayed on python 3.12, e071d18ec's own
+# tree measures `callee_tparams` at 0, so its record was true when written. The
+# record went wrong later in that branch: a merge changed selfhost/emit_rust.rvl,
+# the tree measured 1 again (e7185eb24's tree, also replayed on 3.12), and the
+# ledger still said 0. The equality refuses that ("went from 0 to 1"). A lowered
+# count is never taken on its author's word: it has to equal what the running
+# check measures. That check is the pytest test
+# `test_reference_and_selfhost_line_coverage_match_the_ledger`: on a pull
+# request it runs on python 3.12 (advisory, not a required check), and after
+# the merge to main it runs on every python leg (3.11, 3.12, 3.13). A fall that
+# measures differently on 3.11 or 3.13 shows up as a red main run, as any
+# ledger write already does.
+#
+# A record ABOVE the baseline (a branch cut before a fall landed on main, or a
+# rise recorded with a hand-raised budget, the #1419 mechanism) is held to the
+# same equality and budget checks.
 #
 # WHEN THE BASELINE CANNOT BE RESOLVED, the check fails and says so. CI may run
 # a shallow checkout with no origin/main ref; the one thing it must not do is
@@ -868,46 +877,6 @@ def baseline_report(baseline: tuple[str | None, str, dict], ledger: dict) -> lis
     return lines
 
 
-def _baseline_problems(ledger: dict, baseline: dict, data: dict,
-                       provenance: str, sha: str) -> list[str]:
-    """Fail every in-tree record that lowers the baseline it is judged against.
-
-    One direction only. An in-tree count ABOVE the baseline is either a stale
-    branch (the baseline already records the fall) or a rise the branch has
-    recorded, and the measured-vs-recorded check below already holds it to the
-    measurement and its budget. An in-tree count BELOW the baseline is the
-    branch making its own "before" smaller, which no measurement can detect
-    when the tree and the record agree: e071d18ec measures 0 and records 0.
-    """
-    problems: list[str] = []
-    for half in HALVES:
-        branch_side = ledger.get(half) if isinstance(ledger.get(half), dict) else {}
-        base_side = baseline.get(half) if isinstance(baseline.get(half), dict) else {}
-        for tier in TIERS:
-            recorded = _flatten(branch_side.get(tier, {}))
-            trusted = _flatten(base_side.get(tier, {}))
-            try:
-                measured = data[half][tier]["functions"]
-            except (KeyError, TypeError):
-                measured = {}
-            if not isinstance(measured, dict):
-                measured = {}
-            for name in sorted(set(recorded) | set(trusted)):
-                now, before = recorded.get(name, 0), trusted.get(name, 0)
-                if now >= before:
-                    continue
-                problems.append(
-                    f"{half}/{tier}: the in-tree ledger lowers `{name}` below "
-                    f"the line-coverage baseline ({provenance} at {sha}): the "
-                    f"baseline records {before} uncovered statement(s), the "
-                    f"in-tree ledger records {now}, and this tree measures "
-                    f"{measured.get(name, 0)}. A branch cannot lower the ledger "
-                    f"it is judged against: a recorded fall counts only when the "
-                    f"baseline already records it. Restore the baseline count, "
-                    f"or land the fall on origin/main and merge it here.")
-    return problems
-
-
 def _budget_problems(ledger: dict) -> list[str]:
     """Each function's recorded count against its budget, EXACTLY.
 
@@ -1028,6 +997,26 @@ WHERE = {
 }
 
 
+def _with_baseline(message: str, name: str, recorded: int,
+                   trusted: dict | None, provenance: str, sha: str | None) -> str:
+    """`message`, plus the baseline's count when the branch moved the record.
+
+    The baseline never decides a verdict (issue #2927); it explains one. When
+    the in-tree record differs from the baseline's, an equality failure on it
+    says what the baseline records, so a branch that lowered a record below
+    what its tree measures (the e7185eb24 shape) reads as exactly that.
+    """
+    if trusted is None:
+        return message
+    base = trusted.get(name, 0)
+    if base == recorded:
+        return message
+    direction = "lowered" if recorded < base else "raised"
+    return (f"{message} The in-tree ledger {direction} this record from the "
+            f"line-coverage baseline ({provenance} at {sha}), which records "
+            f"{base} uncovered statement(s).")
+
+
 def check(data: dict,
           baseline: tuple[str | None, str, dict] | None = None) -> list[str]:
     """The gate's problems, measured against the baseline ledger and the tree's.
@@ -1054,8 +1043,6 @@ def check(data: dict,
     problems += _budget_problems(ledger)
     if not isinstance(data, dict):
         return problems + ["survey data is not a map"]
-    if sha is not None:
-        problems += _baseline_problems(ledger, base_ledger, data, provenance, sha)
     for half in ("reference", "selfhost"):
         recorded_half = ledger.get(half, {})
         if not isinstance(recorded_half, dict):
@@ -1070,6 +1057,9 @@ def check(data: dict,
                 problems.append(f"{half}/{tier}: survey functions are not a map")
                 continue
             recorded = _flatten(recorded_half.get(tier, {}))
+            base_half = base_ledger.get(half) if sha is not None else None
+            trusted = (_flatten(base_half.get(tier, {}))
+                       if isinstance(base_half, dict) else None)
             raw_entry = recorded_half.get(tier)
             if isinstance(raw_entry, dict):
                 for name, f in sorted(raw_entry.get("functions", {}).items()):
@@ -1099,7 +1089,7 @@ def check(data: dict,
                         f"Recording the count is the LAST resort and costs a "
                         f"budget written by hand in the same diff.")
                 elif now > before:
-                    problems.append(
+                    problems.append(_with_baseline(
                         f"{half}/{tier}: `{name}` went from {before} to {now} "
                         f"uncovered statement(s). Logic arrived in a mirrored "
                         f"emitter that no corpus document reaches — exactly how "
@@ -1109,17 +1099,18 @@ def check(data: dict,
                         f"it (tests/fixtures/emit_{tier}_refusals/). The "
                         f"statements are `python3 tools/selfhost_line_coverage.py "
                         f"--functions {tier}`; `python3 "
-                        f"tools/selfhost_line_coverage.py --check` reruns the gate.")
+                        f"tools/selfhost_line_coverage.py --check` reruns the gate.",
+                        name, before, trusted, provenance, sha))
                 elif now < before:
-                    problems.append(
+                    problems.append(_with_baseline(
                         f"{half}/{tier}: `{name}` is down to {now} uncovered "
                         f"statement(s) from {before}. Good news, and the ratchet "
                         f"only holds if it is recorded: run "
-                        f"`python3 tools/selfhost_line_coverage.py --write`. "
-                        f"The fall also has to be recorded on origin/main: a "
-                        f"fall that exists only in this branch's ledger is "
-                        f"refused by the baseline check, because the baseline "
-                        f"is the ledger the branch is judged against.")
+                        f"`python3 tools/selfhost_line_coverage.py --write`, "
+                        f"then lower its budget to {now}. A fall recorded in "
+                        f"this branch's ledger passes when this tree measures "
+                        f"exactly the recorded count.",
+                        name, before, trusted, provenance, sha))
     return problems
 
 

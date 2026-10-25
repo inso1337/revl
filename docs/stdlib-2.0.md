@@ -49,8 +49,8 @@ revl refuses.)
 - `.length` also works in property position (the existing `len` node).
 - List element read is indexing (`xs[i]`), not a method. A **negative index
   FAULTS** on every tier — there is no wrap and no silent `undefined` (issue
-  #549). python and TypeScript route the read through `_revl_index`/`revlIndex`
-  which raise on a negative index; go, rust and java fault natively. **A
+  #549). python guards the subscript inline (`_revl_neg_index`) and TypeScript routes
+  the read through `revlIndex`, both raising on a negative index; go, rust and java fault natively. **A
   positive index past the end is REFUSED AT COMPILE TIME when the checker can
   see the list's length** (`["a"][5]`, or `xs[5]` with `let xs = ["a"]` in
   scope) — `index 5 is out of range for a 1-element List`, coded `T1` (issue

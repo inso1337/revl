@@ -15,7 +15,7 @@ source-derived blocks in six documents are byte-compared against a fresh
 generation (`tools/docgen.py --check`). The vision half carried two
 hand-written tables and nothing watched either one (issue #1204).
 
-WHAT IS CHECKED. Five rules, in the shape `check_roadmap_claims.py` uses: a
+WHAT IS CHECKED. Six rules, in the shape `check_roadmap_claims.py` uses: a
 claim is judged only where the sentence names the artifact that makes it
 falsifiable.
 
@@ -56,6 +56,12 @@ falsifiable.
   formal-status  Every explicit G<n> full/partial/unproved claim in
                  docs/vision.md and README.md agrees with the normalized status
                  in formal/STATUS.md, read by the certificate parser.
+
+  formal-wording  Refuses each wording in the do-not-say table
+                 (`tools/formal_wording.py`, rendered into docs/guarantees.md)
+                 that formal/STATUS.md does not support, in the same
+                 documents, and names the wording to use instead. The table
+                 is the only place a phrasing is listed.
 
 THE TIER TABLE IS GENERATED, NOT CHECKED. The table's per-tier column is a
 `docgen` block (`vision-tiers`), rendered by `tools/docgen.py` from the per-tier
@@ -115,6 +121,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import check_roadmap_claims as claims  # noqa: E402
 import docgen  # noqa: E402
+import formal_wording  # noqa: E402
 from revl import cert  # noqa: E402
 
 DEFAULT_DOC = ROOT / "docs" / "vision.md"
@@ -123,7 +130,14 @@ DEFAULT_DOC_RELS = (
     "docs/substrate-boundary.md",
 )
 FORMAL_STATUS_DOC_RELS = frozenset(("docs/vision.md", "README.md"))
-RULES = ("command", "link", "path", "tier", "formal-status")
+# The documents a proof-wording rule reads: the two status documents plus the
+# substrate-boundary page the checker already scans.
+FORMAL_WORDING_DOC_RELS = FORMAL_STATUS_DOC_RELS | {"docs/substrate-boundary.md"}
+RULE_DOCS = {
+    "formal-status": FORMAL_STATUS_DOC_RELS,
+    "formal-wording": FORMAL_WORDING_DOC_RELS,
+}
+RULES = ("command", "link", "path", "tier", "formal-status", "formal-wording")
 
 # The block `tools/docgen.py` owns in this document. Named here as well so the
 # `tier` rule and the generator cannot drift apart on which block they mean.
@@ -156,23 +170,14 @@ SPAN_RE = re.compile(r"`([^`\n]+)`")
 
 # A prose status claim has one or more guarantee codes followed by a status
 # word. Lists and numeric ranges are both common in the reader-facing docs.
-_FORMAL_CODE = r"`?G\d+`?"
-_FORMAL_CODE_GROUP = (
-    _FORMAL_CODE
-    + r"(?:(?:\s*,\s*|\s+(?:and|to|through)\s+|[-–—]\s*)"
-    + _FORMAL_CODE
-    + r")*"
-)
+_FORMAL_CODE_GROUP = formal_wording.CODE_GROUP
 FORMAL_STATUS_RE = re.compile(
     r"(?P<codes>" + _FORMAL_CODE_GROUP + r")"
     r"\s+(?:(?:are|is|remain|remains|stay|stays|also|all|still|currently)\s+)*"
     r"(?P<status>`?(?:full|partial|unproved))`?(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
-FORMAL_RANGE_RE = re.compile(
-    r"`?G(\d+)`?\s*(?:to|through|[-–—])\s*`?G?(\d+)`?",
-    re.IGNORECASE,
-)
+FORMAL_RANGE_RE = formal_wording.CODE_RANGE_RE
 
 
 # --------------------------------------------------------------------------
@@ -293,13 +298,7 @@ def collect_tier_claims(source: str) -> List["claims.Claim"]:
 
 
 def _codes_in_formal_group(group: str) -> List[str]:
-    def expand(match: re.Match[str]) -> str:
-        first, last = (int(value) for value in match.groups())
-        step = 1 if first <= last else -1
-        return " ".join("G%d" % number for number in range(first, last + step, step))
-
-    expanded = FORMAL_RANGE_RE.sub(expand, group)
-    return list(dict.fromkeys(re.findall(r"G\d+", expanded, re.IGNORECASE)))
+    return formal_wording.codes_in(group)
 
 
 def collect_formal_status_claims(source: str) -> List["claims.Claim"]:
@@ -315,12 +314,33 @@ def collect_formal_status_claims(source: str) -> List["claims.Claim"]:
     return out
 
 
+def collect_formal_wording_claims(source: str) -> List["claims.Claim"]:
+    """One claim per match of an entry in the do-not-say table.
+
+    The table is `tools/formal_wording.py`'s `PHRASINGS`; nothing here knows a
+    phrasing. A clean document collects nothing, so the positive control for
+    this rule is the table's own examples (`tests/test_check_vision_claims.py`)
+    and `--self-test`, not a count of claims in the real documents.
+    """
+    out: List["claims.Claim"] = []
+    for phrasing in formal_wording.PHRASINGS:
+        for match in phrasing.pattern.finditer(source):
+            group = match.groupdict().get("codes") or ""
+            codes = formal_wording.codes_in(group) if group else []
+            out.append(_claim(
+                "formal-wording", "%s|%s" % (phrasing.key, ",".join(codes)),
+                source, match.start(), match.group(0),
+            ))
+    return out
+
+
 COLLECTORS = {
     "command": collect_command_claims,
     "link": collect_link_claims,
     "path": collect_path_claims,
     "tier": collect_tier_claims,
     "formal-status": collect_formal_status_claims,
+    "formal-wording": collect_formal_wording_claims,
 }
 
 
@@ -486,12 +506,39 @@ def judge_formal_status(claim: "claims.Claim", tree: "claims.Tree") -> Optional[
     )
 
 
+def judge_formal_wording(claim: "claims.Claim", tree: "claims.Tree") -> Optional[str]:
+    key, _, joined = claim.key.partition("|")
+    codes = [c for c in joined.split(",") if c]
+    phrasing = formal_wording.by_key()[key]
+    if "formal/STATUS.md" not in tree.files:
+        return "the tree has no tracked `formal/STATUS.md` status ledger"
+    try:
+        rows = cert.guarantee_map(
+            tree.text("formal/STATUS.md"), source="formal/STATUS.md")
+        statuses = {}
+        for code, row in rows.items():
+            recorded = cert.status_of(
+                row["status_cell"], source="formal/STATUS.md", code=code)
+            statuses[code] = "full" if recorded == cert.PROVED else recorded
+    except cert.CertError as exc:
+        return "cannot read the status in `formal/STATUS.md`: %s" % exc
+    ledger = formal_wording.Ledger(
+        statuses, formal_wording.unproved_row_in(tree.text("formal/STATUS.md")))
+    if phrasing.holds(codes, ledger):
+        return None
+    return "do not say this (%s: refused when %s). Say instead: %s [ledger now: %s]" % (
+        phrasing.key, phrasing.refused_when, phrasing.say_instead,
+        formal_wording.ledger_summary(statuses),
+    )
+
+
 JUDGES = {
     "command": judge_command,
     "link": judge_link,
     "path": judge_path,
     "tier": judge_tier,
     "formal-status": judge_formal_status,
+    "formal-wording": judge_formal_wording,
 }
 
 
@@ -509,7 +556,7 @@ def run(
     denominator: Dict[str, int] = {}
     findings: List[Tuple["claims.Claim", str]] = []
     for rule in rules:
-        if rule == "formal-status" and doc_rel not in FORMAL_STATUS_DOC_RELS:
+        if rule in RULE_DOCS and doc_rel not in RULE_DOCS[rule]:
             denominator[rule] = 0
             continue
         collected = COLLECTORS[rule](source)
@@ -553,6 +600,7 @@ See [conformance.md](conformance.md) and `demo/bridge_*`.
 | go | `pytest backends/go/test_emit_go.py -q` |
 | formal | `make formal` (`sh formal/scripts/run_gate.sh`) |
 G6 is `full`.
+The compiler is checked against the model by a differential oracle.
 """
 
 # One breakage per rule, each the shape a rename or a move actually takes.
@@ -563,6 +611,8 @@ _SELF_TEST_BREAKS = {
              "[conformance.md](conformance-matrix.md)"),
     "path": ("`demo/bridge_*`", "`demo/span_*`"),
     "formal-status": ("G6 is `full`", "G6 is `partial`"),
+    "formal-wording": ("The compiler is checked against",
+                       "The compiler is formally verified against"),
 }
 
 
@@ -637,8 +687,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         docs = [(args.doc, rules)]
     else:
         docs = [(args.root / rel, rules) for rel in DEFAULT_DOC_RELS]
-        if "formal-status" in rules:
-            docs.append((args.root / "README.md", ["formal-status"]))
+        readme_rules = [r for r in rules if r in RULE_DOCS and
+                        "README.md" in RULE_DOCS[r]]
+        if readme_rules:
+            docs.append((args.root / "README.md", readme_rules))
     all_findings = []
     for doc, doc_rules in docs:
         doc_rel = str(doc.resolve().relative_to(args.root.resolve()))

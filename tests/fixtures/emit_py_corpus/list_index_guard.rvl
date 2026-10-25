@@ -1,0 +1,18 @@
+// A List subscript carries the #549 negative-index guard inline (issue #2902).
+// One document for every spelling the emitter has: a variable index, a
+// non-negative literal, an index that needs the walrus (a call, an expression),
+// a call target (parenthesized), a nested subscript, and the component-body
+// spelling, whose names are `name` nodes rather than `var` nodes.
+extern pure fn mk() -> List[Int] = @py { return [10, 20, 30] }
+extern pure fn probe(i: Int) -> Int = @py { return i }
+
+pub fn by_var(xs: List[Int], i: Int) -> Int { return xs[i] }
+pub fn by_lit(xs: List[Int]) -> Int { return xs[2] }
+pub fn by_expr(xs: List[Int], i: Int) -> Int { return xs[i + 1] }
+pub fn by_call(i: Int) -> Int { return mk()[probe(i)] }
+pub fn nested(g: List[List[Int]], i: Int) -> Int { return g[i][g[i][0]] }
+
+service Probe { fn at(xs: List[Int], i: Int) -> Int }
+component C provides probe: Probe {
+  provide probe { fn at(xs: List[Int], i: Int) = xs[i] }
+}

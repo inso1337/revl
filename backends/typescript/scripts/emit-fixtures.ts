@@ -34,9 +34,21 @@ export function describeEmitFailure(
   return `emit.py failed for ${fixture} (${how}):\n${result.stderr ?? ''}`
 }
 
+// The interpreter that runs `emit.py`. A bare `python3` fails with ENOENT on
+// Windows installs that ship `python.exe` only, so `REVL_PYTHON` names one
+// explicitly and win32 defaults to `python`.
+export function pythonInterpreter(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const explicit = env.REVL_PYTHON?.trim()
+  if (explicit) return explicit
+  return platform === 'win32' ? 'python' : 'python3'
+}
+
 // `python` is a parameter only so a test can name an interpreter that does
 // not exist; every caller uses the default.
-export function emitFixture(fixture: string, outName: string, python = 'python3'): void {
+export function emitFixture(fixture: string, outName: string, python = pythonInterpreter()): void {
   const result = spawnSync(
     python,
     ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],

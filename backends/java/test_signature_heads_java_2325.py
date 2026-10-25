@@ -79,8 +79,104 @@ pub fn eithers(es: List[Either[Str, Int]]) -> List[Either[Str, Int]] { return es
 pub fn count(bs: List[Box[Str]]) -> Int { return bs.length() }
 """
 
+#: A generic record built in a `let` (issue comment 4). It used to be built
+#: raw, `new Bx(n)`, so `final var b` was a raw `Bx` and `b.v + 1L` read an
+#: `Object`. It is built with the diamond now, and javac infers `Bx<Long>`.
+RECORD_LITERAL_PROGRAM = """\
+type Bx[T] = { v: T }
+type Pair[A, B] = { first: A, second: B }
+pub fn bump(n: Int) -> Int {
+  let b: Bx[Int] = { v: n }
+  return b.v + 1
+}
+pub fn both(n: Int) -> Int {
+  let p = { first: "a", second: n }
+  return p.second * 2 + p.first.length()
+}
+pub fn many(n: Int) -> List[Bx[Int]] { return [{ v: n }, { v: n + 1 }] }
+pub fn nested(n: Int) -> Int {
+  let b = { v: { v: n } }
+  return b.v.v + 1
+}
+pub fn some(n: Int) -> Int {
+  let b = { v: Some(n) }
+  return match b.v { Some(x) => x + 1, None => 0 }
+}
+pub fn listed(n: Int) -> Int {
+  let b = { v: [n, 2] }
+  return b.v.length()
+}
+"""
+
+#: Controls: a literal whose field javac would infer looser than revl types it
+#: (an empty list, `None`, `Map.empty()`, a variant case, a local bound to one,
+#: a field read off a raw record) stays raw, because `Bx<List<Object>>` does
+#: not convert to the declared `Bx<List<Long>>` where the raw `Bx` did. Each
+#: compiles on main and must keep compiling.
+LOOSE_RECORD_PROGRAM = """\
+type Bx[T] = { v: T }
+type Box[T] = Full(T) | Empty
+type S = A | B(Int)
+pub fn e() -> Bx[List[Int]] {
+  let b = { v: [] }
+  return b
+}
+pub fn o() -> Bx[Opt[Int]] {
+  let b = { v: None }
+  return b
+}
+pub fn m() -> Bx[Map[Str, Int]] {
+  let b = { v: Map.empty() }
+  return b
+}
+pub fn s() -> Bx[S] {
+  let b = { v: B(1) }
+  return b
+}
+pub fn a() -> Bx[S] {
+  let b = { v: A }
+  return b
+}
+pub fn r(n: Int) -> Bx[Result[Int, Str]] {
+  let b = { v: Ok(n) }
+  return b
+}
+pub fn g(n: Int) -> Bx[Box[Int]] {
+  let b = { v: Full(n) }
+  return b
+}
+pub fn local_list() -> Bx[List[Int]] {
+  let x = []
+  let b = { v: x }
+  return b
+}
+pub fn local_none() -> Bx[Opt[Int]] {
+  let x = None
+  let b = { v: x }
+  return b
+}
+pub fn reassigned() -> Bx[List[Int]] {
+  var x = []
+  x = [1]
+  let b = { v: x }
+  return b
+}
+pub fn raw_field() -> Bx[List[Int]] {
+  let a = { v: [] }
+  let b = { v: a.v }
+  return b
+}
+pub fn raw_nested() -> Bx[Bx[List[Int]]] {
+  let a = { v: [] }
+  let b = { v: a }
+  return b
+}
+"""
+
 PROGRAMS = {
     "variant": VARIANT_PROGRAM,
+    "record_literal": RECORD_LITERAL_PROGRAM,
+    "loose_record": LOOSE_RECORD_PROGRAM,
     "unit": UNIT_PROGRAM,
     "result": RESULT_PROGRAM,
     "set": SET_PROGRAM,
@@ -142,6 +238,42 @@ def test_stream_head_widens_to_object():
     java = _java_source(STREAM_PROGRAM)
     assert "public static Object feed(Object s)" in java
     assert "Stream<" not in java
+
+
+def test_generic_record_literal_uses_the_diamond():
+    java = _java_source(RECORD_LITERAL_PROGRAM)
+    assert "final var b = new Bx<>(n);" in java
+    assert "final var p = new Pair<>(\"a\", n);" in java
+    assert "java.util.List.of(new Bx<>(n), new Bx<>(" in java
+    assert "final var b = new Bx<>(new Bx<>(n));" in java
+    assert "final var b = new Bx<>(java.util.Optional.of(n));" in java
+
+
+def test_plain_record_literal_has_no_diamond():
+    java = _java_source(
+        "type P = { x: Int }\npub fn f(n: Int) -> Int {\n  let p = { x: n }\n"
+        "  return p.x\n}\n")
+    assert "final var p = new P(n);" in java
+
+
+def test_loosely_inferred_record_literal_stays_raw():
+    java = _java_source(LOOSE_RECORD_PROGRAM)
+    for arg in ("java.util.List.of()", "java.util.Optional.empty()",
+                "java.util.Map.of()", "new S.B(1L)", "new S.A()",
+                "new RevlResult.Ok<>(n)", "new Box.Full(n)", "x", "a.v", "a"):
+        assert f"final var b = new Bx({arg});" in java
+    assert "new Bx<>" not in java
+
+
+def test_generic_fn_call_keeps_the_record_raw():
+    # Text only: a generic top-level fn does not compile on this tier yet (its
+    # method declares no `<U>`), but its return type is inferred from its
+    # arguments, so once it does, a diamond around it would be loose.
+    java = _java_source(
+        "type Bx[T] = { v: T }\nfn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b = { v: wrap(n) }\n"
+        "  return b\n}\n")
+    assert "final var b = new Bx(wrap(n));" in java
 
 
 @needs_jdk
