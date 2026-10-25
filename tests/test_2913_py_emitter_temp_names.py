@@ -234,7 +234,8 @@ def test_the_temp_names_corpus_document_runs():
     ir = compile_files([str(CORPUS_DIR / "user_names_like_temps.rvl")])
     ns: dict = {}
     exec(compile(backend_emitter("python").emit(ir), "<corpus_2913>", "exec"), ns)
-    assert ns["temps"](1) == 14 + 8 + 7 + 7
+    assert ns["temps"](1) == 14 + 8 + 7 + 7 + 2
+    assert ns["bumped"](1) == 2
 
 
 # ------------------------------------------- host-spelled names keep theirs

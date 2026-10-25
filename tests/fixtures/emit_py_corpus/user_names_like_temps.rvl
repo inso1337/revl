@@ -1,6 +1,6 @@
 // User locals spelled like python-emitter temporaries (issue #2913): each must
 // be renamed off the temporary, by the reference and the self-hosted emitter
-// alike, so the function answers 36 for x = 1.
+// alike, so the function answers 38 for x = 1.
 type P = { a: Int }
 
 // an inline host body names its parameter itself, so `_f` keeps its spelling
@@ -20,7 +20,9 @@ pub fn temps(x: Int) -> Int {
   let _ov0 = 7
   let _revl_rem = 7
   let _TEMPS_CONFIG = 1
-  return _TEMPS_CONFIG - 1 + a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1)
+  // a match binder is renamed with the reads in its arm body
+  let m = match pick(x) { Some(_rc) => _rc + 1, None => 0 }
+  return _TEMPS_CONFIG - 1 + a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1) + m
 }
 
 pub fn bumped(x: Int) -> Int { return bump(x) }
