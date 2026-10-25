@@ -2745,6 +2745,7 @@ jobs:
           backends/rust/test_type_params_rust_2545.py
           backends/rust/test_unpinned_case_rust_2497.py
           tests/test_163_match_payload_bind_scope.py
+          tests/test_2901_ts_literal_equality.py
           tests/test_async_match_block_arm.py
           tests/test_cluster_c_emitter_hijack_553.py
           tests/test_component_arith_cross_tier_2198.py
