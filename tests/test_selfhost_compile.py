@@ -400,6 +400,8 @@ JAVA_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
     "lists.rvl", "maps.rvl", "records.rvl", "adts.rvl", "optmatch.rvl",
     "match_ignored.rvl", "float_numeric.rvl",
+    # issue #2325: the diamond on a generic record literal and its raw fallbacks
+    "generic_records.rvl",
     # item 391: the branch/value shapes `selfhost/lower.rvl` did not read — the
     # block-bodied `if` in value position, the empty template, the token-level
     # record-update as a `return` rvalue — so this document was a lower.rvl gap

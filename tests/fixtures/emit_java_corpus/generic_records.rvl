@@ -55,10 +55,6 @@ fn none() -> Bx[Opt[Int]] {
   let b = { v: None }
   return b
 }
-fn cased(n: Int) -> Bx[Box[Int]] {
-  let b = { v: Full(n) }
-  return b
-}
 fn local(n: Int) -> Bx[Int] {
   let x = n
   let b = { v: x }
@@ -69,9 +65,13 @@ fn field(n: Int) -> Bx[Int] {
   let b = { v: a.v }
   return b
 }
-fn generic(n: Int) -> Bx[Opt[Int]] {
+fn cased(n: Int) -> Int {
+  let b = { v: Full(n) }
+  return 0
+}
+fn generic(n: Int) -> Int {
   let b = { v: wrap(n) }
-  return b
+  return 0
 }
 fn rebound(n: Int, o: Opt[Int]) -> Int {
   return match o {
