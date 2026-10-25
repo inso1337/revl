@@ -2569,6 +2569,28 @@ def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> 
     return None
 
 
+def _match_variant_spec(types: dict, type_name: str | None) -> dict | None:
+    """The declared variant a match scrutinee of type ``type_name`` ranges
+    over, or ``None`` when it is not a user variant.
+
+    A non-generic ADT is keyed by its own name. An APPLIED generic one
+    (`Mb[Int]`, `Ei[Int, Str]`, `Mb[Mb[Int]]`) is keyed by its head: its case
+    NAMES do not depend on the type arguments, so the exhaustiveness question
+    is the same one the bare declaration answers (issue #2926; looking the
+    whole spelling up admitted a missing case that failed at runtime)."""
+    if not type_name:
+        return None
+    spec = types.get(type_name)
+    if spec is None:
+        head, args = parse_type(type_name)
+        generic = types.get(head or "")
+        if args and generic is not None and generic.get("params"):
+            spec = generic
+    if spec is None or spec.get("kind") != "variant":
+        return None
+    return spec
+
+
 def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
     type_name = _expr_static_type(expr.scrutinee, type_env, types)
     # item 516 slice 3: the model council's answer, checked BEFORE the general
@@ -2589,8 +2611,8 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
     model_answer.check_match(
         type_name, [pattern for pattern, _, _ in expr.arms], filename,
         expr.line)
-    spec = types.get(type_name or "")
-    if spec is None or spec.get("kind") != "variant":
+    spec = _match_variant_spec(types, type_name)
+    if spec is None:
         return
     # An arm naming something that is not a case of the scrutinee's ADT has no
     # meaning on any tier: Java emits a `case` label for a constant that does

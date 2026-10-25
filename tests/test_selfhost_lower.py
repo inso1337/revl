@@ -1748,14 +1748,25 @@ fn f(o: Opt[Int]) -> Int {
   }
 }
 """),
-    # a PARAMETERIZED ADT: the reference looks its `types` entry up under the
-    # applied spelling (`Box[Int]`) and misses, so a missing case is admitted.
-    ("a match over a parameterized ADT draws no verdict", """
+    # a PARAMETERIZED ADT is judged by its head's cases (issue #2926); a match
+    # naming every case, or a `_` arm, stays admitted.
+    ("a match over a parameterized ADT covering every case", """
 type Box[T] = Full(T) | Empty
 
 fn f(b: Box[Int]) -> Int {
   return match b {
+    Full(x) => x,
     Empty => 0,
+  }
+}
+"""),
+    ("a catch-all arm over a multi-parameter ADT", """
+type Ei[L, R] = Le(L) | Ri(R) | Ne
+
+fn f(e: Ei[Int, Str]) -> Int {
+  return match e {
+    Ri(s) => 1,
+    _ => 0,
   }
 }
 """),
@@ -3376,6 +3387,45 @@ component C requires sink: Sink provides api: Api {
      _fixture("t13_unknown_match_case"), "TYPE"),
     ("a match over a variant missing a case",
      _fixture("v2_match_nonexhaustive"), "T1"),
+    # issue #2926: the applied form of a parameterized ADT, which both sides
+    # used to admit with a missing case (the program failed at runtime).
+    ("issue 2926: a match over a parameterized ADT missing a case", """
+type Box[T] = Full(T) | Empty
+
+fn f(b: Box[Int]) -> Int {
+  return match b {
+    Empty => 0,
+  }
+}
+""", "T1"),
+    ("issue 2926: a nested applied ADT missing a case", """
+type Box[T] = Full(T) | Empty
+
+fn f(b: Box[Box[Int]]) -> Int {
+  let r = match b { Empty => 0 }
+  return r
+}
+""", "T1"),
+    ("issue 2926: a multi-parameter ADT missing two cases", """
+type Ei[L, R] = Le(L) | Ri(R) | Ne
+
+fn f(e: Ei[Int, Str]) -> Int {
+  return match e {
+    Le(x) => x,
+  }
+}
+""", "T1"),
+    ("issue 2926: an arm naming no case of an applied ADT", """
+type Box[T] = Full(T) | Empty
+
+fn f(b: Box[Int]) -> Int {
+  return match b {
+    Full(x) => x,
+    Empty => 0,
+    Gone => 1,
+  }
+}
+""", "TYPE"),
     # the plural sentence, which is a different string and not a join of the
     # singular one.
     ("a match missing two cases", """

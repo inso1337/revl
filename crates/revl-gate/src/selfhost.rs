@@ -19839,12 +19839,24 @@ fn tk_missing_cases(declared: Vec<String>, i: i64, arms: Vec<ArmN>, acc: Vec<Str
     return tk_missing_cases(declared.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), arms.clone(), next);
 }
 
+fn tk_case_row(sty: String, env: &[Bind]) -> String {
+    let row = tenv_get(env, &(String::from("cases ").revl_concat(&sty)));
+    if (row != "") {
+        return row;
+    }
+    let head = parse_head(sty.clone());
+    if ((head == sty) || (tenv_get(env, &(String::from("gadt ").revl_concat(&head))) == "")) {
+        return String::from("");
+    }
+    return tenv_get(env, &(String::from("cases ").revl_concat(&head)));
+}
+
 fn tk_exhaustive(m: MatchN, env: Vec<Bind>) -> String {
     let sty = infer(m.scrut.clone(), env.clone());
     if (sty == "") {
         return String::from("");
     }
-    let row = tenv_get(&env, &(String::from("cases ").revl_concat(&sty)));
+    let row = tk_case_row(sty.clone(), &env);
     if (row == "") {
         return String::from("");
     }
@@ -34068,7 +34080,8 @@ fn adt_case_row(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, St
     if (tenv_get(&acc, &(String::from("cases ").revl_concat(&nm))) != "") {
         return acc;
     }
-    return tenv_put(&acc, String::from("cases ").revl_concat(&nm), names.clone());
+    let rows = tenv_put(&acc, String::from("cases ").revl_concat(&nm), names.clone());
+    return if (j > (i).checked_add(2i64).expect("revl: Int overflow")) { tenv_put(&rows, String::from("gadt ").revl_concat(&nm), String::from("1")) } else { rows.clone() };
 }
 
 fn case_binds(ts: Vec<Token>, al: std::collections::HashMap<String, String>) -> Vec<Bind> {

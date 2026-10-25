@@ -14127,8 +14127,9 @@ fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
 //     `types.get(None)` misses.
 //   * a scrutinee whose type is not a DECLARED variant this text spells out —
 //     a record, a builtin, `Opt[T]`/`Result[T, E]` (whose arms the reference
-//     also leaves alone, because `types` holds no entry under those spellings),
-//     or a parameterized ADT's applied form.
+//     also leaves alone, because `types` holds no entry under those spellings).
+//     A parameterized ADT's applied form is judged by its head's cases, as
+//     the reference judges it (issue #2926).
 //   * a variant with an empty case list, which `adt_case_row` records no row
 //     for.
 // Each of those admits a program the reference may refuse; none refuses one the
@@ -14167,6 +14168,19 @@ fn tk_missing_cases(declared: List[Str], i: Int, arms: List[ArmN],
   return tk_missing_cases(declared, i + 1, arms, next)
 }
 
+// issue #2926: an APPLIED generic ADT (`Mb[Int]`, `Ei[Int, Str]`) ranges over
+// the cases its head declares; the case names do not depend on the type
+// arguments, and `adt_case_row` records the row under the bare head. A head
+// declared WITHOUT parameters is not resolved through an applied spelling,
+// as in the reference.
+fn tk_case_row(sty: Str, env: List[Bind]) -> Str {
+  let row = tenv_get(env, "cases ".concat(sty))
+  if (row != "") { return row }
+  let head = parse_head(sty)
+  if (head == sty || tenv_get(env, "gadt ".concat(head)) == "") { return "" }
+  return tenv_get(env, "cases ".concat(head))
+}
+
 fn tk_exhaustive(m: MatchN, env: List[Bind]) -> Str {
   // `_expr_static_type` is `infer_ast` in its NON-raising form, which is the
   // annotation engine here: a scrutinee this walk would refuse is one the
@@ -14174,7 +14188,7 @@ fn tk_exhaustive(m: MatchN, env: List[Bind]) -> Str {
   // answer would reorder the two.
   let sty = infer(m.scrut, env)
   if (sty == "") { return "" }
-  let row = tenv_get(env, "cases ".concat(sty))
+  let row = tk_case_row(sty, env)
   if (row == "") { return "" }
   let declared = split_top_commas(row)
   let unknown = tk_unknown_arm(m.arms, 0, sty, declared)
@@ -29775,7 +29789,9 @@ fn adt_case_row(ts: List[Token], i: Int, al: Map[Str, Str],
   // this walk does not port: keep the FIRST row rather than letting the second
   // win, so nothing here claims a surface the reference never built.
   if (tenv_get(acc, "cases ".concat(nm)) != "") { return acc }
-  return tenv_put(acc, "cases ".concat(nm), names)
+  let rows = tenv_put(acc, "cases ".concat(nm), names)
+  // issue #2926: a PARAMETERIZED ADT, whose applied form takes this row
+  return j > i + 2 ? tenv_put(rows, "gadt ".concat(nm), "1") : rows
 }
 
 // The built-in half of `_case_table`, declared first so a user ADT can shadow
