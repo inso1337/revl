@@ -708,7 +708,10 @@ def run_ts(ir: dict) -> tuple[str, str]:
         try:
             result = _ts_foreground(
                 [*vitest, "run", str(path)], BACKENDS / "typescript", bound,
-                env={**os.environ, "CI": "1"},
+                # vitest.config.ts re-runs emit.py through REVL_PYTHON; hand it
+                # this interpreter rather than have it guess `python3` (#2892).
+                env={**os.environ, "CI": "1",
+                     "REVL_PYTHON": os.environ.get("REVL_PYTHON") or sys.executable},
             )
         except subprocess.TimeoutExpired:
             # No handler here before #2229, so the caller saw the raw

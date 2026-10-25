@@ -851,6 +851,7 @@ class CrateEngine:
 
     def _build(self) -> Path:
         crate = (ROOT / "crates" / "revl-gate").as_posix()
+        target_dir = self._dir / "target"
         src = self._dir / "src"
         src.mkdir(parents=True, exist_ok=True)
         (self._dir / "Cargo.toml").write_text(
@@ -863,13 +864,14 @@ class CrateEngine:
             f'revl-gate = {{ path = "{crate}" }}\n')
         (src / "main.rs").write_text(_CONSUMER_MAIN)
         for offline in (True, False):
-            argv = ["cargo", "build", "--quiet"]
+            argv = ["cargo", "build", "--quiet", "--target-dir",
+                    str(target_dir)]
             if offline:
                 argv.append("--offline")
             done = subprocess.run(argv, cwd=self._dir, capture_output=True,
                                   text=True)
             if done.returncode == 0:
-                return self._dir / "target" / "debug" / "revl_gate_census"
+                return target_dir / "debug" / "revl_gate_census"
             if not offline:
                 raise SystemExit(
                     "gate_reference_census: could not build the consumer "

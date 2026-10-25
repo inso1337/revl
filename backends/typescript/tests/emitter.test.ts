@@ -5,13 +5,14 @@ import { existsSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pythonInterpreter } from '../scripts/emit-fixtures'
 
 const backend = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const repoIr = resolve(backend, '..', '..', 'examples', 'user_cache.ir.json')
 const fixtureIr = join(backend, 'tests', 'fixtures', 'user_cache.ir.json')
 
 function runEmit(irPath: string, extraArgs: string[] = []) {
-  return spawnSync('python3', ['emit.py', ...extraArgs, irPath], {
+  return spawnSync(pythonInterpreter(), ['emit.py', ...extraArgs, irPath], {
     cwd: backend,
     encoding: 'utf-8',
   })

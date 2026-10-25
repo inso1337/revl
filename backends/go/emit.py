@@ -423,6 +423,10 @@ class _Env:
         # surface types of locals/params, for stdlib-method dispatch and the
         # `??` / ternary result-type inference.
         self.var_types: dict[str, str | None] = {}
+        # `{binding: declared type}` a provide-method body hands each local
+        # on to (`_method_flow_hints`); empty outside one.
+        self.flow_hints: dict = {}
+        self.method_body: list = []
         # item 113: the Go value type to instantiate the generic host Map with
         # at a `Map.new()` acquisition (`MapNew[int64]()`); set transiently by
         # the let-effect emitter, None everywhere else.
@@ -2078,6 +2082,9 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
         _open_ui_scope(m, env, out)
         for pn in m.get("params", []):
             env.var_types[pn] = ptypes.get(pn)
+        env.flow_hints = _method_flow_hints(m.get("body", []),
+                                            decl.get("returns"), env)
+        env.method_body = m.get("body", [])
         _emit_method_body(m.get("body", []), env, out, 1,
                           ret_surface=decl.get("returns"))
         out.append("}")
@@ -2221,7 +2228,19 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             _emit_return(step.get("expr"), ret_surface, env, out, pad)
         elif s in ("let", "var"):
             name = _safe_local(step["name"])
-            surface = _comp_infer(step.get("value"), env)
+            value_node = step.get("value") or {}
+            if value_node.get("kind") == "list" and not value_node.get("items"):
+                # `_comp_infer` reads an itemless literal as `List[Int]`, which
+                # is only a guess; the annotation the frontend threads onto
+                # the node, else where the binding flows, decides (#2898)
+                pin = value_node.get("expected")
+                surface = (pin if isinstance(pin, str) and pin.startswith("List[")
+                           else _empty_list_type(step["name"], env.flow_hints,
+                                                 env.method_body,
+                                                 _comp_infer(value_node, env),
+                                                 False))
+            else:
+                surface = _comp_infer(value_node, env)
             if surface is not None:
                 env.var_types[step["name"]] = surface
             value = _expr(step["value"], env, surface)
@@ -6696,6 +6715,8 @@ class _V3GoCtx:
         # `{binding: declared type}` the current body hands each local on to;
         # see `_v3_flow_hints`.
         self.flow_hints: dict = {}
+        # the body those hints were taken from (`_only_sized_or_appended`)
+        self.fn_body: list = []
         # feature flags set during rendering / used at module assembly
         self.needs_fmt = False
         self.used_stdlib = False
@@ -6976,6 +6997,33 @@ def _v3_fill_erased(surface, declared, types=None):
     return surface
 
 
+class _FlowHints(dict):
+    """`{binding: declared type}`, first offer wins as before, plus every
+    distinct declared target a binding was offered (`targets`). Only an
+    untyped empty list reads `targets`: a binding handed to two different
+    List types has no one Go type, so it is refused rather than declared
+    as whichever flow was walked first (issue #2898). `pushed` holds the
+    weaker evidence of what is pushed into a binding, consulted only when
+    no declared target exists."""
+
+    def __init__(self):
+        super().__init__()
+        self.targets: dict = {}
+        self.pushed: dict = {}
+
+    def offer(self, name, declared) -> bool:
+        """Record `declared` as a target of `name`; True if it is new."""
+        if not (isinstance(name, str) and isinstance(declared, str)):
+            return False
+        seen = self.targets.setdefault(name, [])
+        if declared not in seen:
+            seen.append(declared)
+        if name in self:
+            return False
+        self[name] = declared
+        return True
+
+
 def _v3_flow_hints(body, ret_type, ctx) -> dict:
     """`{binding: declared type}` for each local a function body hands on
     whole: `return x` flows into the declared return, and `f(x)` into `f`'s
@@ -6983,12 +7031,12 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
     argument erased fills it from here, so `let r = Ok(1); return r` declares
     `r` as the function's `RevlResult[int64, string]` rather than the
     `RevlResult[int64, any]` Go would refuse to return."""
-    hints: dict = {}
+    hints = _FlowHints()
     for node in _v3_walk_nodes(body):
         if node.get("step") == "return" and ret_type:
             expr = node.get("expr")
             if isinstance(expr, dict) and expr.get("kind") == "var":
-                hints.setdefault(expr.get("name"), ret_type)
+                hints.offer(expr.get("name"), ret_type)
         if node.get("kind") == "call":
             callee = node.get("callee") or {}
             name = callee.get("name") if callee.get("kind") == "var" else None
@@ -7003,7 +7051,122 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
             for arg, declared in zip(node.get("args") or [], params):
                 if (isinstance(arg, dict) and arg.get("kind") == "var"
                         and isinstance(declared, str)):
-                    hints.setdefault(arg.get("name"), declared)
+                    hints.offer(arg.get("name"), declared)
+        if node.get("kind") == "record":
+            # `{ texts: texts }` hands `texts` to the record's declared field
+            fields = node.get("fields") or []
+            raw = ctx.record_by_fields.get(tuple(sorted(k for k, _ in fields)))
+            declared = (ctx.types.get(raw) or {}).get("fields") or {} if raw else {}
+            for key, value in fields:
+                if _local_ref(value) and isinstance(declared.get(key), str):
+                    hints.offer(_local_ref(value), declared[key])
+    _flow_through_assigns(body, hints)
+    saved = ctx.var_types
+    ctx.var_types = dict(saved)
+    try:
+        _push_evidence(body, hints, lambda n: _go_v3_infer_type(n, ctx),
+                       ctx.var_types)
+    finally:
+        ctx.var_types = saved
+    return hints
+
+
+def _is_empty_list(node) -> bool:
+    return (isinstance(node, dict) and node.get("kind") == "list"
+            and not node.get("items"))
+
+
+def _push_evidence(body, hints, infer, scratch) -> None:
+    """Record in `hints.pushed` what each `acc = acc.push(x)` pushes: a List
+    of `x`'s type; and offer the type of any other value assigned to a
+    binding (`out = xs`) as one of its declared targets. The body's locals are typed forward in document order (a
+    loop variable from its iterable, a `let` from its value) into `scratch`,
+    a copy of the parameter types that `infer` reads, the same forward pass
+    the ts tier runs. An empty-list `let` is skipped: its type is the
+    question being answered."""
+    for node in _v3_walk_nodes(body):
+        step = node.get("step")
+        if step == "for" and isinstance(node.get("bind"), str):
+            it = infer(node.get("iterable"))
+            if isinstance(it, str) and it.startswith("List[") and it.endswith("]"):
+                scratch.setdefault(node["bind"], it[5:-1])
+        elif (step == "let" and isinstance(node.get("name"), str)
+                and not _is_empty_list(node.get("value"))):
+            t = infer(node.get("value"))
+            if isinstance(t, str) and not _v3_has_any(t):
+                scratch.setdefault(node["name"], t)
+        value = node.get("value") if step == "assign" else None
+        if (isinstance(value, dict) and value.get("kind") == "builtin"
+                and value.get("method") == "push"
+                and _local_ref(value.get("target")) == node.get("name")
+                and value.get("args")):
+            elem = infer(value["args"][0])
+            if isinstance(elem, str) and not _v3_has_any(elem):
+                hints.pushed.setdefault(node.get("name"), f"List[{elem}]")
+        elif (isinstance(value, dict) and not _is_empty_list(value)
+                and isinstance(node.get("name"), str)):
+            # `out = xs`: Go assigns only between identical types, so the
+            # source's type is a declared target of `out` like a return is
+            t = infer(value)
+            if (isinstance(t, str) and t.startswith("List[") and t.endswith("]")
+                    and not _v3_has_any(t)):
+                hints.offer(node["name"], t)
+
+
+def _local_ref(node):
+    """The local a bare reference names (`{"kind": "var", "name"}` on the
+    pure tier, `{"kind": "name", "id"}` in a component body), else None."""
+    if isinstance(node, dict) and node.get("kind") in ("var", "name"):
+        return node.get("name") or node.get("id")
+    return None
+
+
+def _flow_through_assigns(body, hints) -> None:
+    """Extend `hints` across `out = res`: it hands `res` on to wherever `out`
+    goes, and Go assigns only between identical types, so `res` is declared
+    as `out` is (stdlib `list_sort` builds each pass in `res` and rebinds
+    `out` to it). Iterated, since a chain can be written in any order."""
+    aliases = [(n.get("name"), _local_ref(n.get("value")), False)
+               for n in _v3_walk_nodes(body)
+               if n.get("step") == "assign" and _local_ref(n.get("value"))]
+    # `out = out.push(row)` hands `row` on as one element of `out`
+    aliases += [(_local_ref(n.get("target")), _local_ref(n["args"][0]), True)
+                for n in _v3_walk_nodes(body)
+                if n.get("kind") == "builtin" and n.get("method") == "push"
+                and _local_ref(n.get("target")) and n.get("args")
+                and _local_ref(n["args"][0])]
+    changed = True
+    while changed:
+        changed = False
+        for target, source, element in aliases:
+            if target not in hints:
+                continue
+            want = hints[target]
+            if element:
+                if not (isinstance(want, str) and want.startswith("List[")
+                        and want.endswith("]")):
+                    continue
+                want = want[5:-1]
+            if hints.offer(source, want):
+                changed = True
+
+
+def _method_flow_hints(body, ret_surface, env) -> dict:
+    """`{binding: declared type}` for a provide-method body: `return x` flows
+    into the service method's declared return, then on through assignments;
+    what is pushed is recorded as on the pure tier."""
+    hints = _FlowHints()
+    if isinstance(ret_surface, str):
+        for node in _v3_walk_nodes(body):
+            if node.get("step") == "return" and _local_ref(node.get("expr")):
+                hints.offer(_local_ref(node.get("expr")), ret_surface)
+    _flow_through_assigns(body, hints)
+    saved = env.var_types
+    env.var_types = dict(saved)
+    try:
+        _push_evidence(body, hints, lambda n: _comp_infer(n, env), env.var_types)
+    finally:
+        env.var_types = saved
     return hints
 
 
@@ -8632,6 +8795,74 @@ def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
     return f"delete({name}, {args[0]})"
 
 
+def _only_sized_or_appended(name, body, appends: bool) -> bool:
+    """Whether every read of local `name` in `body` is a `.length()`, or, with
+    `appends`, the receiver of its own unique `name = name.push(x)` (lowered
+    to `append`, which takes any element), and every write is that push or
+    another `[]`. Such a binding builds whatever its element type, so an
+    unhinted one keeps the slice main gave it (`[]any{}` on the pure tier,
+    the tier's `List[Int]` slice in a provide method: `[]int64{}` on
+    ir_version 3, `[]int{}` before). Any other write (`out = xs`) fixes a
+    type that guess could contradict."""
+    refs, allowed = set(), set()
+    for node in _v3_walk_nodes(body):
+        if (node.get("step") == "assign" and node.get("name") == name
+                and not _is_empty_list(node.get("value"))):
+            value = node.get("value")
+            self_push = (appends and node.get("unique") is True
+                         and isinstance(value, dict)
+                         and value.get("kind") == "builtin"
+                         and value.get("method") == "push"
+                         and _local_ref(value.get("target")) == name)
+            if not self_push:
+                return False
+        if _local_ref(node) == name:
+            refs.add(id(node))
+        if (node.get("kind") == "builtin" and node.get("method") == "length"
+                and _local_ref(node.get("target")) == name):
+            allowed.add(id(node["target"]))
+        value = node.get("value")
+        if (appends and node.get("step") == "assign" and node.get("name") == name
+                and node.get("unique") is True and isinstance(value, dict)
+                and value.get("kind") == "builtin" and value.get("method") == "push"
+                and _local_ref(value.get("target")) == name):
+            allowed.add(id(value["target"]))
+    return refs <= allowed
+
+
+def _empty_list_type(name, hints, body, fallback, appends) -> str:
+    """The declared type of `let/var name = []`, taken from where the binding
+    flows (`_v3_flow_hints` / `_method_flow_hints`: a declared return, a
+    parameter, a record field, another binding it is assigned to or pushed
+    into), else from what is pushed into it. Go fixes a composite literal's
+    element type at the literal and never from a later `append` (issue
+    #2898). Two disagreeing targets are refused. With no evidence at all, a
+    binding only sized or appended to keeps `fallback`, the slice main gave
+    it; any other read is refused, as the wasm tier refuses it, rather than
+    emitted as a list `go build` then rejects where it is used."""
+    def is_list(t):
+        return (isinstance(t, str) and t.startswith("List[") and t.endswith("]")
+                and not _v3_has_any(t))
+    targets = [t for t in getattr(hints, "targets", {}).get(name, [])
+               if is_list(t)]
+    if len(targets) > 1:
+        raise EmitError(
+            "an untyped empty list literal has conflicting expected List "
+            f"types: `{name} = []` flows into {' and '.join(sorted(targets))} - "
+            f"annotate it (`var {name}: List[T] = []`)")
+    if targets:
+        return targets[0]
+    pushed = getattr(hints, "pushed", {}).get(name)
+    if is_list(pushed):
+        return pushed
+    if _only_sized_or_appended(name, body, appends):
+        return fallback
+    raise EmitError(
+        "an untyped empty list literal needs an expected List type: "
+        f"no typed target found for `{name} = []` - "
+        f"annotate it (`var {name}: List[T] = []`)")
+
+
 def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=None) -> None:
     pad = "\t" * indent
     step = node.get("step")
@@ -8647,6 +8878,10 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         if _v3_has_any(inferred):
             inferred = _v3_fill_erased(
                 inferred, ctx.flow_hints.get(node.get("name")), ctx.types)
+        if inferred is None and value_node.get("kind") == "list" \
+                and not value_node.get("items"):
+            inferred = _empty_list_type(node.get("name"), ctx.flow_hints,
+                                        ctx.fn_body, "List[any]", True)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         value = _go_v3_expr(node.get("value"), ctx, inferred)
@@ -9182,6 +9417,7 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.ret_type = fn.get("returns")
         ctx.flow_hints = _v3_flow_hints(fn.get("body") or [], ctx.ret_type, ctx)
+        ctx.fn_body = fn.get("body") or []
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
         ctx.reserved_idents = _go_v3_reserved_idents(fn)
@@ -9216,6 +9452,7 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
         ctx.var_types = {}
         ctx.ret_type = None
         ctx.flow_hints = _v3_flow_hints(test.get("body") or [], None, ctx)
+        ctx.fn_body = test.get("body") or []
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
         ctx.scan_loops = _v3_scan_loops(test)

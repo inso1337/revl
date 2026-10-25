@@ -1412,6 +1412,10 @@ class _V3Ctx:
         # in the body being emitted: {binding name: "Map[Str, V]"}. Reset per
         # body beside `arrows` above; see `_pin_value_map_locals` (issue #274).
         self.map_locals: dict[str, str] = {}
+        # Parameter names of the top-level fn being emitted, whose Java type is
+        # their declared one; see `_infers_exactly` (issue #2325). Empty in
+        # every other body, which keeps a generic record literal raw there.
+        self.param_names: set[str] = set()
 
     def new_match_ignored(self) -> str:
         self._match_counter += 1
@@ -2579,7 +2583,12 @@ def _expr(
             if field_name not in by_name:
                 raise EmitError(f"record literal is missing field {field_name!r}")
             args.append(by_name[field_name])
-        return f"new {_ident(type_name, 'type name')}({', '.join(args)})"
+        # issue #2325: a generic record is built with the diamond, so javac
+        # infers its type arguments. Raw `new Bx(n)` made `final var b` a raw
+        # `Bx` whose fields read as `Object` (`b.v + 1L` is rejected).
+        diamond = "<>" if spec.get("params") and all(
+            _infers_exactly(v, ctx) for _, v in fields) else ""
+        return f"new {_ident(type_name, 'type name')}{diamond}({', '.join(args)})"
 
     if kind == "list":
         return "java.util.List.of(" + ", ".join(
@@ -2860,6 +2869,63 @@ def _void_map_arm(node: object) -> bool:
     if target.get("kind") not in ("name", "var", "host"):
         return False
     return node.get("method") in _MAP_VOID_VERBS
+
+
+def _match_bind_names(node: object) -> set[str]:
+    """Every name a `match` arm binds anywhere under *node*. An arm bind may
+    reuse a parameter's name, and inside that arm the name no longer has the
+    parameter's type (see `_infers_exactly`)."""
+    if isinstance(node, list):
+        return set().union(*(_match_bind_names(item) for item in node))
+    if not isinstance(node, dict):
+        return set()
+    names = {node["bind"]} if "pattern" in node and isinstance(node.get("bind"), str) else set()
+    return names.union(*(_match_bind_names(v) for v in node.values()
+                         if isinstance(v, (dict, list))))
+
+
+def _infers_exactly(node: object, ctx: _V3Ctx) -> bool:
+    """True when javac, inferring from *node* alone, gets the revl type
+    (issue #2325).
+
+    A diamond under `final var` has no target type, so a generic record's type
+    arguments come from its constructor arguments alone, and the IR keeps no
+    `let` annotation to declare instead. An allow-list, not a deny-list: a
+    value whose Java type is looser than its revl one (an empty list, `None`,
+    a variant case's nested class, a local bound to any of those, a field read
+    off a raw record) gives `Bx<List<Object>>`, which does not convert to the
+    declared `Bx<List<Long>>` where the raw `Bx` converted unchecked. So only
+    a literal, a parameter of the function, arithmetic over those, a call to a
+    non-generic top-level fn, `Some` of one, a non-empty list of them and a
+    record literal built from them count, and anything else keeps the literal
+    raw.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        return node.get("value") is not None
+    if kind == "var":
+        return node.get("name") in ctx.param_names
+    if kind in ("bin", "un"):
+        return all(_infers_exactly(node.get(k), ctx)
+                   for k in ("left", "right", "operand", "expr") if k in node)
+    if kind == "list":
+        items = node.get("items") or []
+        return bool(items) and all(_infers_exactly(i, ctx) for i in items)
+    if kind == "record":
+        return all(_infers_exactly(v, ctx) for _, v in node.get("fields") or [])
+    if kind == "call":
+        callee = node.get("callee")
+        name = callee.get("name") if isinstance(callee, dict) and callee.get("kind") == "var" else None
+        if name in ctx.function_names and name not in ctx.arrows:
+            # a generic fn's return type is inferred from its arguments too
+            return not any(fn.get("name") == name and fn.get("type_params")
+                           for fn in ctx.functions)
+        args = node.get("args") or []
+        return (name == "Some" and name not in ctx.case_owners and len(args) == 1
+                and _infers_exactly(args[0], ctx))
+    return False
 
 
 def _v3_match_expr(
@@ -4145,6 +4211,8 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         )
         ret = _java_v3_type(fn.get("returns"))
         ctx.arrows = {}  # arrow bindings are local to one body
+        ctx.param_names = ({p.get("name") for p in fn.get("params") or []}
+                           - _match_bind_names(fn.get("body")))
         _pin_value_map_locals(fn.get("body"), fn.get("params"), ctx)
         lines.append(f"public static {ret} {name}({params}) {{")
         if not fn.get("body"):
