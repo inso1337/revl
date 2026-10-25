@@ -1297,6 +1297,7 @@
    "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
   ],
   "1": [
+   "examples/app/private_notes.rvl",
    "examples/rejections/a5_compensatable_without_compensate.rvl",
    "examples/rejections/a5_no_inverse_declares_compensate.rvl",
    "examples/rejections/g2_provider_multiplicity.rvl",
