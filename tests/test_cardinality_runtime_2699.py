@@ -74,19 +74,32 @@ def _call(server, tool: str, arguments: dict) -> dict:
                          )["result"]["structuredContent"]
 
 
-def _real_crossings(src: str) -> int:
+def _clear(server) -> None:
+    if server.SESSION.loaded:
+        server.SESSION.unload()
+    server.SESSION.pending_draft = None
+    server.SESSION.draft = None
+
+
+@pytest.fixture(autouse=True)
+def clean_session(tmp_path, monkeypatch):
     from revl.mcp import server
-    try:
-        loaded = _call(server, "revl_load", {"source": src})
-        assert loaded["ok"] is True, loaded
-        ran = _call(server, "revl_call", {"key": "agent", "method": "run", "args": ["go"]})
-        assert ran["ok"] is True, ran
-        counted = _call(server, "revl_call", {"key": "tally", "method": "count", "args": []})
-        assert counted["ok"] is True, counted
-        return counted["result"]
-    finally:
-        if server.SESSION.loaded:
-            server.SESSION.unload()
+    monkeypatch.chdir(tmp_path)
+    yield
+    _clear(server)
+
+
+def _real_crossings(src: str) -> int:
+    """Load, run and count on a fresh session; each fuel gets its own load."""
+    from revl.mcp import server
+    _clear(server)
+    loaded = _call(server, "revl_load", {"source": src})
+    assert loaded["ok"] is True, loaded
+    ran = _call(server, "revl_call", {"key": "agent", "method": "run", "args": ["go"]})
+    assert ran["ok"] is True, ran
+    counted = _call(server, "revl_call", {"key": "tally", "method": "count", "args": []})
+    assert counted["ok"] is True, counted
+    return counted["result"]
 
 
 def _reported_bound(src: str) -> int:
