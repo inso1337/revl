@@ -10,7 +10,8 @@ literal with an `Int` in a `Float` field, a generic record instantiated both
 ways, and `Opt[Float] == Int` through the `Opt` injection. No marker can reach
 an element, so the tiers disagreed: python answered true, TypeScript compared
 `3n` with `3` inside `revlEq` and answered false, go did not build (`[]int64`
-against `[]float64`).
+against `[]float64`) or answered false; go answered true only for the record
+literal, which it types from the declared record.
 
 The rule (docs/arithmetic.md, "`Int` widens into `Float`, and the IR now says
 where", paragraph "Only a bare operand widens"): only a bare scalar operand of
@@ -24,7 +25,7 @@ What this does NOT cover: an `Int` put into a `Float` slot BEFORE the
 comparison (`let xs: List[Float] = [1, 2]`, `A(3)` for `A(Float)`, `Some(3)`
 into an `Opt[Float]` parameter). Both operands are then `Float`-typed, the
 checker has nothing to refuse, and the typed slot did not convert the nested
-`Int`. That is issue #2937; its shapes are the strict xfail rows at the end,
+`Int`. That is issue #2938; its shapes are the strict xfail rows at the end,
 so they flip to a failure (XPASS) when it lands.
 """
 
@@ -170,10 +171,11 @@ def test_bare_and_same_type_equality_still_checks(name: str):
     compile_source(KEPT[name], "mixed_eq.rvl")
 
 
-# Issue #2937: the typed-slot widening. Each program is ACCEPTED (both operands
+# Issue #2938: the typed-slot widening. Each program is ACCEPTED (both operands
 # are `Float`-typed) and diverges because the slot kept a nested `Int`. The
-# set is the tiers measured to disagree with python on origin/main (py, ts, go
-# on 2026-10-25); a strict xfail turns into a failure once #2937 fixes them.
+# set is the tiers measured to disagree with python on 2026-10-25: ts on all
+# five, go on the List[Float] let. A strict xfail turns into a failure once
+# #2938 fixes them.
 TYPED_SLOT = {
     "a List[Float] let holding Int literals": ("""
 pub fn f() -> Bool {
@@ -209,7 +211,7 @@ def _typed_slot_params():
             if tier in TYPED_SLOT[name][1]:
                 marks = pytest.mark.xfail(
                     strict=True,
-                    reason="issue #2937: a typed slot does not convert a "
+                    reason="issue #2938: a typed slot does not convert a "
                            "nested Int")
             yield pytest.param(tier, name, marks=marks, id=f"{tier}-{name}")
 
