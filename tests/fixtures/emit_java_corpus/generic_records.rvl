@@ -69,7 +69,7 @@ fn field(n: Int) -> Bx[Int] {
 // self-host checker refuses both literals as a returned `Bx[..]` where the
 // reference admits them: `Full(n)` as "got `{v: Box}`" (issue #2472), and
 // `wrap(n)` as "got `{v: Opt[U]}`", the generic fn's result keeping its type
-// parameter (no issue filed yet).
+// parameter (issue #2928).
 fn cased(n: Int) -> Int {
   let b = { v: Full(n) }
   return 0
