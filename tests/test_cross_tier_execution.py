@@ -1315,7 +1315,7 @@ def test_map_index_miss_faults_with_its_reason_slow(tier: str, capsys):
 # observable of #957 was a COMPILE failure on rust and java, so a tier that
 # cannot build must be caught here even when no toolchain is installed.
 _MAP_INDEX_EMITTED = {
-    "python": ("_revl_map_index(", "_revl_index("),
+    "python": ("_revl_map_index(", "_revl_neg_index"),
     # `revlIndex` is the List read the Map subscript used to be routed to (with
     # the key wrapped in `Number(...)`); the probe has no List subscript at all,
     # so the helper must be absent from the module entirely.

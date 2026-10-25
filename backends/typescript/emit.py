@@ -3543,10 +3543,14 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
-    # once, receiver never mutates.
+    # once, receiver never mutates. The operands are ARGUMENTS of the call,
+    # not text inside the closure body, so a user name can never be read
+    # through the closure's own temporaries (a Map named `c` used to hit the
+    # temporary `c` before its initialiser ran, issue #2900).
     if method == "set":
-        return (f"(() => {{ const c = new Map({target}); "
-                f"c.set({args[0]}, {args[1]}); return c }})()")
+        return (f"(<K, V>(_m: Map<K, V>, _k: K, _v: V) => "
+                f"{{ const _c = new Map(_m); _c.set(_k, _v); return _c }})"
+                f"({target}, {args[0]}, {args[1]})")
     if method == "lookup":
         # Map.get answers undefined when absent: exactly the Opt None case.
         return f"{target}.get({args[0]})"
@@ -3570,8 +3574,9 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     if method == "keys":
         return f"[...{target}.keys()].sort(revlStrCmp)"
     if method == "remove":
-        return (f"(() => {{ const c = new Map({target}); "
-                f"c.delete({args[0]}); return c }})()")
+        return (f"(<K, V>(_m: Map<K, V>, _k: K) => "
+                f"{{ const _c = new Map(_m); _c.delete(_k); return _c }})"
+                f"({target}, {args[0]})")
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): Int is a
     # bigint on this tier, and BigInt.prototype.toString is exact decimal.
     if method == "to_str":

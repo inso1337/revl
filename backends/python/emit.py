@@ -826,8 +826,8 @@ def _scan_uses(root) -> _UsesScan:
                             scan.float_interp = True
                             break
             elif kind == "index":
-                # A List subscript `xs[i]` routes through `_revl_index`, which
-                # faults on a negative index (#549: every tier faults, python
+                # A List subscript `xs[i]` carries an inline guard (`_list_index`)
+                # that faults on a negative index (#549: every tier faults, python
                 # would otherwise read from the end). A string-LITERAL key is a
                 # host/`Any` property read, not a List subscript, so it stays a
                 # bare `[...]`. A `Map` subscript (issue #957) is neither: it
@@ -844,6 +844,40 @@ def _scan_uses(root) -> _UsesScan:
         elif isinstance(node, (list, tuple)):
             stack.extend(node)
     return scan
+
+
+def _list_index(target: object, target_src: str, index: object,
+                index_src: str) -> str:
+    """A List subscript `xs[i]` with the #549 negative-index guard inlined.
+
+    python would read a negative index from the end; every other tier faults.
+    The guard goes inside the subscript, so the list is evaluated, then the
+    index, each exactly once and in that order, and an index past the end is
+    the list's own IndexError:
+
+      * a variable index (`xs[i]`) is read twice, which is unobservable:
+        `xs[i if i >= 0 else _revl_neg_index()]`;
+      * a non-negative Int literal needs no guard: `xs[3]`;
+      * anything else is bound once, `xs[_revl_i if (_revl_i := I) >= 0 else
+        _revl_neg_index()]`. One temp name serves every nesting level: nothing
+        runs between the walrus and the read of `_revl_i` that follows it.
+
+    The target is parenthesized unless it renders as an atom (a variable or
+    component-body name, a subscript or a list display); `selfhost/emit_py.rvl` applies the same kind
+    tests so the two emitters agree byte for byte.
+    """
+    kind = target.get("kind") if isinstance(target, dict) else None
+    if kind not in ("var", "name", "index", "list"):
+        target_src = f"({target_src})"
+    ikind = index.get("kind") if isinstance(index, dict) else None
+    if ikind == "lit":
+        value = index.get("value")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return f"{target_src}[{index_src}]"
+    if ikind in ("var", "name"):
+        return f"{target_src}[{index_src} if {index_src} >= 0 else _revl_neg_index()]"
+    return (f"{target_src}[_revl_i if (_revl_i := {index_src}) >= 0 "
+            f"else _revl_neg_index()]")
 
 
 # Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md). `repr`
@@ -1177,7 +1211,7 @@ _FIELD_TMP = "_fv"
 # python refuses an assignment expression that rebinds the iteration variable of
 # the comprehension it sits in, so a payload bound under one of these names has
 # to keep the older walrus binder.
-_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc"})
+_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc", "_revl_i"})
 _OPT_TMP_RE = re.compile(r"_ov\d+\Z")
 
 
@@ -1236,7 +1270,7 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # Character access routes through `_revl_str_at`, which faults for an index
     # outside `0 <= i < length()` — python's `s[i]` is END-RELATIVE, so a bare
     # `s[-1]` would read the LAST code point where go, rust, java and ts all
-    # fault. Same guard, same reason, as `_revl_index` on a List subscript
+    # fault. Same guard, same reason, as the inline guard on a List subscript
     # (#549, docs/stdlib-2.0.md §Str.codepoint_at).
     if method == "charAt":
         return f"_revl_str_at({target}, {args[0]})"
@@ -1993,21 +2027,21 @@ class _ComponentEmitter:
                                opt=bool(expr.get("opt")), rereadable=atom)
         if kind == "index":
             idx = expr.get("index")
-            # A `Map` subscript reads by KEY (issue #957): `_revl_index` is the
-            # List guard and compares the index with 0, which raises a TypeError
+            # A `Map` subscript reads by KEY (issue #957): the List
+            # guard (`_list_index`) compares the index with 0, which raises a TypeError
             # on a `Str` key even for a key that is present.
             if expr.get("key_type") is not None:
                 return (f"_revl_map_index({self._expr(expr.get('target'), where)}, "
                         f"{self._expr(idx, where)})")
             # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`),
             # not a List subscript — emit the bare `[...]` unchanged. A List
-            # subscript routes through `_revl_index`, which faults on a negative
+            # subscript carries the inline guard of `_list_index`, which faults on a negative
             # index so python agrees with every other tier (#549).
             if (isinstance(idx, dict) and idx.get("kind") == "lit"
                     and isinstance(idx.get("value"), str)):
                 return f"{self._expr(expr.get('target'), where)}[{self._expr(idx, where)}]"
-            return (f"_revl_index({self._expr(expr.get('target'), where)}, "
-                    f"{self._expr(idx, where)})")
+            return _list_index(expr.get("target"), self._expr(expr.get("target"), where),
+                               idx, self._expr(idx, where))
         if kind == "bin":
             if expr.get("op") == "??":
                 # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
@@ -4201,12 +4235,12 @@ def _expr(node: dict) -> str:
             return f"_revl_map_index({_expr(node['target'])}, {_expr(idx)})"
         # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
         # List subscript — bare `[...]`. A List subscript routes through
-        # `_revl_index`, which faults on a negative index so python agrees with
+        # the inline guard of `_list_index`, which faults on a negative index so python agrees with
         # every other tier (#549).
         if (isinstance(idx, dict) and idx.get("kind") == "lit"
                 and isinstance(idx.get("value"), str)):
             return f"{_expr(node['target'])}[{_expr(idx)}]"
-        return f"_revl_index({_expr(node['target'])}, {_expr(idx)})"
+        return _list_index(node["target"], _expr(node["target"]), idx, _expr(idx))
     if kind == "if":
         return f"({_expr(node['then'])} if {_expr(node['cond'])} else {_expr(node['else'])})"
     if kind == "record":
@@ -6255,19 +6289,20 @@ def emit(ir: dict) -> str:
         # §index): go/rust/java panic and TypeScript throws, so python — which
         # would silently read from the end — guards the read here. A
         # non-negative index reads exactly as `xs[i]` always did.
-        out.add(0, "def _revl_index(xs, i):")
+        #
+        # The guard is inlined at each subscript (`_list_index`); only the
+        # fault it raises is a function, so the read itself pays no call.
+        out.add(0, "def _revl_neg_index():")
         out.add(0, '    """A negative List index faults on every tier (#549); '
                    'python would"""')
         out.add(0, '    """otherwise read from the end, so guard it here."""')
-        out.add(0, "    if i < 0:")
-        out.add(0, "        raise IndexError('revl: negative list index')")
-        out.add(0, "    return xs[i]")
+        out.add(0, "    raise IndexError('revl: negative list index')")
         out.add(0)
     if _scan.builtins & {"charAt", "charCodeAt", "codepoint_at"}:
         # An index outside `0 <= i < length()` FAULTS on every tier
         # (docs/stdlib-2.0.md §Str.codepoint_at). python's `s[i]` is
         # END-RELATIVE, so `s.charAt(-1)` read the last code point here while
-        # go/rust/java/ts faulted — the `_revl_index` story (#549), one type
+        # go/rust/java/ts faulted — the List subscript story (#549), one type
         # over. `slice`-then-guard is still the total form.
         out.add(0, "def _revl_str_at(s, i):")
         out.add(0, '    """A Str index outside 0 <= i < length() faults on '
