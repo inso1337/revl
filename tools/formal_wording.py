@@ -102,14 +102,23 @@ class Ledger:
     unproved_row: bool = False
 
 
+_GUARANTEE_ROW_LABEL = re.compile(r"G\d+\b")
+
+
 def unproved_row_in(ledger_text: str) -> bool:
-    """True when any table cell of the ledger starts with UNPROVED."""
+    """True when a guarantee row states UNPROVED.
+
+    A guarantee row is a table row whose first cell is a G-code label, so the
+    numbered rows and their unnumbered sub-rows (`G9 path coverage`) count and
+    an UNPROVED cell in an unrelated table (a `T` row, a registry) does not."""
     for line in ledger_text.splitlines():
         if not line.lstrip().startswith("|"):
             continue
-        for cell in line.strip().strip("|").split("|"):
-            if cell.strip().strip("*").strip().lower().startswith("unproved"):
-                return True
+        cells = [c.strip().strip("*").strip() for c in line.strip().strip("|").split("|")]
+        if not cells or not _GUARANTEE_ROW_LABEL.match(cells[0]):
+            continue
+        if any(c.lower().startswith("unproved") for c in cells[1:]):
+            return True
     return False
 
 
@@ -159,11 +168,11 @@ class Phrasing:
 # here: they also say "verified at compile time" or "checked by the checker",
 # which are claims about the compiler's own checks. "verified" counts only
 # after formally / mechanically / machine.
-_STRONG = r"(?:formally|mechanically|mechani[sz]ed|machine)[\s-]+"
+_STRONG = r"(?:formally|mechanically|machine)[\s-]+"
 _PROVED_WORD = (
     r"(?:(?:fully|completely|rigorously|entirely|now|also)\s+)*"
     r"(?:" + _STRONG + r"(?:proved|proven|verified|checked)"
-    r"|proved|proven|machine-checked|mechani[sz]ed)"
+    r"|proved|proven|machine-checked)"
 )
 # The words between a subject and its predicate.
 _AUX = (
@@ -242,7 +251,9 @@ PHRASINGS: Sequence[Phrasing] = (
     Phrasing(
         key="compiler-verified",
         pattern=re.compile(
-            r"\b(?:compiler\s+" + _AUX + _PROVED_WORD + r"(?:\s+correct)?"
+            r"\b(?:(?:(?:the|revl['’]s|our|this)\s+(?:revl\s+)?compiler|revl\s+compiler)\s+"
+            r"(?:is|was|is\s+now|has\s+been|have\s+been)\s+"
+            + _PROVED_WORD + r"(?:\s+correct)?"
             r"|" + _STRONG + r"(?:proved|proven|verified)\s+compiler"
             r"|(?:proved|proven|verified)[-\s]correct\s+compiler)"
             r"(?![A-Za-z0-9_-])",

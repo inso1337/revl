@@ -681,3 +681,39 @@ def test_each_rewording_the_review_found_is_refused(tree, sentence, key):
 ])
 def test_testing_sense_verified_and_checked_sentences_pass(tree, sentence):
     _silent(sentence, tree, "formal-wording")
+
+
+# --------------------------------------------------------------------------
+# (formal-wording) Second review: claim shape, bare mechanized, row scope.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("sentence", [
+    "The compiler has proved nothing about this program.",
+    "The compiler proved safe only what the checker could see.",
+    "G1 is mechanized in Lean as a model.",
+    "The compiler is mechanized in revl.",
+])
+def test_non_claims_about_the_compiler_or_mechanization_pass(tree, sentence):
+    _silent(sentence, tree, "formal-wording")
+
+
+def test_the_claim_shape_about_the_compiler_is_still_refused(tree):
+    for sentence in (
+        "The compiler is formally verified.",
+        "revl's compiler has been mechanically proved.",
+        "The revl compiler is proved correct.",
+    ):
+        assert _findings(sentence, tree, "formal-wording"), sentence
+
+
+def test_an_unproved_cell_in_another_table_does_not_make_an_unproved_row(tree):
+    ledger = (_HISTORICAL_LEDGER.split("## The guarantee set")[0].replace(
+        "rule proved; **coverage unproved and unstatable**", "full")
+        + "\n## Typing\n\n| Code | Status |\n|---|---|\n"
+          "| **T1** typing | **UNPROVED** |\n")
+    assert not formal_wording.unproved_row_in(ledger)
+    tree = _history_tree(tree, ledger)
+    assert _findings("This is the one UNPROVED row.", tree, "formal-wording")
+
+
+def test_an_unproved_guarantee_subrow_does_make_an_unproved_row():
+    assert formal_wording.unproved_row_in(_HISTORICAL_LEDGER)
