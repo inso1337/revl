@@ -1416,6 +1416,10 @@ class _V3Ctx:
         # their declared one; see `_infers_exactly` (issue #2325). Empty in
         # every other body, which keeps a generic record literal raw there.
         self.param_names: set[str] = set()
+        # Declared types of those parameters; see `_selector_type_args`
+        # (issue #2325). Empty in every other body, which keeps a match over
+        # a generic variant raw there.
+        self.param_types: dict[str, str] = {}
 
     def new_match_ignored(self) -> str:
         self._match_counter += 1
@@ -2884,6 +2888,43 @@ def _match_bind_names(node: object) -> set[str]:
                          if isinstance(v, (dict, list))))
 
 
+def _selector_type_args(scrutinee: object, owner: str, ctx: _V3Ctx,
+                        rename: dict[str, str] | None) -> str:
+    """The `<..>` a case pattern of the generic variant *owner* carries, or "".
+
+    A case is `Full<T> implements Box<T>`, so a raw `case Box.Full c` binds
+    `c.value` as `Object`, and javac refuses `v + 1L` in the arm (issue
+    #2325). `case Box.Full<java.lang.Long> c` over a `Box<java.lang.Long>`
+    selector is a checked pattern and binds a `Long`. The arguments are taken
+    from the selector's own Java type, rendered from its declared revl type,
+    so they cannot disagree with it: a parameter of the function (its
+    signature type) or a call to a non-generic top-level fn (its declared
+    return). Any other selector gets no arguments and stays raw: a `let`
+    local, whose annotation the IR does not keep, an arm bind, and a name
+    *rename* maps, which is an inlined arrow's parameter (its argument may
+    have another type) or a capture.
+    """
+    declared = None
+    kind = scrutinee.get("kind") if isinstance(scrutinee, dict) else None
+    if kind == "var" and scrutinee.get("name") not in (rename or {}):
+        declared = ctx.param_types.get(scrutinee.get("name"))
+    elif kind == "call":
+        callee = scrutinee.get("callee")
+        name = (callee.get("name") if isinstance(callee, dict)
+                and callee.get("kind") == "var" else None)
+        if name in ctx.function_names and name not in ctx.arrows:
+            fn = next(f for f in ctx.functions if f.get("name") == name)
+            if not fn.get("type_params"):
+                declared = fn.get("returns")
+    if not isinstance(declared, str):
+        return ""
+    java = _java_v3_type(declared)
+    head = _ident(owner, "type name")
+    if not (java.startswith(head + "<") and java.endswith(">")):
+        return ""
+    return java[len(head):]
+
+
 def _infers_exactly(node: object, ctx: _V3Ctx) -> bool:
     """True when javac, inferring from *node* alone, gets the revl type
     (issue #2325).
@@ -3009,6 +3050,11 @@ def _v3_match_expr(
     lines = [f"switch ({scrutinee}) {{"]
     wildcard = None
     covered = {arm.get("pattern") for arm in arms}
+    # every arm names a case of the scrutinee's ADT (lower.py refuses any
+    # other), so the first one names the owner
+    owner = next((ctx.case_owners.get(p) for p in covered if p != "_"), None)
+    type_args = (_selector_type_args(node.get("scrutinee"), owner, ctx, rename)
+                 if owner else "")
     for arm in arms:
         pattern = arm.get("pattern")
         body = _expr(arm.get("body"), ctx, rename, env)
@@ -3017,6 +3063,7 @@ def _v3_match_expr(
             continue
         case = _ident(pattern, "case name")
         qualified = f"{_ident(ctx.case_owners[case], 'type name')}.{case}" if case in ctx.case_owners else case
+        qualified += type_args
         bind = arm.get("bind")
         # `bind == "_"` (`Case(_) => ..`) has no name to hold the value: fall
         # through to the no-bind branch below (an ignored pattern variable),
@@ -4213,6 +4260,8 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         ctx.arrows = {}  # arrow bindings are local to one body
         ctx.param_names = ({p.get("name") for p in fn.get("params") or []}
                            - _match_bind_names(fn.get("body")))
+        ctx.param_types = {p.get("name"): p.get("type") for p in fn.get("params") or []
+                           if p.get("name") in ctx.param_names}
         _pin_value_map_locals(fn.get("body"), fn.get("params"), ctx)
         lines.append(f"public static {ret} {name}({params}) {{")
         if not fn.get("body"):

@@ -349,8 +349,11 @@ type Ctx = {
   rn: Map[Str, Str], tys: Map[Str, Bool],
   // issue #2325: the generic record types (`gen`), the generic top-level fns
   // (`gfns`) and the parameter names of the top-level fn being emitted (`pn`,
-  // empty in every other body); see `infers_exactly`.
-  gen: Map[Str, Bool], gfns: Map[Str, Bool], pn: Map[Str, Bool]
+  // empty in every other body); see `infers_exactly`. The declared types of
+  // those parameters (`pt`) and the return of each non-generic top-level fn
+  // (`fret`); see `selector_type_args`.
+  gen: Map[Str, Bool], gfns: Map[Str, Bool], pn: Map[Str, Bool],
+  pt: Map[Str, Str], fret: Map[Str, Str]
 }
 // A rendered expression: its text AND the running match-temp counter.
 type Rendered = { text: Str, counter: Int }
@@ -1066,6 +1069,37 @@ fn opt_bind(arms: List[Any]) -> Str {
   }
   return "__revl_v"
 }
+// `_selector_type_args`: the `<..>` every case pattern of a generic variant
+// carries, cut from the selector's own Java type, so a bind is `Long` and not
+// `Object` (issue #2325). Only a parameter of the fn (not renamed) and a call
+// to a non-generic top-level fn have a known type; anything else stays raw.
+fn selector_type_args(scrutinee: Any, owner: Str, ctx: Ctx) -> Str {
+  let kind = node_kind(scrutinee)
+  var declared = ""
+  if (kind == "var") {
+    let name = value_str(value_field(scrutinee, "name"))
+    if (map_get(ctx.rn, name) == "") { declared = map_get(ctx.pt, name) }
+  }
+  if (kind == "call") {
+    let callee = value_field(scrutinee, "callee")
+    if (node_kind(callee) == "var") { declared = map_get(ctx.fret, value_str(value_field(callee, "name"))) }
+  }
+  if (declared == "") { return "" }
+  let java = java_v3_type(declared, false)
+  let head = mangle(owner)
+  if (!java.startsWith(`${head}<`) || !java.endsWith(">")) { return "" }
+  return java.slice(head.length(), java.length())
+}
+// The case owner of the first non-wildcard arm, or "": every arm names a case
+// of the scrutinee's ADT (the checker refuses any other).
+fn arms_owner(arms: List[Any], ctx: Ctx) -> Str {
+  var owner = ""
+  for (arm of arms) {
+    let p = value_str(value_field(arm, "pattern"))
+    if (p != "_" && owner == "") { owner = map_get(ctx.ca, p) }
+  }
+  return owner
+}
 fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let sr = render_expr(value_field(node, "scrutinee"), ctx, counter)
   let arms = value_list(value_field(node, "arms"))
@@ -1084,6 +1118,9 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   var wildcard = ""
   var has_wild = false
   var patterns = []
+  let owner_of_arms = arms_owner(arms, ctx)
+  var type_args = ""
+  if (resolved(owner_of_arms)) { type_args = selector_type_args(value_field(node, "scrutinee"), owner_of_arms, ctx) }
   for (arm of arms) {
     let pattern = value_str(value_field(arm, "pattern"))
     let br = render_expr(value_field(arm, "body"), ctx, c)
@@ -1097,6 +1134,7 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
       let owner = map_get(ctx.ca, pattern)
       var qualified = case_m
       if (resolved(owner)) { qualified = `${mangle(owner)}.${case_m}` }
+      qualified = `${qualified}${type_args}`
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "" && bind != "_") {
         c = c + 1
@@ -1595,11 +1633,15 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
     // issue #2325: a parameter name a match arm rebinds is not counted.
     let binds = match_bind_names(value_field(fnode, "body"))
     var pn: Map[Str, Bool] = Map.empty()
+    var pt: Map[Str, Str] = Map.empty()
     for (p of value_list(value_field(fnode, "params"))) {
       let pname = value_str(value_field(p, "name"))
-      if (!list_contains(binds, pname)) { pn = pn.set(pname, true) }
+      if (!list_contains(binds, pname)) {
+        pn = pn.set(pname, true)
+        pt = pt.set(pname, value_str(value_field(p, "type")))
+      }
     }
-    let fctx = set_pn(ctx, pn)
+    let fctx = set_pn(ctx, pn, pt)
     if (body.length() == 0) {
       lines = lines.push("    // (empty body)")
     } else {
@@ -1661,10 +1703,13 @@ fn core_imports(ir: Any) -> List[Str] {
 fn build_ctx(ir: Any) -> Ctx {
   var fns: Map[Str, Bool] = Map.empty()
   var gfns: Map[Str, Bool] = Map.empty()
+  var fret: Map[Str, Str] = Map.empty()
   for (fnode of value_list(value_field(ir, "functions"))) {
     fns = fns.set(value_str(value_field(fnode, "name")), true)
     if (value_list(value_field(fnode, "type_params")).length() > 0) {
       gfns = gfns.set(value_str(value_field(fnode, "name")), true)
+    } else {
+      fret = fret.set(value_str(value_field(fnode, "name")), value_str(value_field(fnode, "returns")))
     }
   }
   var gen: Map[Str, Bool] = Map.empty()
@@ -1708,20 +1753,21 @@ fn build_ctx(ir: Any) -> Ctx {
   var tys: Map[Str, Bool] = Map.empty()
   for (name of value_keys(types)) { tys = tys.set(name, true) }
   return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys,
-           gen: gen, gfns: gfns, pn: Map.empty() }
+           gen: gen, gfns: gfns, pn: Map.empty(), pt: Map.empty(), fret: fret }
 }
 
 // Swap in a fresh rename map (the component-capture scope for one render); the
 // modern provide-method path threads `{req -> this.req, bind -> this.bind}`.
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
   return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn, tys: ctx.tys,
-           gen: ctx.gen, gfns: ctx.gfns, pn: ctx.pn }
+           gen: ctx.gen, gfns: ctx.gfns, pn: ctx.pn, pt: ctx.pt, fret: ctx.fret }
 }
 
-// Swap in the parameter names of the top-level fn being emitted (issue #2325).
-fn set_pn(ctx: Ctx, pn: Map[Str, Bool]) -> Ctx {
+// Swap in the parameter names and types of the top-level fn being emitted
+// (issue #2325).
+fn set_pn(ctx: Ctx, pn: Map[Str, Bool], pt: Map[Str, Str]) -> Ctx {
   return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: ctx.rn, tys: ctx.tys,
-           gen: ctx.gen, gfns: ctx.gfns, pn: pn }
+           gen: ctx.gen, gfns: ctx.gfns, pn: pn, pt: pt, fret: ctx.fret }
 }
 
 // ============================================================ components/services
