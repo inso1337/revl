@@ -7015,6 +7015,7 @@ class _FlowHints(dict):
 
     def key(self, step) -> str | None:
         """The key the hints use for the binding a `let` step declares."""
+        # a copied `let` step is not in `keys`, so it falls back to keying by name
         return self.keys.get(id(step), step.get("name"))
 
     def offer(self, name, declared) -> bool:

@@ -202,6 +202,8 @@
 
 ["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_FlowHints.offer", 1, 1]
 
+["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_empty_list_class", 16, 16]
+
 ["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_empty_list_type", 16, 16]
 
 ["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_empty_list_type.is_list", 2, 2]
@@ -209,8 +211,6 @@
 ["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_flow_through_assigns", 1, 1]
 
 ["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_only_sized_or_appended", 18, 18]
-
-["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_empty_list_class", 16, 16]
 
 ["function", "issue-2898-untyped-empty-list-inference-waits-on-the-port", "_v3_binding_keys.fresh", 1, 1]
 
