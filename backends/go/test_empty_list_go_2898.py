@@ -16,6 +16,12 @@ a binding that is only sized (or appended to) and never assigned anything
 else keeps the slice main gave it, which builds whatever the element type; any other read is refused by name, as the wasm tier does, instead of
 printing a module that does not build.
 
+Issue #2915: the evidence is keyed by binding, not by name, so two `out`
+in disjoint sibling blocks each take their own type. Issue #2918: untyped
+empty lists assigned to one another (`out = a`, `out = out.concat(a)`)
+share their evidence and one type, `[]any{}` when nothing typed reads
+them, and `out = out.concat(xs)` types `out` as `xs` is.
+
 The run tests execute the program's `test` blocks on py and on go and assert
 both pass. They need `go` and skip without it; a skip is not a pass.
 """
@@ -324,3 +330,216 @@ def test_go_builds_a_provide_method_list_assigned_another_list():
     assert "out := []string{}" in src, src
     status, detail = validator.check([("assigned", src)])["assigned"]
     assert status == validate.OK, detail
+
+
+# Issue #2915: two bindings of one name in disjoint sibling blocks are two
+# bindings. The hints were keyed by name across the function, so both `out`
+# took one element type (and the second loop's `x` the first loop's type),
+# and the module failed `go build`.
+SHADOWED = """\
+pub fn pick(xs: List[Str], b: Bool) -> List[Int] {
+  if (b) {
+    var out = []
+    for (x of xs) { out = out.push(x) }
+    return [out.join("|").length()]
+  } else {
+    var out = []
+    return out
+  }
+}
+
+pub fn both(xs: List[Str], ns: List[Int]) -> Int {
+  var a = []
+  for (x of xs) { a = a.push(x) }
+  var b = []
+  for (x of ns) { b = b.push(x) }
+  return a.length() + b.length()
+}
+
+test "each binding keeps its own element type" {
+  assert pick(["ab", "c"], true)[0] == 4
+  assert pick(["ab"], false).length() == 0
+  assert both(["a"], [1, 2]) == 3
+}
+"""
+
+# Issue #2918: untyped empty lists assigned to one another share one type,
+# `[]any{}` when nothing typed reads them; a concat on the list itself types
+# it from the argument.
+ALIASED = """\
+pub fn alias() -> Int {
+  var a = []
+  var out = []
+  out = a
+  return out.length()
+}
+
+pub fn alias_pushed(xs: List[Str]) -> Int {
+  var a = []
+  for (x of xs) { a = a.push(x) }
+  var out = []
+  out = a
+  return out.length()
+}
+
+pub fn grow() -> Int {
+  var out = []
+  out = out.concat(["a"])
+  return out.length()
+}
+
+test "aliased and concatenated untyped lists" {
+  assert alias() == 0
+  assert alias_pushed(["p", "q"]) == 2
+  assert grow() == 1
+}
+"""
+
+ALIASED_METHOD = """\
+service Cnt { fn count(n: Int) -> Int }
+component C provides cnt: Cnt {
+  provide cnt {
+    fn count(n) {
+      var a = []
+      var out = []
+      out = a
+      return out.length()
+    }
+  }
+}
+"""
+
+CONCAT_METHOD = """\
+service Cnt { fn count(n: Int) -> Int }
+component C provides cnt: Cnt {
+  provide cnt {
+    fn count(n) {
+      var out = []
+      out = out.concat(["a"])
+      return out.length()
+    }
+  }
+}
+"""
+
+
+def _runs_like_py(source, filename):
+    py_status, py_message = RUNNERS["py"](compile_source(source, filename))
+    assert py_status == "pass", py_message
+    status, message = RUNNERS["go"](compile_source(source, filename))
+    if status == "skip":
+        pytest.skip(message)
+    assert status == "pass", message
+    return py_message, message
+
+
+def _go_builds(source, filename):
+    import validate  # noqa: PLC0415
+
+    validator = validate.VALIDATORS["go"]
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip("go toolchain unavailable: %s" % reason)
+    src = go_emit.emit(compile_source(source, filename), "probe")
+    status, detail = validator.check([("probe", src)])["probe"]
+    assert status == validate.OK, detail
+    return src
+
+
+def test_shadowed_empty_lists_each_take_their_own_type():
+    src = go_emit.emit(compile_source(SHADOWED, "shadowed_2915.rvl"))
+    assert "out := []string{}" in src and "out := []int64{}" in src, src
+    assert "a := []string{}" in src and "b := []int64{}" in src, src
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
+def test_go_runs_shadowed_empty_lists_like_py():
+    py_message, message = _runs_like_py(SHADOWED, "shadowed_2915.rvl")
+    assert "1 test(s) passed" in message, (py_message, message)
+
+
+def test_aliased_and_concatenated_empty_lists_are_typed():
+    src = go_emit.emit(compile_source(ALIASED, "aliased_2918.rvl"))
+    assert "a := []any{}" in src and "out := []any{}" in src, src
+    assert "a := []string{}" in src and "out := []string{}" in src, src
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
+def test_go_runs_aliased_and_concatenated_empty_lists_like_py():
+    py_message, message = _runs_like_py(ALIASED, "aliased_2918.rvl")
+    assert "1 test(s) passed" in message, (py_message, message)
+
+
+def test_go_builds_a_provide_method_list_aliased_to_another_empty_list():
+    src = _go_builds(ALIASED_METHOD, "aliased_m_2918.rvl")
+    assert "a := []int64{}" in src and "out := []int64{}" in src, src
+
+
+def test_go_builds_a_provide_method_list_concatenated_onto_itself():
+    src = _go_builds(CONCAT_METHOD, "concat_m_2918.rvl")
+    assert "out := []string{}" in src, src
+
+
+# An annotated empty list is typed, not a member of the untyped class: what
+# is assigned or concatenated from it gives its type to the untyped one.
+ANNOTATED_SOURCE = """\
+pub fn ann() -> Int {
+  var a: List[Str] = []
+  var out = []
+  out = a
+  return out.length()
+}
+
+pub fn ann2(n: Int) -> Int {
+  let a: List[Int] = []
+  var out = []
+  out = out.concat(a)
+  return out.length() + n
+}
+
+test "an annotated source types the untyped list" {
+  assert ann() == 0
+  assert ann2(1) == 1
+}
+"""
+
+ANNOTATED_SOURCE_METHOD = ALIASED_METHOD.replace("var a = []", "var a: List[Str] = []")
+
+# a match arm binds over its own body: its `x` is not the sibling block's
+SHADOWED_BY_ARM = """\
+fn g(xs: List[Int]) -> Int { return xs.length() }
+
+pub fn f(o: Opt[List[Int]], c: Bool) -> List[Str] {
+  if (c) {
+    var x = []
+    x = x.push("a")
+    return [x.join("|")]
+  }
+  let n = match o {
+    Some(x) => g(x),
+    None => 0,
+  }
+  return ["b"]
+}
+
+test "the arm binding is its own" { assert f(None, true)[0] == "a" }
+"""
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
+def test_go_runs_an_untyped_list_fed_from_an_annotated_one_like_py():
+    src = go_emit.emit(compile_source(ANNOTATED_SOURCE, "annotated_src_2918.rvl"))
+    assert "out := []string{}" in src and "out := []int64{}" in src, src
+    _runs_like_py(ANNOTATED_SOURCE, "annotated_src_2918.rvl")
+
+
+def test_go_builds_a_provide_method_list_fed_from_an_annotated_one():
+    src = _go_builds(ANNOTATED_SOURCE_METHOD, "annotated_src_m_2918.rvl")
+    assert "out := []string{}" in src, src
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
+def test_go_runs_a_name_rebound_by_a_match_arm_like_py():
+    src = go_emit.emit(compile_source(SHADOWED_BY_ARM, "arm_2915.rvl"))
+    assert "x := []string{}" in src, src
+    _runs_like_py(SHADOWED_BY_ARM, "arm_2915.rvl")
