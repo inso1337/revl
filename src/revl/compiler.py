@@ -34,6 +34,7 @@ from .hostref import resolve_refs as _resolve_refs
 from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
+from .type_arity import check_declared_type_arity as _check_declared_type_arity
 from .typecheck import format_type, parse_type
 
 
@@ -1177,6 +1178,7 @@ def compile_source(source: str, filename: str = "<string>",
                      "disk (item 459)")
         _reject_name_folds(program.services, "service", filename)
         _reject_component_name_folds(program.components, filename)
+        _check_declared_type_arity(program, filename)
         document = check_and_lower(
             program, taint_strict=bool(profile and profile.taint_strict),
             untrusted=bool(profile and profile.untrusted))
@@ -1737,6 +1739,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             source_of=lambda svc: seen_services.get(svc.name))
         _reject_running_component_name_folds(
             merged.components, ambient["components"], merged.filename)
+    _check_declared_type_arity(merged, merged.filename)
     document = check_and_lower(
         merged, ambient, taint_strict=_taint_strict, untrusted=_untrusted)
     # the allowlist half — refuse a reach outside the granted service set, on the
