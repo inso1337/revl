@@ -227,9 +227,9 @@ _EMITTER_INTERNAL = frozenset({
 
 
 def test_the_temp_names_corpus_document_runs():
-    """`emitter_temp_names.rvl` is in the self-host byte-identity corpus, so the
+    """`user_names_like_temps.rvl` is in the self-host byte-identity corpus, so the
     self-hosted emitter renames the same names the same way; here it runs."""
-    ir = compile_files([str(CORPUS_DIR / "emitter_temp_names.rvl")])
+    ir = compile_files([str(CORPUS_DIR / "user_names_like_temps.rvl")])
     ns: dict = {}
     exec(compile(backend_emitter("python").emit(ir), "<corpus_2913>", "exec"), ns)
     assert ns["temps"](1) == 14 + 8 + 7 + 7
