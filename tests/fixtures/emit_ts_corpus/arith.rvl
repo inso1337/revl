@@ -14,4 +14,5 @@ fn divmod(a: Int, b: Int) -> Int {
 fn realdiv(a: Float, b: Float) -> Float { return a / b }
 fn cmps(a: Int, b: Int) -> Bool { return a < b && a <= b || a > b }
 fn eqs(a: Int, b: Int) -> Bool { return a == b && a != b }
+fn lit_eqs(a: Int, s: Str, b: Bool) -> Bool { return a == 3 && s != "x" && b == true }
 fn boolnot(a: Bool) -> Bool { return !a }

@@ -887,6 +887,36 @@ fn wrap_match(lines: List[Str], tmp: Str, scrutinee: Str, acx: ACx, colour_by_te
   return out.join(newline())
 }
 
+// `_plain_primitive_literal` (issue #2901): a Str, Int or Bool literal that
+// renders as itself. A widened literal renders as a conversion (#2715) and a
+// Float or None literal is not one of the three kinds.
+fn plain_primitive_literal(node: Any) -> Bool {
+  if (node_kind(node) != "lit" || has_widen(node)) { return false }
+  let vk = value_kind(value_field(node, "value"))
+  return vk == "str" || vk == "int" || vk == "bool"
+}
+
+fn has_widen(node: Any) -> Bool { return value_has(node, "widen") }
+
+// `_ts_strict_equality`: a primitive literal on either side makes `===` and
+// `revlEq` agree on every value of the other operand; an operand carrying a
+// `widen` marker (a mixed Int/Float or Int32/Int equality) keeps `revlEq`.
+fn strict_equality(left: Any, right: Any) -> Bool {
+  if (!(plain_primitive_literal(left) || plain_primitive_literal(right))) { return false }
+  return !(has_widen(left) || has_widen(right))
+}
+
+// `_ts_widened_literal`: the literal side typed as its primitive, so tsc does
+// not reject `k === 5n` for a `const k = 4n` or a narrowed `boolean` (TS2367).
+fn typed_literal(node: Any, text: Str) -> Str {
+  if (!plain_primitive_literal(node)) { return text }
+  let vk = value_kind(value_field(node, "value"))
+  var t = "bigint"
+  if (vk == "str") { t = "string" }
+  if (vk == "bool") { t = "boolean" }
+  return `(${text} as ${t})`
+}
+
 // `_expr`'s `bin` branch.
 fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
   let op = node_op(node)
@@ -896,8 +926,15 @@ fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
     return { text: `(${l.text} ?? ${r.text})`, counter: r.counter }
   }
   if (is_equality_op(op)) {
-    let l = expr(value_field(node, "left"), counter, acx)
-    let r = expr(value_field(node, "right"), l.counter, acx)
+    let ln = value_field(node, "left")
+    let rn = value_field(node, "right")
+    let l = expr(ln, counter, acx)
+    let r = expr(rn, l.counter, acx)
+    if (strict_equality(ln, rn)) {
+      var sop = "!=="
+      if (op == "==" || op == "===") { sop = "===" }
+      return { text: `(${typed_literal(ln, l.text)} ${sop} ${typed_literal(rn, r.text)})`, counter: r.counter }
+    }
     let call = `revlEq(${l.text}, ${r.text})`
     if (op == "==" || op == "===") { return { text: call, counter: r.counter } }
     return { text: `(!${call})`, counter: r.counter }
