@@ -153,3 +153,52 @@ def test_non_generic_twin_message_is_the_same(tmp_path):
             _compile(tmp_path, source)
         messages.append(str(excinfo.value).split("\n")[0].split(": ", 1)[-1])
     assert messages[0] == messages[1]
+
+
+def test_unknown_arm_hint_names_the_declared_head(tmp_path):
+    """The hint points at the declaration, which is spelled `type Mb`."""
+    with pytest.raises(RevlError) as excinfo:
+        _compile(tmp_path, REFUSED["unknown_arm"][0])
+    hint = excinfo.value.hint or ""
+    assert "`type Mb`" in hint
+    assert "`type Mb[Int]`" not in hint
+
+
+#: A council bound to an action and a consumer of its `Aggregate[Str]` answer
+#: that names both dissent arms but not `Agreed`.
+AGGREGATE_MISSING_AGREED = """
+model role edge   on_device
+model role local2 on_device
+
+service Review {
+  fn propose(plan: Str) -> Str
+  fn settle(answer: Aggregate[Str]) -> Int
+}
+
+model council Release {
+  proposer  -> local2,
+  adversary -> edge,
+  aggregate unanimous quorum declared on_tie split
+}
+
+component Reviewer provides out: Review {
+  route model on propose {
+    confidential -> Release
+  }
+  provide out {
+    fn propose(plan) = plan
+    fn settle(answer) = match answer {
+      Split(d)     => 0,
+      Inquorate(d) => 0,
+    }
+  }
+}
+"""
+
+
+def test_provided_aggregate_missing_agreed_is_refused(tmp_path):
+    """The provided `Aggregate[T]` is a generic variant like any other, so the
+    general rule now refuses a consumer that leaves `Agreed` unnamed."""
+    with pytest.raises(RevlError) as excinfo:
+        _compile(tmp_path, AGGREGATE_MISSING_AGREED)
+    assert "non-exhaustive match: missing case `Agreed`" in str(excinfo.value)

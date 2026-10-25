@@ -29744,10 +29744,10 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> Ca
 // transparent ALIAS contributes nothing (the reference has erased its
 // declaration before `_lower_type_decls` runs), a record BODY is a record and
 // not a variant, and a bare single-case right-hand side is the one-case nominal
-// the reference reads it as. The row is keyed by the DECLARED name alone, so a
-// parameterized `type Box[T]` is found only by a scrutinee whose spelling is the
-// bare `Box` — which is exactly what the reference's `types.get(type_name)` does
-// with the full spelling `Box[Int]`, namely miss and decide nothing.
+// the reference reads it as. The row is keyed by the DECLARED name alone. A
+// parameterized `type Box[T]` also records a `gadt Box` marker, and
+// `tk_case_row` uses it to send an applied scrutinee such as `Box[Int]` to the
+// `Box` row, as the reference does (issue #2926).
 //
 // An EMPTY case list records NO row: `tenv_get` cannot tell an empty value from
 // an absent key, and "absent" is the silent direction.

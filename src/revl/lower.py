@@ -2594,20 +2594,14 @@ def _match_variant_spec(types: dict, type_name: str | None) -> dict | None:
 def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
     type_name = _expr_static_type(expr.scrutinee, type_env, types)
     # item 516 slice 3: the model council's answer, checked BEFORE the general
-    # rule below and separately from it. Two reasons, both of which the
-    # general rule cannot serve without changing what it admits for programs
-    # that have nothing to do with councils:
-    #
-    #   * the scrutinee is `Aggregate[Str]`, and the general rule looks the
-    #     scrutinee up in `types` by its whole spelling, so it finds nothing
-    #     for any APPLIED generic. `Aggregate[T]` is never written without an
-    #     argument, so under the general rule alone the answer type would be
-    #     the one ADT in the language with no exhaustiveness at all;
-    #   * a `_` arm satisfies the general rule and must not satisfy this one.
-    #     `Split` is the case the construct exists to make un-ignorable, and a
-    #     catch-all that swallows it is `on_tie allow` moved from the
-    #     declaration, where `revl.model_council` refuses it by name, to the
-    #     call site, where nothing was looking.
+    # rule below and separately from it. The general rule already covers an
+    # `Aggregate[Str]` scrutinee (it resolves an applied generic to its head,
+    # issue #2926), so this extra rule exists only to refuse a `_` arm that
+    # swallows `Split`. A `_` arm satisfies the general rule and must not
+    # satisfy this one: `Split` is the case the construct exists to make
+    # un-ignorable, and a catch-all that swallows it is `on_tie allow` moved
+    # from the declaration, where `revl.model_council` refuses it by name, to
+    # the call site, where nothing was looking.
     model_answer.check_match(
         type_name, [pattern for pattern, _, _ in expr.arms], filename,
         expr.line)
@@ -2621,6 +2615,8 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
     # bug rather than a compile error there — which is exactly what revl exists
     # to refuse.
     declared = [case["name"] for case in spec.get("cases", [])]
+    # the declaration is spelled by its head: `type Mb`, never `type Mb[Int]`
+    declared_head = parse_type(type_name)[0] or type_name
     for pattern, _, _ in expr.arms:
         if pattern != "_" and pattern not in declared:
             raise RevlError(
@@ -2630,7 +2626,7 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
                 hint="a match arm names one of the ADT's declared cases, or `_` for "
                      "a catch-all — a bare name is not a binding pattern "
                      "(syntax-2.0 §3.3); check the spelling or add the case to "
-                     f"`type {type_name}`",
+                     f"`type {declared_head}`",
             )
     covered = {pattern for pattern, _, _ in expr.arms if pattern != "_"}
     if "_" in {pattern for pattern, _, _ in expr.arms}:

@@ -66,15 +66,10 @@ exhaustiveness check rather than new opinions about matching:
    `_ => proceed` arm is `on_tie allow` written at the call site. The author
    who wants one outcome for both dissent arms writes both arms; that costs a
    line and says which line it is.
-2. **A parameterised scrutinee is checked.** The general check reads
-   `types[<scrutinee type>]`, which misses `Aggregate[Str]` because the table
-   is keyed by the bare head. `Aggregate[T]` is never written without an
-   argument, so without this the rule would be vacuous on every real program.
-   The fix here is deliberately scoped to the provided types (see
-   `ANSWER_TYPES`) rather than applied to every generic ADT: widening the
-   general check is a change to what the compiler admits for programs that
-   have nothing to do with councils, and it belongs to whoever owns that
-   check.
+2. **A parameterised scrutinee is checked.** `Aggregate[T]` is never written
+   without an argument. The general check now resolves an applied generic
+   such as `Aggregate[Str]` to its head (issue #2926), so it also refuses a
+   missing `Agreed`; this rule adds only the refusal of a `_` arm.
 
 NOT ITEM 471, AND NOT BY CONVENTION
 -----------------------------------
