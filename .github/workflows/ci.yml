@@ -2689,6 +2689,7 @@ jobs:
           tests/test_time_coeffect.py
           tests/test_1850_show_cross_tier.py
           tests/test_2285_str_char_control_cross_tier.py
+          tests/test_mixed_numeric_equality_tiers.py
           -q
         env:
           # LIVE as of item 445. This turns on the rust and java probes, the
