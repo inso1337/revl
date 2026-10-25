@@ -208,7 +208,7 @@ def test_v1_failure_without_code_buckets_unclassified():
 
 def test_json_shape_is_the_computed_document():
     metrics = m.compute_metrics(_v2_trace())
-    # the machine-readable document carries all three metrics under stable keys
+    # the machine-readable document carries every metric under stable keys
     assert set(metrics) == {"events", "emissions", "failures", "residue",
                             "lifecycleDuration"}
     assert set(metrics["residue"]) == {"total", "by_check"}

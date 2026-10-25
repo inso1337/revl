@@ -52,7 +52,7 @@ it:
  "cause":{"kind":"trigger","detail":"withdrawn by operator (revl run --withdraw PgDatabase)"},"ts":1235.1}
 ```
 
-Three `event` kinds (`load`, `withdraw`, and the v2 `emit`; v3 adds `residue`) and four `cause`
+Four `event` kinds (`load`, `withdraw`, the v2 `emit` and the v3 `residue`) and four `cause`
 kinds:
 
 | cause kind | on | means |

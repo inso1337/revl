@@ -15,7 +15,7 @@ the numbers a supervisor actually watches:
    (`diagnostics.classify`, e.g. `A8`); a failure that carried no classifiable
    `RevlError` (a bare crash, no `code`) buckets as `"unclassified"` rather than
    under a fabricated code.
-3. **residue incidents** — how many teardowns ended with something not undone
+3. **residue incidents**: how many teardowns ended with something not undone
    (one ``residue`` event each, issue #2730), by the residue check that failed.
 4. **average lifecycle duration** — per component, the mean of
    ``withdraw.ts − load.ts`` over each component's load→withdraw lifecycles
@@ -303,7 +303,7 @@ def render(metrics: dict) -> str:
         for check, count in by_check.items():
             lines.append(f"  {check.ljust(width)}  {count}")
 
-    # 3. avg lifecycle duration
+    # 4. avg lifecycle duration
     duration = metrics.get("lifecycleDuration") or {}
     lines.append("")
     if "unavailable" in duration:

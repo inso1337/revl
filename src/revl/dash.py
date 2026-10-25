@@ -261,6 +261,8 @@ def _build_trace(trace, timeline) -> dict | None:
                 "transition": event.get("transition"),
                 "cause": cause.get("kind"),
                 "note": wr._cause_note(cause),
+                **({"checks": list(event["checks"])}
+                   if isinstance(event.get("checks"), list) else {}),
             })
         events_view.sort(key=lambda e: (e["seq"] if e["seq"] is not None else 0))
 
@@ -600,9 +602,16 @@ def _render_trace(trace: dict, p: _Palette) -> list:
     for event in events:
         verb = event.get("event") or "?"
         hue = p.green if verb == "load" else p.yellow
+        if event.get("component") is None and event.get("checks") is not None:
+            # a run-level event (residue, issue #2730): no component or
+            # transition to print, so name the event and its failed checks
+            what = (f"{hue}{verb}: "
+                    + (", ".join(map(str, event["checks"])) or "?") + p.reset)
+        else:
+            what = (f"{hue}{event.get('component')}{p.reset} "
+                    f"{event.get('transition')}")
         out.append(f"  {p.dim}seq {event.get('seq')}{p.reset}  "
-                   f"{hue}{event.get('component')}{p.reset} "
-                   f"{event.get('transition')}  "
+                   f"{what}  "
                    f"{p.dim}because{p.reset} {event.get('note')}")
 
     steps = trace.get("timeline")
