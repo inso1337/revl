@@ -332,7 +332,10 @@ fn widening_pair(a: Str, b: Str) -> Bool {
 }
 
 fn nested_widening(lt: Str, rt: Str, tt: Tt, d: Int) -> Widen {
-  if (d > 12 || lt == rt || is_wildcard_ty(lt) || is_wildcard_ty(rt)) {
+  // No depth cap, as in the reference: each step descends into a strictly
+  // smaller spelling on at least one side (a nominal record is resolved only
+  // against a structural side, which shrinks), so the walk ends.
+  if (lt == rt || is_wildcard_ty(lt) || is_wildcard_ty(rt)) {
     return no_widen()
   }
   let ls = structural_parse(lt)
@@ -404,7 +407,7 @@ fn nested_widening_refusal(op: Str, lt: Str, rt: Str, w: Widen) -> Infer {
   let wide = widen_rank(a) < widen_rank(b) ? b : a
   return refuse("T1", "`".concat(op).concat("` cannot compare `")
                   .concat(render_type(lt)).concat("` with `")
-                  .concat(render_type(rt)).concat("` — the `").concat(narrow)
+                  .concat(render_type(rt)).concat("`; the `").concat(narrow)
                   .concat("` inside is not widened to `").concat(wide)
                   .concat("` (only a bare operand widens), so the tiers ")
                   .concat("would not agree on the answer"))

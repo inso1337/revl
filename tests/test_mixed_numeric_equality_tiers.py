@@ -12,11 +12,20 @@ an element, so the tiers disagreed: python answered true, TypeScript compared
 `3n` with `3` inside `revlEq` and answered false, go did not build (`[]int64`
 against `[]float64`).
 
-The rule (docs/arithmetic.md, "Mixed Int/Float equality"): only a bare scalar
-operand widens. A mix inside a list, an option, a record or a type argument is
-refused at check time, the same on every tier. The agreement test below runs
-each program on every tier this machine has and compares its outcome with
-python's, so it fails on base wherever a tier answered differently.
+The rule (docs/arithmetic.md, "`Int` widens into `Float`, and the IR now says
+where", paragraph "Only a bare operand widens"): only a bare scalar operand of
+`==`/`!=` widens. A mix between the two operand TYPES, inside a list, an
+option, a record or a type argument, is refused at check time, so no tier
+reaches it. The agreement test below runs each program on every tier this
+machine has and compares its outcome with python's, so it fails on base
+wherever a tier answered differently.
+
+What this does NOT cover: an `Int` put into a `Float` slot BEFORE the
+comparison (`let xs: List[Float] = [1, 2]`, `A(3)` for `A(Float)`, `Some(3)`
+into an `Opt[Float]` parameter). Both operands are then `Float`-typed, the
+checker has nothing to refuse, and the typed slot did not convert the nested
+`Int`. That is issue #2937; its shapes are the strict xfail rows at the end,
+so they flip to a failure (XPASS) when it lands.
 """
 
 import os
@@ -159,3 +168,59 @@ def test_nested_mixed_equality_is_refused_by_name(name: str):
 @pytest.mark.parametrize("name", sorted(KEPT))
 def test_bare_and_same_type_equality_still_checks(name: str):
     compile_source(KEPT[name], "mixed_eq.rvl")
+
+
+# Issue #2937: the typed-slot widening. Each program is ACCEPTED (both operands
+# are `Float`-typed) and diverges because the slot kept a nested `Int`. The
+# set is the tiers measured to disagree with python on origin/main (py, ts, go
+# on 2026-10-25); a strict xfail turns into a failure once #2937 fixes them.
+TYPED_SLOT = {
+    "a List[Float] let holding Int literals": ("""
+pub fn f() -> Bool {
+  let xs: List[Float] = [1, 2]
+  return xs == [1.0, 2.0]
+}
+test "t" { assert f() }
+""", {"ts", "go"}),
+    "a Float variant payload built from an Int": ("""
+type S = A(Float) | B
+test "t" { assert A(3) == A(3.0) }
+""", {"ts"}),
+    "a Row argument with an Int in its Float field": ("""
+type Row = { i: Int, f: Float }
+pub fn f(r: Row) -> Bool { return r == { i: 3, f: 3.0 } }
+test "t" { assert f({ i: 3, f: 3 }) }
+""", {"ts"}),
+    "an Opt[Float] argument built from Some(3)": ("""
+pub fn g(o: Opt[Float]) -> Bool { return o == Some(3.0) }
+test "t" { assert g(Some(3)) }
+""", {"ts"}),
+    "a List[Float] argument built from [3]": ("""
+pub fn g(xs: List[Float]) -> Bool { return xs == [3.0] }
+test "t" { assert g([3]) }
+""", {"ts"}),
+}
+
+
+def _typed_slot_params():
+    for name in sorted(TYPED_SLOT):
+        for tier in FAST_TIERS:
+            marks = ()
+            if tier in TYPED_SLOT[name][1]:
+                marks = pytest.mark.xfail(
+                    strict=True,
+                    reason="issue #2937: a typed slot does not convert a "
+                           "nested Int")
+            yield pytest.param(tier, name, marks=marks, id=f"{tier}-{name}")
+
+
+@pytest.mark.parametrize("tier, name", list(_typed_slot_params()))
+def test_typed_slot_nested_int_agrees_with_python(tier: str, name: str):
+    source = TYPED_SLOT[name][0]
+    want = _outcome("py", source)
+    got = _outcome(tier, source)
+    if got.startswith("skip"):
+        pytest.skip(f"{tier}: {got}")
+    assert want == "pass", f"{name!r}: python answered {want!r}"
+    assert got == want, (
+        f"{name!r}: python answered {want!r}, {tier} answered {got!r}")

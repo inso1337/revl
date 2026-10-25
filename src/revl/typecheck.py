@@ -1482,7 +1482,7 @@ def nested_widening_error(filename: str, line: int, op: str,
     example = " (`3.0`, not `3`, where a `Float` is meant)" if wide == "Float" else ""
     return RevlError(
         filename, line,
-        f"`{op}` cannot compare `{left}` with `{right}` — the `{narrow}` "
+        f"`{op}` cannot compare `{left}` with `{right}`; the `{narrow}` "
         f"inside is not widened to `{wide}` (only a bare operand widens), so "
         "the tiers would not agree on the answer",
         hint=f"compare bare values (a bare `{narrow}` operand widens), or "
