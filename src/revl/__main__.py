@@ -122,6 +122,9 @@ def _run_test(args, ir: dict) -> int:
                         mock_requires=getattr(args, "mock_requires", False),
                         schedule_seed=getattr(args, "schedule_seed", None),
                         schedule_seeds=getattr(args, "schedule_seeds", None),
+                        fault_profile=getattr(args, "fault_profile", None),
+                        fault_profile_events=getattr(
+                            args, "fault_profile_events", None),
                         list_tests=getattr(args, "list_tests", False),
                         filter_pattern=getattr(args, "filter", None),
                         verbose=getattr(args, "verbose", False),

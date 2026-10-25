@@ -871,6 +871,187 @@ def sweep_dossier(ir: dict, only: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# the fault profile: a seeded run of fault events (issue #2728)
+# ---------------------------------------------------------------------------
+#
+# The sweep injects at every point, one at a time, in IR order.  A profile is a
+# named, seeded list of fault events drawn from the same points: the seed picks
+# which points are hit and in what order, so a run is reproducible from the
+# seed alone and two runs with one seed inject the same sequence.  Each event
+# reuses the sweep's machinery verbatim (`sweep_units`, `_drive`, `_judge`).
+#
+# Every event ends classified or unclassified.  A contained event passes every
+# assertion.  A failed event names the assertion each problem broke (`failed`,
+# `no-residue`, `inverses-lifo`, `siblings-unaffected`): that is its classified
+# cause.  An emitter refusal is classified too (`refused`).  An event whose
+# driver raised anything else has no judged outcome at all, so it is
+# unclassified.  The run fails when any event failed or is unclassified, and
+# when it injected nothing; it always prints the seed, every injected fault and
+# the unclassified count.
+#
+# Scope: the only event kind the injection machinery has is `step-fail` (the
+# component dies after step N), which at a provider's step is a provider that
+# fails during its bring-up.  A provider dying mid-life, network timeouts,
+# dropped mutual-TLS connections and a process crash at a chosen point are not
+# drawn by the profile yet.
+
+_PROFILE_EVENTS = 8
+_PROFILE_KIND = "step-fail"
+
+
+def profile_events(ir: dict, seed: int, count: int = _PROFILE_EVENTS) -> list:
+    """The seeded list of fault events: *count* sweep points of every
+    component, drawn without replacement in a seed-determined order.
+
+    The draw depends only on the seed and the IR's sweep points, never on the
+    interpreter's hash seed, so the same seed gives the same sequence on any
+    run.  A composition with fewer points than *count* gets all of them.
+    """
+    import random  # noqa: PLC0415 - stdlib, only needed when a profile runs
+
+    if count < 1:
+        raise ValueError(f"a fault profile needs at least one event, got {count}")
+    pool = [unit for component in ir.get("components") or []
+            for unit in sweep_units(ir, component.get("name"))]
+    rng = random.Random(f"revl-fault-profile:{seed}")
+    drawn = rng.sample(pool, min(count, len(pool)))
+    return [dict(unit, kind=_PROFILE_KIND, event=index,
+                 name=f"profile {seed} event {index}: {unit['component']} "
+                      f"@ step {unit['step']}")
+            for index, unit in enumerate(drawn, 1)]
+
+
+def _classified_problems(unit: dict, outcome: _Outcome, FiberState) -> list:
+    """``[(assertion, problem)]``: each judged problem tagged with the one
+    assertion that produced it, by judging one assertion at a time."""
+    return [(assertion, problem)
+            for assertion in unit.get("assert") or []
+            for problem in _judge(dict(unit, **{"assert": [assertion]}),
+                                  outcome, FiberState)]
+
+
+def _profile_dossier(seed: int, points: int, results: list,
+                     unreachable: list = ()) -> dict:
+    """Aggregate ``[(event, classified, unclassified, notes)]`` into the profile
+    report.  *classified* is ``[(assertion, problem)]``, *unclassified* a list
+    of problem lines with no assertion behind them.  *unreachable* names the
+    steps the injection scheme cannot address (section 9.3).  The three event
+    states are disjoint: ``contained + failed + unclassified == injected``.  A
+    run that injected nothing is ``empty``, never ``passed``.  Pure, so the
+    counts and the verdict are testable against fabricated results."""
+    events = []
+    contained = failed = unclassified_count = 0
+    for event, classified, unclassified, _notes_lines in results:
+        if unclassified:
+            status = "unclassified"
+            unclassified_count += 1
+        elif classified:
+            status = "fail"
+        else:
+            status = "contained"
+        contained += status == "contained"
+        failed += status == "fail"
+        events.append({
+            "event": event["event"],
+            "kind": event["kind"],
+            "component": event["component"],
+            "step": event["step"],
+            "where": event.get("where") or f"step {event['step']}",
+            "status": status,
+            "causes": sorted({cause for cause, _ in classified}),
+            "problems": [f"[{cause}] {text}" for cause, text in classified]
+                        + [f"[unclassified] {text}" for text in unclassified],
+        })
+    return {
+        "kind": "tested",
+        "status": ("failed" if failed or unclassified_count
+                   else "empty" if not events else "passed"),
+        "title": "fault profile",
+        "tier": "py",
+        "seed": seed,
+        "counts": {"points": points, "injected": len(events),
+                   "contained": contained, "failed": failed,
+                   "unclassified": unclassified_count,
+                   "unreachable": len(unreachable)},
+        "events": events,
+        "unreachable": list(unreachable),
+    }
+
+
+def _format_profile(dossier: dict, results: list, printer) -> None:
+    """Human-readable rendering: the seed first, one line per injected fault,
+    and a closing line that always carries the unclassified count."""
+    counts = dossier["counts"]
+    seed = dossier["seed"]
+    printer(f"fault profile, seed {seed}, py reference tier: "
+            f"{counts['injected']} fault(s) drawn from {counts['points']} "
+            f"sweep point(s)")
+    notes_by_event = {event["event"]: notes for event, _c, _u, notes in results}
+    for event in dossier["events"]:
+        tag = {"contained": "PASS", "fail": "FAIL",
+               "unclassified": "UNCLASSIFIED"}[event["status"]]
+        printer(f"  {tag} event {event['event']}: {event['kind']} "
+                f"{event['component']} {event['where']}")
+        for problem in event["problems"]:
+            printer(f"      - {problem}")
+        for note in notes_by_event.get(event["event"], []):
+            printer(f"      note: {note}")
+    for item in dossier["unreachable"]:
+        printer(f"  UNREACHABLE {item['component']} {item['where']}: "
+                f"{item['reason']}")
+    if not dossier["events"]:
+        printer("  nothing injected: the composition has no addressable "
+                "sweep point")
+    printer("")
+    printer(f"seed {seed}: injected {counts['injected']} fault(s), "
+            f"{counts['contained']} contained, {counts['failed']} failed, "
+            f"{counts['unclassified']} unclassified")
+
+
+def run_fault_profile(ir: dict, seed: int, count: int = _PROFILE_EVENTS,
+                      out=None) -> tuple[int, dict]:
+    """Inject the seeded profile's events on the py reference tier, judge each
+    with the sweep's full assertion set, and report.
+
+    Returns ``(failures, dossier)``, *failures* being the events that did not
+    end contained: the failed ones plus the unclassified ones.  A run that
+    injected nothing has no failures; its dossier status is ``empty``.  Raises ``ModuleNotFoundError``
+    when cordis-py is absent, like :func:`run_sweep`.
+    """
+    printer = (lambda line: print(line)) if out is None else out
+    emit, runtime_mod, Context, FiberState = _load_py_tier()
+
+    dependents = _provider_dependents(ir)
+    points = sum(len(sweep_units(ir, c.get("name")))
+                 for c in ir.get("components") or [])
+    results: list = []
+    for event in profile_events(ir, seed, count):
+        excluded = frozenset(dependents.get(event["component"], ()))
+        try:
+            outcome = asyncio.run(_drive(ir, event, emit, runtime_mod, Context,
+                                         FiberState, exclude=excluded))
+        except Exception as error:  # noqa: BLE001 - no judged outcome
+            line = _driver_failure(emit, error, "fault-profile")
+            if is_refusal(emit, error):
+                # an emitter refusal is an answer with a named cause (the
+                # tier cannot lower this document), not an unexplained crash
+                results.append((event, [("refused", line)], [], []))
+            else:
+                results.append((event, [], [line], []))
+            continue
+        results.append((event, _classified_problems(event, outcome, FiberState),
+                        [], _notes(outcome)))
+
+    unreachable = [dict(item, component=c.get("name"))
+                   for c in ir.get("components") or []
+                   for item in _unreachable_steps(_body_of(ir, c.get("name")))]
+    dossier = _profile_dossier(seed, points, results, unreachable)
+    _format_profile(dossier, results, printer)
+    counts = dossier["counts"]
+    return counts["failed"] + counts["unclassified"], dossier
+
+
+# ---------------------------------------------------------------------------
 # the cross-tier sweep — the same faults, on every runtime (roadmap item 125)
 # ---------------------------------------------------------------------------
 #
