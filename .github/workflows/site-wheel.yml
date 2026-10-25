@@ -92,6 +92,19 @@ on:
 permissions:
   contents: read
 
+# Issue #2872: one group per ref, as the smoke lanes have, so a newer push to
+# main supersedes an older tip's run instead of both holding runners. Unlike
+# the smoke lanes, ci and CodeQL, which never cancel a running main run, this
+# one cancels it. That is safe here: the job is a checkout plus one stdlib
+# script (about a minute), so it cannot be starved the way a long scan could
+# be; it only checks a contract of the tree (nothing consumes its output, the
+# Pages deploy builds its own wheel); and the newest tip's run checks a tree
+# that contains every commit it replaced. A push that does not match `paths:`
+# starts no run, so it cannot cancel one.
+concurrency:
+  group: site-wheel-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   site-wheel-drift:
     runs-on: ubuntu-latest
