@@ -447,6 +447,24 @@ unequal to every `Int` and to itself, and `1` never equals `+Inf`; the
 executing cross-tier probe pins all three cases alongside the two operand
 orders, so a tier that papers over binary64 with a custom equality fails.
 
+**Only a bare operand widens.** The marker sits on an operand, so it reaches a
+scalar and nothing inside one. `compatible` recurses elementwise, and before
+this rule the checker also accepted the same mix one level down:
+`List[Int] == List[Float]`, `Opt[Int] == Opt[Float]` (and `Some(3) ==
+Some(3.0)`), `Opt[Float] == 3` through the `Opt` injection, a record literal
+with an `Int` in a `Float` field (`r == { i: 3, f: 3 }`), `Box[Int] ==
+Box[Float]`, and `List[Int32] == List[Int]`. The tiers then disagreed: python
+answered true, TypeScript compared `3n` with `3` inside `revlEq` and answered
+false, and go did not build. Converting every element would make `==` cost a
+copy of both values, so the checker refuses the comparison instead (`T1`,
+"the `Int` inside is not widened to `Float` (only a bare operand widens)"),
+the same on every tier and in the self-hosted checker. Compare the scalars
+(`r.i == r.f`, `xs[0] == 3.0`), or build both sides with one element type
+(`3.0`, not `3`, where a `Float` is meant). A mix of one element type on both
+sides (`[1] == [1]`, `Some(3) == 3`) is unaffected.
+`tests/test_mixed_numeric_equality_tiers.py` runs each refused shape on every
+tier and asserts that the tiers agree.
+
 ## Sized integers: `Int32`
 
 `Int` is the right default — it indexes, counts and sizes things, which is the
