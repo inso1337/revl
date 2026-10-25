@@ -149,6 +149,10 @@ CORPUS = [
                         #   index borrow. 437 found NO fixture reached these
                         #   shapes, so the oracle stayed green over an unported
                         #   optimisation; this closes that (item 429)
+    "perf_concat.rvl",  # issue #2468 — the `concat` spelling of the 437(a)
+                        #   self-append in a plain fn: `push_str` for a Str
+                        #   receiver, `extend` for a List one, and the shapes the
+                        #   rewrite declines.
     "perf_index.rvl",   # item 437d — a List index read in a read-only position
                         #   (an `==`/`!=` operand, a builtin receiver) borrows
                         #   rather than cloning the element; the owned `return`/

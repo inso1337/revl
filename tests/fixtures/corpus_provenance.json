@@ -1347,6 +1347,7 @@
    "tests/fixtures/emit_rust_corpus/comp_provide_generic_add.rvl",
    "tests/fixtures/emit_rust_corpus/comp_provide_generic_let.rvl",
    "tests/fixtures/emit_rust_corpus/generic_fn.rvl",
+   "tests/fixtures/emit_rust_corpus/perf_concat.rvl",
    "tests/fixtures/emit_rust_corpus/reserved_type_names.rvl",
    "tests/fixtures/emit_rust_corpus/to_char.rvl",
    "tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl",

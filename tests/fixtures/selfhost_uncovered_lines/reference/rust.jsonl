@@ -174,8 +174,6 @@
 
 ["reason", "ownership-and-string-view-alternatives-residuals-are-the", "Ownership and string-view alternatives: residuals are the computed/non-atomic argument refusal, unknown or function-typed clone safety nets, positional char-view threading, and undo recloning branches. The corpus covers ordinary borrowed strings, owned calls, escaping callbacks, computed receivers, and safe string self-append. emit_rust_corpus/by_value_reuse.rvl (item 391) reaches the reuse half: `_by_value_reuse` in full, `_by_value_arg` 4 -> 2 (the unknown-type reuse clone and the reused-field clone) and `_by_value_field_clone` 2 -> 1."]
 
-["function", "ownership-and-string-view-alternatives-residuals-are-the", "_borrow_str_arg", 1, 1]
-
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_arg", 2, 2]
 
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_field_clone", 1, 1]
@@ -192,7 +190,7 @@
 
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_undo_reclone_locals", 1, 1]
 
-["function", "ownership-and-string-view-alternatives-residuals-are-the", "_v3_self_append_inplace", 19, 19]
+["function", "ownership-and-string-view-alternatives-residuals-are-the", "_v3_self_append_inplace", 2, 2]
 
 ["reason", "pure-v3-expression-and-statement-residuals-explicit-refusals", "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. The stdlib-method result table (`_v3_builtin_return_type`) joins this bucket: it names the surface type of a `kind == \"builtin\"` node, so a `let` bound to a method call carries a type instead of none. Driving `_v3_infer_type` over the receivers it now asks about is what pulls `_v3_infer_type` 11 -> 4, `_v3_is_float` 4 -> 1 and `_v3_is_str` 2 -> 1. Its own residual statement is the `@self` fallback for a receiver the corpus never leaves untyped; the same missing mirror keeps a corpus document from reaching it, because `selfhost/emit_rust.rvl` carries no inference layer of its own. emit_rust_corpus/by_value_reuse.rvl (item 391) reaches one more `_v3_infer_type` arm (the `match` arm-body type), 4 -> 3: selfhost/emit_rust.rvl now mirrors the inference arms the by-value rules read (literal, index, field, record, `match`, stdlib-method result). emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_v3_infer_type`'s statements, 3 -> 2."]
 
@@ -208,7 +206,7 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_infer_type", 2, 2]
 
-["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_inplace_persistent", 12, 12]
+["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_inplace_persistent", 3, 3]
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_interp", 3, 3]
 

@@ -1063,6 +1063,32 @@ fn self_append_plus(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
   return `${recv}.push_str(${borrow_str_arg(rn, render_expr(rn, ctx), ctx)});`
 }
 
+// `_v3_self_append_inplace`, its `concat` arm (item 437a): `t = t.concat(x)`
+// rewritten in place, or "" (issue #2468). The receiver must be the assignment
+// target read as a bare `var`, and the appended operand must not read it. The
+// receiver's type picks the lowering (`_v3_inplace_persistent`): a `Str` appends
+// with `push_str` over the borrowed operand, a `List` (bare or `List[T]`)
+// extends. A receiver the emitter could not type still takes the `Str` arm when
+// the operand is certainly a `Str`, since `List.concat` takes a `List`. The
+// other in-place methods (`push`, `set`, `remove`) are not ported: their
+// builtins are named refusals below, so they cannot diverge silently.
+fn self_append_concat(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
+  if (node_kind(valnode) != "builtin") { return "" }
+  if (value_str(value_field(valnode, "method")) != "concat") { return "" }
+  let tn = value_field(valnode, "target")
+  if (node_kind(tn) != "var") { return "" }
+  if (value_str(value_field(tn, "name")) != target) { return "" }
+  let args = value_list(value_field(valnode, "args"))
+  if (args.length() != 1 || mentions_name(args[0], target)) { return "" }
+  let an = args[0]
+  var recv_ty = map_get(ctx.vt, target)
+  if (recv_ty == "" && v3_is_str(an, ctx)) { recv_ty = "Str" }
+  let rendered = render_expr(an, ctx)
+  if (recv_ty == "Str") { return `${recv}.push_str(${borrow_str_arg(an, rendered, ctx)});` }
+  if (strip_spaces(recv_ty.split("[")[0]) == "List") { return `${recv}.extend((${rendered}).iter().cloned());` }
+  return ""
+}
+
 fn is_copy_type(ty: Str) -> Bool {
   let head = strip_spaces(ty.split("[")[0])
   return head == "Int" || head == "Bool" || head == "Float"
@@ -2353,7 +2379,8 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
       // item 437(a): a self-appending `assign` (`s = s + p`) becomes an
       // in-place `push_str`. Only an `assign` qualifies -- a `let` introduces a
       // NEW binding, so its RHS receiver is a different value that stays live.
-      let ip = self_append_plus(raw, nm, valnode, ctx)
+      var ip = self_append_plus(raw, nm, valnode, ctx)
+      if (ip == "") { ip = self_append_concat(raw, nm, valnode, ctx) }
       if (ip != "") { out = out.push(line(indent, ip)) }
       else { out = out.push(line(indent, `${nm} = ${value};`)) }
     }

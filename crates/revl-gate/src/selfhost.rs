@@ -2666,6 +2666,39 @@ fn self_append_plus(target: &str, recv: &str, valnode: Value, ctx_: Ctx__m1) -> 
     return format!("{}.push_str({});", recv, borrow_str_arg(rn.clone(), render_expr(rn.clone(), ctx_.clone()), ctx_.clone()));
 }
 
+fn self_append_concat(target: String, recv: &str, valnode: Value, ctx_: Ctx__m1) -> String {
+    if (node_kind(valnode.clone()) != "builtin") {
+        return String::from("");
+    }
+    if (value_str(value_field(valnode.clone(), String::from("method"))) != "concat") {
+        return String::from("");
+    }
+    let tn = value_field(valnode.clone(), String::from("target"));
+    if (node_kind(tn.clone()) != "var") {
+        return String::from("");
+    }
+    if (value_str(value_field(tn.clone(), String::from("name"))) != target) {
+        return String::from("");
+    }
+    let args = value_list(value_field(valnode.clone(), String::from("args")));
+    if ((args.revl_length() != 1i64) || mentions_name((args)[(0i64) as usize].clone(), &target)) {
+        return String::from("");
+    }
+    let an = (args)[(0i64) as usize].clone();
+    let mut recv_ty = map_get(ctx_.vt.clone(), target.clone());
+    if ((recv_ty == "") && v3_is_str(an.clone(), ctx_.clone())) {
+        recv_ty = String::from("Str");
+    }
+    let rendered = render_expr(an.clone(), ctx_.clone());
+    if (recv_ty == "Str") {
+        return format!("{}.push_str({});", recv, borrow_str_arg(an.clone(), rendered.clone(), ctx_.clone()));
+    }
+    if (strip_spaces(&((recv_ty.revl_split("[")))[(0i64) as usize]) == "List") {
+        return format!("{}.extend(({}).iter().cloned());", recv, rendered);
+    }
+    return String::from("");
+}
+
 fn is_copy_type(ty: &str) -> bool {
     let head = strip_spaces(&((ty.revl_split("[")))[(0i64) as usize]);
     return (((head == "Int") || (head == "Bool")) || (head == "Float"));
@@ -4069,7 +4102,10 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
             }
             out.push(line(indent, &(format!("{} {}{} = {};", kw, nm, annot, value))));
         } else {
-            let ip = self_append_plus(&raw, &nm, valnode.clone(), ctx_.clone());
+            let mut ip = self_append_plus(&raw, &nm, valnode.clone(), ctx_.clone());
+            if (ip == "") {
+                ip = self_append_concat(raw.clone(), &nm, valnode.clone(), ctx_.clone());
+            }
             if (ip != "") {
                 out.push(line(indent, &ip));
             } else {
