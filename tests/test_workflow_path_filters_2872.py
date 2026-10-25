@@ -16,6 +16,14 @@ hand-written copy:
   builder vendors from) and `tools/check_site_wheel.py`'s CONSUMERS,
   PAGES_WORKFLOW, BUILDERS and TARGETS, plus every script the job runs.
 
+What the derivation does NOT see, so a new read of this shape needs its path
+added by hand: a path built from `Path(__file__).parent / ...`, an f-string,
+`os.path.join` or a variable rather than a literal `ROOT / "..."` chain or a
+`"../..."` corpus name; a module loaded by a computed name; and a file opened
+by the compiler other than through the `use`/`from`/`file`/`asset` closure
+followed below. Checked by hand for issue #2872: an audit hook over the three
+smoke files' runs opened no repo file outside the filter.
+
 Each filter's list is also pinned exactly, so widening or narrowing it is a
 deliberate edit here too, and each workflow must keep its schedule as the
 backstop that still runs it on every tree.
@@ -26,6 +34,7 @@ import ast
 import importlib.util
 import re
 import subprocess
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -182,6 +191,25 @@ def _local_imports(path: Path) -> list[Path]:
     return found
 
 
+def _rvl_closure(docs: list[str]) -> set[str]:
+    sys.path.insert(0, str(ROOT / "tests"))
+    try:
+        from _compiled_ir import _import_closure, live_inputs  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(ROOT / "tests"))
+    env = live_inputs()
+    tracked, out = set(_tracked()), set()
+    for doc in docs:
+        for path in _import_closure(ROOT / doc, env):
+            try:
+                rel = path.relative_to(ROOT).as_posix()
+            except ValueError:
+                continue  # outside the checkout: not a path a push can touch
+            if rel in tracked:
+                out.add(rel)
+    return out
+
+
 def smoke_inputs(name: str) -> set[str]:
     run = _run_text(name)
     tests = sorted(set(re.findall(r"\btests/[\w/]+\.py\b", run)))
@@ -214,6 +242,10 @@ def smoke_inputs(name: str) -> set[str]:
                 target = (base / up).resolve()
                 if target.is_file():
                     inputs.add(target.relative_to(ROOT).as_posix())
+    # A corpus document names further files (`use`/`from`/`file`/`asset`),
+    # which the compiler resolves; follow them with the closure the compiled-IR
+    # cache keys on, so a document importing from an uncovered tree is a red.
+    inputs.update(_rvl_closure(sorted(p for p in inputs if p.endswith(".rvl"))))
     for tree in SMOKE_RUNTIME_TREES:
         inputs.update(_tracked_under(tree))
     inputs.update(SMOKE_INSTALL_INPUTS)

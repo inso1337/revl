@@ -202,6 +202,10 @@ BENCH_DEPENDENT_TESTS = (
     # lex, and they are the only exercise the gate's unlexable-file fallback
     # gets.
     "tests/test_no_embedded_frontend_document_1120.py",
+    # Issue #2872: pins the smoke lanes' push `paths:` filter, which names
+    # three `bench/` documents the smoke corpora read, and derives that set
+    # from the tree, so a bench change must re-run it.
+    "tests/test_workflow_path_filters_2872.py",
 )
 
 # Self-host oracle tests, keyed by the selfhost/<stem>.rvl file they check.
