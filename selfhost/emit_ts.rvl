@@ -898,12 +898,40 @@ fn plain_primitive_literal(node: Any) -> Bool {
 
 fn has_widen(node: Any) -> Bool { return value_has(node, "widen") }
 
+// `_ts_literal_kind`: `Str`, `Bool` or `Int` for a plain primitive literal.
+fn literal_kind(node: Any) -> Str {
+  let vk = value_kind(value_field(node, "value"))
+  if (vk == "bool") { return "Bool" }
+  if (vk == "str") { return "Str" }
+  return "Int"
+}
+
+// `_ts_known_primitive`: whether the IR shows `node` has exactly the primitive
+// type `kind`. An Int literal needs an operand whose Int type the IR states
+// (an Int literal, `+ - * %` or a negation annotated `operands: "Int"`, a Map
+// index with `value_type` Int), since an unmarked `number` against a bigint
+// is a TS2367 error. A Map index is held to its `value_type` for every kind; a
+// Str or Bool literal accepts any other operand (no widening reaches either).
+fn known_primitive(node: Any, kind: Str) -> Bool {
+  if (plain_primitive_literal(node)) { return literal_kind(node) == kind }
+  let k = node_kind(node)
+  if (k == "index") { return value_str(value_field(node, "value_type")) == kind }
+  if (kind != "Int") { return true }
+  let op = node_op(node)
+  if (k == "bin") { return (op == "+" || op == "-" || op == "*" || op == "%") && node_operands(node) == "Int" }
+  return k == "un" && op == "-" && node_operands(node) == "Int"
+}
+
 // `_ts_strict_equality`: a primitive literal on either side makes `===` and
-// `revlEq` agree on every value of the other operand; an operand carrying a
-// `widen` marker (a mixed Int/Float or Int32/Int equality) keeps `revlEq`.
+// `revlEq` agree on every value of the other operand, and the operator is
+// written where the other operand is known to have the literal's type. An
+// operand carrying a `widen` marker (a mixed Int/Float or Int32/Int equality)
+// keeps `revlEq`.
 fn strict_equality(left: Any, right: Any) -> Bool {
-  if (!(plain_primitive_literal(left) || plain_primitive_literal(right))) { return false }
-  return !(has_widen(left) || has_widen(right))
+  if (has_widen(left) || has_widen(right)) { return false }
+  if (plain_primitive_literal(left)) { return known_primitive(right, literal_kind(left)) }
+  if (plain_primitive_literal(right)) { return known_primitive(left, literal_kind(right)) }
+  return false
 }
 
 // `_ts_widened_literal`: the literal side typed as its primitive, so tsc does

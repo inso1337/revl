@@ -4647,6 +4647,49 @@ def _plain_primitive_literal(node: object) -> bool:
     return isinstance(node.get("value"), (str, int))
 
 
+def _ts_literal_kind(node: dict) -> str:
+    """`Str`, `Bool` or `Int` for a `_plain_primitive_literal` node."""
+    value = node["value"]
+    if isinstance(value, bool):
+        return "Bool"
+    return "Str" if isinstance(value, str) else "Int"
+
+
+_TS_INT_ARITH_OPS = ("+", "-", "*", "%")
+
+
+def _ts_known_primitive(node: dict, kind: str) -> bool:
+    """Whether the IR shows `node` has exactly the primitive type `kind`.
+
+    Only an Int literal is at risk: an Int operand is a bigint, but an
+    operand the checker lets meet an Int literal can be a JS `number` with no
+    `widen` marker on it (`m["a"] == 3` for a `Map[Str, Float]`, an
+    `Opt[Float]` against `3`), and `number === bigint` is a TS2367 error. So
+    an Int literal needs an operand whose Int type the IR states: another
+    Int literal, `+ - * %` or a negation annotated `operands: "Int"`, or a Map
+    index whose `value_type` is `Int`. A Map index is held to its
+    `value_type` for every kind, and a List index (which carries none) never
+    qualifies.
+
+    A Str or Bool literal accepts any other operand: no widening reaches
+    `Str` or `Bool`, so every operand the checker admits against one is a JS
+    string or boolean, or that or `undefined` for an `Opt`, all of which
+    overlap the literal's type.
+    """
+    if _plain_primitive_literal(node):
+        return _ts_literal_kind(node) == kind
+    node_kind = node.get("kind")
+    if node_kind == "index":
+        return node.get("value_type") == kind
+    if kind != "Int":
+        return True
+    if node_kind == "bin":
+        return node.get("op") in _TS_INT_ARITH_OPS and node.get("operands") == "Int"
+    if node_kind == "un":
+        return node.get("op") == "-" and node.get("operands") == "Int"
+    return False
+
+
 def _ts_strict_equality(node: dict) -> bool:
     """Whether this `==`/`!=` may be written with `===`/`!==` (issue #2901).
 
@@ -4656,15 +4699,19 @@ def _ts_strict_equality(node: dict) -> bool:
     and the bare operator give the same answer for every value of the other
     operand. The Int literal is a bigint like every other Int on this tier.
 
-    An equality where either operand carries a `widen` marker keeps `revlEq`:
-    that is a mixed Int/Float or Int32/Int comparison (#2715), and this rule
-    is only for operands of one primitive representation.
+    The operator is also typechecked, so it is written only where the other
+    operand is known to have the literal's type (`_ts_known_primitive`). An
+    operand carrying a `widen` marker, a mixed Int/Float or Int32/Int
+    comparison (#2715), keeps `revlEq`.
     """
     left, right = node["left"], node["right"]
-    if not (_plain_primitive_literal(left) or _plain_primitive_literal(right)):
+    if any(isinstance(side, dict) and "widen" in side for side in (left, right)):
         return False
-    return not any(isinstance(side, dict) and "widen" in side
-                   for side in (left, right))
+    if _plain_primitive_literal(left):
+        return _ts_known_primitive(right, _ts_literal_kind(left))
+    if _plain_primitive_literal(right):
+        return _ts_known_primitive(left, _ts_literal_kind(right))
+    return False
 
 
 _TS_LITERAL_TYPES = {str: "string", bool: "boolean", int: "bigint"}

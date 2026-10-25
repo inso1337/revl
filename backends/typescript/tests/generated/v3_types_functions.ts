@@ -70,7 +70,7 @@ export function classify(n: bigint): string {
     if ((n < 0n)) {
       return "neg"
     }
-    return ((n === (0n as bigint)) ? "zero" : "pos")
+    return (revlEq(n, 0n) ? "zero" : "pos")
 }
 
 export function first(xs: bigint[]): bigint {
