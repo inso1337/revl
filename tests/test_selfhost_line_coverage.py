@@ -28,6 +28,7 @@ is one the reference emits. Every tier has one: `emit_py_refusals/`,
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -649,10 +650,17 @@ def test_two_new_functions_in_one_new_bucket_share_one_id(lines, monkeypatch,
 # The gate used to compare the measurement against the ledger in the tree under
 # test. A branch that edits that ledger changes the baseline it is judged
 # against: e071d18ec lowered selfhost/rust `callee_tparams` from 1 uncovered to
-# 0 and that tree measures 0 too, so the old check had nothing to compare the 0
-# with. The tests below build a scratch repository whose origin/main holds the
-# committed ledger and whose feature branch holds an edit to it, point the tool
-# at that repository, and hold the verdict and the printed provenance.
+# 0 in its branch ledger while origin/main records 1. The tests below build a
+# scratch repository whose origin/main holds the committed ledger and whose
+# feature branch holds an edit to it, point the tool at that repository, and
+# hold the verdict and the printed provenance.
+#
+# Issue #2927: a record below the baseline passes when the tree measures
+# exactly that count, and is refused otherwise. e071d18ec's own tree measures 0
+# on python 3.12; the record went wrong once a later merge in its branch made
+# the tree measure 1 again while the ledger still said 0 (e7185eb24 restored
+# it). That later state, lower than both the baseline and the measurement, is
+# the shape still refused.
 
 
 def _git_env(tmp_path: Path) -> dict[str, str]:
@@ -735,37 +743,48 @@ def test_check_prints_the_baseline_provenance_and_matches_it(
     assert "IN-TREE line-coverage ledger: matches the baseline" in out
 
 
-def test_the_e071d18ec_replay_fails_against_origin_main(
-        lines, monkeypatch, tmp_path, capsys):
-    """The issue's measured case, replayed: the branch lowers `callee_tparams`
-    to 0/0 and the branch measure is 0 as well, so the tree and its ledger
-    agree. The old check was silent; the baseline says 1 and fails it, and the
-    message names the record, both counts, the measurement and the baseline."""
-    def lower(ledger):
+def _set_record(name: str, uncovered: int, budget: int):
+    """A ledger edit that rewrites selfhost/rust `name`'s count and budget."""
+    def edit(ledger):
         path = ledger / "selfhost" / "rust.jsonl"
         text = path.read_text(encoding="utf-8")
-        assert '"callee_tparams", 1, 1]' in text
-        path.write_text(text.replace('"callee_tparams", 1, 1]',
-                                     '"callee_tparams", 0, 0]'))
+        pattern = re.compile(rf'("{re.escape(name)}", )\d+, \d+\]')
+        assert len(pattern.findall(text)) == 1, name
+        path.write_text(pattern.sub(rf"\g<1>{uncovered}, {budget}]", text),
+                        encoding="utf-8")
+    return edit
 
-    repo, base = _git_fixture(lines, monkeypatch, tmp_path, lower)
+
+def _measuring(lines, ledger: dict, **counts: int) -> dict:
+    """`_survey` of `ledger`, with selfhost/rust functions measuring `counts`."""
+    survey = _survey(lines, ledger)
+    survey["selfhost"]["rust"]["functions"].update(counts)
+    return survey
+
+
+def test_the_e071d18ec_replay_fails_when_the_tree_measures_the_baseline(
+        lines, monkeypatch, tmp_path, capsys):
+    """The record e7185eb24 restored: the branch ledger says `callee_tparams`
+    0/0, origin/main says 1, and the tree measures 1. The lowered record is
+    lower than both the baseline and the measurement, so the baseline check
+    refuses it and names the record, both counts, the measurement and the
+    baseline."""
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path,
+                              _set_record("callee_tparams", 0, 0))
     ledger = lines._load_ledger()
     assert lines._flatten(ledger["selfhost"]["rust"])["callee_tparams"] == 0
-    survey = _survey(lines, ledger)  # e071d18ec's tree measures 0 too
+    survey = _measuring(lines, ledger, callee_tparams=1)
 
     problems = lines.check(survey)
-    found = [problem for problem in problems if "callee_tparams" in problem]
+    found = [problem for problem in problems
+             if "callee_tparams" in problem and "baseline" in problem]
     assert len(found) == 1, problems
     message = found[0]
-    assert "lowers" in message and "baseline" in message
-    assert f"at {base}" in message
+    assert "lowers" in message and f"at {base}" in message
     assert "baseline records 1 uncovered" in message
     assert "in-tree ledger records 0" in message
-    assert "this tree measures 0" in message
-
-    # The tree's own ledger and the measurement agree, which is why the old
-    # check was silent: only the git baseline can see the change.
-    assert lines.check(survey, (base, "in-tree ledger", ledger)) == []
+    assert "this tree measures 1" in message
+    assert "stands only when this tree measures exactly that count" in message
 
     assert _run_check(lines, monkeypatch, survey) == 1
     out = capsys.readouterr().out
@@ -774,6 +793,72 @@ def test_the_e071d18ec_replay_fails_against_origin_main(
     assert ("IN-TREE line-coverage ledger: differs from the baseline in 1 "
             "record(s) (1 lower, 0 higher)") in out
     assert "callee_tparams" in out
+
+
+def test_a_lowered_record_the_measurement_does_not_back_is_refused(
+        lines, monkeypatch, tmp_path):
+    """Below the baseline but not what the tree measures, in either direction
+    of the measurement, or with no measurement of that tier at all: the
+    lowered count is the branch's claim alone, and the baseline check refuses
+    it."""
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path,
+                              _set_record("callee_tparams", 2, 2),
+                              baseline_edit=_set_record("callee_tparams", 3, 3))
+    ledger = lines._load_ledger()
+
+    def refusal(survey):
+        return [problem for problem in lines.check(survey)
+                if "callee_tparams" in problem and "lowers" in problem]
+
+    for measured in (1, 3):
+        found = refusal(_measuring(lines, ledger, callee_tparams=measured))
+        assert len(found) == 1, measured
+        assert "baseline records 3 uncovered" in found[0]
+        assert "in-tree ledger records 2" in found[0]
+        assert f"this tree measures {measured}" in found[0]
+
+    unmeasured = _survey(lines, ledger)
+    del unmeasured["selfhost"]["rust"]
+    found = refusal(unmeasured)
+    assert len(found) == 1
+    assert "this tree measures nothing (no survey data)" in found[0]
+
+
+def test_a_fall_the_tree_measures_is_recorded_in_its_own_branch(
+        lines, monkeypatch, tmp_path, capsys):
+    """Issue #2927, state (a): the branch's code takes `callee_tparams` from 3
+    uncovered statements to 1 and the branch records 1/1. The tree measures
+    exactly the lowered record, so `--check` passes and reports the record as
+    a difference from the baseline."""
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path,
+                              _set_record("callee_tparams", 1, 1),
+                              baseline_edit=_set_record("callee_tparams", 3, 3))
+    ledger = lines._load_ledger()
+    survey = _measuring(lines, ledger, callee_tparams=1)
+    assert lines.check(survey) == []
+    assert _run_check(lines, monkeypatch, survey) == 0
+    out = capsys.readouterr().out
+    assert ("IN-TREE line-coverage ledger: differs from the baseline in 1 "
+            "record(s) (1 lower, 0 higher)") in out
+
+
+def test_an_unrecorded_fall_points_at_a_state_that_passes(
+        lines, monkeypatch, tmp_path):
+    """Issue #2927, state (b): the branch keeps the baseline's 3/3 and the tree
+    measures 1. That still fails, because the ratchet has to be told, and its
+    hint is `--write` plus the budget, which leads to state (a), which passes.
+    It no longer sends the branch to origin/main, which cannot record a fall
+    its own code does not have."""
+    repo, base = _git_fixture(lines, monkeypatch, tmp_path,
+                              _set_record("callee_tparams", 3, 3),
+                              baseline_edit=_set_record("callee_tparams", 3, 3))
+    survey = _measuring(lines, lines._load_ledger(), callee_tparams=1)
+    found = [problem for problem in lines.check(survey)
+             if "callee_tparams" in problem]
+    assert len(found) == 1, found
+    assert "down to 1 uncovered statement(s) from 3" in found[0]
+    assert "--write" in found[0] and "lower its budget to 1" in found[0]
+    assert "origin/main" not in found[0]
 
 
 def test_a_record_above_the_baseline_is_reported_not_refused(
