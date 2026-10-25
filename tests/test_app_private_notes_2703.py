@@ -9,10 +9,15 @@ its store operations take a `Principal`, so each handler has to call
   `Authorization` header;
 * the same program with the `auth.validate` step removed is refused at
   admission, naming `Principal` and `Auth.validate`, one mutant per route;
-* a mutant that fabricates a principal is refused the same way; and
+* a mutant that fabricates a principal is refused the same way;
+* on the real runtime, with the dev stub validator, the routes serve an owner
+  their own notes, answer another owner's note exactly as an absent one, and
+  answer a missing credential 401; and
 * the public notes service still carries no principal, so it stays the control.
 """
 
+import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -53,6 +58,12 @@ def _mutant(tmp_path: Path, old: str, new: str) -> Path:
     return out
 
 
+needs_runtime = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="standing a live composition up needs the cordis-py runtime; install "
+           "it with `sh backends/python/setup.sh`")
+
+
 def _refusal(app: Path) -> str:
     with pytest.raises((RevlError, RevlErrors)) as exc:
         _compile(app)
@@ -78,20 +89,21 @@ def test_the_example_with_the_check_is_admitted():
 def test_get_route_without_the_check_is_refused(tmp_path):
     app = _mutant(tmp_path, GET_CHECK, "      return store.get(bearer, id)")
     msg = _refusal(app)
-    assert "Principal" in msg and "Auth.validate" in msg
+    assert "expects `Principal`, got `Bearer`" in msg and "Auth.validate" in msg
 
 
 def test_list_route_without_the_check_is_refused(tmp_path):
     app = _mutant(tmp_path, LIST_CHECK, "      return Ok(store.mine(bearer))")
     msg = _refusal(app)
-    assert "Principal" in msg and "Auth.validate" in msg
+    assert "expects `Principal`, got `Bearer`" in msg and "Auth.validate" in msg
 
 
 def test_a_fabricated_principal_is_refused(tmp_path):
     app = _mutant(tmp_path, GET_CHECK,
                   '      return store.get({ subject: "alice" }, id)')
     msg = _refusal(app)
-    assert "Principal" in msg and "Auth.validate" in msg
+    assert "expects `Principal`, got `{subject: Str}`" in msg
+    assert "Auth.validate" in msg
 
 
 def test_the_public_notes_service_is_the_control():
@@ -102,3 +114,51 @@ def test_the_public_notes_service_is_the_control():
         for method in service["methods"].values():
             assert "auth" not in method["route"]
             assert all(p["type"] != "Principal" for p in method["params"])
+
+
+# ---------------------------------------------------------------- live
+
+@pytest.fixture
+def dev_stub(monkeypatch):
+    """The documented any-token dev validator: a non-blank token is that
+    subject. It stands in for the HS256 validator so the test needs no key."""
+    for name in ("REVL_AUTH_HS256_SECRET", "REVL_AUTH_HS256_SECRET_FILE",
+                 "REVL_AUTH_ISSUER", "REVL_AUTH_AUDIENCE", "REVL_AUTH_LEEWAY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("REVL_AUTH_INSECURE_DEV_STUB", "1")
+
+
+def _get(face, path, token=None):
+    headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+    return face.dispatch_http("GET", path, b"", headers)
+
+
+@needs_runtime
+def test_live_routes_scope_notes_to_the_validated_subject(dev_stub):
+    from revl.mcp.http_face import HttpComposedServer
+    from revl.mcp.session import Session
+    from revl.mcp.surface import declared_param_types
+
+    roots = [str(APP), str(AUTH)]
+    session = Session()
+    session.load(compile_files(roots), {}, record=True, origin=None)
+    face = HttpComposedServer(session, declared=declared_param_types(roots))
+    try:
+        own = _get(face, "/private/notes/pn-0", "alice")
+        assert own.status == 200
+        assert json.loads(own.body)["owner"] == "alice"
+
+        # another owner's note is answered exactly as an absent one
+        other = _get(face, "/private/notes/pn-0", "bob")
+        absent = _get(face, "/private/notes/pn-99", "bob")
+        assert other.status == absent.status == 404
+        assert other.body == absent.body
+
+        mine = json.loads(_get(face, "/private/notes", "bob").body)
+        assert [n["id"] for n in mine] == ["pn-1"]
+
+        # no credential: the typed 401 from validate, no note read
+        assert _get(face, "/private/notes/pn-0").status == 401
+        assert _get(face, "/private/notes").status == 401
+    finally:
+        session.unload()
