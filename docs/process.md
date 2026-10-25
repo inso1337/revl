@@ -526,9 +526,12 @@ It then runs every generator's own check, and stages what it resolved.
 - **The coverage ledger** (`tests/fixtures/selfhost_uncovered_lines/`) is
   handed to `tools/selfhost_line_coverage.py --write` as it stands, because
   that tool reads through conflict markers and re-measures every count. It
-  never writes a budget. The check holds each record to the `origin/main`
-  baseline: a record lower than the baseline passes only when the tree under
-  test measures exactly that count (issue #2927). When its `--check` names a
+  never writes a budget. The check's verdict is that every record equals what
+  the tree under test measures, so a fall the branch records passes in its own
+  pull request (issue #2927). The `origin/main` baseline is provenance only:
+  `--check` prints it and how the in-tree ledger differs from it, and names its
+  count in a failure on a record the branch moved, but it refuses nothing the
+  measurement backs. When its `--check` names a
   function whose budget no
   longer matches, set that budget by hand in the merge commit; the tool
   prints this step.
