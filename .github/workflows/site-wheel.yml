@@ -92,9 +92,9 @@ on:
 permissions:
   contents: read
 
-# Issue #2872: one group per ref, as the smoke lane has, so a newer push to
+# Issue #2872: one group per ref, as arm64-smoke has, so a newer push to
 # main supersedes an older tip's run instead of both holding runners. Unlike
-# the smoke lane, ci and CodeQL, which never cancel a running main run, this
+# arm64-smoke, ci and CodeQL, which never cancel a running main run, this
 # one cancels it. That is safe here: the job is a checkout plus one stdlib
 # script (about a minute), so it cannot be starved the way a long scan could
 # be; it only checks a contract of the tree (nothing consumes its output, the
