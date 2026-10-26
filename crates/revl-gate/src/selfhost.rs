@@ -15450,6 +15450,204 @@ fn leaky_body(ss: &[Stmt], i: i64, cx: Ctx__m2, cr: bool) -> String {
     return leaky_body(ss, (i).checked_add(1i64).expect("revl: Int overflow"), cx, cr);
 }
 
+fn lc_msg(callee: &str, fnm: &str) -> String {
+    let subject = if (callee == "()") { String::from("a computed callee") } else { (String::from("`").revl_concat(&callee)).revl_concat("`") };
+    return (((((String::from("this arrow in `").revl_concat(&fnm)).revl_concat("` calls ")).revl_concat(&subject)).revl_concat(", which is not a module fn, an extern or an arrow parameter, but `")).revl_concat(&fnm)).revl_concat("` takes an async function parameter and the arrow's type carries no async color, so the caller could receive an unawaited suspension (A1)");
+}
+
+fn lc_or(x: String, y: String) -> String {
+    return if (x != "") { x.clone() } else { y };
+}
+
+fn lc_first_xs(xs: &[Expr], i: i64, bound: &[String], mods: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_first((xs)[(i) as usize].clone(), bound, mods), lc_first_xs(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound, mods));
+}
+
+fn lc_first_inits(xs: &[InitN], i: i64, bound: &[String], mods: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_first((xs)[(i) as usize].value.clone(), bound, mods), lc_first_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound, mods));
+}
+
+fn lc_first_lets(xs: &[ArmLetN], i: i64, bound: &[String], mods: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_first((xs)[(i) as usize].value.clone(), bound, mods), lc_first_lets(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound, mods));
+}
+
+fn lc_first_arms(xs: &[ArmN], i: i64, bound: &[String], mods: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let a = (xs)[(i) as usize].clone();
+    let r = if a.isBlk { lc_or(lc_first_lets(&a.blk, 0i64, bound, mods), lc_first(a.blkTail.clone(), bound, mods)) } else { lc_first(a.body.clone(), bound, mods) };
+    return lc_or(r, lc_first_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound, mods));
+}
+
+fn lc_first_parts(xs: &[PartN], i: i64, bound: &[String], mods: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_first((xs)[(i) as usize].e.clone(), bound, mods), lc_first_parts(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound, mods));
+}
+
+fn lc_first_call(tg: Expr, args: &[Expr], bound: &[String], mods: &[String]) -> String {
+    let own = match tg {
+    Expr::Var(n) => if (contains__m2(bound, &n) || contains__m2(mods, &n)) { String::from("") } else { n.clone() },
+    Expr::Field(f) => { let f = *f; lc_first(f.target, bound, mods) },
+    _ => String::from("()"),
+};
+    return lc_or(own, lc_first_xs(args, 0i64, bound, mods));
+}
+
+fn lc_first(e: Expr, bound: &[String], mods: &[String]) -> String {
+    return match e {
+    Expr::IntLit(_) => String::from(""),
+    Expr::FloatLit(_) => String::from(""),
+    Expr::StrLit(_) => String::from(""),
+    Expr::BoolLit(_) => String::from(""),
+    Expr::NullLit => String::from(""),
+    Expr::Var(_) => String::from(""),
+    Expr::Hole(_) => String::from(""),
+    Expr::Asset(_) => String::from(""),
+    Expr::Bad(_) => String::from(""),
+    Expr::Bin(b) => { let b = *b; lc_or(lc_first(b.l.clone(), bound, mods), lc_first(b.r.clone(), bound, mods)) },
+    Expr::Un(u) => { let u = *u; lc_first(u.e.clone(), bound, mods) },
+    Expr::Emit(u) => { let u = *u; lc_first(u.e.clone(), bound, mods) },
+    Expr::Call(c) => { let c = *c; lc_first_call(c.target.clone(), &c.args, bound, mods) },
+    Expr::Field(f) => { let f = *f; lc_first(f.target.clone(), bound, mods) },
+    Expr::OptField(f) => { let f = *f; lc_first(f.target.clone(), bound, mods) },
+    Expr::OptCall(c) => { let c = *c; lc_first_call(c.target.clone(), &c.args, bound, mods) },
+    Expr::Index(x) => { let x = *x; lc_or(lc_first(x.target.clone(), bound, mods), lc_first(x.idx.clone(), bound, mods)) },
+    Expr::If(x) => { let x = *x; lc_or(lc_first(x.cond.clone(), bound, mods), lc_or(lc_first(x.then_.clone(), bound, mods), lc_first(x.els.clone(), bound, mods))) },
+    Expr::Rec(r) => lc_first_inits(&r.fields, 0i64, bound, mods),
+    Expr::Lst(l) => lc_first_xs(&l.items, 0i64, bound, mods),
+    Expr::Arrow(_) => String::from(""),
+    Expr::Match(m) => { let m = *m; lc_or(lc_first(m.scrut.clone(), bound, mods), lc_first_arms(&m.arms, 0i64, bound, mods)) },
+    Expr::Templ(t) => lc_first_parts(&t.parts, 0i64, bound, mods),
+    Expr::RecUpd(r) => { let r = *r; lc_or(lc_first(r.base.clone(), bound, mods), lc_first_inits(&r.upds, 0i64, bound, mods)) },
+    _ => unreachable!(),
+};
+}
+
+fn lc_scan_xs(xs: &[Expr], i: i64, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_scan((xs)[(i) as usize].clone(), false, bound.clone(), mods, cx.clone()), lc_scan_xs(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound.clone(), mods, cx.clone()));
+}
+
+fn lc_scan_args(xs: &[Expr], i: i64, slots: &[i64], bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_scan((xs)[(i) as usize].clone(), contains_int(slots, i), bound.clone(), mods, cx.clone()), lc_scan_args(xs, (i).checked_add(1i64).expect("revl: Int overflow"), slots, bound.clone(), mods, cx.clone()));
+}
+
+fn lc_scan_inits(xs: &[InitN], i: i64, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_scan((xs)[(i) as usize].value.clone(), false, bound.clone(), mods, cx.clone()), lc_scan_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound.clone(), mods, cx.clone()));
+}
+
+fn lc_scan_lets(xs: &[ArmLetN], i: i64, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_scan((xs)[(i) as usize].value.clone(), false, bound.clone(), mods, cx.clone()), lc_scan_lets(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound.clone(), mods, cx.clone()));
+}
+
+fn lc_scan_arms(xs: &[ArmN], i: i64, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let a = (xs)[(i) as usize].clone();
+    let r = if a.isBlk { lc_or(lc_scan_lets(&a.blk, 0i64, bound.clone(), mods, cx.clone()), lc_scan(a.blkTail.clone(), false, bound.clone(), mods, cx.clone())) } else { lc_scan(a.body.clone(), false, bound.clone(), mods, cx.clone()) };
+    return lc_or(r, lc_scan_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound, mods, cx));
+}
+
+fn lc_scan_parts(xs: &[PartN], i: i64, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_scan((xs)[(i) as usize].e.clone(), false, bound.clone(), mods, cx.clone()), lc_scan_parts(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bound.clone(), mods, cx.clone()));
+}
+
+fn lc_scan_call(tg: Expr, args: &[Expr], bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    return match tg.clone() {
+    Expr::Var(n) => lc_scan_args(args, 0i64, &(match cx.fnAsyncSlots.get(&n).cloned() {
+    Some(v) => v,
+    None => vec![],
+    _ => unreachable!(),
+}), bound.clone(), mods, cx.clone()),
+    _ => lc_or(lc_scan(tg.clone(), false, bound.clone(), mods, cx.clone()), lc_scan_xs(args, 0i64, bound.clone(), mods, cx.clone())),
+};
+}
+
+fn lc_scan_arrow(ar: ArrowN, coerced: bool, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    let inner = union_into(bound.clone(), &param_names(&ar.params));
+    if (!coerced) {
+        let hit = lc_first(ar.body.clone(), &inner, mods);
+        if (hit != "") {
+            return hit;
+        }
+    }
+    return lc_scan(ar.body.clone(), false, inner, mods, cx);
+}
+
+fn lc_scan(e: Expr, coerced: bool, bound: Vec<String>, mods: &[String], cx: Ctx__m2) -> String {
+    return match e {
+    Expr::IntLit(_) => String::from(""),
+    Expr::FloatLit(_) => String::from(""),
+    Expr::StrLit(_) => String::from(""),
+    Expr::BoolLit(_) => String::from(""),
+    Expr::NullLit => String::from(""),
+    Expr::Var(_) => String::from(""),
+    Expr::Hole(_) => String::from(""),
+    Expr::Asset(_) => String::from(""),
+    Expr::Bad(_) => String::from(""),
+    Expr::Bin(b) => { let b = *b; lc_or(lc_scan(b.l.clone(), false, bound.clone(), mods, cx.clone()), lc_scan(b.r.clone(), false, bound.clone(), mods, cx.clone())) },
+    Expr::Un(u) => { let u = *u; lc_scan(u.e.clone(), false, bound.clone(), mods, cx.clone()) },
+    Expr::Emit(u) => { let u = *u; lc_scan(u.e.clone(), false, bound.clone(), mods, cx.clone()) },
+    Expr::Call(c) => { let c = *c; lc_scan_call(c.target.clone(), &c.args, bound.clone(), mods, cx.clone()) },
+    Expr::Field(f) => { let f = *f; lc_scan(f.target.clone(), false, bound.clone(), mods, cx.clone()) },
+    Expr::OptField(f) => { let f = *f; lc_scan(f.target.clone(), false, bound.clone(), mods, cx.clone()) },
+    Expr::OptCall(c) => { let c = *c; lc_scan_call(c.target.clone(), &c.args, bound.clone(), mods, cx.clone()) },
+    Expr::Index(x) => { let x = *x; lc_or(lc_scan(x.target.clone(), false, bound.clone(), mods, cx.clone()), lc_scan(x.idx.clone(), false, bound.clone(), mods, cx.clone())) },
+    Expr::If(x) => { let x = *x; lc_or(lc_scan(x.cond.clone(), false, bound.clone(), mods, cx.clone()), lc_or(lc_scan(x.then_.clone(), false, bound.clone(), mods, cx.clone()), lc_scan(x.els.clone(), false, bound.clone(), mods, cx.clone()))) },
+    Expr::Rec(r) => lc_scan_inits(&r.fields, 0i64, bound.clone(), mods, cx.clone()),
+    Expr::Lst(l) => lc_scan_xs(&l.items, 0i64, bound.clone(), mods, cx.clone()),
+    Expr::Arrow(ar) => { let ar = *ar; lc_scan_arrow(ar, coerced, bound.clone(), mods, cx.clone()) },
+    Expr::Match(m) => { let m = *m; lc_or(lc_scan(m.scrut.clone(), false, bound.clone(), mods, cx.clone()), lc_scan_arms(&m.arms, 0i64, bound.clone(), mods, cx.clone())) },
+    Expr::Templ(t) => lc_scan_parts(&t.parts, 0i64, bound.clone(), mods, cx.clone()),
+    Expr::RecUpd(r) => { let r = *r; lc_or(lc_scan(r.base.clone(), false, bound.clone(), mods, cx.clone()), lc_scan_inits(&r.upds, 0i64, bound.clone(), mods, cx.clone())) },
+    _ => unreachable!(),
+};
+}
+
+fn lc_body(ss: &[Stmt], i: i64, mods: &[String], cx: Ctx__m2) -> String {
+    if (i >= ss.revl_length()) {
+        return String::from("");
+    }
+    return lc_or(lc_scan((ss)[(i) as usize].e.clone(), false, vec![], mods, cx.clone()), lc_body(ss, (i).checked_add(1i64).expect("revl: Int overflow"), mods, cx.clone()));
+}
+
+fn fnd_names(fs: &[FnD]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < fs.revl_length()) {
+        out.push((fs)[(i) as usize].name.clone());
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn col_exprs(xs: &[Expr], i: i64, names: &[String], acc: Vec<String>) -> Vec<String> {
     if (i >= xs.revl_length()) {
         return acc;
@@ -15744,7 +15942,7 @@ fn check_reachable_fn_acquire(pg: Prog) -> Verd {
     return check_fn_acquire(&pg.fns, &sort_strs(&reached_fns(&pg.fns, &seed)), 0i64);
 }
 
-fn fn_a1_verdict(f: FnD, base: Ctx__m2) -> String {
+fn fn_a1_verdict(f: FnD, base: Ctx__m2, mods: &[String]) -> String {
     let sda = self_async_body(&f.body, 0i64);
     if (sda != "") {
         return tagged("A1", &sda);
@@ -15757,6 +15955,12 @@ fn fn_a1_verdict(f: FnD, base: Ctx__m2) -> String {
     if (leak != "") {
         return tagged("A1", &leak);
     }
+    if (f.asyncParams.revl_length() > 0i64) {
+        let lc = lc_body(&f.body, 0i64, mods, base.clone());
+        if (lc != "") {
+            return tagged("A1", &lc_msg(&lc, &f.name));
+        }
+    }
     return String::from("");
 }
 
@@ -15764,7 +15968,7 @@ fn first_module_fn(fns: &[FnD], i: i64, base: Ctx__m2) -> Verd {
     if (i >= fns.revl_length()) {
         return no_verd();
     }
-    let v = fn_a1_verdict((fns)[(i) as usize].clone(), base.clone());
+    let v = fn_a1_verdict((fns)[(i) as usize].clone(), base.clone(), &fnd_names(fns));
     if (v != "") {
         let sl = if (self_async_body(&(fns)[(i) as usize].body, 0i64) != "") { self_async_line(&(fns)[(i) as usize].body, 0i64) } else { 0i64 };
         return mk_verd(v, first_line(sl, (fns)[(i) as usize].line.clone()));

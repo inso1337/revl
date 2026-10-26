@@ -4075,7 +4075,7 @@ component C provides ops: Ops {
   }
 }
 """, "G4"),
-    ("issue 2834: a let in a closed block does not shadow an emission value", """
+    ("issue 2834: a closed block, a finished loop or a later let does not shadow an emission value", """
 extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
 fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
 service Ops { emission fn a(send: Int) -> Int
@@ -4083,31 +4083,13 @@ service Ops { emission fn a(send: Int) -> Int
 component C provides ops: Ops {
   provide ops {
     fn a(send) { return 0 }
-    fn b() { if (true) { let send = 1 } return apply(send, "x") }
-  }
-}
-""", "G4"),
-    ("issue 2834: a for element after its loop does not shadow an emission value", """
-extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
-fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
-service Ops { emission fn a(send: Int) -> Int
-  emission fn b() -> Int }
-component C provides ops: Ops {
-  provide ops {
-    fn a(send) { return 0 }
-    fn b() { for (send of [1]) { } return apply(send, "x") }
-  }
-}
-""", "G4"),
-    ("issue 2834: a let after the use does not shadow an emission value", """
-extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
-fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
-service Ops { emission fn a(send: Int) -> Int
-  emission fn b() -> Int }
-component C provides ops: Ops {
-  provide ops {
-    fn a(send) { return 0 }
-    fn b() { let r = apply(send, "x") let send = 2 return r }
+    fn b() {
+      if (true) { let send = 1 }
+      for (send of [1]) { }
+      let r = apply(send, "x")
+      let send = 2
+      return r
+    }
   }
 }
 """, "G4"),
@@ -4115,6 +4097,31 @@ component C provides ops: Ops {
 extern emission fn send(x: Str) -> Int = @py { return 1 }
 extern emission async fn aop(x: Str) -> Str = @py { return x }
 fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { return (y) => c(y) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a sync arrow cannot call an alias of an async-typed parameter", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { let g = c
+ return (y) => g(y) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a sync arrow cannot call a match binding of an async-typed parameter", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str {
+  return match Some(c) { Some(g) => (y) => g(y), None => (y) => y }
+}
 fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
 service Ops { emission async fn invoke(x: Str) -> Str }
 component C provides ops: Ops { provide ops { async fn invoke(x) {

@@ -9153,11 +9153,23 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         # Async[T]` carries the async flag and is admitted; a plain one that
         # reaches a suspension is refused. Pure fns have no req keys, so only
         # the named-callable reach applies here (rule 3 is component-only).
+        fn_async_params = frozenset(
+            p["name"] for p in (entry.get("params") or [])
+            if _is_async_fn_type(p.get("type")))
         _refuse_leaky_pure_arrow(
             entry.get("body") or [], async_colored,
-            _fn_decls_by_name.get(name), program.filename,
-            frozenset(p["name"] for p in (entry.get("params") or [])
-                      if _is_async_fn_type(p.get("type"))))
+            _fn_decls_by_name.get(name), program.filename, fn_async_params)
+        # issue #2842: a value of async fn type can be renamed (a `let`, a
+        # match binding, a computed callee) before a sync arrow calls it, and
+        # the lowered IR carries no callee types to follow it. So in a fn
+        # that takes an async fn parameter, a sync arrow may call only module
+        # fns and externs, and its own (or an enclosing arrow's) parameters.
+        if fn_async_params:
+            _refuse_local_call_in_sync_arrow(
+                entry.get("body") or [], frozenset(),
+                frozenset(f.name for f in program.fn_decls)
+                | frozenset(e.name for e in program.externs),
+                name, _fn_decls_by_name.get(name), program.filename)
         if name in async_colored:
             entry["async"] = True
 
@@ -11699,6 +11711,76 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename,
     elif isinstance(node, list):
         for value in node:
             _refuse_leaky_pure_arrow(value, async_colored, decl, filename, async_params)
+
+
+def _first_local_call(node, bound: frozenset, exempt: frozenset):
+    """The first call in `node` whose callee is neither a module fn/extern
+    (`exempt`) nor an arrow parameter in scope (`bound`): its name, or "" for a
+    computed callee; None when there is none. Nested arrows are not entered;
+    `_refuse_local_call_in_sync_arrow` judges each one on its own."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            return None
+        if node.get("kind") == "call":
+            callee = node.get("callee")
+            if isinstance(callee, dict) and callee.get("kind") == "var" \
+                    and isinstance(callee.get("name"), str):
+                if callee["name"] not in bound and callee["name"] not in exempt:
+                    return callee["name"]
+            else:
+                return ""
+        for value in node.values():
+            hit = _first_local_call(value, bound, exempt)
+            if hit is not None:
+                return hit
+    elif isinstance(node, list):
+        for value in node:
+            hit = _first_local_call(value, bound, exempt)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _local_call_message(callee: str, fn_name: str) -> str:
+    subject = f"`{callee}`" if callee else "a computed callee"
+    return (f"this arrow in `{fn_name}` calls {subject}, which is not a module "
+            f"fn, an extern or an arrow parameter, but `{fn_name}` takes an "
+            "async function parameter and the arrow's type carries no async "
+            "color, so the caller could receive an unawaited suspension (A1)")
+
+
+def _refuse_local_call_in_sync_arrow(node, bound: frozenset, exempt: frozenset,
+                                     fn_name: str, decl, filename) -> None:
+    """Issue #2842: in a module fn that takes an async fn parameter, refuse a
+    sync-typed arrow that calls anything but a module fn/extern or an arrow
+    parameter. A local could hold the async parameter under another name."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            inner = bound | {p for p in (node.get("params") or [])
+                             if isinstance(p, str)}
+            if not node.get("async"):
+                hit = _first_local_call(node.get("body"), inner, exempt)
+                if hit is not None:
+                    raise RevlError(
+                        (decl.source if decl is not None else None) or filename,
+                        getattr(decl, "line", 0) or 0,
+                        _local_call_message(hit, fn_name),
+                        hint="call the async parameter directly from the fn, "
+                             "or declare the receiving parameter `(…) -> "
+                             "Async[T]` so every call through it is awaited "
+                             "(docs/design/async-function-values.md)",
+                        code="A1", category="async-propagation",
+                    )
+            _refuse_local_call_in_sync_arrow(node.get("body"), inner, exempt,
+                                             fn_name, decl, filename)
+            return
+        for value in node.values():
+            _refuse_local_call_in_sync_arrow(value, bound, exempt, fn_name,
+                                             decl, filename)
+    elif isinstance(node, list):
+        for value in node:
+            _refuse_local_call_in_sync_arrow(value, bound, exempt, fn_name,
+                                             decl, filename)
 
 
 # item 130 rule 3.5 — the IR kinds a `map`/`filter` transform may NOT contain.
