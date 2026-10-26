@@ -218,24 +218,38 @@ _RENAMED_ASYNC_PARAM_TAIL = (
 )
 
 
+_STRICT_MESSAGE = (
+    "`wrapc` takes an async function parameter, so each call in its body "
+    "must name a module fn, an extern or a constructor, or call that "
+    "parameter directly outside a sync arrow; this call to ")
+
+
 @pytest.mark.parametrize(
-    "wrapc",
+    "wrapc,callee",
     [
-        "fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { let g = c\n"
-        " return (y) => g(y) }\n",
-        "fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str {\n"
-        "  return match Some(c) { Some(g) => (y) => g(y), None => (y) => y }\n"
-        "}\n",
-        "fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str {\n"
-        "  var g = c\n  g = c\n  return (y) => g(y)\n}\n",
+        ("fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { let g = c\n"
+         " return (y) => g(y) }\n", "`g`"),
+        ("fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str {\n"
+         "  return match Some(c) { Some(g) => (y) => g(y), None => (y) => y }\n"
+         "}\n", "`g`"),
+        ("fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str {\n"
+         "  var g = c\n  g = c\n  return (y) => g(y)\n}\n", "`g`"),
+        ("fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str "
+         "{ return ((h) => (y) => h(y))(c) }\n", "a computed callee"),
+        ("fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str "
+         "{ let k = (h) => (y) => h(y)\n return k(c) }\n", "`h`"),
+        ("fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str "
+         "{ return ((h) => (z) => (y) => h(y))(c)(1) }\n", "a computed callee"),
     ],
-    ids=["let-alias", "match-binding", "var-alias"],
+    ids=["let-alias", "match-binding", "var-alias", "iife", "let-factory",
+         "iife-3-level"],
 )
-def test_a_sync_arrow_cannot_call_a_renamed_async_typed_parameter(wrapc):
-    """The parameter can reach the arrow under another name, and the lowered
-    IR carries no callee types to follow it. So in a fn that takes an async
-    fn parameter, a sync arrow may call only module fns, externs and arrow
-    parameters."""
+def test_a_fn_with_an_async_parameter_cannot_call_a_local_callee(wrapc, callee):
+    """The parameter can reach a sync arrow under another name, or through
+    an arrow parameter, and the lowered IR carries no callee types to follow
+    it. So in a fn that takes an async fn parameter, every call must name a
+    module fn, an extern or a constructor, or call that parameter directly
+    outside a sync arrow."""
     source = (
         "extern emission fn send(x: Str) -> Int = @py { return 1 }\n"
         "extern emission async fn aop(x: Str) -> Str = @py { return x }\n"
@@ -244,27 +258,32 @@ def test_a_sync_arrow_cannot_call_a_renamed_async_typed_parameter(wrapc):
         compile_source(source, "emission-async-param-rename.rvl")
 
     assert caught.value.code == "A1"
-    assert caught.value.message.startswith("this arrow in `wrapc` calls `g`")
+    assert caught.value.message.startswith(_STRICT_MESSAGE + callee + " does not")
 
 
-def test_a_sync_arrow_may_call_module_fns_and_its_own_parameters():
-    """The control: in a fn with an async fn parameter, a sync arrow that
-    calls module fns, externs and arrow parameters is admitted."""
+def test_a_fn_with_an_async_parameter_may_call_it_directly_and_module_fns():
+    """The control: a fn with an async fn parameter may call that parameter
+    directly in its body, and a sync arrow in it may call module fns,
+    externs and constructors."""
     compile_source(
         "extern pure fn up(x: Str) -> Str = @py { return x }\n"
         "fn other(s: Str) -> Str { return s }\n"
-        "fn wrapc(c: (Str) -> Async[Str]) -> ((Str) -> Str) -> (Str) -> Str "
-        "{ return (k) => (y) => up(other(k(y))) }\n",
+        "fn wrapc(c: (Str) -> Async[Str], x: Str) -> (Str) -> Str "
+        "{ let r = c(x)\n let o = Some(r)\n return (y) => up(other(y)) }\n",
         "emission-async-param-allowed.rvl")
 
 
-def test_an_arrow_parameter_shadows_an_async_typed_parameter():
-    """The control: inside an arrow that rebinds `c` as its own parameter,
-    `c` is that sync parameter, not the async one."""
-    compile_source(
-        'fn w(c: (Str) -> Async[Str]) -> ((Str) -> Str) -> Str '
-        '{ return (c) => c("a") }\n',
-        "emission-async-param-shadow.rvl")
+def test_an_arrow_parameter_named_like_an_async_parameter_is_still_refused():
+    """An arrow parameter that rebinds `c` is a local callee like any other,
+    so it is refused too: the rule does not follow names through scopes."""
+    with pytest.raises(RevlError) as caught:
+        compile_source(
+            'fn w(c: (Str) -> Async[Str]) -> ((Str) -> Str) -> Str '
+            '{ return (c) => c("a") }\n',
+            "emission-async-param-shadow.rvl")
+
+    assert caught.value.code == "A1"
+    assert "this call to `c` does not" in caught.value.message
 
 
 def test_an_emission_value_inside_a_helper_reached_under_emit_is_refused():

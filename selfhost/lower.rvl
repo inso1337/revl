@@ -8831,60 +8831,71 @@ fn leaky_body(ss: List[Stmt], i: Int, cx: Ctx, cr: Bool) -> Str {
   return leaky_body(ss, i + 1, cx, cr)
 }
 
-// issue #2842, the reference's `_refuse_local_call_in_sync_arrow`: in a module
-// fn that takes an async fn parameter, a sync-typed arrow may call only module
-// fns/externs (`mods`) and arrow parameters in scope (`bound`). A local could
-// hold the async parameter under another name, and the self-host carries no
-// callee types to follow it. `lc_first` answers the first other callee: its
-// name, "()" for a computed one, "" for none. Nested arrows are judged alone.
+// issue #2842, the reference's `_refuse_untrusted_call_in_async_param_fn`: in
+// a module fn that takes an async fn parameter, every call must name a trusted
+// declaration (`tr`: module fns, externs, constructors no local rebinds), or
+// call an async parameter (`aps`) directly outside every sync arrow (`sy`).
+// The self-host carries no callee types, so a local, an arrow parameter or a
+// computed callee could be the async parameter under another name. The walk
+// answers the first other callee: its name, "()" for a computed one, "" for
+// none.
 fn lc_msg(callee: Str, fnm: Str) -> Str {
   let subject = callee == "()" ? "a computed callee" : "`".concat(callee).concat("`")
-  return "this arrow in `".concat(fnm).concat("` calls ").concat(subject)
-    .concat(", which is not a module fn, an extern or an arrow parameter, but `")
-    .concat(fnm)
-    .concat("` takes an async function parameter and the arrow's type carries no async color, so the caller could receive an unawaited suspension (A1)")
+  return "`".concat(fnm)
+    .concat("` takes an async function parameter, so each call in its body must name a module fn, an extern or a constructor, or call that parameter directly outside a sync arrow; this call to ")
+    .concat(subject)
+    .concat(" does not, and the caller could receive an unawaited suspension (A1)")
 }
 
 fn lc_or(x: Str, y: Str) -> Str { return x != "" ? x : y }
 
-fn lc_first_xs(xs: List[Expr], i: Int, bound: List[Str], mods: List[Str]) -> Str {
+type LcK = { sy: Bool, tr: List[Str], aps: List[Str] }
+
+fn lc_xs(xs: List[Expr], i: Int, k: LcK, cx: Ctx) -> Str {
   if (i >= xs.length()) { return "" }
-  return lc_or(lc_first(xs[i], bound, mods), lc_first_xs(xs, i + 1, bound, mods))
+  return lc_or(lc_scan(xs[i], false, k, cx), lc_xs(xs, i + 1, k, cx))
 }
 
-fn lc_first_inits(xs: List[InitN], i: Int, bound: List[Str], mods: List[Str]) -> Str {
+fn lc_args(xs: List[Expr], i: Int, slots: List[Int], k: LcK, cx: Ctx) -> Str {
   if (i >= xs.length()) { return "" }
-  return lc_or(lc_first(xs[i].value, bound, mods), lc_first_inits(xs, i + 1, bound, mods))
+  return lc_or(lc_scan(xs[i], contains_int(slots, i), k, cx),
+               lc_args(xs, i + 1, slots, k, cx))
 }
 
-fn lc_first_lets(xs: List[ArmLetN], i: Int, bound: List[Str], mods: List[Str]) -> Str {
+fn lc_inits(xs: List[InitN], i: Int, k: LcK, cx: Ctx) -> Str {
   if (i >= xs.length()) { return "" }
-  return lc_or(lc_first(xs[i].value, bound, mods), lc_first_lets(xs, i + 1, bound, mods))
+  return lc_or(lc_scan(xs[i].value, false, k, cx), lc_inits(xs, i + 1, k, cx))
 }
 
-fn lc_first_arms(xs: List[ArmN], i: Int, bound: List[Str], mods: List[Str]) -> Str {
+fn lc_lets(xs: List[ArmLetN], i: Int, k: LcK, cx: Ctx) -> Str {
+  if (i >= xs.length()) { return "" }
+  return lc_or(lc_scan(xs[i].value, false, k, cx), lc_lets(xs, i + 1, k, cx))
+}
+
+fn lc_arms(xs: List[ArmN], i: Int, k: LcK, cx: Ctx) -> Str {
   if (i >= xs.length()) { return "" }
   let a = xs[i]
-  let r = a.isBlk ? lc_or(lc_first_lets(a.blk, 0, bound, mods), lc_first(a.blkTail, bound, mods))
-                  : lc_first(a.body, bound, mods)
-  return lc_or(r, lc_first_arms(xs, i + 1, bound, mods))
+  let r = a.isBlk ? lc_or(lc_lets(a.blk, 0, k, cx), lc_scan(a.blkTail, false, k, cx))
+                  : lc_scan(a.body, false, k, cx)
+  return lc_or(r, lc_arms(xs, i + 1, k, cx))
 }
 
-fn lc_first_parts(xs: List[PartN], i: Int, bound: List[Str], mods: List[Str]) -> Str {
+fn lc_parts(xs: List[PartN], i: Int, k: LcK, cx: Ctx) -> Str {
   if (i >= xs.length()) { return "" }
-  return lc_or(lc_first(xs[i].e, bound, mods), lc_first_parts(xs, i + 1, bound, mods))
+  return lc_or(lc_scan(xs[i].e, false, k, cx), lc_parts(xs, i + 1, k, cx))
 }
 
-fn lc_first_call(tg: Expr, args: List[Expr], bound: List[Str], mods: List[Str]) -> Str {
-  let own = match tg {
-    Var(n)   => (contains(bound, n) || contains(mods, n)) ? "" : n,
-    Field(f) => lc_first(f.target, bound, mods),
+fn lc_call(tg: Expr, args: List[Expr], k: LcK, cx: Ctx) -> Str {
+  return match tg {
+    Var(n)   => lc_or((contains(k.tr, n) || (contains(k.aps, n) && !k.sy)) ? "" : n,
+                      lc_args(args, 0,
+                        match cx.fnAsyncSlots.lookup(n) { Some(v) => v, None => [] }, k, cx)),
+    Field(f) => lc_or(lc_scan(f.target, false, k, cx), lc_xs(args, 0, k, cx)),
     _        => "()",
   }
-  return lc_or(own, lc_first_xs(args, 0, bound, mods))
 }
 
-fn lc_first(e: Expr, bound: List[Str], mods: List[Str]) -> Str {
+fn lc_scan(e: Expr, coerced: Bool, k: LcK, cx: Ctx) -> Str {
   return match e {
     IntLit(_)   => "",
     FloatLit(_) => "",
@@ -8895,112 +8906,85 @@ fn lc_first(e: Expr, bound: List[Str], mods: List[Str]) -> Str {
     Hole(_)     => "",
     Asset(_)    => "",
     Bad(_)      => "",
-    Bin(b)      => lc_or(lc_first(b.l, bound, mods), lc_first(b.r, bound, mods)),
-    Un(u)       => lc_first(u.e, bound, mods),
-    Emit(u)     => lc_first(u.e, bound, mods),
-    Call(c)     => lc_first_call(c.target, c.args, bound, mods),
-    Field(f)    => lc_first(f.target, bound, mods),
-    OptField(f) => lc_first(f.target, bound, mods),
-    OptCall(c)  => lc_first_call(c.target, c.args, bound, mods),
-    Index(x)    => lc_or(lc_first(x.target, bound, mods), lc_first(x.idx, bound, mods)),
-    If(x)       => lc_or(lc_first(x.cond, bound, mods),
-                         lc_or(lc_first(x.then_, bound, mods), lc_first(x.els, bound, mods))),
-    Rec(r)      => lc_first_inits(r.fields, 0, bound, mods),
-    Lst(l)      => lc_first_xs(l.items, 0, bound, mods),
-    Arrow(_)    => "",
-    Match(m)    => lc_or(lc_first(m.scrut, bound, mods), lc_first_arms(m.arms, 0, bound, mods)),
-    Templ(t)    => lc_first_parts(t.parts, 0, bound, mods),
-    RecUpd(r)   => lc_or(lc_first(r.base, bound, mods), lc_first_inits(r.upds, 0, bound, mods)),
+    Bin(b)      => lc_or(lc_scan(b.l, false, k, cx), lc_scan(b.r, false, k, cx)),
+    Un(u)       => lc_scan(u.e, false, k, cx),
+    Emit(u)     => lc_scan(u.e, false, k, cx),
+    Call(c)     => lc_call(c.target, c.args, k, cx),
+    Field(f)    => lc_scan(f.target, false, k, cx),
+    OptField(f) => lc_scan(f.target, false, k, cx),
+    OptCall(c)  => lc_call(c.target, c.args, k, cx),
+    Index(x)    => lc_or(lc_scan(x.target, false, k, cx), lc_scan(x.idx, false, k, cx)),
+    If(x)       => lc_or(lc_scan(x.cond, false, k, cx),
+                         lc_or(lc_scan(x.then_, false, k, cx), lc_scan(x.els, false, k, cx))),
+    Rec(r)      => lc_inits(r.fields, 0, k, cx),
+    Lst(l)      => lc_xs(l.items, 0, k, cx),
+    Arrow(ar)   => lc_scan(ar.body, false, { sy: k.sy || !coerced, tr: k.tr, aps: k.aps }, cx),
+    Match(m)    => lc_or(lc_scan(m.scrut, false, k, cx), lc_arms(m.arms, 0, k, cx)),
+    Templ(t)    => lc_parts(t.parts, 0, k, cx),
+    RecUpd(r)   => lc_or(lc_scan(r.base, false, k, cx), lc_inits(r.upds, 0, k, cx)),
   }
 }
 
-// Every arrow at any depth; `coerced` as in `leaky_scan` (an argument in an
-// `Async[T]` slot of the named callee carries the async flag).
-fn lc_scan_xs(xs: List[Expr], i: Int, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  if (i >= xs.length()) { return "" }
-  return lc_or(lc_scan(xs[i], false, bound, mods, cx), lc_scan_xs(xs, i + 1, bound, mods, cx))
-}
-
-fn lc_scan_args(xs: List[Expr], i: Int, slots: List[Int], bound: List[Str],
-                mods: List[Str], cx: Ctx) -> Str {
-  if (i >= xs.length()) { return "" }
-  return lc_or(lc_scan(xs[i], contains_int(slots, i), bound, mods, cx),
-               lc_scan_args(xs, i + 1, slots, bound, mods, cx))
-}
-
-fn lc_scan_inits(xs: List[InitN], i: Int, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  if (i >= xs.length()) { return "" }
-  return lc_or(lc_scan(xs[i].value, false, bound, mods, cx), lc_scan_inits(xs, i + 1, bound, mods, cx))
-}
-
-fn lc_scan_lets(xs: List[ArmLetN], i: Int, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  if (i >= xs.length()) { return "" }
-  return lc_or(lc_scan(xs[i].value, false, bound, mods, cx), lc_scan_lets(xs, i + 1, bound, mods, cx))
-}
-
-fn lc_scan_arms(xs: List[ArmN], i: Int, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  if (i >= xs.length()) { return "" }
-  let a = xs[i]
-  let r = a.isBlk ? lc_or(lc_scan_lets(a.blk, 0, bound, mods, cx), lc_scan(a.blkTail, false, bound, mods, cx))
-                  : lc_scan(a.body, false, bound, mods, cx)
-  return lc_or(r, lc_scan_arms(xs, i + 1, bound, mods, cx))
-}
-
-fn lc_scan_parts(xs: List[PartN], i: Int, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  if (i >= xs.length()) { return "" }
-  return lc_or(lc_scan(xs[i].e, false, bound, mods, cx), lc_scan_parts(xs, i + 1, bound, mods, cx))
-}
-
-fn lc_scan_call(tg: Expr, args: List[Expr], bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  return match tg {
-    Var(n) => lc_scan_args(args, 0,
-                match cx.fnAsyncSlots.lookup(n) { Some(v) => v, None => [] }, bound, mods, cx),
-    _      => lc_or(lc_scan(tg, false, bound, mods, cx), lc_scan_xs(args, 0, bound, mods, cx)),
-  }
-}
-
-fn lc_scan_arrow(ar: ArrowN, coerced: Bool, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  let inner = union_into(bound, param_names(ar.params))
-  if (!coerced) {
-    let hit = lc_first(ar.body, inner, mods)
-    if (hit != "") { return hit }
-  }
-  return lc_scan(ar.body, false, inner, mods, cx)
-}
-
-fn lc_scan(e: Expr, coerced: Bool, bound: List[Str], mods: List[Str], cx: Ctx) -> Str {
-  return match e {
-    IntLit(_)   => "",
-    FloatLit(_) => "",
-    StrLit(_)   => "",
-    BoolLit(_)  => "",
-    NullLit     => "",
-    Var(_)      => "",
-    Hole(_)     => "",
-    Asset(_)    => "",
-    Bad(_)      => "",
-    Bin(b)      => lc_or(lc_scan(b.l, false, bound, mods, cx), lc_scan(b.r, false, bound, mods, cx)),
-    Un(u)       => lc_scan(u.e, false, bound, mods, cx),
-    Emit(u)     => lc_scan(u.e, false, bound, mods, cx),
-    Call(c)     => lc_scan_call(c.target, c.args, bound, mods, cx),
-    Field(f)    => lc_scan(f.target, false, bound, mods, cx),
-    OptField(f) => lc_scan(f.target, false, bound, mods, cx),
-    OptCall(c)  => lc_scan_call(c.target, c.args, bound, mods, cx),
-    Index(x)    => lc_or(lc_scan(x.target, false, bound, mods, cx), lc_scan(x.idx, false, bound, mods, cx)),
-    If(x)       => lc_or(lc_scan(x.cond, false, bound, mods, cx),
-                         lc_or(lc_scan(x.then_, false, bound, mods, cx), lc_scan(x.els, false, bound, mods, cx))),
-    Rec(r)      => lc_scan_inits(r.fields, 0, bound, mods, cx),
-    Lst(l)      => lc_scan_xs(l.items, 0, bound, mods, cx),
-    Arrow(ar)   => lc_scan_arrow(ar, coerced, bound, mods, cx),
-    Match(m)    => lc_or(lc_scan(m.scrut, false, bound, mods, cx), lc_scan_arms(m.arms, 0, bound, mods, cx)),
-    Templ(t)    => lc_scan_parts(t.parts, 0, bound, mods, cx),
-    RecUpd(r)   => lc_or(lc_scan(r.base, false, bound, mods, cx), lc_scan_inits(r.upds, 0, bound, mods, cx)),
-  }
-}
-
-fn lc_body(ss: List[Stmt], i: Int, mods: List[Str], cx: Ctx) -> Str {
+fn lc_body(ss: List[Stmt], i: Int, k: LcK, cx: Ctx) -> Str {
   if (i >= ss.length()) { return "" }
-  return lc_or(lc_scan(ss[i].e, false, [], mods, cx), lc_body(ss, i + 1, mods, cx))
+  return lc_or(lc_scan(ss[i].e, false, k, cx), lc_body(ss, i + 1, k, cx))
+}
+
+// Every name a fn body binds (statement binds, arrow parameters, match
+// bindings, block-arm lets), the reference's `_bound_names`.
+fn lb_xs(xs: List[Expr], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return lb_xs(xs, i + 1, lb_expr(xs[i], acc))
+}
+
+fn lb_inits(xs: List[InitN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return lb_inits(xs, i + 1, lb_expr(xs[i].value, acc))
+}
+
+fn lb_lets(xs: List[ArmLetN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return lb_lets(xs, i + 1, lb_expr(xs[i].value, acc.push(xs[i].name)))
+}
+
+fn lb_arms(xs: List[ArmN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  let a = xs[i]
+  let withb = a.bind != "" ? acc.push(a.bind) : acc
+  let r = a.isBlk ? lb_expr(a.blkTail, lb_lets(a.blk, 0, withb)) : lb_expr(a.body, withb)
+  return lb_arms(xs, i + 1, r)
+}
+
+fn lb_parts(xs: List[PartN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return lb_parts(xs, i + 1, lb_expr(xs[i].e, acc))
+}
+
+fn lb_expr(e: Expr, acc: List[Str]) -> List[Str] {
+  return match e {
+    Bin(b)      => lb_expr(b.r, lb_expr(b.l, acc)),
+    Un(u)       => lb_expr(u.e, acc),
+    Emit(u)     => lb_expr(u.e, acc),
+    Call(c)     => lb_xs(c.args, 0, lb_expr(c.target, acc)),
+    Field(f)    => lb_expr(f.target, acc),
+    OptField(f) => lb_expr(f.target, acc),
+    OptCall(c)  => lb_xs(c.args, 0, lb_expr(c.target, acc)),
+    Index(x)    => lb_expr(x.idx, lb_expr(x.target, acc)),
+    If(x)       => lb_expr(x.els, lb_expr(x.then_, lb_expr(x.cond, acc))),
+    Rec(r)      => lb_inits(r.fields, 0, acc),
+    Lst(l)      => lb_xs(l.items, 0, acc),
+    Arrow(ar)   => lb_expr(ar.body, union_into(acc, param_names(ar.params))),
+    Match(m)    => lb_arms(m.arms, 0, lb_expr(m.scrut, acc)),
+    Templ(t)    => lb_parts(t.parts, 0, acc),
+    RecUpd(r)   => lb_inits(r.upds, 0, lb_expr(r.base, acc)),
+    _           => acc,
+  }
+}
+
+fn lb_body(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let withb = ss[i].bind != "" ? acc.push(ss[i].bind) : acc
+  return lb_body(ss, i + 1, lb_expr(ss[i].e, withb))
 }
 
 fn fnd_names(fs: List[FnD]) -> List[Str] {
@@ -9311,7 +9295,8 @@ fn fn_a1_verdict(f: FnD, base: Ctx, mods: List[Str]) -> Str {
   let leak = leaky_body(f.body, 0, ctx_async_params(base, f.asyncParams), false)
   if (leak != "") { return tagged("A1", leak) }
   if (f.asyncParams.length() > 0) {
-    let lc = lc_body(f.body, 0, mods, base)
+    let tr = without_strs(union_into(base.fnNames, mods), lb_body(f.body, 0, []))
+    let lc = lc_body(f.body, 0, { sy: false, tr: tr, aps: f.asyncParams }, base)
     if (lc != "") { return tagged("A1", lc_msg(lc, f.name)) }
   }
   return ""

@@ -817,33 +817,22 @@ _G2403 = "fn g(b: Box[Int]) -> Int { return b.v }\n"
 ACCEPTED_PROGRAMS = [
     # Issue #2834: a local that shadows an emission extern's name is the local,
     # not the extern, in both compilers.
-    ("issue 2834: a local shadowing an emission extern name stays admitted", """extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
-service Ops { emission fn invoke() -> Int }
-component C provides ops: Ops {
-  provide ops { fn invoke() { let call = 1 let g = call return 0 } }
-}
-"""),
-    ("issue 2834: a let inside a block shadows an emission value there", """
+    # Each method shadows an emission name its own way; the program is admitted
+    # only if every one of them is, so one row witnesses all three.
+    ("issue 2834: a local, a block let or a for element shadowing an emission name stays admitted", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
 extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
 fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
 service Ops { emission fn a(send: Int) -> Int
-  emission fn b() -> Int }
+  emission fn b() -> Int
+  emission fn c() -> Int
+  emission fn d() -> Int }
 component C provides ops: Ops {
   provide ops {
     fn a(send) { return send }
     fn b() { if (true) { let send = 1 let g = send } return 0 }
-  }
-}
-"""),
-    ("issue 2834: a for element shadows an emission value in its body", """
-extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
-fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
-service Ops { emission fn a(send: Int) -> Int
-  emission fn b() -> Int }
-component C provides ops: Ops {
-  provide ops {
-    fn a(send) { return send }
-    fn b() { for (send of [1]) { let g = send } return 0 }
+    fn c() { for (send of [1]) { let g = send } return 0 }
+    fn d() { let call = 1 let g = call return 0 }
   }
 }
 """),
@@ -4116,12 +4105,33 @@ component C provides ops: Ops { provide ops { async fn invoke(x) {
   return f(x)
 } } }
 """, "A1"),
-    ("issue 2842: a sync arrow cannot call a match binding of an async-typed parameter", """
+    ("issue 2842: a fn with an async parameter cannot call a let-bound arrow factory", """
 extern emission fn send(x: Str) -> Int = @py { return 1 }
 extern emission async fn aop(x: Str) -> Str = @py { return x }
-fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str {
-  return match Some(c) { Some(g) => (y) => g(y), None => (y) => y }
-}
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { let k = (h) => (y) => h(y)
+ return k(c) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a fn with an async parameter cannot call an immediately applied arrow", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { return ((h) => (y) => h(y))(c) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a fn with an async parameter cannot call a nested immediately applied arrow", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { return ((h) => (z) => (y) => h(y))(c)(1) }
 fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
 service Ops { emission async fn invoke(x: Str) -> Str }
 component C provides ops: Ops { provide ops { async fn invoke(x) {
