@@ -183,6 +183,7 @@ class RegistryEntry:
     emissions: int                    # how many boundary crossings the entry declares
     source_hash: str                  # sha256 of `source` as it is ON DISK
     manifest_hash: str
+    source_path: str                  # the real `component.rvl` this was read from
     evidence_bundle: "EvidenceBundle" = None  # the item-293 evidence bundle
     # What `index.json` CLAIMED for this entry, and every place that claim
     # disagreed with the entry's own `component.rvl` when it was recompiled at
@@ -1673,7 +1674,12 @@ class Registry:
         entries: list[RegistryEntry] = []
         for name, row in sorted(rows.items()):
             entry_dir = comps / name
-            source_path = entry_dir / "component.rvl"
+            # the real file the entry is read from, stored ABSOLUTE: the
+            # export rule asks the disk by this name at every read-back
+            # (issue #2563), which may happen after the process changed
+            # directory, and a relative name would then answer the wrong
+            # file (or none) and the entry would compile unprofiled.
+            source_path = (entry_dir / "component.rvl").resolve()
             source = _read(source_path)
             manifest_path = entry_dir / "manifest.json"
             recorded_manifest_text = (_read(manifest_path)
@@ -1708,6 +1714,7 @@ class Registry:
                 # the truth, always recomputed from the bytes on disk.
                 source_hash=_sha256(source),
                 manifest_hash=facts.get("manifestHash") or "",
+                source_path=str(source_path),
                 evidence_bundle=load_evidence_bundle(entry_dir),
                 recorded_source_hash=row.get("sourceHash") or "",
                 index_problems=tuple(problems),
@@ -1982,11 +1989,15 @@ def _compiled_entry_ir(entry: RegistryEntry, ir_cache: dict) -> dict:
     if ir is None:
         from .compiler import compile_source  # noqa: PLC0415
         try:
-            # compile under the stable published filename so the audit-
-            # normalized `file` basename (and thus the attested composition
-            # hash) matches what `build_evidence` signed from component.rvl.
+            # compile under the entry's REAL `component.rvl` (issue #2563):
+            # the filename is the one the export rule asks about, so an
+            # entry whose source sits in an export directory is profiled
+            # instead of compiled with the operator's trust. The basename is
+            # still `component.rvl`, so the audit-normalized `file` (and thus
+            # the attested composition hash) matches what `build_evidence`
+            # signed from component.rvl.
             ir = _normalize_ir_for_attest(
-                compile_source(entry.source, "component.rvl"))
+                compile_source(entry.source, entry.source_path))
         except RevlError:
             ir = {}
         ir_cache[entry.name] = ir

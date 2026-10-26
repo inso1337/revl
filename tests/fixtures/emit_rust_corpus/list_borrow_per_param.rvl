@@ -1,0 +1,13 @@
+// issue #2906: the List borrow fixpoint drops only the parameter that
+// escapes. `acc` is returned, so it stays an owned `Vec`; `ts` is only read
+// (length, index, a borrowed slot of the recursive call), so it is lent as a
+// `&[..]` slice even though its sibling escapes.
+fn rest_until_blank(ts: List[Str], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ts.length()) { return acc }
+  if (ts[i] == "") { return acc }
+  return rest_until_blank(ts, i + 1, acc)
+}
+
+pub fn count_until_blank(ts: List[Str], seed: List[Str]) -> Int {
+  return rest_until_blank(ts, 0, seed).length()
+}

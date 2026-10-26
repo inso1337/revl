@@ -1081,6 +1081,7 @@ def test_run_pool_private_refuses_a_bundle_name_outside_the_working_dir(
     ["--backend", "go"], ["--config", "c.toml"], ["--env", "e.toml"],
     ["--policy", "p.toml"], ["--watch"], ["--record"],
     ["--estop-latch", "latch"], ["--wal", "w.jsonl"], ["--trace", "t.jsonl"],
+    ["--attestation", "a.json"],
     ["--withdraw", "Comp"], ["--plan"], ["--placement", "p.toml"], ["--once"],
     ["--require-settled-wal"], ["--allow-unsynced-wal"], ["--trust-exported"],
 ])

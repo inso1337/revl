@@ -88,25 +88,25 @@ _DYNAMIC_STEPS = {
         "and tests/ is covered by the plain `pytest tests/ -q` steps anyway."
     ),
     # Issue #2672's review adds the PR path for the cordis-guarded swap and
-    # authoring suites. The nine files ARE explicit on the invocation, but
-    # it ends `2>&1 | tee "$log"` so the receipt (#2642) can read the summary
-    # back, and this scan is not a shell parser: `2>&1`, `|`, `tee` and
-    # `$log` land among the target tokens, so the invocation reads as
-    # unresolved. Listing it here is the deliberate carve-out the scan asks
-    # for, not a claim that the targets are unnameable. tests/ is covered by
-    # the plain `pytest tests/ -q` steps in `frontend` and `frontend-cordis`.
+    # authoring suites, and the dogfood adoption item 2 adds the changed
+    # MCP/swap suite that selected it. The target is `$selection`, built in the
+    # step from the eleven named suites (SUITES) plus the changed MCP/swap test
+    # suites the `changes` job published (SWAP_TESTS), then deduped; the
+    # invocation also ends `2>&1 | tee "$log"` so the receipt (#2642) can read
+    # the summary back. This scan is not a shell parser, so `$selection`,
+    # `$SWAP_TESTS`, `2>&1`, `|`, `tee` and `$log` land among the tokens and
+    # the invocation reads as unresolved. Listing it here is the deliberate
+    # carve-out the scan asks for, not a claim that the targets are unnameable:
+    # tests/test_ci_pr_queue_split_1678.py pins the selection rule (the two
+    # regexes) and the tree-wide invariant that every tests/test_mcp_*.py and
+    # tests/test_swap_*.py file selects the job. tests/ is covered by the plain
+    # `pytest tests/ -q` steps in `frontend` and `frontend-cordis`.
     ("ci.yml", "swap-template-cordis"): (
-        "runs `pytest tests/test_mcp_swap_template_2423.py "
-        "tests/test_self_extending_334.py "
-        "tests/test_mcp_authoring_loop_1704.py "
-        "tests/test_swap_author_flag_2518.py "
-        "tests/test_handoff_realm_2510.py "
-        "tests/test_swap_transactional_1446.py "
-        "tests/test_load_export_area_host_code_2641.py "
-        "tests/test_mcp_authored_host_bodies_2676.py "
-        "tests/test_load_ticket_bodies_2675.py -q 2>&1 | tee \"$log\"` so the "
-        "#2642 receipt can read the summary back. The redirection tokens make "
-        "the invocation unresolved to this scan (see the comment above)."
+        "runs `pytest $selection -q 2>&1 | tee \"$log\"` so the #2642 receipt "
+        "can read the summary back; `$selection` is the eleven named suites "
+        "plus the changed MCP/swap test suites the `changes` job selected "
+        "(the `swap_tests` output). The expansion, redirection and pipe tokens "
+        "make the invocation unresolved to this scan (see the comment above)."
     ),
     # Issue #2642's option B: the cordis half of the affected selection. Its
     # real run is inside `tools/cordis_half.py`, which this scan cannot see, so

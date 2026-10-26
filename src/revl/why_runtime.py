@@ -40,12 +40,18 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+# v3 adds the model crossing's contract fields (`schemaDigest`,
+# `grammarDigest`, `residence`; issue #2694), the attested-run header on the
+# first event (`run`; issue #2730) and the `residue` event kind (issue #2730,
+# written by teardown). Additive: a v1 or v2 event still parses and
+# every reader treats the new keys as optional.
+SCHEMA_VERSION = 3
 
 # event kinds (the `event` field)
 LOAD = "load"          # a component came up (… -> ACTIVE)
 WITHDRAW = "withdraw"  # a component went down (ACTIVE -> DISPOSED/PENDING/FAILED)
 EMIT = "emit"          # (v2) an emission crossed an irreversible boundary at runtime
+RESIDUE = "residue"    # (v3, issue #2730) teardown ended with something not undone
 
 # cause kinds (the `cause.kind` field)
 BOOT = "boot"                          # root: the composition booted
@@ -145,8 +151,63 @@ def make_emit_event(seq: int, gen: int, component: str, capability: str,
     return record
 
 
+def make_residue_event(seq: int, gen: int, checks: list[str], cause: dict,
+                       ts: float | None = None) -> dict:
+    """One ``residue`` trace record (v3, issue #2730 slice 2). Written by
+    teardown when its residue proof reports something not undone: one event per
+    teardown that ended with residue, none for a clean one.
+
+    Like an ``emit`` it carries no `transition` (no fiber settled to a new
+    state), and unlike every other kind it names no `component`: residue is a
+    fact about the whole run, not about one component. `checks` lists the NAMES
+    of the proof checks that failed (``"registry"``, ``"inverse residue"`` ...),
+    in the order the proof ran them. The check's detail text is deliberately not
+    recorded: it can render store contents, and the trace is a durable artifact.
+    A reader that does not model residue ignores the event, as it ignores an
+    ``emit``: it is neither a ``load`` nor a ``withdraw``."""
+    record = {
+        "v": SCHEMA_VERSION,
+        "seq": seq,
+        "gen": gen,
+        "event": RESIDUE,
+        "checks": list(checks),
+        "cause": cause,
+    }
+    if ts is not None:
+        record["ts"] = ts
+    return record
+
+
 def cause_boot() -> dict:
     return {"kind": BOOT}
+
+
+def run_header(composition_hash: str | None = None,
+               attestation_key_id: str | None = None,
+               ruleset_digest: str | None = None) -> dict:
+    """The attested-run header recorded on the FIRST trace event (v3, issue
+    #2730 slice 1).
+
+    The three values identify the composition and the attestation that admitted
+    it: the canonical composition hash, the attestation key's non-secret
+    fingerprint, and the frontend ruleset digest folded into the signed body.
+    Every one is omitted when absent, so a run without an attestation writes no
+    header at all rather than a header full of placeholders.
+
+    They are LABELS, not proof. The run records what the supplied attestation
+    claims (after checking that it binds THIS composition); a consumer that
+    wants proof verifies the attestation itself with `revl attest --verify`.
+    Repeating the header on every span is what lets a dashboard group a whole
+    run by composition without reading the first event.
+    """
+    header: dict = {}
+    if composition_hash:
+        header["compositionHash"] = composition_hash
+    if attestation_key_id:
+        header["attestationKeyId"] = attestation_key_id
+    if ruleset_digest:
+        header["rulesetDigest"] = ruleset_digest
+    return header
 
 
 def cause_trigger(detail: str, code: str | None = None) -> dict:

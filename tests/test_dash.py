@@ -314,3 +314,17 @@ def test_cli_dash_json(capsys):
     model = json.loads(capsys.readouterr().out)
     assert model["readOnly"] is True
     assert model["graph"]["seams"]
+
+
+def test_residue_event_renders_its_checks_not_none(mesh):
+    """Issue #2730: a residue event has no component or transition, so the
+    causal-trace pane names its failed checks instead of printing None."""
+    events = _trace_events() + [why_runtime.make_residue_event(
+        4, 1, ["registry", "inverse residue"],
+        why_runtime.cause_trigger("teardown left residue"))]
+    model = dash.build_model(mesh, trace=events)
+    text = dash.render_model(model)
+    line = next(ln for ln in text.splitlines() if "seq 4" in ln)
+    assert "residue: registry, inverse residue" in line
+    assert "None" not in line
+    assert "teardown left residue" in line

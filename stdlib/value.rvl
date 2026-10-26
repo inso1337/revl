@@ -72,6 +72,17 @@
 // "bool" | "null". Total — every host value answers exactly one tag.
 pub extern pure fn value_kind(v: Value) -> Str =
   @py {
+    # Exact-type lookup first (one dict probe for the common kinds); the
+    # isinstance chain below stays as the fallback for subclasses (a dict or
+    # str subclass, an OrderedDict) and answers every value the table misses.
+    # `bool` is its own key, so the int/bool order problem never arises here.
+    _t = globals().get("_revl_value_kind_by_type")
+    if _t is None:
+        _t = globals().setdefault("_revl_value_kind_by_type", {
+            dict: "record", list: "list", tuple: "list", bool: "bool",
+            int: "int", float: "float", str: "str", type(None): "null"})
+    _k = _t.get(type(v))
+    if _k is not None: return _k
     if isinstance(v, dict): return "record"
     if isinstance(v, (list, tuple)): return "list"
     if isinstance(v, bool): return "bool"

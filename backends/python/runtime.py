@@ -1189,13 +1189,50 @@ def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
     _revl_write_model_decision(obs, validated)
 
 
+class RevlUsageRefused(RuntimeError):
+    """A host reported a usage field that is not a number.
+
+    `tokensIn`, `tokensOut` and `cost.amount` are numbers the trace hop and the
+    WAL model-decision record carry as numbers, and a reader will compare and
+    sum them. A host that answered with text could put a registered
+    `Secret[T]` value, or any other string, into a field that reads as a count;
+    the refusal names the field and the type it saw and never echoes the value,
+    so refusing cannot re-leak what it refused."""
+
+    def __init__(self, field: str, value: Any) -> None:
+        super().__init__(f"host-reported {field} is not a number "
+                         f"(received {type(value).__name__})")
+        self.field = field
+
+
+def _revl_usage_number(value, field: str):
+    """One host-reported usage field as a number, or None when it is absent.
+
+    Issue #2527: strict on TYPE, deliberately. A JSON string is not a number
+    even when it spells one, and coercing it would put a host-chosen digit
+    string (a numeric secret included) into a field a reader trusts as a
+    count. The refusal is the honest answer, and it names the field."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RevlUsageRefused(field, value)
+    return value
+
+
 def revl_host_usage(raw) -> tuple:
     """The HOST-REPORTED model/tokens/cost, best-effort read off a model
     completion's return value (item 121 §2.1). Byte-identical in behaviour to
-    `revl.run._host_usage`, the driver's copy the trace uses; item 250 Slice 3a
-    needs the same read at the crossing, on this side of the boundary, so the
-    WAL record and the trace hop agree on what the host said. Pinned together by
-    the Slice 3a tests.
+    `revl.run._host_usage`, the driver's copy the trace uses, for every value
+    they both accept; item 250 Slice 3a needs the same read at the crossing, on
+    this side of the boundary, so the WAL record and the trace hop agree on
+    what the host said. Pinned together by the Slice 3a tests.
+
+    Issue #2527: this copy additionally COERCES the three numeric leaves
+    (`tokensIn`, `tokensOut`, `cost.amount`) and refuses a value that is not a
+    number by field name (`RevlUsageRefused`). This is the WAL's choke point:
+    the model-decision record is durable evidence, so a host that answers with
+    text instead of a count writes no record rather than a record whose
+    numeric field is a string.
 
     Recognized ONLY when the return is a mapping carrying the conventional keys
     (top-level, or a nested ``usage`` object for the token counts); anything
@@ -1205,10 +1242,15 @@ def revl_host_usage(raw) -> tuple:
         return None, None, None, None
     usage = raw.get("usage")
     usage = usage if isinstance(usage, dict) else {}
-    tokens_in = raw.get("tokensIn", usage.get("tokensIn"))
-    tokens_out = raw.get("tokensOut", usage.get("tokensOut"))
+    tokens_in = _revl_usage_number(
+        raw.get("tokensIn", usage.get("tokensIn")), "tokensIn")
+    tokens_out = _revl_usage_number(
+        raw.get("tokensOut", usage.get("tokensOut")), "tokensOut")
     cost = raw.get("cost")
     cost = cost if isinstance(cost, dict) else None
+    if cost is not None and "amount" in cost:
+        cost = {**cost,
+                "amount": _revl_usage_number(cost.get("amount"), "cost.amount")}
     return raw.get("model"), tokens_in, tokens_out, cost
 
 
@@ -1481,9 +1523,20 @@ def revl_prompt_digest(args, arg_origins, taint_engaged: bool) -> "Optional[dict
             "provenance": "revl-side-args"}
 
 
+def _revl_hop_text(value):
+    """Issue #2527 backstop: redact a host-reported leaf when it is text.
+
+    A number passes through untouched, so the ordinary shape of
+    `tokensIn`/`tokensOut`/`cost.amount` is byte-identical; a caller that hands
+    a string into one of those numeric slots still cannot carry a registered
+    secret into either sink."""
+    return confidential.redact_text(value) if isinstance(value, str) else value
+
+
 def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
                    attempts, attempt_ceiling, verified_by,
                    produced_seq=None, prompt_digest=None,
+                   schema_digest=None, grammar_digest=None, residence=None,
                    model_id_cap: int = 256) -> dict:
     """Assemble the `llm` payload for a model completion crossing (§2.2), with
     every field's provenance fixed and not host-negotiable.
@@ -1493,12 +1546,34 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
     REVL-CONTROLLED (the one cross-checkable number, §3.2). `model` is a
     length-capped opaque string, never parsed or trusted (§4 attack 4a).
     `produced_seq`/`prompt_digest` are attached only when present (both
-    honest-degrade to absent)."""
+    honest-degrade to absent).
+
+    Issue #2694: `schema_digest`/`grammar_digest`/`residence` identify the
+    contract and placement of the crossing, and each is attached only when the
+    caller resolved it from the compiled IR (they are not host-negotiable, so
+    every one is `revl-controlled`). An absent value stays absent: a crossing
+    with no grammar or no declared model role does not get a placeholder.
+
+    Issue #2527: every host-reported STRING leaf (`model`, `cost.currency`,
+    and the numeric slots `tokensIn`/`tokensOut`/`cost.amount` if a caller
+    hands them text) is funnelled through `confidential.redact_text` before it
+    can reach the trace or the WAL's model-decision record, the same
+    exact-value scrub the console trace applies at `_record`. A host body that
+    echoed a registered `Secret[T]` value into one of them would otherwise put
+    it in the trace. The match is exact against values a declared `Secret[T]`
+    marking registered, so a run with no secret is byte-identical. The WAL's
+    read (`revl_host_usage`) refuses a non-numeric usage before it gets here;
+    this backstop is what keeps the TRACE clean for a caller that does not go
+    through that choke point. Redaction happens BEFORE the length cap, so a
+    secret straddling the cap cannot survive as a truncated prefix."""
+    model_text = str(model) if model is not None else None
+    if model_text is not None:
+        model_text = confidential.redact_text(model_text)[:model_id_cap]
     payload: dict = {
-        "model": (str(model)[:model_id_cap] if model is not None else None),
+        "model": model_text,
         "modelProvenance": "host-reported",
-        "tokensIn": tokens_in,
-        "tokensOut": tokens_out,
+        "tokensIn": _revl_hop_text(tokens_in),
+        "tokensOut": _revl_hop_text(tokens_out),
         "usageProvenance": "host-reported",
         "latencySeconds": latency_seconds,
         "latencyProvenance": "revl-measured-bracket",
@@ -1508,13 +1583,23 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
         "verifiedBy": list(verified_by) if verified_by is not None else [],
     }
     if cost is not None:
-        payload["cost"] = {"amount": cost.get("amount"),
-                           "currency": cost.get("currency"),
+        currency = _revl_hop_text(cost.get("currency"))
+        payload["cost"] = {"amount": _revl_hop_text(cost.get("amount")),
+                           "currency": currency,
                            "provenance": "host-reported"}
     if produced_seq:
         payload["producedSeq"] = list(produced_seq)
     if prompt_digest is not None:
         payload["promptDigest"] = prompt_digest
+    if schema_digest is not None:
+        payload["schemaDigest"] = {"digest": schema_digest,
+                                   "provenance": "revl-controlled"}
+    if grammar_digest is not None:
+        payload["grammarDigest"] = {"digest": grammar_digest,
+                                    "provenance": "revl-controlled"}
+    if residence is not None:
+        payload["residence"] = {"value": residence,
+                                "provenance": "revl-controlled"}
     return payload
 
 

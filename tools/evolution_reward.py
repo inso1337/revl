@@ -85,6 +85,14 @@ owns. None of them is a new gate, and none of them reads a candidate's prose:
                           read of the theorem ledger against `base`
     scope                 the changed-file set against the declared scope
     documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
+    reach                 tools/promotion_evidence.py: the audit of every
+                          conformance case at `base` and at head, put through
+                          audit_diff.evaluate (issue #2706)
+    resource              the same audits' per-activation cardinality verdicts;
+                          bounded at `base` and `unbounded` now fails
+    host-fallback         every conformance case emitted through every tier and
+                          scanned for `<<UNSUPPORTED...>>` markers new since
+                          `base`
     held-out              tools/heldout_scoring.py --diff-base, on a draw the
                           candidate could not read; a REFUSAL is a fail here,
                           because a component that was not scored was not
@@ -146,13 +154,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -181,6 +192,12 @@ COMPONENTS = (
     "formal",
     "scope",
     "documentation",
+    # issue #2706: the three entries of the negative promotion bar (item 536)
+    # that none of the components above reads. Each is its own component, so a
+    # failure names one reason and can be acted on.
+    "reach",
+    "resource",
+    "host-fallback",
     "held-out",
     # issue #1224 / item 545: the one component that rises when the system gets
     # better. Last because it is the most expensive to explain when it fails,
@@ -1284,6 +1301,352 @@ def probe_formal(candidate: Candidate) -> Verdict:
         evidence + [f"{FORMAL_AXIOMS}@{_sha256(candidate.tree / FORMAL_AXIOMS)}"])
 
 
+# ------------------------------- reach, resource, host fallback (issue #2706)
+
+EVIDENCE_TOOL = ROOT / "tools" / "promotion_evidence.py"
+
+#: The top-level directories a conformance case needs to be compiled and
+#: emitted at `base`. The extract is these and nothing else: the repository is
+#: tens of megabytes and the measurement reads none of the rest.
+EVIDENCE_ROOTS = ("src", "backends", "tools", "stdlib", "grammar", "schema")
+
+EVIDENCE_TIMEOUT = 900
+
+
+def _evidence_run(argv, *, pythonpath: Path, cwd: Path, retry: bool = False):
+    """`(ok, parsed_json_or_error)` for one run of `tools/promotion_evidence.py`
+    from THIS checkout. `pythonpath` is the `src` of the tree being judged, so
+    each side is compiled by its own compiler.
+
+    `retry` runs the tool again, three attempts in all, when a child is ended by
+    a signal: that is a box reaping a process and not the tool answering. It is
+    asked for only on the base side and on the diff step, which the candidate
+    does not influence. A run of the candidate's own compiler or emitters that
+    is killed by a signal fails at once, because a candidate that crashes now
+    and then must not pass on one clean run in three."""
+    env = candidate_env()
+    env["PYTHONPATH"] = (
+        str(pythonpath) + os.pathsep + env.get("PYTHONPATH", "")).rstrip(os.pathsep)
+    cmd = [sys.executable, str(EVIDENCE_TOOL)] + [str(a) for a in argv]
+    try:
+        for _attempt in range(3 if retry else 1):
+            proc = subprocess.run(cmd, cwd=str(cwd), env=env,
+                                  timeout=EVIDENCE_TIMEOUT,
+                                  capture_output=True, text=True)
+            if proc.returncode >= 0:
+                break
+    except subprocess.TimeoutExpired:
+        return False, f"promotion_evidence {argv[0]} timed out after {EVIDENCE_TIMEOUT}s"
+    except OSError as exc:
+        return False, f"promotion_evidence {argv[0]} could not be run: {exc}"
+    if proc.returncode != 0:
+        tail = (proc.stdout + proc.stderr).strip().splitlines()[-3:]
+        return False, (f"promotion_evidence {argv[0]} exited {proc.returncode}: "
+                       + " | ".join(tail))
+    try:
+        return True, json.loads(proc.stdout)
+    except ValueError as exc:
+        return False, f"promotion_evidence {argv[0]} printed no JSON: {exc}"
+
+
+def _extract_base(candidate: Candidate, dest: Path):
+    """`None` once the measuring directories of `base` are under `dest`, else
+    why not. Read through `git archive`, so the candidate's tree is not touched
+    and no worktree is registered in its repository."""
+    ok, listing = run_git(candidate, ["ls-tree", "--name-only", candidate.base])
+    if not ok:
+        return f"cannot list {candidate.base}: {listing}"
+    names = [n for n in listing.splitlines() if n in EVIDENCE_ROOTS]
+    if not names:
+        return f"{candidate.base} holds none of {', '.join(EVIDENCE_ROOTS)}"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(candidate.tree), "archive", "--format=tar",
+             candidate.base, "--"] + names,
+            timeout=300, capture_output=True, env=candidate_env())
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"git archive of {candidate.base} failed: {exc}"
+    if proc.returncode != 0:
+        return f"git archive of {candidate.base} failed: " + \
+            proc.stderr.decode("utf-8", "replace").strip()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as archive:
+            if hasattr(tarfile, "data_filter"):
+                archive.extractall(dest, filter="data")
+            else:
+                archive.extractall(dest)
+    except (tarfile.TarError, OSError) as exc:
+        return f"cannot unpack {candidate.base}: {exc}"
+    return None
+
+
+def _paired_evidence(candidate: Candidate, kind: str, scratch: Path):
+    """`(None, base, head, unmeasured)` or `(why_not, None, None, 0)`: the same
+    corpus measured at `base` and in the candidate's tree, each by its own
+    compiler. `unmeasured` is how many cases the candidate's own corpus holds
+    that the base's does not: they are new work and are not measured.
+
+    The corpus is the BASE's. Its case sources are written out once and both
+    sides are measured on them, so a candidate that edits a case until the
+    compiler it also changed no longer shows the crossing, the loop or the
+    construct is measured on the case it replaced.
+    """
+    none = (None, None, 0)
+    base_tree = scratch / "base"
+    base_tree.mkdir()
+    why = _extract_base(candidate, base_tree)
+    if why:
+        return (why,) + none
+    ok, cases = _evidence_run(["measure", "--tree", base_tree, "--kind", "cases"],
+                              pythonpath=base_tree / "src", cwd=base_tree,
+                              retry=True)
+    if not ok:
+        return (f"reading the corpus at {candidate.base}: {cases}",) + none
+    if not isinstance(cases, dict) or not cases.get("cases"):
+        return (f"the corpus at {candidate.base} holds no case",) + none
+    cases_file = scratch / "cases.json"
+    cases_file.write_text(json.dumps(cases))
+    ok, own = _evidence_run(
+        ["measure", "--tree", candidate.tree, "--kind", "cases"],
+        pythonpath=candidate.tree / "src", cwd=candidate.tree)
+    if not ok:
+        return (f"reading the candidate's corpus: {own}",) + none
+    known = {(c[0], c[1]) for c in cases["cases"]}
+    unmeasured = sum(1 for c in (own.get("cases") or []) if (c[0], c[1]) not in known)
+    sides = []
+    for label, tree, again in (("base", base_tree, True),
+                               ("the candidate tree", candidate.tree, False)):
+        ok, data = _evidence_run(
+            ["measure", "--tree", tree, "--kind", kind, "--cases", cases_file],
+            pythonpath=tree / "src", cwd=tree, retry=again)
+        if not ok:
+            return (f"measuring {label}: {data}",) + none
+        if not isinstance(data, dict) or not data.get("cases"):
+            return (f"measuring {label}: the corpus came back with no case",) + none
+        sides.append(data["cases"])
+    return None, sides[0], sides[1], unmeasured
+
+
+def _lost_evidence(base: dict, head: dict):
+    """Cases the base compiled that the candidate's compiler no longer accepts.
+    A case the head cannot compile cannot be compared, and a compiler that
+    refuses what it accepted is not a pass."""
+    lost = []
+    for label, before in sorted(base.items()):
+        if "error" in before:
+            continue
+        after = head.get(label)
+        if after is None:
+            lost.append(f"{label}: the case was not measured")
+        elif "error" in after:
+            lost.append(f"{label}: no longer compiles ({after['error']})")
+    return lost
+
+
+def _evidence_probe(candidate: Candidate, name: str, kind: str, judge) -> Verdict:
+    refusal = base_refusal(candidate)
+    if refusal:
+        return failed(name, refusal)
+    with tempfile.TemporaryDirectory(prefix="evolution-reward-evidence-") as raw:
+        scratch = Path(raw)
+        why, base, head, unmeasured = _paired_evidence(candidate, kind, scratch)
+        if why:
+            return failed(name, why, ["tools/promotion_evidence.py"])
+        lost = _lost_evidence(base, head)
+        if lost:
+            return failed(
+                name,
+                f"{len(lost)} case(s) measured at {candidate.base} cannot be "
+                "compared: " + "; ".join(lost[:6]),
+                ["tools/conformance.py CASES"])
+        return judge(candidate, base, head, scratch, unmeasured)
+
+
+def _diff_files(command: str, base: dict, head: dict, scratch: Path):
+    """`(ok, result)` of `promotion_evidence.py <command>` over the two sides,
+    run against THIS checkout's `src` so the decision is the scorer's."""
+    (scratch / "base.json").write_text(json.dumps({"cases": base}))
+    (scratch / "head.json").write_text(json.dumps({"cases": head}))
+    return _evidence_run([command, scratch / "base.json", scratch / "head.json"],
+                         pythonpath=ROOT / "src", cwd=scratch, retry=True)
+
+
+def _unmeasured_note(unmeasured: int) -> str:
+    return (f"; {unmeasured} case(s) new at head were not measured"
+            if unmeasured else "")
+
+
+def probe_reach(candidate: Candidate) -> Verdict:
+    """No widened capability reach at the G8 boundary (item 536, issue #2706).
+
+    The conformance corpus (the base's sources) is compiled and audited at
+    `base` and in the candidate's tree, and each case is put through `revl audit
+    --diff`'s own decision (`audit_diff.evaluate`) and through
+    `diff_capability_scopes`, which that decision does not read. A crossing the
+    candidate added, a reach bound it loosened or a capability scope it widened
+    on a crossing that stayed fails the component; a crossing it removed or a
+    bound it tightened is giving up authority and passes. No acknowledgement
+    is honoured here: an intended widening is a decision for a person, and a
+    trajectory that needs one is not retained.
+
+    At least one case must be comparable: all of them failing to compile on
+    both sides is no evidence.
+    """
+    def judge(candidate, base, head, scratch, unmeasured):
+        name = "reach"
+        ok, diff = _diff_files("reach-diff", base, head, scratch)
+        if not ok:
+            return failed(name, diff, ["tools/promotion_evidence.py"])
+        if not diff:
+            return failed(name, "no conformance case compiled on both sides, so "
+                                "no reach was compared", ["tools/conformance.py CASES"])
+        widened = [f"{label}: {', '.join(result['unacknowledged'])}"
+                   for label, result in sorted(diff.items())
+                   if result.get("unacknowledged")]
+        if widened:
+            return failed(
+                name,
+                f"{len(widened)} conformance case(s) reach further than at "
+                f"{candidate.base}: " + "; ".join(widened[:6]),
+                ["tools/promotion_evidence.py measure --kind audit"])
+        crossings = sum(len(r.get("unchanged", [])) for r in diff.values())
+        return verified(
+            name,
+            f"{len(diff)} conformance case(s) audited at {candidate.base} and "
+            f"at head, {crossings} crossing(s) unchanged, none added, no reach "
+            "bound loosened and no capability scope widened"
+            + _unmeasured_note(unmeasured),
+            ["tools/promotion_evidence.py measure --kind audit"])
+
+    return _evidence_probe(candidate, "reach", "audit", judge)
+
+
+def probe_resource(candidate: Candidate) -> Verdict:
+    """No unbounded resource path (item 536, issue #2706).
+
+    Reads the per-activation cardinality verdict of every `(component,
+    capability)` the conformance corpus audits, at `base` and at head, through
+    `audit_diff.diff_cardinality`. A ceiling that widened fails the component:
+    bounded to `unbounded`, and also one number to a larger one, because both
+    admit more crossings per activation. A verdict present at `base` and
+    missing at head fails as well, since a count that cannot be read has not
+    been shown to hold. An `unbounded` cell that stays `unbounded` is the
+    corpus's existing allowance. A comparison that compared nothing is a fail.
+    """
+    def judge(candidate, base, head, scratch, unmeasured):
+        name = "resource"
+        ok, diff = _diff_files("resource-diff", base, head, scratch)
+        if not ok:
+            return failed(name, diff, ["tools/promotion_evidence.py"])
+        compared = sum(r["compared"] for r in diff.values())
+        widened = [f"{label}: {tok}" for label, r in sorted(diff.items())
+                   for tok in r["widened"]]
+        missing = [f"{label}: {tok}" for label, r in sorted(diff.items())
+                   for tok in r["missing"]]
+        if widened or missing:
+            parts = []
+            if widened:
+                parts.append(f"{len(widened)} emission ceiling(s) widened since "
+                             f"{candidate.base}: " + "; ".join(widened[:6]))
+            if missing:
+                parts.append(f"{len(missing)} verdict(s) present at "
+                             f"{candidate.base} are missing: " + "; ".join(missing[:6]))
+            return failed(name, ", ".join(parts),
+                          ["tools/promotion_evidence.py measure --kind audit"])
+        if not compared:
+            return failed(
+                name, "no per-activation emission verdict was present on both "
+                      "sides, so nothing was compared",
+                ["tools/promotion_evidence.py measure --kind audit"])
+        return verified(
+            name,
+            f"{compared} per-activation emission verdict(s) compared with "
+            f"{candidate.base}, none widened and none missing"
+            + _unmeasured_note(unmeasured),
+            ["tools/promotion_evidence.py measure --kind audit"])
+
+    return _evidence_probe(candidate, "resource", "audit", judge)
+
+
+def probe_host_fallback(candidate: Candidate) -> Verdict:
+    """No hidden host fallback (item 536, issue #2706).
+
+    Emits the conformance corpus through every tier at `base` and at head and
+    reads two things. The first is the marker a tier prints in place of a
+    construct it cannot express (`<<UNSUPPORTED...>>`): an occurrence at head
+    beyond the count the same case and tier carried at `base` fails the
+    component, so a second copy of a marker that was already there is caught.
+    The second is a refusal. The reference emitters never print the marker;
+    they raise, so a tier that emitted a case at `base` and raises on it now has
+    lost a construct, and that is the only way a fallback shows in them. A tier
+    that already refused at `base` is `conformance`'s subject and is not
+    counted. The self-hosted emitters, which are where the marker is spelled,
+    are not run here (`tools/selfhost_differential_survey.py` measures them).
+    """
+    def judge(candidate, base, head, scratch, unmeasured):
+        name = "host-fallback"
+        findings = []
+        scanned = 0
+        walked = 0
+        skipped: list[str] = []
+        for label, tiers in sorted(head.items()):
+            if "error" in tiers:
+                continue
+            before = base.get(label)
+            if not isinstance(before, dict) or "error" in before:
+                # A case the base did not compile is not a baseline: a tier
+                # refusing it now is not "lost a construct", there is nothing
+                # to have lost. The head artifacts are still work the suite
+                # did, so they are counted as walked and skipped as
+                # unmeasured, not as absent.
+                walked += len(tiers)
+                skipped.append(f"{label} (no measurement at {candidate.base})")
+                continue
+            # The head's corpus module names the tiers it walks, so a tier the
+            # candidate dropped from it is absent from `tiers`: walk the base's.
+            gone = sorted(set(before) - set(tiers))
+            findings += [f"{label} on {tier}: measured at {candidate.base}, "
+                         "not walked at head" for tier in gone]
+            for tier, now in sorted(tiers.items()):
+                # A head artifact that was produced at all is work the suite
+                # did; a missing baseline makes it unmeasured, not absent.
+                walked += 1
+                if tier not in before:
+                    # A tier the corpus added at head has no baseline either;
+                    # its first measurement is not a lost construct.
+                    skipped.append(f"{label} on {tier}")
+                    continue
+                scanned += 1
+                then = before[tier]
+                extra = Counter(now["markers"]) - Counter(then["markers"])
+                findings += [f"{label} on {tier}: {m}" + (f" x{n}" if n > 1 else "")
+                             for m, n in sorted(extra.items())]
+                if now["refused"] and not then["refused"]:
+                    findings.append(f"{label} on {tier}: emitted at "
+                                    f"{candidate.base}, refused now")
+        if not walked:
+            return failed(name, "no conformance case compiled, so no emitted "
+                                "artifact was scanned",
+                          ["tools/conformance.py CASES"])
+        if findings:
+            return failed(
+                name,
+                f"{len(findings)} fallback finding(s) since {candidate.base}: "
+                + "; ".join(findings[:6]),
+                ["tools/promotion_evidence.py measure --kind markers"])
+        note = _unmeasured_note(unmeasured)
+        if skipped:
+            note += (f"; {len(skipped)} case or tier had no measurement at "
+                     f"{candidate.base} and was not compared")
+        return verified(
+            name,
+            f"{scanned} emitted artifact(s) scanned, no fallback marker beyond "
+            f"{candidate.base}'s and no tier newly refusing" + note,
+            ["tools/promotion_evidence.py measure --kind markers"])
+
+    return _evidence_probe(candidate, "host-fallback", "markers", judge)
+
+
 # ------------------------------------------------ progress, from the counters
 
 def _progress_module():
@@ -1334,6 +1697,9 @@ PROBES = {
     "formal": probe_formal,
     "scope": probe_scope,
     "documentation": probe_documentation,
+    "reach": probe_reach,
+    "resource": probe_resource,
+    "host-fallback": probe_host_fallback,
     "held-out": probe_held_out,
     "progress": probe_progress,
 }

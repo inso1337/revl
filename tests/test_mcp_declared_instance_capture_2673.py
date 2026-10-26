@@ -152,7 +152,13 @@ def test_declared_successor_with_no_live_instance_still_lands_cold(
     """With the instance quiesced before the swap there is no state to carry:
     the same declared successor still lands, reports no migration, and starts
     its own instance empty. The capture added for #2673 must not invent state
-    or turn the no-instance case into a refusal."""
+    or turn the no-instance case into a refusal.
+
+    `Session` and `Gate` expose no per-instance dispose/quiesce door (their
+    public surface is load/call/swap/state/unload), so the control drives the
+    live handle the runtime registry returns and runs its own dispose pending:
+    the smallest operation that removes the instance, read from the same
+    registry the gate reads."""
     gate = gate_factory(record=True)
     gate.load(_instances_source(1))
     gate.call("admin", "seed", ["bob", "7"])

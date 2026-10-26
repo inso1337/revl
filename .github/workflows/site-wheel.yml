@@ -53,13 +53,34 @@
 name: site wheel
 
 on:
-  # Every push to main. No `paths:` filter on purpose: the contract spans
-  # pages.yml, the builder, pyproject's version and the two pages that fetch the
-  # wheel by name — a filter listing them is one more thing that can be silently
-  # wrong, and the job is a stdlib-only zip build measured in seconds against a
-  # 13-job matrix that runs on the same event.
+  # A push to main that can change the contract below. This used to carry no
+  # `paths:` filter, on the argument that a list of the contract's inputs is one
+  # more thing that can be silently wrong. Issue #2872 weighed that against the
+  # cost: every push to main ran this job on a runner pool the ci jobs were
+  # queuing behind, and most pushes change none of its inputs.
+  #
+  # The inputs, read from `tools/check_site_wheel.py` and
+  # `playground/build_wheel.py`: the vendored trees (`SOURCE_TREES`: every
+  # `src/revl/**/*.py` and the top-level `backends/python/*.py`), the version
+  # and builder (`META_INPUTS`), the two pages that fetch the wheel by name
+  # (`CONSUMERS`), `pages.yml` and the builders it may run (`BUILDERS`), the
+  # two vendor directories the check writes into and globs (`TARGETS`), the
+  # tool itself and this file. `tests/test_workflow_path_filters_2872.py`
+  # derives that set from those constants and reds when a path below stops
+  # covering one, so the list cannot quietly fall behind the tool.
   push:
     branches: [main]
+    paths:
+      - "src/revl/**"
+      - "backends/python/*.py"
+      - "pyproject.toml"
+      - "playground/**"
+      - "site/js/playground.js"
+      - "site/build.py"
+      - "site/vendor/**"
+      - "tools/check_site_wheel.py"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/site-wheel.yml"
   # Backstop and manual handle: a weekly run catches a break that landed while
   # this workflow was disabled or its run was lost, and `gh workflow run "site
   # wheel"` answers "will the next deploy publish a working playground?" before
@@ -70,6 +91,19 @@ on:
 
 permissions:
   contents: read
+
+# Issue #2872: one group per ref, as the smoke lanes have, so a newer push to
+# main supersedes an older tip's run instead of both holding runners. Unlike
+# the smoke lanes, ci and CodeQL, which never cancel a running main run, this
+# one cancels it. That is safe here: the job is a checkout plus one stdlib
+# script (about a minute), so it cannot be starved the way a long scan could
+# be; it only checks a contract of the tree (nothing consumes its output, the
+# Pages deploy builds its own wheel); and the newest tip's run checks a tree
+# that contains every commit it replaced. A push that does not match `paths:`
+# starts no run, so it cannot cancel one.
+concurrency:
+  group: site-wheel-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   site-wheel-drift:

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.mcp import server  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 
 MAIN = ('use "dep.rvl" { seven }\n'
         "service Clock { fn now() -> Int }\n"
@@ -149,6 +150,71 @@ def test_dependencies_of_pure_revl_code_still_restore(tmp_path):
     (ir,) = server.SESSION.recorded_loads
     assert ir.get("externs") in (None, [])
     assert "six" in json.dumps(ir), "the dependencies copy is the one loaded"
+
+
+def test_a_pure_dependency_at_a_provider_path_is_still_snapshot_data(tmp_path):
+    """Restore uses the dependency bytes in the snapshot, not a provider map.
+
+    A matching path is not a provider composition or a reason to refuse a
+    pure-Revl snapshot dependency.
+    """
+    dep = str(tmp_path / "dep.rvl")
+    server.set_authoring_trust(host_code=False, granted=None,
+                               providers={dep: HARMLESS_DEP},
+                               roots=(str(tmp_path),))
+
+    payload = _call("revl_restore",
+                    {"snapshot": _snapshot(tmp_path, HARMLESS_DEP, PURE_DEP)})
+
+    assert payload["ok"] is True, payload
+    (ir,) = server.SESSION.recorded_loads
+    assert "six" in json.dumps(ir), "restore must use snapshot dependency bytes"
+
+
+def test_a_host_body_at_a_provider_path_gets_an_explained_restore_refusal(
+        tmp_path, monkeypatch):
+    """The snapshot does not inherit provider trust from a matching path.
+
+    Pin the user-facing explanation at the structural precheck and at the
+    compile door that produces the loaded IR.
+    """
+    dep = str(tmp_path / "dep.rvl")
+    server.set_authoring_trust(host_code=False, granted=None,
+                               providers={dep: HOST_DEP},
+                               roots=(str(tmp_path),))
+    payload = _call("revl_restore",
+                    {"snapshot": _snapshot(tmp_path, HARMLESS_DEP, HOST_DEP)})
+
+    assert payload["ok"] is False, payload
+    assert "forbids new `extern`/host-block declarations" in _message(payload), payload
+    assert "G8" in json.dumps(payload.get("diagnostics")), payload
+    assert "does not merge the live provider map" in payload["note"], payload
+    assert "does not make those agent-supplied bytes operator-authored" \
+        in payload["note"], payload
+    assert server.SESSION.recorded_loads == []
+
+    monkeypatch.setattr(server, "_authoring_refusal", lambda _arguments: None)
+    compile_payload = _call(
+        "revl_restore",
+        {"snapshot": _snapshot(tmp_path, HARMLESS_DEP, HOST_DEP)})
+    assert compile_payload["ok"] is False, compile_payload
+    assert "forbids reaching host code" in _message(compile_payload), compile_payload
+    assert "does not merge the live provider map" in compile_payload["note"]
+    assert server.SESSION.recorded_loads == []
+
+
+def test_live_composition_still_refuses_an_agent_module_at_a_provider_path(
+        tmp_path):
+    dep = str(tmp_path / "dep.rvl")
+    server.set_authoring_trust(host_code=False, granted=None,
+                               providers={dep: HARMLESS_DEP},
+                               roots=(str(tmp_path),))
+
+    with pytest.raises(RevlError) as refused:
+        server.compile_under_authoring(MAIN, None,
+                                       modules={dep: PURE_DEP})
+
+    assert "operator-sanctioned provider" in refused.value.message
 
 
 def test_a_trusted_author_still_restores_a_host_body(tmp_path):

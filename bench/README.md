@@ -423,6 +423,36 @@ optionally the session's last `revl_state` result. The score reports:
   `null` and listed under `notInRevlState`, so a missing axis never reads as
   zero.
 
+## Host extern call cost (issue #2709)
+
+Every other bench here times something inside one tier. `extern_call_cost.py`
+times a call ACROSS the host boundary on the Python (cordis-py) tier: one
+`extern pure fn`, one capability-bearing `witnessed[fs]` extern, and the same
+host bodies called directly beside them, so the difference is the crossing and
+not the body. It needs the runtime (`sh backends/python/setup.sh`).
+
+```bash
+python3 bench/extern_call_cost.py               # warm run, print the table
+python3 bench/extern_call_cost.py --write       # refresh results/extern-call-cost.md
+```
+
+The committed table is [results/extern-call-cost.md](results/extern-call-cost.md).
+It separates the E-Stop gate from the session entry the witnessed crossing
+registers (the entry row includes its own gate, and the report subtracts it),
+and states what it cannot isolate: the capability check is a compile-time
+refusal (G4) with no per-call runtime step, and the WAL discharge record is
+not on the path unless a recorder is attached. The report also names the
+residual it cannot decompose: allocation at the emitted call site. The
+cross-tier harness (TypeScript, Rust, wasm) the issue asks for next is not
+built yet.
+
+The decision rule it exists to serve, stated now so the cross-tier numbers
+land against it instead of being read as a win by themselves: **native work is
+only justified when the gain survives call overhead.** A native kernel that is
+under 20% faster than the revl path is not worth a tier boundary; a 5x to 10x
+gain is, and anything between them needs the call overhead subtracted before
+it counts.
+
 ## Re-scoring without spending anything
 
 ```bash

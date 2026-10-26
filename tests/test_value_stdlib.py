@@ -253,6 +253,85 @@ def test_py_tier_accessors_are_total(consumer_ir):
     assert ns["t_list_of_scalar_empty"]() == 0
 
 
+# ------------------------------------------------- kind lookup by exact type (2903)
+
+def _chain_kind(v):
+    """The pre-2903 isinstance chain, verbatim: the oracle the lookup must match."""
+    if isinstance(v, dict): return "record"
+    if isinstance(v, (list, tuple)): return "list"
+    if isinstance(v, bool): return "bool"
+    if isinstance(v, int): return "int"
+    if isinstance(v, float): return "float"
+    if isinstance(v, str): return "str"
+    return "null"
+
+
+def _kind_samples():
+    import collections
+    import enum
+
+    class D(dict): pass
+    class L(list): pass
+    class S(str): pass
+    class I(int): pass
+    class F(float): pass
+    class E(enum.IntEnum):
+        A = 1
+
+    return [
+        {}, {"a": 1}, {"a": {"b": [1, {"c": None}]}}, D(a=1),
+        collections.OrderedDict(a=1),
+        [], [1, "x", None], [[1], [[2.5]], {"k": []}], L([1]), (), (1, 2),
+        True, False, 0, 1, -7, 2 ** 70, 0.0, 1.5, float("inf"), float("nan"),
+        "", "x", S("x"), I(3), F(2.5), E.A,
+        None, b"bytes", object(), len, 1 + 2j,
+    ]
+
+
+def test_py_value_kind_agrees_with_the_isinstance_chain(consumer_ir):
+    ns = _exec_python(consumer_ir)
+    for v in _kind_samples():
+        assert ns["value_kind"](v) == _chain_kind(v), repr(v)
+    # the five scalar kinds, bool kept apart from the int it subclasses
+    assert [ns["value_kind"](x) for x in (True, 1, 1.5, "s", None)] == [
+        "bool", "int", "float", "str", "null"]
+    assert ns["value_kind"]([{"a": [None]}]) == "list"
+    assert ns["value_kind"]({"a": [None]}) == "record"
+
+
+def test_py_value_kind_probes_an_exact_type_table_first(consumer_ir):
+    ns = _exec_python(consumer_ir)
+    assert "_revl_value_kind_by_type" not in ns
+    ns["value_kind"](1)
+    table = ns["_revl_value_kind_by_type"]
+    assert table[bool] == "bool" and table[int] == "int"
+    assert table[type(None)] == "null" and table[tuple] == "list"
+    # a subclass is not in the table, so it still takes the isinstance fallback
+    class D(dict): pass
+    assert D not in table and ns["value_kind"](D()) == "record"
+
+
+def test_py_value_kind_survives_a_user_type_named_nameerror(tmp_path):
+    # a user `type NameError` is emitted as `class NameError`, shadowing the
+    # builtin; the first value_kind call must not depend on catching it
+    d = tmp_path / "shadow"
+    (d / "stdlib").mkdir(parents=True)
+    (d / "stdlib" / "value.rvl").write_text(
+        STDLIB.read_text(encoding="utf-8"), encoding="utf-8")
+    (d / "main.rvl").write_text(
+        'use "stdlib/value.rvl" { value_kind }\n'
+        "type NameError = { code: Int }\n"
+        "fn t_kind_of_null() -> Str { return value_kind(value_field_null()) }\n"
+        "fn value_field_null() -> Value { return value_kind_probe() }\n"
+        "extern pure fn value_kind_probe() -> Value = @py { return None }\n",
+        encoding="utf-8")
+    ns = _exec_python(compile_files([str(d / "main.rvl")]))
+    assert "NameError" in ns and isinstance(ns["NameError"], type)
+    assert not issubclass(ns["NameError"], BaseException)
+    assert ns["t_kind_of_null"]() == "null"
+    assert ns["value_kind"]({"a": 1}) == "record"
+
+
 # ---------------------------------------------------------- key enumeration (188)
 
 # a component doc whose `services` record is keyed by name — the exact shape a

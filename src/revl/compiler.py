@@ -34,6 +34,7 @@ from .hostref import resolve_refs as _resolve_refs
 from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
+from .type_arity import check_declared_type_arity as _check_declared_type_arity
 from .typecheck import format_type, parse_type
 
 
@@ -990,6 +991,86 @@ def _reject_running_service_name_folds(services: list, running: dict,
         )
 
 
+def _module_source_text(loader: _ModuleLoader,
+                       module: _LoadedModule) -> str | None:
+    path = os.path.abspath(module.path)
+    if path in loader._sources:
+        return loader._sources[path]
+    return loader.disk_reads.get(path)
+
+
+def _same_loaded_module_copy(loader: _ModuleLoader,
+                             left: _LoadedModule,
+                             right: _LoadedModule) -> bool:
+    """Whether two paths contain byte-identical copies of the same module."""
+    if id(left) == id(right):
+        return True
+    left_path = os.path.abspath(left.path)
+    right_path = os.path.abspath(right.path)
+    if (os.path.basename(left_path) != os.path.basename(right_path)
+            or left_path == right_path):
+        return False
+    left_text = _module_source_text(loader, left)
+    right_text = _module_source_text(loader, right)
+    if left_text is None or left_text != right_text:
+        return False
+    if left_path in loader._sources or right_path in loader._sources:
+        return True
+    return _same_file_two_copies(left_path, right_path)
+
+
+def _canonicalize_identical_module_copies(
+        loader: _ModuleLoader, root_modules: list[_LoadedModule]) -> None:
+    """Share byte-identical imported modules before declarations are merged.
+
+    Roots remain distinct because each root owns composition-level declarations.
+    Importers are rewired to the first loaded copy, so each public declaration
+    is merged once regardless of which tree resolved its local `use` path.
+    """
+    modules: list[_LoadedModule] = []
+    seen: set[int] = set()
+    for module in loader._cache.values():
+        if id(module) not in seen:
+            modules.append(module)
+            seen.add(id(module))
+
+    root_ids = {id(module) for module in root_modules}
+    candidates: list[_LoadedModule] = []
+    duplicate_of: dict[int, _LoadedModule] = {}
+    for module in modules:
+        if id(module) in root_ids:
+            continue
+        match = next((candidate for candidate in candidates
+                      if _same_loaded_module_copy(loader, module, candidate)),
+                     None)
+        if match is None:
+            candidates.append(module)
+        else:
+            duplicate_of[id(module)] = match
+
+    if not duplicate_of:
+        return
+
+    by_id = {id(module): module for module in modules}
+
+    def canonical(module: _LoadedModule) -> _LoadedModule:
+        return duplicate_of.get(id(module), module)
+
+    for module in modules:
+        module.aliases = {name: canonical(used)
+                          for name, used in module.aliases.items()}
+        module.named_from = {
+            name: {id(canonical(by_id[owner])) for owner in owners}
+            for name, owners in module.named_from.items()
+        }
+        module.pure_dependencies = {
+            id(canonical(by_id[dependency]))
+            for dependency in module.pure_dependencies
+        }
+    for path, module in tuple(loader._cache.items()):
+        loader._cache[path] = canonical(module)
+
+
 def compile_source(source: str, filename: str = "<string>",
                    manifest: dict | None = None,
                    replacing: tuple[str, ...] = (),
@@ -1097,6 +1178,7 @@ def compile_source(source: str, filename: str = "<string>",
                      "disk (item 459)")
         _reject_name_folds(program.services, "service", filename)
         _reject_component_name_folds(program.components, filename)
+        _check_declared_type_arity(program, filename)
         document = check_and_lower(
             program, taint_strict=bool(profile and profile.taint_strict),
             untrusted=bool(profile and profile.untrusted))
@@ -1285,6 +1367,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # reached as another root's `use` dependency.
     loader.mark_roots(os.path.abspath(p) for p in paths)
     root_modules = [_load_root(loader, path) for path in paths]
+    _canonicalize_identical_module_copies(loader, root_modules)
 
     merged = Program(filename=paths[0] if paths else "<none>")
     seen_services: dict[str, str] = {}
@@ -1656,6 +1739,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             source_of=lambda svc: seen_services.get(svc.name))
         _reject_running_component_name_folds(
             merged.components, ambient["components"], merged.filename)
+    _check_declared_type_arity(merged, merged.filename)
     document = check_and_lower(
         merged, ambient, taint_strict=_taint_strict, untrusted=_untrusted)
     # the allowlist half — refuse a reach outside the granted service set, on the

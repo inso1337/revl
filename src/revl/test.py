@@ -708,7 +708,10 @@ def run_ts(ir: dict) -> tuple[str, str]:
         try:
             result = _ts_foreground(
                 [*vitest, "run", str(path)], BACKENDS / "typescript", bound,
-                env={**os.environ, "CI": "1"},
+                # vitest.config.ts re-runs emit.py through REVL_PYTHON; hand it
+                # this interpreter rather than have it guess `python3` (#2892).
+                env={**os.environ, "CI": "1",
+                     "REVL_PYTHON": os.environ.get("REVL_PYTHON") or sys.executable},
             )
         except subprocess.TimeoutExpired:
             # No handler here before #2229, so the caller saw the raw
@@ -1456,6 +1459,47 @@ def schedule_command(ir: dict, seed=None, seeds: int = None) -> int:
     return 0
 
 
+def fault_profile_command(ir: dict, seed: int, events: int = None) -> int:
+    """`revl test --fault-profile <SEED>`: a seeded run of fault events
+    (docs/fault-tests.md, issue #2728).
+
+    The sweep injects at every point in IR order; the profile draws a seeded
+    list of events from the same points, judges each with the sweep's full
+    assertion set, and prints the seed, every injected fault and the count of
+    failures with no classified cause. It exits 1 when any event did not end
+    contained (failed or unclassified), and when nothing could be injected. Like the sweep it activates
+    components for real, so a missing cordis-py runtime is a skip with a
+    reason, never a pass.
+    """
+    if not (ir.get("components") or []):
+        print("[fault-profile] no components to inject")
+        return 0
+    if not _cordis_available():
+        print("[fault-profile] skipped: the fault profile activates components "
+              "for real and needs the cordis-py runtime, which this interpreter "
+              "does not have\n"
+              "        set it up:  sh backends/python/setup.sh\n"
+              f"        then rerun:  revl test --fault-profile {seed}")
+        return 0
+
+    from .fault import _PROFILE_EVENTS, run_fault_profile  # noqa: PLC0415 - lazy: needs cordis
+
+    failures, dossier = run_fault_profile(
+        ir, seed, _PROFILE_EVENTS if events is None else events)
+    counts = dossier["counts"]
+    if failures:
+        print(f"[fault-profile] seed {seed}: {failures} injected fault(s) did "
+              f"not end contained, {counts['unclassified']} with no classified "
+              f"cause", file=sys.stderr)
+        return 1
+    if counts["injected"] == 0:
+        # nothing checked must never read as clean (docs/fault-tests.md 9.3)
+        print(f"[fault-profile] seed {seed}: nothing was injected; no "
+              f"component has an addressable sweep point", file=sys.stderr)
+        return 1
+    return 0
+
+
 def mock_requires_command(ir: dict) -> int:
     """`revl test --mock-requires`: run every `lifecycle test` in mock world
     (docs/auto-mocks.md).
@@ -1635,7 +1679,8 @@ def list_command(ir: dict, pattern=None) -> int:
 
 def test_command(ir: dict, backend: str, sweep: bool = False,
                  mock_requires: bool = False, schedule_seed=None,
-                 schedule_seeds: int = None, list_tests: bool = False,
+                 schedule_seeds: int = None, fault_profile=None,
+                 fault_profile_events: int = None, list_tests: bool = False,
                  filter_pattern=None, verbose: bool = False,
                  report: str = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
@@ -1651,6 +1696,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     seeded interleaving sweep (py tier only; roadmap item 295,
     docs/design/295-schedule-testing.md).
 
+    With ``fault_profile`` set (a seed), run the seeded fault profile instead
+    (py tier only; docs/fault-tests.md, issue #2728); ``fault_profile_events``
+    is how many events it draws.
+
     With ``list_tests`` set, print the collected test names and execute nothing
     (issue #843); the mode flags above do not apply to a listing.
 
@@ -1663,8 +1712,8 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     with the reason (exit 0: nothing was expected to run there) instead of
     handing the emitter a document with nothing to emit, or reporting an empty
     document as a pass (`tier_verdict_for_selection`). `--mock-requires` runs
-    lifecycle test units and therefore honours the selection; `--sweep` and
-    `--schedule-*` do not run named units at all, so combining them with a
+    lifecycle test units and therefore honours the selection; `--sweep`,
+    `--schedule-*` and `--fault-profile` do not run named units at all, so combining them with a
     filter is also a usage error rather than a filter that quietly does
     nothing.
 
@@ -1679,19 +1728,45 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     if filter_pattern is not None:
         if not any(filter_pattern in name for _kind, name in collected_tests(ir)):
             return _empty_selection(ir, filter_pattern)
-        if sweep or schedule_seed is not None or schedule_seeds is not None:
-            # `--sweep` sweeps every top-level body step of every component and
-            # `--schedule-*` every interleaving; neither runs named test units,
+        if (sweep or schedule_seed is not None or schedule_seeds is not None
+                or fault_profile is not None):
+            # `--sweep` sweeps every top-level body step of every component,
+            # `--schedule-*` every interleaving and `--fault-profile` a seeded
+            # draw of those steps; none runs named test units,
             # so a filter over test names cannot select inside them. Refusing
             # is the honest answer: a filter that appeared to select while the
             # whole sweep ran anyway is exactly the silent mismatch #843 is
             # about.
             print("error: --filter selects test units by name, and --sweep / "
-                  "--schedule-* sweep the composition's steps or interleavings "
+                  "--schedule-* / --fault-profile sweep the composition's steps or interleavings "
                   "rather than running named units; run them separately "
                   "(issue #843)", file=sys.stderr)
             return 2
         ir = select_tests(ir, filter_pattern)
+
+    if fault_profile_events is not None and fault_profile is None:
+        print("error: --fault-profile-events sets how many events a fault "
+              "profile draws; pass it with --fault-profile SEED",
+              file=sys.stderr)
+        return 2
+    if fault_profile_events is not None and fault_profile_events < 1:
+        print(f"error: --fault-profile-events must be at least 1, got "
+              f"{fault_profile_events}", file=sys.stderr)
+        return 2
+    if fault_profile is not None and (
+            sweep or mock_requires or schedule_seed is not None
+            or schedule_seeds is not None):
+        # each is its own run mode; running one and dropping the others
+        # without a word would read as all of them having run
+        print("error: --fault-profile is its own run mode and does not combine "
+              "with --sweep, --mock-requires or --schedule-*; run them "
+              "separately", file=sys.stderr)
+        return 2
+    if fault_profile is not None:
+        if backend not in ("py", "all"):
+            print(f"[fault-profile] note: the fault profile runs on the py "
+                  f"reference tier only, not `{backend}` (docs/fault-tests.md)")
+        return fault_profile_command(ir, fault_profile, fault_profile_events)
 
     if schedule_seed is not None or schedule_seeds is not None:
         if backend not in ("py", "all"):

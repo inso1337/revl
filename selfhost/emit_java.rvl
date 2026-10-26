@@ -346,7 +346,14 @@ fn is_relational(op: Str) -> Bool {
 type Ctx = {
   fns: Map[Str, Bool], ca: Map[Str, Str], cp: Map[Str, Str],
   rbf: Map[Str, Str], vcases: Map[Str, Str], rfields: Map[Str, Str],
-  rn: Map[Str, Str], tys: Map[Str, Bool]
+  rn: Map[Str, Str], tys: Map[Str, Bool],
+  // issue #2325: the generic record types (`gen`), the generic top-level fns
+  // (`gfns`) and the parameter names of the top-level fn being emitted (`pn`,
+  // empty in every other body); see `infers_exactly`. The declared types of
+  // those parameters (`pt`) and the return of each non-generic top-level fn
+  // (`fret`); see `selector_type_args`.
+  gen: Map[Str, Bool], gfns: Map[Str, Bool], pn: Map[Str, Bool],
+  pt: Map[Str, Str], fret: Map[Str, Str]
 }
 // A rendered expression: its text AND the running match-temp counter.
 type Rendered = { text: Str, counter: Int }
@@ -358,6 +365,9 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
 }
 fn has_fn(ctx: Ctx, name: Str) -> Bool {
   return match ctx.fns.lookup(name) { Some(v) => v, None => false }
+}
+fn bool_get(m: Map[Str, Bool], k: Str) -> Bool {
+  return match m.lookup(k) { Some(v) => v, None => false }
 }
 // A resolved (unique, non-ambiguous) lookup — an empty string OR the `<<AMBIG>>`
 // sentinel both mean "not a byte-exact target here".
@@ -838,7 +848,69 @@ fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   for (fname of split_top(map_get(ctx.rfields, tn), ",")) {
     out_args = out_args.push(map_get(by, fname))
   }
-  return { text: `new ${mangle(tn)}(${out_args.join(", ")})`, counter: c }
+  // issue #2325: a generic record is built with the diamond when javac infers
+  // its type arguments exactly from the values (`infers_exactly`).
+  var diamond = ""
+  if (bool_get(ctx.gen, tn)) {
+    diamond = "<>"
+    for (f of fields) { if (!infers_exactly(value_at(f, 1), ctx)) { diamond = "" } }
+  }
+  return { text: `new ${mangle(tn)}${diamond}(${out_args.join(", ")})`, counter: c }
+}
+
+// `_match_bind_names`: every name a `match` arm binds anywhere under *node* (a
+// record carrying a `pattern` key and a Str `bind`).
+fn match_bind_names(node: Any) -> List[Str] {
+  var out = []
+  let k = value_kind(node)
+  if (k == "record" && list_contains(value_keys(node), "pattern")
+      && value_kind(value_field(node, "bind")) == "str") {
+    out = out.push(value_str(value_field(node, "bind")))
+  }
+  if (k == "record" || k == "list") {
+    for (child of value_children(node)) { out = out.concat(match_bind_names(child)) }
+  }
+  return out
+}
+
+// `_infers_exactly`: javac, inferring from *node* alone, gets the revl type. A
+// diamond under `final var` has no target type, so only a non-null literal, a
+// parameter of the fn, arithmetic over those, a call to a non-generic top-level
+// fn, `Some` of one, a non-empty list of them and a record literal built from
+// them count; anything else keeps the literal raw.
+fn infers_exactly(node: Any, ctx: Ctx) -> Bool {
+  let kind = node_kind(node)
+  if (kind == "lit") { return !value_is_null(value_field(node, "value")) }
+  if (kind == "var") { return bool_get(ctx.pn, value_str(value_field(node, "name"))) }
+  if (kind == "bin" || kind == "un") {
+    let keys = value_keys(node)
+    for (sub of ["left", "right", "operand", "expr"]) {
+      if (list_contains(keys, sub) && !infers_exactly(value_field(node, sub), ctx)) { return false }
+    }
+    return true
+  }
+  if (kind == "list") {
+    let items = value_list(value_field(node, "items"))
+    if (items.length() == 0) { return false }
+    for (it of items) { if (!infers_exactly(it, ctx)) { return false } }
+    return true
+  }
+  if (kind == "record") {
+    for (f of value_list(value_field(node, "fields"))) {
+      if (!infers_exactly(value_at(f, 1), ctx)) { return false }
+    }
+    return true
+  }
+  if (kind == "call") {
+    let callee = value_field(node, "callee")
+    var name = ""
+    if (node_kind(callee) == "var") { name = value_str(value_field(callee, "name")) }
+    if (has_fn(ctx, name)) { return !bool_get(ctx.gfns, name) }
+    let args = value_list(value_field(node, "args"))
+    return name == "Some" && map_get(ctx.ca, name) == "" && args.length() == 1
+      && infers_exactly(args[0], ctx)
+  }
+  return false
 }
 
 // Component templates use positional $N substitutions and $$ dollar escapes.
@@ -997,6 +1069,37 @@ fn opt_bind(arms: List[Any]) -> Str {
   }
   return "__revl_v"
 }
+// `_selector_type_args`: the `<..>` every case pattern of a generic variant
+// carries, cut from the selector's own Java type, so a bind is `Long` and not
+// `Object` (issue #2325). Only a parameter of the fn (not renamed) and a call
+// to a non-generic top-level fn have a known type; anything else stays raw.
+fn selector_type_args(scrutinee: Any, owner: Str, ctx: Ctx) -> Str {
+  let kind = node_kind(scrutinee)
+  var declared = ""
+  if (kind == "var") {
+    let name = value_str(value_field(scrutinee, "name"))
+    if (map_get(ctx.rn, name) == "") { declared = map_get(ctx.pt, name) }
+  }
+  if (kind == "call") {
+    let callee = value_field(scrutinee, "callee")
+    if (node_kind(callee) == "var") { declared = map_get(ctx.fret, value_str(value_field(callee, "name"))) }
+  }
+  if (declared == "") { return "" }
+  let java = java_v3_type(declared, false)
+  let head = mangle(owner)
+  if (!java.startsWith(`${head}<`) || !java.endsWith(">")) { return "" }
+  return java.slice(head.length(), java.length())
+}
+// The case owner of the first non-wildcard arm, or "": every arm names a case
+// of the scrutinee's ADT (the checker refuses any other).
+fn arms_owner(arms: List[Any], ctx: Ctx) -> Str {
+  var owner = ""
+  for (arm of arms) {
+    let p = value_str(value_field(arm, "pattern"))
+    if (p != "_" && owner == "") { owner = map_get(ctx.ca, p) }
+  }
+  return owner
+}
 fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let sr = render_expr(value_field(node, "scrutinee"), ctx, counter)
   let arms = value_list(value_field(node, "arms"))
@@ -1015,6 +1118,9 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   var wildcard = ""
   var has_wild = false
   var patterns = []
+  let owner_of_arms = arms_owner(arms, ctx)
+  var type_args = ""
+  if (resolved(owner_of_arms)) { type_args = selector_type_args(value_field(node, "scrutinee"), owner_of_arms, ctx) }
   for (arm of arms) {
     let pattern = value_str(value_field(arm, "pattern"))
     let br = render_expr(value_field(arm, "body"), ctx, c)
@@ -1028,6 +1134,7 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
       let owner = map_get(ctx.ca, pattern)
       var qualified = case_m
       if (resolved(owner)) { qualified = `${mangle(owner)}.${case_m}` }
+      qualified = `${qualified}${type_args}`
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "" && bind != "_") {
         c = c + 1
@@ -1523,10 +1630,22 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
     let ret = java_v3_type(value_field(fnode, "returns"), false)
     lines = lines.push(`public static ${ret} ${name}(${ps.join(", ")}) {`)
     let body = value_list(value_field(fnode, "body"))
+    // issue #2325: a parameter name a match arm rebinds is not counted.
+    let binds = match_bind_names(value_field(fnode, "body"))
+    var pn: Map[Str, Bool] = Map.empty()
+    var pt: Map[Str, Str] = Map.empty()
+    for (p of value_list(value_field(fnode, "params"))) {
+      let pname = value_str(value_field(p, "name"))
+      if (!list_contains(binds, pname)) {
+        pn = pn.set(pname, true)
+        pt = pt.set(pname, value_str(value_field(p, "type")))
+      }
+    }
+    let fctx = set_pn(ctx, pn, pt)
     if (body.length() == 0) {
       lines = lines.push("    // (empty body)")
     } else {
-      let r = emit_stmts(body, ctx, 1, c)
+      let r = emit_stmts(body, fctx, 1, c)
       lines = lines.concat(r.lines)
       c = r.counter
     }
@@ -1583,9 +1702,17 @@ fn core_imports(ir: Any) -> List[Str] {
 // them `<<AMBIG>>` instead (outside the successful-byte oracle).
 fn build_ctx(ir: Any) -> Ctx {
   var fns: Map[Str, Bool] = Map.empty()
+  var gfns: Map[Str, Bool] = Map.empty()
+  var fret: Map[Str, Str] = Map.empty()
   for (fnode of value_list(value_field(ir, "functions"))) {
     fns = fns.set(value_str(value_field(fnode, "name")), true)
+    if (value_list(value_field(fnode, "type_params")).length() > 0) {
+      gfns = gfns.set(value_str(value_field(fnode, "name")), true)
+    } else {
+      fret = fret.set(value_str(value_field(fnode, "name")), value_str(value_field(fnode, "returns")))
+    }
   }
+  var gen: Map[Str, Bool] = Map.empty()
   var ca: Map[Str, Str] = Map.empty()
   var cp: Map[Str, Str] = Map.empty()
   var rbf: Map[Str, Str] = Map.empty()
@@ -1604,6 +1731,7 @@ fn build_ctx(ir: Any) -> Ctx {
         rbf = rbf.set(key, name)
       }
       rfields = rfields.set(name, fnames.join(","))
+      if (value_list(value_field(spec, "params")).length() > 0) { gen = gen.set(name, true) }
     }
     if (kind == "variant") {
       var cnames = []
@@ -1624,13 +1752,22 @@ fn build_ctx(ir: Any) -> Ctx {
   }
   var tys: Map[Str, Bool] = Map.empty()
   for (name of value_keys(types)) { tys = tys.set(name, true) }
-  return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys }
+  return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys,
+           gen: gen, gfns: gfns, pn: Map.empty(), pt: Map.empty(), fret: fret }
 }
 
 // Swap in a fresh rename map (the component-capture scope for one render); the
 // modern provide-method path threads `{req -> this.req, bind -> this.bind}`.
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn, tys: ctx.tys }
+  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn, tys: ctx.tys,
+           gen: ctx.gen, gfns: ctx.gfns, pn: ctx.pn, pt: ctx.pt, fret: ctx.fret }
+}
+
+// Swap in the parameter names and types of the top-level fn being emitted
+// (issue #2325).
+fn set_pn(ctx: Ctx, pn: Map[Str, Bool], pt: Map[Str, Str]) -> Ctx {
+  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: ctx.rn, tys: ctx.tys,
+           gen: ctx.gen, gfns: ctx.gfns, pn: pn, pt: pt, fret: ctx.fret }
 }
 
 // ============================================================ components/services
@@ -2050,7 +2187,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
   if (kind == "call") {
     let target = value_field(node, "target")
     if (value_str(value_field(target, "kind")) == "req") {
-      let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(target, "name"))))
+      let sname = req_service_of(comp, value_str(value_field(target, "name")))
       if (sname != "") {
         let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(node, "method")))
         return value_str(value_field(decl, "returns"))
@@ -2060,7 +2197,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
     if (value_str(value_field(callee, "kind")) == "field") {
       let ct = value_field(callee, "target")
       if (value_str(value_field(ct, "kind")) == "req") {
-        let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(ct, "name"))))
+        let sname = req_service_of(comp, value_str(value_field(ct, "name")))
         if (sname != "") {
           let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(callee, "name")))
           return value_str(value_field(decl, "returns"))
@@ -3170,7 +3307,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
     if (kind == "provide") {
       let svc = value_str(value_field(step, "service"))
       let pkey = value_str(value_field(step, "name"))
-      let struct = `${cname}${camel(pkey)}`
+      let struct = `${cname}${camel(host_key(pkey))}`
       var cargs = ["ctx", "fx"]
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
@@ -3561,8 +3698,9 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // phase loop; a bracket-only component keeps emitting exactly as before.
   let needs_frame = component_needs_frame(comp, wnames)
   let provider_cfg = provider_config_fields(comp)
+  let req_map = req_bindings(comp)
   var req_locals = []
-  if (!value_is_null(reqs_m)) { req_locals = value_keys(reqs_m) }
+  for (local of req_map.keys()) { req_locals = req_locals.push(mangle(local)) }
   let bind_names = binds(comp)
   // FR-4 (item 238): bind -> revl surface value type for each host Map binding,
   // so provider fields, ctor params and the apply() local all pin `Map<V>`.
@@ -3571,7 +3709,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // `this.<name>` field (item 238 adds the binds).
   var rn: Map[Str, Str] = Map.empty()
   for (b of bind_names) { rn = rn.set(b, `this.${b}`) }
-  for (local of req_locals) { rn = rn.set(local, `this.${local}`) }
+  for (local of req_map.keys()) { rn = rn.set(local, `this.${mangle(local)}`) }
   let mctx = set_rn(base_ctx, rn)
   // `has_await` (a top-level `await` body step) colors the plugin async: the
   // interface widens to `AsyncPlugin` and `apply` gains `throws Exception`.
@@ -3583,13 +3721,13 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   var counter = 0
   for (key of value_keys(provs_m)) {
     let srv = value_str(value_field(provs_m, key))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push("    private final Context ctx;")
     out = out.push("    private final Context.EffectScope fx;")
     if (needs_frame) { out = out.push("    private final RevlFrame frame;") }
-    for (local of req_locals) {
-      out = out.push(`    private final ${value_str(value_field(reqs_m, local))} ${local};`)
+    for (b of req_map.keys()) {
+      out = out.push(`    private final ${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)};`)
     }
     for (b of bind_names) {
       out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
@@ -3601,8 +3739,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     }
     var cparams = ["Context ctx", "Context.EffectScope fx"]
     if (needs_frame) { cparams = cparams.push("RevlFrame frame") }
-    for (local of req_locals) {
-      cparams = cparams.push(`${value_str(value_field(reqs_m, local))} ${local}`)
+    for (b of req_map.keys()) {
+      cparams = cparams.push(`${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)}`)
     }
     for (b of bind_names) {
       cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
@@ -3614,8 +3752,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     out = out.push("        this.ctx = ctx;")
     out = out.push("        this.fx = fx;")
     if (needs_frame) { out = out.push("        this.frame = frame;") }
-    for (local of req_locals) {
-      out = out.push(`        this.${local} = ${local};`)
+    for (b of req_map.keys()) {
+      out = out.push(`        this.${mangle(b)} = ${mangle(b)};`)
     }
     for (b of bind_names) {
       out = out.push(`        this.${b} = ${b};`)
@@ -3681,9 +3819,10 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // any step runs so every bracket/transactional/compensation registration
   // below shares the same commit/abort discriminator.
   if (needs_frame) { out = out.push("        RevlFrame frame = new RevlFrame();") }
-  for (local of req_locals) {
-    let srvn = value_str(value_field(reqs_m, local))
-    out = out.push(`        ${srvn} ${local} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(local)}));`)
+  for (b of req_map.keys()) {
+    let raw = map_get(req_map, b)
+    let srvn = value_str(value_field(reqs_m, raw))
+    out = out.push(`        ${srvn} ${mangle(b)} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(raw)}));`)
   }
   out = out.push("        try {")
   // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
@@ -3743,7 +3882,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
   var out = []
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push(`    ${struct}() {`)
     out = out.push("    }")
@@ -3775,7 +3914,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
   for (step of body) {
     let key = value_str(value_field(step, "name"))
     let srv = value_str(value_field(step, "service"))
-    let struct = `${cname}${camel(key)}`
+    let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class, ${json_dumps(key)}), new ${struct}()));`)
   }
   if (body.length() > 0) {
@@ -3837,11 +3976,102 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
   return out
 }
 
+// `_host_key` (issue #1914): a qualified provision key (`acme::greeter`) is a
+// legal wiring identity but never a legal Java identifier, so it is mangled
+// into one here, and only here. An unqualified key is returned unchanged, so a
+// document that uses no namespacing emits exactly as before:
+//
+//   _host_key(k) = k                                    if "::" not in k
+//                = "__".join(p.replace("_", "_u") for p in k.split("::"))
+//
+// The rule is injective (see backends/java/emit.py), and the collision check
+// refuses the one residual pair (issue #2394).
+fn host_key(key: Str) -> Str {
+  if (key.indexOf("::") < 0) { return key }
+  var parts = []
+  for (part of key.split("::")) { parts = parts.push(part.split("_").join("_u")) }
+  return parts.join("__")
+}
+
+// `_key_binding`: the local a qualified key introduces, its trailing segment
+// (`acme::greeter` -> `greeter`). A `req` IR node names a key by this binding.
+fn key_binding(key: Str) -> Str {
+  let parts = key.split("::")
+  return parts[parts.length() - 1]
+}
+
+// The service a `req` node names: its BINDING in the component's raw-keyed
+// requirement table (issue #2394).
+fn req_service_of(comp: Any, name: Str) -> Str {
+  let raw = map_get(req_bindings(comp), name)
+  return raw == "" ? "" : value_str(value_field(value_field(comp, "requires"), raw))
+}
+
+// binding -> raw wiring key for a component's requirements.
+fn req_bindings(comp: Any) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  for (k of value_keys(value_field(comp, "requires"))) { out = out.set(key_binding(k), k) }
+  return out
+}
+
+// Issue #2458: `_check_host_keys` is the FIRST statement of the reference
+// `emit`, ahead of the holes, deferred, validated and fault-test refusals,
+// and it refuses the one collision the mangling cannot represent: a flat key
+// that already spells a mangled qualified key (`acme__ops` beside `acme::ops`).
+// The port had no marker for it, so the first refusal it named was a later one.
+// One marker per colliding pair, first seen key first, across exactly the five
+// wiring tables the reference reads.
+fn host_key_collision_markers(ir: Any) -> List[Str] {
+  var seen_hosts = []
+  var seen_keys = []
+  var out = []
+  for (c of value_list(value_field(ir, "components"))) {
+    for (table of ["provides", "requires", "routes", "isolate", "intercept"]) {
+      for (k of value_keys(value_field(c, table))) {
+        let host = host_key(k)
+        let at = list_index_of(seen_hosts, host)
+        if (at < 0) {
+          seen_hosts = seen_hosts.push(host)
+          seen_keys = seen_keys.push(k)
+        } else {
+          let first = seen_keys[at]
+          if (first != k) {
+            let mark = `<<UNSUPPORTED-HOST-KEY-COLLISION:${first} / ${k}>>`
+            if (!list_contains(out, mark)) { out = out.push(mark) }
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
+// A component the emitter answers with a named `<<UNSUPPORTED-component-nonsimple>>`
+// marker: neither the simple path nor the modern subset takes it.
+fn has_nonsimple_component(ir: Any) -> Bool {
+  for (c of value_list(value_field(ir, "components"))) {
+    if (!component_simple_ok(c) && !(modern_supported(c) && needs_modern_subset(c))) { return true }
+  }
+  return false
+}
+
+// Named `list_index_of` rather than `index_of`: that name is the language's
+// string builtin, and a same-named helper compiles to a mangled form whose
+// coverage is attributed to the builtin's unexecuted shim.
+fn list_index_of(xs: List[Str], x: Str) -> Int {
+  var i = 0
+  while (i < xs.length()) {
+    if (xs[i] == x) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
 // Issue #2389: the reference spells a namespaced provision key (`acme::greeter`)
-// as a mangled host identifier (`_host_key`, issue #1914), and this port does
-// not port that mangling yet, so it would write the raw `::` key into host
-// names. Until it does, the port names every namespaced key it meets instead
-// of emitting a silent difference.
+// as a mangled host identifier, and the port now mangles it too (issue #2394).
+// The marker below is not a claim that the key is unported; it names a key the
+// port could NOT prove against the reference bytes because the document was
+// refused elsewhere. See the call site.
 fn namespaced_key_markers(ir: Any) -> List[Str] {
   var out = []
   for (c of value_list(value_field(ir, "components"))) {
@@ -3972,17 +4202,32 @@ pub fn emit_java_src(ir: Any) -> Str {
   // before the deferred in-file test section (one named marker per test
   // instead of silence, issue #1123), and a required stream, refused only while
   // the components are emitted, comes after it.
-  out = out.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
+  // Issue #2458: the host-key collision is the reference's FIRST refusal in
+  // `emit` (`_check_host_keys` is its first statement), so its marker opens
+  // the refusal section. The comment below keeps the order of the rest.
+  var refusals = host_key_collision_markers(ir)
+  refusals = refusals.concat(deferred_emission_markers(ir)).concat(validated_markers(ir))
   // issue #2492: an extern with no `@java` body. The reference raises this one
   // from inside the extern block, and that block is emitted while the class
   // body is built, which the reference reaches BEFORE it renders components.
   // So this marker belongs with the two whole-document refusals above rather
   // than after them: it precedes the deferred in-file test section and the
   // required-stream refusal, both of which the reference reaches later.
-  out = out.concat(extern_no_java_body_markers(ir))
-  out = out.concat(deferred_test_markers(ir))
-  out = out.concat(required_stream_markers(ir))
-  out = out.concat(namespaced_key_markers(ir))
+  refusals = refusals.concat(extern_no_java_body_markers(ir))
+  refusals = refusals.concat(deferred_test_markers(ir))
+  refusals = refusals.concat(required_stream_markers(ir))
+  // Issue #2394: a namespaced key's host spelling is PROVEN only when the port
+  // emits the whole document, because only then are its bytes comparable with
+  // the reference's. A document that already hit a refusal above, or that the
+  // legacy component path answers with `<<UNSUPPORTED-component-nonsimple>>`
+  // (no `requires` support among others), reaches those bytes nowhere, so it
+  // names the namespaced keys it could not verify instead of letting that
+  // difference stay silent. A document the port emits whole draws no such
+  // marker: byte parity proves its keys.
+  if (refusals.length() > 0 || has_nonsimple_component(ir)) {
+    refusals = refusals.concat(namespaced_key_markers(ir))
+  }
+  out = out.concat(refusals)
   return rstrip(out.join(newline())).concat(newline())
 }
 

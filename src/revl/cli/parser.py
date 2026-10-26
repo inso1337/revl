@@ -386,6 +386,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    audit.add_argument(
+        "--wal", metavar="FILE", default=None,
+        help="include observed budget records from FILE in a plain --json audit "
+             "(not with --policy or --diff)")
     audit.add_argument("--json-diagnostics", action="store_true",
                        help="on rejection, print a structured diagnostic (code, guarantee, "
                             "expected/actual, hint) instead of the human rendering")
@@ -1070,6 +1074,19 @@ def build_parser() -> argparse.ArgumentParser:
                            "canonical sequential baseline, and report any "
                            "interleaving that violates a property (py tier; "
                            "docs/design/295-schedule-testing.md)")
+    test.add_argument("--fault-profile", type=int, default=None, metavar="SEED",
+                      dest="fault_profile",
+                      help="fault profile: inject a seeded list of fault events "
+                           "drawn from the sweep points, judge each like the "
+                           "sweep, and print the seed, every injected fault and "
+                           "the unclassified count; the same seed injects the "
+                           "same sequence (py tier; docs/fault-tests.md, issue "
+                           "#2728)")
+    test.add_argument("--fault-profile-events", type=int, default=None,
+                      metavar="N", dest="fault_profile_events",
+                      help="with --fault-profile: how many fault events to draw "
+                           "(default 8; a composition with fewer sweep points "
+                           "gets all of them)")
     test.add_argument("-v", "--verbose", action="store_true",
                       help="print one PASS/FAIL line per test with its duration "
                            "(the py tier already prints one line per test; -v "
@@ -1661,6 +1678,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "transition carries the cause chain behind it, "
                           "queryable with `revl why <c> --trace FILE` "
                           "(docs/why-runtime.md)")
+    run.add_argument("--attestation", default=None, metavar="PATH",
+                     help="record this composition's admission attestation in "
+                          "the trace: the attestation must bind THIS composition "
+                          "(its composition_hash must equal the run's), and its "
+                          "composition hash, key id and ruleset digest are "
+                          "written on the trace header and copied to every OTel "
+                          "span (issue #2730). The signature is not checked here; "
+                          "a consumer that wants proof runs `revl attest --verify`")
     run.add_argument("--withdraw", default=None, metavar="COMPONENT",
                      help="one-shot: boot, withdraw this live component while "
                           "recording the causal cascade, then diff the actual "

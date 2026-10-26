@@ -372,6 +372,24 @@ def grammar_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def schema_digest(schema: dict) -> str:
+    """A stable identity for a crossing's response schema (issue #2694).
+
+    The schema sibling of :func:`grammar_digest`: a sha256 over the canonical
+    bytes (sorted keys, no insignificant whitespace) of the `response_schema`
+    item 257 derived and bound into the crossing's IR. It is computed from that
+    IR value, so two runs that compile the same return type record the same
+    digest, and a trace reader can compare the recorded value with the schema
+    in the IR without trusting anything the host said.
+
+    This is a DERIVED identity, not a new IR key: the schema is already bound
+    beside the grammar, and adding a second copy of it (with a digest member)
+    would put a value inside a document that consumers read as a JSON Schema.
+    """
+    text = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # --------------------------------------------------- slice 4: the second dialect
 
 def _wire_json_schema(schema: dict) -> dict:

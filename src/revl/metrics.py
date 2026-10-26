@@ -3,7 +3,7 @@
 `revl metrics <run.jsonl>` is the aggregate companion to `revl why` (one
 component's cause chain) and the OTel export (every transition as a span). Where
 those explain or forward *individual* events, this rolls a whole run up into
-three numbers a supervisor actually watches:
+the numbers a supervisor actually watches:
 
 1. **emission count by capability** — how many irreversible emissions crossed a
    boundary, bucketed by the service capability they were scoped to (and, as a
@@ -15,7 +15,9 @@ three numbers a supervisor actually watches:
    (`diagnostics.classify`, e.g. `A8`); a failure that carried no classifiable
    `RevlError` (a bare crash, no `code`) buckets as `"unclassified"` rather than
    under a fabricated code.
-3. **average lifecycle duration** — per component, the mean of
+3. **residue incidents**: how many teardowns ended with something not undone
+   (one ``residue`` event each, issue #2730), by the residue check that failed.
+4. **average lifecycle duration** — per component, the mean of
    ``withdraw.ts − load.ts`` over each component's load→withdraw lifecycles
    (paired by component **and** generation), plus the lifecycle count.
 
@@ -28,10 +30,10 @@ gate.
 
 ### Schema v1 graceful degradation (detected by data, not by `v`)
 
-The trace schema is v2 (docs/why-runtime.md); the fields these metrics need
+The trace schema is v3 (docs/why-runtime.md); the fields these metrics need
 (`ts` on every event, `code` on a FAILED cause, the `emit` event kind) all
-arrived additively. A v1 trace, or a v2 trace an older recorder wrote without
-them, simply *lacks* the input:
+arrived additively through v2. A v1 trace, or a v2 trace an older recorder wrote
+without them, simply *lacks* the input:
 
 * **duration** needs `ts`. When load/withdraw lifecycles are present but none
   carry `ts`, the metric is reported as ``{"unavailable": …}`` — detected by the
@@ -45,7 +47,7 @@ them, simply *lacks* the input:
 from __future__ import annotations
 
 
-from .why_runtime import EMIT, LOAD, WITHDRAW, read_trace
+from .why_runtime import EMIT, LOAD, RESIDUE, WITHDRAW, read_trace
 
 # the bucket a FAILED withdraw with no classifiable code lands in
 UNCLASSIFIED = "unclassified"
@@ -115,6 +117,23 @@ def _failure_metrics(events: list[dict]) -> dict:
     }
 
 
+def _residue_metrics(events: list[dict]) -> dict:
+    """Residue incidents (issue #2730 slice 2): one per teardown that ended
+    with something not undone, i.e. one per ``residue`` event, with a
+    by-check breakdown of which residue checks failed. A trace with no
+    ``residue`` event reports a total of 0 -- including a trace an older
+    recorder wrote, which could not say."""
+    by_check: dict[str, int] = {}
+    total = 0
+    for event in events:
+        if event.get("event") != RESIDUE:
+            continue
+        total += 1
+        for check in event.get("checks") or []:
+            by_check[str(check)] = by_check.get(str(check), 0) + 1
+    return {"total": total, "by_check": dict(sorted(by_check.items()))}
+
+
 def _lifecycles(events: list[dict]) -> dict[tuple, dict]:
     """Group load/withdraw events into lifecycles keyed by
     ``(component, gen)`` — the pairing the trace makes unambiguous: a component
@@ -179,16 +198,40 @@ def _duration_metrics(events: list[dict]) -> dict:
     }
 
 
+def _run_facts(events: list[dict]) -> dict | None:
+    """The attested-run header, when the trace carries one (issue #2730 slice 1).
+
+    The header is written on the first event; this scans for the first event
+    carrying a `run` mapping so a reordered or hand-built trace still finds it.
+    An unattested trace yields None, and the metrics document then has no `run`
+    key at all rather than an empty block."""
+    for event in events:
+        header = event.get("run")
+        if isinstance(header, dict) and header:
+            return dict(header)
+    return None
+
+
 def compute_metrics(events: list[dict]) -> dict:
     """The whole computation, pure over a list of trace events (the
     :mod:`revl.why_runtime` vocabulary). Returns a machine-readable metrics
-    document — the shape `revl metrics --json` prints and `render` formats."""
-    return {
+    document — the shape `revl metrics --json` prints and `render` formats.
+
+    A trace recorded under an attestation also carries a `run` block (issue
+    #2730): the composition hash, attestation key id and ruleset digest every
+    span repeats, so a consumer can group metrics by composition without
+    reading the trace's first event."""
+    document = {
         "events": len(events),
         "emissions": _emission_metrics(events),
         "failures": _failure_metrics(events),
+        "residue": _residue_metrics(events),
         "lifecycleDuration": _duration_metrics(events),
     }
+    run = _run_facts(events)
+    if run is not None:
+        document["run"] = run
+    return document
 
 
 def metrics_from_file(path: str) -> dict:
@@ -209,6 +252,14 @@ def render(metrics: dict) -> str:
     """A compact human table of the three metrics (the default CLI output;
     `--json` prints the full document `compute_metrics` returns)."""
     lines = [f"metrics over {metrics.get('events', 0)} trace event(s)"]
+    run = metrics.get("run")
+    if isinstance(run, dict):
+        # issue #2730: the attested composition this run is grouped under
+        lines.append(f"run: composition {run.get('compositionHash')}"
+                     + (f"  attestation key {run.get('attestationKeyId')}"
+                        if run.get("attestationKeyId") else "")
+                     + (f"  ruleset {run.get('rulesetDigest')}"
+                        if run.get("rulesetDigest") else ""))
 
     # 1. emissions by capability
     emissions = metrics.get("emissions") or {}
@@ -240,7 +291,19 @@ def render(metrics: dict) -> str:
         for code, count in by_code.items():
             lines.append(f"  {code.ljust(width)}  {count}")
 
-    # 3. avg lifecycle duration
+    # 3. residue incidents (issue #2730 slice 2)
+    residue = metrics.get("residue") or {}
+    lines.append("")
+    lines.append(f"residue incidents (total {residue.get('total', 0)}):")
+    by_check = residue.get("by_check") or {}
+    if not by_check:
+        lines.append("  (none)")
+    else:
+        width = max(len(c) for c in by_check)
+        for check, count in by_check.items():
+            lines.append(f"  {check.ljust(width)}  {count}")
+
+    # 4. avg lifecycle duration
     duration = metrics.get("lifecycleDuration") or {}
     lines.append("")
     if "unavailable" in duration:

@@ -556,6 +556,16 @@ tests arrive.
 - Statement form refused: `effect m.insert_if_absent(k, v) undo ...` without
   a binding is a compile error with the bind-or-use-insert redirect.
 - wasm: the named refusal message cites `insert_if_absent`; no miscompile.
+- Atomicity guard, py and ts (issue #2731): the run-to-completion claim in
+  contract item 2 is a property of the runtime, not of a lock, so it is pinned
+  rather than assumed. On py,
+  `tests/test_insert_if_absent.py::test_insert_if_absent_carries_no_suspension_point`
+  checks the code object is not a coroutine/generator and
+  `test_a_scheduled_caller_cannot_win_between_the_check_and_the_insert` runs two
+  callers on one key with a competing caller scheduled from the membership test;
+  on ts, `backends/typescript/tests/insert_if_absent.test.ts` holds the same
+  structural and behavioural pair. Making the method `async`, or adding an
+  `await`/`yield` between the check and the insert, fails them.
 - Doc gate: this note's `revl sketch` blocks must NOT compile until the
   feature lands, then must be promoted (`tests/test_doc_examples.py:334`).
 

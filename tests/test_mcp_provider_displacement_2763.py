@@ -65,6 +65,16 @@ def _compile(modules: dict) -> dict:
     return server.compile_under_authoring(CANDIDATE, None, modules=modules)
 
 
+def _handle_tool(name: str, arguments: dict, request_id: int) -> dict:
+    response = server.handle({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    })
+    return response["result"]["structuredContent"]
+
+
 @pytest.mark.parametrize("spelling", [
     lambda d: str(d / "prov.rvl"),
     lambda d: os.path.join(".", "prov.rvl"),
@@ -159,3 +169,35 @@ def test_a_nul_byte_in_a_module_key_is_a_named_admission_refusal():
     assert record["code"] == "REVL", record
     assert record["category"] == "admission", record
     assert "NUL" in record["message"], record
+
+
+@pytest.mark.parametrize(("tool", "arguments"), [
+    ("revl_check", {"files": ["bad\0module.rvl"]}),
+    ("revl_check", {"source": CANDIDATE,
+                    "modules": {"bad\0module.rvl": LIB}}),
+    ("revl_export", {"path": "bad\0module.rvl"}),
+    ("revl_restore", {"snapshot": {"sources": {
+        "files_content": {"bad\0module.rvl": ""}}}}),
+    ("revl_restore", {"snapshot": {"sources": {
+        "dependencies": {"bad\0module.rvl": ""}}}}),
+    ("revl_edit", {"target": "bad\0module.rvl", "edits": []}),
+    ("revl_edit", {"edits": [{"target": "bad\0module.rvl",
+                                "anchor": "before", "replacement": "after"}]}),
+    ("revl_change", {"edit": {"target": "bad\0module.rvl", "edits": []}}),
+    ("revl_change", {"add": {"target": "bad\0module.rvl",
+                               "source": CANDIDATE}}),
+], ids=["files", "modules", "export-path", "restore-files-content",
+        "restore-dependencies", "edit-target", "edit-entry-target",
+        "change-edit-target", "change-add-target"])
+def test_transport_nul_paths_are_refused_and_the_server_keeps_serving(
+    tool, arguments,
+):
+    refused = _handle_tool(tool, arguments, request_id=1)
+
+    assert refused["ok"] is False, refused
+    diagnostic = refused["diagnostics"][0]
+    assert diagnostic["category"] == "admission", diagnostic
+    assert "NUL" in diagnostic["message"], diagnostic
+
+    answered = _handle_tool("revl_check", {"source": CANDIDATE}, request_id=2)
+    assert answered["ok"] is True, answered

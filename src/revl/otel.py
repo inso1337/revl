@@ -120,6 +120,15 @@ def _status_for(event_kind: str, target_state: str) -> str:
     return STATUS_OK
 
 
+def _status_of(event_kind: str, target_state: str) -> str:
+    """`_status_for`, plus the run-level ``residue`` event: teardown left
+    something not undone, so its span is an error span (it has no transition,
+    which would otherwise leave it unset)."""
+    if event_kind == wr.RESIDUE:
+        return STATUS_ERROR
+    return _status_for(event_kind, target_state)
+
+
 def _span_id(seq) -> str:
     return f"s{seq}"
 
@@ -222,6 +231,38 @@ def _links_and_parent(cause: dict, gen, index: _Index) -> tuple[list[SpanLink], 
     return links, ROOT_SPAN_ID
 
 
+def _run_header_of(events: list[dict]) -> dict:
+    """The attested-run header a trace carries, or an empty mapping.
+
+    The header is recorded on the FIRST event (issue #2730 slice 1), but this
+    scans for the first event that carries a `run` mapping rather than reading
+    `events[0]`, so a hand-built or reordered trace still finds it and a
+    malformed first record cannot hide it. Only a mapping counts; a bad value
+    yields no header instead of raising."""
+    for event in events:
+        header = event.get("run")
+        if isinstance(header, dict):
+            return header
+    return {}
+
+
+def _header_attributes(header: dict) -> dict:
+    """The span attributes an attested-run header maps to, each only when the
+    header carries a non-empty string. An unattested run yields `{}`, so every
+    span keeps exactly the attributes it had (no placeholder ever appears)."""
+    if not header:
+        return {}
+    out: dict = {}
+    mapping = (("compositionHash", "revl.composition_hash"),
+               ("attestationKeyId", "revl.attestation_key_id"),
+               ("rulesetDigest", "revl.ruleset_digest"))
+    for key, attribute in mapping:
+        value = header.get(key)
+        if isinstance(value, str) and value:
+            out[attribute] = value
+    return out
+
+
 def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanModel]:
     """Map a list of ``why_runtime`` trace events to :class:`SpanModel`s.
 
@@ -231,12 +272,19 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
     order. Non-events / malformed records are skipped defensively."""
     valid = [e for e in events if isinstance(e, dict) and e.get("event")]
     index = _Index(valid)
+    # issue #2730 slice 1: the attested-run header rides the first trace event.
+    # Copy it onto EVERY span (the root included) so a backend can group a whole
+    # run by composition without special-casing the first span; an unattested
+    # run carries no header, so no span gains an attribute.
+    header = _run_header_of(valid)
+    header_attributes = _header_attributes(header)
 
     root = SpanModel(
         span_id=ROOT_SPAN_ID, name=run_name, kind="run", parent_id=None,
         component=None, status=STATUS_OK,
         attributes={"revl.trace.events": len(valid),
-                    "revl.schema.version": wr.SCHEMA_VERSION})
+                    "revl.schema.version": wr.SCHEMA_VERSION,
+                    **header_attributes})
     spans: list[SpanModel] = [root]
 
     for ev in valid:
@@ -257,6 +305,7 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
             "revl.transition.from": src,
             "revl.transition.to": dst,
             "revl.cause.kind": cause.get("kind", "unknown"),
+            **header_attributes,
         }
         # v2 additions, surfaced when present so a v2 trace loses nothing and a
         # v1 trace (no ts, no emit, no code) is unaffected. An `emit` event has
@@ -266,6 +315,11 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
             attributes["revl.ts"] = ev.get("ts")
         if ev.get("activationId") is not None:
             attributes["revl.activation.id"] = ev.get("activationId")
+        if event_kind == wr.RESIDUE:
+            # run-level: no component, no transition; the failed checks' names
+            attributes.pop("revl.component", None)
+            attributes["revl.residue.checks"] = [
+                str(c) for c in ev.get("checks") or []]
         if event_kind == wr.EMIT:
             attributes["revl.capability"] = ev.get("capability") or ""
             attributes["revl.emission.key"] = ev.get("key") or ""
@@ -277,11 +331,12 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
 
         spans.append(SpanModel(
             span_id=_span_id(ev.get("seq")),
-            name=f"{component} {event_kind}",
+            name=(f"{component} {event_kind}" if component is not None
+                  else str(event_kind)),
             kind=event_kind,
             parent_id=parent,
             component=component,
-            status=_status_for(event_kind, dst),
+            status=_status_of(event_kind, dst),
             attributes=attributes,
             events=[_cause_event(cause)],
             links=links,

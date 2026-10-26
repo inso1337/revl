@@ -7,6 +7,20 @@
 # fifteen-second mistake does not cost a CI round-trip.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
+
+if [ "${1:-}" = "--merge-ref" ]; then
+  shift
+  if [ "$#" -ne 0 ]; then
+    echo "usage: ./tools/pre_pr.sh [--merge-ref]" >&2
+    exit 2
+  fi
+  exec python3 tools/pre_pr_merge_ref.py
+fi
+if [ "$#" -ne 0 ]; then
+  echo "usage: ./tools/pre_pr.sh [--merge-ref]" >&2
+  exit 2
+fi
+
 fail=0
 
 echo "== ruff =="
@@ -60,6 +74,17 @@ echo "== vocabulary mirrors =="
 python3 tools/check_vocabulary_mirrors.py --self-test || fail=1
 python3 tools/check_vocabulary_mirrors.py --check || fail=1
 
+# issue #2844: hand-written `path:line` references in docs and comments rot
+# silently when the cited file moves or shortens; nothing else checks them.
+# Advisory for now: tools/doc_refs_ledger.json records the findings the tree
+# already has, so this is green on adoption and reports only a finding that is
+# not recorded. It does not set fail=1 and CI does not run it yet. Repair an
+# anchor, then rerun `--write-ledger` and the ledger shrinks.
+echo "== doc refs (advisory) =="
+if ! python3 tools/check_doc_refs.py --check; then
+  echo "doc refs: advisory only for now (issue #2844); repair the reference or record it with --write-ledger."
+fi
+
 echo "== roadmap markers =="
 # --head-branch is the cheap half of the PR-context check: a marker saying work
 # is IN FLIGHT on the branch you are about to open the PR from goes stale the
@@ -67,7 +92,7 @@ echo "== roadmap markers =="
 # costs nothing, catching it in CI costs a round-trip, and not catching it at
 # all reddens main plus every open PR whose merge-ref carries the new text.
 # A detached HEAD reports "HEAD", which names no branch and leaves it off.
-branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+branch="${PRE_PR_HEAD_BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
 [ "$branch" = "HEAD" ] && branch=""
 python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --head-branch "$branch" || fail=1
 

@@ -1233,6 +1233,11 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         if node.get("op") in _TS_EQUALITY_OPS:
             left = _expr(node["left"], ctx)
             right = _expr(node["right"], ctx)
+            if _ts_strict_equality(node):
+                op = "===" if node["op"] in ("==", "===") else "!=="
+                left = _ts_widened_literal(node["left"], left)
+                right = _ts_widened_literal(node["right"], right)
+                return f"({left} {op} {right})"
             call = f"revlEq({left}, {right})"
             return call if node["op"] in ("==", "===") else f"(!{call})"
         op = _TS_V3_BIN_OPS.get(node.get("op"))
@@ -3534,10 +3539,14 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
-    # once, receiver never mutates.
+    # once, receiver never mutates. The operands are ARGUMENTS of the call,
+    # not text inside the closure body, so a user name can never be read
+    # through the closure's own temporaries (a Map named `c` used to hit the
+    # temporary `c` before its initialiser ran, issue #2900).
     if method == "set":
-        return (f"(() => {{ const c = new Map({target}); "
-                f"c.set({args[0]}, {args[1]}); return c }})()")
+        return (f"(<K, V>(_m: Map<K, V>, _k: K, _v: V) => "
+                f"{{ const _c = new Map(_m); _c.set(_k, _v); return _c }})"
+                f"({target}, {args[0]}, {args[1]})")
     if method == "lookup":
         # Map.get answers undefined when absent: exactly the Opt None case.
         return f"{target}.get({args[0]})"
@@ -3561,8 +3570,9 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     if method == "keys":
         return f"[...{target}.keys()].sort(revlStrCmp)"
     if method == "remove":
-        return (f"(() => {{ const c = new Map({target}); "
-                f"c.delete({args[0]}); return c }})()")
+        return (f"(<K, V>(_m: Map<K, V>, _k: K) => "
+                f"{{ const _c = new Map(_m); _c.delete(_k); return _c }})"
+                f"({target}, {args[0]})")
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): Int is a
     # bigint on this tier, and BigInt.prototype.toString is exact decimal.
     if method == "to_str":
@@ -4623,6 +4633,102 @@ def _uses_assert(node) -> bool:
 
 
 _TS_EQUALITY_OPS = ("==", "===", "!=", "!==")
+
+
+def _plain_primitive_literal(node: object) -> bool:
+    """A Str, Int or Bool literal that renders as itself (issue #2901).
+
+    A literal carrying a `widen` marker renders as a conversion (`Number(3n)`,
+    see #2715), and a Float or `None` literal is not one of the three kinds, so
+    none of those qualify.
+    """
+    if not isinstance(node, dict) or node.get("kind") != "lit" or "widen" in node:
+        return False
+    return isinstance(node.get("value"), (str, int))
+
+
+def _ts_literal_kind(node: dict) -> str:
+    """`Str`, `Bool` or `Int` for a `_plain_primitive_literal` node."""
+    value = node["value"]
+    if isinstance(value, bool):
+        return "Bool"
+    return "Str" if isinstance(value, str) else "Int"
+
+
+_TS_INT_ARITH_OPS = ("+", "-", "*", "%")
+
+
+def _ts_known_primitive(node: dict, kind: str) -> bool:
+    """Whether the IR shows `node` has exactly the primitive type `kind`.
+
+    Only an Int literal is at risk: an Int operand is a bigint, but an
+    operand the checker lets meet an Int literal can be a JS `number` with no
+    `widen` marker on it (`m["a"] == 3` for a `Map[Str, Float]`, an
+    `Opt[Float]` against `3`), and `number === bigint` is a TS2367 error. So
+    an Int literal needs an operand whose Int type the IR states: another
+    Int literal, `+ - * %` or a negation annotated `operands: "Int"`, or a Map
+    index whose `value_type` is `Int`. A Map index is held to its
+    `value_type` for every kind, and a List index (which carries none) never
+    qualifies.
+
+    A Str or Bool literal accepts any other operand: no widening reaches
+    `Str` or `Bool`, so every operand the checker admits against one is a JS
+    string or boolean, or that or `undefined` for an `Opt`, all of which
+    overlap the literal's type.
+    """
+    if _plain_primitive_literal(node):
+        return _ts_literal_kind(node) == kind
+    node_kind = node.get("kind")
+    if node_kind == "index":
+        return node.get("value_type") == kind
+    if kind != "Int":
+        return True
+    if node_kind == "bin":
+        return node.get("op") in _TS_INT_ARITH_OPS and node.get("operands") == "Int"
+    if node_kind == "un":
+        return node.get("op") == "-" and node.get("operands") == "Int"
+    return False
+
+
+def _ts_strict_equality(node: dict) -> bool:
+    """Whether this `==`/`!=` may be written with `===`/`!==` (issue #2901).
+
+    `revlEq` opens with `a === b` and answers false for any other pair where
+    either side is not an object. A Str, Int or Bool literal is a JS string,
+    bigint or boolean, never an object, so with one on either side the call
+    and the bare operator give the same answer for every value of the other
+    operand. The Int literal is a bigint like every other Int on this tier.
+
+    The operator is also typechecked, so it is written only where the other
+    operand is known to have the literal's type (`_ts_known_primitive`). An
+    operand carrying a `widen` marker, a mixed Int/Float or Int32/Int
+    comparison (#2715), keeps `revlEq`.
+    """
+    left, right = node["left"], node["right"]
+    if any(isinstance(side, dict) and "widen" in side for side in (left, right)):
+        return False
+    if _plain_primitive_literal(left):
+        return _ts_known_primitive(right, _ts_literal_kind(left))
+    if _plain_primitive_literal(right):
+        return _ts_known_primitive(left, _ts_literal_kind(right))
+    return False
+
+
+_TS_LITERAL_TYPES = {str: "string", bool: "boolean", int: "bigint"}
+
+
+def _ts_widened_literal(node: object, text: str) -> str:
+    """A literal operand of a strict equality, typed as its primitive (#2901).
+
+    tsc gives `const k = 4n` the literal type `4n`, and narrows a `boolean`
+    to `false` inside `if (!b)`, so a bare `k === 5n` or `b === true` there
+    is a TS2367 "no overlap" error. `(5n as bigint)` widens the literal back
+    to the type the revl checker gave it, which needs no knowledge of the
+    other operand's binding.
+    """
+    if not _plain_primitive_literal(node):
+        return text
+    return f"({text} as {_TS_LITERAL_TYPES[type(node['value'])]})"
 
 # Structural equality, matching python's `==` on dicts/lists and java's
 # `Objects.equals`. Key order is irrelevant (as in python), arrays and objects

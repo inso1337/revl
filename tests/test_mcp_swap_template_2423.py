@@ -424,6 +424,9 @@ def test_a_trusted_host_code_edit_refuses_to_inherit_state(
     assert edited["ok"] is False, edited
     assert edited["code"] == "STATE_UNDISCLOSED"
     assert edited.get("swapped") is not True
+    # issue #2845: the commit door carries the same repair the swap door does
+    assert edited["repair"]["target"] == "template `Worker`"
+    assert "re-declare `Worker`" in edited["repair"]["edit"]
     assert _call("revl_call", {"key": "admin", "method": "ver"})["result"] == 1
     assert _call("revl_call", {"key": "admin", "method": "read",
                                "args": ["alice"]})["result"] == "42"
