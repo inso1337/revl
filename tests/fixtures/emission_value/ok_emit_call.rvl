@@ -1,0 +1,16 @@
+// ADMITTED (issues #2842 and #2834): the emission is reached only by calls,
+// under `emit` in the provide method and directly in the `fn` it reaches it
+// through. The file name's prefix is the expected verdict (`g4_` refused,
+// `ok_` admitted); tests/test_formal_emission_value_row.py holds it.
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn bill(x: Str) -> Int { return send(x) }
+service Ops { emission fn invoke(x: Str) -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn invoke(x) {
+      let a = emit send(x)
+      return emit bill(x)
+    }
+  }
+}

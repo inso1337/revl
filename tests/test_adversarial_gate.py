@@ -25,10 +25,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import RevlError, compile_source  # noqa: E402
 from revl.audit_diff import audit_report, crossings  # noqa: E402
 from revl.mcp.schema import tools_from_ir  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 
 SHIP = (
     'extern emission fn ship(x: Str) -> Str = '
@@ -73,9 +75,9 @@ component C provides s: S {
   }
 }
 """)
-    assert "`S.quiet` is declared plain" in str(excinfo.value)
-    assert "passed as a function value" in str(excinfo.value)
-    assert excinfo.value.category == "emission-propagation"
+    assert "emission `ship` cannot be used as a function value" \
+        in str(excinfo.value)
+    assert excinfo.value.category == "emission-value"
 
 
 def test_emission_stashed_in_a_list_literal_is_refused():
@@ -89,8 +91,9 @@ component C provides s: S {
   provide s { fn quiet(a) = apply0([ship], a) }
 }
 """)
-    assert "passed as a function value" in str(excinfo.value)
-    assert excinfo.value.category == "emission-propagation"
+    assert "emission `ship` cannot be used as a function value" \
+        in str(excinfo.value)
+    assert excinfo.value.category == "emission-value"
 
 
 def test_an_emission_bound_but_never_called_is_still_refused():
@@ -110,8 +113,9 @@ component C provides s: S {
   }
 }
 """)
-    assert "passed as a function value" in str(excinfo.value)
-    assert excinfo.value.category == "emission-propagation"
+    assert "emission `ship` cannot be used as a function value" \
+        in str(excinfo.value)
+    assert excinfo.value.category == "emission-value"
 
 
 def test_an_emission_in_value_position_is_refused():
@@ -174,8 +178,9 @@ component C provides s: S {
 
 def test_a_scoped_emission_reaching_an_unnameable_boundary_is_refused():
     """`emission[db]` promises the provider crosses only `db`. Laundering a
-    host emission through a first-class value reaches the unnameable `*`, which
-    no `emission[...]` bound can name — so the bound must reject it."""
+    host emission through a first-class value would reach the unnameable `*`,
+    which no `emission[...]` bound can name. Since issue #2842 the value itself
+    is refused before the bound is consulted."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(SHIP + """
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
@@ -185,9 +190,9 @@ component C requires db: Database provides s: S {
   provide s { fn put(a) = indirect(ship, a) }
 }
 """)
-    assert "`S.put` is declared `emission[db]`" in str(excinfo.value)
-    assert "unnameable host boundary" in str(excinfo.value)
-    assert excinfo.value.category == "emission-capability"
+    assert "emission `ship` cannot be used as a function value" \
+        in str(excinfo.value)
+    assert excinfo.value.category == "emission-value"
 
 
 def test_a_scoped_emission_that_stays_in_bounds_compiles():
@@ -535,7 +540,9 @@ def test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface():
     exactly as the direct call does. Item 24 folded the G4 first-class-reach
     fixed point into `_boundary`, so the laundered reach now surfaces the same
     `host:` crossing token as the direct call — no authority-drift blind spot.
-    Previously xfail (G8 enumeration gap); now resolved."""
+    Previously xfail (G8 enumeration gap); now resolved. The compiler refuses
+    the source since issue #2842; the surface reads IR, so it is measured on
+    the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
     source = SHIP + """
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 service S { emission fn loud(a: Str) -> Str }
@@ -543,6 +550,10 @@ component C provides s: S {
   provide s { fn loud(a) = indirect(ship, a) }
 }
 """
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(source)
+    with value_rule_off():
+        ir = compile_source(source)
     # surfaces `ship` the same way the direct call does (see the baseline above).
-    assert "ship" in {e["name"] for e in _boundary(source, "C")["externs"]}
-    assert "host:C:ship" in crossings(audit_report(compile_source(source)))
+    assert "ship" in {e["name"] for e in audit_report(ir)["boundary"]["C"]["externs"]}
+    assert "host:C:ship" in crossings(audit_report(ir))

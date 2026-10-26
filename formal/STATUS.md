@@ -343,6 +343,14 @@ Three summary readings of that map:
 | `RevL.G4Deferred.refused_of_mem` | G4 deferred position — the file rule | **proved** | none | one illegal reach refuses the file wherever it sits |
 | `RevL.G4Deferred.fixtures_decided` | G4 deferred position — the corpus shapes | **proved** | `propext` | `ok_emit_step` admitted; a call in a `fn` body, a call in an arrow there and a component value refused |
 | `RevL.G4Deferred.deferred_not_vacuous` | G4 deferred position — non-vacuity | **proved** | `propext, Quot.sound` | the rule admits the component call and refuses the `fn`-body call and the component value |
+| `RevL.G4EmissionValue.legalB_iff` | G4 emission value: one reach (issues #2842, #2834) | **proved** | `propext` | `legalB r = true ↔ Legal r`: a reach of an emission, or of a `fn` reaching one, is legal exactly when it is a call, or a call inside an arrow in a component |
+| `RevL.G4EmissionValue.emissionValueB_iff` | G4 emission value: the bridge | **proved** | `propext, Quot.sound` | `emissionValueB rs = true ↔ EmissionValueOK rs`: the printed `EV` verdict is exactly "every reach is legal" |
+| `RevL.G4EmissionValue.value_never_legal` | G4 emission value: values | **proved** | none | an emission handed on as a function value is refused in every scope, a component included |
+| `RevL.G4EmissionValue.arrow_in_fn_refused` | G4 emission value: arrows in `fn` bodies | **proved** | none | an arrow calling an emission in a `fn` body is refused: the arrow is the emission handed on as a value |
+| `RevL.G4EmissionValue.call_always_legal` | G4 emission value: calls | **proved** | none | a named call is never this rule's refusal; whether it is marked `emit` is the marker rule's |
+| `RevL.G4EmissionValue.refused_of_mem` | G4 emission value: the file rule | **proved** | none | one illegal reach refuses the file wherever it sits |
+| `RevL.G4EmissionValue.fixtures_decided` | G4 emission value: the corpus shapes | **proved** | `propext` | `ok_emit_call` admitted; a component value, a `fn`-body value and a `fn`-body arrow refused |
+| `RevL.G4EmissionValue.emission_value_not_vacuous` | G4 emission value: non-vacuity | **proved** | `propext, Quot.sound` | the rule admits the calls and refuses each of the three value shapes |
 | `RevL.G4Approval.coversB_iff` | G4 approval floor — coverage (issue #1455) | **proved** | `propext, Classical.choice, Quot.sound` | `coversB scope token = true ↔ Covers scope token`: exact match, or the glob scope matches (`lower._approval_covers`) |
 | `RevL.G4Approval.edgeCoversB_iff` | G4 approval floor — the edge | **proved** | `propext, Classical.choice, Quot.sound` | no edge covers nothing; an edge covers exactly what its scope covers |
 | `RevL.G4Approval.crossingB_iff` | G4 approval floor — the bridge | **proved** | `propext, Classical.choice, Quot.sound` | `crossingB required c = true ↔ CrossingOK required c`: the printed `AP` verdict is exactly the rule |

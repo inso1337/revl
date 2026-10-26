@@ -4144,10 +4144,12 @@ def _witnessed_extern_names(program: Program) -> set[str]:
 
 
 def _refuse_effect_position_bound_externs_in_fn_body(
-        program: Program, filename: str) -> None:
-    """One walk over every `fn`/`test` body, refusing the three extern kinds
-    whose effect machinery exists only in effect position — a bare call from a
-    plain fn/test body would silently drop it:
+        program: Program, filename: str,
+        emission_values: dict[str, str] | None = None) -> None:
+    """One walk over every `fn`/`test` body, refusing three extern kinds whose
+    effect machinery exists only in effect position (a bare call from a plain
+    fn/test body would silently drop it), plus first-class emission values in
+    module function bodies:
 
     * `witnessed` (rule 1, docs/design/243-witnessed-externs.md): the teardown
       accumulator that auto-registers the declared inverse exists only in a
@@ -4158,6 +4160,10 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     * a `deferred` emission (item 400): a fn/test body has no session commit for
       the deferral to fire at, so it fires immediately, bypassing the commit
       queue (`deferred` fires at commit; an abort drops the queue, item 245).
+    * an irreversible emission callable (issue #2842): a function value has no
+      named `emit` call site, so dispatching it would bypass the marker. That
+      covers an arrow whose body calls one: the arrow is itself such a value.
+      `emission_values` maps each callable to the extern its refusal names.
 
     Every extern is otherwise callable from a fn/test body (they seed the
     `callables` set), so these are explicit refusals, checked over the author's
@@ -4172,15 +4178,12 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     not compile. A component's own CALL of one carries the marker (#1437) and
     is enqueued in every position the marker appears.
 
-    These were three sequential passes, each re-walking the identical set of
-    fn/test bodies (P-9, #543). Folded into one traversal here. Diagnostic order
-    is preserved verbatim: the walk records the FIRST violation of each kind (in
-    the same fn-then-test, definition-order recursion the passes used) and then
-    reports them witnessed-before-(acquire/deferred) — exactly what running the
-    witnessed pass to completion before the teardown pass produced. An extern
-    carries one classification, so the `witnessed` and `acquire` sets are
-    disjoint; `acquire` is checked before `deferred`, matching the original
-    first-`if`-raises order."""
+    The original three rules were sequential walks over the same bodies
+    (P-9, #543); this keeps them in one traversal and adds the #2842 value check
+    to module functions. Diagnostic order stays witnessed-before-teardown-
+    before-emission-value. Tests keep their deferred/witnessed/acquire rules but
+    do not participate in the #2842 module-function check; component values are
+    resolved in `_lower_component_pure_expr`, where lexical scope is available."""
     from .parser import ExprArrow, ExprCall, ExprVar
 
     witnessed = _witnessed_extern_names(program)
@@ -4188,14 +4191,17 @@ def _refuse_effect_position_bound_externs_in_fn_body(
         ext.name for ext in program.externs
         if ext.classification == "acquire" and ext.undo is not None}
     deferred = {ext.name for ext in program.externs if ext.deferred}
-    if not witnessed and not acquire_undo and not deferred:
+    emission_values = emission_values or {}
+    if not witnessed and not acquire_undo and not deferred and not emission_values:
         return
 
     first_witnessed: RevlError | None = None
     first_teardown: RevlError | None = None
+    first_emission_value: RevlError | None = None
 
-    def _walk(node, where: str, in_arrow: bool = False, calls: bool = True):
-        nonlocal first_witnessed, first_teardown
+    def _walk(node, where: str, in_arrow: bool = False, calls: bool = True,
+              check_emission_values: bool = True):
+        nonlocal first_witnessed, first_teardown, first_emission_value
         if isinstance(node, ExprArrow):
             in_arrow = True
         if isinstance(node, ExprVar) and node.name in deferred \
@@ -4203,6 +4209,22 @@ def _refuse_effect_position_bound_externs_in_fn_body(
             # a value, not a call: the callee position is skipped below
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
+        if check_emission_values and isinstance(node, ExprVar) \
+                and node.name in emission_values and first_emission_value is None:
+            # A callable that reaches an irreversible extern cannot escape as
+            # a value: the eventual dispatch has no named `emit` call site.
+            # Direct call heads are skipped below, so ordinary calls retain
+            # their existing treatment and `emit send(...)` stays valid.
+            first_emission_value = _emission_value_refusal(
+                node.name, emission_values[node.name], filename, node.line)
+        if check_emission_values and isinstance(node, ExprArrow) \
+                and first_emission_value is None:
+            # An arrow that calls one is a value carrying the same crossing:
+            # whoever receives it runs the host body outside any `emit`.
+            hit = sorted(_arrow_call_heads(node.body) & set(emission_values))
+            if hit:
+                first_emission_value = _emission_arrow_refusal(
+                    hit[0], emission_values[hit[0]], filename, node.line)
         if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
             name = node.callee.name
             if first_witnessed is None and name in witnessed:
@@ -4249,27 +4271,31 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 if f == "callee" and isinstance(node, ExprCall) \
                         and isinstance(child, ExprVar):
                     continue  # the callee position is a CALL, judged above
-                _walk(child, where, in_arrow, calls)
+                _walk(child, where, in_arrow, calls, check_emission_values)
         elif isinstance(node, (list, tuple)):
             for x in node:
-                _walk(x, where, in_arrow, calls)
+                _walk(x, where, in_arrow, calls, check_emission_values)
 
     for fn in program.fn_decls:
         for stmt in fn.body:
             _walk(stmt, f"the body of fn `{fn.name}`")
     for test in program.tests:
         for stmt in test.body:
-            _walk(stmt, f"the body of test `{test.name}`")
+            _walk(stmt, f"the body of test `{test.name}`",
+                  check_emission_values=False)
     if deferred:
         # a component CALLS a deferred extern under its `emit` marker, which is
         # enqueued wherever it appears; only a VALUE reference is refused there
         for comp in program.components:
-            _walk(comp.body, f"component `{comp.name}`", calls=False)
+            _walk(comp.body, f"component `{comp.name}`", calls=False,
+                  check_emission_values=False)
 
     if first_witnessed is not None:
         raise first_witnessed
     if first_teardown is not None:
         raise first_teardown
+    if first_emission_value is not None:
+        raise first_emission_value
 
 
 def _deferred_value_refusal(name: str, where: str, filename: str,
@@ -4288,6 +4314,57 @@ def _deferred_value_refusal(name: str, where: str, filename: str,
              "(docs/design/245-session-commit.md, issue #1457)",
         code="G4", category="deferred",
     )
+
+
+def _emission_value_refusal(name: str, extern: str, filename: str,
+                            line: int) -> RevlError:
+    """A callable reaching an emission used as a function value (issue #2842):
+    whoever calls the value runs the host body with no `emit` marker, so no
+    emission step is recorded and no declared ceiling is checked."""
+    subject = (f"emission `{name}`" if name == extern
+               else f"`{name}` reaches emission `{extern}` and")
+    return RevlError(
+        filename, line,
+        f"{subject} cannot be used as a function value; call it by name "
+        f"under `emit` (G4)",
+        hint="an emission crossing is recorded and metered only at a named "
+             "call site marked `emit`; bind its result, not the callable",
+        code="G4", category="emission-value",
+    )
+
+
+def _emission_arrow_refusal(callee: str, extern: str, filename: str,
+                            line: int) -> RevlError:
+    """An arrow in a `fn` body whose body calls an emission callable (issue
+    #2842): the arrow is a function value carrying that crossing."""
+    via = "" if callee == extern else f" through `{callee}`"
+    return RevlError(
+        filename, line,
+        f"this arrow reaches emission `{extern}`{via} and cannot be used as a "
+        f"function value; call `{callee}` by name under `emit` (G4)",
+        hint="an emission crossing is recorded and metered only at a named "
+             "call site marked `emit`; bind its result, not the callable",
+        code="G4", category="emission-value",
+    )
+
+
+def _arrow_call_heads(node) -> set[str]:
+    """The names called by name anywhere under `node` (nested arrows too)."""
+    from .parser import ExprCall, ExprVar
+    out: set[str] = set()
+
+    def _visit(n) -> None:
+        if isinstance(n, ExprCall) and isinstance(n.callee, ExprVar):
+            out.add(n.callee.name)
+        if hasattr(n, "__dataclass_fields__"):
+            for f in type(n).__dataclass_fields__:
+                _visit(getattr(n, f))
+        elif isinstance(n, (list, tuple)):
+            for x in n:
+                _visit(x)
+
+    _visit(node)
+    return out
 
 
 def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: str) -> None:
@@ -8961,9 +9038,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # (item 243 rule 1) whose auto-registered inverse would be dropped; an
     # `acquire` with an `undo` (399) whose teardown would be dropped; a
     # `deferred` emission (400) that would fire immediately, bypassing the
-    # commit queue. Reported witnessed-before-teardown, as when these were three
-    # sequential passes.
-    _refuse_effect_position_bound_externs_in_fn_body(program, program.filename)
+    # commit queue. The same walk rejects first-class references to any
+    # irreversible emission callable (issue #2842). Reported
+    # witnessed-before-teardown-before-emission-value, preserving the existing
+    # diagnostic order from the earlier sequential passes.
+    irreversible_fns = set(_emitting_capabilities(
+        fns, externs, classes=("emission",)))
+    emission_value_externs = _emission_value_externs(
+        fns, externs, exclude=set(_async_callables(fns, externs)))
+    _refuse_effect_position_bound_externs_in_fn_body(
+        program, program.filename, emission_values=emission_value_externs)
     _refuse_host_acquire_in_component_reachable_fn(program, program.filename)
     # Slice 2: the set every component's effect-position lowering consults to
     # tell a witnessed acquisition from an ordinary one (docs/design/243-
@@ -8976,15 +9060,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     emission_evidence = _EmissionEvidence(program)
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
-    # issue #1912: the same closure under the `emission` seed ALONE — the names
-    # whose reach includes a crossing that cannot be reverted, as against
-    # `emitting_fns`, which counts a `witnessed` extern's reach too (item 243).
-    # The provider bound is the consumer: a `witnessed[...]` service operation
-    # promises its providers reach only reversible code, and that promise is
-    # checked against this set. A subset of `emitting_fns` by construction, so
-    # a program with no `witnessed` extern has the two identical.
-    irreversible_fns = set(_emitting_capabilities(fns, externs,
-                                                 classes=("emission",)))
+    # `irreversible_fns` is the closure seeded by the `emission` class alone,
+    # computed above so the same set rejects first-class emission values and
+    # bounds component methods. The provider bound is its other consumer: a
+    # `witnessed[...]` service operation promises its providers reach only
+    # reversible code, and that promise is checked against this set.
 
     # item 310: the capability-aware caching admission checks, run here once the
     # emission fixed point and the type/extern tables are known (a `cache pure`
@@ -9073,8 +9153,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         # Async[T]` carries the async flag and is admitted; a plain one that
         # reaches a suspension is refused. Pure fns have no req keys, so only
         # the named-callable reach applies here (rule 3 is component-only).
-        _refuse_leaky_pure_arrow(entry.get("body") or [], async_colored,
-                                 _fn_decls_by_name.get(name), program.filename)
+        _refuse_leaky_pure_arrow(
+            entry.get("body") or [], async_colored,
+            _fn_decls_by_name.get(name), program.filename,
+            frozenset(p["name"] for p in (entry.get("params") or [])
+                      if _is_async_fn_type(p.get("type"))))
         if name in async_colored:
             entry["async"] = True
 
@@ -9153,6 +9236,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                                 if e.get("class") == "acquire"
                                                 and _callee_name(e.get("undo"))},
                                             irreversible_fns=irreversible_fns,
+                                            emission_value_externs=(
+                                                emission_value_externs),
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -10095,6 +10180,16 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 and not str(info.get("adt", "")).startswith(("Result", "Opt")):
             return {"kind": "adt", "type": info["adt"], "case": name, "args": []}
         if name in callables:
+            # Keep every irreversible crossing at a named `emit` call site.
+            # The local `scope` branch above wins first, so a parameter or
+            # binding that shadows a module callable is not mistaken for the
+            # extern value itself. Async-colored values keep their A1
+            # diagnostic; the method's G4 evidence still checks the declared
+            # service bound before the later async pass.
+            extern = (getattr(env, "emission_value_externs", None) or {}).get(name)
+            if extern is not None \
+                    and name not in (getattr(env, "async_callables", None) or set()):
+                raise _emission_value_refusal(name, extern, filename, line)
             return {"kind": "var", "name": name}
         if name in getattr(env, "stream_requires", {}):
             # item 130: the key IS declared — it is a required stream, and a
@@ -10786,6 +10881,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _calls_in,
     _capability_hint,
     _emission_chain,
+    _emission_value_externs,
     _emitting_capabilities,
     _emitting_fns,
     _method_emissions,
@@ -11566,15 +11662,25 @@ def _admit_sync_test_bodies(tests, prop_tests, async_colored, colour_polymorphic
             )
 
 
-def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
+def _refuse_leaky_pure_arrow(node, async_colored, decl, filename,
+                             async_params: frozenset = frozenset()) -> None:
     """The module-fn twin of `_refuse_leaky_arrow`: a sync-typed arrow whose
     body reaches an async callable (a colored name — pure fns have no req keys)
-    is the item-92 leak. Admitted (async-flagged) arrows are skipped."""
+    is the item-92 leak. Admitted (async-flagged) arrows are skipped.
+
+    `async_params` names the enclosing fn's parameters whose type is an async
+    fn type (`(…) -> Async[T]`). A call through one is a suspension exactly as
+    a call to a colored name is, so a sync arrow that wraps it is the same
+    leak (issue #2842). An arrow's own parameters shadow those names inside
+    its body."""
     if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            own = {p for p in (node.get("params") or []) if isinstance(p, str)}
+            async_params = frozenset(async_params - own)
         if node.get("kind") == "arrow" and not node.get("async"):
             called: set = set()
             _calls_in(node.get("body"), called, stop_async_arrows=True)
-            hit = sorted(called & (async_colored or set()))
+            hit = sorted(called & ((async_colored or set()) | async_params))
             if hit:
                 raise RevlError(
                     (decl.source if decl is not None else None) or filename,
@@ -11589,10 +11695,10 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
                     code="A1", category="async-propagation",
                 )
         for value in node.values():
-            _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
+            _refuse_leaky_pure_arrow(value, async_colored, decl, filename, async_params)
     elif isinstance(node, list):
         for value in node:
-            _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
+            _refuse_leaky_pure_arrow(value, async_colored, decl, filename, async_params)
 
 
 # item 130 rule 3.5 — the IR kinds a `map`/`filter` transform may NOT contain.
@@ -13809,6 +13915,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      extern_undo: dict | None = None,
                      extern_inverse: dict | None = None,
                      irreversible_fns: set | None = None,
+                     emission_value_externs: dict | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
@@ -13823,6 +13930,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # from "does this reach a boundary at all". Absent (an older caller) is the
     # full set, which filters nothing.
     env.irreversible_fns = irreversible_fns
+    # issue #2842: the callables a component body may name only as the head of
+    # a call, each with the extern its value refusal names
+    env.emission_value_externs = emission_value_externs or {}
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()
     env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}

@@ -265,6 +265,11 @@ REJECTIONS = {
         "config field `on_row` of extern `load_rows` has type `Handler`, "
         "which reaches the opaque type `Handler`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
+    # issue #2842: a budget-free emission extern cannot escape its named `emit`
+    # call site as a first-class value.
+    "g4_first_class_emission_value.rvl":
+        "emission `send` cannot be used as a function value; call it by name "
+        "under `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     # item 294 Slice 1: a spawn that widens a parameterized capability (a child
     # reaching a path outside the parent's declared cone) is refused by the same

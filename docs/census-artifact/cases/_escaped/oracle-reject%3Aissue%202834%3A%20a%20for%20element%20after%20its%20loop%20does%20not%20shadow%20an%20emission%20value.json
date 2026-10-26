@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2834: a for element after its loop does not shadow an emission value", "buckets": ["agree-refuse/G4"]}

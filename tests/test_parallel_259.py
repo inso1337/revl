@@ -26,44 +26,61 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _legacy_emission_ir import value_rule_off  # noqa: E402
+
+import pytest  # noqa: E402
 
 from revl import cap_order as co  # noqa: E402
 from revl import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
 from revl.parallel import parallel_plan  # noqa: E402
 
 # Shared declarations: three distinct-token emission services, a `commutative`
-# metrics service, a bare (`*`) emission, and a first-class dispatcher chain
-# (`dispatch` passes the emitting extern `launder` to `indirect`, so its reach is
-# `*`/unknown_dispatch - the arm walk cannot name it).
+# metrics service and a bare (`*`) emission.
 HDR = """
 service Mailer { emission[send.email] fn send(to: Str) }
 service Db { emission[db.write] fn write(row: Str) }
 service Log { commutative emission[metrics] fn tick(x: Str) }
 service Bare { emission fn go(x: Str) -> Str }
 service Run { emission fn run(x: Str) -> Str }
+"""
+
+# A first-class dispatcher chain (`dispatch` passes the emitting extern
+# `launder` to `indirect`, so its reach is `*`/unknown_dispatch - the arm walk
+# cannot name it). The compiler refuses this since issue #2842, so Barrier B is
+# measured on the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`):
+# the plan reads IR, and must still split around such a step.
+DISPATCH = """
 extern emission fn launder(msg: Str) -> Str = @py { return msg }
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 fn dispatch(x: Str) -> Str { return indirect(launder, x) }
 """
 
 
-def _plan(requires: str, body: str) -> list[list[int]]:
-    src = HDR + (
+def _ir(requires: str, body: str) -> dict:
+    dispatch = "dispatch(" in body
+    src = HDR + (DISPATCH if dispatch else "") + (
         f"component W requires {requires} provides run: Run {{\n"
         f"  provide run {{ fn run(x) {{ {body} return x }} }}\n"
         f"}}\n"
     )
-    return parallel_plan(compile_source(src, "parallel.rvl")).get("W", [])
+    if not dispatch:
+        return compile_source(src, "parallel.rvl")
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(src, "parallel.rvl")
+    with value_rule_off():
+        return compile_source(src, "parallel.rvl")
+
+
+def _plan(requires: str, body: str) -> list[list[int]]:
+    return parallel_plan(_ir(requires, body)).get("W", [])
 
 
 def _audit(requires: str, body: str) -> dict:
-    src = HDR + (
-        f"component W requires {requires} provides run: Run {{\n"
-        f"  provide run {{ fn run(x) {{ {body} return x }} }}\n"
-        f"}}\n"
-    )
-    return audit_report(compile_source(src, "parallel.rvl"))
+    return audit_report(_ir(requires, body))
 
 
 # ---------------------------------------------------------------- cap_order.disjoint

@@ -1,0 +1,15 @@
+// REFUSED G4 (issue #2834): a `fn` hands a budgeted emission to the provide
+// method as a value, so the call made through it would bypass `emit` and the
+// declared `calls=1` ceiling.
+
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn get() -> (Str) -> Int { return call }
+service Ops { emission fn m() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn m() {
+      let f = emit get()
+      return f("a")
+    }
+  }
+}

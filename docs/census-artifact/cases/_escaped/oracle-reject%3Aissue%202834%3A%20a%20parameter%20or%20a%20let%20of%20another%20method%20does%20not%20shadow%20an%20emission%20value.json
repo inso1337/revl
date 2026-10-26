@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2834: a parameter or a let of another method does not shadow an emission value", "buckets": ["agree-refuse/G4"]}

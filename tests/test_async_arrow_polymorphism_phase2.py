@@ -43,8 +43,12 @@ def _functions(ir):
 # The repro: ONE colour-polymorphic loop reached from a module `fn` AND directly
 # from a `test` block, each with a genuinely-sync arrow. -----------------------
 
+# `sync_op` is a plain sync extern. It was `extern emission` before issue
+# #2842; an arrow calling an emission in a `fn` body hands the emission on as a
+# value and is refused now, and the colouring under test needs only a sync
+# callee.
 _REPRO = (
-    "extern emission fn sync_op(x: Str) -> Str\n"
+    "extern pure fn sync_op(x: Str) -> Str\n"
     '  = @py { return x + " (sync)" }\n'
     '  = @ts { return x + " (sync)" }\n'
     "fn loop(c: (Str) -> Async[Str], x: Str) -> Str {\n"
@@ -191,7 +195,7 @@ def test_genuinely_async_module_fn_keeps_the_async_loop():
     # sync-arrow loop call must stay the async loop (item-92 coercion), NOT be
     # monomorphized to the sync clone.
     src = (_ASYNC_EXTERN
-           + "extern emission fn sop(x: Str) -> Str = @py { return x }\n"
+           + "extern pure fn sop(x: Str) -> Str = @py { return x }\n"
            + "  = @ts { return x }\n"
            + "fn loop(c: (Str) -> Async[Str], x: Str) -> Str { let r = c(x)\n return r }\n"
            + "fn caller(x: Str) -> Str {\n"

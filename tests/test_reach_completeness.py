@@ -52,6 +52,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import AdmissionProfile, compile_source  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
@@ -60,6 +61,7 @@ from revl.distribute import _resource_taint  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.mcp.approval import ClassMap  # noqa: E402
 from revl.placement import resource_crossing_refusal  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 from revl.policy import (  # noqa: E402
     TAINT_FOLD_ORIGINS, AutoApproveRule, component_reach,
 )
@@ -149,13 +151,27 @@ def _reach_zoo(kinds: frozenset[str]) -> str:
     return src
 
 
+def _zoo_ir(kinds: frozenset[str], src: str, name: str) -> dict:
+    """Compile a zoo. The `firstclass` kind hands an emission extern on as a
+    value, which the compiler refuses since issue #2842. The surfaces under
+    test read IR (a federation may admit IR an earlier compiler emitted), so
+    with that kind present the refusal is asserted and the zoo is measured on
+    the older IR (`tests/_legacy_emission_ir.py`)."""
+    if "firstclass" not in kinds:
+        return compile_source(src, name)
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(src, name)
+    with value_rule_off():
+        return compile_source(src, name)
+
+
 def _boundary_reach(kinds: frozenset[str]) -> frozenset[str]:
     """Surface: the G8 `_boundary` audit. Hub's crossed capability tokens — the
     scope of each emission call site, and the token of each host extern it
     reaches (item 247: a scoped extern's DECLARED token, its NAME when
     unscoped, the same `capabilities or (name,)` rule `component_reach` and the
     approval fold use)."""
-    audit = audit_report(compile_source(_reach_zoo(kinds), "reach.rvl"))
+    audit = audit_report(_zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl"))
     stats = audit["boundary"]["Hub"]
     caps = {tok for caps in stats["capabilities"].values() for tok in caps}
     externs = {tok for e in stats["externs"]
@@ -165,14 +181,14 @@ def _boundary_reach(kinds: frozenset[str]) -> frozenset[str]:
 
 def _component_reach(kinds: frozenset[str]) -> frozenset[str]:
     """Surface: `policy.component_reach`. The reached-authority token set."""
-    audit = audit_report(compile_source(_reach_zoo(kinds), "reach.rvl"))
+    audit = audit_report(_zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl"))
     return frozenset(r.token for r in component_reach(audit, "Hub"))
 
 
 def _approval_reach(kinds: frozenset[str]) -> frozenset[str]:
     """Surface: the approval `ClassMap` fold. The capability set the worst-class
     fold over `hive.go`'s closure derives."""
-    ir = compile_source(_reach_zoo(kinds), "reach.rvl")
+    ir = _zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl")
     reach = ClassMap(ir).classify_call("hive", "go")
     return frozenset(reach["capabilities"]) if reach else frozenset()
 
@@ -535,7 +551,7 @@ def _cache_applicability_reach(kinds: frozenset[str]) -> frozenset[str]:
     tokens the fold names as making `hive.go`'s provider closure uncacheable."""
     from revl.mcp.approval import cache_applicability_findings
     from revl.mcp.session import Session
-    ir = compile_source(_cache_zoo(kinds), "cache.rvl")
+    ir = _zoo_ir(kinds, _cache_zoo(kinds), "cache.rvl")
     index = Session._build_cache_index(Session.__new__(Session), ir)
     return frozenset(
         token for _key, _m, _cls, token, _what, _why
@@ -867,7 +883,7 @@ def _blast_251_reach(kinds: frozenset[str]) -> frozenset[str]:
     `ClassMap` closure the runtime consent path uses (`class_c_capabilities`) - so
     a fold that stopped visiting a crossing kind would drop that kind's capability
     and the differential would go RED (the blast would silently understate)."""
-    ir = compile_source(_reach_zoo(kinds), "reach.rvl")
+    ir = _zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl")
     return class_c_capabilities(ir, "hive", "go")
 
 
@@ -981,7 +997,7 @@ def test_reach_surfaces_agree_on_the_full_zoo():
         assert "host_extern" not in surface
     # the extern NAME is not lost: the audit's `externs` table is the host-code
     # enumeration (class, backends, ref provenance) and stays keyed by name.
-    audit = audit_report(compile_source(_reach_zoo(REACH_KINDS), "reach.rvl"))
+    audit = audit_report(_zoo_ir(REACH_KINDS, _reach_zoo(REACH_KINDS), "reach.rvl"))
     assert "host_extern" in {e["name"]
                              for e in audit["boundary"]["Hub"]["externs"]}
     # the first-class launder is an UNSCOPED `emission` extern, so its token is

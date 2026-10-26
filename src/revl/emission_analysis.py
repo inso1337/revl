@@ -278,6 +278,29 @@ def _emitting_extern_names(fns: list, externs: list) -> dict[str, set]:
     return _emitting_capabilities(fns, externs, by_name=True)
 
 
+def _emission_value_externs(fns: list, externs: list,
+                            exclude: set | frozenset = frozenset()) -> dict[str, str]:
+    """Issue #2842: the callables that may never be used as a function value,
+    each mapped to the `emission` extern its refusal names.
+
+    The key set is the irreversible closure (`classes=("emission",)`), value
+    edges included: an `emission` extern, and every `fn` whose call reaches
+    one. A value has no named `emit` call site, so dispatching it would run the
+    host body with no emission step recorded and no declared ceiling checked.
+    The named extern is the first, by name, that the callable reaches, so a
+    helper's refusal points at the crossing the author must call under `emit`.
+    `exclude` holds the async-colored names, whose values keep their own A1
+    refusal."""
+    reach = _emitting_capabilities(fns, externs, by_name=True,
+                                   classes=("emission",))
+    out: dict[str, str] = {}
+    for name, names in reach.items():
+        concrete = sorted(n for n in names if n != "*")
+        if name not in exclude and concrete:
+            out[name] = concrete[0]
+    return out
+
+
 def _async_callables(fns: list, externs: list, witness: dict | None = None) -> set:
     """Names an `await` must be inserted for: `async` externs, and functions
     that reach one transitively through the static call graph.

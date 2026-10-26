@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2834: a module fn returning a budgeted emission without emit is refused", "buckets": ["agree-refuse/G4"]}

@@ -39,11 +39,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import compile_source  # noqa: E402
 from revl.__main__ import _boundary  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.lower import _calls_in, _emitting_capabilities  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 
 
 def _emit_py(ir):
@@ -52,6 +54,21 @@ def _emit_py(ir):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.emit(ir)
+
+
+_VALUE_REFUSAL = "emission `send` cannot be used as a function value"
+
+
+def _legacy_ir(src: str) -> dict:
+    """The IR an earlier compiler emitted for `src`. Since issue #2842 the
+    compiler refuses an emission used as a value, so the walk, the fixed point
+    and the audit (which read IR) are measured on that older IR. The refusal
+    is asserted first, so the fixture cannot drift into an admitted program
+    (`tests/_legacy_emission_ir.py`)."""
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(src)
+    with value_rule_off():
+        return compile_source(src)
 
 
 def _refuses(src: str, code: str) -> RevlError:
@@ -83,8 +100,8 @@ def _plain_service(dispatch_body: str, extra: str = "",
 
 def test_a_name_inside_a_computed_callee_reaches_the_value_channel():
     """Before: `called = set()`, `values = {'x'}` — `send` in NEITHER."""
-    ir = compile_source(_SEND + "fn dispatch(x: Str) -> Str "
-                                "{ return [send][0](x) }\n")
+    ir = _legacy_ir(_SEND + "fn dispatch(x: Str) -> Str "
+                            "{ return [send][0](x) }\n")
     body = next(f for f in ir["functions"] if f["name"] == "dispatch")["body"]
     called, values = set(), set()
     _calls_in(body, called, values=values)
@@ -108,7 +125,7 @@ def test_a_plain_name_callee_is_a_call_and_not_double_counted_as_a_value():
 def test_a_computed_callee_that_wraps_a_named_call_still_records_the_call():
     """`pick()(x)`: the inner call is a real call (`pick` in `found`), and the
     subtree walk is what reaches it at all."""
-    ir = compile_source(
+    ir = _legacy_ir(
         _SEND
         + "fn pick() -> (Str) -> Str { return send }\n"
         + "fn dispatch(x: Str) -> Str { return pick()(x) }\n")
@@ -124,8 +141,9 @@ def test_a_computed_callee_that_wraps_a_named_call_still_records_the_call():
 def test_g4_refuses_an_index_computed_callee_reaching_an_emission():
     """The executed exploit: ADMITTED before, and the host emission fired."""
     err = _refuses(_plain_service("return [send][0](x)"), "G4")
-    assert "declared plain" in err.message
-    assert "dispatch()" in err.message
+    # refused where `send` is taken as a value (issue #2842), before the
+    # declaration check could see `dispatch()`
+    assert _VALUE_REFUSAL in err.message
 
 
 def test_the_direct_form_is_refused_identically_the_asymmetry_is_gone():
@@ -141,8 +159,8 @@ def test_the_direct_form_is_refused_identically_the_asymmetry_is_gone():
 def test_the_emitting_fixed_point_reaches_the_dispatching_fn():
     """`dispatch` carries `*` (the dispatch is unnameable) AND `send` (the
     boundary behind it), exactly as the `indirect(ship, x)` shape does."""
-    ir = compile_source(_SEND + "fn dispatch(x: Str) -> Str "
-                                "{ return [send][0](x) }\n")
+    ir = _legacy_ir(_SEND + "fn dispatch(x: Str) -> Str "
+                            "{ return [send][0](x) }\n")
     caps = _emitting_capabilities(ir["functions"], ir["externs"])
     assert caps["dispatch"] == {"*", "send"}
 
@@ -155,7 +173,7 @@ def test_g4_refuses_a_factory_returned_handler():
     err = _refuses(
         _plain_service("return pick()(x)",
                        extra="fn pick() -> (Str) -> Str { return send }\n"), "G4")
-    assert "dispatch()" in err.message
+    assert _VALUE_REFUSAL in err.message
 
 
 def test_g4_refuses_a_ternary_selected_handler():
@@ -186,8 +204,8 @@ def test_the_capability_bound_is_not_evaded_by_a_computed_callee():
     err = _refuses(_plain_service("return [send][0](x)",
                                   decl="emission[db] fn calc(a: Str) -> Str"),
                    "G4")
-    assert "emission[db]" in err.message
-    assert "send" in err.message
+    # refused at the value reference (issue #2842), which names `send`
+    assert _VALUE_REFUSAL in err.message
 
 
 # ------------------------------------------------------- F1d: A1 coloring
@@ -236,12 +254,13 @@ _G8_ADMITTED = (_SEND
 
 
 def test_the_g8_audit_reports_the_boundary_behind_a_computed_callee():
-    """Declared `emission`, so the program is admitted — and the audit surface
+    """Declared `emission`, so the program was admitted (it is refused since
+    issue #2842; the audit is measured on the older IR), and the audit surface
     must then say WHICH boundary it reaches. Before, `_boundary` returned no
     externs at all and `revl audit` printed
     `boundary: none — fully revertible (G8)` for a component reaching an
     `extern emission fn`."""
-    externs = _boundary(compile_source(_G8_ADMITTED))["C"]["externs"]
+    externs = _boundary(_legacy_ir(_G8_ADMITTED))["C"]["externs"]
     by_name = {e["name"]: e["class"] for e in externs}
     assert by_name == {"*": "first-class dispatch", "send": "emission"}
 
@@ -277,7 +296,7 @@ def test_a_dispatcher_over_its_own_parameter_stays_clean():
     """The pre-existing invariant: `indirect` dispatches through its OWN
     parameter, so nothing concrete flows there. Only `wrap`, which hands it an
     emitting value, is flagged."""
-    ir = compile_source(
+    ir = _legacy_ir(
         _SEND
         + "fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }\n"
         + "fn wrap(x: Str) -> Str { return indirect(send, x) }\n")

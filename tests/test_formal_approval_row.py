@@ -583,9 +583,16 @@ def test_the_attenuation_fold_keeps_the_checker_s_star(scoped):
 def test_the_token_table_follows_the_checker_s_fixed_point(harness):
     """`_emitting_tokens` against `emission_analysis._emitting_capabilities`
     on one program: a scoped extern is its scope, an unscoped one its name,
-    a `fn` the union of its callees, and a first-class reference adds `*`."""
+    a `fn` the union of its callees, and a first-class reference adds `*`.
+
+    The compiler refuses `hand` since issue #2842 (an emission used as a
+    value). The fixed point is a pure function of the IR, so it is read from
+    the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _legacy_emission_ir import value_rule_off
     from revl.compiler import compile_source
     from revl.emission_analysis import _emitting_capabilities
+    from revl.errors import RevlError
     from revl.parser import Parser
 
     source = """\
@@ -598,7 +605,10 @@ service K { fn f() -> Int }
 component C provides k: K { provide k { fn f() = 1 } }
 """
     tokens = harness._emitting_tokens(Parser(source, "t.rvl").parse())
-    ir = compile_source(source, "t.rvl")
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(source, "t.rvl")
+    with value_rule_off():
+        ir = compile_source(source, "t.rvl")
     reference = _emitting_capabilities(ir["functions"], ir["externs"])
     assert tokens["zz_write"] == {"net"}
     assert tokens["wire"] == {"wire"}

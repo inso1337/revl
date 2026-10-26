@@ -6069,10 +6069,11 @@ fn witnessed_value_msg(name: Str) -> Str {
 // A bare `Var` in VALUE position (never a call/access head — those are routed
 // by `call_check` before `walk_expr` sees the head). Mirrors lower.py's
 // `_lower_component_pure_expr`/`ExprVar` resolution and `_calls_in(values=…)`:
-//   * a first-class reference to an emitting name is G4 evidence, labelled
-//     `<name> (passed as a function value)` and contributing its concrete
-//     capability set PLUS the unnameable `*` boundary (a dispatched value's
-//     reach cannot be statically named), exactly as `_method_emissions` does;
+//   * a first-class reference to an irreversible emitting name is refused
+//     with the same G4 marker message as the reference compiler. Emission
+//     reach takes precedence over async coloring; async-colored names without
+//     emission reach keep their A1 value diagnostic. Local bindings shadowing
+//     a module name resolve through `scopeNames` first;
 //   * a first-class reference to an async-colored name is the `passed_async`
 //     A1 surface, recorded in `avals` for the value-use verdict;
 //   * G1: a name that resolves to no scope name and no callable is an
@@ -6087,6 +6088,10 @@ fn witnessed_value_msg(name: Str) -> Str {
 // so it is `bare_declared` and never trips the G1 branch.
 fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
   var na = a
+  let evx = eval_of(cx, name)
+  if (evx != "" && !contains(cx.scopeNames, name) && !contains(cx.colored, name)) {
+    return ac_refuse(a, "G4", emission_value_msg(name, evx))
+  }
   if (contains(cx.emittingNames, name)) {
     na = { msg: "", tag: "",
            labels: union_into(na.labels,
@@ -6101,6 +6106,168 @@ fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
   }
   if (!bare_declared(cx, name)) { return g1_refuse(cx, name, na) }
   return na
+}
+
+// lower.py `_emission_value_refusal`: the value names its extern, and a helper
+// that reaches one names both.
+fn emission_value_msg(name: Str, ext: Str) -> Str {
+  let subject = name == ext ? "emission `".concat(ext).concat("`")
+    : "`".concat(name).concat("` reaches emission `").concat(ext).concat("` and")
+  return subject.concat(" cannot be used as a function value; call it by name under `emit` (G4)")
+}
+
+// lower.py `_emission_arrow_refusal`: an arrow in a `fn` body whose body calls
+// an emission callable is itself a value carrying that crossing.
+fn emission_arrow_msg(callee: Str, ext: Str) -> Str {
+  let via = callee == ext ? "" : " through `".concat(callee).concat("`")
+  return "this arrow reaches emission `".concat(ext).concat("`").concat(via)
+    .concat(" and cannot be used as a function value; call `").concat(callee)
+    .concat("` by name under `emit` (G4)")
+}
+
+// Issue #2834: `var_check` excludes a name the component binds anywhere
+// (`cx.scopeNames`), but the reference resolves a name against the bindings in
+// scope at the use (`_lower_component_pure_expr`'s `scope`, which a block
+// restores on exit). A `let` in another method, in a closed block, a `for`
+// element after its loop, or a `let` after the use does not shadow the extern
+// there. This pass walks each body lexically and refuses exactly those uses:
+// an emission value whose name is bound somewhere in the component but not in
+// scope where it is read. `sn` keeps it to the names `var_check` skipped.
+type EvlR = { msg: Str, line: Int, bound: List[Str] }
+
+type EvlX = { cx: Ctx, sn: List[Str] }
+
+fn evl_hit(n: Str, x: EvlX, bound: List[Str]) -> Str {
+  let ext = eval_of(x.cx, n)
+  if (ext == "" || !contains(x.sn, n) || contains(bound, n) || contains(x.cx.colored, n)) {
+    return ""
+  }
+  return emission_value_msg(n, ext)
+}
+
+// A block arm's `let`s are hoisted ahead of the statement that carries the
+// `match` and walked there, in the arm's own scope (`arm_open`/`arm_close`).
+// The carrying statement reads the arm's tail once more inline, where only the
+// arm's pattern binding is in scope here: a tail that reads an arm-local `let`
+// named like an emission extern is refused, which errs on the safe side.
+fn evl_expr(e: Expr, x: EvlX, bound: List[Str]) -> Str {
+  return match e {
+    Var(n) => evl_hit(n, x, bound),
+    Call(c) => evl_call(c.target, c.args, x, bound),
+    OptCall(c) => evl_call(c.target, c.args, x, bound),
+    Field(f) => evl_expr(f.target, x, bound),
+    OptField(f) => evl_expr(f.target, x, bound),
+    Bin(b) => dfr_first(evl_expr(b.l, x, bound), evl_expr(b.r, x, bound)),
+    Un(u) => evl_expr(u.e, x, bound),
+    Emit(u) => evl_expr(u.e, x, bound),
+    Index(ix) => dfr_first(evl_expr(ix.target, x, bound), evl_expr(ix.idx, x, bound)),
+    If(c) => dfr_first(evl_expr(c.cond, x, bound),
+                       dfr_first(evl_expr(c.then_, x, bound), evl_expr(c.els, x, bound))),
+    Lst(l) => evl_list(l.items, 0, x, bound),
+    Rec(r) => evl_inits(r.fields, 0, x, bound),
+    Arrow(ar) => evl_expr(ar.body, x, union_into(bound, param_names(ar.params))),
+    Match(m) => dfr_first(evl_expr(m.scrut, x, bound), evl_arms(m.arms, 0, x, bound)),
+    Templ(t) => evl_parts(t.parts, 0, x, bound),
+    RecUpd(r) => dfr_first(evl_expr(r.base, x, bound), evl_inits(r.upds, 0, x, bound)),
+    _ => "",
+  }
+}
+
+// a callee named by a bare name is a call, not a value
+fn evl_call(target: Expr, args: List[Expr], x: EvlX, bound: List[Str]) -> Str {
+  let t = dfr_callee_name(target) != "" ? "" : evl_expr(target, x, bound)
+  if (t != "") { return t }
+  return evl_list(args, 0, x, bound)
+}
+
+fn evl_list(xs: List[Expr], i: Int, x: EvlX, bound: List[Str]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = evl_expr(xs[i], x, bound)
+  if (r != "") { return r }
+  return evl_list(xs, i + 1, x, bound)
+}
+
+fn evl_inits(xs: List[InitN], i: Int, x: EvlX, bound: List[Str]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = evl_expr(xs[i].value, x, bound)
+  if (r != "") { return r }
+  return evl_inits(xs, i + 1, x, bound)
+}
+
+fn evl_parts(xs: List[PartN], i: Int, x: EvlX, bound: List[Str]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = evl_expr(xs[i].e, x, bound)
+  if (r != "") { return r }
+  return evl_parts(xs, i + 1, x, bound)
+}
+
+// each arm sees its own pattern binding and its own `let`s, nothing of another
+fn evl_arms(xs: List[ArmN], i: Int, x: EvlX, bound: List[Str]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let a = xs[i]
+  let ab = a.bind == "" ? bound : bound.push(a.bind)
+  let r = a.isBlk ? evl_blk(a.blk, 0, a.blkTail, x, ab) : evl_expr(a.body, x, ab)
+  if (r != "") { return r }
+  return evl_arms(xs, i + 1, x, bound)
+}
+
+fn evl_blk(ls: List[ArmLetN], i: Int, tail: Expr, x: EvlX, bound: List[Str]) -> Str {
+  if (i >= ls.length()) { return evl_expr(tail, x, bound) }
+  let r = evl_expr(ls[i].value, x, bound)
+  if (r != "") { return r }
+  return evl_blk(ls, i + 1, tail, x, bound.push(ls[i].name))
+}
+
+// `marks` holds the scope's length at each open block (`scoped`, `arm_scoped`):
+// a name bound inside leaves scope where the block ends.
+fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]) -> EvlR {
+  if (i >= ss.length()) { return { msg: "", line: 0, bound: bound } }
+  let s = ss[i]
+  let k = s.kind
+  if (k == "scope_open" || k == "arm_open") {
+    return evl_stmts(ss, i + 1, x, bound, marks.push(bound.length()))
+  }
+  if ((k == "scope_close" || k == "arm_close") && marks.length() > 0) {
+    // an `arm_close` carries the arm's tail, read in the arm's scope
+    let t = k == "arm_close" ? evl_expr(s.e, x, bound) : ""
+    if (t != "") { return { msg: t, line: s.line, bound: bound } }
+    let m = marks[marks.length() - 1]
+    return evl_stmts(ss, i + 1, x, bound.slice(0, m), marks.slice(0, marks.length() - 1))
+  }
+  let r = evl_expr(s.e, x, bound)
+  if (r != "") { return { msg: r, line: s.line, bound: bound } }
+  return evl_stmts(ss, i + 1, x, s.bind == "" ? bound : bound.push(s.bind), marks)
+}
+
+fn evl_any(sn: List[Str], cx: Ctx, i: Int) -> Bool {
+  if (i >= sn.length()) { return false }
+  if (eval_of(cx, sn[i]) != "") { return true }
+  return evl_any(sn, cx, i + 1)
+}
+
+// The component's lexical emission-value verdict: setup first, then each
+// provide method from setup's bindings plus its own parameters.
+fn evl_component(comp: CompD, cx: Ctx) -> Verd {
+  let x: EvlX = { cx: cx, sn: cx.scopeNames }
+  if (!evl_any(x.sn, cx, 0)) { return no_verd() }
+  let s = evl_stmts(comp.setup, 0, x, [], [])
+  if (s.msg != "") {
+    return mk_verd(tagged("G4", s.msg), s.line == 0 ? comp.line : s.line)
+  }
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let ms = comp.provs[pi].methods
+    var mi = 0
+    while (mi < ms.length()) {
+      let r = evl_stmts(ms[mi].body, 0, x, union_into(s.bound, ms[mi].params), [])
+      if (r.msg != "") {
+        return mk_verd(tagged("G4", r.msg), r.line == 0 ? ms[mi].line : r.line)
+      }
+      mi += 1
+    }
+    pi += 1
+  }
+  return no_verd()
 }
 
 // The value-position resolution environment (lower.py `ExprVar`): a bare value
@@ -6352,6 +6519,34 @@ fn build_maps(pg: Prog) -> Ctx {
 // map in it overflowed the gate crate's at-the-bound stack test
 // (crates/revl-gate/tests/admit.rs `a_source_at_the_level_bound_is_still_decided`).
 fn ext_inv_key(name: Str) -> Str { return "extern#".concat(name) }
+
+// Issue #2842: the `emission` extern a callable's value refusal names
+// (`emission_value_externs`) rides in the same table under `emit#<name>`, for
+// the same reason: `emit` is a keyword, so the key space is disjoint, and a
+// field of its own in `Ctx` overflows the at-the-bound stack test.
+fn ext_eval_key(name: Str) -> Str { return "emit#".concat(name) }
+
+fn eval_of(cx: Ctx, name: Str) -> Str { return mget_str(cx.provKeySvc, ext_eval_key(name)) }
+
+fn ctx_evals(cx: Ctx, ts: List[Token], pg: Prog) -> Ctx {
+  let ev = emission_value_externs(ts, pg)
+  var pks = cx.provKeySvc
+  var i = 0
+  while (i < pg.fns.length()) {
+    let x = mget_str(ev, pg.fns[i].name)
+    if (x != "") { pks = pks.set(ext_eval_key(pg.fns[i].name), x) }
+    i += 1
+  }
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: pks, provAlias: cx.provAlias, svcTys: cx.svcTys,
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere,
+           emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
+}
 
 // The global (component `#` key -> service) table: every component's provided
 // keys mapped to the service each supplies. A spawn-handle read `h.<key>.<op>`
@@ -6777,87 +6972,111 @@ fn dfr_callee_name(e: Expr) -> Str {
 
 // The first refusal one expression holds, or "". `calls` is false in a
 // component, whose calls carry the `emit` marker and are enqueued.
-fn dfr_expr(e: Expr, dn: List[Str], where: Str, inArrow: Bool, calls: Bool) -> Str {
+fn dfr_expr(e: Expr, dn: List[Str], emissionValues: Map[Str, Str], where: Str,
+            inArrow: Bool, calls: Bool) -> Str {
   return match e {
-    Var(n) => contains(dn, n) ? dfr_value_msg(n, where) : "",
-    Call(c) => dfr_call(c.target, c.args, dn, where, inArrow, calls),
-    OptCall(c) => dfr_call(c.target, c.args, dn, where, inArrow, calls),
-    Field(f) => dfr_expr(f.target, dn, where, inArrow, calls),
-    OptField(f) => dfr_expr(f.target, dn, where, inArrow, calls),
-    Bin(b) => dfr_first(dfr_expr(b.l, dn, where, inArrow, calls),
-                        dfr_expr(b.r, dn, where, inArrow, calls)),
-    Un(u) => dfr_expr(u.e, dn, where, inArrow, calls),
-    Emit(u) => dfr_expr(u.e, dn, where, inArrow, calls),
-    Index(x) => dfr_first(dfr_expr(x.target, dn, where, inArrow, calls),
-                          dfr_expr(x.idx, dn, where, inArrow, calls)),
-    If(x) => dfr_first(dfr_expr(x.cond, dn, where, inArrow, calls),
-                       dfr_first(dfr_expr(x.then_, dn, where, inArrow, calls),
-                                 dfr_expr(x.els, dn, where, inArrow, calls))),
-    Lst(l) => dfr_list(l.items, 0, dn, where, inArrow, calls),
-    Rec(r) => dfr_inits(r.fields, 0, dn, where, inArrow, calls),
-    Arrow(ar) => dfr_expr(ar.body, dn, where, true, calls),
-    Match(m) => dfr_first(dfr_expr(m.scrut, dn, where, inArrow, calls),
-                          dfr_arms(m.arms, 0, dn, where, inArrow, calls)),
-    Templ(t) => dfr_parts(t.parts, 0, dn, where, inArrow, calls),
-    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, where, inArrow, calls),
-                           dfr_inits(r.upds, 0, dn, where, inArrow, calls)),
+    Var(n) => contains(dn, n) ? dfr_value_msg(n, where)
+      : (mget_str(emissionValues, n) != ""
+         ? emission_value_msg(n, mget_str(emissionValues, n)) : ""),
+    Call(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls),
+    OptCall(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls),
+    Field(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls),
+    OptField(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls),
+    Bin(b) => dfr_first(dfr_expr(b.l, dn, emissionValues, where, inArrow, calls),
+                        dfr_expr(b.r, dn, emissionValues, where, inArrow, calls)),
+    Un(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls),
+    Emit(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls),
+    Index(x) => dfr_first(dfr_expr(x.target, dn, emissionValues, where, inArrow, calls),
+                          dfr_expr(x.idx, dn, emissionValues, where, inArrow, calls)),
+    If(x) => dfr_first(dfr_expr(x.cond, dn, emissionValues, where, inArrow, calls),
+                       dfr_first(dfr_expr(x.then_, dn, emissionValues, where, inArrow, calls),
+                                 dfr_expr(x.els, dn, emissionValues, where, inArrow, calls))),
+    Lst(l) => dfr_list(l.items, 0, dn, emissionValues, where, inArrow, calls),
+    Rec(r) => dfr_inits(r.fields, 0, dn, emissionValues, where, inArrow, calls),
+    Arrow(ar) => dfr_arrow(ar.body, dn, emissionValues, where, calls),
+    Match(m) => dfr_first(dfr_expr(m.scrut, dn, emissionValues, where, inArrow, calls),
+                          dfr_arms(m.arms, 0, dn, emissionValues, where, inArrow, calls)),
+    Templ(t) => dfr_parts(t.parts, 0, dn, emissionValues, where, inArrow, calls),
+    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, emissionValues, where, inArrow, calls),
+                           dfr_inits(r.upds, 0, dn, emissionValues, where, inArrow, calls)),
     _ => "",
   }
 }
 
 fn dfr_first(a: Str, b: Str) -> Str { return a != "" ? a : b }
 
-fn dfr_call(target: Expr, args: List[Expr], dn: List[Str], where: Str,
+// An arrow whose body calls an emission callable (issue #2842) is refused at
+// the arrow, naming the first such callee by name; otherwise its body is walked.
+fn dfr_arrow(body: Expr, dn: List[Str], emissionValues: Map[Str, Str],
+             where: Str, calls: Bool) -> Str {
+  let hit = first_mapped(sort_strs(calls_in(body, [])), emissionValues, 0)
+  if (hit != "") { return emission_arrow_msg(hit, mget_str(emissionValues, hit)) }
+  return dfr_expr(body, dn, emissionValues, where, true, calls)
+}
+
+fn first_mapped(xs: List[Str], m: Map[Str, Str], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  if (mget_str(m, xs[i]) != "") { return xs[i] }
+  return first_mapped(xs, m, i + 1)
+}
+
+fn dfr_call(target: Expr, args: List[Expr], dn: List[Str],
+            emissionValues: Map[Str, Str], where: Str,
             inArrow: Bool, calls: Bool) -> Str {
   let head = dfr_callee_name(target)
   if (head != "" && contains(dn, head)) {
     // the CALL position: refused in a fn/test body, enqueued in a component
     if (calls) { return dfr_call_msg(head, where, inArrow) }
-    return dfr_list(args, 0, dn, where, inArrow, calls)
+    return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls)
   }
-  let t = head != "" ? "" : dfr_expr(target, dn, where, inArrow, calls)
+  let t = head != "" ? "" : dfr_expr(target, dn, emissionValues, where, inArrow, calls)
   if (t != "") { return t }
-  return dfr_list(args, 0, dn, where, inArrow, calls)
+  return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls)
 }
 
-fn dfr_list(xs: List[Expr], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+fn dfr_list(xs: List[Expr], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
+            where: Str, inArrow: Bool,
             calls: Bool) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i], dn, where, inArrow, calls)
+  let r = dfr_expr(xs[i], dn, emissionValues, where, inArrow, calls)
   if (r != "") { return r }
-  return dfr_list(xs, i + 1, dn, where, inArrow, calls)
+  return dfr_list(xs, i + 1, dn, emissionValues, where, inArrow, calls)
 }
 
-fn dfr_inits(xs: List[InitN], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+fn dfr_inits(xs: List[InitN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
+             where: Str, inArrow: Bool,
              calls: Bool) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].value, dn, where, inArrow, calls)
+  let r = dfr_expr(xs[i].value, dn, emissionValues, where, inArrow, calls)
   if (r != "") { return r }
-  return dfr_inits(xs, i + 1, dn, where, inArrow, calls)
+  return dfr_inits(xs, i + 1, dn, emissionValues, where, inArrow, calls)
 }
 
-fn dfr_arms(xs: List[ArmN], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+fn dfr_arms(xs: List[ArmN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
+            where: Str, inArrow: Bool,
             calls: Bool) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].body, dn, where, inArrow, calls)
+  let r = dfr_expr(xs[i].body, dn, emissionValues, where, inArrow, calls)
   if (r != "") { return r }
-  return dfr_arms(xs, i + 1, dn, where, inArrow, calls)
+  return dfr_arms(xs, i + 1, dn, emissionValues, where, inArrow, calls)
 }
 
-fn dfr_parts(xs: List[PartN], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+fn dfr_parts(xs: List[PartN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
+             where: Str, inArrow: Bool,
              calls: Bool) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].e, dn, where, inArrow, calls)
+  let r = dfr_expr(xs[i].e, dn, emissionValues, where, inArrow, calls)
   if (r != "") { return r }
-  return dfr_parts(xs, i + 1, dn, where, inArrow, calls)
+  return dfr_parts(xs, i + 1, dn, emissionValues, where, inArrow, calls)
 }
 
-fn dfr_stmts(ss: List[Stmt], i: Int, dn: List[Str], where: Str,
+fn dfr_stmts(ss: List[Stmt], i: Int, dn: List[Str],
+             emissionValues: Map[Str, Str], where: Str,
              calls: Bool) -> Verd {
   if (i >= ss.length()) { return no_verd() }
-  let r = dfr_expr(ss[i].e, dn, where, false, calls)
+  let r = dfr_expr(ss[i].e, dn, emissionValues, where, false, calls)
   if (r != "") { return mk_verd(tagged("G4", r), ss[i].line) }
-  return dfr_stmts(ss, i + 1, dn, where, calls)
+  return dfr_stmts(ss, i + 1, dn, emissionValues, where, calls)
 }
 
 // The `test` blocks, in source order, as (name, body) pairs.
@@ -6891,7 +7110,7 @@ fn deferred_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
     if (!f.isEmExtern && !f.isAsyncExtern) {
-      let v = dfr_stmts(f.body, 0, dn,
+      let v = dfr_stmts(f.body, 0, dn, Map.empty(),
                         "the body of fn `".concat(f.name).concat("`"), true)
       if (v.v != "") { return v }
     }
@@ -6900,7 +7119,7 @@ fn deferred_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
   let tests = dfr_tests(ts)
   i = 0
   while (i < tests.length()) {
-    let v = dfr_stmts(tests[i].body, 0, dn,
+    let v = dfr_stmts(tests[i].body, 0, dn, Map.empty(),
                       "the body of test `".concat(tests[i].name).concat("`"), true)
     if (v.v != "") { return v }
     i += 1
@@ -6909,13 +7128,13 @@ fn deferred_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
   while (i < pg.comps.length()) {
     let c = pg.comps[i]
     let where = "component `".concat(c.name).concat("`")
-    let sv = dfr_stmts(c.setup, 0, dn, where, false)
+    let sv = dfr_stmts(c.setup, 0, dn, Map.empty(), where, false)
     if (sv.v != "") { return sv }
     var pi = 0
     while (pi < c.provs.length()) {
       var mi = 0
       while (mi < c.provs[pi].methods.length()) {
-        let mv = dfr_stmts(c.provs[pi].methods[mi].body, 0, dn, where, false)
+        let mv = dfr_stmts(c.provs[pi].methods[mi].body, 0, dn, Map.empty(), where, false)
         if (mv.v != "") { return mv }
         mi += 1
       }
@@ -6924,6 +7143,72 @@ fn deferred_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
     i += 1
   }
   return no_verd()
+}
+
+// Issue #2842: a callable that reaches an emission extern cannot be returned,
+// stored, passed, or captured as a first-class value in a module function. The
+// call-only surface remains intact: `emit send(...)` and ordinary named calls
+// are not references because dfr_call skips a direct call head.
+fn emission_value_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
+  let emissionValues = emission_value_externs(ts, pg)
+  if (emissionValues.size() == 0) { return no_verd() }
+  var i = 0
+  while (i < pg.fns.length()) {
+    let f = pg.fns[i]
+    if (!f.isEmExtern && !f.isAsyncExtern) {
+      let v = dfr_stmts(f.body, 0, [], emissionValues,
+                        "the body of fn `".concat(f.name).concat("`"), false)
+      if (v.v != "") { return v }
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// Issue #2842 (lower.py `_emission_value_externs`): callable name -> the
+// `emission` extern its value refusal names, the first by name it reaches. The
+// closure is `emit_caps_reach`'s, value edges included, seeded by NAME from the
+// emission externs that are not `witnessed`; async-colored names keep their A1.
+fn emission_value_externs(ts: List[Token], pg: Prog) -> Map[Str, Str] {
+  let wit = witnessed_extern_names(ts)
+  let names = fn_names_of(pg.fns)
+  var reach: CapsT = Map.empty()
+  var i = 0
+  while (i < pg.fns.length()) {
+    if (pg.fns[i].isEmExtern && !contains(wit, pg.fns[i].name)) {
+      reach = reach.set(pg.fns[i].name, [pg.fns[i].name])
+    }
+    i += 1
+  }
+  // nothing to reach: no body is walked, so a program with no emission extern
+  // costs no stack here (the level-bound frontier case)
+  if (reach.size() == 0) { return Map.empty() }
+  var changed = true
+  while (changed) {
+    changed = false
+    i = 0
+    while (i < pg.fns.length()) {
+      let f = pg.fns[i]
+      let reached = reached_caps(col_values_body(f.body, 0, names, f.callees),
+                                 reach, 0, [])
+      let cur = caps_of(reach, f.name)
+      if (reached.length() > 0 && !subset_of(reached, cur)) {
+        reach = reach.set(f.name, union_into(cur, reached))
+        changed = true
+      }
+      i += 1
+    }
+  }
+  let colored = async_colored(pg.fns, async_slots_map(pg.fns))
+  var out: Map[Str, Str] = Map.empty()
+  i = 0
+  while (i < pg.fns.length()) {
+    let n = pg.fns[i].name
+    let r = caps_of(reach, n)
+    if (r.length() > 0 && !contains(colored, n)) { out = out.set(n, sort_strs(r)[0]) }
+    i += 1
+  }
+  return out
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -8401,6 +8686,53 @@ fn leaky_pure_msg(nm: Str) -> Str {
     .concat("`, but its type carries no async color — the caller would receive an unawaited suspension (A1)")
 }
 
+// issue #2842: a module fn's async-fn-typed parameters (`(…) -> Async[T]`)
+// suspend when called, exactly as a colored name does, so the fn-body leak walk
+// reads them as colored. Each is marked under an `aparam#` key (the `extern#` /
+// `emit#` precedent) so an arrow that rebinds the name as its own parameter
+// drops it again for its body, as `_refuse_leaky_pure_arrow`'s `inner` does.
+fn aparam_key(name: Str) -> Str { return "aparam#".concat(name) }
+
+fn ctx_colored(cx: Ctx, colored: List[Str], pks: Map[Str, Str]) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: pks, provAlias: cx.provAlias, svcTys: cx.svcTys,
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere,
+           emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
+}
+
+fn aparam_marks(m: Map[Str, Str], names: List[Str]) -> Map[Str, Str] {
+  var out = m
+  var i = 0
+  while (i < names.length()) {
+    out = out.set(aparam_key(names[i]), names[i])
+    i += 1
+  }
+  return out
+}
+
+fn ctx_async_params(cx: Ctx, aps: List[Str]) -> Ctx {
+  let added = without_strs(aps, cx.colored)
+  if (added.length() == 0) { return cx }
+  return ctx_colored(cx, union_into(cx.colored, added),
+                     aparam_marks(cx.provKeySvc, added))
+}
+
+fn ctx_arrow_shadow(cx: Ctx, ps: List[ParamN]) -> Ctx {
+  var drop: List[Str] = []
+  var i = 0
+  while (i < ps.length()) {
+    if (mget_str(cx.provKeySvc, aparam_key(ps[i].name)) != "") { drop = drop.push(ps[i].name) }
+    i += 1
+  }
+  if (drop.length() == 0) { return cx }
+  return ctx_colored(cx, without_strs(cx.colored, drop), cx.provKeySvc)
+}
+
 fn leaky_exprs(xs: List[Expr], i: Int, cx: Ctx, cr: Bool) -> Str {
   if (i >= xs.length()) { return "" }
   let r = leaky_scan(xs[i], false, cx, cr)
@@ -8485,7 +8817,7 @@ fn leaky_scan(e: Expr, coerced: Bool, cx: Ctx, cr: Bool) -> Str {
                        or2(leaky_scan(x.then_, false, cx, cr), leaky_scan(x.els, false, cx, cr))),
     Rec(r)      => leaky_inits(r.fields, 0, cx, cr),
     Lst(l)      => leaky_exprs(l.items, 0, cx, cr),
-    Arrow(ar)   => leaky_arrow_body(ar.body, coerced, cx, cr),
+    Arrow(ar)   => leaky_arrow_body(ar.body, coerced, ctx_arrow_shadow(cx, ar.params), cr),
     Match(m)    => or2(leaky_scan(m.scrut, false, cx, cr), leaky_arms(m.arms, 0, cx, cr)),
     Templ(t)    => leaky_parts(t.parts, 0, cx, cr),
     RecUpd(r)   => or2(leaky_scan(r.base, false, cx, cr), leaky_inits(r.upds, 0, cx, cr)),
@@ -8794,7 +9126,7 @@ fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
       .concat("` uses async callable `").concat(vals[0])
       .concat("` as a function value, but an async callable has no arrow type"))
   }
-  let leak = leaky_body(f.body, 0, base, false)
+  let leak = leaky_body(f.body, 0, ctx_async_params(base, f.asyncParams), false)
   if (leak != "") { return tagged("A1", leak) }
   return ""
 }
@@ -19965,9 +20297,9 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
+  let base = ctx_evals(ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
                                   amb_ops_map(ambOps, 0, Map.empty())),
-                      appr_info(ts, pg))
+                      appr_info(ts, pg)), ts, pg)
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
@@ -20068,6 +20400,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // of the host-acquire walk below.
   let dfv = deferred_reach_refusal(ts, pg)
   if (dfv.v != "") { return { done: true, refs: [dfv] } }
+  // Issue #2842: first-class values that reach an emission extern cannot
+  // escape the named `emit` call site. This follows deferred's existing
+  // effect-position rule and precedes the component body walk.
+  let evv = emission_value_reach_refusal(ts, pg)
+  if (evv.v != "") { return { done: true, refs: [evv] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn`.
@@ -20135,7 +20472,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
         // the earlier line of the two is the component's
         let sv = effect_stmt_or(effect_stmt_verd(ts, comp.name, wit),
                                 verified_method_verd(ts, comp.name, wit), comp.line)
-        let v = effect_stmt_or(sv, check_component(comp, cx, gtys), comp.line)
+        // issue #2834: an emission value read where no binding shadows it,
+        // decided lexically (`evl_component`), at the earlier line of the two
+        let cv = effect_stmt_or(evl_component(comp, cx), check_component(comp, cx, gtys),
+                                comp.line)
+        let v = effect_stmt_or(sv, cv, comp.line)
         if (v.v != "") {
           refs = refs.push(v)
           poisoned = poisoned.push(comp.name)

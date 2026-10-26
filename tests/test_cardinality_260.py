@@ -17,12 +17,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import compile_files  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
 from revl.cardinality import _merge_max, cardinality  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
+
+import pytest  # noqa: E402
 
 EXAMPLES = ROOT / "examples"
 
@@ -209,7 +214,10 @@ component C provides svc: Svc {
 
 
 def test_first_class_emitting_arrow_is_unbounded_never_zero():
-    card = _card("""
+    """The compiler refuses this source since issue #2842 (an emitting helper
+    handed on as a value). The fold reads IR, so it is measured on the IR an
+    earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
+    src = """
 service Svc { emission fn run() -> Int }
 extern emission fn boom() -> Int = @py { return 1 }
 fn dispatch(f: () -> Int) -> Int { return f() }
@@ -217,7 +225,11 @@ fn emitter() -> Int { let x = boom(); return x }
 component C provides svc: Svc {
   provide svc { fn run() -> Int { return dispatch(emitter) } }
 }
-""")
+"""
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(src, "t.rvl")
+    with value_rule_off():
+        card = _card(src)
     assert card["C"]["verdict"] == "unbounded"
     # the unnameable boundary `*` is present and unbounded, never counted 0
     star = card["C"]["per_capability"]["*"]
