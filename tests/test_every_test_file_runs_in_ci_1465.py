@@ -49,7 +49,7 @@ WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 # runner and is deliberately absent: `pip install ... pytest` names a package,
 # not an invocation (issue #2160 -- `pages.yml` used to be listed here for
 # exactly that token and no longer is).
-WORKFLOWS = ("ci.yml", "arm64-smoke.yml", "x64-smoke.yml")
+WORKFLOWS = ("ci.yml", "arm64-smoke.yml")
 
 # Directories that are not part of the checked-in test tree (vendored or
 # build output); a test_*.py under one of these, if it ever appeared, is not

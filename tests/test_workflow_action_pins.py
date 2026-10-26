@@ -5,14 +5,14 @@ whatever that ref resolves to on the day it runs. On this repository that is not
 a theoretical exposure: `pages.yml` carries `pages: write` and `id-token: write`,
 so a moved `@v4` there runs inside the `github-pages` environment holding an OIDC
 token minted for it, and `codeql.yml` carries `security-events: write`. Neither
-workflow triggers on `pull_request` (nor does either smoke lane), so the
+workflow triggers on `pull_request` (nor does the smoke lane), so the
 reachable path is an upstream compromise or a force-pushed tag rather than an
 attacker-authored PR -- which is exactly the case a commit pin closes and a tag
 pin does not.
 
 The convention is `owner/repo(/path)@<40 hex>` plus a trailing comment naming
 what that sha is. ci.yml already followed it; pages.yml, codeql.yml,
-site-wheel.yml, arm64-smoke.yml and x64-smoke.yml did not, and nothing in-tree
+site-wheel.yml and arm64-smoke.yml (and the since-deleted x64-smoke.yml) did not, and nothing in-tree
 noticed. This file is the pin.
 
 Two things this test deliberately CANNOT check, because both need the network:

@@ -76,7 +76,17 @@ PUSHERS = sorted(n for n, d in _all().items() if _branch_push(d))
 
 def test_the_expected_workflows_run_on_a_branch_push():
     assert PUSHERS == ["arm64-smoke.yml", "ci.yml", "codeql.yml", "pages.yml",
-                       "site-wheel.yml", "x64-smoke.yml"]
+                       "site-wheel.yml"]
+
+
+def test_x64_smoke_workflow_stays_deleted():
+    """x64-smoke had no registered runner, so its jobs only queued (issue #2872).
+
+    Re-adding it is a deliberate change: register a runner for its labels
+    (`self-hosted,X64,azure,light`) and change this test in the same commit.
+    """
+    assert not (WORKFLOWS / "x64-smoke.yml").exists()
+    assert "x64-smoke.yml" not in _all()
 
 
 @pytest.mark.parametrize("name", PUSHERS)

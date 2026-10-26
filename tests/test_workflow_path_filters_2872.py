@@ -1,8 +1,8 @@
 """Issue #2872: the push-to-main path filters cover every input of their job.
 
 A push to main ran six workflows against one runner pool. Three of them now run
-on a push only when it touches their inputs: the two smoke lanes (`x64-smoke`,
-`arm64-smoke`) and `site wheel`. A path filter that misses an input does not
+on a push only when it touches their inputs: the smoke lane (`arm64-smoke`)
+and `site wheel`. A path filter that misses an input does not
 fail, it silently stops testing that input on push, so each filter is checked
 here against inputs DERIVED from what the job runs, not against a second
 hand-written copy:
@@ -78,7 +78,6 @@ SITE_WHEEL_PATHS = [
     ".github/workflows/site-wheel.yml",
 ]
 FILTERED = {
-    "x64-smoke.yml": SMOKE_PATHS + [".github/workflows/x64-smoke.yml"],
     "arm64-smoke.yml": SMOKE_PATHS + [".github/workflows/arm64-smoke.yml"],
     "site-wheel.yml": SITE_WHEEL_PATHS,
 }
@@ -253,7 +252,7 @@ def smoke_inputs(name: str) -> set[str]:
     return inputs
 
 
-@pytest.mark.parametrize("name", ["x64-smoke.yml", "arm64-smoke.yml"])
+@pytest.mark.parametrize("name", ["arm64-smoke.yml"])
 def test_smoke_filter_covers_every_input(name):
     paths = _push_paths(name)
     assert paths, f"{name}: push to main is not path-filtered (issue #2872)"
