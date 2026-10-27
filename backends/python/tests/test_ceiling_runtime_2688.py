@@ -14,12 +14,18 @@ the host body:
   * `size`  - the canonical payload bytes accumulate per capability, and a
               crossing whose payload would exceed the ceiling never fires;
   * `time`  - a deadline anchored at the capability's first crossing, measured
-              on the monotonic clock and checked before every crossing (a
-              synchronous host call cannot be preempted mid-call on this tier).
+              on the monotonic clock and checked before every crossing, and
+              again when the crossing returns (a synchronous host call cannot
+              be preempted mid-call on this tier).
 
-Each over-budget case is refused with the named `CeilingExceeded`, the host body
-does not run for the refused crossing, and a within-budget control completes.
-A budget-free extern still emits byte-identically and traces nothing.
+Each over-budget case is refused with the named `CeilingExceeded`, and a
+within-budget control completes. A `calls`/`size` refusal, and a `time` refusal
+of a crossing whose deadline was already spent, happen BEFORE the fire and
+before the emission step exists, so the host body does not run and the WAL has
+no step for that crossing. A `time` overrun the host body itself caused is only
+observable when the call returns, so the crossing DID fire: its journal outcome
+is `emitted-then-refused` and the compensation it registered at the seam stays
+owed. A budget-free extern still emits byte-identically and traces nothing.
 
 The budget is per ACTIVATION (one component activation, not one provide call):
 `Frame` owns the counters, so a second activation starts fresh. That is the
@@ -41,7 +47,10 @@ seam at all, a payload-transforming wrapper would be charged on the wrong
 arguments, and a multi-call wrapper would be charged once however many crossings
 it makes. Those shapes are refused at emit time with the named
 `CeilingUnattributable`, naming the capability and the shape, so a declared
-budget is a compile-time contract rather than a promise the runtime cannot keep.
+budget is enforced or refused rather than silently promised. A function value
+(`let f = call`, a wrapper alias, `apply(call)`) is refused earlier still, at
+admission, by the `emission-value` rule from #2979; the emitter's function-value
+refusal remains the backstop for a shape that reaches it.
 """
 
 from __future__ import annotations
@@ -68,20 +77,28 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from revl.compiler import compile_files  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 
 #: A trusted host module (reached through `@py ref`, the sanctioned way for a
 #: fixture to have a side effect). It counts the crossings that actually reach
-#: the host body, and optionally sleeps so a `time` deadline can be crossed.
+#: the host body, records the compensations that run, and optionally sleeps so a
+#: `time` deadline can be crossed.
 _HOST_SOURCE = """\
 import time
 
 CALLS = []
+UNDOS = []
 
 
 def call(x):
     CALLS.append(x)
     if {sleep!r}:
         time.sleep({sleep!r})
+    return 0
+
+
+def revert(x):
+    UNDOS.append(x)
     return 0
 """
 
@@ -134,6 +151,37 @@ def _run(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
     module, host, _code = _load(decl, body, sleep, prelude)
     error = asyncio.run(_activate(module))
     return error, host.CALLS
+
+
+def _compensated_program(decl: str, sleep: float = 0.0, calls=("a",)):
+    """A program whose component emits the budgeted extern once per entry in
+    `calls`, each with a site-spelled compensation, plus its trusted host
+    module. Returns `(path, host_module_name)`."""
+    host = f"ceiling_host_{next(_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_"))
+    (directory / f"{host}.py").write_text(
+        _HOST_SOURCE.format(sleep=sleep), encoding="utf-8")
+    steps = "\n".join(f'  emit call("{name}") compensate revert("{name}")'
+                      for name in calls)
+    source = (
+        f'extern emission[{decl}] fn call(x: Str) -> Int '
+        f'= @py ref call from "{host}.py"\n'
+        f'extern emission fn revert(x: Str) -> Int '
+        f'= @py ref revert from "{host}.py"\n'
+        f"component C {{\n{steps}\n}}\n")
+    main = directory / "main.rvl"
+    main.write_text(source, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return str(main), host
+
+
+def _load_compensated(decl: str, sleep: float = 0.0, calls=("a",)):
+    path, host = _compensated_program(decl, sleep, calls)
+    code = emit.emit(compile_files([path]))
+    module = types.ModuleType(f"ceiling_module_{next(_counter)}")
+    exec(compile(code, "ceiling_module.py", "exec"), module.__dict__)  # noqa: S102
+    return module, importlib.import_module(host), code
 
 
 # ---------------------------------------------------------------------------
@@ -527,9 +575,11 @@ def test_a_conditional_expression_crossing_is_refused_at_emit_time():
     assert host.CALLS == [], "an emit-time refusal never reaches the host"
 
 
-#: The three function-value bypasses: the extern is not the callee of any named
-#: call, so `_call_callee_name` never saw it and the wrapper was emitted with no
-#: caps argument at all.
+#: The three function-value shapes: the extern is not the callee of any named
+#: call. The checker now refuses the value binding at admission (G4
+#: `emission-value`, fixed by #2979), so the emitter never sees these shapes and
+#: the host body cannot run. The emitter's own function-value refusal remains the
+#: fail-closed backstop for any shape that does reach it.
 _EXTERN_ALIAS = 'fn go(x: Str) -> Int { let f = call return f(x) }'
 _WRAPPER_ALIAS = (
     "fn h(x: Str) -> Int = call(x)\n"
@@ -539,43 +589,46 @@ _EXTERN_VALUE = (
     "fn go(x: Str) -> Int = apply(call)")
 
 
-def _assert_function_value_refusal(error, host) -> None:
-    assert isinstance(error, emit.CeilingUnattributable)
-    assert error.capability == "net(calls=1)"
-    assert error.shape == "a call through a function value"
-    assert "a call through a function value" in str(error)
-    assert "net(calls=1)" in str(error)
-    assert host.CALLS == [], "an emit-time refusal never reaches the host"
+def _admission_refusal(decl: str, body: str, prelude: str):
+    """Compile only: the checker refuses the value binding, so no Python module
+    is produced and the host body never runs."""
+    path, host = _program(decl, body, prelude=prelude)
+    with pytest.raises(RevlError) as caught:
+        compile_files([path])
+    return caught.value, importlib.import_module(host)
 
 
-def test_an_extern_alias_is_refused_at_emit_time():
+def _assert_function_value_admission_refusal(error, host) -> None:
+    assert "cannot be used as a function value" in str(error)
+    assert "(G4)" in str(error)
+    assert host.CALLS == [], "an admission refusal never reaches the host"
+
+
+def test_an_extern_alias_is_refused_before_emission():
     """`let f = call return f(x)` binds the budgeted extern to a local and
-    calls through the binding. No named call names the extern, so the reach
-    resolver found nothing and the wrapper emission carried no caps. The
-    function value is refused by name instead."""
-    error, host = _refusal(
+    calls through the binding. No named call names the extern, so the meter
+    would never see it; the checker refuses the value binding instead (#2979)."""
+    error, host = _admission_refusal(
         "net(calls=1)", '  emit go("a")', prelude=_EXTERN_ALIAS)
-    _assert_function_value_refusal(error, host)
+    _assert_function_value_admission_refusal(error, host)
 
 
-def test_a_wrapper_alias_is_refused_at_emit_time():
-    """`let g = h return g(x)` reaches the extern through a local function
-    held as a value. `h` is an exact pass-through when called directly, but a
-    value alias hides the callee from the meter, so the enclosing wrapper is
-    refused by name."""
-    error, host = _refusal(
+def test_a_wrapper_alias_is_refused_before_emission():
+    """`let g = h return g(x)` reaches the extern through a local function held
+    as a value. `h` is an exact pass-through when called directly, but a value
+    alias hides the callee from the meter, so the checker refuses it (#2979)."""
+    error, host = _admission_refusal(
         "net(calls=1)", '  emit go("a")', prelude=_WRAPPER_ALIAS)
-    _assert_function_value_refusal(error, host)
+    _assert_function_value_admission_refusal(error, host)
 
 
-def test_an_extern_passed_as_an_argument_is_refused_at_emit_time():
+def test_an_extern_passed_as_an_argument_is_refused_before_emission():
     """`apply(call)` hands the budgeted extern to another function, which calls
-    it through the parameter. The callee the meter is handed is the wrapper,
-    and the extern itself never reaches the seam, so the enclosing wrapper is
-    refused by name."""
-    error, host = _refusal(
+    it through the parameter. The extern itself never reaches the seam, so the
+    checker refuses the value binding (#2979)."""
+    error, host = _admission_refusal(
         "net(calls=1)", '  emit go("a")', prelude=_EXTERN_VALUE)
-    _assert_function_value_refusal(error, host)
+    _assert_function_value_admission_refusal(error, host)
 
 
 def test_the_statement_form_identity_wrapper_is_still_metered():
@@ -589,29 +642,51 @@ def test_the_statement_form_identity_wrapper_is_still_metered():
     assert host.CALLS == ["a"]
 
 
-def test_a_time_overrun_journals_refusal_not_completion_with_observed_counts():
-    """The WAL ordering fix: the `time` check runs BEFORE the completion record,
-    so an overrun writes `emission-refused` (never `emission-complete`), and the
-    JSON record carries the observed counts beside the ceiling spelling."""
-    module, host, _code = _load(
-        'net(time="10ms")', '  emit call("a")', sleep=0.02)
+def _recorded_emit(module, host, crosses, caps):
+    """Fire a sequence of budgeted crossings through the recording seam on ONE
+    activation, returning `(errors, records)`: the exceptions raised, and the
+    records the WAL wrote."""
     wal_path = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_wal_")) / "wal.jsonl"
     timeline = replay.Timeline("C")
     wal = replay.WriteAheadLog(str(wal_path), ir={}).open()
     timeline.attach_wal(wal)
     ctx = replay._RecordingContext(Context(), timeline, {}, {})
     runtime_mod._bind_frame(ctx, runtime_mod.Frame(ctx, "C"))
+    errors = []
     try:
-        with pytest.raises(runtime_mod.CeilingExceeded):
-            runtime_mod.extern_emit(ctx, "call", module.call, ("a",),
-                                    caps=("net(time=10)",))
+        for args in crosses:
+            try:
+                runtime_mod.extern_emit(ctx, "call", module.call, tuple(args),
+                                        caps=caps)
+            except BaseException as raised:  # noqa: BLE001 - returned
+                errors.append(raised)
     finally:
         wal.close()
     records = [json.loads(line)
                for line in wal_path.read_text(encoding="utf-8").splitlines()]
-    outcomes = [record for record in records
-                if str(record.get("record", "")).startswith("emission-")]
-    assert [record["record"] for record in outcomes] == ["emission-refused"]
+    return errors, records
+
+
+def _outcome_records(records):
+    return [record for record in records
+            if str(record.get("record", "")).startswith("emission-")
+            or record.get("record") == "emitted-then-refused"]
+
+
+def test_a_time_overrun_journals_emitted_then_refused_with_observed_counts():
+    """A `time` overrun is only observable when the host call returns, so the
+    crossing DID happen. Its outcome says so: `emitted-then-refused`, never
+    `emission-complete` (the deadline was spent) and never `emission-refused`
+    (which would claim the crossing never fired). The JSON record carries the
+    observed counts beside the ceiling spelling."""
+    module, host, _code = _load(
+        'net(time="10ms")', '  emit call("a")', sleep=0.02)
+    errors, records = _recorded_emit(
+        module, host, [("a",)], ("net(time=10)",))
+    assert len(errors) == 1
+    assert isinstance(errors[0], runtime_mod.CeilingExceeded)
+    outcomes = _outcome_records(records)
+    assert [record["record"] for record in outcomes] == ["emitted-then-refused"]
     refusal = outcomes[0]
     observed = refusal["ceiling"]["net(time=10)"]
     assert observed["calls"] == 1
@@ -619,7 +694,55 @@ def test_a_time_overrun_journals_refusal_not_completion_with_observed_counts():
     assert observed["elapsed"] >= 20
     assert refusal["error"]["type"] == "CeilingExceeded"
     assert refusal["error"]["kind"] == "time"
-    assert host.CALLS == ["a"]
+    assert host.CALLS == ["a"], "the host body ran before the overrun was seen"
+
+
+def test_a_pre_fire_refusal_leaves_no_emission_step():
+    """The contrast that makes the outcome readable: a crossing refused BEFORE
+    its host body runs is refused before the emission step is recorded, so the
+    WAL carries the completed crossing and NO step for the refused one. Only a
+    crossing that actually fired gets an `emitted-then-refused` outcome; the
+    absence of a record is 'never fired'."""
+    module, host, _code = _load(
+        "net(calls=1)", '  emit call("a")\n  emit call("b")')
+    errors, records = _recorded_emit(
+        module, host, [("a",), ("b",)], ("net(calls=1)",))
+    assert len(errors) == 1
+    assert isinstance(errors[0], runtime_mod.CeilingExceeded)
+    assert errors[0].kind == "calls"
+    assert [record["record"] for record in _outcome_records(records)] == \
+        ["emission-complete"]
+    steps = [record for record in records
+             if record.get("record") == "effect"
+             and record.get("kind") == "emission"]
+    assert len(steps) == 1, "the refused crossing has no emission step"
+    assert host.CALLS == ["a"], "the refused crossing never fired"
+
+
+def test_a_time_overrun_after_the_host_body_keeps_its_compensation():
+    """A crossing that fires and is then refused on its return must stay
+    compensable: the compensation is registered at the seam BEFORE the host
+    body runs, and the refusal enqueues it for Phase 2. Registering it after
+    the fire lost it exactly when it was owed."""
+    module, host, code = _load_compensated('net(time="10ms")', sleep=0.02)
+    assert ".compensation" in code
+    error = asyncio.run(_activate(module))
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert error.kind == "time"
+    assert host.CALLS == ["a"], "the host body ran before the overrun was seen"
+    assert host.UNDOS == ["a"], \
+        "a fired crossing that is then refused must stay compensable"
+
+
+def test_a_crossing_refused_before_it_fires_is_not_compensated():
+    """The other half: the crossing that never fired has no registered
+    compensation, so the abort compensates only the crossing that did fire."""
+    module, host, _code = _load_compensated("net(calls=1)", calls=("a", "b"))
+    error = asyncio.run(_activate(module))
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert error.kind == "calls"
+    assert host.CALLS == ["a"], "the refused crossing never fired"
+    assert host.UNDOS == ["a"], "only the crossing that fired is compensated"
 
 
 def test_the_budget_is_per_activation_and_that_is_intended():

@@ -2732,12 +2732,37 @@ class _ComponentEmitter:
                 self._deferred_step(out, indent, step, deferred, where)
                 out.add(0)
                 return
-            # item 131: `await emit …` awaits the boundary crossing so the
+            # item 131: `await emit ...` awaits the boundary crossing so the
             # emission actually fires (a bare async emit builds a coroutine that
-            # never runs). The compensation registers AFTER, exactly as the sync
-            # spelling registers after the fire (design §4 clause 1).
+            # never runs).
+            #
+            # issue #2688: a budgeted crossing's compensation is registered
+            # BEFORE the host body runs, at the seam, not after the fire. A
+            # `time` overrun can only be detected when the host call returns,
+            # so the fire can raise after the crossing already happened;
+            # registering afterwards left that fired crossing uncompensated and
+            # unrecoverable. The seam registers the entry after the emission
+            # record and before the host body, and the body yields it here. A
+            # crossing refused BEFORE it fired (calls/size, or a deadline that
+            # was already spent) registers nothing, so it compensates nothing.
+            #
+            # Sync steps only. An `await emit` step's fire raises at the await
+            # when the host body fails, and the documented contract there is
+            # that a fire which raises registers nothing (a5b's abort test
+            # pins it), so the async spelling keeps the after-the-fire
+            # registration.
             aw = "await " if step.get("async") else ""
-            if (step.get("async") and step.get("approval") is None
+            compensation = self._step_compensation(step, where)
+            seam = (compensation is not None
+                    and not step.get("async")
+                    and step.get("approval") is None
+                    and self._emission_shape(step.get("expr")) == "extern")
+            if seam:
+                temp = self._emit_temp()
+                out.add(indent, f"{temp} = {aw}"
+                                 f"{self._emit_fire(step, where, compensate=compensation)}")
+                out.add(indent, f"yield {temp}.compensation")
+            elif (step.get("async") and step.get("approval") is None
                     and self._validated_call(step.get("expr")) is not None):
                 # A `validated` async operation checks the SETTLED response
                 # (item 257), so the await belongs inside the seam:
@@ -2752,41 +2777,24 @@ class _ComponentEmitter:
                 finally:
                     self._in_async = prev_async
                 out.add(indent, fire)
+                if compensation is not None:
+                    out.add(indent,
+                            f"yield _revl_frame.compensation({compensation})")
             else:
                 out.add(indent, f"{aw}{self._emit_fire(step, where)}")
-            if step.get("compensate") is not None:
-                # item 247 (docs/design/teardown-contract.md): a compensation
-                # is a first-class COMPENSATION entry on the frame's shared
-                # per-activation LIFO stack, not a bare disposer — it
-                # discharges (never runs) on a clean commit and runs
-                # best-effort in PHASE 2 of an abort, only after every proof
-                # inverse (bracket + transactional) in this activation has
-                # completed. This is the two-phase model, not the old
-                # single-interleaved-LIFO ordering the A5 TCK case predates
-                # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
-                # compensation, not inversion (§6.1).
-                out.add(indent, "yield _revl_frame.compensation(lambda: "
-                                 f"{self._expr(step.get('compensate'), where)}"
-                                 f"{self._compensation_call(step.get('compensate'), where)})")
-            # issue #1902: one compensation per crossing. A site-spelled
-            # `compensate` REPLACES the extern's declared one; the declared one
-            # is the default only when the site spells none.
-            ext_comp = (self._compensated_extern(step.get("expr"))
-                        if step.get("compensate") is None else None)
-            if ext_comp is not None:
-                # item 254: the emitted extern DECLARES its own `compensate` (the
-                # extern owns the reversal, so no site spelling is required — the
-                # item-254 network case is `emit put_endpoint(...)` with the
-                # compensating restore carried on the extern). Register it as the
-                # SAME first-class COMPENSATION entry as a site-spelled compensate
-                # (item 247, two-phase): discharged on a clean commit, best-effort
-                # in Phase 2 of an abort after every proof inverse. The reversal
-                # expression is the extern's lowered `compensate` slot (a bare
-                # call, no `result` binding — lower.py `_check_extern_undo`), the
-                # same shape `_witnessed_step` renders for a witnessed `undo`.
-                out.add(indent, "yield _revl_frame.compensation(lambda: "
-                                 f"{self._expr(ext_comp['compensate'], where)}"
-                                 f"{self._compensation_call(ext_comp['compensate'], where)})")
+                if compensation is not None:
+                    # item 247 (docs/design/teardown-contract.md): a compensation
+                    # is a first-class COMPENSATION entry on the frame's shared
+                    # per-activation LIFO stack, not a bare disposer. It
+                    # discharges (never runs) on a clean commit and runs
+                    # best-effort in PHASE 2 of an abort, only after every proof
+                    # inverse (bracket + transactional) in this activation has
+                    # completed. This is the two-phase model, not the old
+                    # single-interleaved-LIFO ordering the A5 TCK case predates
+                    # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
+                    # compensation, not inversion (§6.1).
+                    out.add(indent,
+                            f"yield _revl_frame.compensation({compensation})")
         elif kind == "approval":
             self._approval_step(out, indent, step, where)
         elif kind == "await":
@@ -3056,7 +3064,8 @@ class _ComponentEmitter:
         capability = ", ".join(caps) if caps else str(raw_name)
         raise CeilingUnattributable(capability, shape)
 
-    def _extern_emit_fire(self, expr: dict, where: str) -> str:
+    def _extern_emit_fire(self, expr: dict, where: str,
+                          compensate: Optional[str] = None) -> str:
         """The Python expression that fires a DIRECT host-extern emission
         (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
         (item 414).
@@ -3076,6 +3085,16 @@ class _ComponentEmitter:
         runtime parses them and the activation frame meters the crossing before
         the host body runs. An extern with no budget passes nothing, so its
         emitted call is byte-identical and no trace line is added.
+
+        `compensate` (issue #2688) rides to the seam as a zero-arg factory that
+        registers the step's compensation. The seam calls it AFTER the emission
+        record and BEFORE the host body, so a crossing that fires and is then
+        refused on its return (a `time` overrun is only observable when the host
+        call returns) still has its compensation registered, and a crossing
+        refused before it fires registers nothing. The seam returns a wrapper the
+        emitted body yields the entry off; `crossing` names the recorded emission
+        so the compensation is paired with it even though registration moved off
+        the next source line.
 
         The callee is resolved through the document's local functions, not only
         through `_extern_by_name`: `emit go(..)` where `fn go(x) = call(x)`
@@ -3113,8 +3132,12 @@ class _ComponentEmitter:
                     raw_name, caps or reached_caps, reason)
         budget = (f", caps={caps!r}"
                   if _ceiling_capabilities(caps) else "")
+        register = ""
+        if compensate is not None:
+            register = (f", compensate=lambda: _revl_frame.compensation("
+                        f"{compensate}, crossing={name!r})")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
-                f"({args}{',' if args else ''}){budget})")
+                f"({args}{',' if args else ''}){budget}{register})")
         if self._in_async and not self._in_arrow \
                 and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
             return f"(await {call})"
@@ -3167,18 +3190,24 @@ class _ComponentEmitter:
                 name, caps or entry[1], _SHAPE_VALUE_POSITION)
         return False
 
-    def _emission_fire(self, expr: dict, where: str) -> str:
+    def _emission_fire(self, expr: dict, where: str,
+                       compensate: Optional[str] = None) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
         host-extern crossing (`_emission_shape` == "extern", the one emission
         shape with no receiver to route it) fires through `_extern_emit_fire`, so
         the crossing reaches the runtime recording seam (item 414); every other
         shape renders exactly as before. The single shape decision every firing
-        site shares, so a new firing site cannot pick up one and miss the other."""
+        site shares, so a new firing site cannot pick up one and miss the other.
+
+        `compensate` (issue #2688) is the rendered compensation thunk to hand the
+        seam, which registers it before the host body runs. Only the extern shape
+        can carry it; every other shape renders exactly as before."""
         if self._emission_shape(expr) == "extern":
-            return self._extern_emit_fire(expr, where)
+            return self._extern_emit_fire(expr, where, compensate=compensate)
         return self._expr(expr, where)
 
-    def _emit_fire(self, step: dict, where: str) -> str:
+    def _emit_fire(self, step: dict, where: str,
+                   compensate: Optional[str] = None) -> str:
         """The Python expression that fires an `emit` step's host body. When the
         step carries a `with a` approval edge (item 246), the fire is wrapped in
         `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
@@ -3188,8 +3217,13 @@ class _ComponentEmitter:
         item 414: a DIRECT host-extern crossing (`_emission_shape` == "extern",
         the one emission shape with no receiver to route it) fires through
         `_extern_emit_fire` instead of a bare module-level call. Nothing else
-        changes shape."""
-        fire = self._emission_fire(step.get("expr"), where)
+        changes shape.
+
+        `compensate` (issue #2688) reaches `_extern_emit_fire` only; an approval
+        edge wraps the fire in a lambda, so its compensation stays on the
+        after-the-fire path."""
+        fire = self._emission_fire(step.get("expr"), where,
+                                   compensate=compensate)
         approval = step.get("approval")
         if approval is None:
             return fire
@@ -3197,6 +3231,32 @@ class _ComponentEmitter:
         cap = approval.get("capability")
         return (f"_revl_frame.approval_crossing({handle}, {cap!r}, "
                 f"lambda: {fire})")
+
+    def _step_compensation(self, step: dict, where: str) -> Optional[str]:
+        """The compensation an `emit` step owes, rendered as the thunk
+        `_revl_frame.compensation(...)` takes, or None (issue #1902: a
+        site-spelled `compensate` REPLACES the extern's declared one, and the
+        declared one is the default only when the site spells none).
+
+        Returned rather than written straight into an after-the-fire `yield` so
+        the budgeted host-extern path can hand it to the seam instead, where it
+        registers BEFORE the host body runs (issue #2688)."""
+        if step.get("compensate") is not None:
+            node = step.get("compensate")
+            return (f"lambda: {self._expr(node, where)}"
+                    f"{self._compensation_call(node, where)}")
+        ext_comp = self._compensated_extern(step.get("expr"))
+        if ext_comp is None:
+            return None
+        node = ext_comp["compensate"]
+        return (f"lambda: {self._expr(node, where)}"
+                f"{self._compensation_call(node, where)}")
+
+    def _emit_temp(self) -> str:
+        """A reserved temp for the value a seam-registered crossing returns, so
+        the body can yield its compensation entry after the fire."""
+        self._counter += 1
+        return f"_revl_emit{self._counter}"
 
     def _approval_step(self, out: "_Lines", indent: int, step: dict,
                        where: str) -> None:

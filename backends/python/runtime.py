@@ -1575,7 +1575,37 @@ def _extern_outcome(ctx, step, outcome: str, error, frame, ceilings: tuple) -> N
     callback(step, outcome, error, observed)
 
 
-def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
+class _MeteredEmission:
+    """What a crossing that also registered a compensation returns.
+
+    The emitted body yields `.compensation` onto the activation's disposer stack
+    and ignores `.value` (an `emit` step never binds its result). A crossing with
+    no compensation returns the host value unchanged, so every pre-#2688 shape is
+    untouched."""
+
+    __slots__ = ("value", "compensation")
+
+    def __init__(self, value: Any, compensation: "_Compensation") -> None:
+        self.value = value
+        self.compensation = compensation
+
+
+def _compensate_fired(compensation: "Optional[_Compensation]") -> None:
+    """Owe the compensation of a crossing that FIRED and then failed or was
+    refused (issue #2688).
+
+    The entry was registered at the seam before the host body, but the emitted
+    body yields it only when the fire returns; a raise skips that line, so
+    nothing would ever enqueue it for Phase 2. Enqueue it here instead. A
+    crossing refused BEFORE it fired never registers an entry and never reaches
+    this call, so "never fired" compensates nothing."""
+    if compensation is None:
+        return
+    compensation.frame._pending_compensations.append(compensation)
+
+
+def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
+                compensate=None):
     """Fire a DIRECT host-extern emission (`emit announce(msg)`, a kind-3/4
     crossing) through the recording seam on `ctx` (item 414).
 
@@ -1593,9 +1623,20 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
     unmetered, and a budgeted crossing with no activation frame is refused
     (:class:`CeilingUnmetered`). The emitted seam journals the observed counts
     (`calls`, `bytes`, `elapsed`) with the outcome, so the audit JSON says what
-    the run spent as well as what the declaration allows; a `time` overrun is
-    journalled BEFORE the completion record as `emission-refused`, never as
-    `emission-complete`.
+    the run spent as well as what the declaration allows.
+
+    `compensate`, when the emitter passes it, is a zero-arg factory that
+    registers the step's compensation. It is called AFTER the emission record
+    and BEFORE the host body, so the compensation is owed for a crossing that
+    fired even when the fire then raises: a `time` overrun is only observable
+    when the host call returns (:meth:`Frame._check_time_ceilings`), and that
+    crossing DID happen. Its outcome is journalled as `emitted-then-refused`,
+    and its already-registered compensation is enqueued for Phase 2. A crossing
+    refused before it fires (calls, size, or a deadline already spent) is
+    refused before the emission record, so it leaves no step in the WAL and
+    registers no compensation: absence of a record is "never fired", and
+    `emitted-then-refused` is "fired then refused". The returned
+    :class:`_MeteredEmission` carries the entry the emitted body yields.
 
     Without this the py tier compiled such a crossing to a bare module-level
     call, so the recorder never saw it, the WAL carried no `KIND_EMISSION` step
@@ -1643,10 +1684,16 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
         frame._meter_ceilings(ceilings, payload)
     record = getattr(ctx, "_revl_record_extern", None)
     step = record(name, args) if callable(record) else None
+    # issue #2688: register the compensation BEFORE the host body runs, after
+    # the emission record so the WAL descriptor still pairs with this crossing.
+    # Everything that refuses a crossing before it fires has already run, so an
+    # entry here means the crossing is about to happen.
+    compensation = compensate() if compensate is not None else None
     try:
         result = fn(*args)
     except BaseException as error:
         _extern_outcome(ctx, step, "emission-failed", error, frame, ceilings)
+        _compensate_fired(compensation)
         raise
     if inspect.isawaitable(result):
         async def await_extern():
@@ -1655,32 +1702,39 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = ()):
             except BaseException as error:
                 _extern_outcome(ctx, step, "emission-failed", error,
                                 frame, ceilings)
+                _compensate_fired(compensation)
                 raise
             # issue #2688: the time check runs BEFORE the completion record.
             # Recording completion first wrote a receipt that said the crossing
             # finished while the ceiling check was about to refuse it, so the
-            # WAL settled an over-budget emission. A refusal is journalled as
-            # `emission-refused` and never as `emission-complete`.
+            # WAL settled an over-budget emission. The host body already ran by
+            # now, so the refusal is journalled as `emitted-then-refused` (never
+            # `emission-refused`): the crossing happened and its compensation
+            # stays owed.
             if frame is not None:
                 try:
                     frame._check_time_ceilings(ceilings)
                 except BaseException as error:
-                    _extern_outcome(ctx, step, "emission-refused", error,
+                    _extern_outcome(ctx, step, "emitted-then-refused", error,
                                     frame, ceilings)
+                    _compensate_fired(compensation)
                     raise
             _extern_outcome(ctx, step, "emission-complete", None,
                             frame, ceilings)
-            return value
+            return (value if compensation is None
+                    else _MeteredEmission(value, compensation))
         return await_extern()
     if frame is not None:
         try:
             frame._check_time_ceilings(ceilings)
         except BaseException as error:
-            _extern_outcome(ctx, step, "emission-refused", error,
+            _extern_outcome(ctx, step, "emitted-then-refused", error,
                             frame, ceilings)
+            _compensate_fired(compensation)
             raise
     _extern_outcome(ctx, step, "emission-complete", None, frame, ceilings)
-    return result
+    return (result if compensation is None
+            else _MeteredEmission(result, compensation))
 
 
 def _revl_canonical_args_bytes(args) -> bytes:
