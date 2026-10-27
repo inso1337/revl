@@ -3072,7 +3072,8 @@ class _ComponentEmitter:
         raise CeilingUnattributable(capability, shape)
 
     def _extern_emit_fire(self, expr: dict, where: str,
-                          compensate: Optional[str] = None) -> str:
+                          compensate: Optional[str] = None,
+                          method_compensate: Optional[str] = None) -> str:
         """The Python expression that fires a DIRECT host-extern emission
         (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
         (item 414).
@@ -3103,6 +3104,14 @@ class _ComponentEmitter:
         the entry off; `crossing` names the recorded emission so the
         compensation is paired with it even though the registration moved off
         the next source line.
+
+        `method_compensate` is the same ordering for a provide-method site,
+        where there is no generator to yield the entry into: it is the full
+        `_revl_frame.compensation_method(...)` registration expression, which
+        parks the entry on the activation frame itself. It is handed to the
+        seam verbatim as its zero-arg factory, so a provide-method crossing
+        that fires and is then refused keeps the compensation it owes exactly
+        as the activation-body, async and approval sites do.
 
         The callee is resolved through the document's local functions, not only
         through `_extern_by_name`: `emit go(..)` where `fn go(x) = call(x)`
@@ -3141,7 +3150,9 @@ class _ComponentEmitter:
         budget = (f", caps={caps!r}"
                   if _ceiling_capabilities(caps) else "")
         register = ""
-        if compensate is not None:
+        if method_compensate is not None:
+            register = f", compensate=lambda: {method_compensate}"
+        elif compensate is not None:
             register = (f", compensate=lambda: _revl_frame.compensation("
                         f"{compensate}, crossing={name!r})")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
@@ -3154,15 +3165,20 @@ class _ComponentEmitter:
     def _value_emission_fire(self, expr: dict, where: str) -> str:
         """A provide-method value emission, fired through the recording seam
         (#1603). When its extern DECLARES a `compensate` (item 254, #1592), the
-        compensation registers on the frame right after the fire and before the
-        rest of the expression, as an `emit` statement registers it:
-        `(<fire>, _revl_frame.compensation_method(lambda: <comp>))[0]` keeps
-        the emission's value. A fire that raises registers nothing."""
-        fire = self._extern_emit_fire(expr, where)
+        compensation rides the same seam an `emit` statement's does: it
+        registers when the host body returns and before a `time` refusal is
+        decided, so a crossing that fires and is then refused keeps it. The
+        factory returns None, so the seam hands back the host value itself and
+        the value keeps its meaning. A fire that raises before it acted
+        registers nothing."""
         ext_comp = self._method_compensated_extern(expr)
         if ext_comp is None:
-            return fire
-        return f"({fire}, {self._method_compensation(ext_comp, where)})[0]"
+            return self._extern_emit_fire(expr, where)
+        crossing = _ident(expr.get("name"), f"{where}: function")
+        registration = self._method_compensation(ext_comp, where, crossing)
+        return self._extern_emit_fire(
+            expr, where,
+            method_compensate=self._method_compensate_factory(registration))
 
     def _inverse_expr(self, expr: Any, where: str) -> str:
         """`_expr` for an undo or a compensation inside a provide-method body:
@@ -3199,7 +3215,8 @@ class _ComponentEmitter:
         return False
 
     def _emission_fire(self, expr: dict, where: str,
-                       compensate: Optional[str] = None) -> str:
+                       compensate: Optional[str] = None,
+                       method_compensate: Optional[str] = None) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
         host-extern crossing (`_emission_shape` == "extern", the one emission
         shape with no receiver to route it) fires through `_extern_emit_fire`, so
@@ -3209,14 +3226,18 @@ class _ComponentEmitter:
 
         `compensate` (issue #2688) is the rendered compensation thunk to hand the
         seam, which registers it when the host body returns and before a `time`
-        refusal is decided. Only the extern shape can carry it; every other shape
-        renders exactly as before."""
+        refusal is decided. `method_compensate` is the provide-method
+        registration expression for that same seam. Only the extern shape can
+        carry either; every other shape renders exactly as before."""
         if self._emission_shape(expr) == "extern":
-            return self._extern_emit_fire(expr, where, compensate=compensate)
+            return self._extern_emit_fire(
+                expr, where, compensate=compensate,
+                method_compensate=method_compensate)
         return self._expr(expr, where)
 
     def _emit_fire(self, step: dict, where: str,
-                   compensate: Optional[str] = None) -> str:
+                   compensate: Optional[str] = None,
+                   method_compensate: Optional[str] = None) -> str:
         """The Python expression that fires an `emit` step's host body. When the
         step carries a `with a` approval edge (item 246), the fire is wrapped in
         `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
@@ -3232,9 +3253,12 @@ class _ComponentEmitter:
         wrapping: an approval edge wraps the fire in a lambda, so the
         registration starts only after the token check consumed the approval,
         and the seam registers when the host body returns. The emitted body
-        yields the returned entry."""
+        yields the returned entry. `method_compensate` is the provide-method
+        form of the same registration; it is a no-op for every non-extern
+        shape, which registers after the fire as before."""
         fire = self._emission_fire(step.get("expr"), where,
-                                   compensate=compensate)
+                                   compensate=compensate,
+                                   method_compensate=method_compensate)
         approval = step.get("approval")
         if approval is None:
             return fire
@@ -3348,14 +3372,71 @@ class _ComponentEmitter:
         return (isinstance(expr, dict) and expr.get("kind") == "fn"
                 and expr.get("name") in self._decorated)
 
-    def _method_compensation(self, ext_comp: dict, where: str) -> str:
+    def _method_registration(self, thunk: str, call: str,
+                             crossing: Optional[str] = None) -> str:
+        """A provide-method `_revl_frame.compensation_method(...)` call.
+
+        `crossing`, when the fire goes through the host-extern seam, names the
+        recorded emission the compensation offsets (issue #1369). The
+        registration and the fire share one emitted line now, so the recorder's
+        source-adjacency rule (the registration sits on the line above) no
+        longer reaches the emission; the named lookup pairs them the way the
+        activation-body seam does, and the WAL discharge descriptor keeps the
+        emission seq in `offsets`."""
+        named = f", crossing={crossing!r}" if crossing is not None else ""
+        return (f"_revl_frame.compensation_method({thunk}"
+                f"{call or ''}{named})")
+
+    def _method_compensation(self, ext_comp: dict, where: str,
+                             crossing: Optional[str] = None) -> str:
         """The compensation an extern declares, registered at a provide-method
         site: the thunk and the named call a fresh process re-issues
         (`_named_call_kwarg`), both rendered as an inverse."""
         comp = ext_comp["compensate"]
-        return (f"_revl_frame.compensation_method(lambda: "
-                f"{self._inverse_expr(comp, where)}"
-                f"{_named_call_kwarg(comp, lambda a: self._inverse_expr(a, where))})")
+        return self._method_registration(
+            f"lambda: {self._inverse_expr(comp, where)}",
+            _named_call_kwarg(comp, lambda a: self._inverse_expr(a, where)),
+            crossing)
+
+    def _method_compensate_factory(self, registration: str) -> str:
+        """The seam's zero-arg factory for a provide-method registration.
+
+        It registers and returns None. The entry is already parked on the
+        frame's deferred list by `compensation_method`, so the body has nothing
+        to yield (a provide method is not a generator), and returning the entry
+        would make the seam enqueue a second copy for Phase 2 when a fired
+        crossing is then refused."""
+        return f"({registration}, None)[1]"
+
+    def _method_compensated_fire(self, out: "_Lines", indent: int, step: dict,
+                                 where: str,
+                                 registration: "Callable[[Optional[str]], str]"
+                                 ) -> None:
+        """Fire a provide-method `emit` step that owes a compensation, with the
+        registration ordered so a crossing that fired is never left without an
+        entry (issue #2688).
+
+        A DIRECT host-extern crossing hands the registration to the seam, which
+        runs it when the host body RETURNS and before the outcome (completion
+        or a `time` refusal) is decided: a refusal raises out of the fire, so a
+        next-line registration would be skipped exactly when the crossing is
+        owed. The registration is built with the crossing's name so the
+        recorder still pairs it (see `_method_registration`), and the factory
+        returns None so the seam does not enqueue a second copy (see
+        `_method_compensate_factory`). A crossing refused before it fires and a
+        host body that raises register nothing either way. Every other shape (a
+        required-service emission) does not pass this seam: it fires first and
+        registers on the next line, byte-identically to before."""
+        expr = step.get("expr")
+        if self._emission_shape(expr) == "extern":
+            crossing = _ident(expr.get("name"), f"{where}: function")
+            out.add(indent, self._emit_fire(
+                step, where,
+                method_compensate=self._method_compensate_factory(
+                    registration(crossing))))
+        else:
+            out.add(indent, self._emit_fire(step, where))
+            out.add(indent, registration(None))
 
     def _compensated_extern(self, expr: Any) -> Optional[dict]:
         """The emission extern (one DECLARING a `compensate`) an `emit` step's
@@ -3921,12 +4002,19 @@ class _ComponentEmitter:
                 # `Frame.compensation_method` (the compensation analog of item
                 # 318's `transactional_method`) makes it abort-only: discharged on
                 # a clean commit, drained in Phase 2 after every proof inverse,
-                # guarded and residue-collected. Fire the emission first, then
-                # register — the sync spelling of the activation body's
-                # `<fire>; yield _revl_frame.compensation(...)`.
-                site = (f"{_inverse_lambda(step, 'compensate')}: "
-                        f"{self._inverse_expr(step.get('compensate'), where)}"
-                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))}")
+                # guarded and residue-collected. A DIRECT host-extern crossing
+                # hands that registration to the seam, which runs it when the
+                # host body RETURNS and before a `time` refusal is decided
+                # (issue #2688): the method body has no generator to register
+                # from afterwards, and a refusal that raises out of the fire
+                # would skip a next-line registration. Every other shape fires
+                # first and registers on the next line, as it always has.
+                thunk = (f"{_inverse_lambda(step, 'compensate')}: "
+                         f"{self._inverse_expr(step.get('compensate'), where)}")
+                call = _named_call_kwarg(
+                    step.get("compensate"),
+                    lambda a: self._inverse_expr(a, where))
+                site = f"{thunk}{call}"
                 if (self._decorated_crossing(step.get("expr"))
                         and self._compensated_extern(step.get("expr")) is not None):
                     # issue #1902: a decorated crossing registers its extern's
@@ -3937,16 +4025,22 @@ class _ComponentEmitter:
                     out.add(indent, f"with {_runtime_ref('site_compensation')}({site}):")
                     out.add(indent + 1, self._emit_fire(step, where))
                 else:
-                    out.add(indent, self._emit_fire(step, where))
-                    out.add(indent, f"_revl_frame.compensation_method({site})")
+                    self._method_compensated_fire(
+                        out, indent, step, where,
+                        lambda crossing: self._method_registration(
+                            thunk, call, crossing))
             else:
-                out.add(indent, self._emit_fire(step, where))
-            ext_comp = self._method_compensated_extern(step.get("expr"))
-            if deferred is None and ext_comp is not None and step.get("compensate") is None:
-                # item 254 / #1592: the extern DECLARES its own `compensate`,
-                # registered after the fire. A site-spelled one replaces it
-                # (issue #1902), as at the activation body.
-                out.add(indent, self._method_compensation(ext_comp, where))
+                ext_comp = self._method_compensated_extern(step.get("expr"))
+                if ext_comp is None:
+                    out.add(indent, self._emit_fire(step, where))
+                else:
+                    # item 254 / #1592: the extern DECLARES its own
+                    # `compensate`. A site-spelled one replaces it (issue
+                    # #1902), as at the activation body.
+                    self._method_compensated_fire(
+                        out, indent, step, where,
+                        lambda crossing: self._method_compensation(
+                            ext_comp, where, crossing))
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")

@@ -610,25 +610,27 @@ class Timeline:
     def emission_for(self, compensation: Any, crossing: Optional[str] = None
                      ) -> Optional[Step]:
         """The recorded emission a compensation being registered offsets, or
-        None. First by source adjacency, the rule `record_yield` has always
-        used (the registration sits on the line after the emission); then, for
-        a compensation an extern DECLARES, whose thunk lives with the extern
-        rather than beside the call, by the crossing's name: the newest
-        emission of that extern not yet paired with a compensation. None when
-        nothing matches: a crossing the recorder never saw (an emission in
-        expression position) is left unpaired rather than paired with a
-        neighbour, which would report the neighbour as offset."""
+        None. A named crossing is EXACT: the newest emission of that extern not
+        yet paired with a compensation, because source adjacency can reach an
+        unrelated unpaired emission on the line above (a compensation and its
+        fire share a line at the seam). Without a name, by source adjacency, the
+        rule `record_yield` has always used (the registration sits on the line
+        after the emission), which is what a site-spelled compensation whose
+        thunk lives beside the call gets. None when nothing matches: a crossing
+        the recorder never saw (an emission in expression position) is left
+        unpaired rather than paired with a neighbour, which would report the
+        neighbour as offset."""
+        if crossing is not None:
+            for step in reversed(self.steps):
+                if step.kind == KIND_EMISSION and step.compensation is None \
+                        and (step.detail or {}).get("key") == crossing:
+                    return step
+            return None
         file, lineno = _code_site(_unguarded(compensation))
         if lineno:
             adjacent = self._emission_sites.get((file, lineno - 1))
             if adjacent is not None and adjacent.compensation is None:
                 return adjacent
-        if crossing is None:
-            return None
-        for step in reversed(self.steps):
-            if step.kind == KIND_EMISSION and step.compensation is None \
-                    and (step.detail or {}).get("key") == crossing:
-                return step
         return None
 
     # -- recording ---------------------------------------------------------

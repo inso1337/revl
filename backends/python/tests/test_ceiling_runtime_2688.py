@@ -966,6 +966,62 @@ def test_an_async_refusal_compensates_after_phase_one():
         "the bracket inverse is Phase 1; the compensation is Phase 2"
 
 
+def _provide_compensated_program(decl: str, sleep: float = 0.0):
+    """A component whose PROVIDE METHOD emits the budgeted extern with a
+    site-spelled compensation, plus its trusted host module. A provide method
+    has no generator to register a compensation from after the fire, so this is
+    the surface a `time` refusal can strip. Returns `(path, host_module_name)`."""
+    host = f"ceiling_host_{next(_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_provide_"))
+    (directory / f"{host}.py").write_text(
+        _HOST_SOURCE.format(sleep=sleep, raises=False), encoding="utf-8")
+    source = (
+        f'extern emission[{decl}] fn call(x: Str) -> Int '
+        f'= @py ref call from "{host}.py"\n'
+        f'extern emission fn revert(x: Str) -> Int '
+        f'= @py ref revert from "{host}.py"\n'
+        "service Ops { emission fn net() }\n"
+        "component C provides ops: Ops {\n"
+        "  provide ops {\n"
+        '    fn net() { emit call("a") compensate revert("a") }\n'
+        "  }\n"
+        "}\n")
+    main = directory / "main.rvl"
+    main.write_text(source, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return str(main), host
+
+
+def test_a_provide_method_time_overrun_keeps_its_compensation():
+    """The probe's shape: a provide method emits a host extern under
+    `time="10ms"` with a site-spelled compensation. A method body has no
+    generator, and its registration used to sit on the line after the fire, so
+    the return check's refusal raised out of the fire before it ran: CALLS
+    ["a"], UNDOS []. Handing the registration to the seam as a zero-arg factory
+    registers it when the host body returns and before the outcome is decided,
+    so the abort compensates the fired crossing exactly once."""
+    from revl.mcp.session import Session  # noqa: PLC0415
+
+    path, host_name = _provide_compensated_program('net(time="10ms")', sleep=0.02)
+    host = importlib.import_module(host_name)
+    session = Session()
+    session.load(compile_files([path]))
+    with pytest.raises(runtime_mod.CeilingExceeded) as caught:
+        session.call("ops", "net", [])
+    assert caught.value.kind == "time"
+    assert host.CALLS == ["a"], "the host body ran before the overrun was seen"
+    assert host.UNDOS == [], "the refusal itself compensates nothing"
+    ((_name, fiber),) = session._driver.fibers.items()
+    frame = session._driver.runtime._frame_for_ctx(fiber.ctx)
+    frame.abort()
+    session.unload()
+    assert host.UNDOS == ["a"], \
+        "a provide-method crossing that fired and was then refused must stay compensable"
+    assert [entry.ran for entry in frame._compensations] == [True], \
+        "the owed compensation runs exactly once"
+
+
 def _load_approval_emit():
     """A budgeted emit written with an approval edge in the activation body:
     `emit call("a") compensate revert("a") with a`. The extern does not declare

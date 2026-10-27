@@ -10,9 +10,12 @@ that, and the timer site since #1590, but a provide-method `emit put_row(m)`
 rendered only the forward call: a call then an abort left `put m` and never
 ran `restore`, while the site-spelled control (`emit put_row(m) compensate
 plain_restore()`) restored. The method site now registers the declared
-compensation through `Frame.compensation_method` after the fire, unless the
-site spells its own, which replaces it (issue #1902); a value-position `return
-emit put_row(m)` (#1603) registers it too, before the value is returned.
+compensation through `Frame.compensation_method`, unless the site spells its
+own, which replaces it (issue #1902); a value-position `return emit put_row(m)`
+(#1603) registers it too. Issue #2688 moved the direct host-extern registration
+into the seam: the fire carries `compensate=lambda: <registration>`, so the
+runtime runs it when the host body returns and before a `time` refusal is
+decided, rather than on a next line the refusal would skip.
 """
 
 import copy
@@ -90,27 +93,39 @@ def _method(src: str, name: str) -> list:
 
 FIRE = "_revl_extern_emit(_revl_ctx, 'put_row', put_row, (m,))"
 # the named call rides beside the thunk so a fresh process can re-issue it
-# (issue #1369's WAL descriptor)
+# (issue #1369's WAL descriptor); the crossing is named because the
+# registration now shares the fire's line (issue #2688), so the recorder
+# cannot pair them by source adjacency
 DECLARED = ("_revl_frame.compensation_method(lambda: restore_row(), "
-            "call={'receiver': None, 'method': 'restore_row', 'args': []})")
+            "call={'receiver': None, 'method': 'restore_row', 'args': []}, "
+            "crossing='put_row')")
+
+
+def _seam_fire(registration: str) -> str:
+    """The fire with the registration handed to the seam (issue #2688). The
+    factory registers and returns None: the entry is already on the frame, so
+    the seam must not enqueue a second copy for Phase 2."""
+    return FIRE[:-1] + f", compensate=lambda: ({registration}, None)[1])"
 
 
 def test_an_emit_statement_registers_the_declared_compensation():
-    assert _method(_emitted(), "put") == [FIRE, DECLARED]
+    assert _method(_emitted(), "put") == [_seam_fire(DECLARED)]
 
 
 def test_a_site_spelled_compensation_replaces_the_declared_one():
     """Issue #1902: one compensation per crossing. The site spells its own, so
     the extern's declared one is not registered beside it."""
-    assert _method(_emitted(), "both") == [
-        FIRE, "_revl_frame.compensation_method(lambda: plain_restore(), "
-              "call={'receiver': None, 'method': 'plain_restore', 'args': []})"]
+    site = ("_revl_frame.compensation_method(lambda: plain_restore(), "
+            "call={'receiver': None, 'method': 'plain_restore', 'args': []}, "
+            "crossing='put_row')")
+    assert _method(_emitted(), "both") == [_seam_fire(site)]
 
 
 def test_a_value_emission_registers_the_declared_compensation_before_returning():
     src = _emitted()
-    assert _method(src, "give") == [f"return ({FIRE}, {DECLARED})[0]"]
-    assert _method(src, "keep") == [f"n = ({FIRE}, {DECLARED})[0]", "return n"]
+    declared_fire = _seam_fire(DECLARED)
+    assert _method(src, "give") == [f"return {declared_fire}"]
+    assert _method(src, "keep") == [f"n = {declared_fire}", "return n"]
 
 
 # ---------------------------------------------------------------------------
