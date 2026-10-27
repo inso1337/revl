@@ -33,13 +33,9 @@ MARKER = re.compile(r"<<UNSUPPORTED[^>]*>>")
 # fails the day one is marked (or no longer refused), so the entry is deleted.
 # DOCUMENTS globs every tier's refusal directory and every tier runs over all of
 # them, which is why go's directive documents reach the java port at all.
-_IMPORT_DIRECTIVE_REFUSALS = frozenset(
-    f"tests/fixtures/emit_go_refusals/import_directive_{name}.rvl"
-    for name in ("alias_clash", "keyword_alias", "malformed"))
 KNOWN_SILENT = {
-    # issue #2486: the go port's `import_directive` does not refuse a
-    # `//revl:import` line the reference refuses (it re-quotes it instead)
-    "go": _IMPORT_DIRECTIVE_REFUSALS,
+    # issue #2486 used to list the go port's three `//revl:import` documents here.
+    # The port now names each one, so go has no known-silent ones left.
     # issue #2492 used to list the same documents for java, because the java
     # port had no marker for an extern with no @java body and emitted the module
     # anyway. The port now names it (`<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:...>>`),
@@ -84,8 +80,9 @@ def test_every_refusal_document_is_marked_by_the_port(tiers, tier):
 
 
 # Issue #2389: on py, rust and java a namespaced provision key either emits the
-# reference bytes or carries a named marker. The ports do not mangle the key
-# yet, so each one names it (`<<UNSUPPORTED-NAMESPACED-KEY:Comp.key>>`).
+# reference bytes or carries a named marker. Each tier mangles the key as the
+# reference does (issue #2394), so the marker names only a key whose document
+# the tier could not emit whole (`<<UNSUPPORTED-NAMESPACED-KEY:Comp.key>>`).
 NAMESPACED_TIERS = ("py", "rust", "java")
 NAMESPACED_SOURCES = ("ISSUE_REPRODUCER", "TWO_NAMESPACES",
                       "ROUTED_NAMESPACED", "KEYWORD_PARTS")

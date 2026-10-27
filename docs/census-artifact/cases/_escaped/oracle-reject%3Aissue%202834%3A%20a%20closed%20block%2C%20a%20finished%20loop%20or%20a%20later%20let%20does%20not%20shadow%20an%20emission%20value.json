@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2834: a closed block, a finished loop or a later let does not shadow an emission value", "buckets": ["agree-refuse/G4"]}

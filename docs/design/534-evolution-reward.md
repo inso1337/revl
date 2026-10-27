@@ -18,10 +18,11 @@ Sources studied, all at `c136eae6`: `tools/gate_reference_census.py` (`bucket`,
 ## 0. The decision in one paragraph
 
 The reward is a **conjunction, not a scalar**, and retention is that same
-conjunction. Ten components each answer `verified` or `failed` (item 536's
-eight, plus the `held-out` component design doc 535 owns and the `progress`
+conjunction. Thirteen components each answer `verified` or `failed` (item 536's
+eight, the three more that its negative promotion bar needs and slice 4 below
+adds, the `held-out` component design doc 535 owns and the `progress`
 component design doc 546 owns), every answer is read off an artifact the
-repository owns, and a trajectory is retained only when all ten say `verified`.
+repository owns, and a trajectory is retained only when all thirteen say `verified`.
 `progress` is the one that requires an IMPROVEMENT, so the empty diff is not
 retained. No weight, no threshold, no partial credit, and no
 number exported anywhere a threshold could later be attached to it. The scorer is
@@ -377,15 +378,74 @@ Parser: `test_the_committed_block_parser_reads_the_real_one` holds the base-side
 parser against the real generated block rather than against the fixture that
 mimics it.
 
-**Slice 4: the negative promotion bar.** Item 536 states seven entries that green
-tests alone must not carry: no new false admits, no widened capability reach at
-the G8 boundary, no weakened refusal, no reduced formal coverage, no unexplained
-golden change, no unbounded resource path, no hidden host fallback. Slices 1 to 3
-cover the first, the third (a weakened refusal now shows as a weakened
-`(guarantee, tier)` cell), the fourth and the fifth. The other three -- widened
-capability reach at the G8 boundary, an unbounded resource path, a hidden host
-fallback -- need their own reads and are not folded into an existing component,
-because a component that fails for two unrelated reasons cannot be acted on.
+**Slice 4: the negative promotion bar (issue #2706).** Item 536 states seven
+entries that green tests alone must not carry: no new false admits, no widened
+capability reach at the G8 boundary, no weakened refusal, no reduced formal
+coverage, no unexplained golden change, no unbounded resource path, no hidden
+host fallback. Seven entries, seven components. Slices 1 to 3 cover the first
+(`no-new-false-admits`), the third (a weakened refusal shows as a weakened
+`(guarantee, tier)` cell in `conformance`), the fourth (`formal`) and the fifth
+(`artifact-stability`). The other three each have their own component, because
+a component that fails for two unrelated reasons cannot be acted on:
+
+| entry | component | evidence it reads | fails when |
+|---|---|---|---|
+| no widened capability reach at the G8 boundary | `reach` | `audit_report` of every conformance case, at `base` and at head, through `audit_diff.evaluate` and `diff_capability_scopes` | a crossing is added, a reach bound loosens, or a capability scope widens on a crossing whose token did not change |
+| no unbounded resource path | `resource` | the per-activation `cardinality` verdict of the same audits, through `audit_diff.diff_cardinality` | a `(component, capability)` ceiling widens (bounded to `unbounded`, or to a larger bound), a verdict present at `base` is missing at head, or nothing was compared |
+| no hidden host fallback | `host-fallback` | every case emitted through every tier, scanned for `<<UNSUPPORTED...>>` | an occurrence appears beyond the count the same case and tier carried at `base`, or a tier that emitted a case at `base` refuses it now |
+
+All three measure with `tools/promotion_evidence.py`, run from the scorer's
+checkout. The tree under judgement is data: `base` is unpacked with `git
+archive` into a scratch directory and each side is compiled by its own `src`
+(`PYTHONPATH`), so the head is not judged by the base's compiler or the other
+way round.
+
+The corpus is the BASE's `CASES`, and both sides are measured on those sources.
+A candidate cannot widen the compiler and, in the same change, edit a case until
+the new compiler no longer shows it: the edit is not read. A case the candidate
+adds is not measured (it is new work), and a case it deletes is still measured.
+A case the candidate's compiler no longer accepts fails all three. A verified
+`reach` or `resource` reason says how many cases new at head were not measured.
+`host-fallback` walks the base's tiers as well as the head's, because the
+head's corpus module names the tiers it walks: a tier the candidate drops from
+it fails the component.
+
+A child process ended by a signal is a box reaping it and not the tool
+answering, so it is run again, three attempts in all, on the base side and on
+the diff step, which the candidate does not influence. A run of the
+candidate's own compiler or emitters that is killed by a signal fails at once:
+a candidate that crashes now and then must not pass on one clean run in three. No `--accept`
+is honoured: an intended widening is a decision for a person, and a trajectory
+that needs one is not retained. `reach` also fails when no case compiled on both
+sides, and `host-fallback` when nothing was emitted, because no evidence is not
+a pass.
+
+What these cannot see. The corpus is small (62 cases, 61 of which compile, 6
+with a crossing, 5 cardinality verdicts), so they are a ratchet over what the
+corpus exercises, not over the language. `host-fallback` runs the reference
+emitters, and they never print the marker: they raise. So on them the check is
+the refusal (a tier that emitted a case at `base` and raises on it now), which
+is a lost construct and not strictly a hidden fallback; the marker count is
+armed for any emitter that does print it. The self-hosted emitters, which are
+where the marker is spelled, are not run here and stay with
+`tools/selfhost_differential_survey.py`. The marker is a text match, so a
+fallback spelled any other way is not seen. A `resource` verdict that goes
+missing fails even when the cause is the candidate removing the emission, which
+`reach` passes; the two read different questions.
+Oracle: the `reach`, `resource` and `host-fallback` block of
+`tests/test_evolution_reward.py`. Each fixture changes one thing at head (the
+fixture's compiler or emitter, since the corpus measured is the base's) and
+scores all three, so `test_a_candidate_that_adds_a_crossing_fails_reach_only`,
+`test_a_scope_widened_on_a_stable_crossing_fails_reach_only`,
+`test_a_bounded_loop_turned_unbounded_fails_resource_only`,
+`test_a_bound_moving_to_a_larger_bound_fails_resource_only` and
+`test_a_new_fallback_marker_fails_host_fallback_only` assert the other two stay
+verified. `test_editing_a_case_while_widening_the_compiler_is_still_caught` is
+the attack the base's corpus closes. The direction is held by
+`test_a_candidate_that_gives_up_a_crossing_passes_reach` and
+`test_an_unbounded_path_made_bounded_passes_resource`, and
+`test_the_real_emitters_report_their_refusals` is the positive control that the
+instrument sees a refusal on the real emitters.
 
 **Slice 5: the progress conjunct (issue #1224, item 545).** All eight of item
 536's components are PRESERVATION checks, so a reward made of them alone is
@@ -455,6 +515,6 @@ Oracle: `tests/test_evolution_progress.py` and the `progress` block of
   a refactor, a new feature, a performance fix, a documentation correction.
   That is the price of a reward whose maximum is not the empty diff, and design
   doc 546 section 6 lists what the counters cannot see.
-* Only `progress` resolves the merge base. The other nine components read
+* Only `progress` resolves the merge base. The other twelve components read
   `candidate.base` verbatim, which against a moving ref errs toward failing
   (`scope` would count the trunk's own changes), never toward crediting.

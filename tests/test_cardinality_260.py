@@ -17,12 +17,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import compile_files  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
 from revl.cardinality import _merge_max, cardinality  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
+
+import pytest  # noqa: E402
 
 EXAMPLES = ROOT / "examples"
 
@@ -209,7 +214,10 @@ component C provides svc: Svc {
 
 
 def test_first_class_emitting_arrow_is_unbounded_never_zero():
-    card = _card("""
+    """The compiler refuses this source since issue #2842 (an emitting helper
+    handed on as a value). The fold reads IR, so it is measured on the IR an
+    earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
+    src = """
 service Svc { emission fn run() -> Int }
 extern emission fn boom() -> Int = @py { return 1 }
 fn dispatch(f: () -> Int) -> Int { return f() }
@@ -217,7 +225,11 @@ fn emitter() -> Int { let x = boom(); return x }
 component C provides svc: Svc {
   provide svc { fn run() -> Int { return dispatch(emitter) } }
 }
-""")
+"""
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(src, "t.rvl")
+    with value_rule_off():
+        card = _card(src)
     assert card["C"]["verdict"] == "unbounded"
     # the unnameable boundary `*` is present and unbounded, never counted 0
     star = card["C"]["per_capability"]["*"]
@@ -420,6 +432,225 @@ component Agent requires model: Model provides agent: Loop {
     # the reason names the fan-out and clause 4 - the CRITICAL fix
     assert "fans out" in entry["reason"]
     assert "clause 4" in entry["reason"]
+
+
+# --------------------------------------------------------------------------
+# Issue #2699: branching self-recursion with a SMALL LITERAL fuel certifies to
+# `(k^(N+1) - 1) / (k - 1)` activations times the per-call crossings. Anything
+# that is not a literal, or whose activation count is over the ceiling, stays
+# `unbounded` with the fan-out reason.
+# --------------------------------------------------------------------------
+
+def _tree_agent(fuel: str, calls: int = 2, config: str = "") -> dict:
+    recur = "\n".join(
+        ("  return" if i == calls - 1 else f"  let a{i} =") + " tree(step, msgs, n - 1)"
+        for i in range(calls))
+    return _agent_model_verdict(f"""
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {{
+  if (n <= 0) {{ return "stop" }}
+  let x = step(msgs)
+{recur}
+}}""", f"tree(msgs2 => emit model.complete(msgs2), msgs, {fuel})", config=config)
+
+
+def test_branching_recursion_literal_fuel_three_is_a_finite_bound_of_fifteen():
+    """Two self-calls, fuel 3, one crossing per call: 1 + 2 + 4 + 8 = 15
+    activations, `2^4 - 1`, each crossing the model once."""
+    agent = _tree_agent("3")
+    assert agent["verdict"] == "bounded"
+    assert agent["per_capability"]["model"] == {"bound": 15, "kind": "bounded"}
+
+
+def test_branching_recursion_three_calls_uses_the_geometric_sum():
+    """k = 3, fuel 2: 1 + 3 + 9 = 13 activations."""
+    agent = _tree_agent("2", calls=3)
+    assert agent["per_capability"]["model"] == {"bound": 13, "kind": "bounded"}
+
+
+def test_branching_recursion_bound_is_not_below_the_real_count():
+    """The reported bound must be at least the crossings a run makes. The
+    function is run by hand: each activation with fuel > 0 crosses once, and
+    the leaves (fuel 0) cross zero times, so 7 crossings at fuel 3; the bound
+    15 covers it."""
+    def real(n):
+        return 0 if n <= 0 else 1 + 2 * real(n - 1)
+    agent = _tree_agent("3")
+    assert agent["per_capability"]["model"]["bound"] >= real(3)
+
+
+def test_branching_recursion_over_the_ceiling_stays_unbounded():
+    """The same shape with fuel 5 (63 activations) and fuel 60 is over the
+    ceiling: `unbounded` with the fan-out reason, never a number."""
+    for fuel in ("5", "60"):
+        agent = _tree_agent(fuel)
+        entry = agent["per_capability"]["model"]
+        assert agent["verdict"] == "unbounded", fuel
+        assert entry["kind"] == "unbounded" and entry["bound"] is None, fuel
+        assert "fans out" in entry["reason"] and "clause 4" in entry["reason"]
+
+
+def test_branching_recursion_at_the_ceiling_is_still_certified():
+    """fuel 4 is 31 activations, exactly the ceiling."""
+    agent = _tree_agent("4")
+    assert agent["per_capability"]["model"] == {"bound": 31, "kind": "bounded"}
+
+
+def test_branching_recursion_config_fuel_stays_unbounded():
+    """A config-field fuel is not a small literal: never bounded-symbolic for a
+    branching recursion (the issue leaves it unbounded)."""
+    agent = _tree_agent("config.max_steps", config="config { max_steps: Int }")
+    entry = agent["per_capability"]["model"]
+    assert agent["verdict"] == "unbounded"
+    assert entry["kind"] == "unbounded"
+    assert "fans out" in entry["reason"]
+
+
+def test_branching_recursion_derived_fuel_stays_unbounded():
+    agent = _tree_agent("1 + 2")
+    assert agent["per_capability"]["model"]["kind"] == "unbounded"
+
+
+def _assert_fanout_unbounded(agent: dict):
+    entry = agent["per_capability"]["model"]
+    assert agent["verdict"] == "unbounded"
+    assert entry["kind"] == "unbounded" and entry["bound"] is None
+    assert "fans out" in entry["reason"] and "clause 4" in entry["reason"]
+
+
+_RUN_TREE = "tree(msgs2 => emit model.complete(msgs2), msgs, 3)"
+
+
+class _TimeBound:
+    """Fail fast instead of hanging CI (no pytest-timeout here): a SIGALRM
+    after `seconds`, where the platform has one."""
+
+    def __init__(self, seconds: int = 20):
+        self.seconds = seconds
+
+    def __enter__(self):
+        import signal
+        self._signal = signal if hasattr(signal, "SIGALRM") else None
+        if self._signal is not None:
+            def fire(signum, frame):
+                raise AssertionError(
+                    f"did not finish within {self.seconds}s (a huge literal "
+                    "fuel must hit the ceiling guard, not a huge power)")
+            self._old = signal.signal(signal.SIGALRM, fire)
+            signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, *exc):
+        if self._signal is not None:
+            self._signal.alarm(0)
+            self._signal.signal(self._signal.SIGALRM, self._old)
+        return False
+
+
+def test_branching_guard_is_hit_for_a_huge_fuel_without_a_huge_power():
+    """`_branching_calls` stops as soon as it passes the ceiling, so a huge
+    literal fuel neither builds a huge integer nor hangs."""
+    from revl.cardinality import _BRANCHING_CALL_CEILING, _branching_calls
+    with _TimeBound():
+        for iters in (10**6, 10**18):
+            assert _branching_calls(2, iters) > _BRANCHING_CALL_CEILING
+            assert _branching_calls(3, iters) > _BRANCHING_CALL_CEILING
+    assert _branching_calls(2, 3) == 15
+
+
+def test_branching_calls_with_no_iterations_is_one_activation():
+    from revl.cardinality import _branching_calls
+    assert _branching_calls(2, 0) == 1
+    assert _branching_calls(3, 0) == 1
+    assert _branching_calls(2, 1) == 3
+
+
+def test_branching_recursion_fuel_zero_is_one_activation():
+    """Fuel 0 hits the base arm at once: one activation. The bound charges it
+    the larger of the base and continuation counts (1), a safe over-count."""
+    agent = _tree_agent("0")
+    assert agent["verdict"] == "bounded"
+    assert agent["per_capability"]["model"]["bound"] == 1
+
+
+def test_branching_recursion_huge_literal_fuel_stays_unbounded():
+    with _TimeBound():
+        for fuel in ("1000000", str(10**18)):
+            _assert_fanout_unbounded(_tree_agent(fuel))
+
+
+def test_branching_recursion_with_a_self_call_in_a_local_arrow_stays_refused():
+    """Two syntactic self-calls plus a self-call inside a local arrow invoked
+    twice: the arrow makes the real call count larger than the syntactic one,
+    so the branching path must refuse. The arrow-expression refusal preempts
+    the fan-out wording for this shape; the verdict is still unbounded.
+    Fuel 2 keeps the syntactic count (3 per path) under the ceiling, so only
+    the arrow rule can refuse it."""
+    agent = _agent_model_verdict("""
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let x = step(msgs)
+  let g = m => tree(step, m, n - 1)
+  let a = g(msgs)
+  let b = g(msgs)
+  let c = tree(step, msgs, n - 1)
+  return tree(step, msgs, n - 1)
+}""", "tree(msgs2 => emit model.complete(msgs2), msgs, 2)")
+    entry = agent["per_capability"]["model"]
+    assert agent["verdict"] == "unbounded"
+    assert entry["kind"] == "unbounded" and entry["bound"] is None
+    assert "self-call inside an arrow expression" in entry["reason"]
+    assert "never the linear ceiling" in entry["reason"]
+
+
+def test_branching_recursion_with_a_self_call_in_a_loop_body_stays_refused():
+    """A branching recursion whose extra self-call sits inside a `while` body
+    must be refused as unbounded, never certified: the loop runs that call once
+    per iteration, which the syntactic per-path count does not cover. The
+    uncounted-construct check must flag a real lowered loop body, not only a
+    local arrow (fuel 2 keeps the syntactic count of 2 per path under the
+    ceiling)."""
+    from revl.cardinality import _self_call_in_uncounted_construct
+    body = """
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let x = step(msgs)
+  var i = 0
+  while (i < n) { let a = tree(step, msgs, n - 1); i = i + 1 }
+  return tree(step, msgs, n - 1)
+}"""
+    ir = compile_source(_HEAD + body, "t.rvl")
+    decl = next(fn for fn in ir["functions"] if fn.get("name") == "tree")
+    assert _self_call_in_uncounted_construct(decl["body"], "tree") is True
+    agent = _agent_model_verdict(
+        body, "tree(msgs2 => emit model.complete(msgs2), msgs, 2)")
+    assert agent["verdict"] == "unbounded"
+    entry = agent["per_capability"]["model"]
+    assert entry["kind"] == "unbounded" and entry["bound"] is None
+
+
+def test_branching_recursion_that_fails_clause_one_keeps_the_fanout_reason():
+    """A branching recursion whose fuel does not decrease on one back-edge was
+    reported with the fan-out reason before #2699 and still is."""
+    agent = _agent_model_verdict("""
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let x = step(msgs)
+  let a = tree(step, msgs, n)
+  return tree(step, msgs, n - 1)
+}""", _RUN_TREE)
+    _assert_fanout_unbounded(agent)
+
+
+def test_branching_recursion_with_an_escaping_param_keeps_the_fanout_reason():
+    agent = _agent_model_verdict("""
+fn tree(step: (List[Str]) -> Str, msgs: List[Str], n: Int) -> Str {
+  if (n <= 0) { return "stop" }
+  let alias = step
+  let x = alias(msgs)
+  let a = tree(step, msgs, n - 1)
+  return tree(step, msgs, n - 1)
+}""", _RUN_TREE)
+    _assert_fanout_unbounded(agent)
 
 
 # --------------------------------------------------------------------------

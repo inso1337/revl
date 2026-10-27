@@ -140,6 +140,7 @@ CORPUS = [
     "strings.rvl",   # string `+`, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, nested list types
     "boxed_generics.rvl",  # Int32/Any type arguments, generic record parameters (#2303)
+    "generic_records.rvl",  # the diamond on a generic record literal, and its raw fallbacks (#2325)
     "maps.rvl",      # the empty map literal and the Map/List generic type lowering
     # slice 2 (item 210) — the v3 typed-core
     "records.rvl",   # record decls, out-of-order literals, field access, nesting
@@ -653,7 +654,9 @@ def test_an_extern_with_a_java_body_emits_no_refusal(emitted, reference, tmp_pat
 
 
 # The reference refuses a deferred emission before it looks at host keys, so a
-# document with both must surface the DEFERRED marker first on the port.
+# document with both must surface the DEFERRED marker first on the port. The
+# namespaced key keeps its marker too: the reference bytes are unreachable here,
+# so the port names the key it could not verify (issue #2394).
 NAMESPACED_AND_DEFERRED = """extern emission deferred fn deliver(sink: Str, msg: Str)
   = @py { return } = @ts { return; } = @rs { () } = @go { return } = @java { return; }
 service Ops { emission fn enqueue(sink: Str, msg: Str) }
@@ -676,6 +679,40 @@ def test_a_deferred_call_is_named_before_a_namespaced_key(
     markers = re.findall(r"<<UNSUPPORTED-[A-Z-]+:", got)
     assert "<<UNSUPPORTED-NAMESPACED-KEY:" in markers, markers
     assert markers[0] == "<<UNSUPPORTED-DEFERRED-EMISSION:", markers
+
+
+# Issue #2458: `_check_host_keys` is the FIRST statement of the reference
+# `emit`, ahead of the holes, deferred, validated and fault-test refusals, so a
+# document that trips a host-key collision AND a deferred call must name the
+# collision first on the port. `acme__ops` is exactly what `acme::ops` mangles
+# to (`_host_key`), so the two wiring keys land on one Java identifier.
+COLLIDING_KEYS_AND_DEFERRED = """extern emission deferred fn deliver(sink: Str, msg: Str)
+  = @py { return } = @ts { return; } = @rs { () } = @go { return } = @java { return; }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides acme::ops: Ops {
+  provide acme::ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+  }
+}
+component Flat provides acme__ops: Ops {
+  provide acme__ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+  }
+}
+"""
+
+
+def test_a_host_key_collision_is_named_before_a_deferred_call(
+        emitted, reference, tmp_path):
+    path = tmp_path / "host_key_collision.rvl"
+    path.write_text(COLLIDING_KEYS_AND_DEFERRED)
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError, match="both lower to the"):
+        reference.emit(ir)
+    got = emitted["emit_java_src"](ir)
+    markers = re.findall(r"<<UNSUPPORTED-[A-Z-]+:", got)
+    assert "<<UNSUPPORTED-DEFERRED-EMISSION:" in markers, markers
+    assert markers[0] == "<<UNSUPPORTED-HOST-KEY-COLLISION:", markers
 
 
 # issue #2408: the reference refuses a deferred call and a `validated` crossing

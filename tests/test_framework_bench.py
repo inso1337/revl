@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -1159,6 +1160,11 @@ def test_the_bench_runner_is_the_one_in_bench_and_not_a_namesake():
         assert hasattr(bench_run, attr), attr
 
 
+# The module name `run`, not every name that starts with those three letters.
+# `import runtime` is the Python tier's runtime adapter and reaches no runner.
+_BARE_RUN_IMPORT = re.compile(r"^(?:import|from) run\b")
+
+
 def test_no_bench_module_reaches_its_runner_through_a_bare_import():
     """The import that broke, refused by name rather than by its symptom. A
     bare `import run` is correct only until something else registers that name,
@@ -1168,9 +1174,20 @@ def test_no_bench_module_reaches_its_runner_through_a_bare_import():
     for path in sorted(BENCH.glob("*.py")):
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
-            if stripped.startswith(("import run", "from run import")):
+            if _BARE_RUN_IMPORT.match(stripped):
                 offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, offenders
+
+
+def test_the_bare_runner_guard_matches_the_module_not_its_prefix():
+    """The guard is about the name `run` exactly. A prefix match flags
+    `import runtime`, which every backend module reaches and which imports no
+    runner: `bench/extern_call_cost.py` is built on it, so the prefix form
+    failed the root suite on a module whose imports were always correct."""
+    assert _BARE_RUN_IMPORT.match("import run")
+    assert _BARE_RUN_IMPORT.match("from run import main")
+    assert not _BARE_RUN_IMPORT.match("import runtime")
+    assert not _BARE_RUN_IMPORT.match("from runtime import Ok")
 
 
 # ---------------------------------------------------------------------------

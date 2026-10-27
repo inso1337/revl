@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pythonInterpreter } from '../scripts/emit-fixtures'
 
 const backend = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const generated = join(backend, 'tests', 'generated', 'v3_tests.test.ts')
@@ -118,7 +119,7 @@ describe('checked-in generated modules are current', () => {
     it(`is committed current with its fixture: ${output}`, () => {
       // Same recipe scripts/emit-fixtures.ts uses at setup time.
       const fresh = spawnSync(
-        'python3',
+        pythonInterpreter(),
         ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
         { cwd: backend, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
       )

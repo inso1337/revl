@@ -106,15 +106,35 @@ def attach(payload: dict, nxt) -> dict:
 
 def describe(nxt: dict | list) -> str:
     """One sentence naming the remedy, for the refusal's message."""
-    first = nxt[0] if isinstance(nxt, list) else nxt
-    if "operator" in first:
-        return f"Next, for an operator: {first['operator']}."
-    tool = first["tool"]
-    if not first.get("ready", True):
-        return f"Next: {tool} with {first['needs']}; `next` holds the call."
-    origin = _origin_phrase(first["arguments"]) if tool == "revl_load" else ""
-    tail = f" ({origin})" if origin else ""
-    return f"Next: {tool}{tail}; `next` holds the call, ready to send as-is."
+    if not isinstance(nxt, list):
+        if "operator" in nxt:
+            return f"Next, for an operator: {nxt['operator']}."
+        tool = nxt["tool"]
+        if not nxt.get("ready", True):
+            return f"Next: {tool} with {nxt['needs']}; `next` holds the call."
+        origin = _origin_phrase(nxt["arguments"]) if tool == "revl_load" else ""
+        tail = f" ({origin})" if origin else ""
+        return f"Next: {tool}{tail}; `next` holds the call, ready to send as-is."
+
+    if not nxt:
+        return "No next call is available."
+
+    def option_text(option: dict) -> str:
+        if "operator" in option:
+            return f"an operator action: {option['operator']}"
+        tool = option["tool"]
+        if not option.get("ready", True):
+            return f"{tool} needs {option['needs']}"
+        origin = _origin_phrase(option["arguments"]) if tool == "revl_load" else ""
+        tail = f" ({origin})" if origin else ""
+        return f"{tool}{tail}, ready to send as-is"
+
+    total = len(nxt)
+    sentence = (f"Next: option 1 of {total} is {option_text(nxt[0])}. "
+                f"The `next` field holds all {total} options.")
+    for index, option in enumerate(nxt[1:], start=2):
+        sentence += f" Alternative {index}: {option_text(option)}."
+    return sentence
 
 
 def _origin_phrase(arguments: dict) -> str:

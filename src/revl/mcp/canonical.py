@@ -53,13 +53,18 @@ def digest(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def canonicalise(text: str, filename: str = "<candidate>.rvl") -> Canonical:
+def canonicalise(text: str, filename: str = "<candidate>.rvl", *,
+                 original_ir: dict | None = None) -> Canonical:
     """`text` in canonical layout when the formatter can prove the rewrite
-    changed nothing the compiler sees; `text` itself otherwise."""
+    changed nothing the compiler sees; `text` itself otherwise.
+
+    `original_ir` (issue #2194) is the document a caller already compiled for
+    `text`, so the gate does not compile it again."""
     from ..formatter import FormatError, format_admitted  # noqa: PLC0415
 
     try:
-        formatted, gate = format_admitted(text, filename)
+        formatted, gate = format_admitted(text, filename,
+                                          original_ir=original_ir)
     except (FormatError, RevlError) as error:
         return Canonical(text, False, f"not formatted: {error.message}")
     if formatted == text:
@@ -90,15 +95,10 @@ def canonical_arguments(arguments: dict) -> tuple[dict, dict | None]:
     return out, report
 
 
-def prepare(arguments: dict) -> tuple[dict, dict, dict | None]:
-    """`(sent, stored, report)` for a verb's inline candidate (issue #1700).
-
-    `sent` is what to COMPILE: the arguments as given, with terse punctuation
-    completed when the source does not parse as written (`complete.py`; the
-    insertions stay inside their lines, so diagnostics keep their line
-    numbers). `stored` is what to HOLD: `sent` canonicalised under the
-    IR-equivalence gate. `report` is `canonicalSource`, with `completed` when
-    anything was inserted; None when the call carried no inline source."""
+def complete_arguments(arguments: dict) -> tuple[dict, list]:
+    """`(sent, completed)`: the arguments with terse punctuation completed
+    (`complete.py`), and the insertions made. Split out of `prepare` so a verb
+    that compiles before it canonicalises (issue #2194) can complete first."""
     from .complete import complete  # noqa: PLC0415
 
     source = arguments.get("source")
@@ -109,11 +109,46 @@ def prepare(arguments: dict) -> tuple[dict, dict, dict | None]:
     if isinstance(modules, dict):
         sent["modules"] = {path: complete(text, path)[0] if isinstance(text, str)
                            else text for path, text in modules.items()}
+    return sent, completed
+
+
+def prepare(arguments: dict) -> tuple[dict, dict, dict | None]:
+    """`(sent, stored, report)` for a verb's inline candidate (issue #1700).
+
+    `sent` is what to COMPILE: the arguments as given, with terse punctuation
+    completed when the source does not parse as written (`complete.py`; the
+    insertions stay inside their lines, so diagnostics keep their line
+    numbers). `stored` is what to HOLD: `sent` canonicalised under the
+    IR-equivalence gate. `report` is `canonicalSource`, with `completed` when
+    anything was inserted; None when the call carried no inline source."""
+    sent, completed = complete_arguments(arguments)
     stored, report = canonical_arguments(sent)
     if report is not None and completed:
         report["completed"] = completed
         report["changed"] = True
     return sent, stored, report
+
+
+def report_after(arguments: dict, completed=(), original_ir=None) -> dict | None:
+    """`canonicalSource` for arguments already completed, and optionally
+    already compiled (issue #2194).
+
+    `original_ir` is the document the caller's own compile produced for the
+    inline `source`; the gate reuses it instead of compiling that text again.
+    The `modules` shape keeps the plain path: the gate compiles the main
+    source WITHOUT `modules` (they are not its argument), so the caller's
+    compile is not the one the gate would make and cannot be substituted."""
+    source = arguments.get("source")
+    if (original_ir is not None and isinstance(source, str)
+            and not arguments.get("modules")):
+        report = canonicalise(source, original_ir=original_ir).report(
+            with_text=arguments.get("returnCanonical") is True)
+    else:
+        _stored, report = canonical_arguments(arguments)
+    if report is not None and completed:
+        report["completed"] = list(completed)
+        report["changed"] = True
+    return report
 
 
 def attach(payload: dict, report: dict | None) -> dict:

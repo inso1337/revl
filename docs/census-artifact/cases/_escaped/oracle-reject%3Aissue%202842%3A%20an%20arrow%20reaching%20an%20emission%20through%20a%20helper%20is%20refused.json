@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2842: an arrow reaching an emission through a helper is refused", "buckets": ["agree-refuse/G4"]}

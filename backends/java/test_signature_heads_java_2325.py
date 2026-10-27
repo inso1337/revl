@@ -11,14 +11,19 @@ WHAT WAS WRONG. These signature shapes emitted Java that javac rejects:
   emitted only when a document builds or matches an `Ok`/`Err`;
 * a `Set[..]` or `Stream[..]` head rendered as the bare class name
   (`Set<java.lang.Long>`, `Stream<java.lang.Long>`), and no such class exists in
-  the unit.
+  the unit;
+* a `match` over a generic variant used the raw case pattern
+  (`case Box.Full c`), so a bound payload was an `Object` and `v + 1L` in the
+  arm did not compile.
 
 WHAT IS EMITTED NOW. A generic variant is `Box<T>` and each case
 `Full<T> implements Box<T>`. `Unit` boxes to `java.lang.Void`, a signature naming
 `Result[..]` pulls in `RevlResult`, `Set[T]` is `java.util.Set<T>`, and
 `Stream[T]` widens to `Object` (the tier's `Stream` runtime class is emitted
 only for a document that holds a stream and takes no type parameter; rust
-widens the same head to `Value`).
+widens the same head to `Value`). A case pattern over a selector whose type is
+known (a parameter, a call to a non-generic top-level fn) carries the
+selector's type arguments, `case Box.Full<java.lang.Long> c`.
 
 The compile tests need a JDK and skip without one. A skip is not a pass: CI's
 `backend-java` job provisions a JDK.
@@ -68,9 +73,7 @@ STREAM_PROGRAM = """\
 pub fn feed(s: Stream[Int]) -> Stream[Int] { return s }
 """
 
-#: Declaration side only: no value of a generic variant can be built yet (the
-#: checker refuses `Full(1)` for `Box[Int]`, issue #2402), and a `match` that
-#: binds a generic payload is not covered here.
+#: Declaration side; `MATCH_PROGRAM` builds and matches values.
 VARIANT_PROGRAM = """\
 type Box[T] = Full(T) | Empty
 type Either[L, R] = Left(L) | Right(R) | Neither
@@ -79,8 +82,152 @@ pub fn eithers(es: List[Either[Str, Int]]) -> List[Either[Str, Int]] { return es
 pub fn count(bs: List[Box[Str]]) -> Int { return bs.length() }
 """
 
+#: A generic record built in a `let` (issue comment 4). It used to be built
+#: raw, `new Bx(n)`, so `final var b` was a raw `Bx` and `b.v + 1L` read an
+#: `Object`. It is built with the diamond now, and javac infers `Bx<Long>`.
+RECORD_LITERAL_PROGRAM = """\
+type Bx[T] = { v: T }
+type Pair[A, B] = { first: A, second: B }
+pub fn bump(n: Int) -> Int {
+  let b: Bx[Int] = { v: n }
+  return b.v + 1
+}
+pub fn both(n: Int) -> Int {
+  let p = { first: "a", second: n }
+  return p.second * 2 + p.first.length()
+}
+pub fn many(n: Int) -> List[Bx[Int]] { return [{ v: n }, { v: n + 1 }] }
+pub fn nested(n: Int) -> Int {
+  let b = { v: { v: n } }
+  return b.v.v + 1
+}
+pub fn some(n: Int) -> Int {
+  let b = { v: Some(n) }
+  return match b.v { Some(x) => x + 1, None => 0 }
+}
+pub fn listed(n: Int) -> Int {
+  let b = { v: [n, 2] }
+  return b.v.length()
+}
+"""
+
+#: Controls: a literal whose field javac would infer looser than revl types it
+#: (an empty list, `None`, `Map.empty()`, a variant case, a local bound to one,
+#: a field read off a raw record) stays raw, because `Bx<List<Object>>` does
+#: not convert to the declared `Bx<List<Long>>` where the raw `Bx` did. Each
+#: compiles on main and must keep compiling.
+LOOSE_RECORD_PROGRAM = """\
+type Bx[T] = { v: T }
+type Box[T] = Full(T) | Empty
+type S = A | B(Int)
+pub fn e() -> Bx[List[Int]] {
+  let b = { v: [] }
+  return b
+}
+pub fn o() -> Bx[Opt[Int]] {
+  let b = { v: None }
+  return b
+}
+pub fn m() -> Bx[Map[Str, Int]] {
+  let b = { v: Map.empty() }
+  return b
+}
+pub fn s() -> Bx[S] {
+  let b = { v: B(1) }
+  return b
+}
+pub fn a() -> Bx[S] {
+  let b = { v: A }
+  return b
+}
+pub fn r(n: Int) -> Bx[Result[Int, Str]] {
+  let b = { v: Ok(n) }
+  return b
+}
+pub fn g(n: Int) -> Bx[Box[Int]] {
+  let b = { v: Full(n) }
+  return b
+}
+pub fn local_list() -> Bx[List[Int]] {
+  let x = []
+  let b = { v: x }
+  return b
+}
+pub fn local_none() -> Bx[Opt[Int]] {
+  let x = None
+  let b = { v: x }
+  return b
+}
+pub fn reassigned() -> Bx[List[Int]] {
+  var x = []
+  x = [1]
+  let b = { v: x }
+  return b
+}
+pub fn raw_field() -> Bx[List[Int]] {
+  let a = { v: [] }
+  let b = { v: a.v }
+  return b
+}
+pub fn raw_nested() -> Bx[Bx[List[Int]]] {
+  let a = { v: [] }
+  let b = { v: a }
+  return b
+}
+"""
+
+#: A match whose selector has a known type: a parameter, or a call to a
+#: non-generic top-level fn. Each arm reads its payload at the type argument.
+MATCH_PROGRAM = """\
+type Box[T] = Full(T) | Empty
+type Either[L, R] = Left(L) | Right(R) | Neither
+pub fn full_of(n: Int) -> Box[Int] { return Full(n) }
+pub fn bumped(b: Box[Int]) -> Int {
+  return match b { Full(v) => v + 1, Empty => 0 }
+}
+pub fn doubled(e: Either[Str, Int]) -> Int {
+  return match e { Right(n) => n * 2, Left(s) => 0, Neither => 0 }
+}
+pub fn wild(e: Either[Str, Int]) -> Int {
+  return match e { Right(n) => n - 1, _ => 0 }
+}
+pub fn called(n: Int) -> Int {
+  return match full_of(n) { Full(v) => v + 1, Empty => 0 }
+}
+pub fn first(b: Box[List[Int]]) -> Int {
+  return match b { Full(xs) => xs[0] + 1, Empty => 0 }
+}
+pub fn half(b: Box[Float]) -> Float {
+  return match b { Full(x) => x / 2.0, Empty => 0.0 }
+}
+pub fn done(b: Box[Unit]) -> Int {
+  return match b { Full(_) => 1, Empty => 0 }
+}
+"""
+
+#: Controls: a selector whose type the emitter does not know keeps the raw
+#: pattern. An arrow's `b` is inlined as the call's argument, a `Box<String>`
+#: here, so the function's `b: Box[Int]` must not type it; a `let` local's
+#: annotation is not in the IR. Each compiles on main and must keep compiling.
+RAW_MATCH_PROGRAM = """\
+type Box[T] = Full(T) | Empty
+pub fn full_of(n: Int) -> Box[Int] { return Full(n) }
+pub fn shadow(b: Box[Int], c: Box[Str]) -> Int {
+  let g = (b: Box[Str]) => match b { Full(s) => 1, Empty => 0 }
+  return g(c) + 1
+}
+pub fn local(n: Int) -> Int {
+  let b = full_of(n)
+  return match b { Full(_) => 1, Empty => 0 }
+}
+"""
+
 PROGRAMS = {
     "variant": VARIANT_PROGRAM,
+    "match": MATCH_PROGRAM,
+    "raw_match": RAW_MATCH_PROGRAM,
+    "record_literal": RECORD_LITERAL_PROGRAM,
+    "loose_record": LOOSE_RECORD_PROGRAM,
     "unit": UNIT_PROGRAM,
     "result": RESULT_PROGRAM,
     "set": SET_PROGRAM,
@@ -100,6 +247,47 @@ def test_generic_variant_declares_its_parameters():
     assert "final class Empty<T> implements Box<T> {" in java
     assert "final class Neither<L, R> implements Either<L, R> {" in java
     assert "public static Box<java.lang.Long> keep(Box<java.lang.Long> b)" in java
+
+
+def test_generic_variant_match_applies_the_selector_arguments():
+    java = _java_source(MATCH_PROGRAM)
+    assert "case Box.Full<java.lang.Long> __revl_case_1 -> {" in java
+    assert "case Box.Empty<java.lang.Long> __revl_ignored_2 -> {" in java
+    assert "case Either.Right<String, java.lang.Long> __revl_case_3 -> {" in java
+    assert "case Either.Neither<String, java.lang.Long> __revl_ignored_5 -> {" in java
+    assert "case Either.Right<String, java.lang.Long> __revl_case_6 -> {" in java
+    assert "return switch (full_of(n)) {\n            case Box.Full<java.lang.Long> " in java
+    assert "case Box.Full<java.util.List<java.lang.Long>> " in java
+    assert "case Box.Full<java.lang.Double> " in java
+    assert "case Box.Full<java.lang.Void> " in java
+    assert "case Box.Full __" not in java and "case Box.Empty __" not in java
+
+
+def test_unknown_selector_keeps_the_raw_pattern():
+    java = _java_source(RAW_MATCH_PROGRAM)
+    assert "switch ((c)) {\n            case Box.Full __revl_case_1 -> {" in java
+    assert "switch (b) {\n            case Box.Full __revl_ignored_3 -> {" in java
+    assert "<java.lang.Long> __revl" not in java
+
+
+def test_arm_bind_reusing_a_parameter_keeps_the_raw_pattern():
+    # Text only: javac already refuses an arm bind that shadows a parameter.
+    # Inside `Full(a)`, `a` is the outer payload, a `Box<String>`, so the
+    # inner pattern must not take the `a: Box[Int]` parameter's arguments.
+    java = _java_source(
+        "type Box[T] = Full(T) | Empty\n"
+        "pub fn f(b: Box[Box[Str]], a: Box[Int]) -> Int {\n"
+        "  return match b { Full(a) => match a { Full(s) => 1, Empty => 0 }, Empty => 0 }\n}\n")
+    assert "switch (a) {\n            case Box.Full __revl_case_" in java
+    assert "<java.lang.Long> __revl" not in java
+
+
+def test_plain_variant_match_has_no_type_arguments():
+    java = _java_source(
+        "type S = A | B(Int)\npub fn f(s: S) -> Int {\n"
+        "  return match s { B(n) => n + 1, A => 0 }\n}\n")
+    assert "case S.B __revl_case_1 -> {" in java
+    assert "case S.A __revl_ignored_2 -> {" in java
 
 
 def test_plain_variant_is_not_parameterised():
@@ -142,6 +330,42 @@ def test_stream_head_widens_to_object():
     java = _java_source(STREAM_PROGRAM)
     assert "public static Object feed(Object s)" in java
     assert "Stream<" not in java
+
+
+def test_generic_record_literal_uses_the_diamond():
+    java = _java_source(RECORD_LITERAL_PROGRAM)
+    assert "final var b = new Bx<>(n);" in java
+    assert "final var p = new Pair<>(\"a\", n);" in java
+    assert "java.util.List.of(new Bx<>(n), new Bx<>(" in java
+    assert "final var b = new Bx<>(new Bx<>(n));" in java
+    assert "final var b = new Bx<>(java.util.Optional.of(n));" in java
+
+
+def test_plain_record_literal_has_no_diamond():
+    java = _java_source(
+        "type P = { x: Int }\npub fn f(n: Int) -> Int {\n  let p = { x: n }\n"
+        "  return p.x\n}\n")
+    assert "final var p = new P(n);" in java
+
+
+def test_loosely_inferred_record_literal_stays_raw():
+    java = _java_source(LOOSE_RECORD_PROGRAM)
+    for arg in ("java.util.List.of()", "java.util.Optional.empty()",
+                "java.util.Map.of()", "new S.B(1L)", "new S.A()",
+                "new RevlResult.Ok<>(n)", "new Box.Full(n)", "x", "a.v", "a"):
+        assert f"final var b = new Bx({arg});" in java
+    assert "new Bx<>" not in java
+
+
+def test_generic_fn_call_keeps_the_record_raw():
+    # Text only: a generic top-level fn does not compile on this tier yet (its
+    # method declares no `<U>`), but its return type is inferred from its
+    # arguments, so once it does, a diamond around it would be loose.
+    java = _java_source(
+        "type Bx[T] = { v: T }\nfn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b = { v: wrap(n) }\n"
+        "  return b\n}\n")
+    assert "final var b = new Bx(wrap(n));" in java
 
 
 @needs_jdk

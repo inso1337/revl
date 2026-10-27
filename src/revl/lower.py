@@ -58,6 +58,8 @@ from .typecheck import (
     _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
+    _OPEN_CALLABLE_HEADS,
+    is_function_type,
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
@@ -4142,10 +4144,12 @@ def _witnessed_extern_names(program: Program) -> set[str]:
 
 
 def _refuse_effect_position_bound_externs_in_fn_body(
-        program: Program, filename: str) -> None:
-    """One walk over every `fn`/`test` body, refusing the three extern kinds
-    whose effect machinery exists only in effect position — a bare call from a
-    plain fn/test body would silently drop it:
+        program: Program, filename: str,
+        emission_values: dict[str, str] | None = None) -> None:
+    """One walk over every `fn`/`test` body, refusing three extern kinds whose
+    effect machinery exists only in effect position (a bare call from a plain
+    fn/test body would silently drop it), plus first-class emission values in
+    module function bodies:
 
     * `witnessed` (rule 1, docs/design/243-witnessed-externs.md): the teardown
       accumulator that auto-registers the declared inverse exists only in a
@@ -4156,6 +4160,10 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     * a `deferred` emission (item 400): a fn/test body has no session commit for
       the deferral to fire at, so it fires immediately, bypassing the commit
       queue (`deferred` fires at commit; an abort drops the queue, item 245).
+    * an irreversible emission callable (issue #2842): a function value has no
+      named `emit` call site, so dispatching it would bypass the marker. That
+      covers an arrow whose body calls one: the arrow is itself such a value.
+      `emission_values` maps each callable to the extern its refusal names.
 
     Every extern is otherwise callable from a fn/test body (they seed the
     `callables` set), so these are explicit refusals, checked over the author's
@@ -4170,15 +4178,12 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     not compile. A component's own CALL of one carries the marker (#1437) and
     is enqueued in every position the marker appears.
 
-    These were three sequential passes, each re-walking the identical set of
-    fn/test bodies (P-9, #543). Folded into one traversal here. Diagnostic order
-    is preserved verbatim: the walk records the FIRST violation of each kind (in
-    the same fn-then-test, definition-order recursion the passes used) and then
-    reports them witnessed-before-(acquire/deferred) — exactly what running the
-    witnessed pass to completion before the teardown pass produced. An extern
-    carries one classification, so the `witnessed` and `acquire` sets are
-    disjoint; `acquire` is checked before `deferred`, matching the original
-    first-`if`-raises order."""
+    The original three rules were sequential walks over the same bodies
+    (P-9, #543); this keeps them in one traversal and adds the #2842 value check
+    to module functions. Diagnostic order stays witnessed-before-teardown-
+    before-emission-value. Tests keep their deferred/witnessed/acquire rules but
+    do not participate in the #2842 module-function check; component values are
+    resolved in `_lower_component_pure_expr`, where lexical scope is available."""
     from .parser import ExprArrow, ExprCall, ExprVar
 
     witnessed = _witnessed_extern_names(program)
@@ -4186,14 +4191,17 @@ def _refuse_effect_position_bound_externs_in_fn_body(
         ext.name for ext in program.externs
         if ext.classification == "acquire" and ext.undo is not None}
     deferred = {ext.name for ext in program.externs if ext.deferred}
-    if not witnessed and not acquire_undo and not deferred:
+    emission_values = emission_values or {}
+    if not witnessed and not acquire_undo and not deferred and not emission_values:
         return
 
     first_witnessed: RevlError | None = None
     first_teardown: RevlError | None = None
+    first_emission_value: RevlError | None = None
 
-    def _walk(node, where: str, in_arrow: bool = False, calls: bool = True):
-        nonlocal first_witnessed, first_teardown
+    def _walk(node, where: str, in_arrow: bool = False, calls: bool = True,
+              check_emission_values: bool = True):
+        nonlocal first_witnessed, first_teardown, first_emission_value
         if isinstance(node, ExprArrow):
             in_arrow = True
         if isinstance(node, ExprVar) and node.name in deferred \
@@ -4201,6 +4209,22 @@ def _refuse_effect_position_bound_externs_in_fn_body(
             # a value, not a call: the callee position is skipped below
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
+        if check_emission_values and isinstance(node, ExprVar) \
+                and node.name in emission_values and first_emission_value is None:
+            # A callable that reaches an irreversible extern cannot escape as
+            # a value: the eventual dispatch has no named `emit` call site.
+            # Direct call heads are skipped below, so ordinary calls retain
+            # their existing treatment and `emit send(...)` stays valid.
+            first_emission_value = _emission_value_refusal(
+                node.name, emission_values[node.name], filename, node.line)
+        if check_emission_values and isinstance(node, ExprArrow) \
+                and first_emission_value is None:
+            # An arrow that calls one is a value carrying the same crossing:
+            # whoever receives it runs the host body outside any `emit`.
+            hit = sorted(_arrow_call_heads(node.body) & set(emission_values))
+            if hit:
+                first_emission_value = _emission_arrow_refusal(
+                    hit[0], emission_values[hit[0]], filename, node.line)
         if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
             name = node.callee.name
             if first_witnessed is None and name in witnessed:
@@ -4247,27 +4271,31 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 if f == "callee" and isinstance(node, ExprCall) \
                         and isinstance(child, ExprVar):
                     continue  # the callee position is a CALL, judged above
-                _walk(child, where, in_arrow, calls)
+                _walk(child, where, in_arrow, calls, check_emission_values)
         elif isinstance(node, (list, tuple)):
             for x in node:
-                _walk(x, where, in_arrow, calls)
+                _walk(x, where, in_arrow, calls, check_emission_values)
 
     for fn in program.fn_decls:
         for stmt in fn.body:
             _walk(stmt, f"the body of fn `{fn.name}`")
     for test in program.tests:
         for stmt in test.body:
-            _walk(stmt, f"the body of test `{test.name}`")
+            _walk(stmt, f"the body of test `{test.name}`",
+                  check_emission_values=False)
     if deferred:
         # a component CALLS a deferred extern under its `emit` marker, which is
         # enqueued wherever it appears; only a VALUE reference is refused there
         for comp in program.components:
-            _walk(comp.body, f"component `{comp.name}`", calls=False)
+            _walk(comp.body, f"component `{comp.name}`", calls=False,
+                  check_emission_values=False)
 
     if first_witnessed is not None:
         raise first_witnessed
     if first_teardown is not None:
         raise first_teardown
+    if first_emission_value is not None:
+        raise first_emission_value
 
 
 def _deferred_value_refusal(name: str, where: str, filename: str,
@@ -4286,6 +4314,57 @@ def _deferred_value_refusal(name: str, where: str, filename: str,
              "(docs/design/245-session-commit.md, issue #1457)",
         code="G4", category="deferred",
     )
+
+
+def _emission_value_refusal(name: str, extern: str, filename: str,
+                            line: int) -> RevlError:
+    """A callable reaching an emission used as a function value (issue #2842):
+    whoever calls the value runs the host body with no `emit` marker, so no
+    emission step is recorded and no declared ceiling is checked."""
+    subject = (f"emission `{name}`" if name == extern
+               else f"`{name}` reaches emission `{extern}` and")
+    return RevlError(
+        filename, line,
+        f"{subject} cannot be used as a function value; call it by name "
+        f"under `emit` (G4)",
+        hint="an emission crossing is recorded and metered only at a named "
+             "call site marked `emit`; bind its result, not the callable",
+        code="G4", category="emission-value",
+    )
+
+
+def _emission_arrow_refusal(callee: str, extern: str, filename: str,
+                            line: int) -> RevlError:
+    """An arrow in a `fn` body whose body calls an emission callable (issue
+    #2842): the arrow is a function value carrying that crossing."""
+    via = "" if callee == extern else f" through `{callee}`"
+    return RevlError(
+        filename, line,
+        f"this arrow reaches emission `{extern}`{via} and cannot be used as a "
+        f"function value; call `{callee}` by name under `emit` (G4)",
+        hint="an emission crossing is recorded and metered only at a named "
+             "call site marked `emit`; bind its result, not the callable",
+        code="G4", category="emission-value",
+    )
+
+
+def _arrow_call_heads(node) -> set[str]:
+    """The names called by name anywhere under `node` (nested arrows too)."""
+    from .parser import ExprCall, ExprVar
+    out: set[str] = set()
+
+    def _visit(n) -> None:
+        if isinstance(n, ExprCall) and isinstance(n.callee, ExprVar):
+            out.add(n.callee.name)
+        if hasattr(n, "__dataclass_fields__"):
+            for f in type(n).__dataclass_fields__:
+                _visit(getattr(n, f))
+        elif isinstance(n, (list, tuple)):
+            for x in n:
+                _visit(x)
+
+    _visit(node)
+    return out
 
 
 def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: str) -> None:
@@ -6728,8 +6807,12 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             actual_declared = infer_ast(stmt.value, type_env, types, None)
         else:
             inferred = infer_ast(stmt.value, type_env, types, filename)
-            if inferred is not None:
-                type_env[stmt.name] = inferred
+            # Keep the lexical binding in the type environment even when its
+            # type is unknown.  `infer_ast` consults this map before the
+            # project-wide module-function table; omitting the `None` entry
+            # would let a private same-named function from another file type
+            # this local instead (issue #2590).
+            type_env[stmt.name] = inferred
             actual_declared = None
         lowered_value = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
@@ -6856,8 +6939,10 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         inner_scope[stmt.bind] = False
         iter_type = _expr_static_type(stmt.iterable, type_env, types)
         element_type = _type_arg(iter_type, "List")
-        if element_type is not None:
-            inner_type_env[stmt.bind] = element_type
+        # The loop name is in scope even when the iterable's element type is
+        # unknown.  Preserve that binding so inference cannot fall through to
+        # a same-named project-wide module function (issue #2590).
+        inner_type_env[stmt.bind] = element_type
         inner_body = []
         for s in stmt.body:
             _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types, expected_return)
@@ -8225,10 +8310,11 @@ def _binder_names(node, out: list) -> None:
     """Append every `(name, line)` this subtree BINDS.
 
     A parameter, a `let`/`var`, a destructure, a `for` bind, an arrow
-    parameter, a match-arm payload, and the component-body binders (an effect
-    `let`, an approval `let`, a lifecycle `call ... as`). Traversal is generic
-    over the AST dataclasses so a binder form added to the grammar is covered
-    without a second edit here; only the RECOGNITION is enumerated.
+    parameter, a match-arm payload, the `every … in` item, and the
+    component-body binders (an effect `let`, an approval `let`, a lifecycle
+    `call ... as`). Traversal is generic over the AST dataclasses so a binder
+    form added to the grammar is covered without a second edit here; only the
+    RECOGNITION is enumerated.
     """
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -8246,7 +8332,21 @@ def _binder_names(node, out: list) -> None:
             out.extend((name, pattern.line) for name in pattern.binds)
             if pattern.rest:
                 out.append((pattern.rest, pattern.line))
-    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt)):
+    elif isinstance(node, (ForStmt, LetEffect, LetApprovalStmt, CallStmt,
+                           StreamIterStmt)):
+        # One binder form can have NO type for the type environment to judge
+        # (#2544): the `every <x> in <sub>` item (item 130: a plain iteration
+        # carries no contract), which StreamIterStmt binds. It is enumerated
+        # here so a call on one is refused, rather than silently reaching a
+        # same-named module `fn`, whenever such a callable is in scope. With no
+        # same-named callable there is no fall-through to refuse; the call
+        # lowers as a call on the binder's `name` node. The component
+        # `let <x> = effect <acquire>` arm is the paired form: its binder now
+        # carries the acquisition's family as its type (a host `Map` is
+        # `Map[Any, Any]`), so the typecheck guard judges a call on it, and the
+        # component scan here keeps refusing the module `fn`/extern pairing at
+        # this earlier site (pinned in
+        # tests/test_2544_provide_param_shadows_module_fn.py).
         if isinstance(node.bind, str):
             out.append((node.bind, node.line))
     elif isinstance(node, ExprArrow):
@@ -8938,9 +9038,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # (item 243 rule 1) whose auto-registered inverse would be dropped; an
     # `acquire` with an `undo` (399) whose teardown would be dropped; a
     # `deferred` emission (400) that would fire immediately, bypassing the
-    # commit queue. Reported witnessed-before-teardown, as when these were three
-    # sequential passes.
-    _refuse_effect_position_bound_externs_in_fn_body(program, program.filename)
+    # commit queue. The same walk rejects first-class references to any
+    # irreversible emission callable (issue #2842). Reported
+    # witnessed-before-teardown-before-emission-value, preserving the existing
+    # diagnostic order from the earlier sequential passes.
+    irreversible_fns = set(_emitting_capabilities(
+        fns, externs, classes=("emission",)))
+    emission_value_externs = _emission_value_externs(
+        fns, externs, exclude=set(_async_callables(fns, externs)))
+    _refuse_effect_position_bound_externs_in_fn_body(
+        program, program.filename, emission_values=emission_value_externs)
     _refuse_host_acquire_in_component_reachable_fn(program, program.filename)
     # Slice 2: the set every component's effect-position lowering consults to
     # tell a witnessed acquisition from an ordinary one (docs/design/243-
@@ -8953,15 +9060,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     emission_evidence = _EmissionEvidence(program)
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
-    # issue #1912: the same closure under the `emission` seed ALONE — the names
-    # whose reach includes a crossing that cannot be reverted, as against
-    # `emitting_fns`, which counts a `witnessed` extern's reach too (item 243).
-    # The provider bound is the consumer: a `witnessed[...]` service operation
-    # promises its providers reach only reversible code, and that promise is
-    # checked against this set. A subset of `emitting_fns` by construction, so
-    # a program with no `witnessed` extern has the two identical.
-    irreversible_fns = set(_emitting_capabilities(fns, externs,
-                                                 classes=("emission",)))
+    # `irreversible_fns` is the closure seeded by the `emission` class alone,
+    # computed above so the same set rejects first-class emission values and
+    # bounds component methods. The provider bound is its other consumer: a
+    # `witnessed[...]` service operation promises its providers reach only
+    # reversible code, and that promise is checked against this set.
 
     # item 310: the capability-aware caching admission checks, run here once the
     # emission fixed point and the type/extern tables are known (a `cache pure`
@@ -9050,8 +9153,25 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         # Async[T]` carries the async flag and is admitted; a plain one that
         # reaches a suspension is refused. Pure fns have no req keys, so only
         # the named-callable reach applies here (rule 3 is component-only).
-        _refuse_leaky_pure_arrow(entry.get("body") or [], async_colored,
-                                 _fn_decls_by_name.get(name), program.filename)
+        fn_async_params = frozenset(
+            p["name"] for p in (entry.get("params") or [])
+            if _is_async_fn_type(p.get("type")))
+        _refuse_leaky_pure_arrow(
+            entry.get("body") or [], async_colored,
+            _fn_decls_by_name.get(name), program.filename, fn_async_params)
+        # issue #2842: a value of async fn type can be renamed (a `let`, a
+        # match binding, an arrow parameter, a computed callee) before
+        # something calls it, and the lowered IR carries no callee types to
+        # follow it. So in a fn that takes an async fn parameter, every call
+        # must name a module fn, an extern or a constructor no local rebinds,
+        # or call that parameter directly outside any sync arrow.
+        if fn_async_params:
+            _refuse_untrusted_call_in_async_param_fn(
+                entry.get("body") or [], False,
+                _trusted_callees(fns, program, types)
+                - _bound_names(entry.get("body") or []),
+                fn_async_params, name, _fn_decls_by_name.get(name),
+                program.filename)
         if name in async_colored:
             entry["async"] = True
 
@@ -9130,6 +9250,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                                 if e.get("class") == "acquire"
                                                 and _callee_name(e.get("undo"))},
                                             irreversible_fns=irreversible_fns,
+                                            emission_value_externs=(
+                                                emission_value_externs),
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -9901,6 +10023,34 @@ def _check_arrow_return_annotation(arrow, body: dict, env: Env,
              env.services, filename, arrow.line, ARROW_BODY_WHERE)
 
 
+def _component_scope_value_is_callee(name: str, env: Env,
+                                     scope: dict[str, str]) -> bool:
+    """True if the scope binds `name` to a value that is the callee of a bare
+    call, so a same-named module callable must not take the call.
+
+    Issue #1823's owner ruling on #2544: a function-valued parameter
+    (`(Int) -> Int`, `Fn[Int, Int]`) is the callee, not a same-named module
+    `fn`. The typecheck layer admits such a call as a call on the value, so
+    the lowering must lower it that way or the parameter is silently dropped.
+    `Any`/`Value` (erased dynamic types that can hold a function) and `Never`
+    (the uninhabited bottom, whose call is vacuous) are callable for the same
+    reason the typecheck guard leaves their calls open. A scoped built-in
+    constructor is the value, not the constructor (issue #2490). A binder
+    whose type the environment does not hold stays with the module callable:
+    only a type that says "callable value" moves the call off it.
+
+    The type environment is keyed by the scope's safe id (`env.params`), so
+    read `name` through `scope` first, falling back to the surface spelling.
+    """
+    if name in _BUILTIN_CONSTRUCTORS:
+        return True
+    safe = scope.get(name, name)
+    ty = env.type_env.get(safe)
+    if ty is None and safe != name:
+        ty = env.type_env.get(name)
+    return is_function_type(ty) or parse_type(ty)[0] in _OPEN_CALLABLE_HEADS
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -10044,6 +10194,16 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 and not str(info.get("adt", "")).startswith(("Result", "Opt")):
             return {"kind": "adt", "type": info["adt"], "case": name, "args": []}
         if name in callables:
+            # Keep every irreversible crossing at a named `emit` call site.
+            # The local `scope` branch above wins first, so a parameter or
+            # binding that shadows a module callable is not mistaken for the
+            # extern value itself. Async-colored values keep their A1
+            # diagnostic; the method's G4 evidence still checks the declared
+            # service bound before the later async pass.
+            extern = (getattr(env, "emission_value_externs", None) or {}).get(name)
+            if extern is not None \
+                    and name not in (getattr(env, "async_callables", None) or set()):
+                raise _emission_value_refusal(name, extern, filename, line)
             return {"kind": "var", "name": name}
         if name in getattr(env, "stream_requires", {}):
             # item 130: the key IS declared — it is a required stream, and a
@@ -10290,11 +10450,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
             # `callables` holds the constructors too, so a scoped one must not
-            # fall through to a `fn` node here. A scoped name that spells a
-            # module fn still resolves to the module fn (a `fn` body refuses
-            # that shadowing; the self-host lowers it the same way), which is
-            # why this arm is not `name not in scope`.
-            if name in callables and not (name in scope and name in _BUILTIN_CONSTRUCTORS):
+            # fall through to a `fn` node here. A scoped name whose type is a
+            # callable VALUE is the callee (issue #1823: a function-valued
+            # parameter is what `f(n)` calls, not a same-named module `fn`;
+            # the owner ruling on #2544 requires the binder to win). A scoped
+            # name of any other type still resolves to the module fn -- a
+            # `fn` body refuses that shadowing at item 445, and the typecheck
+            # guard refuses the provide-parameter form -- which is why this
+            # arm is not `name not in scope`.
+            if name in callables and not (
+                    name in scope
+                    and _component_scope_value_is_callee(name, env, scope)):
                 # item 187: fill omitted trailing arguments with their default
                 # expressions before async coercion, so the module-fn call the
                 # emitters see is fully supplied (no per-tier default handling).
@@ -10729,6 +10895,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _calls_in,
     _capability_hint,
     _emission_chain,
+    _emission_value_externs,
     _emitting_capabilities,
     _emitting_fns,
     _method_emissions,
@@ -11509,15 +11676,25 @@ def _admit_sync_test_bodies(tests, prop_tests, async_colored, colour_polymorphic
             )
 
 
-def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
+def _refuse_leaky_pure_arrow(node, async_colored, decl, filename,
+                             async_params: frozenset = frozenset()) -> None:
     """The module-fn twin of `_refuse_leaky_arrow`: a sync-typed arrow whose
     body reaches an async callable (a colored name — pure fns have no req keys)
-    is the item-92 leak. Admitted (async-flagged) arrows are skipped."""
+    is the item-92 leak. Admitted (async-flagged) arrows are skipped.
+
+    `async_params` names the enclosing fn's parameters whose type is an async
+    fn type (`(…) -> Async[T]`). A call through one is a suspension exactly as
+    a call to a colored name is, so a sync arrow that wraps it is the same
+    leak (issue #2842). An arrow's own parameters shadow those names inside
+    its body."""
     if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            own = {p for p in (node.get("params") or []) if isinstance(p, str)}
+            async_params = frozenset(async_params - own)
         if node.get("kind") == "arrow" and not node.get("async"):
             called: set = set()
             _calls_in(node.get("body"), called, stop_async_arrows=True)
-            hit = sorted(called & (async_colored or set()))
+            hit = sorted(called & ((async_colored or set()) | async_params))
             if hit:
                 raise RevlError(
                     (decl.source if decl is not None else None) or filename,
@@ -11532,10 +11709,93 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
                     code="A1", category="async-propagation",
                 )
         for value in node.values():
-            _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
+            _refuse_leaky_pure_arrow(value, async_colored, decl, filename, async_params)
     elif isinstance(node, list):
         for value in node:
-            _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
+            _refuse_leaky_pure_arrow(value, async_colored, decl, filename, async_params)
+
+
+_BUILTIN_CTORS = frozenset({"Some", "None", "Ok", "Err", "Map", "Pool", "Job"})
+
+
+def _trusted_callees(fns, program, types) -> frozenset:
+    """Module fns (the lowered list, so a lifted `match_arm_N` counts),
+    externs and constructors: callees that are declarations, not values."""
+    ctors = {case["name"] for t in (types or {}).values()
+             if isinstance(t, dict) and t.get("kind") == "variant"
+             for case in (t.get("cases") or []) if isinstance(case, dict)}
+    return (frozenset(f["name"] for f in fns if isinstance(f.get("name"), str))
+            | frozenset(e.name for e in program.externs)
+            | _BUILTIN_CTORS | frozenset(ctors))
+
+
+def _bound_names(node, acc: set | None = None) -> frozenset:
+    """Every name a fn body binds: `let`s, `for` elements, match bindings and
+    arrow parameters. A trusted callee name rebound locally is a value."""
+    acc = set() if acc is None else acc
+    if isinstance(node, dict):
+        if node.get("step") == "let" and isinstance(node.get("name"), str):
+            acc.add(node["name"])
+        if isinstance(node.get("bind"), str):
+            acc.add(node["bind"])
+        if node.get("kind") == "arrow":
+            acc.update(p for p in (node.get("params") or []) if isinstance(p, str))
+        for value in node.values():
+            _bound_names(value, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _bound_names(value, acc)
+    return frozenset(acc)
+
+
+def _untrusted_call_message(callee: str, fn_name: str) -> str:
+    subject = f"`{callee}`" if callee else "a computed callee"
+    return (f"`{fn_name}` takes an async function parameter, so each call in "
+            "its body must name a module fn, an extern or a constructor, or "
+            "call that parameter directly outside a sync arrow; this call to "
+            f"{subject} does not, and the caller could receive an unawaited "
+            "suspension (A1)")
+
+
+def _refuse_untrusted_call_in_async_param_fn(node, in_sync: bool,
+                                             trusted: frozenset,
+                                             async_params: frozenset,
+                                             fn_name: str, decl,
+                                             filename) -> None:
+    """Issue #2842: in a module fn that takes an async fn parameter, refuse a
+    call through anything but a trusted declaration, or through the async
+    parameter itself in async context (outside every sync arrow)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            _refuse_untrusted_call_in_async_param_fn(
+                node.get("body"), in_sync or not node.get("async"), trusted,
+                async_params, fn_name, decl, filename)
+            return
+        if node.get("kind") == "call":
+            callee = node.get("callee")
+            name = (callee.get("name") if isinstance(callee, dict)
+                    and callee.get("kind") == "var" else None)
+            ok = isinstance(name, str) and (
+                name in trusted or (name in async_params and not in_sync))
+            if not ok:
+                raise RevlError(
+                    (decl.source if decl is not None else None) or filename,
+                    getattr(decl, "line", 0) or 0,
+                    _untrusted_call_message(name if isinstance(name, str) else "",
+                                            fn_name),
+                    hint="call the async parameter directly from the fn body, "
+                         "or declare the receiving parameter `(…) -> "
+                         "Async[T]` so every call through it is awaited "
+                         "(docs/design/async-function-values.md)",
+                    code="A1", category="async-propagation",
+                )
+        for value in node.values():
+            _refuse_untrusted_call_in_async_param_fn(
+                value, in_sync, trusted, async_params, fn_name, decl, filename)
+    elif isinstance(node, list):
+        for value in node:
+            _refuse_untrusted_call_in_async_param_fn(
+                value, in_sync, trusted, async_params, fn_name, decl, filename)
 
 
 # item 130 rule 3.5 — the IR kinds a `map`/`filter` transform may NOT contain.
@@ -13752,6 +14012,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      extern_undo: dict | None = None,
                      extern_inverse: dict | None = None,
                      irreversible_fns: set | None = None,
+                     emission_value_externs: dict | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
@@ -13766,6 +14027,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # from "does this reach a boundary at all". Absent (an older caller) is the
     # full set, which filters nothing.
     env.irreversible_fns = irreversible_fns
+    # issue #2842: the callables a component body may name only as the head of
+    # a call, each with the extern its value refusal names
+    env.emission_value_externs = emission_value_externs or {}
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()
     env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}
@@ -13923,6 +14187,22 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # `host_locals`), so the type is resolved here where it is known.
             if acquired_type is None:
                 acquired_type = _host_result_type(acquire, env)
+            # issue #2544: a HOST acquisition (`Map.new()`, `Pool.open(..)`)
+            # yields a handle of its family, and the binding must carry that
+            # family as its type. An untyped binder is invisible to the call
+            # guard in typecheck.py, so a call on it (`Tag("x")`, `Tag` being
+            # the handle) was admitted without being judged even when the name
+            # also names a module callee. The host constructor form types the
+            # same value as its family; `Map`'s key and value types are the
+            # resource's own (a host local does not carry them), so the open
+            # `Map[Any, Any]` is its static type and stands where any
+            # `Map[K, V]` does.
+            if acquired_type is None and acquire.get("kind") == "host":
+                _acquired_family = str(acquire.get("fn") or "").partition(".")[0]
+                if _acquired_family in _HOST_FAMILIES:
+                    acquired_type = (f"{_acquired_family}[Any, Any]"
+                                     if _acquired_family == "Map"
+                                     else _acquired_family)
             # issue #1968: an effect-acquired binding whose type is a HOST
             # family is a handle even when the acquisition spelled no host call
             # (a typed hole, an extern's declared return). `Map` is the one
@@ -14742,9 +15022,22 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     navigate=_b1_navigate(env, "return", "borrowed", _ret_res))
             actual = _sweep(lowered_return, ms.line)
             if decl.returns:
-                check_ir(lowered_return, decl.returns, env.type_env,
-                         env.types, env.services, filename, ms.line,
-                         f"`{method.name}` returns")
+                # issue #2083 / #2544: the named refusal below is the wording
+                # the `Unit` body guarantee is stated in, and it must be the
+                # one a program meets. Since #2620 types an effect binder from
+                # its acquisition's family (a host `Map` is `Map[Any, Any]`), a
+                # body that IS the handle now reaches the generic return-type
+                # check as a typed value, and "returns expects `Unit`" fires
+                # before the guard. Leave the generic mismatch out for exactly
+                # the shape the guard refuses; the raise below still refuses
+                # it, so this reorders the refusal and admits nothing.
+                unit_body_refused = bool(
+                    decl.returns == "Unit" and actual != "Unit"
+                    and _unit_body_drops_host_value(lowered_return, env))
+                if not unit_body_refused:
+                    check_ir(lowered_return, decl.returns, env.type_env,
+                             env.types, env.services, filename, ms.line,
+                             f"`{method.name}` returns")
                 # issue #2083: `check_ir` leaves an UNKNOWN body alone (`if
                 # actual and ...`), so a resource READ — whose value no host
                 # table types — was admitted as the body of a method declared
@@ -14753,8 +15046,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # rooted at the component's own resource is refused unless it
                 # is a host call admitted as a `Unit` body (issues #2123,
                 # #2127).
-                if decl.returns == "Unit" and actual != "Unit" \
-                        and _unit_body_drops_host_value(lowered_return, env):
+                if unit_body_refused:
                     raise RevlError(
                         filename, ms.line,
                         f"`{method.name}` implements `{svc.name}.{method.name}`, "

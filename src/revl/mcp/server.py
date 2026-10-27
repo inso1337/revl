@@ -67,8 +67,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, replace
+from xml.etree import ElementTree as ET
 
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
@@ -77,6 +81,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
 from . import unknownargs as _unknownargs
+from . import artifacts as _artifacts
 from . import fillspec
 from . import draft as _draft
 from . import knowledge_index as _knowledge
@@ -89,6 +94,7 @@ from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
+from .. import answer as _answer
 from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import quorum as _quorum
@@ -108,6 +114,7 @@ from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from . import ambient as _ambient
+from . import brief as _brief
 from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
@@ -639,6 +646,10 @@ def _authoring_refusal(arguments: dict) -> dict | None:
                                "agent may compose granted services but may not "
                                "author host code (`revl mcp serve "
                                "--author-trust`, --provider, --grant)")
+            provider_note = _restore_provider_dependency_refusal_note(
+                arguments.get("snapshot"))
+            if provider_note is not None:
+                payload["note"] = provider_note
             return payload
     return None
 
@@ -836,6 +847,74 @@ def _provider_files(providers: dict) -> dict[str, str]:
             for path in providers}
 
 
+def _provider_use_closure(providers: dict) -> dict[str, tuple[str, str]]:
+    """Issue #2778: every file the providers' own text `use`s, by realpath.
+
+    The displacement refusal below compared the agent's modules with the
+    provider FILES themselves. A provider's `use` imports are ordinary files
+    on disk, not registered providers, and the composition compile resolves a
+    provider's `use` through the in-memory sources map first, so an agent
+    module keyed at a dependency's path still composes in the place of the
+    file the provider depends on: the provider's text is unchanged and its
+    behaviour changes.
+
+    Resolution mirrors the operator compile exactly. Each module is walked
+    from the absolute path the loader keys it by, and a nested `use` resolves
+    relative to that path's directory first, then the search path
+    (`REVL_IMPORT_PATH`, then the stdlib). The realpath is only the comparison
+    key, so every spelling of one file collides with the same agent module
+    while a symlinked dependency is still walked from the directory the
+    compiler reads it through. A source that does not parse and a `use` that
+    does not resolve are skipped: the provider compile owns those errors and
+    refuses them before anything runs.
+    """
+    from ..compiler import _default_search_path  # noqa: PLC0415 - same package
+    from ..parser import parse_text  # noqa: PLC0415 - avoids a parser import here
+
+    def resolve(importer: str, use_path: str) -> str:
+        target = os.path.join(os.path.dirname(importer), use_path)
+        if os.path.isfile(target):
+            return target
+        for base in _default_search_path():
+            candidate = os.path.join(base, use_path)
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    closure: dict[str, tuple[str, str]] = {}
+    seen = {os.path.realpath(path) for path in providers}
+    for registered, text in providers.items():
+        # the frontier carries the path the compiler would LOAD the module by,
+        # and the realpath is used only to compare one file against another
+        frontier = [registered]
+        sources = {registered: text}
+        while frontier:
+            importer = frontier.pop()
+            try:
+                program = parse_text(sources.pop(importer), importer)
+            except (RevlError, RecursionError):
+                # the provider compile reports an unparseable module itself
+                continue
+            for use in program.uses:
+                target = resolve(importer, use.path)
+                if not target:
+                    continue
+                real = os.path.realpath(target)
+                if real in seen:
+                    continue
+                seen.add(real)
+                closure[real] = (registered, use.path)
+                loaded = os.path.abspath(target)
+                try:
+                    with open(loaded, encoding="utf-8") as handle:
+                        sources[loaded] = handle.read()
+                except (OSError, UnicodeDecodeError):
+                    # the provider compile owns a dependency it cannot read
+                    continue
+                frontier.append(loaded)
+    return closure
+
+
 def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     """Issue #2763: refuse a candidate whose in-memory module names a file the
     operator registered as a `--provider`, under any spelling of that path.
@@ -848,23 +927,44 @@ def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     the agent's text compiled in the provider's place. A refusal, not a silent
     drop: the reason names the module as the caller sent it and the provider
     it collided with, a path inside the roots the jail refusal already shows,
-    and nothing is compiled."""
+    and nothing is compiled.
+
+    Issue #2778: the same rule covers the files a provider's own text `use`s.
+    Those are not registered providers, but the composition compile resolves a
+    provider's `use` through the in-memory map first, so a module keyed at a
+    dependency's path would compose in the place of the file the provider
+    depends on."""
     taken = _provider_files(providers)
+    dependencies = _provider_use_closure(providers)
     for key in modules:
-        registered = taken.get(os.path.realpath(os.path.abspath(key)))
-        if registered is None:
+        real = os.path.realpath(os.path.abspath(key))
+        registered = taken.get(real)
+        if registered is not None:
+            raise RevlError(
+                key, 1,
+                f"admission refused: module `{key}` names the operator-sanctioned "
+                f"provider `{registered}`; an agent-supplied module may not take "
+                f"a granted provider's place",
+                hint="a `--provider` module is the operator's own host code and "
+                     "is composed under the path the operator registered; it "
+                     "cannot be replaced from the transport under any spelling "
+                     "of that path. Send your module under a path of its own and "
+                     "compose the provider's service through `use` of the "
+                     "registered path, or ask the operator to change the provider",
+                category="admission")
+        owner = dependencies.get(real)
+        if owner is None:
             continue
+        dependency_provider, use_path = owner
         raise RevlError(
             key, 1,
-            f"admission refused: module `{key}` names the operator-sanctioned "
-            f"provider `{registered}`; an agent-supplied module may not take "
-            f"a granted provider's place",
-            hint="a `--provider` module is the operator's own host code and "
-                 "is composed under the path the operator registered; it "
-                 "cannot be replaced from the transport under any spelling "
-                 "of that path. Send your module under a path of its own and "
-                 "compose the provider's service through `use` of the "
-                 "registered path, or ask the operator to change the provider",
+            f"admission refused: module `{key}` names `{use_path}`, a file the "
+            f"operator-sanctioned provider `{dependency_provider}` uses; an "
+            f"agent-supplied module may not take a provider's dependency's place",
+            hint="the provider's own `use` resolves through the composition's "
+                 "in-memory sources first, so a module sent under a path the "
+                 "provider imports would compose in place of the file the "
+                 "operator sanctioned. Send your module under a path of its own",
             category="admission")
 
 
@@ -1095,22 +1195,114 @@ def _refusal_code(error: BaseException) -> dict:
     return {"code": code} if code else {}
 
 
-def _session_error(message: str | BaseException, category: str = "session",
-                   fix: str | None = None, **extra) -> dict:
+def _repair_field(repair: dict | None) -> dict:
+    """The refusal's structured repair (issue #2845), or nothing at all.
+
+    Spelled here, like `_fix_field`, because the envelope's copies
+    (`http_face._err`, `query_tools._require`, `query_tools._run` and
+    `_session_error` itself) share one recorded vocabulary
+    (`tools/check_vocabulary_mirrors.py`): adding the field in a helper keeps
+    that literal at the six fields those copies spell."""
+    return {} if repair is None else {"repair": repair}
+
+
+def _session_error(message: str | BaseException, category: str | None = None,
+                   fix: str | None = None, refusal_code: str | None = None,
+                   **extra) -> dict:
     """A session refusal. `message` is the prose, or the exception that
     refused. Its next call, when it has one (issue #1691), is resolved and
     attached by `remedy`, which also names it at the end of the message.
 
-    `fix` is the mechanical remedy in the caller's own terms — the one edit to
-    the arguments that makes this same call work — and rides on the diagnostic
+    `fix` is the mechanical remedy in the caller's own terms, the one edit to
+    the arguments that makes this same call work, and rides on the diagnostic
     when the refusal has one (issue #2035). It is deliberately not the `next`
     call: a next call is a *different* call to make, where `fix` is this call
-    with one argument dropped."""
+    with one argument dropped.
+
+    `refusal_code` (issue #2858) names a registered code, and the category is
+    read from that registry entry rather than passed here, so a code and its
+    category cannot disagree. The structured `refusal` rides the answer and
+    keeps `message` free to change. A `code` arriving in `extra` (a
+    `SessionError`'s own) stays what it was: a carried classification, not a
+    registered one.
+
+    Issue #2845: a refusal exception that carries a structured `repair` (a
+    `SessionError` with a code and a minimal edit, e.g. STATE_UNDISCLOSED)
+    hands it to the payload here, beside the diagnosis. It is additive, and
+    the prose message is untouched."""
+    refused_error = message if isinstance(message, BaseException) else None
+    carried = getattr(refused_error, "repair", None) if refused_error is not None else None
     message, remedy = _remedy.resolve(message, extra)
-    diagnostic = {"severity": "error", "code": "REVL", "category": category,
+    if refusal_code is not None:
+        category = _answer.define(refusal_code).category
+    diagnostic = {"severity": "error", "code": "REVL",
+                  "category": category or "session",
                   "message": message, **_fix_field(fix)}
-    return _remedy.attach({"ok": False, "diagnostics": [diagnostic], **extra},
-                          remedy)
+    payload = {"ok": False, "diagnostics": [diagnostic], **extra}
+    if carried is not None and "repair" not in payload:
+        payload.update(_repair_field(carried))
+    payload = _remedy.attach(payload, remedy)
+    if refusal_code is not None:
+        payload["code"] = refusal_code
+        payload = _answer.attach_refusal(payload, refusal_code, message, fix)
+    return payload
+
+
+# -- content handles (issue #2852) -------------------------------------------
+#
+# Output tokens cost several times what input tokens cost (issue #1700), and an
+# answer that returns text the session already holds spends them on a copy. A
+# producing verb can mint an `artifactId` for that text instead of returning it
+# (`revl_fmt` with `handle: true`), and a verb that consumes the text accepts
+# the id in place of `source`. The bytes stay in the session
+# (`mcp/artifacts.py`), so nothing is re-sent and nothing is written.
+#
+# One consumer in this slice. `revl_check` is the verb that turns a candidate
+# into a verdict, so a handle minted by `revl_fmt` saves the resend exactly
+# where the authoring loop used to pay it, and the check itself stays
+# read-only.
+_HANDLE_CONSUMERS = frozenset({"revl_check"})
+
+
+def _resolve_handle(name: str, arguments: dict) -> tuple[dict, dict | None]:
+    """`(arguments, refusal)` for a call that carries a content handle.
+
+    A consumer verb gets the text the handle names as its `source`, so
+    everything below this point in the dispatch (the path jail and the
+    authoring gate included) reads the same call it would have read had the
+    caller sent the text. A handle for an id the session cannot resolve is
+    refused here, before anything is read or compiled, and the refusal names
+    the id and the reason. A verb that takes no handle, or a call that carries
+    none, is returned unchanged."""
+    if (name not in _HANDLE_CONSUMERS
+            or arguments.get(_artifacts.ARTIFACT_KEY) is None):
+        return arguments, None
+    if arguments.get("session") is True:
+        return arguments, _session_error(
+            "`session: true` checks the composition the session holds, and "
+            f"`{_artifacts.ARTIFACT_KEY}` names a candidate of its own: pass "
+            "the handle alone, or check the held set alone",
+            category="usage",
+            fix=f"drop `session` to check the text the handle names, or drop "
+                f"`{_artifacts.ARTIFACT_KEY}` to check the held composition")
+    if arguments.get("source") is not None or arguments.get("files"):
+        artifact_id = arguments[_artifacts.ARTIFACT_KEY]
+        return arguments, _session_error(
+            f"`{_artifacts.ARTIFACT_KEY}` {artifact_id} names text the "
+            "session holds, so it takes no `source`/`files` of its own: pass "
+            "the handle, or pass the text",
+            category="usage",
+            fix=f"drop `source`/`files` to use the handle, or drop "
+                f"`{_artifacts.ARTIFACT_KEY}` to send the text")
+    try:
+        text = _artifacts.resolve(SESSION, arguments[_artifacts.ARTIFACT_KEY])
+    except _artifacts.ArtifactError as error:
+        return arguments, _session_error(error, category="usage",
+                                         **_refusal_code(error))
+    resolved = {key: value for key, value in arguments.items()
+                if key != _artifacts.ARTIFACT_KEY}
+    resolved["source"] = text
+    return resolved, None
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -2237,8 +2429,18 @@ def _tool_change(arguments: dict) -> dict:
                 if arguments.get("gauntlet") is True else None)
     # a cold refusal is answered before `_tool_edit`'s load gate on purpose:
     # nothing is loaded by it, so there is nothing for that gate to decide
-    refused = (_change.cascade_refusal(arguments, plan, cold=cold)
-               if intent == "withdraw" else None)
+    refused = None
+    if intent == "withdraw":
+        if cold and isinstance(compiled, tuple):
+            source, files, modules = _candidate_of(arguments)
+            vs = {"source": source, "files": files, "modules": modules,
+                  "files_content": compiled[2] or {},
+                  "dependencies": _dependency_buffers(compiled[1])}
+        else:
+            vs = _change_working_set()
+        readonly = _change.read_only_components(vs)
+        refused = _change.cascade_refusal(arguments, plan, cold=cold,
+                                          read_only=readonly)
     result = _proposal.annotate(
         SESSION, refused or _tool_edit(edit_arguments, verify=verifier,
                                        caller="revl_change", compiled=compiled),
@@ -2628,11 +2830,64 @@ def _tool_export(arguments: dict) -> dict:
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
+    copied = _copied_not_adopted(held)
+    if copied:
+        payload["note"] = _copied_note(copied)
+        payload["adopt"] = copied
     if skipped:
         payload["skipped"] = skipped
     if damaged:
         payload["exportRecordDamaged"] = damaged
     return payload
+
+
+def _copied_not_adopted(held: dict) -> list[dict]:
+    """The loaded files whose bytes are not the held text, each with the copy
+    that holds it (issue #2766).
+
+    A files-loaded composition exports each changed file to its copy under
+    `.revl/export/`, never over the loaded file (issue #2524). The success
+    payload nevertheless said the held source was "written to disk" and
+    `disk.inSync` was true, so a client read the export as adopted and stopped
+    with the loaded file still holding the old bytes. This names the difference
+    in the payload; the divergence block keeps comparing against the copy, as
+    issue #2524 defined it.
+
+    Decided from state, not from what this call wrote: a second export writes
+    nothing (the copy already holds the text) and still leaves the loaded file
+    alone, and a revert can rewrite the copy so the loaded file already equals
+    the held text, which must not be reported as waiting for a copy-out."""
+    if not held.get("files"):
+        return []
+    texts = held.get("files_content") or {}
+    roots = _file_roots()
+    out = []
+    for path in held["files"]:
+        text = texts.get(path)
+        copy = _export_jail.export_copy(path, roots)
+        if copy != path and text is not None and _edit._read_disk(path) != text:
+            out.append({"file": path, "export": copy})
+    return out
+
+
+def _copied_note(copied: list[dict]) -> str:
+    """The export note when a loaded file is not the held text (issue #2766):
+    name the copy that holds the text and the file that still holds the old
+    bytes, and say that adopting the export means copying it over. It names a
+    copy, not a tool: the server does not know which file tool the client has
+    (#2524 leaves the copy-out to whoever asked for the export)."""
+    if len(copied) == 1:
+        one = copied[0]
+        return (f"the held source is at the export copy "
+                f"{one['export']}; the loaded file {one['file']} still holds "
+                "the previous bytes. An export never writes over a loaded file "
+                "outside the export directory: adopt it by copying the copy "
+                "over that file")
+    pairs = "; ".join(f"{i['file']} (copy {i['export']})" for i in copied)
+    return ("the held source is at export copies; these loaded files "
+            f"still hold the previous bytes: {pairs}. An export never writes "
+            "over a loaded file outside the export directory: adopt it by "
+            "copying each copy over its file")
 
 
 def _write_records(records) -> tuple | None:
@@ -3452,6 +3707,14 @@ def _tool_estop_report(_arguments: dict) -> dict:
         return _session_error(error)
 
 
+def _tool_brief(_arguments: dict) -> dict:
+    """The compact next-step answer (issue #2854): a projection of the
+    session's own fields, never a second state. `brief.project` recomputes
+    every field, so this handler is the projection plus the `ok` flag the
+    response shape carries."""
+    return {"ok": True, **_brief.project(SESSION)}
+
+
 def _tool_state(_arguments: dict) -> dict:
     state = {"ok": True, **SESSION.state(drain=True)}
     if SESSION.loaded:
@@ -3483,6 +3746,224 @@ def _tool_gauntlet(arguments: dict) -> dict:
     if hasattr(SESSION, "record_gauntlet"):
         SESSION.record_gauntlet(dossier)
     return dossier
+
+
+# -- selected test runs (issue #2843) ---------------------------------------
+
+#: One failing test's message is bounded: a pytest traceback can be tens of
+#: kilobytes and there is one per failing test, so an unbounded answer would be
+#: the runner's stdout under another name.
+_TEST_MESSAGE_LIMIT = 500
+
+#: The default wall-clock budget of one `revl_test_run` call, in seconds.
+_TEST_RUN_TIMEOUT = 300.0
+
+
+def _test_message(text: str | None) -> str | None:
+    """One test's message, whitespace-collapsed and bounded."""
+    if not text:
+        return None
+    text = " ".join(text.split())
+    if len(text) <= _TEST_MESSAGE_LIMIT:
+        return text
+    return text[: _TEST_MESSAGE_LIMIT - 4].rstrip() + " ..."
+
+
+def _test_node_id(case) -> str:
+    """The node id pytest would report for one junit `<testcase>`.
+
+    junit carries `file`, `classname` and `name`, and no node id, so the three
+    are reconstructed (`tests/test_a.py::TestX::test_y`) with no plugin.
+    """
+    file = case.get("file") or ""
+    name = case.get("name") or ""
+    cls = case.get("classname") or ""
+    if not file:
+        return f"{cls}::{name}" if cls else name
+    module = file[:-3].replace("/", ".") if file.endswith(".py") else file
+    inner = cls[len(module) + 1:] if cls.startswith(module + ".") else ""
+    prefix = file + ("::" + inner.replace(".", "::") if inner else "")
+    return f"{prefix}::{name}"
+
+
+def _test_entry(case) -> dict:
+    """One junit `<testcase>` as the answer's per-test entry."""
+    outcome = "passed"
+    node = None
+    for tag, mapped in (("failure", "failed"), ("error", "error"),
+                        ("skipped", "skipped")):
+        found = case.find(tag)
+        if found is not None:
+            outcome, node = mapped, found
+            break
+    try:
+        duration = round(float(case.get("time") or 0.0), 3)
+    except ValueError:
+        duration = 0.0
+    return {"nodeId": _test_node_id(case), "outcome": outcome,
+            "duration": duration,
+            "message": None if node is None else _test_message(
+                node.get("message") or node.text)}
+
+
+def _parse_junit(path: str) -> list[dict]:
+    """Every per-test entry in a junit report, or [] when it cannot be read."""
+    try:
+        tree = ET.parse(path)
+    except (OSError, ET.ParseError):
+        return []
+    return [_test_entry(case) for case in tree.getroot().iter("testcase")]
+
+
+def _test_run_refusal(message: str, code: str, location: str | None = None,
+                      repair: str | None = None, **extra) -> dict:
+    """A named refusal from `revl_test_run`, with the run's receipt when it has
+    one. The verdict vocabulary is shared with a completed run, so a caller
+    reads `verdict` first and `code` when it is `refused`. `location` names the
+    argument to change and `repair` the change, both carried in the answer's
+    structured `refusal` (issue #2858)."""
+    fields = {"location": location, "repair": repair, **extra}
+    return _session_error(message, refusal_code=code, refused=True,
+                          verdict="refused",
+                          **{k: v for k, v in fields.items() if v is not None})
+
+
+def _tool_test_run(arguments: dict) -> dict:
+    """Run a selected test suite under this server's interpreter and answer
+    with structured per-test results (issue #2843).
+
+    pytest runs as a subprocess with `--junitxml` into a temp file, which is
+    parsed and deleted; the runner's stdout is never read or echoed. `ok`
+    reports that the run produced an answer and the result is in `verdict`
+    (`passed` | `failed`), so a failing test is a result, not a tool fault. An
+    empty selection, a selection that collected no test and one where every
+    test skipped are named refusals, so a vacuous run cannot read green.
+    """
+    selection = arguments.get("selection")
+    if selection is None or selection == []:
+        return _test_run_refusal(
+            "`selection` is required: the test paths or pytest node ids to run, "
+            "e.g. [\"tests/test_mcp.py\"]. An empty selection is refused, so a "
+            "run over nothing cannot read as green", "EMPTY_SELECTION",
+            location="selection",
+            repair="pass the test paths or node ids to run")
+    if not isinstance(selection, list) or not selection:
+        return _test_run_refusal(
+            "`selection` must be a non-empty array of test paths or node ids",
+            "BAD_SELECTION", location="selection",
+            repair="pass a non-empty array of test paths or node ids")
+    if not all(isinstance(item, str) and item.strip() for item in selection):
+        return _test_run_refusal(
+            "every `selection` entry must be a non-empty test path or node id",
+            "BAD_SELECTION", location="selection",
+            repair="pass only non-empty test paths or node ids")
+    for item in selection:
+        if item.startswith("-"):
+            return _test_run_refusal(
+                f"`selection` entry `{item}` looks like a pytest option; this "
+                "verb takes test paths and node ids, not options",
+                "BAD_SELECTION", location="selection",
+                repair="pass test paths or node ids, not pytest options")
+        if not item.split("::", 1)[0].strip():
+            return _test_run_refusal(
+                f"`selection` entry `{item}` names no path before `::`",
+                "BAD_SELECTION", location="selection",
+                repair="put a test path before `::`")
+    cwd = arguments.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return _test_run_refusal(
+            "`cwd` is required: the working directory pytest runs in",
+            "BAD_CWD", location="cwd",
+            repair="pass the directory pytest runs in")
+    cwd = os.path.realpath(os.path.abspath(cwd))
+    if not os.path.isdir(cwd):
+        return _test_run_refusal(f"`cwd` {cwd} is not a directory", "BAD_CWD",
+                                 location="cwd",
+                                 repair="pass an existing directory")
+    timeout = arguments.get("timeout", _TEST_RUN_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or not timeout > 0:
+        return _test_run_refusal(
+            f"`timeout` must be a positive number of seconds, not {timeout!r}",
+            "BAD_TIMEOUT", location="timeout",
+            repair="pass a positive number of seconds")
+    # a test selection is a path argument like any other: the tree it can run
+    # and the directory it runs in stay inside the operator-sanctioned roots
+    roots = _file_roots()
+    outside: list[str] = []
+    if not _within_roots(cwd, roots):
+        outside.append(cwd)
+    for item in selection:
+        path = item.split("::", 1)[0]
+        if not path or not _within_roots(os.path.join(cwd, path), roots):
+            outside.append(path or item)
+    if outside:
+        allowed = ", ".join(f"`{root}`" for root in roots)
+        named = ", ".join(f"`{path}`" for path in sorted(set(outside)))
+        return _test_run_refusal(
+            f"refused: {named} is outside the operator-sanctioned root(s) "
+            f"[{allowed}]; a selection and its working directory are confined "
+            "like every other path argument", "OUTSIDE_ROOT",
+            location="cwd" if cwd in outside else "selection",
+            repair="use a selection and working directory inside a "
+                   "sanctioned root")
+    fd, report = tempfile.mkstemp(prefix="revl-test-run-", suffix=".xml")
+    os.close(fd)
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               "-o", "junit_family=xunit1", f"--junitxml={report}", *selection]
+    started = time.monotonic()
+    try:
+        try:
+            proc = subprocess.run(
+                command, cwd=cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=float(timeout), check=False)
+        except subprocess.TimeoutExpired:
+            return _test_run_refusal(
+                f"the selection did not finish within {timeout:g} s; raise "
+                "`timeout` or narrow the selection", "TIMEOUT",
+                location="timeout",
+                repair="raise `timeout` or narrow the selection",
+                receipt={"command": command, "cwd": cwd, "exitCode": None,
+                         "durationSeconds": round(time.monotonic() - started, 3),
+                         "timeoutSeconds": float(timeout), "timedOut": True})
+        except OSError as error:
+            return _test_run_refusal(
+                f"pytest could not be started: {error}", "TEST_RUN_FAILED",
+                location="pytest",
+                repair="make pytest importable by this server's interpreter")
+        exit_code = proc.returncode
+        elapsed = round(time.monotonic() - started, 3)
+        tests = _parse_junit(report)
+    finally:
+        try:
+            os.unlink(report)
+        except OSError:
+            pass
+    receipt = {"command": command, "cwd": cwd, "exitCode": exit_code,
+               "durationSeconds": elapsed, "timeoutSeconds": float(timeout)}
+    if not tests:
+        return _test_run_refusal(
+            f"the selection collected no test: pytest exited {exit_code} and "
+            "reported no test case. Check the paths and node ids",
+            "NO_TESTS_COLLECTED", location="selection",
+            repair="check the paths and node ids", receipt=receipt,
+            selection=list(selection))
+    counts = {"total": len(tests), "passed": 0, "failed": 0, "skipped": 0,
+              "errors": 0}
+    for entry in tests:
+        key = "errors" if entry["outcome"] == "error" else entry["outcome"]
+        counts[key] += 1
+    if counts["skipped"] == counts["total"]:
+        return _test_run_refusal(
+            f"all {counts['total']} selected test(s) were skipped; a skipped "
+            "run is not a passing run", "ALL_SKIPPED", location="selection",
+            repair="select tests that are not all skipped", receipt=receipt,
+            counts=counts)
+    verdict = "failed" if (counts["failed"] or counts["errors"]
+                           or exit_code != 0) else "passed"
+    return {"ok": True, "verdict": verdict, "selection": list(selection),
+            "tests": tests, "counts": counts, "receipt": receipt}
 
 
 def _tool_quarantine(arguments: dict) -> dict:
@@ -3545,7 +4026,38 @@ def _tool_snapshot(_arguments: dict) -> dict:
         return _session_error(error)
 
 
-def _restore_authoring_refusal(error: RevlError) -> dict:
+def _restore_has_provider_dependency(snap: dict | None) -> bool:
+    """Whether a snapshot's captured dependency buffers name a live provider.
+
+    Restore re-admits the snapshot itself and does not merge `AUTHORING`
+    providers. A matching path therefore explains why a caller may mistake a
+    dependency buffer for operator-authored provider code, but it cannot confer
+    that trust on bytes carried by the snapshot.
+    """
+    sources = snap.get("sources") if isinstance(snap, dict) else None
+    dependencies = sources.get(ORIGIN_DEPENDENCIES) if isinstance(sources, dict) else None
+    if not isinstance(dependencies, dict):
+        return False
+    provider_paths = _provider_files(AUTHORING.providers or {})
+    return any(
+        os.path.realpath(os.path.abspath(path)) in provider_paths
+        for path in dependencies
+        if isinstance(path, str)
+    )
+
+
+def _restore_provider_dependency_refusal_note(snap: dict | None) -> str | None:
+    if not _restore_has_provider_dependency(snap):
+        return None
+    return (
+        "nothing was restored — this snapshot includes a dependency path also "
+        "configured as an operator `--provider`. `revl_restore` re-admits "
+        "snapshot bytes and does not merge the live provider map, so the "
+        "matching path does not make those agent-supplied bytes "
+        "operator-authored")
+
+
+def _restore_authoring_refusal(error: RevlError, snap: dict | None = None) -> dict:
     """The answer to a `revl_restore` whose snapshot does not admit under the
     session's untrusted authoring trust: the same report `revl_load` gives.
 
@@ -3560,9 +4072,10 @@ def _restore_authoring_refusal(error: RevlError) -> dict:
     payload["restored"] = False
     payload["reAdmitted"] = False
     payload["authoringTrust"] = "untrusted"
-    payload["note"] = ("nothing was restored — a snapshot is agent-supplied "
-                       "source and admits under the same authoring trust "
-                       "`revl_load` does")
+    payload["note"] = (
+        _restore_provider_dependency_refusal_note(snap)
+        or ("nothing was restored — a snapshot is agent-supplied source and "
+            "admits under the same authoring trust `revl_load` does"))
     return payload
 
 
@@ -3578,7 +4091,11 @@ def _tool_restore(arguments: dict) -> dict:
     trust: a snapshot may no more smuggle a host body past it than `revl_load`
     may. That compile is the one whose IR is loaded (`persist.restore`), so
     the text admitted is the text that runs, `dependencies` included. (The operator's own
-    `revl mcp serve --restore` path is not agent-supplied and is unaffected.)"""
+    `revl mcp serve --restore` path is not agent-supplied and is unaffected.)
+
+    Snapshot dependency buffers remain agent-supplied even when their path
+    matches an operator `--provider`: restore re-admits the captured buffers and
+    does not merge the live provider map."""
     snap = arguments.get("snapshot")
     if snap is None:
         return _session_error("`snapshot` (a document from revl_snapshot) is required")
@@ -3605,7 +4122,7 @@ def _tool_restore(arguments: dict) -> dict:
         return _approval_required(error, host_bodies=authored)
     except RestoreError as error:
         if profile is not None and error.revl_error is not None:
-            return _restore_authoring_refusal(error.revl_error)
+            return _restore_authoring_refusal(error.revl_error, snap)
         # a rejected re-admission is a *result*: surface the diagnostic, and
         # make clear nothing was loaded
         payload = {"ok": False, "restored": False, "reAdmitted": False,
@@ -3855,7 +4372,8 @@ def _tool_check(arguments: dict) -> dict:
         return _session_error(
             "`session: true` checks the composition the session holds, so it "
             "takes no candidate of its own",
-            category="usage",
+            refusal_code="SESSION_TAKES_NO_CANDIDATE",
+            location="session",
             fix="drop `source`/`files` to check the held composition, or drop "
                 "`session` to check the candidate you sent")
     if _carries_candidate(arguments) and _held_draft() is not None:
@@ -3863,16 +4381,44 @@ def _tool_check(arguments: dict) -> dict:
             f"refused: revl_check with {_load_shape(arguments)} checks that "
             f"candidate, not {_held_draft_phrase()} — the draft is the loop's "
             "artifact, and a check that names a candidate cannot see it",
-            category="usage",
+            refusal_code="DRAFT_HELD",
+            location="source",
             fix="drop `source`/`files` to check the composition the session "
                 "holds",
             next=_remedy.call("revl_check", {"session": True}),
             draft=True)
     if explicit or not _carries_candidate(arguments):
         return _note_session_check_disk(_check_held(arguments))
-    sent, _stored, canon = _canonical.prepare(arguments)
+    # issue #2194: compile once, then let the canonicaliser's IR-equivalence
+    # gate reuse that document instead of compiling the same text again.
+    sent, completed = _canonical.complete_arguments(arguments)
+    checked, ir = _check_as_sent(sent)
+    canon = _canonical.report_after(sent, completed,
+                                   ir if _gate_can_reuse(arguments) else None)
     return _note_held_file_differs(
-        arguments, _canonical.attach(_check_as_sent(sent), canon))
+        arguments, _canonical.attach(checked, canon))
+
+
+def _gate_can_reuse(arguments: dict) -> bool:
+    """Whether `_check_as_sent`'s compile of `arguments` is the compile the
+    canonicaliser's gate would make for itself (issue #2194).
+
+    It is for an inline `source` with no `modules`: the check compiles
+    `compile_source(source, "<candidate>.rvl", profile=AUTHORING.profile())`
+    and the gate otherwise compiles the same text with no profile. The
+    profile's fields refuse or are IR-neutral (none of them rewrites the
+    returned document; `realm_bindings` is the field that does change
+    lowering, and it is excluded below), so when the check compiled there is
+    a document and it is the one the gate would compare against.
+    `tests/test_mcp_check_compile_cost_2194.py` pins that equality for an
+    emission program that compiles under both. `modules` enter the check's
+    compile but not the gate's, and `providers` and realm bindings enter the
+    check compile as well, so any of them means the gate must make its own
+    compile."""
+    return (arguments.get("source") is not None
+            and not arguments.get("modules")
+            and not AUTHORING.providers
+            and not AUTHORING.realm_bindings)
 
 
 _CHECK_FILE_DIFFERS_NOTE = ("the file on disk differs from the session's "
@@ -3968,7 +4514,8 @@ def _check_held(arguments: dict) -> dict:
         return _session_error(
             "`modules` are the in-memory `use` imports of a candidate: they "
             "ride beside `source` or `files`, and this call carries neither",
-            category="usage",
+            refusal_code="MODULES_WITHOUT_CANDIDATE",
+            location="modules",
             fix="pass `source` or `files` beside `modules`")
     vs = _held_working_set()
     if vs is None:
@@ -3976,7 +4523,8 @@ def _check_held(arguments: dict) -> dict:
             "revl_check needs a candidate: pass `source` or `files`, or check "
             "the composition the session holds — and this session holds none "
             "(nothing is loaded and no draft is open)",
-            category="usage",
+            refusal_code="NO_CANDIDATE",
+            location="source",
             fix="pass `source` or `files`",
             next=_remedy.load_next())
     candidate = _held_candidate(vs)
@@ -3985,8 +4533,10 @@ def _check_held(arguments: dict) -> dict:
             "the session's composition carries no source text to check — it "
             "was not loaded from `source` or `files`, so there is nothing to "
             "recompile",
-            category="session")
-    result = _check_as_sent(candidate, held=vs)
+            refusal_code="NOTHING_TO_CHECK",
+            location="session",
+            fix="reload the composition from `source` or `files`")
+    result, _ir = _check_as_sent(candidate, held=vs)
     result["checked"] = "session"
     return result
 
@@ -4054,8 +4604,14 @@ _HELD_DOC = (" `source`/`files` are optional when the session holds a "
              "answers `queried: \"session\"`.")
 
 
-def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
-    """Compile a candidate as sent. `held` is the session's working set a
+def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
+    """Compile a candidate as sent, and return `(payload, ir)`.
+
+    `ir` is the document that compile produced (`None` when it refused), which
+    a caller that goes on to canonicalise hands to the IR-equivalence gate so
+    it does not compile the same text again (issue #2194).
+
+    `held` is the session's working set a
     held-session check compiled instead (issue #2117), used only to describe
     the candidate: the arguments carry the equivalent `source`/`files`/`modules`
     the compile reads, while `held` carries the edited buffers the argument
@@ -4068,7 +4624,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
-        return _with_candidate_knowledge(refused, arguments, refused, held)
+        return _with_candidate_knowledge(refused, arguments, refused, held), None
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -4088,7 +4644,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
     if blocked:
         # flagged, not handed out: holes this author can never fill
         result["unfillable"] = blocked
-    return _with_candidate_knowledge(result, arguments, None, held)
+    return _with_candidate_knowledge(result, arguments, None, held), ir
 
 
 def _with_candidate_knowledge(payload: dict, arguments: dict, refused,
@@ -4647,7 +5203,11 @@ def _tool_fmt(arguments: dict) -> dict:
     interpolation rewrite) over inline source — the MCP twin of `revl fmt`,
     taking text in and text out instead of touching the filesystem. Gated by
     the same IR-equivalence proof the CLI runs: a rewrite that would change
-    what the compiler sees is refused, never silently written."""
+    what the compiler sees is refused, never silently written.
+
+    With `handle: true` the answer names the formatted text (`artifactId`)
+    instead of returning it, for a caller that hands it to `revl_check`
+    without reading it (issue #2852)."""
     from ..fmt import migrate_source
     from ..formatter import FormatError, format_admitted, ir_equivalent
 
@@ -4673,8 +5233,18 @@ def _tool_fmt(arguments: dict) -> dict:
     if not gate.admitted:
         return {"ok": False, "admitted": False, "reason": gate.reason,
                 "note": "refused — the rewrite would change what the compiler sees"}
-    result = {"ok": True, "admitted": True, "formatted": rewritten,
-              "changed": rewritten != source, "proof": gate.proof}
+    # issue #2852: a caller that hands the formatted text straight to the next
+    # verb does not need the text itself back. `handle: true` answers with a
+    # content handle for the held text in place of the copy (artifacts.py),
+    # and `revl_check` accepts the id in place of `source`. The text form is
+    # unchanged, so an answer that does want the bytes still carries them.
+    if arguments.get("handle") is True:
+        result = {"ok": True, "admitted": True,
+                  "artifactId": _artifacts.mint(SESSION, rewritten),
+                  "changed": rewritten != source, "proof": gate.proof}
+    else:
+        result = {"ok": True, "admitted": True, "formatted": rewritten,
+                  "changed": rewritten != source, "proof": gate.proof}
     # a check the gate could not run to completion travels with the result, so
     # a weakened proof is as visible to an agent as it is on the CLI.
     if gate.warning:
@@ -4731,7 +5301,11 @@ TOOLS = [
                        "that carries neither a candidate nor anything held is a "
                        "`category: \"usage\"` refusal, not a composition "
                        "verdict: `ok: false` means the composition has a "
-                       "problem.",
+                       "problem. `artifactId` names a candidate the session "
+                       "already holds (a content handle from `revl_fmt` with "
+                       "`handle: true`) and is checked in place of `source`, "
+                       "so the text is not sent again; a stale or unknown "
+                       "handle is refused by name.",
         "inputSchema": {"type": "object", "properties": {
             **_SOURCE_INPUT,
             "session": {"type": "boolean",
@@ -4741,6 +5315,14 @@ TOOLS = [
                                        "candidate — the form the bare "
                                        "`revl_check {}` already takes. Carries "
                                        "no `source`/`files` of its own"},
+            "artifactId": {"type": "string",
+                           "description": "a content handle minted by "
+                                          "`revl_fmt` with `handle: true`: "
+                                          "check the text it names instead of "
+                                          "sending it again. Session scoped; a "
+                                          "stale or unknown handle is refused "
+                                          "by name. Takes no `source`/`files` "
+                                          "of its own"},
             **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
@@ -5408,6 +5990,43 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_gauntlet,
+    },
+    {
+        "name": "revl_test_run",
+        "description": "Run a selected test suite under this server's own "
+                       "interpreter and return per-test results instead of "
+                       "runner text: one entry per test with the node id, the "
+                       "outcome (passed | failed | skipped | error), the duration "
+                       "in seconds and the test's message (bounded), plus the "
+                       "summary counts, the verdict and a receipt with the exact "
+                       "command. pytest writes a junit report to a temp file, "
+                       "which is parsed and deleted; the runner's stdout is never "
+                       "returned. `ok` reports that a run produced an answer and "
+                       "the result is in `verdict` (passed | failed), so a failing "
+                       "test is a result, not a tool fault. An empty selection, a "
+                       "selection that collected no test and one where every test "
+                       "skipped are named refusals (EMPTY_SELECTION, "
+                       "NO_TESTS_COLLECTED, ALL_SKIPPED), so a vacuous run cannot "
+                       "read green. The selection and `cwd` are confined to the "
+                       "operator-sanctioned root(s), like every other path "
+                       "argument. See docs/mcp-reference.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "selection": {"type": "array", "items": {"type": "string"},
+                              "description": "the test paths or pytest node ids "
+                                             "to run (`path::Class::test`)"},
+                "cwd": {"type": "string",
+                        "description": "the working directory pytest runs in; "
+                                       "relative selections resolve against it"},
+                "timeout": {"type": "number",
+                            "description": "wall-clock budget in seconds "
+                                           "(default 300)"},
+            },
+            "required": ["selection", "cwd"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_test_run,
     },
     {
         "name": "revl_quarantine",
@@ -6166,6 +6785,30 @@ TOOLS = [
         "handler": _tool_revoke_distillation,
     },
     {
+        "name": "revl_brief",
+        "description": "One compact next-step answer for the authoring loop, "
+                       "instead of a state dump: `state` (`loaded`, `draft` or "
+                       "the named `empty`), the generation and component names, "
+                       "the source the working set came from, `last` (the code, "
+                       "location and repair of the last refusal, or the verdict "
+                       "of the last `revl_check`/`revl_admit`), `pending` (a "
+                       "held proposal or draft) and `next`, the one call to make. "
+                       "It is a STRICT PROJECTION of state the session already "
+                       "holds: every field is recomputed from the ambient "
+                       "footer, the proposal store, the held draft and the "
+                       "recorded verdict, so it cannot disagree with `revl_state`. "
+                       "The BRIEF BLOCK is bounded: at most 1200 characters of "
+                       "compact JSON, with names dropped before `next` (a "
+                       "`trimmed` list names what was dropped). The session "
+                       "footer every response carries is outside that bound. An "
+                       "empty session answers `state: \"empty\"` with a `why` "
+                       "line and a `next` call, never nulls. See "
+                       "docs/mcp-reference.md.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_brief,
+    },
+    {
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
                        "a rollback is available, and the trace since the last call. "
@@ -6489,7 +7132,10 @@ TOOLS.extend([
                        "touches disk. The rewrite is proven against the same "
                        "IR-equivalence gate the CLI runs: `admitted: false` means "
                        "the rewrite would change what the compiler sees, and "
-                       "`formatted` is NOT returned.",
+                       "`formatted` is NOT returned. With `handle: true` the "
+                       "answer names the formatted text (`artifactId`) instead "
+                       "of returning it, for a caller that hands it to "
+                       "`revl_check` without reading it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -6501,6 +7147,12 @@ TOOLS.extend([
                             "description": "rewrite 1.x `$` interpolation to "
                                            "backtick templates instead of "
                                            "canonical formatting"},
+                "handle": {"type": "boolean",
+                           "description": "true: return an `artifactId` for the "
+                                          "formatted text instead of the text "
+                                          "itself (`formatted` is omitted), for "
+                                          "a `revl_check` call that takes the "
+                                          "handle. The text form is unchanged"},
             },
             "required": ["source"],
         },
@@ -6910,7 +7562,21 @@ def handle(message: dict) -> dict | None:
         # refusal just before it says so instead of repeating byte for byte
         state = _ambient.footer(SESSION)
         payload = _attempt_fields(name, payload)
+        # issue #2858: the converted verbs answer in the shared envelope, before
+        # the repeat rewrite and the footer: the repeat layer may prepend a
+        # REPEATED_REFUSAL diagnostic, and a refusal code is derived from the
+        # verb's own diagnostics so it cannot flip between attempts. The
+        # envelope describes the answer, the repeat layer rewrites its prose.
+        payload = _answer.envelope(name, payload)
         payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
+        # issue #2854: the one record `revl_brief` reads. It indexes the
+        # verdict of the answer just built (the refusal's code, location and
+        # repair, or a check/admit verdict) so the brief can report it without
+        # keeping a second copy of session state. Recording changes nothing in
+        # the payload. The hatch records the verb it called, so a call through
+        # `revl_verbs` is indistinguishable from a direct one here too.
+        _brief.observe(SESSION, _called_verb(name, params.get("arguments") or {}),
+                       payload)
         payload = _ambient.stamp(payload, state)
         result = {
             "content": [{"type": "text", "text": json.dumps(_actionable_first(payload), indent=2)}],
@@ -6929,6 +7595,19 @@ def handle(message: dict) -> dict | None:
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _called_verb(name: str, arguments: dict) -> str:
+    """The verb an answer belongs to. A `revl_verbs` hatch call answers as the
+    verb it names, so the brief records that verb and not the lookup. A hatch
+    that names no verb this server has records the discovery call: the name
+    came from the caller and can be any length, and the brief's answer is
+    bounded."""
+    if name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
+        verb, _args, _reason, _next = _disclosure.hatch(arguments)
+        if verb in _HANDLERS:
+            return verb
+    return name
 
 
 def _hatch_call(arguments: dict) -> dict:
@@ -6958,7 +7637,9 @@ def _hatch_call(arguments: dict) -> dict:
     payload = _unknown_arguments(verb, args) or _call_tool(verb, args)
     # issue #2690: the hatch is documented as indistinguishable from a direct
     # call, so its check/admit refusals carry the attempt fields too
-    return _attempt_fields(verb, payload)
+    # issue #2858: and a converted verb reached through the hatch answers in
+    # the same envelope a direct call does
+    return _answer.envelope(verb, _attempt_fields(verb, payload))
 
 
 def _unknown_arguments(name: str, arguments: dict) -> dict | None:
@@ -6988,6 +7669,13 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
                                                       arguments)
     if wrong:
         return _session_error(wrong, category="usage")
+    # issue #2852: a content handle is resolved to the text it names HERE, so
+    # the gates below, the handler and the recorders all read the call the
+    # caller would have sent with the text, and an unknown or stale handle is
+    # refused before anything is read or compiled.
+    arguments, handle_refusal = _resolve_handle(name, arguments)
+    if handle_refusal is not None:
+        return _canonicalised(handle_refusal, canonicalised)
     # the path jail and the authoring gate run BEFORE the operator gate and
     # before any handler: a refusal here has read nothing, compiled nothing
     # and run nothing, so neither can be used as an oracle.

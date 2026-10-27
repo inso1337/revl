@@ -52,13 +52,40 @@ component C provides s: S {
 
 
 def test_an_emission_smuggled_through_a_first_class_value_is_refused():
-    """`quiet` never names `ship` in call position — the value does. The
-    declaration check must refuse it exactly like the direct call."""
+    """`quiet` never names `ship` in call position; the value does. Since
+    issue #2842 the value reference itself is refused, before the declaration
+    check: an emission is only ever called by name under `emit`."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(FIRST_CLASS)
     message = str(excinfo.value)
+    # the diagnostic names the first-class flow and the extern behind it
+    assert "emission `ship` cannot be used as a function value" in message
+    assert excinfo.value.category == "emission-value"
+    assert "bind its result, not the callable" in (excinfo.value.hint or "")
+
+
+def test_a_witnessed_extern_smuggled_through_a_value_is_still_refused_as_plain():
+    """Issue #2842 refuses an emission used as a value before the declaration
+    check runs, but a `witnessed` extern is outside that rule. Passed as a
+    value from a plain method it still reaches the declaration check, which
+    names the first-class flow and the dispatch it crosses."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("""
+type Witness = { path: Str }
+type FsError = { code: Str }
+extern pure fn unstash(w: Witness) -> Unit = @py { return }
+extern witnessed[fs] fn stash(path: Str) -> Result[Witness, FsError] undo idempotent unstash(result) = @py {
+    return Ok({'path': path})
+}
+fn relay(f: (Str) -> Result[Witness, FsError], p: Str) -> Int { let r = f(p)
+ return 1 }
+service S { fn quiet(a: Str) -> Int }
+component C provides s: S {
+  provide s { fn quiet(a) = relay(stash, a) }
+}
+""")
+    message = str(excinfo.value)
     assert "`S.quiet` is declared plain" in message
-    # the diagnostic names the first-class flow, not just a callee name
     assert "passed as a function value" in message
     assert excinfo.value.category == "emission-propagation"
     assert "first-class dispatch" in (excinfo.value.hint or "")
@@ -115,8 +142,9 @@ component C provides s: S {
   provide s { fn quiet(a) = dispatch(emit getship(), a) }
 }
 """)
-    assert "`S.quiet` is declared plain" in str(excinfo.value)
-    assert "`getship()`" in str(excinfo.value)
+    # refused where `getship` hands `ship` on as a value (issue #2842)
+    assert "emission `ship` cannot be used as a function value" \
+        in str(excinfo.value)
 
 
 def test_aliasing_an_emission_to_a_local_is_refused():
@@ -135,7 +163,8 @@ component C provides s: S {
   }
 }
 """)
-    assert "passed as a function value" in str(excinfo.value)
+    assert "emission `ship` cannot be used as a function value" \
+        in str(excinfo.value)
 
 
 def test_a_three_layer_transitive_chain_is_refused():

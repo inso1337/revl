@@ -95,6 +95,18 @@ def _ir() -> dict:
     return copy.deepcopy(_BASE)
 
 
+def _failing_ir() -> dict:
+    """The same composition with a deliberate activation fault in the
+    component's body. Item 372 lands the fiber FAILED without raising, so the
+    item-334 health gate is what rejects the swap, and `_abort_swap` reloads the
+    predecessor as a new generation."""
+    ir = copy.deepcopy(_BASE)
+    ir["components"][0]["body"].insert(
+        0, {"step": "fail",
+            "message": {"kind": "lit", "value": "deliberate activation fault"}})
+    return ir
+
+
 def _plain_ir() -> dict:
     return copy.deepcopy(_PLAIN_BASE)
 
@@ -235,3 +247,105 @@ def test_non_witnessed_swap_is_transparent(artifact):
     report = session.unload()
     assert report["unloaded"]
     assert report["noResidue"], report["checks"]
+
+
+# ---------------------------------------------------------------------------
+# ABORT AFTER A ROLLED-BACK SWAP: `_abort_swap` reloads the predecessor as a
+# new generation, so it too must install an owner (issue #2732). A session
+# abort after that rollback must still restore what the predecessor changed.
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_abort_after_a_rolled_back_swap_restores_the_predecessor_mutation(artifact):
+    """Load, make a witnessed change, attempt a swap whose successor fails its
+    activation, let the health gate roll it back through `_abort_swap`, then
+    abort. The predecessor's witnessed change is escrowed across the rollout,
+    carried into the reloaded generation's owner, and replayed by the abort.
+
+    The issue's report is that nothing covers this third load path: `swap` and
+    `_abort_swap` each reload a generation, and only the abort-after-a-clean-
+    swap case was pinned before."""
+    from revl.mcp.session import SessionError
+
+    session = _session()
+    session.load(_ir(), record=True)
+    session.call("ops", "stash", [artifact])
+    assert _mutated(artifact), "the predecessor's witnessed change did not apply"
+
+    with pytest.raises(SessionError) as caught:
+        session.swap(_failing_ir(), agent_authored=False)
+    assert "swap rejected" in str(caught.value)
+
+    # The rollback reloaded the predecessor. The change must still be in the
+    # world (the swap rollback is not the session verdict), and the reloaded
+    # generation's frame must have joined a live owner whose escrow carries the
+    # predecessor's undischarged entry.
+    assert _mutated(artifact), (
+        "the rolled-back swap replayed the predecessor's inverse by itself")
+    frame = _sole_registered_frame(session)
+    assert frame._owner is session._owner
+    owner = session._owner
+    assert owner._escrow, (
+        "the rolled-back swap dropped the predecessor's escrow, so the later "
+        "abort would restore nothing")
+
+    result = session.abort()
+    assert result["aborted"]
+    assert _pristine(artifact), (
+        "abort after a rolled-back swap restored NOTHING; the predecessor's "
+        "witnessed mutation was made permanent")
+    assert owner._escrow == [], "the abort left the escrow unreplayed"
+    assert result["noResidue"], result["checks"]
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL: every path that boots a generation installs a session owner
+# before it prepares the module. The admit-turn path is the one caller of
+# `_prepare_module` that is NOT a generation load: it plugs components into the
+# live generation and rightly keeps the current owner, so it calls neither
+# `_install_session_owner` nor the driver's `_load`.
+# ---------------------------------------------------------------------------
+
+def test_every_generation_load_installs_a_session_owner_before_preparing():
+    """A later load path cannot skip the owner install by convention. Parsed
+    from `src/revl/mcp/session.py` per method: a method that calls
+    `_prepare_module` and boots a module through the driver's `_load` is a
+    generation load, and its `_install_session_owner` call must come first.
+    `_boot` is the load path behind `load`, `_cut_over` is the swap's successor
+    and `_abort_swap` the rolled-back predecessor. `_wire_turn` (the admit-turn
+    plug path) calls `_prepare_module` but no `_load`, so it is not judged as a
+    new generation. The exact set of judged methods is asserted, so adding a
+    load path forces a reviewer to say which kind it is."""
+    import ast
+
+    source = (_ROOT / "src" / "revl" / "mcp" / "session.py").read_text(
+        encoding="utf-8")
+    generation_loads, offenders = [], []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls = [child for child in ast.walk(node)
+                 if isinstance(child, ast.Call)
+                 and isinstance(child.func, ast.Attribute)]
+        names = {call.func.attr for call in calls}
+        if "_prepare_module" not in names or "_load" not in names:
+            continue
+        generation_loads.append(node.name)
+        prepares = [c.lineno for c in calls if c.func.attr == "_prepare_module"]
+        installs = [c.lineno for c in calls
+                    if c.func.attr == "_install_session_owner"]
+        if not installs:
+            offenders.append(
+                f"{node.name} boots a generation through _prepare_module and "
+                f"_load without calling _install_session_owner")
+        elif min(installs) > min(prepares):
+            offenders.append(
+                f"{node.name} calls _prepare_module (line {min(prepares)}) "
+                f"before _install_session_owner (line {min(installs)})")
+
+    assert sorted(generation_loads) == ["_abort_swap", "_boot", "_cut_over"], (
+        "the set of methods that boot a generation changed: "
+        f"{sorted(generation_loads)}. A new load path must install a session "
+        "owner before preparing its module; if it is a plug into the live "
+        "generation (like the admit-turn path), it must be named here as such")
+    assert not offenders, "\n".join(offenders)

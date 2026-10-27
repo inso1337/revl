@@ -663,6 +663,12 @@ question.
   ([interchange-format.md](interchange-format.md)). The default (prose) render
   is for people and is **not** a stability contract; its wording may change
   between releases. Parse `--json`, not the prose.
+- `--wal FILE` - with plain `--json`, add the observed runtime ceiling records
+  from one WAL as `runtime_ceilings`. Each record carries its WAL sequence and
+  the calls, bytes, and elapsed values recorded for its budgeted crossing. The
+  field also reports whether the activation completed and whether the WAL has a
+  torn trailing record. It does not include effect arguments or error details;
+  it cannot be combined with `--policy` or `--diff`.
 - `--root DIR` - with a COMPOSITION document argument, the project root row
   provenance and origins are recorded against (default: the working
   directory), the same root `revl composition` takes. Ignored for module
@@ -1951,6 +1957,13 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `--schedule-seeds N` - schedule testing: sample `N` seeded interleavings (a
   random walk over the schedule space) plus the canonical sequential baseline,
   and report any interleaving that violates a property (py tier).
+- `--fault-profile SEED` - fault profile: inject a seeded list of fault events
+  drawn from the sweep points, judge each like the sweep, and print the seed,
+  every injected fault and the count of failures with no classified cause. The
+  same seed injects the same sequence; the run exits 1 when any event did not
+  end contained (py tier; section 11 of [fault-tests.md](fault-tests.md)).
+- `--fault-profile-events N` - with `--fault-profile`, how many events to draw
+  (default 8).
 
 ---
 

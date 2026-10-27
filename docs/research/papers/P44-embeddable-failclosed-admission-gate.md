@@ -38,7 +38,7 @@ The claim is not that the gate is complete, fast in every form, or sufficient fo
 | Cedar, OPA/Rego (including Rego-to-Wasm) | Embeddable authorization evaluators returning allow/deny | Those evaluate request policy; the revl gate checks agent-authored components and has no allow arm on its verdict surface |
 | Java Security Manager | In-process sandbox for untrusted classes | revl does not sandbox host code; extern bodies are surfaced on a review surface, not confined (`docs/threat-model.md:113-125`) |
 
-Citations to be checked: eBPF verifier documentation and Gershuni et al. PLDI 2019 (citation to be checked); Cedar (Cutler et al., OOPSLA 2024) (citation to be checked); Haas et al. PLDI 2017 for WebAssembly (citation to be checked); Klein et al. SOSP 2009 for seL4 (citation to be checked).
+Primary sources for eBPF verification, Cedar authorization, WebAssembly validation, and seL4 are recorded in the [related-work table](../related-work.md).
 
 ## Evidence on main
 | Claim | path:line or test | Status | Note |

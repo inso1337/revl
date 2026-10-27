@@ -1,0 +1,15 @@
+// REFUSED G4 (issue #2842): a `fn` that reaches an emission is bound to a
+// local in a provide method and called through it, so the emission would run
+// with no `emit` call site to record and meter it.
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn bill(x: Str) -> Int { return send(x) }
+service Ops { emission fn invoke(x: Str) -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn invoke(x) {
+      let f = bill
+      return f(x)
+    }
+  }
+}

@@ -35,6 +35,15 @@ The drafts are published as a section of the project site:
 with their state and has a filter by theme, state and kind. Drafts that cover one
 argument from several sides are listed as planned combined papers.
 
+## Checked background sources
+
+- [Cordis paper reading note](cordis-paper-reading.md) records the paper's
+  theorem assumptions, capability boundary, and implementation-language
+  wording.
+- [Related-work table](related-work.md) records a bounded set of opened primary
+  sources and the date each was checked. It is not an exhaustive novelty
+  survey.
+
 ## Licence and author
 
 Author: Thomas Moussajee. The text in this directory is licensed under the

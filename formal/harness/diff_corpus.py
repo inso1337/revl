@@ -4188,6 +4188,54 @@ def deferred_reach_rows(prog, rel: str) -> list[str]:
     return rows
 
 
+#: The scopes and positions of an emission value reach (`EVR` rows, issues
+#: #2842 and #2834). A test body is not read by the checker's rule, so it
+#: exports no row. The positions are the `DR` walk's.
+EMISSION_VALUE_SCOPES = ("fn", "component")
+EMISSION_VALUE_POSITIONS = DEFERRED_POSITIONS
+
+
+def _emission_value_names(prog) -> set:
+    """The names an emission value reach is keyed by: every `extern emission`
+    and every `fn` whose body reaches one, by a call or as a value, to a
+    fixed point. Read off the AST, independently of the checker's own
+    closure (`emission_analysis._emission_value_externs`)."""
+    names = {e.name for e in prog.externs
+             if getattr(e, "classification", None) == "emission"}
+    bodies = {fn.name: fn.body for fn in prog.fn_decls}
+    changed = True
+    while changed:
+        changed = False
+        for name, body in bodies.items():
+            if name in names:
+                continue
+            found: list = []
+            _deferred_reaches(body, names, found)
+            if found:
+                names.add(name)
+                changed = True
+    return names
+
+
+def emission_value_rows(prog, rel: str) -> list[str]:
+    """`EVR <file> <scope> <owner> <name> <position>`: one row per reach of a
+    name in `_emission_value_names`, in the body of a `fn` or a component.
+    Facts only: which reaches are legal is the model's
+    `RevL.G4EmissionValue.legalB`."""
+    names = _emission_value_names(prog)
+    if not names:
+        return []
+    rows: list[str] = []
+    scopes = ([("fn", fn.name, fn.body) for fn in prog.fn_decls]
+              + [("component", c.name, c.body) for c in prog.components])
+    for scope, owner, body in scopes:
+        found: list = []
+        _deferred_reaches(body, names, found)
+        for name, pos in found:
+            rows.append("\t".join(["EVR", rel, scope, owner, name, pos]))
+    return rows
+
+
 def config_rows(prog, rel: str) -> list[str]:
     """`CF` (a config field is declared) + `CN` (one node its type reaches)
     for every config field in the file — a component's and an extern's, the
@@ -4337,6 +4385,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         # deferred-position facts (DR, issue #1742), file-wide: every reach of
         # a `deferred` emission extern and where it sits.
         tsv.extend(deferred_reach_rows(prog, rel))
+        # emission value facts (EVR, issues #2842 and #2834), file-wide: every
+        # reach of an emission extern, or of a `fn` reaching one, and where
+        # it sits.
+        tsv.extend(emission_value_rows(prog, rel))
 
         # approval-floor facts (AR), file-wide: the approval-required tokens.
         # The per-crossing AX/AE rows follow each component below.
@@ -5548,6 +5600,51 @@ def deferred_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided per file under the EV row: (admitted, the set of
+#: (scope, position) reaches). Filled by `reference_from_tsv`, read by
+#: `emission_value_coverage`.
+_EMISSION_VALUE_FILES: dict = {}
+
+
+def emission_value_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `EV` row (issues #2842 and #2834).
+
+    The corpus must exercise the rule on both sides of it
+    (tests/fixtures/emission_value/): a file ADMITTED with a reach, and files
+    REFUSED for a value in a component, for a value in a `fn` body, and for
+    a call inside an arrow in a `fn` body. The verdict is the model's
+    `RevL.G4EmissionValue.emissionValueB` on the Lean side. Returns findings,
+    treated as gate failures."""
+    witnesses = {
+        "an admitted file that reaches an emission":
+            lambda ok, reach: ok and bool(reach),
+        "a file refused for a value reference in a component":
+            lambda ok, reach: not ok and ("component", "value") in reach,
+        "a file refused for a value reference in a fn body":
+            lambda ok, reach: not ok and ("fn", "value") in reach,
+        "a file refused for a call inside an arrow in a fn body":
+            lambda ok, reach: not ok and ("fn", "arrow") in reach,
+    }
+    findings: list[str] = []
+    found: dict[str, str] = {}
+    for label, test in witnesses.items():
+        hit = next((rel for rel, (ok, reach)
+                    in sorted(_EMISSION_VALUE_FILES.items())
+                    if test(ok, reach)), None)
+        if hit is None:
+            findings.append(f"emission value coverage: NO witness of {label}: "
+                            "the EV row would agree vacuously")
+        else:
+            found[label] = hit
+    if not findings:
+        reaching = sum(1 for _ok, reach in _EMISSION_VALUE_FILES.values()
+                       if reach)
+        print(f"emission value coverage: {len(_EMISSION_VALUE_FILES)} files, "
+              f"{reaching} reach an emission; witnesses "
+              + ", ".join(sorted(set(found.values()))))
+    return findings
+
+
 #: What the REFERENCE decided for each marked crossing under the approval
 #: floor: (admitted, carries an edge, reaches an approval-required token).
 #: Filled by `reference_from_tsv`, read by `approval_coverage`.
@@ -6104,7 +6201,9 @@ class Verdicts(NamedTuple):
     REPORTS under `G4`/`reversibility`, issue #2114), and `gc` GC rows (G9
     coverage: the walk the checker PERFORMED visits every statement of the
     body the parse enumerates and seeds every origin-carrying parameter — the
-    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108)."""
+    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108), and `ev`
+    EV rows (G4 emission value: an emission is reached only by a call, never
+    as a function value, issues #2842 and #2834)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -6137,6 +6236,7 @@ class Verdicts(NamedTuple):
     sw: dict[tuple[str, str, str], str]
     a5: dict[tuple[str, str, str], str]
     gc: dict[tuple[str, str, str], str]
+    ev: dict[str, str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -6153,7 +6253,8 @@ class Verdicts(NamedTuple):
                 + len(self.places) + len(self.model_reach)
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
-                + len(self.sw) + len(self.a5) + len(self.gc))
+                + len(self.sw) + len(self.a5) + len(self.gc)
+                + len(self.ev))
 
 
 
@@ -6197,6 +6298,7 @@ def parse_verdicts(text: str) -> Verdicts:
     sw: dict[tuple[str, str, str], str] = {}
     a5: dict[tuple[str, str, str], str] = {}
     gc: dict[tuple[str, str, str], str] = {}
+    ev: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -6268,6 +6370,9 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "DF" and len(parts) == 3:
             # G4 deferred position (issue #1742): file -> ok|fail.
             deferred[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "EV" and len(parts) == 3:
+            # G4 emission value (issues #2842, #2834): file -> ok|fail.
+            ev[parts[1]] = parts[2].split("=", 1)[1]
         elif parts[0] == "AP" and len(parts) == 5:
             # The approval floor: (file, comp, crossing ord) -> ok|fail.
             approvals[(parts[1], parts[2], parts[3])] = \
@@ -6361,7 +6466,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw, a5, gc)
+            places, model_reach, councils, g9, retain, inv, sw, a5, gc, ev)
 
 
 
@@ -6991,6 +7096,22 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         deferred[rel] = "fail" if bad else "ok"
         _DEFERRED_FILES[rel] = (not bad, frozenset(mine))
 
+    # EV rows (G4 emission value, issues #2842 and #2834), recomputed
+    # INDEPENDENTLY from the EVR rows with the checker's own rule (`lower.
+    # _refuse_effect_position_bound_externs_in_fn_body` and the component
+    # pure-expression check): a call is legal in either scope, a call inside
+    # an arrow is legal in a component (the marker rule decides it there) and
+    # refused in a `fn` body, and a value reference is refused everywhere.
+    evrows = [r for r in rows if r and r[0] == "EVR" and len(r) == 6]
+    _EMISSION_VALUE_FILES.clear()
+    ev: dict[str, str] = {}
+    for rel in sorted({r[1] for r in mrows}):
+        mine = [(r[2], r[5]) for r in evrows if r[1] == rel]
+        bad = [(sc, pos) for sc, pos in mine
+               if pos == "value" or (sc == "fn" and pos == "arrow")]
+        ev[rel] = "fail" if bad else "ok"
+        _EMISSION_VALUE_FILES[rel] = (not bad, frozenset(mine))
+
     # AP rows (the approval floor, issue #1455), recomputed from the AR/AX/AE
     # rows with the checker's own coverage test (`lower._approval_covers`):
     # every token the crossing reaches that the file requires approval for
@@ -7112,7 +7233,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc)
+                    gc, ev)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -7454,9 +7575,13 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # a DF failure clears a G4 `deferred` refusal, and a DF failure over
         # a file the checker accepts is `formal-strict` like any other.
         df_fail = v.deferred.get(rel, "ok") == "fail"
+        # The EV row is a fifth rule under G4 (issues #2842 and #2834), read
+        # the same way: an EV failure clears a G4 `emission-value` refusal,
+        # and one over an accepted file is `formal-strict`.
+        ev_fail = v.ev.get(rel, "ok") == "fail"
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
-            and not df_fail and not bu_fail and not g1_fail and not a1_fail \
+            and not df_fail and not ev_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
             and not mp_fail and not ma_fail and not cv_fail and not g9_fail \
             and not rt_fail and not inv_fail and not sw_fail \
@@ -7479,6 +7604,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # the DF row that must see it: a checker refusal the row does not
             # fail is the model being weaker than revl, and fatal.
             record("agree-G4" if df_fail else "missed-G4", rel)
+        elif code == "G4" and category == "emission-value":
+            # The emission value rule (issues #2842 and #2834, `lower.
+            # _emission_value_refusal` and `_emission_arrow_refusal`) is the
+            # model's `RevL.G4EmissionValue` over the `EVR` position facts,
+            # decided as the `EV` row. It asks WHERE an emission (or a `fn`
+            # reaching one) is reached, not whether a call is marked: a
+            # checker refusal the row does not fail is the model being
+            # weaker than revl, and fatal.
+            record("agree-G4" if ev_fail else "missed-G4", rel)
         elif code == "G4" and category == "inverse":
             # The release rules (issue #1859, `lower._check_site_release`: the
             # host family's release, and an `extern acquire`'s declared
@@ -8253,6 +8387,126 @@ def write_status(ledger: bool = False) -> int:
     return 0
 
 
+#: The row kinds that carry an accept/refuse verdict, as (Verdicts field,
+#: label). The label names the row and its guarantee for the job summary.
+#: `refused` (parse refusals, refusals by definition), `dispositions` and
+#: `recoveries` (execution outcomes), `g8surface` and `g5reg` (a surface and a
+#: count) carry no accept/refuse verdict and are not graded (issue #2745).
+ROW_KINDS = (
+    ("files", "V link (G2, G3)"),
+    ("comps", "G marker (G4)"),
+    ("providers", "P emission bound (G4)"),
+    ("spawns", "W attenuation (cap ceilings)"),
+    ("confinements", "C confinement (G6)"),
+    ("a9", "A9 provide clause"),
+    ("configs", "CD config is data (G4)"),
+    ("a2", "A2 acquisition order"),
+    ("deferred", "DF deferred position (G4)"),
+    ("approvals", "AP approval floor (G4)"),
+    ("bindings", "BU binding uniqueness (G6)"),
+    ("access", "G1 declared access"),
+    ("async_sites", "A1 async site"),
+    ("async_sigs", "A1S async signature"),
+    ("preludes", "PL prelude order"),
+    ("intercepts", "IC intercept target"),
+    ("methods", "MS method in service"),
+    ("places", "MPV model placement"),
+    ("model_reach", "MAV model reach"),
+    ("councils", "CTV council split"),
+    ("g9", "TAINT flow (G9)"),
+    ("retain", "RETAIN retention (G9)"),
+    ("inv", "INV inverse (G4)"),
+    ("sw", "SW witnessed site (G4)"),
+    ("a5", "A5 compensation"),
+    ("gc", "GC walk coverage (G9)"),
+    ("ev", "EV emission value (G4)"),
+)
+
+#: Row kinds whose corpus is one-sided today, as field -> (the side that has no
+#: document, why). Shrink-only, like `formal/out_of_fragment_ledger/`: a kind
+#: lacking a side that is not named here fails the gate, and an entry naming a
+#: side the corpus now has fails it too, so the exemption cannot outlive its
+#: reason. The missing side is proved in Lean, not exercised by a document.
+ONE_SIDED: dict[str, tuple[str, str]] = {
+    "g9": ("accepted", "rows are exported only for a taint refusal the "
+           "checker reports, so every document is a refusal"),
+    "retain": ("accepted", "rows are exported only for a retention refusal "
+               "the checker reports, so every document is a refusal"),
+    "inv": ("accepted", "rows are exported only for a G4 inverse refusal the "
+            "checker reports, so every document is a refusal"),
+    "gc": ("refused", "a document the checker refuses completes no walk, so "
+           "it has no row; the refusing side is the Lean "
+           "coversB_refuses_* theorems"),
+}
+
+
+def _row_refused(field: str, value: object) -> bool:
+    """Whether one reference verdict of kind `field` is a refusal. A `files`
+    verdict is a (disjoint, closed, link) triple, refused when any is not ok;
+    every other graded kind is `ok` or `fail`."""
+    if field == "files":
+        return any(v != "ok" for v in value)
+    return value != "ok"
+
+
+def row_census(ref: "Verdicts") -> dict[str, dict]:
+    """Per graded row kind: its rows, and how many corpus DOCUMENTS are
+    accepted and refused. A document is refused for a kind when any of its rows
+    of that kind is refused, accepted when it has rows and none is."""
+    out: dict[str, dict] = {}
+    for field, label in ROW_KINDS:
+        refused: set[str] = set()
+        accepted: set[str] = set()
+        rows = getattr(ref, field)
+        for key, value in rows.items():
+            doc = key if isinstance(key, str) else key[0]
+            (refused if _row_refused(field, value) else accepted).add(doc)
+        accepted -= refused
+        out[field] = {"label": label, "rows": len(rows),
+                      "accepted": len(accepted), "refused": len(refused)}
+    return out
+
+
+def polarity_coverage(census: dict[str, dict]) -> list[str]:
+    """The accept-and-refuse rule (issue #2745), as G6's
+    `confinement_coverage` states it for its own row: a row kind whose corpus
+    has no refused document (or no accepted one) is agreeing vacuously. Every
+    graded kind needs both, except the one-sided kinds `ONE_SIDED` names, and a
+    stale exemption is a finding too. Returns findings, gate failures."""
+    findings: list[str] = []
+    for field, c in census.items():
+        have = {"accepted": c["accepted"], "refused": c["refused"]}
+        exempt = ONE_SIDED.get(field)
+        for side, n in have.items():
+            if n == 0 and (exempt is None or exempt[0] != side):
+                findings.append(
+                    f"row polarity {c['label']}: no {side} corpus document, "
+                    "so the row can agree vacuously")
+        if exempt is not None and have[exempt[0]] != 0:
+            findings.append(
+                f"row polarity {c['label']}: ONE_SIDED exempts the "
+                f"{exempt[0]} side but {have[exempt[0]]} such document(s) "
+                "exist now, so delete the exemption")
+    return findings
+
+
+def write_row_census(census: dict[str, dict], path: Path) -> None:
+    """Write the census for `formal/scripts/proof_summary.py`, with each
+    kind's exemption beside its counts."""
+    kinds = {f: dict(c, exempt=({"side": ONE_SIDED[f][0],
+                                 "why": ONE_SIDED[f][1]}
+                                if f in ONE_SIDED else None))
+             for f, c in census.items()}
+    path.write_text(json.dumps({"row_kinds": kinds}, indent=1,
+                               sort_keys=True) + "\n", encoding="utf-8")
+
+
+def print_row_census(census: dict[str, dict]) -> None:
+    for c in census.values():
+        print(f"row polarity: {c['label']}: {c['rows']} rows, "
+              f"{c['accepted']} accepted and {c['refused']} refused documents")
+
+
 def main() -> int:
     tsv, file_facts, census = export()
     refusals: dict[str, str] = census["refusals"]
@@ -8282,6 +8536,9 @@ def main() -> int:
         return 0
     formal = parse_verdicts(formal_text)
     ref = reference_from_tsv(tsv)
+    polarity = row_census(ref)
+    write_row_census(polarity, out_dir / "row_census.json")
+    print_row_census(polarity)
 
     mismatches: list[str] = []
     for label, refmap, gotmap in (
@@ -8316,7 +8573,8 @@ def main() -> int:
             ("g9_coverage", ref.gc, formal.gc),
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
-            ("a5", ref.a5, formal.a5)):
+            ("a5", ref.a5, formal.a5),
+            ("emission_value", ref.ev, formal.ev)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -8339,6 +8597,7 @@ def main() -> int:
         f"{len(ref.configs)} config fields + "
         f"{len(ref.a2)} a2 bodies + "
         f"{len(ref.deferred)} deferred-position files + "
+        f"{len(ref.ev)} emission-value files + "
         f"{len(ref.approvals)} approval crossings + "
         f"{len(ref.bindings)} binding scopes + "
         f"{len(ref.access)} access components + "
@@ -8366,6 +8625,7 @@ def main() -> int:
     mismatches.extend(config_coverage())
     mismatches.extend(a2_coverage())
     mismatches.extend(deferred_coverage())
+    mismatches.extend(emission_value_coverage())
     mismatches.extend(approval_coverage())
     mismatches.extend(binding_coverage())
     mismatches.extend(access_coverage())
@@ -8379,6 +8639,7 @@ def main() -> int:
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
     mismatches.extend(a5_coverage())
+    mismatches.extend(polarity_coverage(polarity))
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

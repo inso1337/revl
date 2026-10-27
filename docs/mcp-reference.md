@@ -37,6 +37,9 @@ order, and each verb on it opens its description with "Authoring loop step N of
 6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
    `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
+Between steps, `revl_brief` answers where the loop stands and what to call next
+in one small answer, instead of re-reading `revl_state` (issue #2854).
+
 ## How to read this
 
 **Source input.** Every verb that takes a candidate composition accepts the
@@ -92,6 +95,88 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
 load remedy.
+
+**The answer envelope (revl_check, revl_test_run).** The two verbs converted by
+issue #2858 answer in one envelope, additive to every key they returned before:
+
+| field | meaning |
+| ----- | ------- |
+| `ok` | did the call answer at all (this one is on every verb) |
+| `verdict` | `passed`, `failed` or `refused` |
+| `payloadKey` | the key in the same answer that carries the verb's substance: `selfCheck` for `revl_check`, `tests` for `revl_test_run` |
+| `refusal` | present when `verdict` is `refused`: `code`, `category`, `message`, `location`, `repair` |
+
+`failed` is a verdict about what was checked: the call ran, and the composition
+did not compile (so `diagnostics` and `selfCheck` explain it) or the suite had a
+failing test (so `tests` and `counts` explain it). `refused` is about the call
+itself: it did not run, and `refusal` names the argument to change (`location`)
+and how to change it (`repair`), so nothing has to parse the message. A
+refusal's `code` and `category` come from one registry,
+`revl.answer.REFUSALS`, and a converted handler can emit no code the registry
+does not hold: an unregistered code raises when the refusal is built, rather
+than reaching an answer.
+
+**Refusal codes.** The stable contract across the converted verbs. Message text
+stays free to improve; a script or an agent branches on the code and its
+category. This table is generated from the registry by
+`python3 tools/docgen.py --write`, so it cannot drift from what the handlers
+emit.
+
+<!-- docgen:mcp-refusal-codes begin -->
+| code | category | meaning |
+| ---- | -------- | ------- |
+| `ADMISSION_REFUSED` | admission | a path argument or an import left what the operator sanctioned |
+| `ALL_SKIPPED` | usage | every selected test was skipped, and a skipped run is not a passing run |
+| `AUTHORING_REFUSED` | admission | the candidate carried host code the session's authoring trust does not admit |
+| `BAD_CWD` | usage | the working directory was missing, was not a string, or is not a directory |
+| `BAD_SELECTION` | usage | the test selection was not a non-empty array of test paths or node ids, or one of its entries named nothing runnable |
+| `BAD_TIMEOUT` | usage | the timeout was not a positive number of seconds |
+| `DRAFT_HELD` | usage | a candidate was sent while an edit draft is held; checking it would replace the working set the draft is filling |
+| `EMPTY_SELECTION` | usage | the test selection was empty, so a run over nothing would read as green |
+| `INTERNAL_REFUSED` | internal | the verb failed while answering |
+| `LEASE_REFUSED` | lease | another operator holds a lease on a component this call would replace |
+| `MODULES_WITHOUT_CANDIDATE` | usage | `modules` are the in-memory `use` imports of a candidate and do not name a candidate by themselves |
+| `NOTHING_TO_CHECK` | session | the held composition carries no source text that could be recompiled, so there is no check to make |
+| `NO_CANDIDATE` | usage | the call named no candidate and the session held no composition to check instead |
+| `NO_TESTS_COLLECTED` | usage | the selection collected no test, so there is no result to report |
+| `OPERATOR_REFUSED` | operator | the bound operator profile does not allow this management action |
+| `OUTSIDE_ROOT` | admission | the test selection or its working directory leaves the operator-sanctioned root(s), and a selection is confined like every other path argument |
+| `RUNTIME_REFUSED` | runtime | the verb's runtime could not do what the call asked |
+| `SESSION_REFUSED` | session | the call did not fit the state the session held |
+| `SESSION_TAKES_NO_CANDIDATE` | usage | `session: true` asks to check the composition the session holds, so the call may not carry a `source`/`files` candidate of its own |
+| `TEST_RUN_FAILED` | runtime | the test runner could not be started by this server's interpreter |
+| `TIMEOUT` | runtime | the selected tests did not finish inside the timeout |
+| `USAGE` | usage | the call's arguments did not satisfy the verb's input contract |
+<!-- docgen:mcp-refusal-codes end -->
+
+**Refusals carry their repair.** A refusal whose class the compiler already
+knows how to repair returns the minimal repair as data in `repair`, beside the
+diagnostics (issue #2845):
+
+```json
+"repair": {"target": "<candidate>.rvl:2 record literal for `Point`",
+           "edit": "add the field `y` in the literal checked against `Point`",
+           "reason": "T1: a record literal must carry exactly the fields its declared record type declares"}
+```
+
+`target` names the smallest thing to change: a `file:line` locator plus what
+sits there, a template name, or a handoff key. `edit` is the one edit that
+closes the refusal; where the repair is a call rather than an edit, `command`
+plays that role. `reason` is the rule that refused, in one sentence. A definite
+mismatch whose minimal edit the compiler cannot name still carries `repair`: no
+`edit` or `command`, and `"known": false`, so a caller reads "checked, nothing
+known" rather than a missing field. `repair` is additive, and the diagnostics
+beside it keep every field and every message they carried before.
+
+Repairs today:
+
+| Refusal | `repair` |
+| ------- | -------- |
+| a type mismatch of a shape the checker can repair (`typecheck.mismatch`, used by the typecheck and the lower stages) | `target` the position, `edit` the unwrap of an `Opt[...]`, or the `Auth.validate` step that mints the `Principal` |
+| a record literal that does not match its declared record (the checker's check position and the lowered IR check) | `target` the literal's `file:line`, `edit` the fields to add or drop |
+| any other definite type mismatch | `target` the position, no `edit`, `known: false` |
+| `STATE_UNDISCLOSED` on a changed live template | `target` the template name, `edit` re-declare it with the text gen N runs, or quiesce the live instances with `revl_unload` |
+| `STATE_UNDISCLOSED` on an incompatible `handoff` accept type | `target` the handoff key, `edit` declare an accept type that holds the running export, or drop the handoff so the successor starts cold |
 
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
@@ -250,6 +335,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | - (source) |
 | `revl_gauntlet` | yes | no | - (source) |
+| `revl_test_run` | no | no | `selection`, `cwd` |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
 | `revl_rollback` | no | yes | - |
@@ -270,6 +356,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_distillation_offers` | yes | no | - |
 | `revl_apply_distillation` | no | no | `offerId` |
 | `revl_revoke_distillation` | no | no | `rule` |
+| `revl_brief` | yes | no | - |
 | `revl_state` | yes | no | - |
 | `revl_lease` | no | no | `component` |
 | `revl_snapshot` | yes | no | - |
@@ -351,12 +438,13 @@ hundred. The core tier is `CORE` in `src/revl/mcp/disclosure.py`.
 ### `revl_verbs`
 
 The discovery verb, and the escape hatch. With no arguments it returns every
-verb grouped by topic (`author`, `session`, `approve`, `grade`, `replay`,
-`query`, the sections of this page), one sentence each and no schemas, plus the
-names `tools/list` currently shows. With `topic` it returns the exact schemas of
-that topic's verbs; with `names` it returns those verbs' exact schemas. The
-schemas are the same objects the full list carries under `--all-tools`. An
-unknown topic or name is refused with `next` set to the no-argument call.
+verb grouped by topic (`author`, `session`, `approve`, `grade`, `test`,
+`replay`, `query`, the sections of this page), one sentence each and no
+schemas, plus the names `tools/list` currently shows. With `topic` it returns
+the exact schemas of that topic's verbs; with `names` it returns those verbs'
+exact schemas. The schemas are the same objects the full list carries under
+`--all-tools`. An unknown topic or name is refused with `next` set to the
+no-argument call.
 
 With `name` and `args` it **calls** the verb `name` with the arguments `args` -
 the same handler, the same jail, authoring, operator and runtime gates, the
@@ -371,11 +459,67 @@ A hatch that cannot name the verb it means refuses by name rather than
 answering the lookup: an unknown `name`, a missing `args`, or an `args` that is
 not an object is a diagnostic, not a silent index.
 
-- Inputs: `topic` (one of the six); `names` (verb names); `name` (a verb to
+- Inputs: `topic` (one of the seven); `names` (verb names); `name` (a verb to
   call) with `args` (that verb's arguments). All optional, and the two forms are
   mutually exclusive.
 
 ## Author and admit
+
+### `revl_brief`
+
+One compact next-step answer for the loop, instead of a state dump (issue
+#2854). No inputs. It is a strict projection of state the session already
+holds, so it cannot disagree with `revl_state`:
+
+- `state`: `loaded`, `draft` (a draft is held and nothing is loaded) or
+  `empty`.
+- `generation`, `components` and `source`: what is running, at which
+  generation, and where it came from (the file names, or `inline source`). A
+  held draft reports its own source.
+- `last`: the verdict of the last answer that judged work, and only that one:
+  a green verdict or a refusal replaces the previous record, it never merges
+  with it. A refusal carries `outcome: "refused"`, the `verb`, the `code`, the
+  `location` (`file:line` when the diagnostic names one) and the `repair` (the
+  diagnostic's `fix` or `hint`) when it has one. A green `revl_check` or
+  `revl_admit` carries `outcome: "ok"`, the `verb` and the `verdict`, plus
+  `held: true` when a check judged the source the session holds rather than a
+  candidate the caller sent, and the open `holes` count when a check leaves
+  any.
+- `pending`: the held proposal (`kind`, its `generation`, the components it
+  replaces, `stale: true` when the running composition moved under it) or the
+  held draft (`kind: "draft"` and its open `holes` count).
+- `next`: exactly one call, in the same `{tool, arguments, ready}` shape a
+  refusal's `next` uses. A refusal's own remedy comes first, whatever the
+  state. Otherwise the state decides: on an empty session `revl_load`, then
+  commit a proposal (discard a stale one), then boot a draft with no holes
+  (`revl_load`) or edit one that has holes (`revl_edit`), then a green
+  verdict: swap the held working source when the check judged it, fill the
+  holes when the check left any, and otherwise name `revl_swap` as not ready
+  because the brief does not carry the checked candidate's source.
+
+**It is bounded.** The brief block's compact JSON is at most 1200 characters
+(`brief.CAP` in `src/revl/mcp/brief.py`). When a projection is over that, the
+trims run in a fixed order and names go before the action: the next call's
+arguments first (the `tool` and any `needs` stay, and `ready` becomes false),
+then the component names (a `componentCount` replaces them), then the
+proposal's replaced names, the refusal's `repair`, its `location`, the source
+name, and finally the whole `last` block. `trimmed` lists what was dropped, so
+a short answer never hides that it is short. A value no trim can shorten (a
+hatch's verb name is the one caller-supplied name recorded) is clipped at the
+source, and a final floor keeps the state and the next call if every trim is
+spent.
+
+**An empty session is a named answer, not nulls.** With nothing loaded and no
+draft held, the answer is `state: "empty"`, a `why` line and a `next` call:
+the last refusal's own remedy when it offered one, else `revl_load` with the
+origin this session still holds when it has one. No field is null, so a caller
+reads it without checking each value.
+
+The brief keeps no state of its own. Every field is recomputed from the
+ambient footer, the proposal store, the held draft and a verdict recorded
+where every answer already passes. That record is an index of an answer the
+session already gave, never an input to admission, planning or a swap, and the
+brief's own call is never recorded, so reading it cannot change what it says.
 
 ### `revl_check`
 
@@ -413,8 +557,19 @@ guarantee:
   warning, or why rows are `unchecked`.
 
 - Inputs: `source` / `files` / `modules`, or none at all (see below);
-  `session: true` asks for the held form explicitly; `returnCanonical` adds the
-  canonical text.
+  `artifactId` names text the session already holds in place of `source` (see
+  below); `session: true` asks for the held form explicitly; `returnCanonical`
+  adds the canonical text.
+
+**A candidate the session already holds can be named instead of sent (issue
+#2852).** `revl_check {artifactId}` takes a content handle minted by `revl_fmt`
+with `handle: true` and checks the formatted text it names. It is the
+supplied-source form: the answer is what the same text would get as `source`
+(`canonicalSource` included), and the handle is bound to the unit of work it
+was minted in, so a load, swap, rollback or undo makes it stale. An unknown or
+stale handle is a `category: "usage"` refusal that names the id and the
+reason; a handle takes no `source`/`files` of its own. The text form is
+unchanged.
 
 **With no candidate, it checks the composition the session holds.** Pass no
 `source` and no `files` (or pass `session: true`) and `revl_check` compiles the
@@ -462,6 +617,31 @@ verdict. A verdict always carries `selfCheck`; a usage error never does, so a
 caller can branch on that alone. The draft refusal above is the same kind of
 usage error, and carries no `selfCheck` for the same reason: nothing about the
 caller's composition was judged.
+
+The answer also carries the shared envelope (issue #2858): `verdict` is
+`passed` on a compiling candidate, `failed` when the candidate did not compile
+(the `diagnostics` and `selfCheck` rows explain why), and `refused` when the
+call itself did not run, in which case `refusal` names a registered `code`,
+its `category`, the `location` to change and a `repair`. The `revl_check`
+refusal codes are:
+
+| code | when |
+| ---- | ---- |
+| `SESSION_TAKES_NO_CANDIDATE` | `session: true` arrived with a `source`/`files` candidate |
+| `DRAFT_HELD` | a candidate arrived while an edit draft is held |
+| `MODULES_WITHOUT_CANDIDATE` | `modules` arrived with no `source`/`files` |
+| `NO_CANDIDATE` | no candidate was sent and the session holds no composition |
+| `NOTHING_TO_CHECK` | the held composition carries no source text to recompile |
+| `USAGE` | an argument the verb does not declare (shared fallback) |
+| `ADMISSION_REFUSED` | a `files` path or a `use` import outside the sanctioned roots (shared fallback) |
+| `AUTHORING_REFUSED` | the source carries host code the authoring trust does not admit (shared fallback) |
+| `SESSION_REFUSED` | a session error the handler raised while answering (shared fallback) |
+| `INTERNAL_REFUSED` | the handler raised while answering (shared fallback) |
+
+`payloadKey` is `selfCheck`. No key this verb answered with before moved. The
+last five rows are the shared fallbacks a refusal made before or around the
+handler carries; the generated table above gives every code's category and
+meaning.
 
 ### `revl_admit`
 
@@ -658,7 +838,15 @@ text out, nothing touches disk. The rewrite is proven against the same
 IR-equivalence gate the CLI runs, so `admitted: false` means the rewrite would
 change what the compiler sees and `formatted` is NOT returned ([fmt.md](fmt.md)).
 
-- Inputs: `source` (required); `filename`; `migrate`.
+With `handle: true` the answer names the formatted text instead of returning
+a copy of it: `artifactId` is a session-scoped content handle and `formatted`
+is omitted, so the caller can hand the text to `revl_check` without reading
+or re-sending it (issue #2852). The text form is unchanged, and the ledger
+still measures it; `changed` and `proof` ride on both forms, so the handle
+form is still a verdict on the rewrite.
+
+- Inputs: `source` (required); `filename`; `migrate`; `handle` (true: answer
+  with `artifactId` instead of `formatted`).
 
 ### `revl_explain`
 
@@ -1015,12 +1203,20 @@ calls for one change, five of them `revl_check` polls):
    withdrawal would plan (issue #2225): `cascade: true` withdraws the whole
    cascade, and a withdrawal that would strand a dependent is refused before
    anything is loaded, with `loaded: false` and the same plan and hint. The
-   refusal also carries `next` (issue #2536): the same `revl_change` call with
-   `cascade: true`, `ready` and pre-filled from the arguments it refused (the
-   carried `files`/`source`/`modules`). It never carries `commit`, even when the
-   refused call did: the cascade withdraws more than the caller named, so sent
-   as-is it answers with the plan of the cascade (`committed: false`), and
-   committing that is a separate call the caller chooses;
+   refusal also carries `next` (issue #2536) as a preference-ordered list. The
+   first entry is the same `revl_change` call with `cascade: true`, ready to
+   send as-is. It retains `source`/`files` only for a cold call; a warm call
+   uses the composition already held by the session. When every stranded
+   dependent is editable, the second entry is an unready `revl_change` edit
+   template with one `symbol` per dependent. The caller supplies a replacement
+   declaration for each one and must ensure each replacement no longer
+   requires any provision lost in the withdrawal. Send and commit that
+   replacement change first, then retry the withdrawal. If a dependent is in a
+   read-only `use` buffer, the replacement option is omitted and the hint names
+   the buffer that must be updated before reloading. No `next` option carries
+   `commit`, even when the refused call did: sending the first entry returns
+   the cascade plan (`committed: false`), and committing a change is a separate
+   call the caller chooses;
 3. **apply** the change to a working copy of the server-side source, so
    nothing about the running composition has changed yet;
 4. **verify**: admission against the running composition, the lease and
@@ -1109,6 +1305,14 @@ export of the held source.
   operator's file is never written; adopting an export is the operator's act,
   copying it out. After an export, the copies equal `revl_snapshot`'s
   `files_content`, and `disk.stale` (which names the loaded files) is empty.
+  The answer names what it left alone (issue #2766): when a loaded file still
+  holds the previous bytes rather than the held text, `note` names the copy and
+  that file, and `adopt` lists `{"file": <loaded path>, "export": <copy>}` for
+  each. It is decided from state, not from what this call wrote, so a second
+  export (which writes nothing) still names it, and a reverted export (whose
+  copy matches the loaded file again) does not. A client that reads the export
+  as done would stop with the loaded file holding the old bytes, so the
+  copy-out step is part of the answer.
 - A composition loaded from inline source writes to `path`, with its in-memory
   modules beside it, and refuses to replace an existing file unless
   `overwrite: true`.
@@ -1994,6 +2198,91 @@ Pass `manifest` to upgrade the answer from "compatible somewhere" to
 - Inputs: `need` (required); `manifest` (the running composition's IR);
   `limit` (max candidates, default 5); `registry` (dir, default
   `$REVL_REGISTRY` or the repo's `registry/`).
+
+---
+
+## Run tests
+
+### `revl_test_run`
+
+Run a selected test suite and read the result as data instead of scraping the
+runner's text. It runs `pytest` as a subprocess under this server's own
+interpreter (the one serving MCP), in the working directory you name, writes a
+junit XML report to a temporary file, parses it with the standard library and
+deletes it. The runner's stdout is never returned, so the answer's size is what
+the tests say, not what pytest printed.
+
+`ok` reports that the run produced an answer; the result is in `verdict`
+(`passed` | `failed`, or `refused` on a refusal), so a failing test is a result
+and not a tool fault. Each per-test entry carries `nodeId` (as pytest reports
+it), `outcome` (`passed` | `failed` | `skipped` | `error`), `duration` in
+seconds, and `message` (null when there is none; otherwise the test's own
+message, bounded to 500 characters). `counts` is the summary over the entries,
+and `receipt` names the command, the working directory, the exit code and the
+run's duration.
+
+An empty selection, a selection that collects no test and one where every test
+skipped are REFUSED with a named `code` (`EMPTY_SELECTION`,
+`NO_TESTS_COLLECTED`, `ALL_SKIPPED`), so a vacuous run cannot read green. The
+selection and `cwd` are confined to the operator-sanctioned root(s), like every
+other path argument.
+
+The answer carries the shared envelope (issue #2858): `payloadKey` is `tests`,
+`verdict` is `passed` or `failed` for a completed run and `refused` when the
+call did not run, and a refusal adds `refusal` with the registered `code`, its
+`category`, the argument to change in `location` and a `repair`. The existing
+`code` field is unchanged. The refusal codes are:
+
+| code | category | when |
+| ---- | -------- | ---- |
+| `EMPTY_SELECTION` | usage | `selection` was missing or empty |
+| `BAD_SELECTION` | usage | `selection` was not a non-empty array of test paths or node ids |
+| `BAD_CWD` | usage | `cwd` was missing or is not a directory |
+| `BAD_TIMEOUT` | usage | `timeout` was not a positive number of seconds |
+| `OUTSIDE_ROOT` | admission | the selection or `cwd` leaves the sanctioned root(s) |
+| `TIMEOUT` | runtime | the run outlasted `timeout` |
+| `TEST_RUN_FAILED` | runtime | pytest could not be started |
+| `NO_TESTS_COLLECTED` | usage | the selection collected no test |
+| `ALL_SKIPPED` | usage | every selected test was skipped |
+| `USAGE` | usage | an argument the verb does not declare (shared fallback) |
+| `SESSION_REFUSED` | session | a session error the handler raised while answering (shared fallback) |
+| `INTERNAL_REFUSED` | internal | the handler raised while answering (shared fallback) |
+
+The last three rows are the shared fallbacks a refusal made before or around
+the handler carries; the generated table above gives every code's category and
+meaning.
+
+- Inputs: `selection` (required; test paths or pytest node ids); `cwd`
+  (required; the working directory pytest runs in); `timeout` (seconds,
+  default 300; a run that outlasts it is refused with `code: TIMEOUT`).
+
+The example runs one passing and one failing test, so `verdict` is `failed`
+and both per-test entries are present:
+
+```json
+{
+  "ok": true,
+  "verdict": "failed",
+  "selection": ["tests/test_example.py::test_ok", "tests/test_example.py::test_bad"],
+  "tests": [
+    {"nodeId": "tests/test_example.py::test_ok", "outcome": "passed",
+     "duration": 0.001, "message": null},
+    {"nodeId": "tests/test_example.py::test_bad", "outcome": "failed",
+     "duration": 0.001, "message": "assert 1 == 2"}
+  ],
+  "counts": {"total": 2, "passed": 1, "failed": 1, "skipped": 0, "errors": 0},
+  "receipt": {
+    "command": ["/usr/local/bin/python3", "-m", "pytest", "-q",
+                "-p", "no:cacheprovider", "-o", "junit_family=xunit1",
+                "--junitxml=/tmp/revl-test-run-abcd.xml",
+                "tests/test_example.py::test_ok", "tests/test_example.py::test_bad"],
+    "cwd": "/work/repo",
+    "exitCode": 1,
+    "durationSeconds": 0.42,
+    "timeoutSeconds": 300.0
+  }
+}
+```
 
 ---
 

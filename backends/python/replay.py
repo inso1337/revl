@@ -539,6 +539,34 @@ class Step:
 #: discriminator (docs/design/121-revl-trace.md §4 attack 3).
 _ACTIVATION_ORDINALS = itertools.count(1)
 
+#: Issue #2728: the name of the deterministic fault point between an effect
+#: taking place and its record becoming durable. An ordinary effect's record is
+#: appended in `Timeline._wal_append`, after the effect body has run and yielded
+#: its inverse, so the world holds the effect while the log holds nothing. This
+#: is the one window `revl recover` cannot report: there is no record to name,
+#: invert or fence. The variable is unset on every production run; a test sets it
+#: to a step label (or `any`) and the process exits 137 in `_wal_append` before
+#: the append. `os._exit`, not a raise, so no `finally`/`atexit` hook can write
+#: the record the crash is testing.
+_CRASH_BEFORE_RECORD_ENV = "REVL_CRASH_BEFORE_RECORD"
+
+
+def _crash_before_record(step: "Step") -> None:
+    """Test-only crash point for the effect-to-record window (issue #2728).
+
+    Matches the step's own label (`activation/effect`) or the effect label it
+    was recorded under (`activation`), so a test can name the effect it means
+    without spelling the suffix. An emission is excluded: its record is written
+    BEFORE the host body runs, so a crash at its append is not this window."""
+    if step.kind == KIND_EMISSION:
+        return
+    wanted = os.environ.get(_CRASH_BEFORE_RECORD_ENV)
+    if not wanted:
+        return
+    if wanted not in ("any", step.label, step.effect):
+        return
+    os._exit(137)
+
 
 class Timeline:
     """The recorded activation of one component, and the operations over it."""
@@ -574,6 +602,9 @@ class Timeline:
 
     def _wal_append(self, step: Step) -> None:
         if self._wal is not None:
+            # issue #2728: the effect has run and yielded its inverse; this is
+            # the last instant before its record is durable.
+            _crash_before_record(step)
             step.wal_seq = self._wal.append_step(step, self.component)["seq"]
 
     def emission_for(self, compensation: Any, crossing: Optional[str] = None

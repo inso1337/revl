@@ -1,0 +1,35 @@
+// issue #2905: a by-value argument whose name is read exactly once in a
+// `return` expression, outside any arrow, moves instead of cloning; the
+// function returns, so nothing reads it again. A second read in the same
+// return, or a capture inside an arrow, still clones.
+type Tally = { names: List[Str], count: Int }
+
+fn bump(t: Tally, n: Int) -> Tally {
+  return { names: t.names, count: t.count + n }
+}
+
+fn merge(a: Tally, b: Tally) -> Tally {
+  return { names: a.names, count: a.count + b.count }
+}
+
+fn bump_once(t: Tally) -> Tally {
+  return bump(t, 1)
+}
+
+fn bump_merge(t: Tally) -> Tally {
+  return merge(t, bump(t, 1))
+}
+
+fn bump_later(t: Tally) -> () -> Int {
+  return () => bump(t, 1).count
+}
+
+fn bump_after_use(t: Tally) -> Tally {
+  let first = bump(t, 2)
+  return merge(first, t)
+}
+
+pub fn tally_report(names: List[Str]) -> Int {
+  let t = { names: names, count: 1 }
+  return bump_once(t).count + bump_merge(t).count + bump_later(t)() + bump_after_use(t).count
+}

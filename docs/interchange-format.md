@@ -57,6 +57,13 @@ host bootstrap it needs are [composition-bootstrap.md](composition-bootstrap.md)
 | `externs` | every declared host-code extern — the trust surface a proof cannot cover. Each entry carries `name`, `class`, and `backends` (the tiers it has a body for), plus, **only when declared**, `reach` (item 373 — what a confined crossing is bounded to: `{"kind": "confined", "target": "<param>"}`) and `deferred` (item 484 — `true` for an `emission` declared `deferred`). A **deferred** emission is the one crossing whose timing differs: its host call does NOT fire at the call site; it is held and flushed at the commit prompt, and an abort drops the queue. An immediate emission carries no `deferred` key, so its entry is byte-identical to before the field existed. |
 | `distributability` | per service, whether it may cross a process seam (`transport-safe` / `address-space-bound`) and why (interop-bridge §4). |
 | `retention` | optional (item 308 F10). The report-only retention surface: one row per resource-carrying parameter of a non-inverse extern or of a service method — every declared position at which a resource handle leaves revl's sight. Present only when there is one, so a handle-free composition omits the key. Each row is a MAY-retain: it does not prove a host body keeps the handle, and an absent row does not prove one does not. A declared inverse is excluded (teardown closing a handle is the contract working). |
+| `runtime_ceilings` | optional, present only with `revl audit --json --wal FILE`. It identifies the supplied WAL, reports whether its activation completed or its tail is torn, and copies each budgeted emission outcome's `record`, `seq`, and `ceiling` map. `seq` points back to the exact WAL outcome record; the map carries the observed calls, bytes, and elapsed values. |
+
+`--wal` adds runtime evidence without changing the static audit body. The
+`runtime_ceilings.records` entries intentionally omit effect arguments and
+error details. Without `--wal`, the interchange document is unchanged. The
+option is available only on the plain JSON audit, not with `--policy` or
+`--diff`.
 
 Provides / requires / reaches — the three things another admission harness
 needs — are `manifest.components[].provides`, `manifest.components[].inject`,

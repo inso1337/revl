@@ -9230,6 +9230,16 @@ class Parser:
                      "side-effecting body)",
             )
         self.next()
+        if self.at("kw", "if"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected {{, found {tok.value!r}",
+                hint=("an expression `if` needs one value in `else { ... }`. "
+                      "To keep the chained form, write a block-bodied function: "
+                      "`fn f(x) { if (x > 0) { return 1 } else if (x < 0) "
+                      "{ return 2 } else { return 0 } }`"),
+            )
         otherwise = self._if_branch_expr()
         return ExprIf(cond, then, otherwise, line)
 

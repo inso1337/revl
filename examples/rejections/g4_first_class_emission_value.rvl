@@ -1,0 +1,17 @@
+// REJECTED — G4: a budget-free emission extern is used as a function value.
+// Keep the irreversible crossing at a named `emit` call site (issue #2842).
+//
+// expected error:
+//   emission `send` cannot be used as a function value; call it by name under `emit` (G4)
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+
+service Ops { fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn invoke() {
+      let f = send
+      return f("x")
+    }
+  }
+}

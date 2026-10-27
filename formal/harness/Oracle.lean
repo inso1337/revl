@@ -9,6 +9,7 @@ import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
 import RevL.Theorems.G4_DeferredPosition
+import RevL.Theorems.G4_EmissionValue
 import RevL.Theorems.G4_ApprovalFloor
 import RevL.Theorems.G6_BindingUnique
 import RevL.Theorems.G1_KeyAccess
@@ -92,7 +93,8 @@ overstated:
    row). Three rules under the G4
    guarantee. (The fourth, the DEFERRED-POSITION rule, is not a private
    restatement: the `DF` row decides `RevL.G4Deferred.deferredB`, issue
-   #1742.) `g4OK` is the MARKER rule; the G4 model
+   #1742; nor is the fifth, the EMISSION VALUE rule: the `EV` row decides
+   `RevL.G4EmissionValue.emissionValueB`, issues #2842 and #2834.) `g4OK` is the MARKER rule; the G4 model
    (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
    by statement syntax, and the export carries call FACTS — receiver,
    service, method, marker context — so no model definition takes its
@@ -243,6 +245,12 @@ Fact rows in (tab-separated, one fact per line):
                                              a call inside an arrow, or the
                                              extern as a function value (G4,
                                              category `deferred`, issue #1742)
+  EVR <file> <fn|component> <owner> <name> <call|arrow|value>
+                                             one reach of an emission extern,
+                                             or of a `fn` reaching one, and
+                                             where it sits (G4, category
+                                             `emission-value`, issues #2842
+                                             and #2834)
   CF <file> <component|extern> <owner> <field> <type>
                                              a declared config field
   CN <file> <component|extern> <owner> <field> <ord> <form> <type>
@@ -324,6 +332,9 @@ Verdict rows out:
   DF <file> <deferred=ok|fail>                     G4 deferred position:
                                                    `RevL.G4Deferred.deferredB`
                                                    over the file's `DR` reaches
+  EV <file> <emission_value=ok|fail>               G4 emission value:
+                                                   `RevL.G4EmissionValue.emissionValueB`
+                                                   over the file's `EVR` reaches
   AP <file> <comp> <ord> <approval=ok|fail>        the approval floor over one
                                                    marked crossing:
                                                    `RevL.G4Approval.crossingB`
@@ -1135,6 +1146,15 @@ structure DRRow where
   ext : String
   pos : String
 
+/-- One reach of an emission extern, or of a `fn` reaching one (`EVR` row),
+with the scope and position the model's `RevL.G4EmissionValue` rule reads. -/
+structure EVRRow where
+  path : String
+  scope : String
+  owner : String
+  name : String
+  pos : String
+
 /-- A declared config field (`CF` row). `kind` is `component` or `extern`,
 the two owners `lower._check_config` is called for; `spelling` is the type
 as the author wrote it and is carried for legibility only — the judgment
@@ -1432,6 +1452,11 @@ def parseDR (f : List String) : Option DRRow :=
   | ["DR", path, scope, owner, ext, pos] => some ⟨path, scope, owner, ext, pos⟩
   | _ => none
 
+def parseEVR (f : List String) : Option EVRRow :=
+  match f with
+  | ["EVR", path, scope, owner, name, pos] => some ⟨path, scope, owner, name, pos⟩
+  | _ => none
+
 def parseCF (f : List String) : Option CFRow :=
   match f with
   | ["CF", path, kind, owner, field, spelling] =>
@@ -1686,6 +1711,58 @@ theorem deferredOKB_iff (reaches : List RevL.G4Deferred.Reach) :
   RevL.G4Deferred.deferredB_iff reaches
 
 end DeferredPosition
+
+/-! ## Deciding the G4 emission value rule (issues #2842 and #2834)
+
+An `EVR` row is one reach of an emission extern, or of a `fn` reaching one.
+Its scope and position are read into the model's own
+`RevL.G4EmissionValue.Reach`, and the file verdict is
+`RevL.G4EmissionValue.emissionValueB` over the file's reaches.
+`emissionValueOKB_iff` is the bridge: the printed `EV` Bool is the
+declarative `RevL.G4EmissionValue.EmissionValueOK`. A scope or position the
+model has no constructor for is a HARD error in `main`. -/
+
+section EmissionValue
+
+def parseEVScope : String → Option RevL.G4EmissionValue.Scope
+  | "fn" => some .fn
+  | "component" => some .component
+  | _ => none
+
+def parseEVPos : String → Option RevL.G4EmissionValue.Pos
+  | "call" => some .call
+  | "arrow" => some .arrow
+  | "value" => some .value
+  | _ => none
+
+/-- The model's reach for one `EVR` row, or `none` for an unknown spelling. -/
+def evReachOf (r : EVRRow) : Option RevL.G4EmissionValue.Reach :=
+  match parseEVScope r.scope, parseEVPos r.pos with
+  | some s, some p => some ⟨s, p⟩
+  | _, _ => none
+
+/-- **Emission value decider**: the model's rule over the file's reaches. -/
+def emissionValueOKB (reaches : List RevL.G4EmissionValue.Reach) : Bool :=
+  RevL.G4EmissionValue.emissionValueB reaches
+
+/-- **The `EV` verdict is the model's rule**
+(`RevL.G4EmissionValue.emissionValueB_iff`). -/
+theorem emissionValueOKB_iff (reaches : List RevL.G4EmissionValue.Reach) :
+    emissionValueOKB reaches = true ↔ RevL.G4EmissionValue.EmissionValueOK reaches :=
+  RevL.G4EmissionValue.emissionValueB_iff reaches
+
+/-- The paths of the `EVR` rows whose scope or position the model has no
+constructor for: a hard error, never a silently dropped reach. -/
+def evUnknownPaths (rows : List EVRRow) : List String :=
+  (rows.filter (fun r => (evReachOf r).isNone)).map (·.path)
+
+/-- The `EV` verdict line for one file. -/
+def evLine (rows : List EVRRow) (p : String) : String :=
+  let reaches := (rows.filter (fun r => r.path == p)).filterMap evReachOf
+  let v := if emissionValueOKB reaches then "ok" else "fail"
+  s!"EV\t{p}\temission_value={v}\n"
+
+end EmissionValue
 
 /-! ## Deciding A2: no acquisition after a provision (issue 1166)
 
@@ -2909,6 +2986,7 @@ def main (args : List String) : IO UInt32 := do
     let prrows := fields.filterMap parsePR
     let harows := fields.filterMap parseHA
     let drrows := fields.filterMap parseDR
+    let evrows := fields.filterMap parseEVR
     let cfrows := fields.filterMap parseCF
     let cnrows := fields.filterMap parseCN
     let irows := fields.filterMap parseI
@@ -3023,6 +3101,10 @@ def main (args : List String) : IO UInt32 := do
     let unknownDR := drrows.filter (fun r => (reachOf r).isNone)
     if !unknownDR.isEmpty then
       IO.eprintln s!"oracle: DR rows of unknown scope or position: {unknownDR.map (·.path)}"
+      return 1
+    let unknownEVR := evUnknownPaths evrows
+    if !unknownEVR.isEmpty then
+      IO.eprintln s!"oracle: EVR rows of unknown scope or position: {unknownEVR}"
       return 1
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
@@ -3195,6 +3277,9 @@ def main (args : List String) : IO UInt32 := do
       let reaches := (drrows.filter (fun r => r.path == p)).filterMap reachOf
       let dfv := if deferredOKB reaches then "ok" else "fail"
       out := out ++ s!"DF\t{p}\tdeferred={dfv}\n"
+      -- EV verdict (G4 emission value, issues #2842 and #2834), one per
+      -- file: the model's rule over every reach of an emission it makes.
+      out := out ++ evLine evrows p
       -- AP verdicts (the approval floor, issue #1455), one per marked
       -- crossing that reaches a token: the model's `crossingB` over its `AX`
       -- tokens, its `AE` edge and the file's `AR` required tokens.
@@ -3281,6 +3366,7 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.parseStep_stepName
 #print axioms RevLOracle.a2OKB_iff
 #print axioms RevLOracle.deferredOKB_iff
+#print axioms RevLOracle.emissionValueOKB_iff
 #print axioms RevLOracle.approvalRowB_iff
 #print axioms RevLOracle.bindingRowB_iff
 #print axioms RevLOracle.accessRowB_iff

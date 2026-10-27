@@ -16,6 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import compile_source  # noqa: E402
 from revl.__main__ import _boundary, main  # noqa: E402
@@ -23,6 +24,7 @@ from revl.errors import RevlError  # noqa: E402
 from revl.lower import _emitting_capabilities  # noqa: E402
 from revl.mcp.schema import tools_from_ir  # noqa: E402
 from revl.parser import Parser  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 
 # a provider that emits through exactly the capability it was granted
 SCOPED = """
@@ -401,6 +403,9 @@ def test_a_plain_operation_has_an_empty_capability_set():
 # concrete boundary names in the same situation: `*` says *that* the reach is
 # unnameable, the concrete names say *what* it reaches.
 
+# The compiler refuses this since issue #2842 (an emission handed on as a
+# value). The fixed point and the audit surface read IR, so they are measured
+# on the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`).
 _DISPATCH_SOURCE = """
 extern emission fn ship(x: Str) -> Str = @py { print("SHIP EMITTED"); return x }
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
@@ -412,8 +417,15 @@ component C provides s: S {
 """
 
 
+def _dispatch_ir() -> dict:
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(_DISPATCH_SOURCE)
+    with value_rule_off():
+        return compile_source(_DISPATCH_SOURCE)
+
+
 def test_capability_fixed_point_keeps_concrete_names_alongside_the_dispatch_star():
-    ir = compile_source(_DISPATCH_SOURCE)
+    ir = _dispatch_ir()
     caps = _emitting_capabilities(ir.get("functions") or [], ir.get("externs") or [])
     # `wrap` carries both: `*` marks that a first-class dispatch happens,
     # `ship` names the boundary the dispatched value reaches.
@@ -425,7 +437,7 @@ def test_capability_fixed_point_keeps_concrete_names_alongside_the_dispatch_star
 
 
 def test_the_audit_reports_the_boundary_behind_a_first_class_dispatch():
-    ir = compile_source(_DISPATCH_SOURCE)
+    ir = _dispatch_ir()
     externs = _boundary(ir)["C"]["externs"]
     names = {e["name"] for e in externs}
     # before the fix only `*`-less name-only reaches appeared: ship vanished

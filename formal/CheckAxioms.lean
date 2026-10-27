@@ -345,6 +345,14 @@ import RevL
 #print axioms RevL.G4Deferred.refused_of_mem
 #print axioms RevL.G4Deferred.fixtures_decided
 #print axioms RevL.G4Deferred.deferred_not_vacuous
+#print axioms RevL.G4EmissionValue.legalB_iff
+#print axioms RevL.G4EmissionValue.emissionValueB_iff
+#print axioms RevL.G4EmissionValue.value_never_legal
+#print axioms RevL.G4EmissionValue.arrow_in_fn_refused
+#print axioms RevL.G4EmissionValue.call_always_legal
+#print axioms RevL.G4EmissionValue.refused_of_mem
+#print axioms RevL.G4EmissionValue.fixtures_decided
+#print axioms RevL.G4EmissionValue.emission_value_not_vacuous
 -- Issue #1455: the approval floor (item 246, Decision 3). The capability
 -- token, the approval edge and the refusal, decided per marked crossing by
 -- the differential oracle's `AP` row.

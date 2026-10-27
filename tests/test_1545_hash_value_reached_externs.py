@@ -32,6 +32,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 sys.path.insert(0, str(ROOT / "tests"))
 
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 from _load_by_path import load_by_path  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
 from revl.mcp.approval import ApprovalRequired, ClassMap  # noqa: E402
@@ -62,7 +63,12 @@ _EXTERN = """extern emission fn charge(n: Int) -> Int = @py {{
 
 def _ir(sink: str, dest: str, spelling: str) -> dict:
     source = _T118._fn_value_source(_EXTERN.format(sink=sink, dest=dest), spelling)
-    return copy.deepcopy(compile_source(source, "item1545.rvl"))
+    # the IR a compiler from before issue #2842 emitted: the current one
+    # refuses the source (`tests/test_deploy_118.py`), while a standing grant
+    # is checked against whatever IR is swapped in, so the hash must still
+    # close over the value channel of one
+    with value_rule_off():
+        return copy.deepcopy(compile_source(source, "item1545.rvl"))
 
 
 def _sink_lines(sink: str) -> list:

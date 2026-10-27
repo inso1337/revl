@@ -36,6 +36,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 BACKEND = ROOT / "backends" / "python"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -44,6 +45,7 @@ from revl.compiler import compile_files, compile_source  # noqa: E402
 from revl.lower import RevlError, check_and_lower  # noqa: E402
 from revl.parser import Parser  # noqa: E402
 from revl.placement import cache_crossing_refusal  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -564,12 +566,19 @@ def test_surface_h_follows_the_spawn_seam():
 def test_surface_h_refuses_the_star_widening():
     """414 crossing kind 8. An emitting callable handed on as a VALUE reaches a
     boundary no `emission[...]` list can name, so an entry cannot be scoped to
-    the authority that covered its miss."""
-    problem = _surface_h(
+    the authority that covered its miss.
+
+    The compiler refuses this source since issue #2842, so the fold is measured
+    on the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
+    src = (
         "extern emission fn ship(x: Str) -> Str = @py { return x }\n"
         "fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }\n"
         "service S { emission fn loud(a: Str) -> Str cache capability }\n"
         "component C provides s: S { provide s { fn loud(a) = indirect(ship, a) } }\n")
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(src, "h.rvl")
+    with value_rule_off():
+        problem = _surface_h(src)
     assert problem is not None
     assert "as a VALUE" in problem and "(`*`)" in problem
 

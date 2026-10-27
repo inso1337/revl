@@ -714,7 +714,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
     return { text: `((_rc: string) => _rc === " " || _rc === "\t" || _rc === "\n" || _rc === "\r")(${target})`, counter: counter }
   }
   if (method == "set") {
-    return { text: `(() => { const c = new Map(${target}); c.set(${args[0]}, ${args[1]}); return c })()`, counter: counter }
+    return { text: `(<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(${target}, ${args[0]}, ${args[1]})`, counter: counter }
   }
   if (method == "lookup") { return { text: `${target}.get(${args[0]})`, counter: counter } }
   if (method == "has") { return { text: `${target}.has(${args[0]})`, counter: counter } }
@@ -723,7 +723,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
     return { text: `[...${target}.keys()].sort(revlStrCmp)`, counter: counter }
   }
   if (method == "remove") {
-    return { text: `(() => { const c = new Map(${target}); c.delete(${args[0]}); return c })()`, counter: counter }
+    return { text: `(<K, V>(_m: Map<K, V>, _k: K) => { const _c = new Map(_m); _c.delete(_k); return _c })(${target}, ${args[0]})`, counter: counter }
   }
   if (method == "to_str") { return { text: `${target}.toString()`, counter: counter } }
   return { text: `<<UNSUPPORTED-BUILTIN:${method}>>`, counter: counter }
@@ -887,6 +887,64 @@ fn wrap_match(lines: List[Str], tmp: Str, scrutinee: Str, acx: ACx, colour_by_te
   return out.join(newline())
 }
 
+// `_plain_primitive_literal` (issue #2901): a Str, Int or Bool literal that
+// renders as itself. A widened literal renders as a conversion (#2715) and a
+// Float or None literal is not one of the three kinds.
+fn plain_primitive_literal(node: Any) -> Bool {
+  if (node_kind(node) != "lit" || has_widen(node)) { return false }
+  let vk = value_kind(value_field(node, "value"))
+  return vk == "str" || vk == "int" || vk == "bool"
+}
+
+fn has_widen(node: Any) -> Bool { return value_has(node, "widen") }
+
+// `_ts_literal_kind`: `Str`, `Bool` or `Int` for a plain primitive literal.
+fn literal_kind(node: Any) -> Str {
+  let vk = value_kind(value_field(node, "value"))
+  if (vk == "bool") { return "Bool" }
+  if (vk == "str") { return "Str" }
+  return "Int"
+}
+
+// `_ts_known_primitive`: whether the IR shows `node` has exactly the primitive
+// type `kind`. An Int literal needs an operand whose Int type the IR states
+// (an Int literal, `+ - * %` or a negation annotated `operands: "Int"`, a Map
+// index with `value_type` Int), since an unmarked `number` against a bigint
+// is a TS2367 error. A Map index is held to its `value_type` for every kind; a
+// Str or Bool literal accepts any other operand (no widening reaches either).
+fn known_primitive(node: Any, kind: Str) -> Bool {
+  if (plain_primitive_literal(node)) { return literal_kind(node) == kind }
+  let k = node_kind(node)
+  if (k == "index") { return value_str(value_field(node, "value_type")) == kind }
+  if (kind != "Int") { return true }
+  let op = node_op(node)
+  if (k == "bin") { return (op == "+" || op == "-" || op == "*" || op == "%") && node_operands(node) == "Int" }
+  return k == "un" && op == "-" && node_operands(node) == "Int"
+}
+
+// `_ts_strict_equality`: a primitive literal on either side makes `===` and
+// `revlEq` agree on every value of the other operand, and the operator is
+// written where the other operand is known to have the literal's type. An
+// operand carrying a `widen` marker (a mixed Int/Float or Int32/Int equality)
+// keeps `revlEq`.
+fn strict_equality(left: Any, right: Any) -> Bool {
+  if (has_widen(left) || has_widen(right)) { return false }
+  if (plain_primitive_literal(left)) { return known_primitive(right, literal_kind(left)) }
+  if (plain_primitive_literal(right)) { return known_primitive(left, literal_kind(right)) }
+  return false
+}
+
+// `_ts_widened_literal`: the literal side typed as its primitive, so tsc does
+// not reject `k === 5n` for a `const k = 4n` or a narrowed `boolean` (TS2367).
+fn typed_literal(node: Any, text: Str) -> Str {
+  if (!plain_primitive_literal(node)) { return text }
+  let vk = value_kind(value_field(node, "value"))
+  var t = "bigint"
+  if (vk == "str") { t = "string" }
+  if (vk == "bool") { t = "boolean" }
+  return `(${text} as ${t})`
+}
+
 // `_expr`'s `bin` branch.
 fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
   let op = node_op(node)
@@ -896,8 +954,15 @@ fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
     return { text: `(${l.text} ?? ${r.text})`, counter: r.counter }
   }
   if (is_equality_op(op)) {
-    let l = expr(value_field(node, "left"), counter, acx)
-    let r = expr(value_field(node, "right"), l.counter, acx)
+    let ln = value_field(node, "left")
+    let rn = value_field(node, "right")
+    let l = expr(ln, counter, acx)
+    let r = expr(rn, l.counter, acx)
+    if (strict_equality(ln, rn)) {
+      var sop = "!=="
+      if (op == "==" || op == "===") { sop = "===" }
+      return { text: `(${typed_literal(ln, l.text)} ${sop} ${typed_literal(rn, r.text)})`, counter: r.counter }
+    }
     let call = `revlEq(${l.text}, ${r.text})`
     if (op == "==" || op == "===") { return { text: call, counter: r.counter } }
     return { text: `(!${call})`, counter: r.counter }

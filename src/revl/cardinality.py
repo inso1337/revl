@@ -13,9 +13,14 @@ bounded-iteration certification: a single-fn LINEAR self-recursion whose fuel
 strictly decreases by a positive literal under a dominating base guard, with a
 statically-resolvable initial fuel AND at most one in-SCC call site per path
 (clause 4), reports the finite ceiling `base + max_iters * per_iter` instead of
-`unbounded`. Everything the recognizer cannot certify still reports `unbounded`;
+`unbounded`. Issue #2699 adds branching self-recursion (several in-SCC call
+sites per path) with a LITERAL initial fuel: at most
+`(k^(iters+1) - 1) / (k - 1)` activations, each crossing at most
+`max(base, per_iter)`, certified only while the activation count is within
+`_BRANCHING_CALL_CEILING`. Everything the recognizer cannot certify still reports `unbounded`;
 in particular a fan-out (`f(n-1); f(n-1)`) crosses `2^n - 1` times and is NEVER
-reported as the linear ceiling `<= n` (the CRITICAL clause-4 fix). Multi-fn /
+reported as the linear ceiling `<= n` (the CRITICAL clause-4 fix); it is
+certified only by the branching form above, with a literal fuel under the ceiling. Multi-fn /
 mutual recursion stays `unbounded` this slice (§5.2 OPEN).
 
 The soundness tie (§5.1): the count fold reuses the EXACT reach `_boundary`
@@ -44,6 +49,34 @@ import math
 # certify stays `unbounded`; a fan-out (`f(n-1); f(n-1)`) crosses `2^n - 1` times
 # and MUST NOT be reported as the linear ceiling `<= n`.
 # --------------------------------------------------------------------------
+
+
+# Issue #2699: the largest number of ACTIVATIONS of a branching self-recursion
+# that is still certified. Above it the verdict stays `unbounded` (a bound of
+# 2^60 - 1 is true and useless). 31 admits two calls per path up to fuel 4.
+_BRANCHING_CALL_CEILING = 31
+
+
+def _branching_calls(branch: int, iters: int) -> int:
+    """Upper bound on the activations of a self-recursion that makes at most
+    `branch` (>= 2) self-calls per activation and recurses at most `iters`
+    levels deep: `1 + branch + ... + branch^iters`, that is
+    `(branch^(iters+1) - 1) / (branch - 1)`.
+
+    Sound because every self-call lowers the fuel by at least the minimum
+    decrement, so no activation sits deeper than `iters` (the same depth the
+    linear form uses), and depth `d` holds at most `branch^d` activations.
+
+    The sum stops as soon as it passes _BRANCHING_CALL_CEILING and returns that
+    partial total (still over the ceiling), so a huge literal fuel never builds
+    a huge integer."""
+    total, term = 0, 1
+    for _ in range(iters + 1):
+        total += term
+        if total > _BRANCHING_CALL_CEILING:
+            return total
+        term *= branch
+    return total
 
 
 def _retry_mult(spec: dict) -> int:
@@ -138,6 +171,22 @@ def _path_max_calls(node, predicate) -> int:
     for value in node.values():
         total += _path_max_calls(value, predicate)
     return total
+
+
+def _self_call_in_uncounted_construct(node, fname: str) -> bool:
+    """True when a self-call of `fname` sits inside a local arrow or a loop in
+    `node`. Such a call runs once per INVOCATION of the arrow (or per iteration),
+    which the syntactic per-path count does not cover, so a branching recursion
+    containing one is never certified (issue #2699)."""
+    if isinstance(node, list):
+        return any(_self_call_in_uncounted_construct(i, fname) for i in node)
+    if not isinstance(node, dict):
+        return False
+    if node.get("kind") == "arrow" or node.get("step") in ("while", "for"):
+        if _path_max_calls(node, lambda n: _is_self_call(n, fname)) > 0:
+            return True
+    return any(_self_call_in_uncounted_construct(v, fname)
+               for v in node.values())
 
 
 def _has_top_return(steps) -> bool:
@@ -330,11 +379,23 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
         return refuse("arrow-recursion")
 
     # --- clause 4 (the CRITICAL): at most one in-SCC call site per path. Two
-    # self-calls sequentially reachable on one path fan out to `2^n - 1`.
-    if _path_max_calls(cont, is_self) > 1:
+    # self-calls sequentially reachable on one path fan out to `2^n - 1`. A
+    # branching recursion is not refused here (issue #2699): the record carries
+    # its branching factor, and the call site certifies it only for a literal
+    # initial fuel whose call count stays under _BRANCHING_CALL_CEILING.
+    branch = max(1, _path_max_calls(cont, is_self))
+
+    def refuse_late(reason_kind):
+        # a branching recursion that fails any later clause keeps the fan-out
+        # reason it always had (issue #2699: unbounded programs report as before)
+        return refuse("fanout" if branch > 1 else reason_kind)
+
+    if branch > 1 and _self_call_in_uncounted_construct(body, fname):
+        # a self-call inside a local arrow (or loop) can run any number of times
+        # per activation; the syntactic count above does not cover it
         return refuse("fanout")
     if _path_max_calls(base, is_self) != 0:
-        return refuse("noguard")
+        return refuse_late("noguard")
 
     # --- clause 1: every self-call strictly decreases the SAME fuel param by a
     # positive literal, and threads every FUNCTION-TYPED argument by identity,
@@ -350,25 +411,25 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
     for call in self_calls:
         args = call.get("args") or []
         if len(args) != len(params):
-            return refuse("nonfuel")
+            return refuse_late("nonfuel")
         fuel_arg = args[fuel_index]
         if not (isinstance(fuel_arg, dict) and fuel_arg.get("kind") == "bin"
                 and fuel_arg.get("op") == "-"
                 and _bare_name(fuel_arg.get("left")) == pname):
-            return refuse("nonfuel")
+            return refuse_late("nonfuel")
         k = _int_lit(fuel_arg.get("right"))
         if k is None or k < 1:
-            return refuse("nonfuel")
+            return refuse_late("nonfuel")
         k_min = k if k_min is None else min(k_min, k)
         for j, arg in enumerate(args):
             if j == fuel_index or _bare_name(arg) == params[j]:
                 continue
             if fn_typed[j]:
-                return refuse("rebinds-fn")
+                return refuse_late("rebinds-fn")
 
     return {"ok": True, "params": params, "fuel_index": fuel_index,
             "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont,
-            "body": body}
+            "body": body, "branch": branch}
 
 
 def _local_call_names(node, out: set) -> None:
@@ -1018,13 +1079,32 @@ def cardinality(ir: dict) -> dict:
                         _record_cert_unbounded(cap, reason)
                 return
 
+            branch = rec.get("branch", 1)
+            if branch > 1:
+                # issue #2699: only a literal fuel whose activation count is
+                # under the ceiling certifies; config, derived and large fuel
+                # keep the fan-out refusal. Runs before the escape test, so
+                # the reason for these shapes is unchanged from before.
+                n0_branch = _int_lit(args[rec["fuel_index"]]
+                                     if rec["fuel_index"] < len(args) else None)
+                if n0_branch is None or _branching_calls(
+                        branch, _max_iters(n0_branch, rec["c"], rec["k"],
+                                           rec["fuel_op"])
+                ) > _BRANCHING_CALL_CEILING:
+                    resolutions[id(node)] = {"int": {}}
+                    reason = _cert_reason("fanout", fname)
+                    for vec in arg_vecs:
+                        for cap in vec:
+                            _record_cert_unbounded(cap, reason)
+                    return
             params = rec["params"]
             escaped = [i for i, p in enumerate(params)
                        if i < len(arg_vecs) and arg_vecs[i]
                        and _param_escapes(rec["body"], p, fname, i)]
             if escaped:
                 resolutions[id(node)] = {"int": {}}
-                reason = _cert_reason("escape", fname)
+                # a branching recursion keeps the fan-out reason it always had
+                reason = _cert_reason("fanout" if branch > 1 else "escape", fname)
                 for vec in arg_vecs:
                     for cap in vec:
                         _record_cert_unbounded(cap, reason)
@@ -1046,7 +1126,13 @@ def cardinality(ir: dict) -> dict:
                 iters = _max_iters(n0, rec["c"], rec["k"], rec["fuel_op"])
                 vec: dict[str, int] = {}
                 for i, p in enumerate(params):
-                    mult = base_m[p] + iters * per_iter[p]
+                    if branch > 1:
+                        # every activation runs the base arm or the continuation,
+                        # so it crosses at most the larger of the two
+                        mult = _branching_calls(branch, iters) * max(
+                            base_m[p], per_iter[p])
+                    else:
+                        mult = base_m[p] + iters * per_iter[p]
                     if mult == 0:
                         continue
                     for cap, cnt in arg_vecs[i].items():

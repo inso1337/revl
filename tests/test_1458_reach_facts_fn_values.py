@@ -34,9 +34,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(ROOT / "tests"))
 
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 from _load_by_path import load_by_path  # noqa: E402
 from revl import erase_report, query  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 from revl.mcp.approval import ClassMap, _cache_scope_findings  # noqa: E402
 
 # `tests/test_deploy_118.py` holds the eight spellings; loading it under its
@@ -57,7 +59,11 @@ def _ir(tmp_path, spelling: str, extern: str = "bare", *, realm: bool = False):
         source = source.replace(
             "component C provides s: S {\n",
             'component C provides s: S {\n  isolate s in realm("alpha")\n')
-    return compile_source(source, str(tmp_path / f"{extern}-{spelling}.rvl"))
+    # the IR a compiler from before issue #2842 emitted: the current one
+    # refuses the source (`tests/test_deploy_118.py`), and these facts are
+    # read off IR, so they must still see the value channel in one
+    with value_rule_off():
+        return compile_source(source, str(tmp_path / f"{extern}-{spelling}.rvl"))
 
 
 def _charge_fact(facts: dict) -> dict:
@@ -164,8 +170,13 @@ def test_a_value_route_beside_a_direct_call_is_not_resource_scoped(tmp_path):
     """The direct call forwards the caller's `host`, but the same scope hands
     `http_post` to `relay`, which posts to a host the caller never passed. A
     scope reading `host="<caller's>"` would be a narrow claim about a
-    destination the call does not control (item 427 F2)."""
-    cmap = ClassMap(compile_source(_MIXED, str(tmp_path / "mixed.rvl")))
+    destination the call does not control (item 427 F2). The compiler
+    refuses the source since issue #2842; the binder reads IR, so it is
+    tested on the IR an earlier compiler emitted."""
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(_MIXED, str(tmp_path / "mixed.rvl"))
+    with value_rule_off():
+        cmap = ClassMap(compile_source(_MIXED, str(tmp_path / "mixed.rvl")))
     spelling, refusal, _from_caller = cmap.bind_resource_scope(
         "net.post", ["api.example", "payload"], "Agent:api.send")
     assert spelling is None

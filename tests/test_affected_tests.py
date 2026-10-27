@@ -200,6 +200,13 @@ def test_selector_change_runs_self_test():
     assert "tests/test_affected_tests.py" in r["pytest"]
 
 
+def test_pre_pr_merge_ref_tools_select_their_regression_test():
+    for changed in ("tools/pre_pr.sh", "tools/pre_pr_merge_ref.py"):
+        r = sel(changed)
+        assert r["full"] is False, r
+        assert "tests/test_pre_pr_merge_ref_2848.py" in r["pytest"], r
+
+
 # --- machine emit round-trips the decision --------------------------------- #
 def test_machine_emit_is_parseable():
     r = sel("stdlib/json.rvl")

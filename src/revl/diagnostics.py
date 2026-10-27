@@ -272,6 +272,25 @@ OTHER_CODES = {
         "fix": "admit the turn again against the live generation to get a "
                "handle onto it",
     },
+    "STALE_ARTIFACT": {
+        "category": "session",
+        "guarantee": "a content handle names text minted in the current unit "
+                     "of work",
+        "meaning": "the handle was minted before a load, swap, rollback or "
+                   "undo moved the session's unit, so the text it names no "
+                   "longer belongs to this one",
+        "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint a "
+               "handle for the current unit, or pass the text as `source`",
+    },
+    "UNKNOWN_ARTIFACT": {
+        "category": "session",
+        "guarantee": "a content handle names text the session actually holds",
+        "meaning": "the id names no text this session holds: it was never "
+                   "minted here, or it has been dropped to keep the store "
+                   "bounded",
+        "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint "
+               "one, or pass the text as `source`",
+    },
     "MCP-IDENTITY": {
         "category": "identity",
         "guarantee": "every answer comes from the revision the client pinned",
@@ -659,9 +678,24 @@ def report(error: RevlError) -> dict:
     `.errors` holds every collected refusal; map `classify` over the list. A
     single `RevlError` (no `.errors`) still yields a one-element list, so every
     existing single-error consumer is unchanged.
+
+    Issue #2845: the refusal carries the repair the constructing check already
+    knows, in preference to the diagnosis alone. `repair` is additive at the
+    payload's top level, beside `diagnostics`, and it is the first one the
+    refusal carries in diagnostic order. A refusal whose class has no repair
+    known to the compiler carries `{"target": ..., "reason": ..., "known":
+    False}` from its own constructor rather than omitting the field, so a
+    caller can tell "checked, nothing known" from "this server predates the
+    field".
     """
     errors = getattr(error, "errors", None) or [error]
-    return {"ok": False, "diagnostics": [classify(e) for e in errors]}
+    payload = {"ok": False, "diagnostics": [classify(e) for e in errors]}
+    for one in errors:
+        repair = getattr(one, "repair", None)
+        if repair is not None:
+            payload["repair"] = repair
+            break
+    return payload
 
 
 def ok(**payload) -> dict:

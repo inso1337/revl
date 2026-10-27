@@ -38,3 +38,33 @@ fn reason(r: Result[Int, Str]) -> Str {
     _ => "ok",
   }
 }
+// A `match` over a generic variant applies the selector's type arguments to
+// each case pattern, so a bound payload is `Long`, not `Object` (issue
+// #2325). A parameter and a call to a top-level fn carry them; a `let` local
+// keeps the raw pattern. No case is built here: the self-host checker refuses
+// `Full(n)` for `Box[Int]` (issue #2472).
+fn bumped(b: Box[Int]) -> Int {
+  return match b {
+    Full(v) => v + 1,
+    Empty => 0,
+  }
+}
+fn doubled(e: Either[Str, Int]) -> Int {
+  return match e {
+    Right(n) => n * 2,
+    _ => 0,
+  }
+}
+fn called(b: Box[Int]) -> Int {
+  return match keep(b) {
+    Full(v) => v - 1,
+    Empty => 0,
+  }
+}
+fn local(b: Box[Int]) -> Int {
+  let c = keep(b)
+  return match c {
+    Full(_) => 1,
+    Empty => 0,
+  }
+}

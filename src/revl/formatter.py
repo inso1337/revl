@@ -517,10 +517,17 @@ def format_source(source: str, filename: str = "<source>", *,
     return _finalize(rendered)
 
 
-def format_admitted(source: str, filename: str = "<source>"):
+def format_admitted(source: str, filename: str = "<source>", *,
+                    original_ir: dict | None = None):
     """`(formatted text, gate result)` under the IR-equivalence gate, for the
     callers that write or store a formatting (`revl fmt`, `revl_fmt`, the MCP
     canonicaliser).
+
+    `original_ir` (issue #2194): a caller that has ALREADY compiled `source`
+    hands the document in, and the gate does not compile it again. The MCP
+    check compiles the candidate it was sent once and then canonicalises it;
+    the gate's own compile of the original is that same text, so this removes
+    one of the three compiles a `revl_check` used to pay for.
 
     The provide-member split is the one change that moves tokens to new
     lines, and a few IR fields carry a source line (a `spawn` acquire does), so
@@ -529,12 +536,13 @@ def format_admitted(source: str, filename: str = "<source>"):
     before the split existed. The gate is never weakened: whichever layout is
     returned is one it admitted, or the refusal stands."""
     split = format_source(source, filename)
-    gate = ir_equivalent(source, split, filename)
+    gate = ir_equivalent(source, split, filename, original_ir=original_ir)
     if gate.admitted:
         return split, gate
     plain = format_source(source, filename, split_members=False)
     if plain != split:
-        plain_gate = ir_equivalent(source, plain, filename)
+        plain_gate = ir_equivalent(source, plain, filename,
+                                   original_ir=original_ir)
         if plain_gate.admitted:
             return plain, plain_gate
     return split, gate
@@ -736,11 +744,18 @@ class GateResult:
 
 
 def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
-                  token_preserving: bool = True) -> GateResult:
+                  token_preserving: bool = True, *,
+                  original_ir: dict | None = None) -> GateResult:
     """The admissibility gate shared by `fmt` and `--migrate`.
 
     Compile both texts and require their IR to be byte-identical.  The result
     records what was proven, or -- when refused -- why.
+
+    `original_ir` (issue #2194) is the document an earlier compile of
+    `original` produced: the gate uses it instead of compiling `original`
+    again. The RE-COMPILE the IR-delta arm below does to test its own oracle
+    still happens, but only there, so a caller that already compiled the
+    original pays one compile here instead of two on the admitted path.
 
     `token_preserving` describes the rewrite.  The formatter only ever
     normalises whitespace, so its rewrites keep the token stream identical
@@ -813,7 +828,12 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
                        + _first_token_delta(sig_orig, sig_cand),
             )
 
-    ir_orig, err_orig = _compile_ir(original, filename)
+    if original_ir is not None:
+        # issue #2194: an earlier compile already produced the original's
+        # document, so the gate does not compile it a second time.
+        ir_orig, err_orig = original_ir, None
+    else:
+        ir_orig, err_orig = _compile_ir(original, filename)
     ir_cand, err_cand = _compile_ir(candidate, filename)
 
     if ir_orig is not None:

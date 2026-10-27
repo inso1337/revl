@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2842: a fn with an async parameter cannot call an immediately applied arrow", "buckets": ["agree-refuse/A1"]}
