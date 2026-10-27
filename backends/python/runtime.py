@@ -1591,14 +1591,20 @@ class _MeteredEmission:
 
 
 def _compensate_fired(compensation: "Optional[_Compensation]") -> None:
-    """Owe the compensation of a crossing that FIRED and then failed or was
-    refused (issue #2688).
+    """Owe the compensation of a crossing that FIRED and was then refused
+    (issue #2688).
 
-    The entry was registered at the seam before the host body, but the emitted
-    body yields it only when the fire returns; a raise skips that line, so
-    nothing would ever enqueue it for Phase 2. Enqueue it here instead. A
-    crossing refused BEFORE it fired never registers an entry and never reaches
-    this call, so "never fired" compensates nothing."""
+    The entry is registered at the seam when the host body returns, before the
+    outcome (completion or a `time` refusal) is decided, but the emitted body
+    yields it only on a successful return; the refusal raising out of the seam
+    skips that line, so nothing would ever enqueue it for Phase 2. Enqueue it
+    here instead. The frame's Phase-2 hook runs it after every Phase-1 inverse:
+    `install`'s synchronous except for a sync body, and `begin` for an async
+    one, whose unwind goes through cordis's asynchronous dispose path. Neither
+    a crossing refused BEFORE it fired nor a host body that RAISED reaches this
+    call with an entry: registration happens after the body returns, so nothing
+    is owed when the crossing was never confirmed (item 247's rule,
+    `declared_crossing`)."""
     if compensation is None:
         return
     compensation.frame._pending_compensations.append(compensation)
@@ -1626,12 +1632,16 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
     the run spent as well as what the declaration allows.
 
     `compensate`, when the emitter passes it, is a zero-arg factory that
-    registers the step's compensation. It is called AFTER the emission record
-    and BEFORE the host body, so the compensation is owed for a crossing that
-    fired even when the fire then raises: a `time` overrun is only observable
-    when the host call returns (:meth:`Frame._check_time_ceilings`), and that
-    crossing DID happen. Its outcome is journalled as `emitted-then-refused`,
-    and its already-registered compensation is enqueued for Phase 2. A crossing
+    registers the step's compensation. It is called when the host body returns
+    and BEFORE the outcome (completion or a `time` refusal) is decided, so the
+    compensation is owed for a crossing that fired even when the fire is then
+    refused: a `time` overrun is only observable when the host call returns
+    (:meth:`Frame._check_time_ceilings`), and that crossing DID happen. Its
+    outcome is journalled as `emitted-then-refused`, and its registered
+    compensation is enqueued for Phase 2. A host body that RAISES registers
+    nothing: the runtime cannot confirm that the crossing happened, item 247's
+    stated rule for a bare emission (`declared_crossing`), and compensating a
+    crossing that never acted is as wrong as dropping one that did. A crossing
     refused before it fires (calls, size, or a deadline already spent) is
     refused before the emission record, so it leaves no step in the WAL and
     registers no compensation: absence of a record is "never fired", and
@@ -1684,16 +1694,18 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
         frame._meter_ceilings(ceilings, payload)
     record = getattr(ctx, "_revl_record_extern", None)
     step = record(name, args) if callable(record) else None
-    # issue #2688: register the compensation BEFORE the host body runs, after
-    # the emission record so the WAL descriptor still pairs with this crossing.
-    # Everything that refuses a crossing before it fires has already run, so an
-    # entry here means the crossing is about to happen.
-    compensation = compensate() if compensate is not None else None
+    # issue #2688: register the compensation when the host body RETURNS, and
+    # before the outcome (completion or a time refusal) is decided. A body that
+    # raises registers nothing: the runtime cannot confirm the crossing
+    # happened, and item 247's rule is that a compensation is owed for an
+    # emission that crossed. A time overrun is only observable on the return,
+    # so registering here (not in the emitted body, and not before the body)
+    # is exactly what keeps a fired-then-refused crossing compensable without
+    # compensating a crossing that never acted.
     try:
         result = fn(*args)
     except BaseException as error:
         _extern_outcome(ctx, step, "emission-failed", error, frame, ceilings)
-        _compensate_fired(compensation)
         raise
     if inspect.isawaitable(result):
         async def await_extern():
@@ -1702,8 +1714,10 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
             except BaseException as error:
                 _extern_outcome(ctx, step, "emission-failed", error,
                                 frame, ceilings)
-                _compensate_fired(compensation)
                 raise
+            # The await WAS the host body: it settled, so the crossing fired.
+            # Register now, before the return check decides its outcome.
+            compensation = (compensate() if compensate is not None else None)
             # issue #2688: the time check runs BEFORE the completion record.
             # Recording completion first wrote a receipt that said the crossing
             # finished while the ceiling check was about to refuse it, so the
@@ -1724,6 +1738,7 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
             return (value if compensation is None
                     else _MeteredEmission(value, compensation))
         return await_extern()
+    compensation = compensate() if compensate is not None else None
     if frame is not None:
         try:
             frame._check_time_ceilings(ceilings)

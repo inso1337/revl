@@ -2736,26 +2736,33 @@ class _ComponentEmitter:
             # emission actually fires (a bare async emit builds a coroutine that
             # never runs).
             #
-            # issue #2688: a budgeted crossing's compensation is registered
-            # BEFORE the host body runs, at the seam, not after the fire. A
-            # `time` overrun can only be detected when the host call returns,
-            # so the fire can raise after the crossing already happened;
-            # registering afterwards left that fired crossing uncompensated and
-            # unrecoverable. The seam registers the entry after the emission
-            # record and before the host body, and the body yields it here. A
-            # crossing refused BEFORE it fired (calls/size, or a deadline that
-            # was already spent) registers nothing, so it compensates nothing.
+            # issue #2688: a compensated direct host-extern crossing registers
+            # its compensation AT THE SEAM, when the host body returns and
+            # before the outcome (completion or a `time` refusal) is decided,
+            # and the body yields the entry the seam returns here. A `time`
+            # overrun is only observable when the host call returns, so the
+            # refusal raises after the crossing already happened; registering
+            # in the body afterwards lost that fired crossing's compensation.
+            # A crossing refused BEFORE it fired (calls/size, or a deadline
+            # already spent) registers nothing, and a host body that raises
+            # registers nothing either (item 247's rule: the compensation is
+            # owed for an emission that crossed), so the entry exists exactly
+            # when the crossing emitted.
             #
-            # Sync steps only. An `await emit` step's fire raises at the await
-            # when the host body fails, and the documented contract there is
-            # that a fire which raises registers nothing (a5b's abort test
-            # pins it), so the async spelling keeps the after-the-fire
-            # registration.
+            # The same seam shape covers `await emit` and an `emit ... with a`
+            # edge. For an async extern the await IS the host body, so the seam
+            # registers when it settles: a successful await returns the entry
+            # for this yield, and a fired-then-refused await enqueues it for
+            # Phase 2, which the frame's begin hook drains after Phase 1 (an
+            # async activation body unwinds through the asynchronous dispose
+            # path, so install's synchronous hook does not run; begin, yielded
+            # first and disposed last, is that body's post-unwind hook). An
+            # approval edge wraps only the fire (the token is checked and
+            # consumed first), so the registration inside that lambda still
+            # starts after the token check and when the body returns.
             aw = "await " if step.get("async") else ""
             compensation = self._step_compensation(step, where)
             seam = (compensation is not None
-                    and not step.get("async")
-                    and step.get("approval") is None
                     and self._emission_shape(step.get("expr")) == "extern")
             if seam:
                 temp = self._emit_temp()
@@ -3087,13 +3094,14 @@ class _ComponentEmitter:
         emitted call is byte-identical and no trace line is added.
 
         `compensate` (issue #2688) rides to the seam as a zero-arg factory that
-        registers the step's compensation. The seam calls it AFTER the emission
-        record and BEFORE the host body, so a crossing that fires and is then
-        refused on its return (a `time` overrun is only observable when the host
-        call returns) still has its compensation registered, and a crossing
-        refused before it fires registers nothing. The seam returns a wrapper the
-        emitted body yields the entry off; `crossing` names the recorded emission
-        so the compensation is paired with it even though registration moved off
+        registers the step's compensation. The seam calls it when the host body
+        returns and before the outcome is decided, so a crossing that fires and
+        is then refused on its return (a `time` overrun is only observable when
+        the host call returns) still has its compensation registered, while a
+        crossing refused before it fires and a host body that raises both
+        register nothing. The seam returns a wrapper the emitted body yields
+        the entry off; `crossing` names the recorded emission so the
+        compensation is paired with it even though the registration moved off
         the next source line.
 
         The callee is resolved through the document's local functions, not only
@@ -3200,8 +3208,9 @@ class _ComponentEmitter:
         site shares, so a new firing site cannot pick up one and miss the other.
 
         `compensate` (issue #2688) is the rendered compensation thunk to hand the
-        seam, which registers it before the host body runs. Only the extern shape
-        can carry it; every other shape renders exactly as before."""
+        seam, which registers it when the host body returns and before a `time`
+        refusal is decided. Only the extern shape can carry it; every other shape
+        renders exactly as before."""
         if self._emission_shape(expr) == "extern":
             return self._extern_emit_fire(expr, where, compensate=compensate)
         return self._expr(expr, where)
@@ -3219,9 +3228,11 @@ class _ComponentEmitter:
         `_extern_emit_fire` instead of a bare module-level call. Nothing else
         changes shape.
 
-        `compensate` (issue #2688) reaches `_extern_emit_fire` only; an approval
-        edge wraps the fire in a lambda, so its compensation stays on the
-        after-the-fire path."""
+        `compensate` (issue #2688) reaches `_extern_emit_fire` under the same
+        wrapping: an approval edge wraps the fire in a lambda, so the
+        registration starts only after the token check consumed the approval,
+        and the seam registers when the host body returns. The emitted body
+        yields the returned entry."""
         fire = self._emission_fire(step.get("expr"), where,
                                    compensate=compensate)
         approval = step.get("approval")
@@ -3239,8 +3250,9 @@ class _ComponentEmitter:
         declared one is the default only when the site spells none).
 
         Returned rather than written straight into an after-the-fire `yield` so
-        the budgeted host-extern path can hand it to the seam instead, where it
-        registers BEFORE the host body runs (issue #2688)."""
+        the host-extern path can hand it to the seam instead, where it registers
+        when the host body returns and before a `time` refusal is decided
+        (issue #2688)."""
         if step.get("compensate") is not None:
             node = step.get("compensate")
             return (f"lambda: {self._expr(node, where)}"

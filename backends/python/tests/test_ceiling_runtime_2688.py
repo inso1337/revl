@@ -24,8 +24,11 @@ of a crossing whose deadline was already spent, happen BEFORE the fire and
 before the emission step exists, so the host body does not run and the WAL has
 no step for that crossing. A `time` overrun the host body itself caused is only
 observable when the call returns, so the crossing DID fire: its journal outcome
-is `emitted-then-refused` and the compensation it registered at the seam stays
-owed. A budget-free extern still emits byte-identically and traces nothing.
+is `emitted-then-refused` and the compensation it registered at the seam, when
+the body returned and before the refusal was decided, stays owed. A host body
+that RAISES registers nothing, because the crossing was never confirmed (item
+247's rule). An `await emit` and an `emit ... with a` edge use the same seam
+ordering. A budget-free extern still emits byte-identically and traces nothing.
 
 The budget is per ACTIVATION (one component activation, not one provide call):
 `Frame` owns the counters, so a second activation starts fresh. That is the
@@ -94,6 +97,8 @@ def call(x):
     CALLS.append(x)
     if {sleep!r}:
         time.sleep({sleep!r})
+    if {raises!r}:
+        raise RuntimeError("host body failed before it acted")
     return 0
 
 
@@ -102,19 +107,52 @@ def revert(x):
     return 0
 """
 
+#: The async twin: the host body is the awaited coroutine, so a `time` overrun
+#: is only observable after the await settles. `hook`/`drop` are the bracket a
+#: Phase-1-before-Phase-2 ordering test acquires before the refused crossing.
+_ASYNC_HOST_SOURCE = """\
+import asyncio
+
+CALLS = []
+UNDOS = []
+
+
+async def call(x):
+    CALLS.append(x)
+    await asyncio.sleep({sleep!r})
+    return 0
+
+
+def hook(x):
+    return 0
+
+
+def drop(x):
+    UNDOS.append("drop")
+    return 0
+
+
+def revert(x):
+    UNDOS.append(x)
+    return 0
+"""
+
+
 _counter = itertools.count()
 
 
-def _program(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
+def _program(decl: str, body: str, sleep: float = 0.0, prelude: str = "",
+             raises: bool = False):
     """Write a program plus its trusted host module into a fresh directory and
     return `(path, host_module_name)`. The host module name is unique per
     program, so its embedded sleep value cannot collide across the tests in
     this file. `prelude` is module-level text between the extern and the
-    component - the wrapper function the bypass tests need."""
+    component - the wrapper function the bypass tests need. `raises` makes the
+    host body raise before it returns."""
     host = f"ceiling_host_{next(_counter)}"
     directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_"))
     (directory / f"{host}.py").write_text(
-        _HOST_SOURCE.format(sleep=sleep), encoding="utf-8")
+        _HOST_SOURCE.format(sleep=sleep, raises=raises), encoding="utf-8")
     source = (
         f'extern emission[{decl}] fn call(x: Str) -> Int = @py ref call from "{host}.py"\n'
         f"{prelude + chr(10) if prelude else ''}"
@@ -126,8 +164,9 @@ def _program(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
     return str(main), host
 
 
-def _load(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
-    path, host = _program(decl, body, sleep, prelude)
+def _load(decl: str, body: str, sleep: float = 0.0, prelude: str = "",
+          raises: bool = False):
+    path, host = _program(decl, body, sleep, prelude, raises)
     code = emit.emit(compile_files([path]))
     module = types.ModuleType(f"ceiling_module_{next(_counter)}")
     exec(compile(code, "ceiling_module.py", "exec"), module.__dict__)  # noqa: S102
@@ -153,14 +192,15 @@ def _run(decl: str, body: str, sleep: float = 0.0, prelude: str = ""):
     return error, host.CALLS
 
 
-def _compensated_program(decl: str, sleep: float = 0.0, calls=("a",)):
+def _compensated_program(decl: str, sleep: float = 0.0, calls=("a",),
+                         raises: bool = False):
     """A program whose component emits the budgeted extern once per entry in
     `calls`, each with a site-spelled compensation, plus its trusted host
     module. Returns `(path, host_module_name)`."""
     host = f"ceiling_host_{next(_counter)}"
     directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_"))
     (directory / f"{host}.py").write_text(
-        _HOST_SOURCE.format(sleep=sleep), encoding="utf-8")
+        _HOST_SOURCE.format(sleep=sleep, raises=raises), encoding="utf-8")
     steps = "\n".join(f'  emit call("{name}") compensate revert("{name}")'
                       for name in calls)
     source = (
@@ -176,8 +216,76 @@ def _compensated_program(decl: str, sleep: float = 0.0, calls=("a",)):
     return str(main), host
 
 
-def _load_compensated(decl: str, sleep: float = 0.0, calls=("a",)):
-    path, host = _compensated_program(decl, sleep, calls)
+def _load_compensated(decl: str, sleep: float = 0.0, calls=("a",),
+                      raises: bool = False):
+    path, host = _compensated_program(decl, sleep, calls, raises)
+    code = emit.emit(compile_files([path]))
+    module = types.ModuleType(f"ceiling_module_{next(_counter)}")
+    exec(compile(code, "ceiling_module.py", "exec"), module.__dict__)  # noqa: S102
+    return module, importlib.import_module(host), code
+
+
+def _async_compensated_program(decl: str, sleep: float = 0.0):
+    """The reviewer probe's shape: an ASYNC host extern under a `time` ceiling,
+    emitted with `await` and a site-spelled compensation. Returns
+    `(path, host_module_name)`."""
+    host = f"ceiling_async_host_{next(_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_async_"))
+    (directory / f"{host}.py").write_text(
+        _ASYNC_HOST_SOURCE.format(sleep=sleep), encoding="utf-8")
+    source = (
+        f'extern emission[{decl}] async fn call(x: Str) -> Int '
+        f'= @py ref call from "{host}.py"\n'
+        f'extern emission fn revert(x: Str) -> Int '
+        f'= @py ref revert from "{host}.py"\n'
+        "component C {\n"
+        '  await emit call("a") compensate revert("a")\n'
+        "}\n")
+    main = directory / "main.rvl"
+    main.write_text(source, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return str(main), host
+
+
+def _load_async_compensated(decl: str, sleep: float = 0.0):
+    path, host = _async_compensated_program(decl, sleep)
+    code = emit.emit(compile_files([path]))
+    module = types.ModuleType(f"ceiling_module_{next(_counter)}")
+    exec(compile(code, "ceiling_module.py", "exec"), module.__dict__)  # noqa: S102
+    return module, importlib.import_module(host), code
+
+
+def _async_bracketed_program(decl: str, sleep: float = 0.0):
+    """The async probe plus a Phase-1 bracket acquired before the refused
+    crossing, so the test can pin that the compensation runs in Phase 2, after
+    the bracket inverse, not at the seam. Returns `(path, host_module_name)`."""
+    host = f"ceiling_async_host_{next(_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_async_"))
+    (directory / f"{host}.py").write_text(
+        _ASYNC_HOST_SOURCE.format(sleep=sleep), encoding="utf-8")
+    source = (
+        f'extern emission[{decl}] async fn call(x: Str) -> Int '
+        f'= @py ref call from "{host}.py"\n'
+        f'extern emission fn revert(x: Str) -> Int '
+        f'= @py ref revert from "{host}.py"\n'
+        f'extern acquire fn hook(x: Str) -> Handle undo drop(result) '
+        f'= @py ref hook from "{host}.py"\n'
+        f'extern pure fn drop(x: Handle) -> Int '
+        f'= @py ref drop from "{host}.py"\n'
+        "component C {\n"
+        '  let h = effect hook("h") undo drop(h)\n'
+        '  await emit call("a") compensate revert("a")\n'
+        "}\n")
+    main = directory / "main.rvl"
+    main.write_text(source, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return str(main), host
+
+
+def _load_async_bracketed(decl: str, sleep: float = 0.0):
+    path, host = _async_bracketed_program(decl, sleep)
     code = emit.emit(compile_files([path]))
     module = types.ModuleType(f"ceiling_module_{next(_counter)}")
     exec(compile(code, "ceiling_module.py", "exec"), module.__dict__)  # noqa: S102
@@ -472,7 +580,7 @@ def _provide_program(decl: str, method_body: str, prelude: str = ""):
     host = f"ceiling_host_{next(_counter)}"
     directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_"))
     (directory / f"{host}.py").write_text(
-        _HOST_SOURCE.format(sleep=0.0), encoding="utf-8")
+        _HOST_SOURCE.format(sleep=0.0, raises=False), encoding="utf-8")
     source = (
         f'extern emission[{decl}] fn call(x: Str) -> Int = @py ref call from "{host}.py"\n'
         f"{prelude + chr(10) if prelude else ''}"
@@ -721,9 +829,10 @@ def test_a_pre_fire_refusal_leaves_no_emission_step():
 
 def test_a_time_overrun_after_the_host_body_keeps_its_compensation():
     """A crossing that fires and is then refused on its return must stay
-    compensable: the compensation is registered at the seam BEFORE the host
-    body runs, and the refusal enqueues it for Phase 2. Registering it after
-    the fire lost it exactly when it was owed."""
+    compensable: the compensation is registered at the seam when the host body
+    returns, before the `time` check decides the outcome, and the refusal
+    enqueues it for Phase 2. Registering it after the fire lost it exactly when
+    it was owed."""
     module, host, code = _load_compensated('net(time="10ms")', sleep=0.02)
     assert ".compensation" in code
     error = asyncio.run(_activate(module))
@@ -743,6 +852,163 @@ def test_a_crossing_refused_before_it_fires_is_not_compensated():
     assert error.kind == "calls"
     assert host.CALLS == ["a"], "the refused crossing never fired"
     assert host.UNDOS == ["a"], "only the crossing that fired is compensated"
+
+
+def test_a_sync_host_body_that_raises_registers_no_compensation():
+    """A host body that RAISES never confirmed that the crossing happened, so
+    nothing is owed. The compensation registers when the body returns; a raise
+    skips that registration, item 247's rule (`declared_crossing`), because
+    compensating a crossing that never acted is as wrong as dropping one that
+    did. Before this, the seam registered before the body and compensated even
+    a body that raised before any effect."""
+    module, host, _code = _load_compensated("net(calls=1)", raises=True)
+    error = asyncio.run(_activate(module))
+    assert isinstance(error, RuntimeError)
+    assert host.CALLS == ["a"], "the host body did start"
+    assert host.UNDOS == [], \
+        "a raising host body must not register a compensation"
+
+
+def _install_emitted_body(module, ctx):
+    """Run the module's `apply`, intercepting `Frame.install` only to capture
+    the activation frame and the cordis effect it registered. The effect drives
+    the emitted body, so awaiting it also runs cordis's dispose pass on the
+    body's failure, which is the path the async test must exercise."""
+    captured = {}
+    original = runtime_mod.Frame.install
+
+    def capture(self, body):
+        effect = original(self, body)
+        captured["frame"] = self
+        captured["effect"] = effect
+        return effect
+
+    runtime_mod.Frame.install = capture
+    try:
+        module.C["apply"](ctx, {})
+    finally:
+        runtime_mod.Frame.install = original
+    return captured["frame"], captured["effect"]
+
+
+async def _drive_until_time_refusal(effect):
+    """Await the installed effect: the async body's time refusal fails the
+    setup task, cordis then disposes the yielded entries (Phase 1), and `begin`
+    (yielded first, disposed last) drains Phase 2."""
+    with pytest.raises(runtime_mod.CeilingExceeded) as caught:
+        await effect
+    await asyncio.sleep(0)
+    return caught.value
+
+
+def _recording_context():
+    wal_path = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_wal_")) / "wal.jsonl"
+    timeline = replay.Timeline("C")
+    wal = replay.WriteAheadLog(str(wal_path), ir={}).open()
+    timeline.attach_wal(wal)
+    ctx = replay._RecordingContext(Context(), timeline, {}, {})
+    return ctx, wal, wal_path
+
+
+def _wal_records(wal_path):
+    return [json.loads(line)
+            for line in wal_path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_an_async_time_overrun_runs_its_compensation_exactly_once():
+    """The reviewer probe's shape: an async host extern under `time="10ms"`,
+    `await emit call("a") compensate revert("a")`. The await IS the host body
+    and it returns, so the crossing fired; the return check refuses it. The
+    compensation must reach the seam (not the after-fire yield) and run exactly
+    once, and the WAL outcome must stay `emitted-then-refused`."""
+    module, host, code = _load_async_compensated('net(time="10ms")', sleep=0.02)
+    fires = [line for line in code.splitlines() if "_revl_extern_emit(" in line]
+    assert len(fires) == 1
+    assert "compensate=" in fires[0], \
+        "the async fire must hand its compensation to the seam"
+    assert ".compensation" in code
+    ctx, wal, wal_path = _recording_context()
+    try:
+        frame, effect = _install_emitted_body(module, ctx)
+        error = asyncio.run(_drive_until_time_refusal(effect))
+    finally:
+        wal.close()
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert error.kind == "time"
+    assert host.CALLS == ["a"], "the host body ran before the overrun was seen"
+    assert host.UNDOS == ["a"], \
+        "a fired async refusal must run its compensation exactly once"
+    assert [entry.ran for entry in frame._compensations] == [True]
+    assert frame._pending_compensations == []
+    frame._drain_phase2()
+    assert host.UNDOS == ["a"], "Phase 2 is single-flight"
+    outcomes = _outcome_records(_wal_records(wal_path))
+    assert [record["record"] for record in outcomes] == ["emitted-then-refused"]
+
+
+def test_an_async_refusal_compensates_after_phase_one():
+    """The compensation is Phase 2. An async body's unwind first disposes the
+    yielded bracket inverse (Phase 1), then `begin` (yielded first, disposed
+    last) drains the enqueued compensation. Draining at the seam instead would
+    run the offset before the bracket inverse, breaking the two-phase contract
+    (teardown-contract.md)."""
+    module, host, _code = _load_async_bracketed('net(time="10ms")', sleep=0.02)
+    ctx, wal, _wal_path = _recording_context()
+    try:
+        _frame, effect = _install_emitted_body(module, ctx)
+        error = asyncio.run(_drive_until_time_refusal(effect))
+    finally:
+        wal.close()
+    assert isinstance(error, runtime_mod.CeilingExceeded)
+    assert error.kind == "time"
+    assert host.CALLS == ["a"]
+    assert host.UNDOS == ["drop", "a"], \
+        "the bracket inverse is Phase 1; the compensation is Phase 2"
+
+
+def _load_approval_emit():
+    """A budgeted emit written with an approval edge in the activation body:
+    `emit call("a") compensate revert("a") with a`. The extern does not declare
+    `requires approval`, so the edge is admitted by the policy surface, which
+    is enough to reach the emitter shape under test."""
+    host = f"ceiling_host_{next(_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl2688_approval_"))
+    (directory / f"{host}.py").write_text(
+        _HOST_SOURCE.format(sleep=0.0, raises=False), encoding="utf-8")
+    source = (
+        f'extern emission[net(calls=1)] fn call(x: Str) -> Int '
+        f'= @py ref call from "{host}.py"\n'
+        f'extern emission fn revert(x: Str) -> Int '
+        f'= @py ref revert from "{host}.py"\n'
+        "component C {\n"
+        '  let a = await approval[net] { reason: "go" }\n'
+        '  emit call("a") compensate revert("a") with a\n'
+        "}\n")
+    main = directory / "main.rvl"
+    main.write_text(source, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return emit.emit(compile_files([str(main)])), host
+
+
+def test_an_approval_edge_registers_the_compensation_at_the_same_seam():
+    """An `emit ... with a` edge is the same shape: the token is checked and
+    consumed before the fire, and the compensation rides the same seam fire, so
+    it registers when the host body returns. It must not stay on the
+    after-the-fire yield, which a `time` refusal skips."""
+    code, _host = _load_approval_emit()
+    lines = code.splitlines()
+    approval = [i for i, line in enumerate(lines) if "approval_crossing(" in line]
+    assert len(approval) == 1
+    assert "compensate=" in lines[approval[0]], \
+        "the approval-wrapped fire must hand its compensation to the seam"
+    assert "caps=('net(calls=1)',)" in lines[approval[0]]
+    assert not any(line.strip().startswith("yield _revl_frame.compensation(")
+                   for line in lines), \
+        "the compensation must not stay on the after-fire yield"
+    assert any("yield" in line and ".compensation" in line
+               for line in lines[approval[0] + 1:]), \
+        "the body must yield the entry the seam returned"
 
 
 def test_the_budget_is_per_activation_and_that_is_intended():
@@ -774,7 +1040,7 @@ def test_an_mcp_session_call_surfaces_the_typed_refusal(tmp_path):
 
     host_name = f"ceiling_mcp_host_{next(_counter)}"
     (tmp_path / f"{host_name}.py").write_text(
-        _HOST_SOURCE.format(sleep=0.0), encoding="utf-8")
+        _HOST_SOURCE.format(sleep=0.0, raises=False), encoding="utf-8")
     (tmp_path / "main.rvl").write_text(
         f'extern emission[net(calls=1)] fn call(x: Str) -> Int '
         f'= @py ref call from "{host_name}.py"\n'

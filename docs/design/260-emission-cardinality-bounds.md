@@ -473,15 +473,26 @@ its WAL outcome is `emitted-then-refused`, never `emission-complete` and never
 refusal of a crossing whose deadline was already spent happens before the fire,
 like `calls` and `size`.
 
-A compensation for a synchronous host-extern crossing is registered at the seam
-before the host body runs, and the emitted body yields it onto the activation's
+A compensation for a direct host-extern crossing is registered at the seam
+when the host body RETURNS, before the outcome (completion or a `time`
+refusal) is decided, and the emitted body yields it onto the activation's
 compensation stack. That is what keeps a fired-then-refused crossing
 compensable: the refusal enqueues the registered entry for Phase 2 instead of
-losing it. A synchronous host body that raises after it began keeps the same
-owed compensation, because the entry was registered before it ran; a crossing
-refused before it fires registers nothing. An `await emit` step keeps the
-previous after-the-fire registration, because a host body that raises at the
-await registers nothing there.
+losing it. A host body that RAISES registers nothing: the runtime cannot
+confirm that the crossing happened, item 247's rule is that a compensation is
+owed for an emission that crossed, and compensating a crossing that never
+acted is as wrong as dropping one that did. A crossing refused before it fires
+registers nothing either.
+
+The same ordering covers `await emit` and an `emit ... with a` edge. For an
+async extern the await IS the host body, so registration follows the settled
+await: a successful await returns the entry for the emitted yield, and a
+fired-then-refused await enqueues it for Phase 2. An async activation body
+unwinds through cordis's asynchronous dispose path, so `install`'s synchronous
+hook does not run; `begin`, yielded first and disposed last, is its post-unwind
+hook and drains the queue after Phase 1. For an approval edge the token is
+checked and consumed before the fire, and the registration inside that fire
+still starts only when the body returns.
 
 A metered crossing writes a `ceiling <token> <kind>=<observed>/<limit>` run
 trace event, and a refusal writes the same line with `refused` after it
@@ -522,6 +533,11 @@ Not enforced by this slice, tracked rather than implied:
   statically-counted `calls` case is a compile refusal already);
 * a `deferred` extern (enqueued and fired at session commit) and a spawn-handle
   emission (`s.inner.method()`), which do not pass this seam;
+* the self-hosted Python emitter (`selfhost/emit_py.rvl`), which does not yet
+  forward a declared ceiling spelling (`caps=`) or tag the extern
+  (`_revl_declared_caps`), so a program emitted through it reaches this seam
+  unmetered. The reference emitter (`backends/python/emit.py`) is the one this
+  slice covers; the self-host port of the ceiling forwarding is part of #2688;
 * the other five tiers.
 
 Tier list: the Python host-extern crossing only. Every other tier and every
