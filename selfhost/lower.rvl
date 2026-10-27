@@ -6125,6 +6125,31 @@ fn emission_arrow_msg(callee: Str, ext: Str) -> Str {
     .concat("` by name under `emit` (G4)")
 }
 
+// Issue #2972 (lower.py `_acquire_value_refusal`): an `acquire` extern reached
+// as a function VALUE. The acquisition has no effect bracket, so the `undo` its
+// declaration asserts is never registered; inside a provide-method body the
+// acquisition itself is refused, so the value inherits that refusal. `where` is
+// the position clause, so the two positions spell one sentence.
+fn acquire_value_msg(n: Str, where: Str) -> Str {
+  return "`acquire` extern `".concat(n).concat("` is used as a function value ")
+    .concat(where)
+    .concat("; its declared `undo` teardown would be dropped, leaving the acquisition irreversible (G4)")
+}
+
+// The `acquire` externs an `extern acquire fn` declares. `FnD.inv` is the
+// declared call inverse, which `p_extern` keeps ONLY for the acquire class, so
+// a non-empty `inv` is exactly an `extern acquire` with a declared inverse (the
+// reference refuses one without it, so every corpus acquire extern is here).
+fn acquire_extern_names(pg: Prog) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < pg.fns.length()) {
+    if (pg.fns[i].inv != "") { out = out.push(pg.fns[i].name) }
+    i += 1
+  }
+  return out
+}
+
 // Issue #2834: `var_check` excludes a name the component binds anywhere
 // (`cx.scopeNames`), but the reference resolves a name against the bindings in
 // scope at the use (`_lower_component_pure_expr`'s `scope`, which a block
@@ -6133,11 +6158,20 @@ fn emission_arrow_msg(callee: Str, ext: Str) -> Str {
 // there. This pass walks each body lexically and refuses exactly those uses:
 // an emission value whose name is bound somewhere in the component but not in
 // scope where it is read. `sn` keeps it to the names `var_check` skipped.
+//
+// Issue #2972 adds the `mode` axis: the same lexical walk refuses an `acquire`
+// extern read as a value in a provide-method body (`mode` "acquire", `aq` the
+// acquire externs), where the reference's `Env.in_provide_method` refuses it.
 type EvlR = { msg: Str, line: Int, bound: List[Str] }
 
-type EvlX = { cx: Ctx, sn: List[Str] }
+type EvlX = { cx: Ctx, sn: List[Str], mode: Str, aq: List[Str] }
 
 fn evl_hit(n: Str, x: EvlX, bound: List[Str]) -> Str {
+  if (x.mode == "acquire") {
+    if (!contains(x.aq, n) || contains(bound, n)) { return "" }
+    return acquire_value_msg(n,
+      "inside a provide-method body, where only `spawn` may be acquired")
+  }
   let ext = eval_of(x.cx, n)
   if (ext == "" || !contains(x.sn, n) || contains(bound, n) || contains(x.cx.colored, n)) {
     return ""
@@ -6234,7 +6268,13 @@ fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]
     let m = marks[marks.length() - 1]
     return evl_stmts(ss, i + 1, x, bound.slice(0, m), marks.slice(0, marks.length() - 1))
   }
-  let r = evl_expr(s.e, x, bound)
+  // Issue #2972: in the acquire mode the ROOT of an effect statement is an
+  // acquisition, not a value, and the reference exempts it by identity
+  // (`_host_acquire_root`). Its call spelling is already skipped by
+  // `evl_call`; a bare-name root (`let h = effect open_sock`) is skipped here so
+  // it keeps the direct-spelling verdict the gate's own slice decides.
+  let is_acq_root = x.mode == "acquire" && k == "effect" && dfr_callee_name(s.e) != ""
+  let r = is_acq_root ? "" : evl_expr(s.e, x, bound)
   if (r != "") { return { msg: r, line: s.line, bound: bound } }
   return evl_stmts(ss, i + 1, x, s.bind == "" ? bound : bound.push(s.bind), marks)
 }
@@ -6248,7 +6288,7 @@ fn evl_any(sn: List[Str], cx: Ctx, i: Int) -> Bool {
 // The component's lexical emission-value verdict: setup first, then each
 // provide method from setup's bindings plus its own parameters.
 fn evl_component(comp: CompD, cx: Ctx) -> Verd {
-  let x: EvlX = { cx: cx, sn: cx.scopeNames }
+  let x: EvlX = { cx: cx, sn: cx.scopeNames, mode: "emission", aq: [] }
   if (!evl_any(x.sn, cx, 0)) { return no_verd() }
   let s = evl_stmts(comp.setup, 0, x, [], [])
   if (s.msg != "") {
@@ -6266,6 +6306,69 @@ fn evl_component(comp: CompD, cx: Ctx) -> Verd {
       mi += 1
     }
     pi += 1
+  }
+  return no_verd()
+}
+
+// Issue #2972: the component's lexical acquire-value verdict. The reference
+// refuses an `acquire` extern read as a VALUE only inside a provide-method body
+// (`Env.in_provide_method`), because that is where the direct acquisition is
+// refused; the activation body admits the acquisition, so it keeps the value.
+// Setup's bindings are still in scope in every method, so they are collected
+// first (an empty `aq` makes that walk a no-op that only reports `bound`).
+fn aqv_component(comp: CompD, cx: Ctx, aq: List[Str]) -> Verd {
+  if (aq.length() == 0) { return no_verd() }
+  let x0: EvlX = { cx: cx, sn: [], mode: "acquire", aq: [] }
+  let s = evl_stmts(comp.setup, 0, x0, [], [])
+  let x: EvlX = { cx: cx, sn: [], mode: "acquire", aq: aq }
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let ms = comp.provs[pi].methods
+    var mi = 0
+    while (mi < ms.length()) {
+      let r = evl_stmts(ms[mi].body, 0, x, union_into(s.bound, ms[mi].params), [])
+      if (r.msg != "") {
+        return mk_verd(tagged("G4", r.msg), r.line == 0 ? ms[mi].line : r.line)
+      }
+      mi += 1
+    }
+    pi += 1
+  }
+  return no_verd()
+}
+
+// Issue #2972: the module-`fn` twin (lower.py's
+// `_refuse_effect_position_bound_externs_in_fn_body`): an `acquire` extern read
+// as a value in a `fn` body loses the teardown registration exactly as the
+// direct call there does, so it is refused by name. The reference's walk over a
+// `fn` body keeps no binding scope, so neither does this one, and a `let` in the
+// body named like the extern shadows it nowhere on either side. Tests are NOT
+// walked, matching the reference's `check_acquire_values`.
+// The statement walk for the fn pass: the first statement whose VALUE position
+// names an acquire extern. `col_values` is the gate's own no-scope collector
+// (the same one `_calls_in(values=...)` mirrors), so a bare call head is the
+// callee and never a value, and a `let` in the body does NOT shadow the extern
+// here, exactly as in the reference's walk.
+fn aqv_fn_stmts(ss: List[Stmt], i: Int, aq: List[Str], where: Str) -> Verd {
+  if (i >= ss.length()) { return no_verd() }
+  let hits = col_values(ss[i].e, aq, [])
+  if (hits.length() > 0) {
+    return mk_verd(tagged("G4", acquire_value_msg(hits[0], where)), ss[i].line)
+  }
+  return aqv_fn_stmts(ss, i + 1, aq, where)
+}
+
+fn aqv_fns(pg: Prog, aq: List[Str]) -> Verd {
+  if (aq.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < pg.fns.length()) {
+    let f = pg.fns[i]
+    if (!f.isEmExtern && !f.isAsyncExtern) {
+      let v = aqv_fn_stmts(f.body, 0, aq,
+                           "in the body of fn `".concat(f.name).concat("`"))
+      if (v.v != "") { return v }
+    }
+    i += 1
   }
   return no_verd()
 }
@@ -20576,6 +20679,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // effect-position rule and precedes the component body walk.
   let evv = emission_value_reach_refusal(ts, pg)
   if (evv.v != "") { return { done: true, refs: [evv] } }
+  // Issue #2972: an `acquire` extern read as a value in a module `fn` body. The
+  // reference decides it inside the same walk as #2842's emission values (its
+  // `check_acquire_values` arm) and in the same stage, so it rides here.
+  let aqNames = acquire_extern_names(pg)
+  let aqv = aqv_fns(pg, aqNames)
+  if (aqv.v != "") { return { done: true, refs: [aqv] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn`.
@@ -20645,7 +20754,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
                                 verified_method_verd(ts, comp.name, wit), comp.line)
         // issue #2834: an emission value read where no binding shadows it,
         // decided lexically (`evl_component`), at the earlier line of the two
-        let cv = effect_stmt_or(evl_component(comp, cx), check_component(comp, cx, gtys),
+        // issue #2972: the same lexical walk in its acquire mode, over the
+        // provide-method bodies only (`aqv_component`)
+        let cv = effect_stmt_or(evl_component(comp, cx),
+                                effect_stmt_or(aqv_component(comp, cx, aqNames),
+                                               check_component(comp, cx, gtys),
+                                               comp.line),
                                 comp.line)
         let v = effect_stmt_or(sv, cv, comp.line)
         if (v.v != "") {
