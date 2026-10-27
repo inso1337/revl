@@ -186,9 +186,16 @@ def test_a_nul_byte_in_a_module_key_is_a_named_admission_refusal():
     ("revl_change", {"edit": {"target": "bad\0module.rvl", "edits": []}}),
     ("revl_change", {"add": {"target": "bad\0module.rvl",
                                "source": CANDIDATE}}),
+    ("revl_change", {"replace": {"component": "T", "source": CANDIDATE,
+                                   "target": "bad\0module.rvl"}}),
+    ("revl_test_run", {"cwd": "bad\0module.rvl",
+                       "selection": ["tests/test_mcp.py"]}),
+    ("revl_test_run", {"cwd": ".",
+                       "selection": ["tests/bad\0test.py"]}),
 ], ids=["files", "modules", "export-path", "restore-files-content",
         "restore-dependencies", "edit-target", "edit-entry-target",
-        "change-edit-target", "change-add-target"])
+        "change-edit-target", "change-add-target", "change-replace-target",
+        "test-run-cwd", "test-run-selection"])
 def test_transport_nul_paths_are_refused_and_the_server_keeps_serving(
     tool, arguments,
 ):

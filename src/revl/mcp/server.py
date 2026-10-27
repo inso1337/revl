@@ -554,20 +554,28 @@ def _nul_path_refusal(name: str | None, arguments: dict) -> dict | None:
 
     if name == "revl_export" and isinstance(arguments.get("path"), str):
         paths.append(arguments["path"])
+    if name == "revl_test_run":
+        if isinstance(arguments.get("cwd"), str):
+            paths.append(arguments["cwd"])
+        selection = arguments.get("selection")
+        if isinstance(selection, list):
+            paths.extend(item for item in selection if isinstance(item, str))
     if name == "revl_edit":
         _edit_target_paths(arguments, paths)
     elif name == "revl_change":
-        for intent in ("edit", "add"):
+        for intent in ("edit", "replace", "add"):
             _edit_target_paths(arguments.get(intent), paths)
 
     invalid = sorted({path for path in paths if "\0" in path})
     if not invalid:
         return None
+    noun = "path" if len(invalid) == 1 else "paths"
+    verb = "contains" if len(invalid) == 1 else "contain"
     named = ", ".join(repr(path) for path in invalid)
     return {"ok": False, "diagnostics": [{
         "severity": "error", "code": "REVL", "category": "admission",
-        "message": (f"refused: path(s) {named} contain a NUL byte and "
-                    "cannot name filesystem paths"),
+        "message": (f"refused: {noun} {named} {verb} a NUL byte and "
+                    "cannot name a filesystem path"),
         "hint": "Remove NUL bytes from path values and retry; nothing was read or written",
     }], "note": "nothing was read, compiled or loaded"}
 
@@ -578,9 +586,10 @@ def _jail_refusal(arguments: dict, name: str | None = None) -> dict | None:
     handler runs, so nothing is opened, stat-ed or compiled, and the message
     discloses only what the caller already sent.
 
-    Two carriers, one jail: a path ARGUMENT (`files`, `traceFile`, ...) and a
-    `use` path written inside transport-carried source (`_transport_use_escapes`,
-    roadmap 425 F2).
+    Three checks, one refusal: a NUL byte in any caller path
+    (`_nul_path_refusal`, before any normalisation), a path ARGUMENT outside the
+    sanctioned roots (`files`, `traceFile`, ...), and a `use` path written
+    inside transport-carried source (`_transport_use_escapes`, roadmap 425 F2).
 
     A relative path argument is first resolved against the sanctioned roots
     (`_absolutise_path_arguments`, issue #2038) — the operator sanctioned that
