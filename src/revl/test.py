@@ -43,6 +43,109 @@ from .refusal import refusals
 
 BACKENDS = backends_root()
 
+
+# --- capturing a child's output (issue #2977) -------------------------------
+#
+# Every input this module hands a child is written as UTF-8, so every child's
+# output is read back as UTF-8 as well, explicitly. A bare
+# `subprocess.run(..., text=True)` decodes with the host's locale encoding and
+# `errors="strict"`: on a host whose locale is a single-byte codepage, a tick
+# or a box-drawing character in a child's output raised
+# `UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d` out of the
+# capture, left `stdout`/`stderr` as `None`, and the next `result.stdout +
+# result.stderr` then raised `TypeError`. That crash is upstream of every
+# assertion, so the child's real result reached nobody: two composition targets
+# were reported as failures naming no test at all.
+#
+# A decode error must therefore not be able to end the capture. The bytes are
+# decoded with `errors="surrogateescape"`, which maps each byte that is not
+# valid UTF-8 to one lone surrogate instead of raising, and `_decoded` then
+# turns those surrogates into U+FFFD and counts them. Using the surrogates as
+# the intermediate step is what makes the count exact: a lone surrogate has no
+# UTF-8 encoding, so one in the decoded text can only have come from a byte
+# that could not be decoded, never from the child printing U+FFFD itself. The
+# count is reported against the child that produced it, so an undecodable byte
+# is stated and attributed rather than silently swallowed, and the rest of the
+# output still reaches the report.
+_SURROGATE_ESCAPES = {code: 0xFFFD for code in range(0xDC80, 0xDD00)}
+
+
+def _decoded(text: str) -> "tuple[str, int]":
+    """*text* with every undecodable byte shown as U+FFFD, and how many.
+
+    The input is the `errors="surrogateescape"` decoding of a child's output;
+    the output is safe to print, compare and write anywhere.
+    """
+    # No `text or ""` guard: with `errors=` set on the capture no decode can
+    # fail, so neither stream can be `None` any more, and a `None` reaching
+    # here would be a new defect worth raising rather than one to absorb.
+    clean = text.translate(_SURROGATE_ESCAPES)
+    if clean == text:
+        return (text, 0)
+    return (clean, sum(1 for char in text if "\udc80" <= char <= "\udcff"))
+
+
+def _undecodable_note(argv: list, count: int) -> str:
+    """What is printed when a child's output was not valid UTF-8.
+
+    Deliberately ASCII, including the name of the character it talks about: it
+    is printed on the host that could not decode the byte, and a console on a
+    single-byte codepage cannot encode U+FFFD either.
+    """
+    child = Path(str(argv[0])).name if argv else "the child"
+    bytes_ = "byte that is" if count == 1 else "bytes that are"
+    return (f"note: {child} printed {count} {bytes_} not valid UTF-8; "
+            f"shown as U+FFFD in its output below")
+
+
+def _reporting_cannot_crash() -> None:
+    """Let the report's own streams survive a child's characters (issue #2977).
+
+    Decoding the capture as UTF-8 is half of it. The text then goes to a
+    console whose encoding is still the host's, and on a single-byte codepage
+    that write is the same defect from the other side: a tick, a box-drawing
+    character or the U+FFFD standing in for an undecodable byte has no cp1252
+    encoding, so `print` raises `UnicodeEncodeError` and destroys the child's
+    result exactly as the strict decode did, upstream of every assertion.
+
+    `errors="backslashreplace"` on the two report streams makes that write
+    unraisable and loses nothing a person needs: a character the console cannot
+    encode is written as its own escape, so it is still visible and still
+    identifies itself. A stream with no `reconfigure` (a plain replaced object,
+    an in-memory stub) is left exactly as it is.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError, TypeError):  # pragma: no cover - not a file stream
+            pass
+
+
+def _captured(argv: list, returncode: int, stdout: str, stderr: str,
+              ) -> subprocess.CompletedProcess:
+    """One `CompletedProcess` whose output is decoded text, never `None`."""
+    out, out_bad = _decoded(stdout)
+    err, err_bad = _decoded(stderr)
+    if out_bad or err_bad:
+        print(_undecodable_note(argv, out_bad + err_bad))
+    return subprocess.CompletedProcess(argv, returncode, out, err)
+
+
+def _capture(argv: list, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` for every child this module reads (issue #2977).
+
+    The one place the capture's decoding is decided: UTF-8, and a byte that
+    cannot be decoded is reported rather than raised.
+    """
+    result = subprocess.run(argv, capture_output=True, text=True,
+                            encoding="utf-8", errors="surrogateescape",
+                            **kwargs)
+    return _captured(list(argv), result.returncode, result.stdout, result.stderr)
+
+
 def _emitter(backend: str) -> types.ModuleType:
     """The backend emitter, from the one cached loader every caller of that tier
     shares (`placement.backend_emit_module`, issue #2204): one module and one
@@ -489,8 +592,7 @@ def _node_version() -> "tuple[int, int] | None":
     if shutil.which("node") is None:
         return None
     try:
-        probe = subprocess.run(["node", "--version"], capture_output=True,
-                               text=True, timeout=30)
+        probe = _capture(["node", "--version"], timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     match = re.match(r"^v(\d+)\.(\d+)\.", probe.stdout.strip())
@@ -572,6 +674,7 @@ def _ts_foreground(argv: list, cwd: Path, timeout: int,
     """
     process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True,
+                               encoding="utf-8", errors="surrogateescape",
                                start_new_session=True, env=env)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -585,7 +688,7 @@ def _ts_foreground(argv: list, cwd: Path, timeout: int,
             process.kill()
         process.communicate()
         raise
-    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    return _captured(list(argv), process.returncode, stdout, stderr)
 
 
 def _ts_timeout_message(ir: dict, bound: int) -> str:
@@ -788,8 +891,7 @@ def run_rust(ir: dict) -> tuple[str, str]:
         (tmp / "src").mkdir()
         (tmp / "src" / "lib.rs").write_text(source, encoding="utf-8")
         (tmp / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
-        result = subprocess.run(["cargo", "test"], cwd=tmp,
-                                capture_output=True, text=True, timeout=600)
+        result = _capture(["cargo", "test"], cwd=tmp, timeout=600)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -900,9 +1002,8 @@ def run_go(ir: dict) -> tuple[str, str]:
         # emitter's output runs", not "it passes go vet's style rules";
         # `-vet=off` restores that contract without distorting revl's
         # semantics to satisfy a linter (architect decision, roadmap 314).
-        result = subprocess.run([go, "test", "-vet=off", "-v", "./..."], cwd=tmp,
-                                capture_output=True, text=True, timeout=600,
-                                env=env)
+        result = _capture([go, "test", "-vet=off", "-v", "./..."], cwd=tmp,
+                          timeout=600, env=env)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -1039,16 +1140,16 @@ def run_java(ir: dict) -> tuple[str, str]:
         # `out`, so without the variable `out` alone is the whole classpath
         classpath = str(out) + (os.pathsep + real_classes if real_classes else "")
         if real_classes:
-            compile_components = subprocess.run(
+            compile_components = _capture(
                 [javac, "--release", "21", "-cp", classpath,
                  "-d", str(out), str(pkg / "Components.java")],
-                capture_output=True, text=True, timeout=600)
+                timeout=600)
         else:
             stubs = [str(s) for s in sorted((BACKENDS / "java" / "stubs").rglob("*.java"))]
-            compile_components = subprocess.run(
+            compile_components = _capture(
                 [javac, "--release", "21", "-d", str(out)] + stubs
                 + [str(pkg / "Components.java")],
-                capture_output=True, text=True, timeout=600)
+                timeout=600)
         if compile_components.returncode != 0:
             return ("fail", f"javac failed: {compile_components.stderr.strip()}")
 
@@ -1065,13 +1166,12 @@ def run_java(ir: dict) -> tuple[str, str]:
             "    }\n"
             "}\n",
             encoding="utf-8")
-        compile_runner = subprocess.run(
+        compile_runner = _capture(
             [javac, "--release", "21", "-cp", classpath, "-d", str(out), str(runner)],
-            capture_output=True, text=True, timeout=600)
+            timeout=600)
         if compile_runner.returncode != 0:
             return ("fail", f"javac runner failed: {compile_runner.stderr.strip()}")
-        run = subprocess.run([java, "-cp", classpath, "RunRevlTests"],
-                             capture_output=True, text=True, timeout=600)
+        run = _capture([java, "-cp", classpath, "RunRevlTests"], timeout=600)
         run_output = run.stdout
 
     if run.returncode != 0:
@@ -1132,9 +1232,8 @@ def _run_wasm_pure(ir: dict, wasmtime: str, note: str) -> tuple[str, str] | None
         wat = Path(tmpd) / "mod.wat"
         wat.write_text(source, encoding="utf-8")
         for tname, export in exports:
-            run = subprocess.run(
-                [wasmtime, "--invoke", export, str(wat)],
-                capture_output=True, text=True, timeout=600)
+            run = _capture(
+                [wasmtime, "--invoke", export, str(wat)], timeout=600)
             if run.returncode != 0:
                 failures += 1
                 detail = (run.stderr.strip().splitlines() or [""])[-1]
@@ -1223,9 +1322,9 @@ def _run_wasm_lifecycle(ir: dict, lifecycle: list) -> tuple[str, str]:
     with tempfile.TemporaryDirectory(prefix="revl_test_wasm_lifecycle_") as tmpd:
         spec_file = Path(tmpd) / "lifecycle.spec.json"
         spec_file.write_text(json.dumps(spec), encoding="utf-8")
-        result = subprocess.run(
+        result = _capture(
             [_cordis_wasm_python(), str(harness), str(spec_file)],
-            capture_output=True, text=True, timeout=600, env=env)
+            timeout=600, env=env)
     output = (result.stdout + result.stderr).strip()
     for line in output.splitlines():
         if line.startswith("SUMMARY "):
@@ -1722,6 +1821,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     ``"tap"``) emits a machine-readable per-test report on the py tier instead
     of the human summary. Both apply to the py reference tier only.
     """
+    # Before anything is reported: a child's characters must not be able to
+    # take the report down on the way out either (issue #2977).
+    _reporting_cannot_crash()
+
     if list_tests:
         return list_command(ir, filter_pattern)
 
