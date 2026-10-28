@@ -287,6 +287,16 @@ m.insert(k, v), None => m.remove(k) }`. A defaulted read
 (`let prev = m.get(k) ?? []`) erases the `Opt`, so the undo is refused,
 naming that `match` form.
 
+There is one narrower computed inverse for a list append (issue #2640): a raw
+`known = m.get(k) != None` remembers only whether the key existed, the effect
+pushes onto `(m.get(k) ?? []).push(v)`, and the undo uses `drop_last` on that
+same defaulted read when `known`, or removes the key otherwise. G4 admits it
+only when `drop_last(xs)` is exactly `xs.slice(0, xs.length() - 1)`, every read
+and write uses the same simple key, and no write or reassignment of the proof
+names intervenes. A lookalike helper or mismatched key remains a named G4
+refusal. The separate raw presence flag is what makes the defaulted list read
+safe here; a defaulted read alone still cannot restore an overwritten value.
+
 For an `extern acquire` or a user `effect` over a service, revl has no table
 to check the `undo` against, so a wrong inverse there is still the author's
 assertion. A provide-method step records how far the check reached as

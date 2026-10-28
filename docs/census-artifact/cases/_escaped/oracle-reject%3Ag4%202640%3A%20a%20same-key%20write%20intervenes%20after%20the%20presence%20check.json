@@ -1,0 +1,1 @@
+{"case": "oracle-reject:g4 2640: a same-key write intervenes after the presence check", "buckets": ["agree-refuse/G4"]}
