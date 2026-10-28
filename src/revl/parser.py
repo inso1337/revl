@@ -6631,7 +6631,13 @@ class Parser:
             # the step is an iteration boundary whose payload is an emission.
             # `await` on a provide-method emission is not this form — that path
             # is refused above unless the method is `async fn`.
-            if not in_method and self.at("kw", "emit"):
+            # Item 131's awaited emit step is the AWAITED spelling of an emit
+            # statement, so an `async fn` method body takes it too: it is still
+            # an emit statement (its crossing is the same one, awaited), and
+            # reading it as a bare `await <emit expression>` would hand the
+            # value-position rules an expression that is not in value position
+            # (issue #2969's async wrapper refusal fired on it).
+            if self.at("kw", "emit"):
                 self.next()
                 return self._emit_stmt(tok.line, is_async=True)
             return AwaitStmt(self.pure_expr(), tok.line)

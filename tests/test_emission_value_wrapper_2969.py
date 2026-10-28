@@ -245,6 +245,45 @@ def test_an_async_wrapper_value_emit_is_refused(tmp_path):
     assert "`emit` of async wrapper `helper` in value position" in err.value.message
 
 
+AWAITED_STATEMENT = """
+service Ops {
+  emission async fn stmt(msg: Str) -> Str
+}
+
+extern emission async fn aext(msg: Str) -> Str
+  = @py { return "aext:" + msg }
+
+extern pure fn plain(msg: Str) -> Str
+  = @py { return msg }
+
+fn helper(msg: Str) -> Str { return aext(msg) }
+
+component Agent provides ops: Ops {
+  provide ops {
+    async fn stmt(msg) {
+      await emit helper(msg)
+      return "done"
+    }
+  }
+}
+"""
+
+
+def test_an_awaited_wrapper_emit_stays_the_statement_form(tmp_path):
+    """`await emit helper(msg)` in an `async fn` method is the AWAITED statement
+    form, not a value (issue #2969).
+
+    Its crossing IS awaited, so an async wrapper reaches it through the
+    recording seam: the step is a statement emit step keyed by the wrapper, the
+    value-position refusal does not fire, and the py method awaits the step.
+    Reading it as a bare `await <emit expression>` refused it."""
+    path = tmp_path / "awaited_statement.rvl"
+    path.write_text(AWAITED_STATEMENT, encoding="utf-8")
+    emitted = _emit(tmp_path, AWAITED_STATEMENT)
+    method = _method(emitted, "stmt")
+    assert "await _revl_extern_emit(_revl_ctx, 'helper', helper, (msg,))" in method
+
+
 @needs_cordis
 def test_an_async_direct_value_emit_still_records_the_extern():
     """The refusal is narrow: a direct async extern in value position was
