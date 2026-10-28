@@ -4372,7 +4372,8 @@ def _emission_value_refusal(name: str, extern: str, filename: str,
 
 
 def _refuse_unrecorded_async_wrapper_emit(node: dict, env: Env,
-                                          filename: str, line: int) -> None:
+                                          filename: str, line: int,
+                                          *, emit_expr=None) -> None:
     """A marked `emit` of an async-colored wrapper `fn` in VALUE position
     (issue #2969).
 
@@ -4383,9 +4384,18 @@ def _refuse_unrecorded_async_wrapper_emit(node: dict, env: Env,
     record no emission step, the unrecorded crossing #2969 is about. Refuse it
     rather than admit a crossing the WAL cannot see. The STATEMENT form still
     records the wrapper under its own name, so it is left alone; a direct async
-    extern (`emit aext(m)`) is recorded and left alone too."""
+    extern (`emit aext(m)`) is recorded and left alone too.
+
+    An ASYNC ACQUISITION is not value position either: in
+    `let c = effect await emit bad_open(u) undo ...` the emitted call is the
+    bracket's own acquire expression (item 131), so the refusal is keyed to the
+    emit node not being the bracket root. `_acquire_position` already marks that
+    root by identity."""
     name = node.get("name")
     if node.get("kind") != "fn" or not isinstance(name, str):
+        return
+    if emit_expr is not None and \
+            getattr(env, "_host_acquire_root", None) is emit_expr:
         return
     if name in (getattr(env, "extern_class", None) or {}):
         return
@@ -10210,7 +10220,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                      "drop the `emit` marker (G4)",
                 code="G4", category="emission",
             )
-        _refuse_unrecorded_async_wrapper_emit(node, env, filename, expr.line)
+        _refuse_unrecorded_async_wrapper_emit(node, env, filename, expr.line,
+                                              emit_expr=expr)
         _require_declared_approval(node, None, env, expr.line, value_form=True)
         return node
     if isinstance(expr, ExprMatch):

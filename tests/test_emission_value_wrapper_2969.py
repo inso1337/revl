@@ -284,6 +284,36 @@ def test_an_awaited_wrapper_emit_stays_the_statement_form(tmp_path):
     assert "await _revl_extern_emit(_revl_ctx, 'helper', helper, (msg,))" in method
 
 
+ASYNC_ACQUISITION = """
+service Database {
+  fn query(q: Str) -> Str
+}
+
+extern emission async fn aext(msg: Str) -> Str
+  = @py { return "aext:" + msg }
+
+fn helper(msg: Str) -> Str { return aext(msg) }
+
+component Consumer requires db: Database {
+  let h = effect await emit helper("ACQ") undo db.query("UNDO")
+}
+"""
+
+
+def test_an_async_acquisition_is_not_value_position(tmp_path):
+    """An ASYNC ACQUISITION of an async wrapper compiles (item 131, #2969).
+
+    `effect await emit helper(...) undo ...` puts the emitted call in the
+    bracket's own acquire position: the landed result is bound to the handle and
+    the `undo` is its inverse, so it is not a value the caller reads. The
+    value-position refusal is keyed to the emit node not being the bracket root,
+    or it would refuse the acquisition form too."""
+    path = tmp_path / "async_acquisition.rvl"
+    path.write_text(ASYNC_ACQUISITION, encoding="utf-8")
+    program = compile_files([str(path)])
+    assert program is not None
+
+
 @needs_cordis
 def test_an_async_direct_value_emit_still_records_the_extern():
     """The refusal is narrow: a direct async extern in value position was
