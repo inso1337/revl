@@ -343,6 +343,8 @@ pub struct EvlR {
 pub struct EvlX {
     cx: Ctx__m2,
     sn: Vec<String>,
+    mode: String,
+    aq: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -13236,7 +13238,29 @@ fn emission_arrow_msg(callee: &str, ext: &str) -> String {
     return (((((String::from("this arrow reaches emission `").revl_concat(&ext)).revl_concat("`")).revl_concat(&via)).revl_concat(" and cannot be used as a function value; call `")).revl_concat(&callee)).revl_concat("` by name under `emit` (G4)");
 }
 
+fn acquire_value_msg(n: &str, where_: &str) -> String {
+    return (((String::from("`acquire` extern `").revl_concat(&n)).revl_concat("` is used as a function value ")).revl_concat(&where_)).revl_concat("; its declared `undo` teardown would be dropped, leaving the acquisition irreversible (G4)");
+}
+
+fn acquire_extern_names(pg: Prog) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < pg.fns.revl_length()) {
+        if ((pg.fns)[(i) as usize].inv != "") {
+            out.push((pg.fns)[(i) as usize].name.clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn evl_hit(n: &str, x: EvlX, bound: &[String]) -> String {
+    if (x.mode == "acquire") {
+        if ((!contains__m2(&x.aq, n)) || contains__m2(bound, n)) {
+            return String::from("");
+        }
+        return acquire_value_msg(n, "inside a provide-method body, where only `spawn` may be acquired");
+    }
     let ext = eval_of(x.cx.clone(), n);
     if ((((ext == "") || (!contains__m2(&x.sn, n))) || contains__m2(bound, n)) || contains__m2(&x.cx.colored, n)) {
         return String::from("");
@@ -13348,9 +13372,10 @@ fn evl_stmts(ss: &[Stmt], i: i64, x: EvlX, bound: Vec<String>, marks: &[i64]) ->
         let m = (marks)[((marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
         return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, bound.revl_slice(0i64, m), &(marks.revl_slice(0i64, (marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
     }
-    let r = evl_expr(s.e.clone(), x.clone(), bound.clone());
+    let is_acq_root = (((x.mode == "acquire") && (k == "effect")) && (dfr_callee_name(s.e.clone()) != ""));
+    let r = if is_acq_root { String::from("") } else { evl_expr(s.e.clone(), x.clone(), bound.clone()) };
     if (r != "") {
-        return EvlR { msg: r, line: s.line, bound: bound };
+        return EvlR { msg: r.clone(), line: s.line, bound: bound };
     }
     return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, if (s.bind == "") { bound.clone() } else { bound.revl_push(s.bind.clone()) }, marks);
 }
@@ -13366,7 +13391,7 @@ fn evl_any(sn: &[String], cx: Ctx__m2, i: i64) -> bool {
 }
 
 fn evl_component(comp: CompD, cx: Ctx__m2) -> Verd {
-    let x = EvlX { cx: cx.clone(), sn: cx.scopeNames.clone() };
+    let x = EvlX { cx: cx.clone(), sn: cx.scopeNames.clone(), mode: String::from("emission"), aq: vec![] };
     if (!evl_any(&x.sn, cx.clone(), 0i64)) {
         return no_verd();
     }
@@ -13386,6 +13411,58 @@ fn evl_component(comp: CompD, cx: Ctx__m2) -> Verd {
             mi = (mi).checked_add(1i64).expect("revl: Int overflow");
         }
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn aqv_component(comp: CompD, cx: Ctx__m2, aq: Vec<String>) -> Verd {
+    if (aq.revl_length() == 0i64) {
+        return no_verd();
+    }
+    let x0 = EvlX { cx: cx.clone(), sn: vec![], mode: String::from("acquire"), aq: vec![] };
+    let s = evl_stmts(&comp.setup, 0i64, x0.clone(), vec![], &(vec![]));
+    let x = EvlX { cx: cx.clone(), sn: vec![], mode: String::from("acquire"), aq: aq.clone() };
+    let mut pi = 0i64;
+    while (pi < comp.provs.revl_length()) {
+        let ms = (comp.provs)[(pi) as usize].methods.clone();
+        let mut mi = 0i64;
+        while (mi < ms.revl_length()) {
+            let r = evl_stmts(&(ms)[(mi) as usize].body, 0i64, x.clone(), union_into(s.bound.clone(), &(ms)[(mi) as usize].params), &(vec![]));
+            if (r.msg != "") {
+                return mk_verd(tagged("G4", &r.msg), if (r.line == 0i64) { (ms)[(mi) as usize].line.clone() } else { r.line });
+            }
+            mi = (mi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        pi = (pi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn aqv_fn_stmts(ss: &[Stmt], i: i64, aq: &[String], where_: &str) -> Verd {
+    if (i >= ss.revl_length()) {
+        return no_verd();
+    }
+    let hits = col_values((ss)[(i) as usize].e.clone(), aq, vec![]);
+    if (hits.revl_length() > 0i64) {
+        return mk_verd(tagged("G4", &acquire_value_msg(&(hits)[(0i64) as usize], where_)), (ss)[(i) as usize].line.clone());
+    }
+    return aqv_fn_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), aq, where_);
+}
+
+fn aqv_fns(pg: Prog, aq: &[String]) -> Verd {
+    if (aq.revl_length() == 0i64) {
+        return no_verd();
+    }
+    let mut i = 0i64;
+    while (i < pg.fns.revl_length()) {
+        let f = (pg.fns)[(i) as usize].clone();
+        if ((!f.isEmExtern) && (!f.isAsyncExtern)) {
+            let v = aqv_fn_stmts(&f.body, 0i64, aq, &((String::from("in the body of fn `").revl_concat(&f.name)).revl_concat("`")));
+            if (v.v != "") {
+                return v;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return no_verd();
 }
@@ -25432,6 +25509,11 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], am
     if (evv.v != "") {
         return NoLink { done: true, refs: vec![evv.clone()] };
     }
+    let aqNames = acquire_extern_names(pg.clone());
+    let aqv = aqv_fns(pg.clone(), &aqNames);
+    if (aqv.v != "") {
+        return NoLink { done: true, refs: vec![aqv.clone()] };
+    }
     let acq = check_reachable_fn_acquire(pg.clone());
     if (acq.v != "") {
         return NoLink { done: true, refs: vec![acq.clone()] };
@@ -25466,7 +25548,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], am
                 } else {
                     let cx = ctx_for(base.clone(), comp.clone());
                     let sv = effect_stmt_or(effect_stmt_verd(&ts, &comp.name, &wit), verified_method_verd(&ts, &comp.name, &wit), comp.line);
-                    let cv = effect_stmt_or(evl_component(comp.clone(), cx.clone()), check_component(comp.clone(), cx.clone(), &gtys), comp.line);
+                    let cv = effect_stmt_or(evl_component(comp.clone(), cx.clone()), effect_stmt_or(aqv_component(comp.clone(), cx.clone(), aqNames.clone()), check_component(comp.clone(), cx.clone(), &gtys), comp.line), comp.line);
                     let v = effect_stmt_or(sv.clone(), cv.clone(), comp.line);
                     if (v.v != "") {
                         refs.push(v.clone());
