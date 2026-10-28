@@ -6632,12 +6632,22 @@ class Parser:
             # `await` on a provide-method emission is not this form — that path
             # is refused above unless the method is `async fn`.
             # Item 131's awaited emit step is the AWAITED spelling of an emit
-            # statement, so an `async fn` method body takes it too: it is still
-            # an emit statement (its crossing is the same one, awaited), and
-            # reading it as a bare `await <emit expression>` would hand the
-            # value-position rules an expression that is not in value position
-            # (issue #2969's async wrapper refusal fired on it).
-            if self.at("kw", "emit"):
+            # statement, so a STATEMENT in an `async fn` method body takes it
+            # too: it is still an emit statement (its crossing is the same one,
+            # awaited), and reading it as a bare `await <emit expression>` would
+            # hand the value-position rules an expression that is not in value
+            # position (issue #2969's async wrapper refusal fired on it).
+            #
+            # `await emit <call>` is the awaited emit STATEMENT in an
+            # activation body and in an `async fn` method body alike. The one
+            # spelling that keeps the expression reading is an ASYNC
+            # ACQUISITION, `effect await emit <call> undo <e>` (item 131,
+            # examples/rejections/a1_async_undo_suspends.rvl): there the
+            # `await` belongs to `effect` and the emitted call is the acquire
+            # expression, so taking it as an emit statement would lose the
+            # acquired value and the undo. That form is parsed by the `effect`
+            # path, not from here, so it never reaches this branch.
+            if (not in_method or in_async_method) and self.at("kw", "emit"):
                 self.next()
                 return self._emit_stmt(tok.line, is_async=True)
             return AwaitStmt(self.pure_expr(), tok.line)

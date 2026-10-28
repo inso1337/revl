@@ -2269,11 +2269,14 @@ component LyingCache provides cache: Cache {
   }
 }
 """, "G4"),
+    # The emission is the STATEMENT form on purpose: an `emit <async wrapper>`
+    # in value position records no emission step and is refused under G4
+    # (issue #2969), which would hide the A1 colouring fault this case grades.
     ("a1 transitively-colored fn in sync method", """extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url }
 fn helper(u: Str) -> Str { return http_post(u, u) }
 service Http { emission fn post(url: Str, body: Str) -> Str }
 component Poster provides http: Http {
-  provide http { fn post(url, body) = emit helper(url) }
+  provide http { fn post(url, body) { emit helper(url) return body } }
 }
 """, "A1"),
     # G1: `db` is read but never declared in the requires row (fixture).
