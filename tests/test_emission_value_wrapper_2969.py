@@ -98,6 +98,46 @@ component Agent provides ops: Ops {
 """
 
 
+ASYNC = """
+service Ops {
+  emission async fn value(msg: Str) -> Str
+  emission async fn stmt(msg: Str) -> Str
+  emission async fn direct(msg: Str) -> Str
+}
+
+extern emission async fn aext(msg: Str) -> Str
+  = @py { return "aext:" + msg }
+
+fn helper(msg: Str) -> Str { return aext(msg) }
+
+component Agent provides ops: Ops {
+  provide ops {
+    async fn value(msg) {
+      let r = emit helper(msg)
+      return r
+    }
+    async fn stmt(msg) {
+      emit helper(msg)
+      return "done"
+    }
+    async fn direct(msg) {
+      let r = emit aext(msg)
+      return r
+    }
+  }
+}
+"""
+
+
+ASYNC_ADMITTED = ASYNC.replace(
+    "  emission async fn value(msg: Str) -> Str\n", "").replace(
+    """    async fn value(msg) {
+      let r = emit helper(msg)
+      return r
+    }
+""", "")
+
+
 def _emit(tmp_path: Path, source: str) -> str:
     sys.path.insert(0, str(ROOT / "backends" / "python"))
     from revl._paths import python_backend_emitter  # noqa: PLC0415
@@ -187,3 +227,40 @@ def test_an_unmarked_wrapper_call_is_still_refused(tmp_path):
     path.write_text(UNMARKED, encoding="utf-8")
     with pytest.raises(RevlError, match="call to emission `helper` must be marked `emit`"):
         compile_files([str(path)])
+
+
+def test_an_async_wrapper_value_emit_is_refused(tmp_path):
+    """An async-colored wrapper in VALUE position is refused (issue #2969).
+
+    Its suspension cannot be settled through the recording seam, so `let r =
+    emit helper(msg)` would run the host body and record no emission step. The
+    refusal is loud rather than an unrecorded crossing, and the direct async
+    extern (`emit aext(msg)`) is still admitted and recorded."""
+    path = tmp_path / "async_wrapper.rvl"
+    path.write_text(ASYNC, encoding="utf-8")
+    with pytest.raises(RevlError) as err:
+        compile_files([str(path)])
+    assert err.value.code == "G4"
+    assert err.value.category == "emission-value"
+    assert "`emit` of async wrapper `helper` in value position" in err.value.message
+
+
+@needs_cordis
+def test_an_async_direct_value_emit_still_records_the_extern():
+    """The refusal is narrow: a direct async extern in value position was
+    already recorded, and still is."""
+    steps = _steps(ASYNC_ADMITTED, "direct", "hi")
+    emissions = [label for kind, label in steps if kind == "emission"]
+    assert emissions == ["aext"]
+
+
+@needs_cordis
+def test_an_async_wrapper_statement_form_still_records_the_wrapper():
+    """PIN: the statement form of an async wrapper is admitted and records the
+    wrapper's own name (`helper`), not the extern it reaches. The reach map
+    skips async fns in both emitters, so the statement form names the wrapper;
+    the WAL still holds an emission step, so no crossing runs unrecorded."""
+    steps = _steps(ASYNC_ADMITTED, "stmt", "hi")
+    emissions = [label for kind, label in steps if kind == "emission"]
+    assert emissions == ["helper"]
+
