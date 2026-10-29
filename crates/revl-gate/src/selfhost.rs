@@ -2716,7 +2716,7 @@ fn self_append_concat(target: String, recv: &str, valnode: Value, ctx_: Ctx__m1)
     }
     let rendered = render_expr(an.clone(), ctx_.clone());
     if (recv_ty == "Str") {
-        return format!("{}.push_str({});", recv, borrow_str_arg(an.clone(), rendered.clone(), ctx_.clone()));
+        return format!("{}.push_str({});", recv, borrow_str_arg(an, rendered, ctx_));
     }
     if (strip_spaces(&((recv_ty.revl_split("[")))[(0i64) as usize]) == "List") {
         return format!("{}.extend(({}).iter().cloned());", recv, rendered);
