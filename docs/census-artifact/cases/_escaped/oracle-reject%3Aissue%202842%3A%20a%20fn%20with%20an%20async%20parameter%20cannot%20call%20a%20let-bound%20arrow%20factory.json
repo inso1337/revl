@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2842: a fn with an async parameter cannot call a let-bound arrow factory", "buckets": ["agree-refuse/A1"]}

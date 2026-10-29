@@ -18,7 +18,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { pythonInterpreter } from '../scripts/emit-fixtures'
+import { emitFixtureOutput } from '../scripts/emit-fixtures'
 
 const backend = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const generated = join(backend, 'tests', 'generated', 'v3_tests.test.ts')
@@ -117,14 +117,10 @@ describe('checked-in generated modules are current', () => {
 
   for (const { fixture, output } of pairs) {
     it(`is committed current with its fixture: ${output}`, () => {
-      // Same recipe scripts/emit-fixtures.ts uses at setup time.
-      const fresh = spawnSync(
-        pythonInterpreter(),
-        ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
-        { cwd: backend, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-      )
-      if (fresh.error) return // no python3 available (source tarball) — nothing to assert
-      expect(fresh.status, `emit.py failed for ${fixture}:\n${fresh.stderr}`).toBe(0)
+      // Same recipe scripts/emit-fixtures.ts uses at setup time, including
+      // its interpreter selection; a missing interpreter throws here instead
+      // of skipping the assertion.
+      const fresh = emitFixtureOutput(fixture)
       const committed = gitShow(`backends/typescript/tests/generated/${output}`)
       if (committed === null) {
         throw new Error(
@@ -132,7 +128,7 @@ describe('checked-in generated modules are current', () => {
             `run whatever its own setup emits instead of this tree's proof`)
       }
       expect(
-        fresh.stdout,
+        fresh,
         `tests/generated/${output} does not match a fresh emit of ` +
           `tests/fixtures/${fixture} + emit.py — regenerate ` +
           `(backends/typescript/scripts/emit-fixtures.ts) and commit`,

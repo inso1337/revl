@@ -1,0 +1,134 @@
+// The authorization half of the exemplary web application (issue #2703, slice 1;
+// item 457 Slice 2, docs/design/457-endpoint-one-definition.md, "Authorization:
+// explicit, and not derivable").
+//
+// examples/app/notes.rvl is the public control: its routes reach no
+// principal-taking service, so they are open by construction. This file is the
+// other side. Every route here reads a user's notes, so the store operations
+// take a `Principal`, and the only value of that type is the result of
+// `Auth.validate` (stdlib/auth.rvl). The handler therefore has to call it:
+//
+//   * with the step, `who` is in scope in the `Ok` arm and reaches the store;
+//   * without it, the handler holds only a `Bearer`, which is not a
+//     `Principal`, and the compiler refuses the program at admission, naming
+//     `Principal` and `Auth.validate`. tests/test_app_private_notes_2703.py
+//     removes the step from this very file and asserts that refusal.
+//
+// A missing or invalid credential is the `Err` that `validate` returns, which
+// the route maps to 401 by its type. A caller that is valid but does not own
+// the note gets the same typed 404 as an absent note, so the answer does not
+// say whether the id exists.
+//
+// Compose this file with stdlib/auth.rvl as roots:
+//   compile_files(["examples/app/private_notes.rvl", "stdlib/auth.rvl"])
+// On the py tier the validator is the HS256 JWT check documented in
+// stdlib/auth.rvl.
+//
+// Limitation: reading the owner of a `Principal` needs the py-only extern
+// `subject_of` below, because stdlib/auth.rvl has no accessor for it. The
+// untrusted-author profile refuses every extern, so this file is refused there
+// and runs on the py tier only (#2951).
+//
+// Not in this file: a second persistence driver and the audit view (issue
+// #2703 slices 2 and 3), and the ts binding of `Auth` (item 457 Slice 3).
+
+use "stdlib/http.rvl" { ApiError, not_found_error }
+use "stdlib/auth.rvl" { Auth, Bearer }
+
+type OwnedNote = { id: Str, owner: Str, title: Str, body: Str }
+
+// A `Principal` is opaque in revl source, so reading the subject of one is a
+// host read. It builds nothing: it only reports the subject of a principal it
+// is given, and it raises on anything that is not a principal with a subject,
+// so a malformed value can never read as an owner.
+//
+// Limitation: this is a py-only extern that relies on how stdlib/auth.rvl
+// stores a principal (a record with a `subject` member). The untrusted-author
+// profile refuses every extern, so this file is refused there, and no other
+// tier can run it. A first-party accessor in stdlib/auth.rvl would remove both
+// limits; that is a separate decision, tracked in #2951.
+extern pure fn subject_of(who: Principal) -> Str = @py {
+    subject = who.get("subject") if isinstance(who, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("subject_of: not a principal with a subject")
+    return subject
+}
+
+// The user-scoped store. Every verb takes the `Principal`, so no note is
+// reachable without one.
+service OwnedNoteStore {
+  fn get(who: Principal, id: Str) -> Result[OwnedNote, ApiError]
+  fn mine(who: Principal) -> List[OwnedNote]
+}
+
+// Pure read helpers, kept out of the handler bodies the way notes.rvl keeps
+// `take`: a row is visible only to its owner, and a hidden row is
+// indistinguishable from an absent one.
+fn visible(found: Opt[OwnedNote], subject: Str) -> Result[OwnedNote, ApiError] {
+  return match found {
+    Some(n) => if (n.owner == subject) { Ok(n) }
+               else { Err(not_found_error("no note with that id")) },
+    None    => Err(not_found_error("no note with that id")),
+  }
+}
+
+fn owned_by(found: Opt[OwnedNote], subject: Str) -> Bool {
+  return match found {
+    Some(n) => n.owner == subject,
+    None    => false,
+  }
+}
+
+component OwnedMemoryStore provides store: OwnedNoteStore {
+  let rows = effect Map.new() undo rows.drop()
+
+  // Two owners' rows, seeded at activation so the routes have something to
+  // serve and to withhold. Both inserts revert with the component.
+  effect rows.insert("pn-0", { id: "pn-0", owner: "alice", title: "plan", body: "alice only" })
+  undo   rows.remove("pn-0")
+  effect rows.insert("pn-1", { id: "pn-1", owner: "bob", title: "todo", body: "bob only" })
+  undo   rows.remove("pn-1")
+
+  provide store {
+    fn get(who, id) = visible(rows.get(id), subject_of(who))
+
+    fn mine(who) {
+      let subject = subject_of(who)
+      var out = []
+      for (k of rows.keys()) {
+        if (owned_by(rows.get(k), subject)) { out = out.push(rows.get(k)) }
+      }
+      return out
+    }
+  }
+}
+
+// `bearer` is bound from the `Authorization` header by the route bind table. It
+// is a claim, not a right: holding one grants nothing until `validate` turns it
+// into a `Principal`.
+service PrivateNotesApi {
+  route get "/private/notes/{id}"
+  fn get_private_note(bearer: Bearer, id: Str) -> Result[OwnedNote, ApiError]
+
+  route get "/private/notes"
+  fn list_private_notes(bearer: Bearer) -> Result[List[OwnedNote], ApiError]
+}
+
+component PrivateNotesHttp requires auth: Auth, store: OwnedNoteStore
+                           provides private_api: PrivateNotesApi {
+  provide private_api {
+    fn get_private_note(bearer, id) {
+      return match auth.validate(bearer) {
+        Err(e)  => Err(e),
+        Ok(who) => store.get(who, id),
+      }
+    }
+
+    fn list_private_notes(bearer) {
+      return match auth.validate(bearer) {
+        Err(e)  => Err(e),
+        Ok(who) => Ok(store.mine(who)),
+      }
+    }
+  }
+}

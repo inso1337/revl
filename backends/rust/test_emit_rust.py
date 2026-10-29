@@ -538,11 +538,12 @@ pub fn classify(source: Str, i: Int) -> Tok {
 def test_reused_uninferred_string_clones_each_move_but_not_copies():
     src = emit.emit(compile_source(_REUSED_VALUE_RVL))
     body = src.split("pub fn classify")[1].split("\n}")[0]
-    # every by-value use of the un-inferred `c` is cloned: the two `tag` calls,
-    # the `if`-expression else-branch tail, and the record field.
+    # every by-value use of the reused `c` is cloned: the two `tag` calls and
+    # the `if`-expression else-branch tail. Its last read, the record field in
+    # the `return`, moves (issue #2905).
     assert body.count("tag(c.clone())") == 2, body
     assert 'else { c.clone() }' in body, body
-    assert "text: c.clone()" in body, body
+    assert "return Tok { kind: kind, text: c };" in body, body
     # the Copy `Int` param reused across two moves is never cloned.
     assert "i.clone()" not in body, body
 
@@ -2466,10 +2467,10 @@ def test_user_ctx_field_and_local_emit_consistently():
         "fn mk_ctx() -> Ctx { return { n: 0 } }\n"
     ))
     assert "    ctx_: Ctx," in src                       # struct field decl
-    assert "return Ck { ctx_: x.clone(), msg:" in src    # construction
+    assert "return Ck { ctx_: x, msg:" in src           # construction (moves, #2905)
     assert "return ck.ctx_;" in src                      # field access
     assert "let ctx_ = mk_ctx();" in src                 # local binding decl
-    assert "Ck { ctx_: ctx_.clone()" in src              # local used as field value
+    assert "return Ck { ctx_: ctx_, msg:" in src        # local used as field value
     assert "pub struct Ctx {" in src                     # type name untouched
 
 
@@ -2654,6 +2655,85 @@ def test_vec_iterated_twice_cargo_builds(tmp_path):
     """The into_iter-twice + empty-accumulator payoff: it cargo-builds."""
     result = _cargo_check(tmp_path, emit.emit(compile_source(_ITER_TWICE_RVL)))
     assert result.returncode == 0, result.stderr
+
+
+# An empty list no later expression constrains still needs a concrete Rust
+# element type; `Vec<_>` alone is rejected by rustc with E0282.
+_UNREAD_EMPTY_LIST_RVL = """
+pub fn unused() -> Int {
+  let values = []
+  return 1
+}
+"""
+
+
+@needs_cargo
+def test_unread_untyped_empty_list_builds_as_unit_vec(tmp_path):
+    src = emit.emit(compile_source(_UNREAD_EMPTY_LIST_RVL))
+    assert "let values: Vec<()> = vec![];" in src
+    result = _cargo_test(
+        tmp_path,
+        src,
+        "#[test]\nfn unused_empty_list_does_not_block_build() { assert_eq!(unused(), 1); }\n",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_java_branch_shapes_fixture_builds_on_rust(tmp_path):
+    """The shared unused-empty-list fixture is valid for the Rust tier too."""
+    ir = compile_files([str(ROOT / "tests/fixtures/emit_java_corpus/branch_shapes.rvl")])
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+# issue #2911: the empty-list shapes rustc leaves as `Vec<_>` (E0282) when no
+# push, alias, declared type or typed context pins the element type. The tier
+# refuses each by name instead of emitting a module cargo rejects.
+_UNTYPED_EMPTY_LIST_SHAPES = {
+    "length": (
+        "pub fn length() -> Int {\n"
+        "  let values = []\n"
+        "  let n = values.length()\n"
+        "  return n\n"
+        "}\n"),
+    "equality": (
+        "pub fn equality() -> Bool {\n"
+        "  let a = []\n"
+        "  let b = []\n"
+        "  return a == b\n"
+        "}\n"),
+    "for_iterable": (
+        "pub fn walk() -> Int {\n"
+        "  let values = []\n"
+        "  var s = 0\n"
+        "  for (v of values) { s = s + 1 }\n"
+        "  return s\n"
+        "}\n"),
+    "reassigned": (
+        "pub fn reassigned() -> Int {\n"
+        "  var values = []\n"
+        "  values = []\n"
+        "  return 1\n"
+        "}\n"),
+    "nested": (
+        "pub fn nested() -> Int {\n"
+        "  let xs = [[]]\n"
+        "  return xs.length()\n"
+        "}\n"),
+    "read_in_if": (
+        "pub fn guarded(c: Bool) -> Int {\n"
+        "  let values = []\n"
+        "  if (c) { return values.length() }\n"
+        "  return 0\n"
+        "}\n"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_UNTYPED_EMPTY_LIST_SHAPES))
+def test_an_untypeable_empty_list_is_a_named_refusal(shape):
+    with pytest.raises(emit.EmitError, match="needs an element type"):
+        emit.emit(compile_source(_UNTYPED_EMPTY_LIST_SHAPES[shape]))
 
 
 # item 437(f): a `for` iterable that is DEAD after the loop MOVES instead of

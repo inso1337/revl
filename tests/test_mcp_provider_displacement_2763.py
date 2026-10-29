@@ -18,6 +18,7 @@ import os
 
 import pytest
 
+from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.mcp import server
 from revl.mcp.session import Session
@@ -62,6 +63,16 @@ def _provider_registered_by_relative_path(monkeypatch, tmp_path):
 
 def _compile(modules: dict) -> dict:
     return server.compile_under_authoring(CANDIDATE, None, modules=modules)
+
+
+def _handle_tool(name: str, arguments: dict, request_id: int) -> dict:
+    response = server.handle({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    })
+    return response["result"]["structuredContent"]
 
 
 @pytest.mark.parametrize("spelling", [
@@ -146,3 +157,54 @@ def test_target_derivation_refuses_the_same_module(tmp_path):
     ir = operator._compile_candidate({"source": CANDIDATE, "modules": {}})
     by_name = {c["name"]: c for c in ir["manifest"]["components"]}
     assert by_name["T"]["provides"] == ["tool"], by_name
+
+
+def test_a_nul_byte_in_a_module_key_is_a_named_admission_refusal():
+    """An invalid path-like module key is refused before realpath can leak an
+    internal ValueError through the agent-facing compile diagnostic."""
+    with pytest.raises(RevlError) as refused:
+        _compile({"bad\0module.rvl": HIJACK})
+
+    record = classify(refused.value)
+    assert record["code"] == "REVL", record
+    assert record["category"] == "admission", record
+    assert "NUL" in record["message"], record
+
+
+@pytest.mark.parametrize(("tool", "arguments"), [
+    ("revl_check", {"files": ["bad\0module.rvl"]}),
+    ("revl_check", {"source": CANDIDATE,
+                    "modules": {"bad\0module.rvl": LIB}}),
+    ("revl_export", {"path": "bad\0module.rvl"}),
+    ("revl_restore", {"snapshot": {"sources": {
+        "files_content": {"bad\0module.rvl": ""}}}}),
+    ("revl_restore", {"snapshot": {"sources": {
+        "dependencies": {"bad\0module.rvl": ""}}}}),
+    ("revl_edit", {"target": "bad\0module.rvl", "edits": []}),
+    ("revl_edit", {"edits": [{"target": "bad\0module.rvl",
+                                "anchor": "before", "replacement": "after"}]}),
+    ("revl_change", {"edit": {"target": "bad\0module.rvl", "edits": []}}),
+    ("revl_change", {"add": {"target": "bad\0module.rvl",
+                               "source": CANDIDATE}}),
+    ("revl_change", {"replace": {"component": "T", "source": CANDIDATE,
+                                   "target": "bad\0module.rvl"}}),
+    ("revl_test_run", {"cwd": "bad\0module.rvl",
+                       "selection": ["tests/test_mcp.py"]}),
+    ("revl_test_run", {"cwd": ".",
+                       "selection": ["tests/bad\0test.py"]}),
+], ids=["files", "modules", "export-path", "restore-files-content",
+        "restore-dependencies", "edit-target", "edit-entry-target",
+        "change-edit-target", "change-add-target", "change-replace-target",
+        "test-run-cwd", "test-run-selection"])
+def test_transport_nul_paths_are_refused_and_the_server_keeps_serving(
+    tool, arguments,
+):
+    refused = _handle_tool(tool, arguments, request_id=1)
+
+    assert refused["ok"] is False, refused
+    diagnostic = refused["diagnostics"][0]
+    assert diagnostic["category"] == "admission", diagnostic
+    assert "NUL" in diagnostic["message"], diagnostic
+
+    answered = _handle_tool("revl_check", {"source": CANDIDATE}, request_id=2)
+    assert answered["ok"] is True, answered

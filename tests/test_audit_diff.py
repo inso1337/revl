@@ -19,12 +19,17 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from revl import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.audit_diff import audit_report, crossings, evaluate  # noqa: E402
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 
 
 # a provider that emits through exactly one service call — the stable base
@@ -101,7 +106,10 @@ def test_a_first_class_laundered_new_extern_is_detected_and_fails():
     first-class value handed to a dispatcher (`indirect(write, a)`), never by
     name. `_boundary` folds that G4 first-class reach onto the surface, so the
     laundered widening produces the SAME `host:Quiet:write` crossing a direct
-    call would — audit --diff catches it instead of silently accepting it."""
+    call would, so audit --diff catches it instead of silently accepting it.
+    Since issue #2842 the compiler refuses the regeneration outright; the diff
+    reads IR, so it is measured on the IR an earlier compiler emitted
+    (`tests/_legacy_emission_ir.py`)."""
     prev_src = """
     extern emission fn write(msg: Str) -> Str = @py { return msg }
     fn passthru(x: Str) -> Str { return x }
@@ -119,7 +127,10 @@ def test_a_first_class_laundered_new_extern_is_detected_and_fails():
     }
     """
     prev = _audit(prev_src)
-    new = _audit(new_src)
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(new_src)
+    with value_rule_off():
+        new = _audit(new_src)
     result = evaluate(prev, new)
     assert "host:Quiet:write" in result["added"]
     assert result["widened"] is True

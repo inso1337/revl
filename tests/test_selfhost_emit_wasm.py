@@ -298,6 +298,23 @@ def test_fn_type_param_refused(emitted, reference):
     assert "<<UNSUPPORTED-fn-type>>" in got
 
 
+def test_an_untyped_empty_list_is_named(emitted, reference):
+    """issue #2911: an empty list literal no flow target or annotation pins has
+    no element type, and `_list_type` raises for it (and for the nested shape
+    `let xs = [[]]`, whose inner literal gets no type from a sibling item). Both
+    documents are reference REFUSALS with no bytes to agree with, so they live in
+    `emit_wasm_refusals/` and are pinned here. The port has no refusal channel;
+    it answers with the marker instead of silently emitting a count-only cell."""
+    for name in ("untyped_empty_list.rvl", "nested_empty_list.rvl"):
+        ir = compile_files([str(ROOT / "tests" / "fixtures"
+                                / "emit_wasm_refusals" / name)])
+        with pytest.raises(reference.EmitError,
+                           match="an untyped empty list literal needs an "
+                                 "expected List type"):
+            reference.emit(ir)
+        assert "<<UNSUPPORTED-EMPTY-LIST-TYPE>>" in emitted["emit_wasm_src"](ir)
+
+
 @pytest.mark.parametrize("source, reference_token, port_token", [
     pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
                  "i64.load", "<<UNSUPPORTED-coalesce>>", id="tagged-coalesce"),

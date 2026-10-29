@@ -72,6 +72,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from ..admit_profile import AdmissionProfile
@@ -520,15 +521,76 @@ def _operator_text_of(in_memory: dict, providers: dict) -> dict:
     return operator
 
 
-def _jail_refusal(arguments: dict) -> dict | None:
+def _source_map_paths(node, paths: list[str]) -> None:
+    """Collect the path keys of every in-memory source map in a call or snapshot."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _SOURCE_MAP_ARGUMENTS and isinstance(value, dict):
+                paths.extend(source_path for source_path in value
+                             if isinstance(source_path, str))
+            _source_map_paths(value, paths)
+    elif isinstance(node, list):
+        for item in node:
+            _source_map_paths(item, paths)
+
+
+def _edit_target_paths(value, paths: list[str]) -> None:
+    """Collect buffer targets that edit intents pass to path resolution."""
+    if not isinstance(value, dict):
+        return
+    target = value.get("target")
+    if isinstance(target, str):
+        paths.append(target)
+    edits = value.get("edits")
+    if isinstance(edits, list):
+        for edit in edits:
+            _edit_target_paths(edit, paths)
+
+
+def _nul_path_refusal(name: str | None, arguments: dict) -> dict | None:
+    """Refuse NUL bytes in every caller path before path normalization runs."""
+    paths: list[str] = []
+    _collect_path_arguments(arguments, paths)
+    _source_map_paths(arguments, paths)
+
+    if name == "revl_export" and isinstance(arguments.get("path"), str):
+        paths.append(arguments["path"])
+    if name == "revl_test_run":
+        if isinstance(arguments.get("cwd"), str):
+            paths.append(arguments["cwd"])
+        selection = arguments.get("selection")
+        if isinstance(selection, list):
+            paths.extend(item for item in selection if isinstance(item, str))
+    if name == "revl_edit":
+        _edit_target_paths(arguments, paths)
+    elif name == "revl_change":
+        for intent in ("edit", "replace", "add"):
+            _edit_target_paths(arguments.get(intent), paths)
+
+    invalid = sorted({path for path in paths if "\0" in path})
+    if not invalid:
+        return None
+    noun = "path" if len(invalid) == 1 else "paths"
+    verb = "contains" if len(invalid) == 1 else "contain"
+    named = ", ".join(repr(path) for path in invalid)
+    return {"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": "admission",
+        "message": (f"refused: {noun} {named} {verb} a NUL byte and "
+                    "cannot name a filesystem path"),
+        "hint": "Remove NUL bytes from path values and retry; nothing was read or written",
+    }], "note": "nothing was read, compiled or loaded"}
+
+
+def _jail_refusal(arguments: dict, name: str | None = None) -> dict | None:
     """The refusal payload when a tool call names a path outside the sanctioned
     roots, or `None` when every path is inside. Fails CLOSED: refused before the
     handler runs, so nothing is opened, stat-ed or compiled, and the message
     discloses only what the caller already sent.
 
-    Two carriers, one jail: a path ARGUMENT (`files`, `traceFile`, ...) and a
-    `use` path written inside transport-carried source (`_transport_use_escapes`,
-    roadmap 425 F2).
+    Three checks, one refusal: a NUL byte in any caller path
+    (`_nul_path_refusal`, before any normalisation), a path ARGUMENT outside the
+    sanctioned roots (`files`, `traceFile`, ...), and a `use` path written
+    inside transport-carried source (`_transport_use_escapes`, roadmap 425 F2).
 
     A relative path argument is first resolved against the sanctioned roots
     (`_absolutise_path_arguments`, issue #2038) — the operator sanctioned that
@@ -536,6 +598,9 @@ def _jail_refusal(arguments: dict) -> dict | None:
     server can mean. The comparison below then sees absolute paths only, and
     every real escape (`../`, a symlink out, an absolute path outside every
     root) is still refused with the caller's own spelling."""
+    nul_refusal = _nul_path_refusal(name, arguments)
+    if nul_refusal is not None:
+        return nul_refusal
     roots = _file_roots()
     unadmitted = _absolutise_path_arguments(arguments, roots)
     paths: list = []
@@ -937,6 +1002,14 @@ def _refuse_provider_displacement(modules: dict, providers: dict) -> None:
     taken = _provider_files(providers)
     dependencies = _provider_use_closure(providers)
     for key in modules:
+        if "\0" in key:
+            raise RevlError(
+                key, 1,
+                "admission refused: an in-memory module key contains a NUL "
+                "byte and cannot name a filesystem path",
+                hint="Use a module key without NUL bytes; this key is also "
+                     "checked as a path when preventing provider replacement",
+                category="admission")
         real = os.path.realpath(os.path.abspath(key))
         registered = taken.get(real)
         if registered is not None:
@@ -5264,6 +5337,192 @@ def _tool_explain(arguments: dict) -> dict:
     return explain(code)
 
 
+_AFFECTED_TESTS_MAX_PATHS = 256
+_AFFECTED_TESTS_MAX_PATH_LENGTH = 4096
+_AFFECTED_TESTS_ROOT_LIMIT = 8
+_AFFECTED_TESTS_SELECTOR_TIMEOUT = 10
+_AFFECTED_TESTS_SELECTOR_PROGRAM = """\
+import json
+import runpy
+import sys
+from pathlib import Path
+
+script, root, base = sys.argv[1:]
+selector = runpy.run_path(script)
+changed = json.load(sys.stdin)
+root = Path(root)
+added, deleted = selector["status_of_paths"](root, base, changed)
+selection = selector["answer_for"](changed, added, deleted, root)
+print(json.dumps(selection, separators=(",", ":")))
+"""
+
+
+def _affected_tests_answer(selection: dict, base: str | None) -> dict:
+    reason = str(selection.get("reason", "selection unavailable"))
+    selection = {**selection, "reason": reason.replace("\r", " ").replace("\n", " ")}
+    machine = "\n".join((
+        f"FULL {1 if selection.get('full') else 0}",
+        f"REASON {selection['reason']}",
+        f"PYTEST {' '.join(selection.get('pytest', []))}",
+        f"BACKENDS {' '.join(selection.get('backends', []))}",
+        f"GATES {' '.join(selection.get('gates', []))}",
+    ))
+    return {"ok": True, "base": base, "selection": selection, "machine": machine}
+
+
+def _affected_tests_full(reason: str, base: str | None = None) -> dict:
+    selection = {
+        "full": True,
+        "reason": reason,
+        "pytest": ["tests/"],
+        "backends": ["python", "go", "rust", "wasm", "java"],
+        "gates": ["conformance", "site-wheel", "ruff", "formal", "docs",
+                  "vocabulary", "census"],
+    }
+    return _affected_tests_answer(selection, base)
+
+
+def _run_affected_tests_selector(script: Path, root: Path, base: str,
+                                 paths: list[str]) -> tuple[dict | None, str | None]:
+    """Run the selector in a fresh, bounded process so tree edits cannot stale caches."""
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _AFFECTED_TESTS_SELECTOR_PROGRAM,
+             str(script), str(root), base],
+            cwd=root, input=json.dumps(paths), capture_output=True, text=True,
+            check=False, timeout=_AFFECTED_TESTS_SELECTOR_TIMEOUT, env=environment)
+    except subprocess.TimeoutExpired:
+        return None, (f"affected-test selector timed out after "
+                      f"{_AFFECTED_TESTS_SELECTOR_TIMEOUT} seconds -> full (fail safe)")
+    except OSError:
+        return None, "could not start affected-test selector -> full (fail safe)"
+    if completed.returncode != 0:
+        return None, "affected-test selector failed -> full (fail safe)"
+    try:
+        selection = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return None, "affected-test selector returned invalid data -> full (fail safe)"
+    if (not isinstance(selection, dict)
+            or not isinstance(selection.get("full"), bool)
+            or not isinstance(selection.get("reason"), str)
+            or any(not isinstance(selection.get(key), list)
+                   or any(not isinstance(item, str) for item in selection[key])
+                   for key in ("pytest", "backends", "gates"))):
+        return None, "affected-test selector returned invalid data -> full (fail safe)"
+    return selection, None
+
+
+def _tool_affected_tests(arguments: dict) -> dict:
+    """The MCP form of `tools/affected_tests.py` for changed repo-relative paths.
+
+    This is deliberately read-only and fail-safe: when the current directory is
+    not a revl worktree, no merge base exists, or the selector cannot run, the
+    caller receives the FULL gate and a reason instead of an empty answer.
+    """
+    paths = arguments.get("paths")
+    if not isinstance(paths, list) or any(not isinstance(item, str) or not item.strip()
+                                          for item in paths):
+        return _session_error("`paths` must be an array of non-empty changed paths")
+    if len(paths) > _AFFECTED_TESTS_MAX_PATHS:
+        return _affected_tests_full(
+            f"more than {_AFFECTED_TESTS_MAX_PATHS} changed paths -> full (fail safe)")
+    if any(len(path) > _AFFECTED_TESTS_MAX_PATH_LENGTH for path in paths):
+        return _affected_tests_full(
+            f"a changed path exceeds {_AFFECTED_TESTS_MAX_PATH_LENGTH} characters "
+            "-> full (fail safe)")
+
+    roots = _file_roots()
+    if len(roots) > _AFFECTED_TESTS_ROOT_LIMIT:
+        return _affected_tests_full(
+            f"more than {_AFFECTED_TESTS_ROOT_LIMIT} sanctioned roots -> full (fail safe)")
+    top = None
+    for allowed_root in roots:
+        try:
+            candidate = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=allowed_root, capture_output=True, text=True, check=False,
+                timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if candidate.returncode == 0 and candidate.stdout.strip():
+            top = candidate
+            break
+    if top is None:
+        return _affected_tests_full(
+            "no git worktree was found under the operator-sanctioned roots -> full "
+            "(fail safe)")
+    root = Path(top.stdout.strip()).resolve()
+    if not _within_roots(str(root), roots):
+        return _affected_tests_full(
+            "the worktree root is outside the operator-sanctioned roots -> full "
+            "(fail safe)")
+    selector_root = Path(__file__).resolve().parents[3]
+    script = selector_root / "tools" / "affected_tests.py"
+    if not script.is_file():
+        return _affected_tests_full(
+            "the installed revl checkout has no tools/affected_tests.py -> full (fail safe)")
+    if not (root / "src" / "revl").is_dir():
+        return _affected_tests_full(
+            "the current worktree is not a revl checkout -> full (fail safe)")
+    worktree_selector = root / "tools" / "affected_tests.py"
+    if not worktree_selector.is_file():
+        return _affected_tests_full(
+            "the current worktree has no tools/affected_tests.py -> full (fail safe)")
+    if (script.resolve() != worktree_selector.resolve() and
+            script.read_bytes() != worktree_selector.read_bytes()):
+        return _affected_tests_full(
+            "the installed selector differs from the worktree selector -> full (fail safe)")
+
+    base = None
+    for ref in ("origin/main", "main"):
+        try:
+            merged = subprocess.run(
+                ["git", "merge-base", ref, "HEAD"], cwd=root,
+                capture_output=True, text=True, check=False, timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if merged.returncode == 0 and merged.stdout.strip():
+            base = merged.stdout.strip()
+            break
+    if base is None:
+        return _affected_tests_full(
+            "no merge base with origin/main or main -> full (fail safe)")
+
+    changed = []
+    for raw in paths:
+        candidate = Path(raw.replace("\\", "/"))
+        absolute = candidate if candidate.is_absolute() else root / candidate
+        try:
+            resolved = absolute.resolve()
+            if not _within_roots(str(resolved), roots):
+                return _affected_tests_full(
+                    f"changed path {raw!r} is outside the operator-sanctioned roots "
+                    "-> full (fail safe)", base)
+            relative = resolved.relative_to(root)
+        except (OSError, ValueError):
+            return _affected_tests_full(
+                f"changed path {raw!r} is outside the worktree -> full (fail safe)",
+                base)
+        name = relative.as_posix()
+        if (name.startswith("tests/") and relative.name.startswith("test_")
+                and relative.suffix == ".py" and not resolved.exists()):
+            return _affected_tests_full(
+                f"test file {name} is missing (possibly deleted) -> full (fail safe)",
+                base)
+        changed.append(name)
+
+    selection, reason = _run_affected_tests_selector(
+        worktree_selector, root, base, sorted(set(changed)))
+    if reason is not None:
+        return _affected_tests_full(reason, base)
+    return _affected_tests_answer(selection, base)
+
+
 _SOURCE_INPUT = {
     "source": {"type": "string",
                "description": "inline .rvl source (use this for a generated component; "
@@ -5599,6 +5858,28 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_counterfactual,
+    },
+    {
+        "name": "revl_affected_tests",
+        "description": "Map changed repository paths to the same fail-safe test selection "
+                       "as `tools/affected_tests.py --format machine`. Pass repo-relative "
+                       "paths from the operator-sanctioned roots, up to 256 paths with "
+                       "4096 characters each. The answer includes `base` and `machine` "
+                       "(`FULL`, `REASON`, `PYTEST`, `BACKENDS`, `GATES`); if the "
+                       "worktree, merge base or selector is unavailable, it returns FULL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "maxItems": _AFFECTED_TESTS_MAX_PATHS,
+                          "items": {"type": "string",
+                                    "maxLength": _AFFECTED_TESTS_MAX_PATH_LENGTH},
+                          "description": "changed repo-relative paths; pass every path "
+                                         "touched by the proposed change"},
+            },
+            "required": ["paths"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_affected_tests,
     },
     {
         "name": "revl_swap",
@@ -7679,7 +7960,7 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
     # the path jail and the authoring gate run BEFORE the operator gate and
     # before any handler: a refusal here has read nothing, compiled nothing
     # and run nothing, so neither can be used as an oracle.
-    payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
+    payload = _jail_refusal(arguments, name) or _authoring_refusal(arguments)
     if payload is not None:
         return _canonicalised(payload, canonicalised)
     # operator capabilities (roadmap item 55): gate a mutating management

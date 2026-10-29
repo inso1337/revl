@@ -1,0 +1,14 @@
+// REFUSED G4 (issue #2842): a `fn` returns an arrow that calls an emission,
+// so whoever calls the arrow runs the emission with no `emit` call site.
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn mk() -> (Str) -> Int { return (x: Str) => send(x) }
+service Ops { emission fn m() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn m() {
+      let f = emit mk()
+      return f("a")
+    }
+  }
+}

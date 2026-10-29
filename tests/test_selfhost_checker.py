@@ -1652,8 +1652,8 @@ ACCEPTED_PROG_EXPR = [
     ("type Row = { name: Str, age: Int }", "1 == Some(1)"),
     ("type Row = { name: Str, age: Int }", "None == None"),
     ("type Row = { name: Str, age: Int }", "Ok(1) == Err(1)"),
-    ("", "Some(1) == Some(2.5)"),
-    ("", "Some(1) != Some(2.5)"),
+    ("", "Some(1) == Some(2)"),
+    ("", "Some(1.5) != Some(2.5)"),
     ("", "Ok(Some(1)) == Ok(Some(1))"),
     ("type S = A(Float) | B", "A(x) == A(x)"),
     ("type Box = Wrap(Any) | Empty", "Wrap(1) == Wrap(1)"),
@@ -1686,6 +1686,12 @@ ACCEPTED_PROG_EXPR = [
 ]
 
 REJECTED_PROG_EXPR = [
+    # issue #2715: an Int/Float mix NESTED in an equality is not widened
+    ("", "Some(1) == Some(2.5)"),
+    ("", "Some(1) != Some(2.5)"),
+    ("", "[1, 2] == [1.0, 2.0]"),
+    ("", "[[1]] != [[1.0]]"),
+    ("type Row = { i: Int, f: Float }", "{ i: 1, f: 2.5 } == { i: 1, f: 2 }"),
     # opt-escape: field access on an optional is refused
     ("", "Some(1).foo"),
     ("", "None.foo"),

@@ -443,6 +443,7 @@ UNGATED = {
     "revl_explain": "renders a diagnostic",
     "revl_grammar": "returns the grammar",
     "revl_idiom": "returns a fixed example document",
+    "revl_affected_tests": "runs the read-only selector under sanctioned roots",
     "revl_verbs": "returns the server's own verb schemas (issue #1697)",
     "revl_tools": "returns the tool surface",
     "revl_source": "reads one declaration of the held source; changes nothing "

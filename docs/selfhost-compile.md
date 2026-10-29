@@ -401,8 +401,10 @@ Still admitted silently, each listed on the issue:
 - gap 6: a function value passed where its parameter types differ by a type
   argument. The FN-TYPED `let` position is closed (the reference's message on
   both sides); the call-argument position is not.
-- gap 7: a generic record applied with the wrong number of type arguments. No
-  reproducer the reference refuses has been found yet.
+- gap 7: a declared type applied with the wrong number of type arguments
+  (`Box[Int, Int]` for `type Box[T]`, `Mb[Int]` for `type Mb = Jj(Int) | Nn`).
+  The reference refuses it where it is written (issue #2942); the native gate
+  does not count a declared head's arguments yet.
 - gap 8: an `Opt[Box[Str]]` match binder used as `Box[Int]`; a block-arm `let`
   is not typed against the binder.
 - gap 10: a prop body whose match block arm ends in an `if`; the reference

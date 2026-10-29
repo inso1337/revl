@@ -117,6 +117,32 @@ one run* — never a wall-clock time (docs/why-runtime.md §2).
 }
 ```
 
+### Residue incidents (counter, issue #2730)
+
+Counts `residue` events: one per `revl run` teardown that ended with something
+not undone, bucketed by the name of the residue check that failed (`registry`,
+`provisions`, `effects`, `listeners`, `inverse residue`, `models`). A teardown
+can fail several checks, so `by_check` can sum to more than `total`; `total` is
+the number of incidents. A clean teardown writes no event.
+
+The source is the run driver's residue proof at teardown (`src/revl/run.py`
+`_teardown`), the same checks it prints as `RESIDUE LEFT`; it records the check
+names only, never their detail text, because that text can render store
+contents. A `residue` event has no `component` and no `transition` (residue is a
+fact about the whole run), and an older recorder wrote none, so a trace
+recorded before this counter exists reports `total: 0` without that meaning the
+run was clean.
+
+```json
+"residue": {"total": 1, "by_check": {"inverse residue": 1}}
+```
+
+In the OTel export the event is an error span named `residue` with the failed
+check names in `revl.residue.checks`.
+
+Not counted here: admission rejections (the gate runs before a trace exists;
+tracked in issue #2730 slice 3).
+
 ## 3. Schema v1 graceful degradation
 
 The trace schema is v3 (docs/why-runtime.md §2); the fields these metrics need
@@ -128,6 +154,7 @@ field) simply lacks the input, and each metric degrades honestly:
 | --- | --- | --- |
 | emissions | `emit` events | a v1 trace has none → `total: 0` |
 | failures | `code` on the FAILED cause | no `code` → every failure buckets `"unclassified"` |
+| residue | `residue` events | a trace without them reports `total: 0` (it cannot say the run was clean) |
 | duration | `ts` on the paired events | completed lifecycles present but no `ts` → `{"unavailable": "ts not present (trace schema v1)"}` |
 
 The duration degrade is **detected by data, not by the `v` field**: the metric
@@ -166,6 +193,6 @@ attestation (`revl attest --verify`).
   metrics.
 
 The document `compute_metrics` returns has stable top-level keys `events`,
-`emissions`, `failures`, `lifecycleDuration` — exactly what `--json` prints,
+`emissions`, `failures`, `residue`, `lifecycleDuration` — exactly what `--json` prints,
 plus the optional `run` block described above, present only on an attested
 trace.

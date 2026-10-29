@@ -21,6 +21,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from revl.compiler import compile_files  # noqa: E402
 from revl import erase_report  # noqa: E402
@@ -203,11 +204,18 @@ def test_star_widening_crossing_is_enumerated(realms_ir):
     # the erase report must list the SAME class-(c) `*` crossing the
     # auto-approve ClassMap raises for a first-class emitting callable that
     # escapes in value position (item 414: the report was a second class fold
-    # blind to the widening).
+    # blind to the widening). The compiler refuses the source since issue
+    # #2842, so the report is measured on the IR an earlier compiler emitted
+    # (`tests/_legacy_emission_ir.py`).
     from revl.compiler import compile_source
+    from revl.errors import RevlError
     from revl.mcp.approval import ClassMap
+    from _legacy_emission_ir import value_rule_off
 
-    ir = compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
+    with pytest.raises(RevlError, match="cannot be used as a function value"):
+        compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
+    with value_rule_off():
+        ir = compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
     # ClassMap sees the widening as a class-(c) crossing capability `*`.
     reach = ClassMap(ir).classify_call("gw", "send")
     assert reach["class"] == "c" and "*" in reach["capabilities"]

@@ -1074,6 +1074,19 @@ def build_parser() -> argparse.ArgumentParser:
                            "canonical sequential baseline, and report any "
                            "interleaving that violates a property (py tier; "
                            "docs/design/295-schedule-testing.md)")
+    test.add_argument("--fault-profile", type=int, default=None, metavar="SEED",
+                      dest="fault_profile",
+                      help="fault profile: inject a seeded list of fault events "
+                           "drawn from the sweep points, judge each like the "
+                           "sweep, and print the seed, every injected fault and "
+                           "the unclassified count; the same seed injects the "
+                           "same sequence (py tier; docs/fault-tests.md, issue "
+                           "#2728)")
+    test.add_argument("--fault-profile-events", type=int, default=None,
+                      metavar="N", dest="fault_profile_events",
+                      help="with --fault-profile: how many fault events to draw "
+                           "(default 8; a composition with fewer sweep points "
+                           "gets all of them)")
     test.add_argument("-v", "--verbose", action="store_true",
                       help="print one PASS/FAIL line per test with its duration "
                            "(the py tier already prints one line per test; -v "

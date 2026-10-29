@@ -16,7 +16,7 @@
       "id": "modelcontextprotocol-sdk",
       "name": "@modelcontextprotocol/sdk",
       "ecosystem": "npm",
-      "version": "1.30.0",
+      "version": "1.32.0",
       "role": "candidate",
       "category": "tool-host",
       "registration_api": "McpServer.registerTool(name, config, handler)",
@@ -29,7 +29,7 @@
       ],
       "fetched": true,
       "artifact": {
-        "filename": "modelcontextprotocol-sdk-1.30.0.tgz"
+        "filename": "modelcontextprotocol-sdk-1.32.0.tgz"
       },
       "claims": [
         {
@@ -43,22 +43,22 @@
           "hits": [
             {
               "file": "package/dist/esm/server/mcp.d.ts",
-              "line": 289,
+              "line": 300,
               "symbol": "remove(): void"
             },
             {
               "file": "package/dist/esm/server/mcp.d.ts",
-              "line": 319,
+              "line": 330,
               "symbol": "remove(): void"
             },
             {
               "file": "package/dist/esm/server/mcp.d.ts",
-              "line": 341,
+              "line": 352,
               "symbol": "remove(): void"
             },
             {
               "file": "package/dist/esm/server/mcp.d.ts",
-              "line": 361,
+              "line": 372,
               "symbol": "remove(): void"
             }
           ],
@@ -75,22 +75,22 @@
           "hits": [
             {
               "file": "package/dist/esm/server/mcp.js",
-              "line": 646,
+              "line": 690,
               "symbol": "sendToolListChanged"
             },
             {
               "file": "package/dist/esm/server/mcp.js",
-              "line": 651,
+              "line": 695,
               "symbol": "sendToolListChanged"
             },
             {
               "file": "package/dist/esm/server/mcp.js",
-              "line": 765,
+              "line": 809,
               "symbol": "sendToolListChanged"
             },
             {
               "file": "package/dist/esm/server/mcp.js",
-              "line": 767,
+              "line": 811,
               "symbol": "sendToolListChanged"
             }
           ],
@@ -107,7 +107,7 @@
           "hits": [
             {
               "file": "package/dist/esm/server/mcp.d.ts",
-              "line": 44,
+              "line": 55,
               "symbol": "close(): Promise<void>"
             }
           ],

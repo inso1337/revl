@@ -202,6 +202,10 @@ BENCH_DEPENDENT_TESTS = (
     # lex, and they are the only exercise the gate's unlexable-file fallback
     # gets.
     "tests/test_no_embedded_frontend_document_1120.py",
+    # Issue #2872: pins the smoke lane's push `paths:` filter, which names
+    # three `bench/` documents the smoke corpora read, and derives that set
+    # from the tree, so a bench change must re-run it.
+    "tests/test_workflow_path_filters_2872.py",
 )
 
 # Self-host oracle tests, keyed by the selfhost/<stem>.rvl file they check.
@@ -2014,6 +2018,18 @@ def changed_files(root: Path, base: str | None):
     return sorted(names), added, deleted, base
 
 
+def status_of_paths(root: Path, base: str | None, paths):
+    """`(added, deleted)` among `paths`, relative to `base`.
+
+    `changed_files` learns this from the whole worktree; the MCP verb is handed
+    the changed paths instead, and still has to give the add/delete override the
+    same status the CLI would see for this tree.
+    """
+    _, added, deleted, _ = changed_files(root, base)
+    wanted = {_norm(f) for f in paths}
+    return added & wanted, deleted & wanted
+
+
 def _is_frontend_test(f: str) -> bool:
     return (f.startswith("tests/") and Path(f).name.startswith("test_")
             and f.endswith(".py"))
@@ -2364,6 +2380,22 @@ def _emit(result: dict, base: str, fmt: str) -> str:
     return "\n".join(lines)
 
 
+def answer_for(changed, added, deleted, root) -> dict:
+    """The selection for a diff whose changed/added/deleted sets are known.
+
+    `main` and the MCP `revl_affected_tests` verb both call this, so the
+    add/delete test override is applied exactly once, in one place, and the verb
+    cannot answer a narrower set than the CLI for the same tree (issue #2799
+    review).
+    """
+    result = (_test_add_delete_override(changed, added, deleted, root)
+              or select(changed, root))
+    # Issue #2103: the census gate is a property of the whole diff, and the
+    # override above may have answered for only part of it. `select()` has
+    # already applied this for its own answer; the call is a no-op then.
+    return add_census_gate(result, changed, root)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default=None,
@@ -2382,12 +2414,7 @@ def main(argv=None) -> int:
         root = Path(top) if top else Path.cwd()
 
     changed, added, deleted, base = changed_files(root, args.base)
-    result = (_test_add_delete_override(changed, added, deleted, root)
-              or select(changed, root))
-    # Issue #2103: the census gate is a property of the whole diff, and the
-    # override above may have answered for only part of it. `select()` has
-    # already applied this for its own answer; the call is a no-op then.
-    result = add_census_gate(result, changed, root)
+    result = answer_for(changed, added, deleted, root)
     if args.ci_backends:
         print(f"CI_BACKENDS {' '.join(ci_backends(changed, result, root))}".rstrip())
         return 0

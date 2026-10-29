@@ -59,6 +59,9 @@ if str(SRC) not in sys.path:
 from revl import attest, deploy  # noqa: E402
 from revl import placement as _placement  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "tests"))
+from _legacy_emission_ir import value_rule_off  # noqa: E402
+
 
 def _bridge():
     """backends/python/bridge.py, imported by path (it needs no cordis). Same
@@ -1374,6 +1377,15 @@ def _ir(source, tmp_path, name):
     return compile_source(source, str(tmp_path / name))
 
 
+def _legacy_ir(source, tmp_path, name):
+    """The IR a compiler from before issue #2842 emitted for a program that
+    uses an emission extern as a function value (`tests/_legacy_emission_ir.py`).
+    The current compiler refuses every such source
+    (`test_the_compiler_refuses_every_function_value_spelling`)."""
+    with value_rule_off():
+        return _ir(source, tmp_path, name)
+
+
 def test_a_plan_that_must_cross_a_non_deferrable_effect_is_refused(tmp_path):
     """The second CRITICAL's refusal: PREPARE cannot HOLD a class-(c) crossing,
     so admitting the plan would let a late partition strand this composition
@@ -1584,7 +1596,9 @@ def _fn_value_source(extern: str, spelling: str, *, emission: bool = True) -> st
 
 @pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
 def test_a_bare_emission_reached_as_a_function_value_is_refused(tmp_path, spelling):
-    ir = _ir(_fn_value_source(_BARE_CHARGE, spelling), tmp_path, "v.rvl")
+    """Federation admission refuses the IR on its own, for an IR built before
+    the compiler refused the source (issue #2842)."""
+    ir = _legacy_ir(_fn_value_source(_BARE_CHARGE, spelling), tmp_path, "v.rvl")
     assert deploy.reached_emissions(ir) == [
         {"component": "C", "extern": "charge", "deferrable": False,
          "idempotency_key": None, "via": None}]
@@ -1596,16 +1610,22 @@ def test_a_bare_emission_reached_as_a_function_value_is_refused(tmp_path, spelli
     assert verdict["deferred"] == []
 
 
+@pytest.mark.parametrize("emission", [True, False], ids=["emission", "plain"])
 @pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
-def test_the_compiler_sees_every_function_value_spelling_too(tmp_path, spelling):
-    """The same body on a PLAIN method is refused by G4, so the admission
-    decision and the compiler's diagnostic agree about each spelling."""
+def test_the_compiler_refuses_every_function_value_spelling(
+        tmp_path, spelling, emission):
+    """Issue #2842: the compiler refuses each spelling itself, whatever the
+    method declares, so no admitted program reaches `charge` except through
+    an `emit`-marked call. Federation admission above is the second line."""
     from revl.errors import RevlError
 
     with pytest.raises(RevlError) as excinfo:
-        _ir(_fn_value_source(_BARE_CHARGE, spelling, emission=False),
+        _ir(_fn_value_source(_BARE_CHARGE, spelling, emission=emission),
             tmp_path, "p.rvl")
-    assert "`S.go` is declared plain" in str(excinfo.value)
+    assert excinfo.value.code == "G4"
+    assert excinfo.value.message == (
+        "emission `charge` cannot be used as a function value; call it by "
+        "name under `emit` (G4)")
 
 
 @pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))

@@ -188,7 +188,7 @@ where the embeddable gate admits programs the reference compiler refuses.
 
 ### The third host, and how it was chosen
 
-The framework is `@modelcontextprotocol/sdk`, pinned at 1.30.0. The criterion
+The framework is `@modelcontextprotocol/sdk`, pinned at 1.32.0. The criterion
 that decided it is the one `bench/hosts.json` stated before any framework was
 named: a host with no unload path cannot fail the residue column honestly,
 because it scores maximally badly by construction for a reason that says
@@ -229,7 +229,7 @@ opposite reason: it was chosen because its unload path was known to exist.
 
 ### Running the third host
 
-The host is runnable. `bench/mcp_host/` pins `@modelcontextprotocol/sdk` 1.30.0
+The host is runnable. `bench/mcp_host/` pins `@modelcontextprotocol/sdk` 1.32.0
 and zod by `package-lock.json`, and `bench/mcp_host/probe.mjs` is its residue
 probe: it builds one `McpServer`, connects a `Client` over the SDK's in-memory
 transport, and installs and unloads a generated tool pack N times on that one

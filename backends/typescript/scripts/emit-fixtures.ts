@@ -49,16 +49,28 @@ export function pythonInterpreter(
 // `python` is a parameter only so a test can name an interpreter that does
 // not exist; every caller uses the default.
 export function emitFixture(fixture: string, outName: string, python = pythonInterpreter()): void {
+  const output = emitFixtureOutput(fixture, python)
+  mkdirSync(join(backend, 'tests', 'generated'), { recursive: true })
+  writeFileSync(join(backend, 'tests', 'generated', outName), output)
+}
+
+// The one spawn path for `emit.py`, shared by fixture setup and the
+// committed-output coverage check, so a missing interpreter is a reported
+// failure there instead of a silent skip.
+export function emitFixtureOutput(
+  fixture: string,
+  python = pythonInterpreter(),
+  maxBuffer = 16 * 1024 * 1024,
+): string {
   const result = spawnSync(
     python,
     ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
-    { cwd: backend, encoding: 'utf-8' },
+    { cwd: backend, encoding: 'utf-8', maxBuffer },
   )
   if (result.error || result.status !== 0) {
     throw new Error(describeEmitFailure(fixture, result))
   }
-  mkdirSync(join(backend, 'tests', 'generated'), { recursive: true })
-  writeFileSync(join(backend, 'tests', 'generated', outName), result.stdout)
+  return result.stdout
 }
 
 export function emitFixtures(): void {

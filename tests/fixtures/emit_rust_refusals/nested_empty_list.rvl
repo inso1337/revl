@@ -1,0 +1,12 @@
+// Issue #2911: `let xs = [[]]` leaves the inner `vec![]` with no element type
+// for rustc to unify with (no sibling item carries one), so the reference
+// REFUSES it by name. It cannot live in tests/fixtures/emit_rust_corpus:
+// there are no reference bytes to agree with.
+//
+// Both self-host ports name it instead: selfhost/emit_rust.rvl
+// (`<<UNSUPPORTED-EMPTY-LIST-TYPE:xs>>`) and selfhost/emit_wasm.rvl
+// (`<<UNSUPPORTED-EMPTY-LIST-TYPE>>`).
+pub fn nested() -> Int {
+  let xs = [[]]
+  return xs.length()
+}

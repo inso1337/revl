@@ -548,3 +548,64 @@ bring-up, mid-life, and (compensating) teardown. A full-toolchain **CI** run
 leaves the cap unset and sweeps *every* step of *every* component on *every*
 tier whose runtime is present; on a machine with all six runtimes that is the
 complete portability verdict.
+
+---
+
+## 11. The fault profile: a seeded run of fault events
+
+```
+revl test app.rvl --fault-profile 7                          # 8 events drawn with seed 7
+revl test app.rvl --fault-profile 7 --fault-profile-events 3
+```
+
+The sweep injects at every point in program order. A **profile** draws a seeded
+list of fault events from the same points (`fault.sweep_units` over every
+component), drives each through the sweep's own machinery and judges it with
+the sweep's full assertion set. The seed picks which points are hit and in what
+order. The draw depends only on the seed and the composition, not on the
+interpreter's hash seed, so two runs with one seed inject the same sequence
+(`tests/test_fault_profile_2728.py`). `--fault-profile-events N` sets how many
+events are drawn (default 8, without replacement); a composition with fewer
+sweep points gets all of them. Steps the sweep cannot address (section 9.3) are
+not in the pool; the run names each of them as `UNREACHABLE`, as the sweep does.
+
+Every event ends in exactly one of three states, so the contained, failed and
+unclassified counts add up to the injected count:
+
+- **contained**: every assertion held.
+- **failed**, with a classified cause: each problem line is tagged with the
+  assertion it broke (`[failed]`, `[no-residue]`, `[inverses-lifo]`,
+  `[siblings-unaffected]`), or `[refused]` when the py emitter refused the
+  document.
+- **unclassified**: the driver raised something other than a refusal, so the
+  event has no judged outcome and no cause.
+
+The run prints the seed on its first line, one line per injected fault, and a
+closing line with the counts, unclassified included. For the second command
+above, on a two-component composition with five sweep points:
+
+```
+fault profile, seed 7, py reference tier: 3 fault(s) drawn from 5 sweep point(s)
+  PASS event 1: step-fail Store step 2 (emit)
+      note: irreversible: step 2: emit log.write('store coming up') ...
+  PASS event 2: step-fail Sink step 1 (provision `log`)
+  PASS event 3: step-fail Store step 1 (effect `scratch`)
+
+seed 7: injected 3 fault(s), 3 contained, 0 failed, 0 unclassified
+```
+
+It exits 1 when any event did not end contained, so a run with an unclassified
+failure or any residue is red; rerun with the printed seed to reproduce it. A
+run that could inject nothing (no component has an addressable step) also exits
+1: nothing checked never reads as clean. `--fault-profile` is its own run mode
+and is refused with `--sweep`, `--mock-requires`, `--schedule-*` or `--filter`.
+Like the sweep it runs on the py reference tier only, and a missing cordis-py
+runtime is a skip with a reason.
+
+**Scope.** The only event kind the injection machinery has is `step-fail`: the
+component dies after step N. At one of a provider's steps that is a provider
+failing during its bring-up (its dependents are held out, section 9.2). A
+provider dying mid-life, network timeouts, a dropped mutual-TLS connection and
+a process crash at a chosen point (for the crash between an effect and its record, see
+[crash-recovery.md](crash-recovery.md), section 4c) are not drawn by the profile
+yet.

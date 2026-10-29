@@ -86,7 +86,7 @@ CANDIDATES = [
         "category": "tool-host",
         "name": "@modelcontextprotocol/sdk",
         "ecosystem": "npm",
-        "version": "1.30.0",
+        "version": "1.32.0",
         "role": "candidate",
         "registration_api": "McpServer.registerTool(name, config, handler)",
         "claims": [

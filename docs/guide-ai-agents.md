@@ -14,7 +14,10 @@ and around the mistakes you actually make.
 > `EXPR_REFUSED` tables in each emit.py in step (the conformance test
 > `tests/test_expr_dispatcher_conformance.py` makes "did you patch both paths"
 > a red test). Run `pytest tests/test_frontend.py tests/test_doc_examples.py`
-> for the fast frontend loop; the full suite (~60s) before committing.
+> for the fast frontend loop; run `make pre-merge-affected` for the lane gate
+> and selector receipt. If it reports `FULL` or the selector is unavailable,
+> it stops without starting the full gate. Review the receipt before explicitly
+> escalating with `make pre-merge`; CI runs the full suite.
 
 If you are changing RevL itself, follow [CONTRIBUTING.md](../CONTRIBUTING.md)
 and [the agent workflow](process.md). Run `./tools/pre_pr.sh --merge-ref`
@@ -333,6 +336,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_change` | **propose, verify, commit**: speculative by default (nothing swaps until `commit: true`), one call for a whole change: `{edit}`, `{replace: {component, source}}` or `{withdraw}`; loads if needed, plans (the withdrawal cascade), verifies (admission, gates, optional gauntlet) and commits only if all pass, naming every component touched | [mcp-reference.md](mcp-reference.md#revl_change) |
 | `revl_source` | read **one declaration** by symbol (`NotesHttp`, `<file>:Name`, `<file>:<line>`), optionally with the declarations it names and without comments, instead of the whole file | [mcp-reference.md](mcp-reference.md#revl_source) |
 | `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor / symbol), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
+| `revl_affected_tests` | map changed repository paths to the shared pre-merge test selection; unavailable worktree/base returns `FULL` with a reason | [mcp-reference.md](mcp-reference.md#revl_affected_tests) |
 | `revl_swap` · `revl_rollback` · `revl_undo` · `revl_unload` | replace a generation, undo the last swap, return to an earlier generation through the gate, tear down + prove no residue (R4) | [mcp-reference.md](mcp-reference.md#revl_swap) · [generation-history.md](generation-history.md) |
 | `revl_gauntlet` · `revl_quarantine` | grade a candidate (proved / tested / claimed), or prove an untrusted one in the wasm sandbox | [gauntlet.md](gauntlet.md) · [quarantine-tier.md](quarantine-tier.md) |
 | `revl_test_run` | run a selected test suite under the server's interpreter and read per-test outcomes, counts and verdict instead of scraping runner text | [mcp-reference.md](mcp-reference.md#revl_test_run) |

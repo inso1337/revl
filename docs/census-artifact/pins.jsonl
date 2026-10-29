@@ -84,6 +84,8 @@
 
 ["reference", "src/revl/taint.py"]
 
+["reference", "src/revl/type_arity.py"]
+
 ["reference", "src/revl/type_schema.py"]
 
 ["reference", "src/revl/typecheck.py"]

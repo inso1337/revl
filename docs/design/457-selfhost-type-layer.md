@@ -905,14 +905,14 @@ over-refused.
 
 Where each rule stays SILENT, and why the direction is the sound one. A
 scrutinee whose type the annotation engine cannot answer, or whose type is not a
-declared variant this text spells out — a record, a builtin, `Opt[T]` and
-`Result[T, E]`, a parameterized ADT's applied form — draws no exhaustiveness
-verdict, which is what `types.get(type_name)` does on the reference side too. A
+declared variant this text spells out — a record, a builtin, `Opt[T]` or
+`Result[T, E]` — draws no exhaustiveness verdict. An applied user variant does
+resolve through its declared head, matching the reference after issue #2926. A
 variant with an empty case list records no row, because `tenv_get` cannot tell an
 empty value from an absent key. A duplicate type name keeps its FIRST row rather
 than letting the second win, so nothing here claims a surface the reference
 never built (it refuses `duplicate type` instead, which this slice does not
-port). Each of those admits a program the reference may refuse; none refuses one
+port). Each remaining silence is a documented gap and does not refuse a program
 the reference admits.
 
 What it does NOT carry, out of T3b's own list: `duplicate function` /

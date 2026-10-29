@@ -1414,6 +1414,83 @@ def incomparable(filename: str, line: int, op: str,
         expected=left, actual=right)
 
 
+# The implicit numeric widenings `compatible` admits, as unordered pairs.
+_WIDENING_PAIRS = frozenset((frozenset(("Int", "Float")),
+                             frozenset(("Int32", "Int")),
+                             frozenset(("Int32", "Float"))))
+
+
+def _rank(name: str) -> int:
+    """Position on the widening ladder `Int32 -> Int -> Float`."""
+    return ("Int32", "Int", "Float").index(name) if name in ("Int32", "Int", "Float") else 3
+
+
+def nested_widening(lt: str | None, rt: str | None, types: dict | None = None,
+                    _depth: int = 0) -> tuple[str, str] | None:
+    """The first numeric widening NESTED inside an equality's operands.
+
+    A bare mixed operand (`x == 3.0`, `x: Int`) widens: the frontend marks it
+    (lower._mark_equality_widen) and every tier converts it. `compatible`
+    recurses elementwise, though, so it also admits the same mix one level
+    down: `List[Int] == List[Float]`, `Opt[Int] == Opt[Float]`, a record
+    literal with an `Int` in a `Float` field, `Box[Int] == Box[Float]`, and
+    `Opt[Float] == Int` through the injection. No marker reaches an element,
+    and the tiers disagreed (python true, TypeScript false, go no build), so
+    the checker refuses these (issue #2715). Returns the inner `(left,
+    right)` pair, or None when the only widening is at the top level."""
+    if not lt or not rt or lt == rt or _is_wildcard(lt) or _is_wildcard(rt):
+        return None
+    deeper = _depth + 1
+    l_struct, r_struct = structural_fields(lt), structural_fields(rt)
+    if l_struct is not None and r_struct is None:
+        r_struct = nominal_record_fields(rt, types)
+    elif r_struct is not None and l_struct is None:
+        l_struct = nominal_record_fields(lt, types)
+    if l_struct is not None and r_struct is not None:
+        for key in sorted(set(l_struct) & set(r_struct)):
+            hit = nested_widening(l_struct[key], r_struct[key], types, deeper)
+            if hit:
+                return hit
+        return None
+    lhead, largs = parse_type(lt)
+    rhead, rargs = parse_type(rt)
+    if frozenset((lhead, rhead)) in _WIDENING_PAIRS:
+        return (lt, rt) if _depth else None
+    if lhead in _FUNCTION_TYPE_HEADS or rhead in _FUNCTION_TYPE_HEADS:
+        return None
+    if lhead == rhead and len(largs) == len(rargs):
+        for a, b in zip(largs, rargs):
+            hit = nested_widening(a, b, types, deeper)
+            if hit:
+                return hit
+        return None
+    # `T` flows into `Opt[T]`: the injected side meets the option's payload.
+    if lhead == "Opt" and rhead != "Opt" and len(largs) == 1:
+        return nested_widening(largs[0], rt, types, deeper)
+    if rhead == "Opt" and lhead != "Opt" and len(rargs) == 1:
+        return nested_widening(lt, rargs[0], types, deeper)
+    return None
+
+
+def nested_widening_error(filename: str, line: int, op: str,
+                          lt: str | None, rt: str | None,
+                          inner: tuple[str, str]) -> RevlError:
+    """`==`/`!=` whose operands differ only by a widening inside them."""
+    left, right = render_type(lt), render_type(rt)
+    a, b = render_type(inner[0]), render_type(inner[1])
+    narrow, wide = (a, b) if _rank(a) < _rank(b) else (b, a)
+    example = " (`3.0`, not `3`, where a `Float` is meant)" if wide == "Float" else ""
+    return RevlError(
+        filename, line,
+        f"`{op}` cannot compare `{left}` with `{right}`; the `{narrow}` "
+        f"inside is not widened to `{wide}` (only a bare operand widens), so "
+        "the tiers would not agree on the answer",
+        hint=f"compare bare values (a bare `{narrow}` operand widens), or "
+             f"build both sides with the same element type{example}",
+        code="T1", category="type-mismatch",
+        expected=left, actual=right)
+
+
 def opt_escape_error(filename: str, line: int, what: str, target: str,
                      inner: str | None, alt: str | None = None) -> RevlError:
     """`Opt[T]` reached through as if it were `T`.
@@ -1470,6 +1547,10 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
         if filename and lt and rt and not (compatible(lt, rt, types)
                                            or compatible(rt, lt, types)):
             raise incomparable(filename, line, op, lt, rt)
+        if filename and lt and rt:
+            inner = nested_widening(lt, rt, types)
+            if inner:
+                raise nested_widening_error(filename, line, op, lt, rt, inner)
         return "Bool"
     if op in ("<", "<=", ">", ">="):
         for t in (lt, rt):

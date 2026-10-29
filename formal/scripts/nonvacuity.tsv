@@ -233,6 +233,14 @@ RevL.G4Deferred.body_reach_refused	necessity	RevL.G4Deferred.deferred_not_vacuou
 RevL.G4Deferred.refused_of_mem	instance	RevL.G4Deferred.deferred_not_vacuous	callInFn holds the illegal fn call beside a legal component call, and is refused
 RevL.G4Deferred.fixtures_decided	concrete	-	the four tests/fixtures/deferred_reach shapes: ok_emit_step admitted; a call in a fn body, a call in an arrow there, and a component value refused
 RevL.G4Deferred.deferred_not_vacuous	concrete	-	okEmitStep is admitted by the rule, callInFn and valueInComponent refused
+RevL.G4EmissionValue.legalB_iff	instance	RevL.G4EmissionValue.emission_value_not_vacuous,RevL.G4EmissionValue.fixtures_decided	legalB decides true on a call (Legal) and false on a fn-body value and a fn-body arrow, so the per-reach verdict is mutation-sensitive
+RevL.G4EmissionValue.emissionValueB_iff	instance	RevL.G4EmissionValue.emission_value_not_vacuous,RevL.G4EmissionValue.fixtures_decided	emissionValueB is true on okEmitCall (which satisfies EmissionValueOK) and false on valueInComponent, valueInFn and arrowInFn, so the printed EV verdict is mutation-sensitive
+RevL.G4EmissionValue.value_never_legal	necessity	RevL.G4EmissionValue.emission_value_not_vacuous	a value reach is refused in every scope; the refusal is not universal, since a call is admitted
+RevL.G4EmissionValue.arrow_in_fn_refused	necessity	RevL.G4EmissionValue.emission_value_not_vacuous	an arrow reach in a fn body is refused; the fn-body call in okEmitCall is admitted, so the refusal is scoped to the position
+RevL.G4EmissionValue.call_always_legal	instance	RevL.G4EmissionValue.emission_value_not_vacuous	a call is legal in both scopes, and okEmitCall holds a call in each
+RevL.G4EmissionValue.refused_of_mem	instance	RevL.G4EmissionValue.emission_value_not_vacuous	valueInComponent holds the illegal component value beside a legal fn call, and is refused
+RevL.G4EmissionValue.fixtures_decided	concrete	-	the four tests/fixtures/emission_value shapes: ok_emit_call admitted; a component value, a fn-body value and a fn-body arrow refused
+RevL.G4EmissionValue.emission_value_not_vacuous	concrete	-	okEmitCall is admitted by the rule, valueInComponent, valueInFn and arrowInFn refused
 RevL.G4Approval.coversB_iff	instance	RevL.G4Approval.approval_not_vacuous	the coverage decider: true on the exact and the glob scope over production.payment, false on staging.*
 RevL.G4Approval.edgeCoversB_iff	instance	RevL.G4Approval.approval_not_vacuous	the edge decider: false on no edge (scopedNoEdge), true on a covering edge (scopedExactEdge)
 RevL.G4Approval.crossingB_iff	instance	RevL.G4Approval.approval_not_vacuous,RevL.G4Approval.approval_row_not_vacuous	the per-crossing decision the oracle prints: false on the scoped-extern and other-edge fixtures, true on their covered twins

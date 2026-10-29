@@ -160,6 +160,10 @@ REJECTIONS = {
     "v2_duplicate_let_block_scope.rvl": "`y` is already declared in this function",
     "v2_keyword_as_field_name.rvl": "`type` is a reserved keyword — it cannot name a field",
     "v2_match_nonexhaustive.rvl": "non-exhaustive match: missing case `Invalid`",
+    # issue #2926: exhaustiveness over an applied generic still uses the
+    # declared variant's cases.
+    "t1_generic_variant_match_nonexhaustive.rvl":
+        "non-exhaustive match: missing case `Jj`",
     "v2_map_set_value_mismatch.rvl": "builtin `set` argument expects `Int`, got `Str`",
     "v2_provide_emission_fn.rvl": "provider methods are plain `fn` — emission-ness is inherited from the service declaration",
     "v2_map_value_unknown_method.rvl": "no builtin method `fetch`",
@@ -265,6 +269,11 @@ REJECTIONS = {
         "config field `on_row` of extern `load_rows` has type `Handler`, "
         "which reaches the opaque type `Handler`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
+    # issue #2842: a budget-free emission extern cannot escape its named `emit`
+    # call site as a first-class value.
+    "g4_first_class_emission_value.rvl":
+        "emission `send` cannot be used as a function value; call it by name "
+        "under `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     # item 294 Slice 1: a spawn that widens a parameterized capability (a child
     # reaching a path outside the parent's declared cone) is refused by the same

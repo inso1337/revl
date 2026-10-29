@@ -280,6 +280,14 @@ python3 scripts/axioms_gate.py \
   RevL.G4Deferred.refused_of_mem \
   RevL.G4Deferred.fixtures_decided \
   RevL.G4Deferred.deferred_not_vacuous \
+  RevL.G4EmissionValue.legalB_iff \
+  RevL.G4EmissionValue.emissionValueB_iff \
+  RevL.G4EmissionValue.value_never_legal \
+  RevL.G4EmissionValue.arrow_in_fn_refused \
+  RevL.G4EmissionValue.call_always_legal \
+  RevL.G4EmissionValue.refused_of_mem \
+  RevL.G4EmissionValue.fixtures_decided \
+  RevL.G4EmissionValue.emission_value_not_vacuous \
   RevL.G4Approval.coversB_iff \
   RevL.G4Approval.edgeCoversB_iff \
   RevL.G4Approval.crossingB_iff \
@@ -454,6 +462,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.parseStep_stepName \
   RevLOracle.a2OKB_iff \
   RevLOracle.deferredOKB_iff \
+  RevLOracle.emissionValueOKB_iff \
   RevLOracle.approvalRowB_iff \
   RevLOracle.bindingRowB_iff \
   RevLOracle.accessRowB_iff \

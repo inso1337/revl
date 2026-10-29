@@ -896,16 +896,6 @@ _REQUIRE_ENV = "REVL_REQUIRE_TIERS"
 # file -- it may only shrink, `test_no_stale_tier_exemptions` sees to that, and
 # `test_local_declaration_carries_a_real_reason`'s rules apply to the prose.
 _TIER_NOT_REQUIRED_IN_CI: dict[str, str] = {
-    "java": (
-        "`RUNNERS['java']` compiles against in-repo stubs unless "
-        "REVL_CORDIS4J_CLASSES points at real cordis4j classes, and that "
-        "variable is set only in `backend-java`, which never collects tests/ -- "
-        "the hole already enumerated in _KNOWN_WRONG_JOB above. Requiring the "
-        "java tier before that pairing is fixed would demand the stub path in "
-        "the job that has a JDK while the real path stays unmeasured, which "
-        "buys a green tick and no coverage. Close it with _KNOWN_WRONG_JOB, "
-        "in one change, not before."
-    ),
     "wasm": (
         "The wasm tier needs BOTH wasmtime and a cordis-wasm checkout, and only "
         "`backend-wasm` provisions the second (a pinned clone plus its own "
@@ -1003,6 +993,7 @@ def _parametrized_tiers(tree: ast.Module) -> set[str]:
 #: conftest.py turns the matching skip into a failure under the switch.
 _DIRECT_PROBES = {
     "go": re.compile(r"""which\(\s*["']go["']\s*\)|go_runtime_reason\("""),
+    "java": re.compile(r"java_runtime_reason\("),
 }
 
 _NOT_SOURCE = frozenset({".venv", "node_modules", "__pycache__", "target"})

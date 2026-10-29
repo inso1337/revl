@@ -1,7 +1,7 @@
 # MCP tool pack (TypeScript, @modelcontextprotocol/sdk)
 
 You are writing a **tool pack for a Model Context Protocol server**, in
-**TypeScript**, against `@modelcontextprotocol/sdk` 1.30.0. The host is a
+**TypeScript**, against `@modelcontextprotocol/sdk` 1.32.0. The host is a
 long-running MCP server that loads and unloads tool packs while it keeps
 serving clients. Your pack is loaded by calling its `install` function with the
 host's `McpServer`, and later unloaded.

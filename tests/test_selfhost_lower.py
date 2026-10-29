@@ -81,6 +81,57 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+_APPEND2640 = (ROOT / "tests" / "fixtures" / "g4_method_append_inverse.rvl").read_text(
+    encoding="utf-8")
+
+
+def _append2640_assignment_presence() -> str:
+    return _APPEND2640.replace(
+        "let known = store.get(id) != None",
+        "var known = false\n      known = store.get(id) != None")
+
+
+def _append2640_reassigned_key() -> str:
+    source = _APPEND2640.replace(
+        "let known = store.get(id) != None",
+        "var key = id\n"
+        "      let known = store.get(key) != None\n"
+        "      key = \"other\"")
+    source = source.replace("store.insert(id, (store.get(id) ?? []).push(msg))",
+                            "store.insert(key, (store.get(key) ?? []).push(msg))")
+    source = source.replace("store.insert(id, drop_last(store.get(id) ?? []))",
+                            "store.insert(key, drop_last(store.get(key) ?? []))")
+    return source.replace("store.remove(id)", "store.remove(key)")
+
+
+def _cfg_owner_summary(ns, source: str) -> list[tuple[str, list[str]]]:
+    tokens = ns["lex_src"](source)
+    owners = ns["cfg_owners_walk"](tokens, 0,
+                                    {"comps": [], "exts": []})
+    return [(owner["owner"], [field["fname"] for field in owner["flds"]])
+            for owner in owners["comps"]]
+
+
+def test_cfg_scan_keeps_a_component_after_a_service_header_without_a_body(ns):
+    # This malformed header is rejected before config checks in the full
+    # pipeline. Exercise the scanner directly: p_service's recovery cursor is
+    # i + 2, where this same-line component begins.
+    source = ("service Broken component Later { "
+              "config { handler: (Str) -> Str } }")
+    assert _cfg_owner_summary(ns, source) == [
+        ("component `Later`", ["handler"])]
+
+
+def test_cfg_scan_uses_the_expected_body_cursor_for_a_multiline_fn(ns):
+    source = ("fn identity(\n  value: Int\n) -> Int =\n  value\n"
+              "component Later { config { handler: (Str) -> Str } }")
+    tokens = ns["lex_src"](source)
+    equals = next(i for i, token in enumerate(tokens) if token["text"] == "=")
+    assert ns["cfg_fn_end"](tokens, 0) == equals
+    assert _cfg_owner_summary(ns, source) == [
+        ("component `Later`", ["handler"])]
+
+
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
@@ -815,6 +866,27 @@ _G2403 = "fn g(b: Box[Int]) -> Int { return b.v }\n"
 
 
 ACCEPTED_PROGRAMS = [
+    # Issue #2834: a local that shadows an emission extern's name is the local,
+    # not the extern, in both compilers.
+    # Each method shadows an emission name its own way; the program is admitted
+    # only if every one of them is, so one row witnesses all three.
+    ("issue 2834: a local, a block let or a for element shadowing an emission name stays admitted", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn a(send: Int) -> Int
+  emission fn b() -> Int
+  emission fn c() -> Int
+  emission fn d() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn a(send) { return send }
+    fn b() { if (true) { let send = 1 let g = send } return 0 }
+    fn c() { for (send of [1]) { let g = send } return 0 }
+    fn d() { let call = 1 let g = call return 0 }
+  }
+}
+"""),
     # Issue #1897: a provide method may mark a WITNESSED effect `verified`.
     ("a verified witnessed effect in a provide method", _VERIFIED_WIT + """service W { emission fn put(k: Str) }
 component C provides w: W {
@@ -1748,17 +1820,6 @@ fn f(o: Opt[Int]) -> Int {
   }
 }
 """),
-    # a PARAMETERIZED ADT: the reference looks its `types` entry up under the
-    # applied spelling (`Box[Int]`) and misses, so a missing case is admitted.
-    ("a match over a parameterized ADT draws no verdict", """
-type Box[T] = Full(T) | Empty
-
-fn f(b: Box[Int]) -> Int {
-  return match b {
-    Empty => 0,
-  }
-}
-"""),
     # an alias CHAIN that terminates is the whole point of the erasure; only a
     # cycle has no expansion.
     ("a terminating chain of transparent aliases", """
@@ -1904,6 +1965,12 @@ component Supervisor requires net: Kv provides sup: Sup {
     ("issue 1980: a write at another key between the read and the effect",
      _restoring(between='effect store.insert("j", "mid")\n'
                         'undo   store.remove("j")')),
+    # issue #2640: the scalar presence flag plus a proven drop-last helper
+    # keeps the inverse bounded; it does not retain the overwritten list.
+    ("issue 2640: a computed inverse removes the appended list item",
+     _APPEND2640),
+    ("issue 2640: assignment binds the presence check",
+     _append2640_assignment_presence()),
     # ---- issue #2403: the matching twins of the rows in REJECTED_PROGRAMS ----
     ("issue 2403: a generic record argument with the same type argument",
      _BOX2403 + _G2403 + "fn f(s: Box[Int]) -> Int { return g(s) }\n"),
@@ -2661,6 +2728,38 @@ component C requires kv: Kv {
     ("g4 1980: a read AFTER the effect",
      _restoring(read=None, undo="store.insert(k, p)",
                 after="let later = store.get(k)"), "G4"),
+    # issue #2640: the computed append is admitted only when the presence
+    # proof, key and exact pure drop-last helper establish a bounded inverse.
+    ("g4 2640: drop-last helper removes the wrong range",
+     _APPEND2640.replace("return xs.slice(0, xs.length() - 1)",
+                         "return xs.slice(1, xs.length())"), "G4"),
+    ("g4 2640: presence flag is overwritten after its check",
+     _APPEND2640.replace("let known = store.get(id) != None",
+                         "var known = store.get(id) != None\n"
+                         "      known = false"), "G4"),
+    ("g4 2640: a defaulted read is not a presence check",
+     _APPEND2640.replace("let known = store.get(id) != None",
+                         "let known = (store.get(id) ?? []) != None"), "G4"),
+    ("g4 2640: presence key differs from the restored key",
+     _APPEND2640.replace("drop_last(store.get(id) ?? [])",
+                         'drop_last(store.get("other") ?? [])'), "G4"),
+    ("g4 2640: key is reassigned after the presence check",
+     _append2640_reassigned_key(), "G4"),
+    ("g4 2640: a same-key write intervenes after the presence check",
+     _APPEND2640.replace(
+         "      effect store.insert(id, (store.get(id) ?? []).push(msg))",
+         "      effect store.insert(id, [\"between\"])\n"
+         "      undo store.remove(id)\n"
+         "      effect store.insert(id, (store.get(id) ?? []).push(msg))"),
+     "G4"),
+    ("g4 2640: a same-key effect nested under if is refused before G4",
+     _APPEND2640.replace(
+         "      effect store.insert(id, (store.get(id) ?? []).push(msg))",
+         "      if (msg != \"\") {\n"
+         "        effect store.insert(id, [\"between\"]) undo store.remove(id)\n"
+         "      }\n"
+         "      effect store.insert(id, (store.get(id) ?? []).push(msg))"),
+     "T1"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies
@@ -3887,6 +3986,237 @@ component C provides ops: Ops {
     ("issue 2403: a nested generic record argument with the wrong type argument",
      _BOX2403 + "fn g(b: Box[Box[Int]]) -> Int { return 1 }\n"
      "fn f(s: Box[Box[Str]]) -> Int { return g(s) }\n", "T1"),
+    # ---- issue #2842: a budget-free emission extern cannot escape as a value
+    ("issue 2842: an emission extern bound to a local is refused", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = send return f("x") } }
+}
+""", "G4"),
+    ("issue 2842: an emission extern passed to a function parameter is refused", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { return apply(send, "x") } }
+}
+""", "G4"),
+    ("issue 2842: a helper cannot return an emission extern value", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn get_send() -> (Str) -> Int { return send }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn invoke() {
+      let f = get_send()
+      let first = f("one")
+      return f("two")
+    }
+  }
+}
+""", "G4"),
+    ("issue 2842: a helper reaching an emission cannot escape as a value", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn bill(x: Str) -> Int { return send(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = bill return f("x") } }
+}
+""", "G4"),
+    ("issue 2842: an arrow cannot capture an emission extern value", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn invoke() {
+      let get_send = () => send
+      let f = get_send()
+      return f("x")
+    }
+  }
+}
+""", "G4"),
+    ("issue 2842: an emission extern stored in a record field is refused", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let r = { f: send } let g = r.f return g("x") } }
+}
+""", "G4"),
+    ("issue 2842: an emission extern stored in a list is refused", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let fs = [send] return fs[0]("x") } }
+}
+""", "G4"),
+    ("issue 2842: an arrow in a fn body that calls an emission is refused", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn h() -> (Str) -> Int { return (x: Str) => send(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = emit h() return f("x") } }
+}
+""", "G4"),
+    ("issue 2842: an arrow reaching an emission through a helper is refused", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn bill(x: Str) -> Int { return send(x) }
+fn h() -> (Str) -> Int { return (x: Str) => bill(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = emit h() return f("x") } }
+}
+""", "G4"),
+    # ---- issue #2834: the same rule over an extern with a declared ceiling
+    ("issue 2834: a budgeted emission extern bound to a local is refused", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = call return f("a") } }
+}
+""", "G4"),
+    ("issue 2834: a helper reaching a budgeted emission used as a value is refused", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn h(x: Str) -> Int { return call(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let g = h return g("a") } }
+}
+""", "G4"),
+    ("issue 2834: a budgeted emission passed to a function-typed argument is refused", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let r = apply(call, "a") return r } }
+}
+""", "G4"),
+    ("issue 2834: a module fn returning a budgeted emission under emit is refused", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn get() -> (Str) -> Int { return call }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = emit get() return f("a") } }
+}
+""", "G4"),
+    ("issue 2834: a module fn returning a budgeted emission without emit is refused", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn get() -> (Str) -> Int { return call }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = get() return f("a") } }
+}
+""", "G4"),
+    ("issue 2834: a module fn binding a budgeted emission locally is refused", """
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn go(x: Str) -> Int { let f = call return f(x) }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { return emit go("a") } }
+}
+""", "G4"),
+    ("issue 2834: a budgeted emission value in a compensate slot is refused", """
+service Db { emission fn execute(q: Str) -> Int }
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn invoke() -> Int }
+component C requires db: Db provides ops: Ops {
+  provide ops { fn invoke() { emit db.execute("r") compensate apply(call, "r") return 0 } }
+}
+""", "G4"),
+    # ---- issue #2834: a binding of the extern's name shadows it only where
+    # it is in scope (the reference's lexical `scope`), not anywhere in the
+    # component
+    ("issue 2834: a parameter or a let of another method does not shadow an emission value", """
+extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn a(send: Int) -> Int
+  emission fn c() -> Int
+  emission fn b() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn a(send) { return send }
+    fn c() { let send = 1 return send }
+    fn b() { return apply(send, "x") }
+  }
+}
+""", "G4"),
+    ("issue 2834: a closed block, a finished loop or a later let does not shadow an emission value", """
+extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
+fn apply(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+service Ops { emission fn a(send: Int) -> Int
+  emission fn b() -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn a(send) { return 0 }
+    fn b() {
+      if (true) { let send = 1 }
+      for (send of [1]) { }
+      let r = apply(send, "x")
+      let send = 2
+      return r
+    }
+  }
+}
+""", "G4"),
+    ("issue 2842: a sync arrow cannot wrap an async-typed parameter", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { return (y) => c(y) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a sync arrow cannot call an alias of an async-typed parameter", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { let g = c
+ return (y) => g(y) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a fn with an async parameter cannot call a let-bound arrow factory", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { let k = (h) => (y) => h(y)
+ return k(c) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a fn with an async parameter cannot call an immediately applied arrow", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { return ((h) => (y) => h(y))(c) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
+    ("issue 2842: a fn with an async parameter cannot call a nested immediately applied arrow", """
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+extern emission async fn aop(x: Str) -> Str = @py { return x }
+fn wrapc(c: (Str) -> Async[Str]) -> (Str) -> Str { return ((h) => (z) => (y) => h(y))(c)(1) }
+fn get() -> (Str) -> Str { return wrapc(y => aop(y)) }
+service Ops { emission async fn invoke(x: Str) -> Str }
+component C provides ops: Ops { provide ops { async fn invoke(x) {
+  let f = emit get()
+  return f(x)
+} } }
+""", "A1"),
 ]
 
 
@@ -3906,6 +4236,40 @@ def test_rejected_programs_agree(admit, case):
     assert ref_tag == tag, \
         f"corpus bug: reference tag for {name} is {ref_tag!r}, expected {tag!r}"
     _agree(admit, src)
+
+
+def test_generic_variant_exhaustiveness_matches_reference(admit):
+    """Issue #2926: both checkers resolve an applied variant to its declared head."""
+    _agree(admit, _fixture("t1_generic_variant_match_nonexhaustive"))
+    for arms in ("Jj(x) => x,\n    Nn => 0,", "_ => 0,"):
+        src = f"""type Mb[T] = Jj(T) | Nn
+
+fn f(m: Mb[Int]) -> Int {{
+  return match m {{
+    {arms}
+  }}
+}}
+"""
+        _agree(admit, src)
+
+
+def test_issue_2842_scope_and_non_emission_controls_stay_admitted(admit):
+    shadowed = """extern emission fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn invoke(send: (Str) -> Int) -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke(send) { let alias = send return 1 } }
+}
+"""
+    pure = """extern pure fn format_name(x: Str) -> Str = @py { return x }
+service Ops { emission fn invoke() -> Int }
+component C provides ops: Ops {
+  provide ops { fn invoke() { let f = format_name let name = f("x") return 1 } }
+}
+"""
+    assert _ref(shadowed) == ("", "")
+    assert _ref(pure) == ("", "")
+    _agree(admit, shadowed)
+    _agree(admit, pure)
 
 
 # Parse refusals the gate spells in the reference's words. They cannot be

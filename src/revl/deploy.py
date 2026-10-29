@@ -2099,11 +2099,11 @@ def request_commit(transport, request: CommitRequest, *,
 # mistaken for one that admitted.
 #
 # Deliberately NOT here, and named so the boundary stays explicit (all §1.2 /
-# [REMAINS] or Deferred): STAGING the sliced bundle over scp/rsync (this slice
-# assumes the bundle is already staged at the path the request names), the mTLS
-# staging identity (R5), the replicated WAL, the partition-safe distributed
-# commit coordinator and its two-phase commit/ABORT over > 1 host (S3), the
-# container/microVM transport, and the Ed25519 migration a genuinely
+# [REMAINS] or Deferred): the mTLS staging identity (R5; staging the sliced
+# bundle over scp under the pinned host key has since landed as
+# :func:`stage_bundle_over_ssh`), the replicated WAL, the partition-safe
+# distributed commit coordinator and its two-phase commit/ABORT over > 1 host
+# (S3), the container/microVM transport, and the Ed25519 migration a genuinely
 # cross-trust-domain deploy needs (S2.4 / S5-A1).
 
 #: The subcommand the far host exposes as the runner. The conductor never trusts

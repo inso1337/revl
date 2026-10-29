@@ -1,0 +1,1 @@
+{"case": "oracle-reject:issue 2842: a sync arrow cannot call an alias of an async-typed parameter", "buckets": ["agree-refuse/A1"]}

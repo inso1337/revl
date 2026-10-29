@@ -52,7 +52,7 @@ it:
  "cause":{"kind":"trigger","detail":"withdrawn by operator (revl run --withdraw PgDatabase)"},"ts":1235.1}
 ```
 
-Three `event` kinds (`load`, `withdraw`, and the v2 `emit`) and four `cause`
+Four `event` kinds (`load`, `withdraw`, the v2 `emit` and the v3 `residue`) and four `cause`
 kinds:
 
 | cause kind | on | means |
@@ -135,6 +135,21 @@ v1/v2 event is still a valid, fully-handled record.
   role` the crossing names. All three are compile-time facts, so they are
   `revl-controlled`. A crossing with no grammar (an unvalidated emission) or no
   declared role **omits** the field rather than writing an empty value.
+
+* **`residue`** (a fourth `event` kind, issue #2730): written by `revl run`'s
+  teardown when its residue proof reports something not undone, one event per
+  such teardown and none for a clean one. Like `emit` it has no `transition`;
+  unlike every other kind it has no `component`, because residue is a fact about
+  the whole run. `checks` lists the names of the proof checks that failed, never
+  their detail text:
+
+  ```json
+  {"v":3,"seq":9,"gen":1,"event":"residue","checks":["inverse residue"],
+   "cause":{"kind":"trigger","detail":"teardown left residue"},"ts":1240.0}
+  ```
+
+  A reader that does not model residue ignores it. `revl metrics` counts it
+  (docs/revl-metrics.md) and the OTel export maps it to an error span.
 
 * **the attested-run header** (issue #2730): `revl run --trace FILE
   --attestation ATTESTATION.json` records the admission's identity on the

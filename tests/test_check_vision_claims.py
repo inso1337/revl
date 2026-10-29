@@ -229,6 +229,14 @@ def test_a_formal_status_claim_that_matches_the_ledger_passes(tree):
     _silent("G1 is `partial`.", tree, "formal-status")
 
 
+def test_readme_formal_status_claims_are_checked(tree):
+    _, findings = gate.run(
+        "G6 is `partial`.", tree, ["formal-status"], doc_rel="README.md")
+    assert len(findings) == 1, findings
+    assert "G6" in findings[0][1]
+    assert "formal/STATUS.md" in findings[0][1]
+
+
 def test_lists_and_ranges_check_each_guarantee_status(tree):
     _silent("G2, G3 and G7 are `full`.", tree, "formal-status")
     _silent("G2 through G9 are `full`.", tree, "formal-status")

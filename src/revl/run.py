@@ -1370,6 +1370,16 @@ class _Driver:
             ts=time.monotonic())))
         self._seq += 1
 
+    def _record_residue(self, checks: list[str]) -> None:
+        """Issue #2730 slice 2: teardown ended with something not undone. One
+        event per teardown, naming the failed residue checks (never their
+        detail text, which can render store contents)."""
+        self._events.append(self._stamp_header(why_runtime.make_residue_event(
+            self._seq, self.generation, checks,
+            why_runtime.cause_trigger("teardown left residue"),
+            ts=time.monotonic())))
+        self._seq += 1
+
     def _record_emit(self, component: str, capability: str, key: str,
                      cause: dict, *, llm: dict | None = None,
                      activation_id: str | None = None) -> None:
@@ -2743,6 +2753,9 @@ class _Driver:
                 or "every loaded member unloaded, none reported loaded"))
         for name, ok, detail in checks:
             self._log("ok" if ok else "FAIL", name, detail)
+        left = [name for name, ok, _ in checks if not ok]
+        if left:
+            self._record_residue(left)
         print("  no residue — the composition left nothing behind"
               if all(ok for _, ok, _ in checks)
               else "  RESIDUE LEFT — see FAILs above")

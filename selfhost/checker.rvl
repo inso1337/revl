@@ -312,6 +312,107 @@ fn eq_compatible(lt: Str, rt: Str, tt: Tt) -> Bool {
   return compat_tt(lt, rt, tt) || compat_tt(rt, lt, tt)
 }
 
+// typecheck.nested_widening (issue #2715): the first numeric widening NESTED
+// inside an equality's operands. A bare mixed operand widens; the same mix
+// inside a list, an option, a record or a type argument is refused, because no
+// marker reaches an element and the tiers disagreed on the answer.
+type Widen = { hit: Bool, l: Str, r: Str }
+
+fn no_widen() -> Widen { return { hit: false, l: "", r: "" } }
+
+fn widen_rank(t: Str) -> Int {
+  if (t == "Int32") { return 0 }
+  if (t == "Int") { return 1 }
+  if (t == "Float") { return 2 }
+  return 3
+}
+
+fn widening_pair(a: Str, b: Str) -> Bool {
+  return a != b && widen_rank(a) < 3 && widen_rank(b) < 3
+}
+
+fn nested_widening(lt: Str, rt: Str, tt: Tt, d: Int) -> Widen {
+  // No depth cap, as in the reference: each step descends into a strictly
+  // smaller spelling on at least one side (a nominal record is resolved only
+  // against a structural side, which shrinks), so the walk ends.
+  if (lt == rt || is_wildcard_ty(lt) || is_wildcard_ty(rt)) {
+    return no_widen()
+  }
+  let ls = structural_parse(lt)
+  let rs = structural_parse(rt)
+  var lrec = ls.is_rec
+  var rrec = rs.is_rec
+  var lf = ls.fields
+  var rf = rs.fields
+  if (lrec && !rrec) {
+    let n = nominal_rec_fields(rt, tt)
+    rrec = n.is_rec
+    rf = n.fields
+  } else if (rrec && !lrec) {
+    let n = nominal_rec_fields(lt, tt)
+    lrec = n.is_rec
+    lf = n.fields
+  }
+  if (lrec && rrec) {
+    var names: List[Str] = []
+    var i = 0
+    while (i < lf.length()) {
+      names = names.push(lf[i].name)
+      i += 1
+    }
+    let ks = sort_strs(names)
+    var j = 0
+    while (j < ks.length()) {
+      if (rec_has(rf, ks[j])) {
+        let w = nested_widening(struct_field_ty(lf, ks[j]),
+                                struct_field_ty(rf, ks[j]), tt, d + 1)
+        if (w.hit) { return w }
+      }
+      j += 1
+    }
+    return no_widen()
+  }
+  let lp = parse_type(lt)
+  let rp = parse_type(rt)
+  if (widening_pair(lp.head, rp.head)) {
+    if (d > 0) { return { hit: true, l: lt, r: rt } }
+    return no_widen()
+  }
+  if (lp.head == "->" || rp.head == "->" || lp.head == "Fn" || rp.head == "Fn") {
+    return no_widen()
+  }
+  if (lp.head == rp.head && lp.args.length() == rp.args.length()) {
+    var k = 0
+    while (k < lp.args.length()) {
+      let w = nested_widening(lp.args[k], rp.args[k], tt, d + 1)
+      if (w.hit) { return w }
+      k += 1
+    }
+    return no_widen()
+  }
+  if (lp.head == "Opt" && rp.head != "Opt" && lp.args.length() == 1) {
+    return nested_widening(lp.args[0], rt, tt, d + 1)
+  }
+  if (rp.head == "Opt" && lp.head != "Opt" && rp.args.length() == 1) {
+    return nested_widening(lt, rp.args[0], tt, d + 1)
+  }
+  return no_widen()
+}
+
+// typecheck.nested_widening_error, message for message.
+fn nested_widening_refusal(op: Str, lt: Str, rt: Str, w: Widen) -> Infer {
+  let a = render_type(w.l)
+  let b = render_type(w.r)
+  let narrow = widen_rank(a) < widen_rank(b) ? a : b
+  let wide = widen_rank(a) < widen_rank(b) ? b : a
+  return refuse("T1", "`".concat(op).concat("` cannot compare `")
+                  .concat(render_type(lt)).concat("` with `")
+                  .concat(render_type(rt)).concat("`; the `").concat(narrow)
+                  .concat("` inside is not widened to `").concat(wide)
+                  .concat("` (only a bare operand widens), so the tiers ")
+                  .concat("would not agree on the answer"))
+}
+
 // `join` with the table: the reference's `join(a, b, types)`.
 fn join_tt(a: Str, b: Str, tt: Tt) -> Str {
   if (a == "" || b == "") { return "" }
@@ -325,6 +426,10 @@ fn binop_type(op: Str, lt: Str, rt: Str, tt: Tt) -> Infer {
   if (op == "==" || op == "!=" || op == "===" || op == "!==") {
     if (lt != "" && rt != "" && !eq_compatible(lt, rt, tt)) {
       return incomparable(op, lt, rt)
+    }
+    if (lt != "" && rt != "") {
+      let w = nested_widening(lt, rt, tt, 0)
+      if (w.hit) { return nested_widening_refusal(op, lt, rt, w) }
     }
     return ok_ty("Bool")
   }

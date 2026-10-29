@@ -14,4 +14,7 @@ fn divmod(a: Int, b: Int) -> Int {
 fn realdiv(a: Float, b: Float) -> Float { return a / b }
 fn cmps(a: Int, b: Int) -> Bool { return a < b && a <= b || a > b }
 fn eqs(a: Int, b: Int) -> Bool { return a == b && a != b }
+fn lit_eqs(a: Int, s: Str, b: Bool) -> Bool { return a == 3 && s != "x" && b == true }
+fn typed_eqs(a: Int, m: Map[Str, Int], f: Map[Str, Float]) -> Bool { return a * 2 == 4 && -a == 3 && m["k"] == 1 && f["k"] == 1 && 1 == 1 }
+fn mixed_eq(x: Float) -> Bool { return x == 3 }
 fn boolnot(a: Bool) -> Bool { return !a }

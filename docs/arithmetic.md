@@ -447,6 +447,39 @@ unequal to every `Int` and to itself, and `1` never equals `+Inf`; the
 executing cross-tier probe pins all three cases alongside the two operand
 orders, so a tier that papers over binary64 with a custom equality fails.
 
+**Only a bare operand widens.** The marker sits on an operand, so it reaches a
+scalar and nothing inside one. `compatible` recurses elementwise, and before
+this rule the checker also accepted the same mix one level down:
+`List[Int] == List[Float]`, `Opt[Int] == Opt[Float]` (and `Some(3) ==
+Some(3.0)`), `Opt[Float] == 3` through the `Opt` injection, a record literal
+with an `Int` in a `Float` field (`r == { i: 3, f: 3 }`), `Box[Int] ==
+Box[Float]`, and `List[Int32] == List[Int]`. The tiers then disagreed: python
+answered true, TypeScript compared `3n` with `3` inside `revlEq` and answered
+false, and go did not build or answered false (it answered true only for the
+record literal, which it types from the declared record). Converting every element would make `==` cost a
+copy of both values, so the checker refuses the comparison instead (`T1`,
+"the `Int` inside is not widened to `Float` (only a bare operand widens)"),
+in the reference and in the self-hosted checker, so no tier reaches such a
+comparison. Compare the scalars (`r.i == r.f`, `xs[0] == 3.0`), or build both
+sides with one element type (`3.0`, not `3`, where a `Float` is meant). A mix
+of one element type on both sides (`[1] == [1]`, `Some(3) == 3`) is
+unaffected. `tests/test_mixed_numeric_equality_tiers.py` compares each shape's
+outcome on ts and go (rust and java when `REVL_CROSS_TIER_SLOW=1` is set) with
+python's: it fails on base wherever a tier diverged, and after the fix every
+tier refuses the shape at check time, so nothing executes.
+
+This rule covers the equality site only, where the two operand TYPES differ.
+An `Int` put into a `Float` slot BEFORE the comparison is a separate gap,
+issue #2938: `let xs: List[Float] = [1, 2]`, `A(3)` for `type S = A(Float) |
+B`, a `{ i: 3, f: 3 }` argument to a `{ i: Int, f: Float }` parameter, and
+`Some(3)` or `[3]` passed into an `Opt[Float]` or `List[Float]` parameter all
+check, because the slot accepts the nested `Int`, but the slot does not convert
+it. Both operands of a later `==` are then `Float`-typed, nothing is refused,
+and the tiers still disagree (python true, TypeScript false, and go false on
+the `List[Float]` let). The same test file pins those five shapes as strict
+expected failures. A `List[Int]` VALUE passed into a `List[Float]` parameter
+is the related issue #2937.
+
 ## Sized integers: `Int32`
 
 `Int` is the right default — it indexes, counts and sizes things, which is the

@@ -43,6 +43,109 @@ from .refusal import refusals
 
 BACKENDS = backends_root()
 
+
+# --- capturing a child's output (issue #2977) -------------------------------
+#
+# Every input this module hands a child is written as UTF-8, so every child's
+# output is read back as UTF-8 as well, explicitly. A bare
+# `subprocess.run(..., text=True)` decodes with the host's locale encoding and
+# `errors="strict"`: on a host whose locale is a single-byte codepage, a tick
+# or a box-drawing character in a child's output raised
+# `UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d` out of the
+# capture, left `stdout`/`stderr` as `None`, and the next `result.stdout +
+# result.stderr` then raised `TypeError`. That crash is upstream of every
+# assertion, so the child's real result reached nobody: two composition targets
+# were reported as failures naming no test at all.
+#
+# A decode error must therefore not be able to end the capture. The bytes are
+# decoded with `errors="surrogateescape"`, which maps each byte that is not
+# valid UTF-8 to one lone surrogate instead of raising, and `_decoded` then
+# turns those surrogates into U+FFFD and counts them. Using the surrogates as
+# the intermediate step is what makes the count exact: a lone surrogate has no
+# UTF-8 encoding, so one in the decoded text can only have come from a byte
+# that could not be decoded, never from the child printing U+FFFD itself. The
+# count is reported against the child that produced it, so an undecodable byte
+# is stated and attributed rather than silently swallowed, and the rest of the
+# output still reaches the report.
+_SURROGATE_ESCAPES = {code: 0xFFFD for code in range(0xDC80, 0xDD00)}
+
+
+def _decoded(text: str) -> "tuple[str, int]":
+    """*text* with every undecodable byte shown as U+FFFD, and how many.
+
+    The input is the `errors="surrogateescape"` decoding of a child's output;
+    the output is safe to print, compare and write anywhere.
+    """
+    # No `text or ""` guard: with `errors=` set on the capture no decode can
+    # fail, so neither stream can be `None` any more, and a `None` reaching
+    # here would be a new defect worth raising rather than one to absorb.
+    clean = text.translate(_SURROGATE_ESCAPES)
+    if clean == text:
+        return (text, 0)
+    return (clean, sum(1 for char in text if "\udc80" <= char <= "\udcff"))
+
+
+def _undecodable_note(argv: list, count: int) -> str:
+    """What is printed when a child's output was not valid UTF-8.
+
+    Deliberately ASCII, including the name of the character it talks about: it
+    is printed on the host that could not decode the byte, and a console on a
+    single-byte codepage cannot encode U+FFFD either.
+    """
+    child = Path(str(argv[0])).name if argv else "the child"
+    bytes_ = "byte that is" if count == 1 else "bytes that are"
+    return (f"note: {child} printed {count} {bytes_} not valid UTF-8; "
+            f"shown as U+FFFD in its output below")
+
+
+def _reporting_cannot_crash() -> None:
+    """Let the report's own streams survive a child's characters (issue #2977).
+
+    Decoding the capture as UTF-8 is half of it. The text then goes to a
+    console whose encoding is still the host's, and on a single-byte codepage
+    that write is the same defect from the other side: a tick, a box-drawing
+    character or the U+FFFD standing in for an undecodable byte has no cp1252
+    encoding, so `print` raises `UnicodeEncodeError` and destroys the child's
+    result exactly as the strict decode did, upstream of every assertion.
+
+    `errors="backslashreplace"` on the two report streams makes that write
+    unraisable and loses nothing a person needs: a character the console cannot
+    encode is written as its own escape, so it is still visible and still
+    identifies itself. A stream with no `reconfigure` (a plain replaced object,
+    an in-memory stub) is left exactly as it is.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError, TypeError):  # pragma: no cover - not a file stream
+            pass
+
+
+def _captured(argv: list, returncode: int, stdout: str, stderr: str,
+              ) -> subprocess.CompletedProcess:
+    """One `CompletedProcess` whose output is decoded text, never `None`."""
+    out, out_bad = _decoded(stdout)
+    err, err_bad = _decoded(stderr)
+    if out_bad or err_bad:
+        print(_undecodable_note(argv, out_bad + err_bad))
+    return subprocess.CompletedProcess(argv, returncode, out, err)
+
+
+def _capture(argv: list, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` for every child this module reads (issue #2977).
+
+    The one place the capture's decoding is decided: UTF-8, and a byte that
+    cannot be decoded is reported rather than raised.
+    """
+    result = subprocess.run(argv, capture_output=True, text=True,
+                            encoding="utf-8", errors="surrogateescape",
+                            **kwargs)
+    return _captured(list(argv), result.returncode, result.stdout, result.stderr)
+
+
 def _emitter(backend: str) -> types.ModuleType:
     """The backend emitter, from the one cached loader every caller of that tier
     shares (`placement.backend_emit_module`, issue #2204): one module and one
@@ -489,8 +592,7 @@ def _node_version() -> "tuple[int, int] | None":
     if shutil.which("node") is None:
         return None
     try:
-        probe = subprocess.run(["node", "--version"], capture_output=True,
-                               text=True, timeout=30)
+        probe = _capture(["node", "--version"], timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     match = re.match(r"^v(\d+)\.(\d+)\.", probe.stdout.strip())
@@ -572,6 +674,7 @@ def _ts_foreground(argv: list, cwd: Path, timeout: int,
     """
     process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True,
+                               encoding="utf-8", errors="surrogateescape",
                                start_new_session=True, env=env)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -585,7 +688,7 @@ def _ts_foreground(argv: list, cwd: Path, timeout: int,
             process.kill()
         process.communicate()
         raise
-    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    return _captured(list(argv), process.returncode, stdout, stderr)
 
 
 def _ts_timeout_message(ir: dict, bound: int) -> str:
@@ -788,8 +891,7 @@ def run_rust(ir: dict) -> tuple[str, str]:
         (tmp / "src").mkdir()
         (tmp / "src" / "lib.rs").write_text(source, encoding="utf-8")
         (tmp / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
-        result = subprocess.run(["cargo", "test"], cwd=tmp,
-                                capture_output=True, text=True, timeout=600)
+        result = _capture(["cargo", "test"], cwd=tmp, timeout=600)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -900,9 +1002,8 @@ def run_go(ir: dict) -> tuple[str, str]:
         # emitter's output runs", not "it passes go vet's style rules";
         # `-vet=off` restores that contract without distorting revl's
         # semantics to satisfy a linter (architect decision, roadmap 314).
-        result = subprocess.run([go, "test", "-vet=off", "-v", "./..."], cwd=tmp,
-                                capture_output=True, text=True, timeout=600,
-                                env=env)
+        result = _capture([go, "test", "-vet=off", "-v", "./..."], cwd=tmp,
+                          timeout=600, env=env)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -1039,16 +1140,16 @@ def run_java(ir: dict) -> tuple[str, str]:
         # `out`, so without the variable `out` alone is the whole classpath
         classpath = str(out) + (os.pathsep + real_classes if real_classes else "")
         if real_classes:
-            compile_components = subprocess.run(
+            compile_components = _capture(
                 [javac, "--release", "21", "-cp", classpath,
                  "-d", str(out), str(pkg / "Components.java")],
-                capture_output=True, text=True, timeout=600)
+                timeout=600)
         else:
             stubs = [str(s) for s in sorted((BACKENDS / "java" / "stubs").rglob("*.java"))]
-            compile_components = subprocess.run(
+            compile_components = _capture(
                 [javac, "--release", "21", "-d", str(out)] + stubs
                 + [str(pkg / "Components.java")],
-                capture_output=True, text=True, timeout=600)
+                timeout=600)
         if compile_components.returncode != 0:
             return ("fail", f"javac failed: {compile_components.stderr.strip()}")
 
@@ -1065,13 +1166,12 @@ def run_java(ir: dict) -> tuple[str, str]:
             "    }\n"
             "}\n",
             encoding="utf-8")
-        compile_runner = subprocess.run(
+        compile_runner = _capture(
             [javac, "--release", "21", "-cp", classpath, "-d", str(out), str(runner)],
-            capture_output=True, text=True, timeout=600)
+            timeout=600)
         if compile_runner.returncode != 0:
             return ("fail", f"javac runner failed: {compile_runner.stderr.strip()}")
-        run = subprocess.run([java, "-cp", classpath, "RunRevlTests"],
-                             capture_output=True, text=True, timeout=600)
+        run = _capture([java, "-cp", classpath, "RunRevlTests"], timeout=600)
         run_output = run.stdout
 
     if run.returncode != 0:
@@ -1132,9 +1232,8 @@ def _run_wasm_pure(ir: dict, wasmtime: str, note: str) -> tuple[str, str] | None
         wat = Path(tmpd) / "mod.wat"
         wat.write_text(source, encoding="utf-8")
         for tname, export in exports:
-            run = subprocess.run(
-                [wasmtime, "--invoke", export, str(wat)],
-                capture_output=True, text=True, timeout=600)
+            run = _capture(
+                [wasmtime, "--invoke", export, str(wat)], timeout=600)
             if run.returncode != 0:
                 failures += 1
                 detail = (run.stderr.strip().splitlines() or [""])[-1]
@@ -1223,9 +1322,9 @@ def _run_wasm_lifecycle(ir: dict, lifecycle: list) -> tuple[str, str]:
     with tempfile.TemporaryDirectory(prefix="revl_test_wasm_lifecycle_") as tmpd:
         spec_file = Path(tmpd) / "lifecycle.spec.json"
         spec_file.write_text(json.dumps(spec), encoding="utf-8")
-        result = subprocess.run(
+        result = _capture(
             [_cordis_wasm_python(), str(harness), str(spec_file)],
-            capture_output=True, text=True, timeout=600, env=env)
+            timeout=600, env=env)
     output = (result.stdout + result.stderr).strip()
     for line in output.splitlines():
         if line.startswith("SUMMARY "):
@@ -1459,6 +1558,47 @@ def schedule_command(ir: dict, seed=None, seeds: int = None) -> int:
     return 0
 
 
+def fault_profile_command(ir: dict, seed: int, events: int = None) -> int:
+    """`revl test --fault-profile <SEED>`: a seeded run of fault events
+    (docs/fault-tests.md, issue #2728).
+
+    The sweep injects at every point in IR order; the profile draws a seeded
+    list of events from the same points, judges each with the sweep's full
+    assertion set, and prints the seed, every injected fault and the count of
+    failures with no classified cause. It exits 1 when any event did not end
+    contained (failed or unclassified), and when nothing could be injected. Like the sweep it activates
+    components for real, so a missing cordis-py runtime is a skip with a
+    reason, never a pass.
+    """
+    if not (ir.get("components") or []):
+        print("[fault-profile] no components to inject")
+        return 0
+    if not _cordis_available():
+        print("[fault-profile] skipped: the fault profile activates components "
+              "for real and needs the cordis-py runtime, which this interpreter "
+              "does not have\n"
+              "        set it up:  sh backends/python/setup.sh\n"
+              f"        then rerun:  revl test --fault-profile {seed}")
+        return 0
+
+    from .fault import _PROFILE_EVENTS, run_fault_profile  # noqa: PLC0415 - lazy: needs cordis
+
+    failures, dossier = run_fault_profile(
+        ir, seed, _PROFILE_EVENTS if events is None else events)
+    counts = dossier["counts"]
+    if failures:
+        print(f"[fault-profile] seed {seed}: {failures} injected fault(s) did "
+              f"not end contained, {counts['unclassified']} with no classified "
+              f"cause", file=sys.stderr)
+        return 1
+    if counts["injected"] == 0:
+        # nothing checked must never read as clean (docs/fault-tests.md 9.3)
+        print(f"[fault-profile] seed {seed}: nothing was injected; no "
+              f"component has an addressable sweep point", file=sys.stderr)
+        return 1
+    return 0
+
+
 def mock_requires_command(ir: dict) -> int:
     """`revl test --mock-requires`: run every `lifecycle test` in mock world
     (docs/auto-mocks.md).
@@ -1638,7 +1778,8 @@ def list_command(ir: dict, pattern=None) -> int:
 
 def test_command(ir: dict, backend: str, sweep: bool = False,
                  mock_requires: bool = False, schedule_seed=None,
-                 schedule_seeds: int = None, list_tests: bool = False,
+                 schedule_seeds: int = None, fault_profile=None,
+                 fault_profile_events: int = None, list_tests: bool = False,
                  filter_pattern=None, verbose: bool = False,
                  report: str = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
@@ -1654,6 +1795,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     seeded interleaving sweep (py tier only; roadmap item 295,
     docs/design/295-schedule-testing.md).
 
+    With ``fault_profile`` set (a seed), run the seeded fault profile instead
+    (py tier only; docs/fault-tests.md, issue #2728); ``fault_profile_events``
+    is how many events it draws.
+
     With ``list_tests`` set, print the collected test names and execute nothing
     (issue #843); the mode flags above do not apply to a listing.
 
@@ -1666,8 +1811,8 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     with the reason (exit 0: nothing was expected to run there) instead of
     handing the emitter a document with nothing to emit, or reporting an empty
     document as a pass (`tier_verdict_for_selection`). `--mock-requires` runs
-    lifecycle test units and therefore honours the selection; `--sweep` and
-    `--schedule-*` do not run named units at all, so combining them with a
+    lifecycle test units and therefore honours the selection; `--sweep`,
+    `--schedule-*` and `--fault-profile` do not run named units at all, so combining them with a
     filter is also a usage error rather than a filter that quietly does
     nothing.
 
@@ -1676,25 +1821,55 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     ``"tap"``) emits a machine-readable per-test report on the py tier instead
     of the human summary. Both apply to the py reference tier only.
     """
+    # Before anything is reported: a child's characters must not be able to
+    # take the report down on the way out either (issue #2977).
+    _reporting_cannot_crash()
+
     if list_tests:
         return list_command(ir, filter_pattern)
 
     if filter_pattern is not None:
         if not any(filter_pattern in name for _kind, name in collected_tests(ir)):
             return _empty_selection(ir, filter_pattern)
-        if sweep or schedule_seed is not None or schedule_seeds is not None:
-            # `--sweep` sweeps every top-level body step of every component and
-            # `--schedule-*` every interleaving; neither runs named test units,
+        if (sweep or schedule_seed is not None or schedule_seeds is not None
+                or fault_profile is not None):
+            # `--sweep` sweeps every top-level body step of every component,
+            # `--schedule-*` every interleaving and `--fault-profile` a seeded
+            # draw of those steps; none runs named test units,
             # so a filter over test names cannot select inside them. Refusing
             # is the honest answer: a filter that appeared to select while the
             # whole sweep ran anyway is exactly the silent mismatch #843 is
             # about.
             print("error: --filter selects test units by name, and --sweep / "
-                  "--schedule-* sweep the composition's steps or interleavings "
+                  "--schedule-* / --fault-profile sweep the composition's steps or interleavings "
                   "rather than running named units; run them separately "
                   "(issue #843)", file=sys.stderr)
             return 2
         ir = select_tests(ir, filter_pattern)
+
+    if fault_profile_events is not None and fault_profile is None:
+        print("error: --fault-profile-events sets how many events a fault "
+              "profile draws; pass it with --fault-profile SEED",
+              file=sys.stderr)
+        return 2
+    if fault_profile_events is not None and fault_profile_events < 1:
+        print(f"error: --fault-profile-events must be at least 1, got "
+              f"{fault_profile_events}", file=sys.stderr)
+        return 2
+    if fault_profile is not None and (
+            sweep or mock_requires or schedule_seed is not None
+            or schedule_seeds is not None):
+        # each is its own run mode; running one and dropping the others
+        # without a word would read as all of them having run
+        print("error: --fault-profile is its own run mode and does not combine "
+              "with --sweep, --mock-requires or --schedule-*; run them "
+              "separately", file=sys.stderr)
+        return 2
+    if fault_profile is not None:
+        if backend not in ("py", "all"):
+            print(f"[fault-profile] note: the fault profile runs on the py "
+                  f"reference tier only, not `{backend}` (docs/fault-tests.md)")
+        return fault_profile_command(ir, fault_profile, fault_profile_events)
 
     if schedule_seed is not None or schedule_seeds is not None:
         if backend not in ("py", "all"):

@@ -41,8 +41,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # v3 adds the model crossing's contract fields (`schemaDigest`,
-# `grammarDigest`, `residence`; issue #2694) and the attested-run header on the
-# first event (`run`; issue #2730). Additive: a v1 or v2 event still parses and
+# `grammarDigest`, `residence`; issue #2694), the attested-run header on the
+# first event (`run`; issue #2730) and the `residue` event kind (issue #2730,
+# written by teardown). Additive: a v1 or v2 event still parses and
 # every reader treats the new keys as optional.
 SCHEMA_VERSION = 3
 
@@ -50,6 +51,7 @@ SCHEMA_VERSION = 3
 LOAD = "load"          # a component came up (… -> ACTIVE)
 WITHDRAW = "withdraw"  # a component went down (ACTIVE -> DISPOSED/PENDING/FAILED)
 EMIT = "emit"          # (v2) an emission crossed an irreversible boundary at runtime
+RESIDUE = "residue"    # (v3, issue #2730) teardown ended with something not undone
 
 # cause kinds (the `cause.kind` field)
 BOOT = "boot"                          # root: the composition booted
@@ -146,6 +148,33 @@ def make_emit_event(seq: int, gen: int, component: str, capability: str,
         record["activationId"] = activation_id
     if llm is not None:
         record["llm"] = llm
+    return record
+
+
+def make_residue_event(seq: int, gen: int, checks: list[str], cause: dict,
+                       ts: float | None = None) -> dict:
+    """One ``residue`` trace record (v3, issue #2730 slice 2). Written by
+    teardown when its residue proof reports something not undone: one event per
+    teardown that ended with residue, none for a clean one.
+
+    Like an ``emit`` it carries no `transition` (no fiber settled to a new
+    state), and unlike every other kind it names no `component`: residue is a
+    fact about the whole run, not about one component. `checks` lists the NAMES
+    of the proof checks that failed (``"registry"``, ``"inverse residue"`` ...),
+    in the order the proof ran them. The check's detail text is deliberately not
+    recorded: it can render store contents, and the trace is a durable artifact.
+    A reader that does not model residue ignores the event, as it ignores an
+    ``emit``: it is neither a ``load`` nor a ``withdraw``."""
+    record = {
+        "v": SCHEMA_VERSION,
+        "seq": seq,
+        "gen": gen,
+        "event": RESIDUE,
+        "checks": list(checks),
+        "cause": cause,
+    }
+    if ts is not None:
+        record["ts"] = ts
     return record
 
 

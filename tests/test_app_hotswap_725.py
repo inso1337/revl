@@ -384,8 +384,8 @@ def test_6b_a_crash_mid_activation_rolls_back_residue_free(tmp_path):
     """Recovery, the roll-back branch: `activation-complete` absent, so the crash
     happened mid-activation. Every one of the ranker's boundary inverses is an
     in-process Map inverse (memory gone with the process), so recovery reports the
-    honest residue-FREE verdict — nothing unreconstructible, the world holding only
-    what was deliberately committed — rather than pretending an undo ran."""
+    honest residue-FREE verdict (nothing unreconstructible, the proof covering only
+    the effects the log recorded) rather than pretending an undo ran."""
     import replay  # noqa: PLC0415 — backends/python, cordis-only
 
     src = _ranker("recency", 1)

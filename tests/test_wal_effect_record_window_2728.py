@@ -15,9 +15,9 @@ record and not the setup.
 
 The verdict asserted is the one `docs/crash-recovery.md` states for this
 window: recovery reports `rolled-back` over the records it has (here none) and
-the landed effect stays out in the world, unmentioned. The clean proof's world
-sentence overclaims in this window; the doc names it and the test does not
-assert it.
+the landed effect stays out in the world, unmentioned. The clean proof bounds
+its claim to the effects the log recorded and points at the doc for an effect
+whose record never landed; the test asserts that wording.
 """
 
 from __future__ import annotations
@@ -119,12 +119,12 @@ def test_recover_cannot_name_an_effect_whose_record_never_landed(crashed):
     that landed. The effect is unknown to recovery; the report does not claim it
     was undone.
 
-    The clean residue proof is bounded by the log, but its closing sentence is
-    not: `_residue_proof` says "The world holds only what was deliberately
-    committed" (`src/revl/recovery.py:2637-2640`), and this window makes that
-    sentence false, because the landed effect is still out in the world and
-    unnamed. The test asserts the fields recovery really reports and does not
-    assert the proof string, so it cannot be read as blessing the overclaim."""
+    The clean residue proof says only what the log can back: it covers the
+    effects the log recorded, and it names an effect whose record never landed
+    as not covered and to be reconciled by hand, pointing at
+    `docs/crash-recovery.md` section 4c. It must not claim the world holds only
+    what was deliberately committed, which is false in this window (issue
+    #2958)."""
     effect, wal_path = crashed
     report = recover(wal_path)
 
@@ -134,9 +134,16 @@ def test_recover_cannot_name_an_effect_whose_record_never_landed(crashed):
     assert report["moot"] == []
     assert report["unreconstructible"] == []
     # clean because it has nothing outstanding to report: exactly the limitation
-    # this window names, and the proof's world sentence overclaims on top of it
+    # this window names, which the proof's closing sentence must now say
     assert report["residue"]["clean"] is True
     assert report["residue"]["outstanding"] == []
+    proof = report["residue"]["proof"]
+    assert "deliberately committed" not in proof
+    assert "covers only the effects the log recorded" in proof
+    assert "record never landed" in proof
+    assert "reconciled by hand" in proof
+    assert "docs/crash-recovery.md section 4c" in proof
+    assert "deliberately committed" not in render(report)
     # the landed effect is still out in the world and the report never names it
     assert os.path.exists(effect)
     assert "activation/effect" not in render(report)

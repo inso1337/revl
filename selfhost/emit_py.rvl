@@ -181,7 +181,10 @@ extern pure fn newline() -> Str = @py { return chr(10) }
 // method's `def` (dispatched by its service-contract name) and a record field
 // annotation. `mangle_type` adds the module-scope classes the emitter writes
 // itself (`Ok`/`Err`, the router's two classes) for a type-name position.
-extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py {
+// With `temps`, a name the emitter binds itself (`_EMITTER_TEMPS` and
+// `_EMITTER_TEMP_RE`: `_bi`, `_fv`, `_ov<N>`, the `_revl*` namespace, ...) is
+// lifted the same way, so a user local cannot rebind a temporary (issue #2913).
+extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool, temps: Bool) -> Str = @py {
     import keyword
     extra = set()
     if builtins:
@@ -194,18 +197,29 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py 
         }
     if types:
         extra |= {"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"}
+    import re
+    temp_names = {"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"}
+    temp_re = re.compile(
+        r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|_[A-Z0-9_]*_CONFIG"
+        r"|(?i:_+revl\w*))\Z")
+    def temp(n):
+        return temps and (n in temp_names or temp_re.match(n) is not None)
     root = name
     while root:
-        if keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra:
+        if (keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra
+                or temp(root)):
             return name + "_"
         if not root.endswith("_"):
             break
         root = root[:-1]
     return name
 }
-fn mangle(name: Str) -> Str { return mangle_with(name, true, false) }
-fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false) }
-fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true) }
+fn mangle(name: Str) -> Str { return mangle_with(name, true, false, true) }
+fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false, false) }
+fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true, true) }
+// an inline extern body's parameter: host code names it, no temporary shares
+// its scope, so only the builtin rung (`_ident(..., temps=False)`)
+fn mangle_host_param(name: Str) -> Str { return mangle_with(name, true, false, false) }
 // `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
 // fn name is `_<snake>_apply`, a provision class is `_<Pascal>`.
 extern pure fn snake(name: Str) -> Str = @py {
@@ -914,33 +928,18 @@ fn as_async_block() -> List[Str] {
   return o
 }
 
-// The emitter's own walrus temporaries (`_bi`, `_fv`, `_rc`, `_revl_i`, `_ov<N>`): an
-// awaited payload bound under one of these keeps the tuple spelling, since a
-// comprehension may not rebind a walrus target.
-fn walrus_temp(name: Str) -> Bool {
-  if (name == "_bi" || name == "_fv" || name == "_rc" || name == "_revl_i") { return true }
-  if (name.length() > 3 && name.slice(0, 3) == "_ov") {
-    var i = 3
-    while (i < name.length()) {
-      let ch = name.charAt(i)
-      if (ch < "0" || ch > "9") { return false }
-      i = i + 1
-    }
-    return true
-  }
-  return false
-}
-
 fn bind_payload(bind: Str, body: Str, payload: Str, node: Any, aw: Bool) -> Str {
   if (arm_body_is_bind(node, bind)) { return payload }
   if (!arm_body_mentions(node, bind)) { return body }
+  // The body reads the bind through `mangle`, so the binder is spelled the
+  // same way (issue #2913).
+  let py = mangle(bind)
   // An awaited arm cannot use the one-shot lambda (a sync frame): a
   // one-element comprehension is a scope that still admits `await`.
   if (aw) {
-    if (walrus_temp(bind)) { return `((${bind} := ${payload}), ${body})[1]` }
-    return `[${body} for ${bind} in (${payload},)][0]`
+    return `[${body} for ${py} in (${payload},)][0]`
   }
-  return `(lambda ${bind}: ${body})(${payload})`
+  return `(lambda ${py}: ${body})(${payload})`
 }
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
@@ -1771,7 +1770,7 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
     var ps = []
-    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle(value_str(value_field(p, "name")))) }
+    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle_host_param(value_str(value_field(p, "name")))) }
     var kw = "def"
     if (value_bool(value_field(ext, "async"))) { kw = "async def" }
     // item 421 F6 (ported per item 429(d)): the extern's declared return carried
@@ -2325,7 +2324,15 @@ fn cexpr(node: Any) -> Str {
     if (nm == "Some") { return "(lambda _v: _v)" }
     return mangle(nm)
   }
-  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (kind == "name") {
+    let id = value_str(value_field(node, "id"))
+    // `route_reqs` writes the proxy's final spelling into a `name` node; the
+    // reference renders it bare, and `mangle` would lift it off the `_revl*`
+    // namespace (issue #2913). No user name reaches here with that prefix: a
+    // component identifier in `_revl*` is refused.
+    if (id.startsWith("_revl_route_")) { return id }
+    return mangle(id)
+  }
   if (kind == "req") { return "_revl_ctx.".concat(value_str(value_field(node, "name"))) }
   // `config.<field>` (slice 4): a read of the resolved config dict. The field
   // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring

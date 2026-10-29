@@ -413,6 +413,58 @@ _EMITTED_BUILTINS = frozenset({
 # own spelling keeps the bare name.
 _TYPE_RESERVED = frozenset({"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"})
 
+# Every name the emitter binds ITSELF in a scope a user binding can share
+# (issue #2913). A user local, parameter or top-level fn of the same spelling
+# was emitted verbatim and the two bindings were one Python name: `let _bi = 7`
+# then `x + 1` rebound `_bi` through the bounded-arithmetic walrus and the
+# function returned the wrong value, with nothing failing. The emitter's own
+# spellings are literal text, so `_mangle` lifts the USER identifier off them,
+# at its declaration and every use alike, exactly as for `_EMITTED_BUILTINS`.
+# Renaming the user name rather than moving the temporaries into a scope of
+# their own (the ts fix for a Map helper, #2909) because a temporary sits in an
+# expression: a scope per temporary is a Python frame per `+` or field read,
+# which roadmap item 436 removed on purpose; and no prefix is unspellable,
+# since a revl identifier can spell any leading-underscore Python name.
+#
+#   _bi, _fv, _rc      expression walrus temps: bounded arithmetic
+#                      (`_BOUNDED_TMP`), field read (`_FIELD_TMP`), char class
+#   _f, _r             the `@py ref` extern thunk, beside the extern's params
+#   _inspect           the module-scope `import inspect as _inspect`
+#   _body, _run        the component apply's body def; the lifecycle harness
+#   _<NAME>_CONFIG     a component's module-scope config schema (by pattern)
+#
+# and, by pattern (`_EMITTER_TEMP_RE`), the numbered temps `_ov<N>` (`?.`/`??`
+# chains), `_effect_<N>`, `_timer_<N>` with its `_h`/`_inflight`/`_cancel`
+# companions, and the whole `_revl*` scaffolding namespace in any case
+# (`_revl_i64`, `_revl_div`, `_REVL_I64_MAX`, `__revl_destructure_<N>`, the
+# list-index `_revl_i`). The component path (`_ident`) keeps REFUSING a
+# `_revl*` name, as before; everywhere else it is renamed. The test
+# `tests/test_2913_py_emitter_temp_names.py` reads both tables.
+_EMITTER_TEMPS = frozenset({"_bi", "_fv", "_rc", "_f", "_r", "_inspect", "_body", "_run"})
+_EMITTER_TEMP_RE = re.compile(
+    r"(?:_ov\d+|_effect_\d+|_timer_\d+(?:_h|_inflight|_cancel)?|_[A-Z0-9_]*_CONFIG"
+    r"|(?i:_+revl\w*))\Z")
+
+
+def _emitter_temp(name: str) -> bool:
+    return name in _EMITTER_TEMPS or _EMITTER_TEMP_RE.match(name) is not None
+
+
+def _refuse_public_temp_names(ir: dict) -> None:
+    """A `pub fn` is called by the host under its own spelling, so the rename
+    that lifts a user name off an emitter temporary would hide it (issue
+    #2913): refuse one whose name only that rename would change. No temporary
+    ends in `_`, so the root the ladder matched is the name without its
+    trailing `_`."""
+    for fn in ir.get("functions") or []:
+        name = fn.get("name")
+        if (fn.get("public") and isinstance(name, str)
+                and _mangle(name) != _mangle_escaping(name, _EMITTED_BUILTINS)):
+            raise EmitError(
+                f"pub fn {name!r} is spelled like the python emitter temporary "
+                f"{name.rstrip('_')!r}; a host calls a pub fn by name, so the "
+                "emitter cannot rename it: give it another name")
+
 
 def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
@@ -475,7 +527,7 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     practice, since the builtins that are also `_CONTEXT_MEMBERS` are refused as
     provision keys upstream. Keyword escaping applies at every site regardless,
     since a Python keyword is illegal in any of them."""
-    return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
+    return _mangle_escaping(name, _EMITTED_BUILTINS | extra, temps=True)
 
 
 def _method_def_name(name: Any, what: str) -> str:
@@ -518,13 +570,18 @@ def _mangle_kw(name: str) -> str:
     return _mangle_escaping(name, frozenset())
 
 
-def _mangle_escaping(name: str, extra: "frozenset[str]") -> str:
+def _mangle_escaping(name: str, extra: "frozenset[str]",
+                     temps: bool = False) -> str:
     """The shared injective append-`_` rung: escape iff `name`, or any name
-    reachable from it by dropping trailing `_`, is a keyword or in `extra`."""
+    reachable from it by dropping trailing `_`, is a keyword or in `extra`, or,
+    with `temps`, an emitter temporary (`_emitter_temp`, issue #2913). No
+    fixed temporary or scaffolding name ends in `_`, so an escaped name is
+    never one (an escaped `_revl*` name stays in that namespace, ending in
+    `_`)."""
     root = name
     while root:
         if (keyword.iskeyword(root) or keyword.issoftkeyword(root)
-                or root in extra):
+                or root in extra or (temps and _emitter_temp(root))):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -560,7 +617,7 @@ def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     return f"lambda {bound}" if bound else "lambda"
 
 
-def _ident(name: Any, what: str, *, attr: bool = False) -> str:
+def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True) -> str:
     """Validate and rename one user identifier. `attr=True` marks a name emitted
     as an attribute the runtime dispatches by its contract spelling (a provide-
     method name) — it takes the keyword-only rung, since it cannot shadow a
@@ -583,7 +640,11 @@ def _ident(name: Any, what: str, *, attr: bool = False) -> str:
     if name in _RESERVED or (name.startswith("_") and name.lstrip("_").startswith("revl")):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
     extra = _TYPE_RESERVED if what == "type name" else frozenset()
-    return _mangle_kw(name) if attr else _mangle(name, extra)
+    # `temps=False`: a name host code spells itself (an inline extern body's
+    # parameter) shares no scope with an emitter temporary, so it takes only
+    # the builtin rung (issue #2913).
+    return (_mangle_kw(name) if attr else _mangle(name, extra) if temps
+            else _mangle_escaping(name, _EMITTED_BUILTINS | extra))
 
 
 # -- namespaced provision keys (issue #1914, docs/namespacing.md) ------------
@@ -1204,19 +1265,6 @@ def _annotated_un(node: dict, render) -> str | None:
 # `_BOUNDED_TMP`: the walrus sits in a condition python evaluates first, so a
 # nested read has finished with the name before the outer read rebinds it.
 _FIELD_TMP = "_fv"
-
-# Every name the expression renderer may spell as a walrus target of its own:
-# the bounded-arithmetic temp, the field-read temp, the char-class temp, and
-# the `?.`/`??` chain temps (`_ov<height>`). `_match_expr` needs the set because
-# python refuses an assignment expression that rebinds the iteration variable of
-# the comprehension it sits in, so a payload bound under one of these names has
-# to keep the older walrus binder.
-_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc", "_revl_i"})
-_OPT_TMP_RE = re.compile(r"_ov\d+\Z")
-
-
-def _walrus_temp(name: str) -> bool:
-    return name in _WALRUS_TEMPS or _OPT_TMP_RE.match(name) is not None
 
 
 def _field_read(target: str, name: str, opt: bool = False,
@@ -4018,19 +4066,13 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
             return payload
         if not _arm_body_mentions(node, bind):
             return body
+        # The body reads the bind through `_mangle`, so the binder is spelled
+        # the same way (issue #2913: a payload bound as `_bi` is read as `_bi_`).
+        bind = _mangle(bind)
         # `await`-free arm -> the classic one-shot lambda; an awaited arm ->
         # a one-element comprehension, whose iteration variable is a scope the
         # `await` in the body can still be spelled inside.
         if awaited:
-            if _walrus_temp(bind):
-                # Python refuses a walrus that rebinds a comprehension's
-                # iteration variable, and a body reaching one of the emitter's
-                # own walrus temps (`_bi` and friends) does exactly that when
-                # the payload is bound under that name. Such a bind is already
-                # clobbered by the scaffolding that owns the name, with or
-                # without a match, so keep the pre-item-163 spelling rather
-                # than turn a wrong value into a `SyntaxError`.
-                return f"(({bind} := {payload}), {body})[1]"
             return f"[{body} for {bind} in ({payload},)][0]"
         return f"(lambda {bind}: {body})({payload})"
 
@@ -4673,7 +4715,9 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
       silent — so the async direction stays awaited-by-name.
     """
     dotted = _ref_dotted(ref["path"])
-    symbol = _ident(ref["symbol"], "ref symbol")
+    # A host attribute name, imported under the `_f` alias, so it binds no
+    # local of its own spelling and is never lifted off a temporary (#2913).
+    symbol = _ident(ref["symbol"], "ref symbol", attr=True)
     where = f"{dotted}.{symbol}"
     out = _Lines()
     is_async = bool(ext.get("async"))
@@ -4772,7 +4816,12 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         out.add(0)
     for ext in externs:
         name = _ident(ext["name"], "extern name")
-        params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
+        # An inline host body names its parameters itself, so they keep their
+        # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
+        # lifts one off an emitter temporary (issue #2913).
+        thunk = "py" in (ext.get("refs") or {}) and "py" not in (ext.get("bodies") or {})
+        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk)
+                           for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
         # item 421 F6: the extern's declared return carried `Secret[T]`, so its
@@ -6002,6 +6051,7 @@ def emit(ir: dict) -> str:
     _refuse_holes(ir)
     _refuse_validated_externs(ir)
     _check_host_keys(ir)
+    _refuse_public_temp_names(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 

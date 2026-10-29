@@ -125,6 +125,7 @@ CORPUS = [
     "records.rvl",     # record literal, functional record update, list literal
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
+    "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)
     # component/service documents (slice 2, item 185)
     "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses
@@ -1033,4 +1034,14 @@ def test_a_host_identifier_collision_is_refused_by_name(reference):
     ir = compile_files([str(REFUSALS_DIR / "host_identifier_collision.rvl")])
     with pytest.raises(reference.EmitError,
                        match="both mangle to the Python identifier"):
+        reference.emit(ir)
+
+
+def test_a_pub_fn_spelled_like_an_emitter_temporary_is_refused_by_name(reference):
+    """A host calls a pub fn by its own name, so the rename that lifts a user
+    name off an emitter temporary cannot apply to it (issue #2913)."""
+    ir = compile_files([str(REFUSALS_DIR / "pub_fn_temp_name.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match="pub fn '_run' is spelled like the python emitter "
+                             "temporary '_run'"):
         reference.emit(ir)

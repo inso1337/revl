@@ -120,6 +120,15 @@ def _status_for(event_kind: str, target_state: str) -> str:
     return STATUS_OK
 
 
+def _status_of(event_kind: str, target_state: str) -> str:
+    """`_status_for`, plus the run-level ``residue`` event: teardown left
+    something not undone, so its span is an error span (it has no transition,
+    which would otherwise leave it unset)."""
+    if event_kind == wr.RESIDUE:
+        return STATUS_ERROR
+    return _status_for(event_kind, target_state)
+
+
 def _span_id(seq) -> str:
     return f"s{seq}"
 
@@ -306,6 +315,11 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
             attributes["revl.ts"] = ev.get("ts")
         if ev.get("activationId") is not None:
             attributes["revl.activation.id"] = ev.get("activationId")
+        if event_kind == wr.RESIDUE:
+            # run-level: no component, no transition; the failed checks' names
+            attributes.pop("revl.component", None)
+            attributes["revl.residue.checks"] = [
+                str(c) for c in ev.get("checks") or []]
         if event_kind == wr.EMIT:
             attributes["revl.capability"] = ev.get("capability") or ""
             attributes["revl.emission.key"] = ev.get("key") or ""
@@ -317,11 +331,12 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
 
         spans.append(SpanModel(
             span_id=_span_id(ev.get("seq")),
-            name=f"{component} {event_kind}",
+            name=(f"{component} {event_kind}" if component is not None
+                  else str(event_kind)),
             kind=event_kind,
             parent_id=parent,
             component=component,
-            status=_status_for(event_kind, dst),
+            status=_status_of(event_kind, dst),
             attributes=attributes,
             events=[_cause_event(cause)],
             links=links,

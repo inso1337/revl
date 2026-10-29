@@ -143,6 +143,7 @@ PROVED = "proved"
 DIVERGENCE = "divergence"
 NO_REPRODUCER = "no reproducer"
 UNIMPLEMENTED = "unimplemented"
+UNMEASURED = "unmeasured"
 
 #: Host-tier cells that are not `proved`, each with the reason a reader needs
 #: and nothing else. This is a RATCHET, not a licence: a code that belongs here
@@ -696,6 +697,8 @@ def matrix() -> dict:
 
 START = "<!-- GUARANTEE-TIER-MATRIX:START -->"
 END = "<!-- GUARANTEE-TIER-MATRIX:END -->"
+SUPPORT_START = "<!-- TIER-SUPPORT-MATRIX:START -->"
+SUPPORT_END = "<!-- TIER-SUPPORT-MATRIX:END -->"
 
 #: How the explanation list says each verdict, in the issue's own vocabulary.
 _PHRASE = {
@@ -820,6 +823,244 @@ def totals(data: dict | None = None) -> str:
     return "\n".join(out)
 
 
+def _recovery_checks(tier: str, tests_root: Path) -> list[tuple[str, list[str]]]:
+    """Return test files that contain a named crash-recovery test for `tier`.
+
+    The root Python recovery module predates the per-tier modules. The other
+    tiers follow `test_<short-tier>_crash_recovery.py`, so adding a check for a
+    tier is enough to make it visible here. A filename without a crash test
+    function is not evidence.
+    """
+    import ast
+
+    short = _short(tier)
+    paths = ([tests_root / "test_crash_recovery.py"] if tier == "python"
+             else [tests_root / f"test_{short}_crash_recovery.py"])
+    found = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        cases = sorted({node.name for node in ast.walk(tree)
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name.startswith("test_")
+                        and "crash" in node.name.lower()})
+        if cases:
+            found.append((path.relative_to(tests_root.parent).as_posix(), cases))
+    return found
+
+
+def _known_compile_failures(path: Path) -> dict[str, set[str]]:
+    """Read the compile-test baseline as data; never import or execute tests."""
+    import ast
+
+    if not path.is_file():
+        return {}
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if (isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "KNOWN_FAILURES"):
+            value = ast.literal_eval(node.value)
+            return {str(tier): set(cases) for tier, cases in value.items()}
+    return {}
+
+
+def _ci_run_commands(workflow_text: str) -> list[str]:
+    """Read executable workflow steps, excluding comments and prose."""
+    try:
+        import yaml  # noqa: PLC0415, part of the repository's test extra
+        workflow = yaml.safe_load(workflow_text)
+    except Exception as exc:  # noqa: BLE001, malformed CI cannot support a claim
+        raise MatrixError(f"tier_guarantees: cannot read the CI workflow: {exc}") from exc
+    commands = []
+    for job in (workflow or {}).get("jobs", {}).values():
+        for step in job.get("steps", ()):
+            command = step.get("run")
+            if isinstance(command, str):
+                commands.append(command)
+    return commands
+
+
+def support_matrix(*, report: dict | None = None,
+                   selfhost: dict[str, str] | None = None,
+                   tests_root: Path | None = None,
+                   ci_text: str | None = None) -> dict:
+    """Derive the adopter-facing evidence table from the checks that run it.
+
+    Emit counts and the self-host agreement come from `tools/conformance.py`.
+    Compile/execution coverage comes from its validator registries and CI steps.
+    Durable recovery is discovered from crash-test modules and the CI test
+    collection. Missing evidence is always `unmeasured`, never a positive cell.
+    """
+    import conformance  # noqa: PLC0415, tools/ is already on sys.path
+    from validate import EXECUTORS, VALIDATORS  # noqa: PLC0415
+
+    tests_root = tests_root or ROOT / "tests"
+    if report is None:
+        report = conformance.run()
+    if selfhost is None:
+        selfhost = conformance.selfhost_column()
+    if ci_text is None:
+        ci_path = ROOT / ".github" / "workflows" / "ci.yml"
+        ci_text = ci_path.read_text(encoding="utf-8") if ci_path.is_file() else ""
+
+    compile_test = "tests/test_conformance_validate.py"
+    compile_test_path = tests_root / "test_conformance_validate.py"
+    ci_commands = _ci_run_commands(ci_text)
+    # Both steps, because either alone is a weaker claim than the column
+    # makes: the pytest gate is baselined and a tier whose validator cannot
+    # run reports `unavailable` while the run still exits 0, which is why CI
+    # runs `--check-toolchains` first. Removing that guard must not leave the
+    # emits column at `proved`.
+    compile_in_ci = (
+        any("python3 tools/conformance.py --check-toolchains" in command
+            for command in ci_commands)
+        and any("pytest tests/test_conformance_validate.py -q" in command
+                for command in ci_commands)
+    )
+    compile_baselines = _known_compile_failures(compile_test_path)
+    executable_count = len(conformance.executable_cases())
+    execute_in_ci = any("tools/conformance.py --execute --require-execution" in command
+                        for command in ci_commands)
+    rows = []
+
+    for tier in conformance.TIERS:
+        short = _short(tier)
+        kinds = [case.get("emit_kind", {}).get(tier) for case in report.get("cases", [])]
+        measured = [kind for kind in kinds if kind in ("ok", "limit", "gap")]
+        emitted = kinds.count("ok")
+        limits = kinds.count("limit")
+        gaps = kinds.count("gap")
+        validator = VALIDATORS.get(tier)
+        known_failures = compile_baselines.get(tier, set())
+        if (not validator or not compile_test_path.is_file() or not compile_in_ci
+                or len(measured) != len(kinds) or not kinds):
+            emit_status = UNMEASURED
+        elif gaps or known_failures:
+            emit_status = DIVERGENCE
+        else:
+            emit_status = PROVED
+        limit_word = "limit" if limits == 1 else "limits"
+        gap_word = "gap" if gaps == 1 else "gaps"
+        emit_detail = (f"{emitted} emitted; {limits} classified {limit_word}; "
+                       f"{gaps} {gap_word}; "
+                       f"{validator.depth if validator else 'no validator'}")
+        if known_failures:
+            count = len(known_failures)
+            noun = "failure" if count == 1 else "failures"
+            emit_detail += f"; {count} known compile {noun}"
+
+        executor = EXECUTORS.get(tier)
+        if executor and execute_in_ci and executable_count:
+            execute_status = PROVED
+            execute_detail = f"{executable_count} answer-bearing cases; CI requires execution"
+        else:
+            execute_status = UNMEASURED
+            execute_detail = ("no executor registered" if not executor
+                              else "no required execution check is wired in CI")
+
+        recovery_checks = _recovery_checks(tier, tests_root)
+        root_suite_in_ci = any("pytest tests/ -q" in command for command in ci_commands)
+        # The regular root-suite jobs do not provision cordis-wasm. Its test
+        # counts only when the wasm job explicitly collects it alongside the
+        # pinned runtime it installs.
+        if short == "wasm":
+            recovery_in_ci = any(path in command for path, _cases in recovery_checks
+                                 for command in ci_commands)
+        else:
+            recovery_in_ci = root_suite_in_ci or any(
+                path in command for path, _cases in recovery_checks
+                for command in ci_commands)
+        if recovery_checks and recovery_in_ci:
+            recovery_status = PROVED
+            recovery_detail = "; ".join(
+                f"{path}: {', '.join(cases)}" for path, cases in recovery_checks)
+        else:
+            recovery_status = UNMEASURED
+            recovery_detail = ("no crash-recovery test is registered"
+                              if not recovery_checks
+                              else "crash test exists but is not collected by CI")
+
+        selfhost_row = None
+        if selfhost is not None:
+            selfhost_row = next((row for row in conformance._summary_rows(report, selfhost)
+                                 if row[0] == f"{SELFHOST_TIER} (self-host)"), None)
+        if selfhost_row is None:
+            selfhost_status, selfhost_detail = UNMEASURED, "self-host comparison did not run"
+        else:
+            _name, exact, frontier, selfhost_gaps = selfhost_row
+            total = exact + frontier + selfhost_gaps
+            selfhost_status = DIVERGENCE if selfhost_gaps else PROVED
+            selfhost_detail = (f"shared revl measure: {exact}/{total} byte-identical; "
+                               f"{frontier} frontier limits; {selfhost_gaps} gaps")
+
+        rows.append({
+            "tier": short,
+            "emits": {"status": emit_status, "detail": emit_detail,
+                      "evidence": [compile_test, "tools/conformance.py"]},
+            "executes": {"status": execute_status, "detail": execute_detail,
+                         "evidence": ["tools/conformance.py"] if executor else []},
+            "durable_recovery": {"status": recovery_status,
+                                 "detail": recovery_detail,
+                                 "evidence": [path for path, _cases in recovery_checks]},
+            "selfhost_agreement": {"status": selfhost_status,
+                                   "detail": selfhost_detail,
+                                   "evidence": ["tools/conformance.py"]
+                                   if selfhost_row else []},
+        })
+
+    return {"tiers": [_short(tier) for tier in conformance.TIERS], "rows": rows}
+
+
+def support_markdown(data: dict | None = None) -> str:
+    """Render the evidence table, with every unsupported measurement explicit."""
+    data = data or support_matrix()
+    out = ["_Generated by `python3 tools/conformance.py --write-readme`. Do not edit by hand._",
+           "",
+           "A `proved` cell names the check wired for that tier; `divergence` names a "
+           "known gap; `unmeasured` means no matching check runs. The self-host "
+           "agreement is one shared `revl` pipeline, so its measured count repeats "
+           "across the host-tier rows.",
+           "",
+           "| tier | emits and compiles | executes | durable recovery | self-host agreement |",
+           "|---|---|---|---|---|"]
+
+    def cell(value: dict) -> str:
+        details = value["detail"]
+        links = [f"[`{path}`](../{path})" for path in value["evidence"]]
+        return "**" + value["status"] + "**: " + details + (
+            " (" + ", ".join(links) + ")" if links else "")
+
+    for row in data["rows"]:
+        out.append("| " + row["tier"] + " | " + " | ".join(
+            cell(row[key]) for key in
+            ("emits", "executes", "durable_recovery", "selfhost_agreement")) + " |")
+    return "\n".join(out)
+
+
+def support_block(data: dict | None = None, *, report: dict | None = None,
+                  selfhost: dict[str, str] | None = None) -> str:
+    if data is None:
+        data = support_matrix(report=report, selfhost=selfhost)
+    return f"{SUPPORT_START}\n## Per-tier support\n\n{support_markdown(data)}\n{SUPPORT_END}"
+
+
+def check_support_block() -> int:
+    """The issue-facing `--check` gate for the generated support matrix."""
+    path = ROOT / "docs" / "conformance.md"
+    text = path.read_text(encoding="utf-8")
+    expected = support_block()
+    if (SUPPORT_START in text and SUPPORT_END in text
+            and text[text.index(SUPPORT_START):text.index(SUPPORT_END) + len(SUPPORT_END)]
+            == expected):
+        print("docs/conformance.md per-tier support matrix is current.")
+        return 0
+    print("docs/conformance.md per-tier support matrix is STALE; regenerate with "
+          "`python3 tools/conformance.py --write-readme`.", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--json", action="store_true",
@@ -827,7 +1068,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--show", action="store_true",
                     help="the per-tier verdict totals, which the committed "
                          "block leaves out")
+    ap.add_argument("--check", action="store_true",
+                    help="fail if docs/conformance.md's generated per-tier "
+                         "support table is stale")
     args = ap.parse_args(argv)
+    if args.check:
+        return check_support_block()
     data = matrix()
     if args.show:
         print(totals(data))

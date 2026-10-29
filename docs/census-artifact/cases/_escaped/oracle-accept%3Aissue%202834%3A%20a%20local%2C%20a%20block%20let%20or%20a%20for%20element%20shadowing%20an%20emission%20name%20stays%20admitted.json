@@ -1,0 +1,1 @@
+{"case": "oracle-accept:issue 2834: a local, a block let or a for element shadowing an emission name stays admitted", "buckets": ["agree-admit"]}

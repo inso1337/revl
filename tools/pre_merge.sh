@@ -130,10 +130,12 @@ fi
 # origin/main by default; override with --base=<ref>). This is NOT a replacement
 # for the full `make pre-merge` — that stays the release/CI gate. The selector
 # fails SAFE: any change to a core/compile-reachable frontend file, or any file
-# it cannot map, falls back to the full gate here.
+# it cannot map, requires an explicit escalation to the full gate.
 AFF=0
 AFF_BASE=""
 PLAN=0
+REFUSED=0
+REFUSE_HOW=""
 WITH=${REVL_PREMERGE_WITH:-}
 for arg in "$@"; do
     case "$arg" in
@@ -172,29 +174,88 @@ SEL_PYTEST="tests/"
 SEL_BACKENDS="python go rust wasm java"
 SEL_GATES="conformance site-wheel ruff"
 
+# refuse "<how to escalate>" : stop before any step runs. Under --plan the run
+# keeps RUN_ALL=1 so every step still prints its "would run" line, and the same
+# refusal is printed again before the exit; otherwise it stops here.
+refuse() {
+    REFUSE_HOW=$1
+    if [ "$PLAN" -eq 1 ]; then
+        REFUSED=1
+        return 0
+    fi
+    echo "pre-merge --affected: no full gate was run."
+    echo "pre-merge --affected: to explicitly escalate, $REFUSE_HOW"
+    exit 2
+}
+
 if [ "$AFF" -eq 1 ]; then
     PY=$(command -v python3 || command -v python || true)
     if [ -z "$PY" ]; then
-        echo "pre-merge --affected: no python3 to run the selector -> running FULL gate."
+        echo "pre-merge --affected: selector unavailable (no python3 or python on PATH)."
+        refuse "review the change and run 'make pre-merge'."
     else
         base_arg=""
         [ -n "$AFF_BASE" ] && base_arg="--base $AFF_BASE"
-        SEL_OUT=$("$PY" tools/affected_tests.py --root "$root" --format machine $base_arg 2>/dev/null)
+        SEL_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/revl-premerge-sel.XXXXXX") || SEL_ERR_FILE=/dev/null
+        if SEL_OUT=$("$PY" tools/affected_tests.py --root "$root" --format machine $base_arg 2>"$SEL_ERR_FILE"); then
+            SEL_RC=0
+        else
+            SEL_RC=$?
+        fi
+        if [ "$SEL_ERR_FILE" = /dev/null ]; then
+            SEL_ERR=""
+            SEL_ERR_LOST=1
+        else
+            SEL_ERR=$(cat "$SEL_ERR_FILE" 2>/dev/null)
+            SEL_ERR_LOST=0
+            rm -f "$SEL_ERR_FILE"
+        fi
         SEL_FULL=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^FULL //p')
         SEL_REASON=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^REASON //p')
-        if [ -z "$SEL_OUT" ] || [ -z "$SEL_FULL" ]; then
-            echo "pre-merge --affected: selector produced no usable output -> running FULL gate."
-        elif [ "$SEL_FULL" = "1" ]; then
-            echo "pre-merge --affected: ${SEL_REASON:-full}"
-            echo "pre-merge --affected: selection is the FULL gate (nothing skipped)."
+        echo "pre-merge --affected: selector receipt:"
+        if [ -n "$SEL_OUT" ]; then
+            printf '%s\n' "$SEL_OUT" | sed 's/^/  /'
         else
-            RUN_ALL=0
-            SEL_PYTEST=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^PYTEST //p')
-            SEL_BACKENDS=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^BACKENDS //p')
-            SEL_GATES=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^GATES //p')
-            echo "pre-merge --affected: ${SEL_REASON:-targeted}"
-            echo "pre-merge --affected: pytest $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s) | backends [${SEL_BACKENDS:-none}] | gates [${SEL_GATES:-none}]"
-            echo "pre-merge --affected: inner-loop gate only; full \`make pre-merge\` still required at release/CI."
+            echo "  (no output)"
+        fi
+        # stderr is reported, never parsed: a warning line mixed into stdout
+        # could land inside a PYTEST line and corrupt the node list.
+        if [ "$SEL_ERR_LOST" -eq 1 ]; then
+            echo "pre-merge --affected: selector stderr: (not captured; mktemp failed)"
+        elif [ -n "$SEL_ERR" ]; then
+            echo "pre-merge --affected: selector stderr:"
+            printf '%s\n' "$SEL_ERR" | sed 's/^/  /'
+        fi
+        SEL_REFUSAL=""
+        SEL_HOW="review the change and run 'make pre-merge'."
+        if [ "$SEL_RC" -ne 0 ]; then
+            SEL_REFUSAL="selector exited with status $SEL_RC; refusing to run the FULL gate automatically."
+        elif [ -z "$SEL_FULL" ]; then
+            SEL_REFUSAL="selector produced no usable FULL line; refusing to run the FULL gate automatically."
+        else
+            case "$SEL_FULL" in
+                1)
+                    echo "pre-merge --affected: ${SEL_REASON:-selection requires the FULL gate}."
+                    SEL_REFUSAL="refusing to run the FULL gate automatically."
+                    SEL_HOW="review the receipt and run 'make pre-merge'."
+                    ;;
+                0)
+                    RUN_ALL=0
+                    SEL_PYTEST=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^PYTEST //p')
+                    SEL_BACKENDS=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^BACKENDS //p')
+                    SEL_GATES=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^GATES //p')
+                    echo "pre-merge --affected: ${SEL_REASON:-targeted}"
+                    echo "pre-merge --affected: pytest $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s) | backends [${SEL_BACKENDS:-none}] | gates [${SEL_GATES:-none}]"
+                    echo "pre-merge --affected: inner-loop gate only; full \`make pre-merge\` still required at release/CI."
+                    ;;
+                *)
+                    SEL_REFUSAL="selector produced invalid FULL value '$SEL_FULL'; refusing to run the FULL gate automatically."
+                    ;;
+            esac
+        fi
+        if [ -n "$SEL_REFUSAL" ]; then
+            echo "pre-merge --affected: $SEL_REFUSAL"
+            refuse "$SEL_HOW"
         fi
     fi
 fi
@@ -644,6 +705,11 @@ ci_only_suites
 echo
 if [ "${PLAN:-0}" -eq 1 ]; then
     echo "pre-merge --plan: $planned would run, $skipped skipped, $optout CI-only suite(s) not opted in; nothing was run"
+    if [ "$REFUSED" -eq 1 ]; then
+        echo "pre-merge --affected: no full gate was run."
+        echo "pre-merge --affected: to explicitly escalate, $REFUSE_HOW"
+        exit 2
+    fi
     exit 0
 fi
 echo "pre-merge: $ran ran, $skipped skipped"

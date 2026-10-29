@@ -1,0 +1,12 @@
+// Issue #2911: `let values = []` read by a use that carries no element type.
+// The wasm reference REFUSES it by name: an empty list literal with no
+// expected `List` type has no representation on this tier.
+//
+// It cannot live in tests/fixtures/emit_wasm_corpus: there are no reference
+// bytes to agree with. selfhost/emit_wasm.rvl answers this shape with
+// `<<UNSUPPORTED-EMPTY-LIST-TYPE>>`, and the tier oracle pins that text.
+pub fn length() -> Int {
+  let values = []
+  let n = values.length()
+  return n
+}

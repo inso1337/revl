@@ -327,6 +327,36 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+def _return_move_names(expr: object) -> frozenset:
+    """The names a `return` expression may MOVE rather than clone (issue #2905).
+
+    The function returns once the expression is evaluated, so a name the
+    expression reads exactly once is never read again: cloning it into a
+    by-value slot only copies a value that is dropped right after. A read
+    inside an arrow counts twice, because the closure may run more than once
+    and a `move` closure cannot give up what it captured, so a captured name
+    still clones. revl values are immutable, so a move cannot be observed, and
+    rustc refuses a wrong one at build time (E0382).
+    """
+    counts: dict[str, int] = {}
+
+    def walk(node: object, in_arrow: bool) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident is not None:
+                    counts[ident] = counts.get(ident, 0) + (2 if in_arrow else 1)
+            inner = in_arrow or node.get("kind") == "arrow"
+            for value in node.values():
+                walk(value, inner)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, in_arrow)
+
+    walk(expr, False)
+    return frozenset(n for n, c in counts.items() if c == 1)
+
+
 def _body_assigned_names(body: object) -> set[str]:
     """Every name a function body ASSIGNS (`x = Some(1)`) after its
     declaration. `_body_multi_use` counts reads only, so a `var` the body
@@ -611,6 +641,9 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     the body is cloned at each by-value move, while a single-use name is left
     untouched. That keeps a lone move byte-identical to before and clones only
     the reused shape that would otherwise fail to build.
+
+    Inside a `return` expression, a known non-Copy name the expression reads
+    only once moves instead (`ctx.return_moves`, issue #2905).
     """
     field_clone = _by_value_field_clone(arg_node, rendered, ctx)
     if field_clone is not None:
@@ -630,6 +663,8 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
         if _is_fn_type(ty):
             return f"&{rendered}"
         if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+            return rendered
+        if name in ctx.return_moves:
             return rendered
         return f"{rendered}.clone()"
     if name in ctx.multi_use:
@@ -1323,7 +1358,12 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
 
 
 def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
-    """Find internal List parameters used only by read-only operations."""
+    """Find internal List parameters used only by read-only operations.
+
+    The fixpoint drops only the parameters that escape (issue #2906): one
+    `return acc` no longer makes a read-only `ts` in the same function owned,
+    so its callers lend the list instead of copying it.
+    """
     names = frozenset(fn.get("name") for fn in functions if fn.get("name"))
     borrow = {
         fn.get("name"): frozenset(
@@ -1332,26 +1372,35 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
         for fn in functions
     }
 
-    def escapes(node, candidates, safe):
+    def escapes(node, candidates, safe, out):
+        """Add to `out` every candidate that reaches a consuming position."""
         if isinstance(node, dict):
             kind = node.get("kind")
             if kind in ("var", "name", "req"):
-                return (node.get("id") or node.get("name")) in candidates and not safe
+                ident = node.get("id") or node.get("name")
+                if ident in candidates and not safe:
+                    out.add(ident)
+                return
             if kind in ("len", "index"):
-                return escapes(node.get("target"), candidates, True)
+                escapes(node.get("target"), candidates, True, out)
+                return
             if kind == "builtin":
                 read = node.get("method") in ("length", "at")
-                return (escapes(node.get("target"), candidates, True) or
-                        any(escapes(a, candidates, read) for a in node.get("args") or []))
+                escapes(node.get("target"), candidates, True, out)
+                for a in node.get("args") or []:
+                    escapes(a, candidates, read, out)
+                return
             cname, args = _free_fn_call(node, names)
             if cname is not None:
                 allowed = borrow.get(cname, frozenset())
-                return any(escapes(a, candidates, i in allowed)
-                           for i, a in enumerate(args))
-            return any(escapes(v, candidates, False) for v in node.values())
-        if isinstance(node, list):
-            return any(escapes(v, candidates, safe) for v in node)
-        return False
+                for i, a in enumerate(args):
+                    escapes(a, candidates, i in allowed, out)
+                return
+            for v in node.values():
+                escapes(v, candidates, False, out)
+        elif isinstance(node, list):
+            for v in node:
+                escapes(v, candidates, safe, out)
 
     changed = True
     while changed:
@@ -1360,8 +1409,10 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
             current = borrow.get(fn.get("name"), frozenset())
             params = fn.get("params") or []
             candidates = {params[i].get("name") for i in current}
-            if escapes(fn.get("body") or [], candidates, False):
-                kept = frozenset(i for i in current if params[i].get("name") not in candidates)
+            escaped: set = set()
+            escapes(fn.get("body") or [], candidates, False, escaped)
+            if escaped:
+                kept = frozenset(i for i in current if params[i].get("name") not in escaped)
                 if kept != current:
                     borrow[fn.get("name")] = kept
                     changed = True
@@ -6983,6 +7034,36 @@ def _v3_empty_vec_elem_types(body: object, ctx: "_V3Ctx") -> dict:
         ctx.var_types = saved
 
 
+def _v3_pinned_empty_vecs(body: object, ctx: "_V3Ctx") -> set:
+    """Names bound to an empty list whose element type a LATER typed use pins
+    even though `_v3_empty_vec_elem_types` cannot name it (issue #2911): a
+    non-empty assignment (`lines = lines.concat(r.lines)`), a bare `return`
+    under a declared `List[T]`, or a bare name passed into a declared `List[T]`
+    parameter. Rustc takes the type from such a use, so `_v3_stmt` leaves those
+    bindings unannotated instead of refusing; everything else is refused.
+    """
+    nodes = list(_v3_walk_nodes(body or []))
+    assigned = {n.get("name") for n in nodes
+                if n.get("step") == "assign"
+                and not _v3_is_empty_list(n.get("value"))}
+    returned = {n["expr"].get("name") for n in nodes
+                if n.get("step") == "return"
+                and isinstance(n.get("expr"), dict)
+                and isinstance(ctx.current_return, str)
+                and ctx.current_return.startswith("List[")}
+    called: set = set()
+    for node in nodes:
+        if node.get("kind") != "call":
+            continue
+        callee = node.get("callee") or {}
+        params = ctx.fn_param_types.get(callee.get("name")) or []
+        for i, arg in enumerate(node.get("args") or []):
+            if (isinstance(arg, dict) and arg.get("kind") in ("var", "name")
+                    and i < len(params) and str(params[i]).startswith("List[")):
+                called.add(arg.get("name"))
+    return assigned | returned | called
+
+
 # The stdlib method table's UNCONDITIONAL result types — the builtins whose
 # surface result does not depend on the receiver (a mirror of
 # `revl.typecheck._BUILTIN_SIG`'s third column, restricted to the rows that name
@@ -7258,6 +7339,10 @@ class _V3Ctx:
         # reset per fn by `_emit_v3_functions`, empty everywhere the reuse
         # context is not established.
         self.multi_use: set[str] = set()
+        # issue #2905: while a `return` expression renders, the names it reads
+        # exactly once outside any arrow (`_return_move_names`); a by-value use
+        # of one moves instead of cloning. Empty everywhere else.
+        self.return_moves: frozenset = frozenset()
         # issue #2497: reads per name in the body being rendered, so a `let`
         # nothing reads again can be typed (or refused) where rustc has no
         # later use to infer from
@@ -7271,6 +7356,11 @@ class _V3Ctx:
         # `vec![]` (E0282 annotation); reset per fn by `_emit_v3_functions`, empty
         # in every other emit context (no empty-vec annotation needed there).
         self.vec_elems: dict = {}
+        # Names bound to an empty `vec![]` whose element type a LATER typed use
+        # pins even though this emitter cannot name it (issue #2911). Rustc
+        # infers those, so they are emitted unannotated; a binding in neither
+        # this set nor `vec_elems` is refused by `_v3_stmt`.
+        self.vec_pinned: set = set()
         # Free function name -> set of parameter INDICES lowered to `&str`
         # (read-only `Str` params, item 282). Computed once from the whole
         # function list so a call site knows which argument slots take a borrow;
@@ -8873,6 +8963,9 @@ def _v3_refuse_unbound_case(value: dict, binding, ctx: _V3Ctx) -> None:
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
+    raw_name = node.get("name")
+    dead_binding = (ctx.read_counts.get(raw_name, 0) == 0
+                    and raw_name not in ctx.assigned_names)
 
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
@@ -8910,11 +9003,36 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
             # pushes/aliases make it knowable, annotate so the accumulator idiom
             # (`let mut out = []; .. out = out.push(x)`) compiles (E0282).
             if _v3_is_empty_list(node.get("value")):
-                elem = ctx.vec_elems.get(node.get("name"))
+                elem = ctx.vec_elems.get(raw_name) or ("Unit" if dead_binding else None)
                 if isinstance(elem, str):
                     annot = f": Vec<{_rust_type(elem, ctx.types)}>"
-            elif (ctx.read_counts.get(node.get("name"), 0) == 0
-                    and node.get("name") not in ctx.assigned_names):
+                elif raw_name not in ctx.vec_pinned:
+                    # Nothing pushes into this binding, aliases it, declares
+                    # its `List[T]`, or pins it from a later typed use, so
+                    # rustc is left with `Vec<_>` and reports E0282 wherever a
+                    # read does not carry an element type (`.length()`, `==`, a
+                    # `for` iterable, a plain reload). Refuse by name rather
+                    # than emit a module cargo rejects (issue #2911).
+                    raise EmitError(
+                        "an untyped empty list literal needs an element type: "
+                        f"nothing pins `{raw_name} = []` - annotate it "
+                        f"(`let {raw_name}: List[T] = []`) or push a typed "
+                        "element into it (rustc reports E0282 otherwise)")
+            elif (isinstance(node.get("value"), dict)
+                    and node["value"].get("kind") == "list"
+                    and node["value"].get("items")
+                    and all(_v3_is_empty_list(item)
+                            for item in node["value"]["items"])
+                    and raw_name not in ctx.vec_pinned):
+                # `let xs = [[]]` leaves the inner `vec![]` unconstrained too:
+                # no sibling item carries a type for rustc to unify the empty
+                # lists with (issue #2911).
+                raise EmitError(
+                    "an untyped nested empty list literal needs an element type: "
+                    f"nothing pins `{raw_name} = [[]]` - annotate it "
+                    f"(`let {raw_name}: List[List[T]] = []`) or push a typed "
+                    "element into it (rustc reports E0282 otherwise)")
+            elif dead_binding:
                 annot = _v3_dead_let_annotation(node, ctx)
             out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
@@ -8923,8 +9041,13 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if node.get("expr") is None:
             out.append(f"{pad}return;")
         else:
-            rendered = _render_expr(node['expr'], ctx,
-                                    expected=ctx.current_return)
+            saved_moves = ctx.return_moves
+            ctx.return_moves = _return_move_names(node['expr'])
+            try:
+                rendered = _render_expr(node['expr'], ctx,
+                                        expected=ctx.current_return)
+            finally:
+                ctx.return_moves = saved_moves
             # The RETURN half of the `Any`-boxing coercion (`_coerce_any_arg`):
             # a declared `-> Any` erases to the opaque `Value`, so returning a
             # concrete `Str`/`Int`/… from such a function is E0308 exactly as
@@ -9240,6 +9363,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         # annotated `Vec<T>` (E0282). Computed before the body renders and after
         # `var_types` is seeded with the params it reads.
         ctx.vec_elems = _v3_empty_vec_elem_types(fn.get("body") or [], ctx)
+        ctx.vec_pinned = _v3_pinned_empty_vecs(fn.get("body") or [], ctx)
         # A read-only `Str` param lowers to a borrowed `&str` (item 282): the
         # caller lends the string instead of cloning it. `_render_param_type`
         # spells the borrow, and `ctx.borrowed_params` tells the body renderer
@@ -9754,6 +9878,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
             ctx.movable_for_iterables = _movable_for_iterables(
                 test["body"], ctx.multi_use)
             ctx.vec_elems = _v3_empty_vec_elem_types(test["body"], ctx)
+            ctx.vec_pinned = _v3_pinned_empty_vecs(test["body"], ctx)
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
         out.append("}")

@@ -379,15 +379,16 @@ process killed between the two leaves the effect in the world and no record of
 it in the log. Recovery cannot name, invert or fence an effect it has no record
 of: it reports `rolled-back` over the records it has, and an effect whose record
 never landed is UNKNOWN to it, so it must be reconciled by hand. That clean
-verdict is bounded by the log, but the residue proof's closing sentence is not:
-`_residue_proof` says "The world holds only what was deliberately committed"
-(`src/revl/recovery.py:2637-2640`), and in this window the world still holds the
-unrecorded effect. The sentence overclaims here; the proof covers the records,
-not the world. The window is deterministic and pinned:
+verdict is bounded by the log, and so is the residue proof's closing sentence.
+`_residue_proof` ends a clean proof with "This covers only the effects the log
+recorded; an effect whose record never landed (a crash between the effect and
+its record) is not covered and must be reconciled by hand (see
+docs/crash-recovery.md section 4c)." It does not claim anything about the world
+beyond the log. The window is deterministic and pinned:
 `REVL_CRASH_BEFORE_RECORD` (a step label, or `any`) exits the process in
 `Timeline._wal_append` before the append, and
-`tests/test_wal_effect_record_window_2728.py` asserts the verdict and records
-that the proof's world sentence is the overclaim. A plain emission does not have this window:
+`tests/test_wal_effect_record_window_2728.py` asserts the verdict and that
+wording in the clean proof. A plain emission does not have this window:
 its record is written before the host body runs. The other named unresolved
 outcome is `fenced-before-attempt, outcome unknown` in section 4c.
 

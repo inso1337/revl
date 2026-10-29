@@ -1,6 +1,11 @@
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { describeEmitFailure, emitFixture, pythonInterpreter } from '../scripts/emit-fixtures'
+import {
+  describeEmitFailure,
+  emitFixture,
+  emitFixtureOutput,
+  pythonInterpreter,
+} from '../scripts/emit-fixtures'
 
 describe('emit-fixtures failure message', () => {
   it('names the spawn error when the interpreter cannot be spawned', () => {
@@ -26,6 +31,11 @@ describe('emit-fixtures failure message', () => {
 
   it('emitFixture throws the spawn error for a missing interpreter', () => {
     expect(() => emitFixture('user_cache.ir.json', 'unused_2892.ts', 'revl-no-such-interpreter-2892'))
+      .toThrow(/could not run emit\.py for user_cache\.ir\.json: ENOENT/)
+  })
+
+  it('emitFixtureOutput throws the spawn error for its selected interpreter', () => {
+    expect(() => emitFixtureOutput('user_cache.ir.json', 'revl-no-such-interpreter-2917-output'))
       .toThrow(/could not run emit\.py for user_cache\.ir\.json: ENOENT/)
   })
 

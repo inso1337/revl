@@ -1957,6 +1957,13 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `--schedule-seeds N` - schedule testing: sample `N` seeded interleavings (a
   random walk over the schedule space) plus the canonical sequential baseline,
   and report any interleaving that violates a property (py tier).
+- `--fault-profile SEED` - fault profile: inject a seeded list of fault events
+  drawn from the sweep points, judge each like the sweep, and print the seed,
+  every injected fault and the count of failures with no classified cause. The
+  same seed injects the same sequence; the run exits 1 when any event did not
+  end contained (py tier; section 11 of [fault-tests.md](fault-tests.md)).
+- `--fault-profile-events N` - with `--fault-profile`, how many events to draw
+  (default 8).
 
 ---
 
