@@ -73,8 +73,12 @@ SHAPES = {
     "async_method_reaches_op": ("", "emission " + _ASYNC,
                                 "async fn f(x) = emit m.complete(x)", "accept"),
     "sync_method_plain": ("", _SYNC, _PLAIN, "accept"),
+    # A body with statements rather than `= emit relay(x)`: the emitted async
+    # wrapper belongs in value position there, which records no emission step
+    # and is refused under G4 first (issue #2969), hiding the A1 colouring
+    # verdict this shape grades.
     "sync_method_reaches_fn": ("", "emission " + _SYNC,
-                               "fn f(x) = emit relay(x)", "A1"),
+                               "fn f(x) { emit relay(x) return x }", "A1"),
     "effect_unawaited": ('  let c = effect w.open("u") undo w.cool()',
                          _SYNC, _PLAIN, "A1"),
     "effect_awaited": ('  let c = effect await w.open("u") undo w.cool()',
@@ -173,11 +177,15 @@ def test_the_checker_verdict_on_each_shape(name):
 # ------------------------------------------------------------- the facts
 
 def test_the_undo_fixture_s_facts(rows):
-    """`open_conn` reaches the async extern `ho` through the `fn` graph,
-    the acquisition is awaited, and the `undo` calls the async `W.heat`."""
-    assert f"AN\t{UNDO}\tho" in rows and f"AN\t{UNDO}\tW.heat" in rows
+    """The acquisition is awaited, and the `undo` calls the async `W.heat`.
+
+    The acquisition is a plain async operation (`Pool.open`) rather than an
+    `effect await emit <wrapper>`: the emit side of that spelling records no
+    emission step and is refused under G4 first (issue #2969), so it would hide
+    the A1 fault this fixture is about."""
+    assert f"AN\t{UNDO}\tW.heat" in rows
     sites = [r.split("\t")[3:] for r in rows if r.startswith(f"AS\t{UNDO}\tA\t")]
-    assert ["0", "effectAwait", "open_conn"] in sites
+    assert ["0", "effectAwait", "Pool.open"] in sites
     assert ["1", "undo", "W.heat"] in sites
 
 

@@ -1492,8 +1492,15 @@ class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
                  plan_groups: list | None = None,
                  scopes: dict | None = None,
-                 decorated: set | None = None) -> None:
+                 decorated: set | None = None,
+                 emission_reach: dict | None = None) -> None:
         self.ir = component
+        # issue #2969: `fn name -> the class-emission extern names its body
+        # reaches` (`_emission_extern_reach`, computed once in `emit()`), so a
+        # marked `emit` of a wrapper `fn` can be keyed by the host extern it
+        # crosses. Empty in a context that did not supply it, which keeps the
+        # callee name and every non-wrapper emission byte-identical.
+        self._emission_reach: dict = dict(emission_reach or {})
         # the externs `declared_crossing` decorates (computer-use crossings):
         # they register their own compensation, so a provide-method site does
         # not write the explicit line for them (`_method_compensated_extern`)
@@ -2645,6 +2652,23 @@ class _ComponentEmitter:
         # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
         out.add(indent, "_revl_raise_first(_revl_group)")
 
+    def _emission_record_name(self, expr: dict) -> str:
+        """The name a marked `emit` of `expr` is RECORDED under (issue #2969).
+
+        A direct emission extern is its own answer. A plain `fn` that reaches a
+        host extern runs that host body, so the WAL step belongs to the extern
+        that crossed (`fn helper(m) { return ext(m) }` records `ext`), not to the
+        wrapper the source names. The reach is named only when the checker's
+        fixed point resolves EXACTLY ONE class-emission extern: a wrapper that
+        reaches several host bodies would need one step per boundary, which one
+        `emit` step cannot carry, so it keeps its own name rather than record a
+        step that silently stands for more than the one it names."""
+        name = expr.get("name")
+        reach = self._emission_reach.get(name) if isinstance(name, str) else None
+        if reach and len(reach) == 1:
+            return next(iter(reach))
+        return name
+
     def _extern_emit_fire(self, expr: dict, where: str) -> str:
         """The Python expression that fires a DIRECT host-extern emission
         (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
@@ -2654,15 +2678,19 @@ class _ComponentEmitter:
         the callee OBJECT and the arguments are all evaluated before the helper
         is entered, the same shape and the same record-then-fire order as the
         `_revl_produced_emit` seam and `_ServiceProxy`, so a crossing nested in an
-        argument still records first and a host body never runs unrecorded.
+        argument still records first and a host body never runs unrecorded. The
+        recorded name is the host extern that crossed (`_emission_record_name`,
+        issue #2969); the callee fired is still the one the source named.
 
         The `await` stays OUTSIDE the helper: calling an async extern returns a
         coroutine, and the same rule `_expr`'s `fn` branch applies decides whether
         this context settles it."""
         self.uses.add("extern_emit")
         name = _ident(expr.get("name"), f"{where}: function")
+        record = _ident(self._emission_record_name(expr) or expr.get("name"),
+                        f"{where}: function")
         args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-        call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
+        call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {record!r}, {name}, "
                 f"({args}{',' if args else ''}))")
         if self._in_async and not self._in_arrow \
                 and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
@@ -2695,12 +2723,21 @@ class _ComponentEmitter:
     def _is_value_emission(self, expr: dict) -> bool:
         """A value-position call of an `emission` extern inside a provide-method
         body (`return emit f(x)`, `let r = emit f(x)`), see
-        `_route_value_emissions`. A deferred emission is an `emit` step only."""
+        `_route_value_emissions`. A deferred emission is an `emit` step only.
+
+        Issue #2969: a plain `fn` that reaches a class-emission extern is a
+        crossing too. The `emit` marker leaves no trace on the IR node, and the
+        wrapper is not in the extern table, so reading the callee's class alone
+        rendered `let r = emit helper(m)` as a bare call and the WAL held nothing
+        for the host body it ran. The reach resolves it (`_emission_reach`), the
+        same way the statement form's `_emission_shape` already routes any `fn`."""
         if not self._route_value_emissions:
             return False
         name = expr.get("name")
         decl = self._extern_by_name.get(name) or {}
-        return decl.get("class") == "emission" and name not in (self.deferred or {})
+        return name not in (self.deferred or {}) and (
+            decl.get("class") == "emission"
+            or bool(self._emission_reach.get(name)))
 
     def _emission_fire(self, expr: dict, where: str) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
@@ -5714,6 +5751,76 @@ def _inline_templates(functions: list) -> dict:
     return final
 
 
+def _named_calls(node: Any, found: set) -> None:
+    """The function/extern names a pure `fn` body CALLS:
+    `{kind: "call", callee: {kind: "var", name}}`, the shape
+    `emission_analysis._calls_in` reads for that stratum. A first-class reference
+    is not a call, and a component body (which spells a call `{kind: "fn"}`) is
+    not walked here: this reads the `functions` section only."""
+    if isinstance(node, dict):
+        callee = node.get("callee")
+        if node.get("kind") == "call" and isinstance(callee, dict) \
+                and callee.get("kind") == "var" \
+                and isinstance(callee.get("name"), str):
+            found.add(callee["name"])
+        for value in node.values():
+            _named_calls(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _named_calls(value, found)
+
+
+def _emission_extern_reach(functions: list, externs: list) -> dict:
+    """`fn name -> the class-emission extern names its body reaches`, the least
+    fixed point over the module call graph (issue #2969).
+
+    A marked `emit` of a plain `fn` performs a host crossing the IR node does not
+    itself name: `fn helper(m) { return ext(m) }` under `emit helper(m)` runs
+    `ext`, so the WAL step belongs to `ext`, not to the wrapper. The checker's
+    `emission_analysis._emitting_capabilities` already resolves this over the
+    same two sections; this is that walk restricted to the HOST NAME (which
+    extern crossed) rather than the declared capability token (which boundary
+    was permitted), so the emitter can key a step without importing `revl` and
+    the self-host port can mirror it from the interchange IR alone.
+
+    `*` (a first-class dispatch no name binds) is deliberately not collected:
+    the emitter keys a step only when exactly one host extern is named, and
+    keeps the callee's own name otherwise. Empty for a document with no emission
+    extern, so every other program emits byte-identically.
+
+    An async-colored `fn` is left out: settling a coroutine through the seam is
+    the tier's async slice, which the self-host port defers, so routing one here
+    would make the two emitters diverge. A sync `fn` can only reach sync externs
+    (A1 refuses the other direction), so the split loses no reach a sync wrapper
+    has."""
+    seeds = {ext.get("name") for ext in externs or []
+             if ext.get("class") == "emission"
+             and not ext.get("async")
+             and isinstance(ext.get("name"), str)}
+    calls: dict = {}
+    for fn in functions or []:
+        name = fn.get("name")
+        if not isinstance(name, str) or fn.get("async"):
+            continue
+        found: set = set()
+        _named_calls(fn.get("body") or [], found)
+        calls[name] = found
+    reach: dict = {}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            now = set(reach.get(name) or ())
+            for callee in called:
+                if callee in seeds:
+                    now.add(callee)
+                now |= reach.get(callee) or set()
+            if now != (reach.get(name) or set()):
+                reach[name] = now
+                changed = True
+    return reach
+
+
 def _inline_pure_fns(ir: dict) -> dict:
     """Return a copy of `ir` with calls to safely-inlinable pure fns folded into
     their call sites, inside pure `fn` bodies. The fn definitions are kept (a fn
@@ -6109,10 +6216,14 @@ def emit(ir: dict) -> str:
     # and byte-identical to before).
     plan_groups = _parallel_step_groups(ir)
     crossings, scopes = _crossing_facts(ir)
+    # issue #2969: the host extern each module `fn` reaches, so a marked `emit`
+    # of a wrapper `fn` records the extern that crossed rather than the wrapper.
+    emission_reach = _emission_extern_reach(functions, externs)
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),
-                          scopes.get(component.get("name")), set(crossings))
+                          scopes.get(component.get("name")), set(crossings),
+                          emission_reach=emission_reach)
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]

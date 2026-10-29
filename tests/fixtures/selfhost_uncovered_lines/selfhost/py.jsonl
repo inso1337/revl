@@ -24,6 +24,10 @@
 
 ["function", "conditional-capability-discovery-branches-body-has-secret-pa", "body_has_timer", 2, 2]
 
+["reason", "emission-wrapper-reach-transitive-hop-unreached", "Emission wrapper reach (issue #2969): the emitter keys a marked `emit` of a wrapper `fn` by the class-emission extern that fn reaches transitively. `em_extern_reach` is the least fixed point over the module call graph, and the two statements here join a callee's reach into its caller's: the hop a wrapper two or more calls away from the extern needs. No emit_py corpus document emits a transitive wrapper (ui_transaction_unit.rvl's `peek` reaches `read_pane` in one hop), so the join runs on an empty list and its two statements never execute. The shape is exercised against this emitter by tests/test_selfhost_emit_py.py::test_a_wrapper_emit_is_keyed_by_the_crossed_extern_in_both_emitters and against the reference by tests/test_emission_value_wrapper_2969.py::test_the_emitted_fire_names_the_crossed_extern[deep-relay], so a byte divergence on it still fails. Reaching it from the corpus would mean a new census document for two statements."]
+
+["function", "emission-wrapper-reach-transitive-hop-unreached", "em_extern_reach", 2, 2]
+
 ["reason", "empty-interpolation-fallback-interp-fstring-emits-the-empty", "Empty interpolation fallback: interp_fstring emits the empty literal for an empty parts list. Empty source strings lower lit instead; both implementations agree on this legacy shape, and strings/float_interp cover nonempty interpolation."]
 
 ["function", "empty-interpolation-fallback-interp-fstring-emits-the-empty", "interp_fstring", 1, 1]

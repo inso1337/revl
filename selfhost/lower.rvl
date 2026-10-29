@@ -22538,7 +22538,12 @@ fn sg_stmt(ts: List[Token], i: Int, in_method: Bool, in_async: Bool, loops: Int)
   if (atw(ts, i, "emit")) { return sg_emit(ts, i + 1) }
   if (atw(ts, i, "await")) {
     if (in_method && !in_async) { return sg_err("`await` is only allowed in a component body", ln) }
-    if (!in_method && atw(ts, i + 1, "emit")) { return sg_emit(ts, i + 2) }
+    // `await emit <call>` is the AWAITED spelling of an emit statement, so an
+    // `async fn` method body takes it too: its crossing is the same one, awaited.
+    // Reading it as a bare `await <emit expression>` would hand the value
+    // position rules an expression that is not in value position (issue #2969's
+    // async wrapper refusal fired on it).
+    if (atw(ts, i + 1, "emit")) { return sg_emit(ts, i + 2) }
     return sg_expr(ts, i + 1)
   }
   if (atw(ts, i, "return")) {
