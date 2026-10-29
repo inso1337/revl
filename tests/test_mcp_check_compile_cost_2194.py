@@ -241,6 +241,32 @@ def test_outside_a_tool_call_every_parse_is_fresh():
     assert shared_parse.program(TERSE, "x.rvl") is not once
 
 
+def test_a_nested_scope_starts_empty_and_restores_the_outer_memo():
+    """The undo path makes a tool call from inside a call. Its scope must not
+    see the outer call's parses, and leaving it must restore them."""
+    from revl import shared_parse  # noqa: PLC0415
+
+    with shared_parse.scope():
+        outer = shared_parse.program(TERSE, "x.rvl")
+        with shared_parse.scope():
+            assert shared_parse.program(TERSE, "x.rvl") is not outer
+        assert shared_parse.program(TERSE, "x.rvl") is outer
+
+
+def test_a_scope_resets_when_the_handler_inside_it_raises():
+    """A handler that raises must not leave its parses in the memo: the next
+    call starts clean rather than reading a half-filled entry."""
+    from revl import shared_parse  # noqa: PLC0415
+
+    with pytest.raises(RuntimeError):
+        with shared_parse.scope():
+            shared_parse.program(TERSE, "x.rvl")
+            raise RuntimeError("handler failed")
+    with shared_parse.scope():
+        first = shared_parse.program(TERSE, "x.rvl")
+        assert shared_parse.program(TERSE, "x.rvl") is first
+
+
 _RESPONSE = r'''
 import contextlib, json, os, sys, tempfile
 os.chdir(tempfile.mkdtemp())
