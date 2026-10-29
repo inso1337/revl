@@ -1,0 +1,9 @@
+// Issue #2911: a `let` bound to an empty list that no later use reads or
+// assigns has no element type for rustc to infer from, so the reference
+// annotates the `vec![]` concretely (`Vec<()>`) instead of leaving `Vec<_>`
+// (E0282). The self-host emitter carries the same rule, so this is a
+// byte-agreement case over the shared corpus.
+pub fn unused() -> Int {
+  let values = []
+  return 1
+}

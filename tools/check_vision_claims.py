@@ -693,7 +693,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             docs.append((args.root / "README.md", readme_rules))
     all_findings = []
     for doc, doc_rules in docs:
-        doc_rel = str(doc.resolve().relative_to(args.root.resolve()))
+        doc_rel = doc.resolve().relative_to(args.root.resolve()).as_posix()
         source = doc.read_text(encoding="utf-8")
         denominator, findings = run(source, tree, doc_rules, doc_rel)
         all_findings.extend(findings)

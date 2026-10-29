@@ -24,7 +24,11 @@ belongs: the PR jobs on the PR, the heavy jobs after merge.
    `agent/<issue>-<slug>`.
 2. Run **only the tests covering what you changed.** If you touched
    `backends/rust/emit.py`, run the rust emit suite and the rust golden tests.
-   Do not run the root `tests/` tree. Do not run the cordis suite.
+   Do not run the root `tests/` tree. Do not run the cordis suite. Then run
+   `make pre-merge-affected` for the lane gate and its selector receipt. It runs
+   only the selected pre-merge targets; if the selector reports `FULL` or is
+   unavailable, it stops before the full gate. Review that receipt before
+   explicitly escalating with `make pre-merge`.
 3. Commit the branch.
 4. Before the first push and again before merge, run the branch and merge-tree
    checks:

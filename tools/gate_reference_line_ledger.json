@@ -1,4 +1,73 @@
 {
- "mismatches": {},
+ "mismatches": {
+  "examples/rejections/g4_method_write_not_inverse.rvl": [
+   23,
+   24
+  ],
+  "oracle-reject:g4 1980: a defaulted read erases the Opt": [
+   10,
+   12
+  ],
+  "oracle-reject:g4 1980: a defaulted read under the match form": [
+   10,
+   12
+  ],
+  "oracle-reject:g4 1980: a plain restore of the Opt read": [
+   10,
+   12
+  ],
+  "oracle-reject:g4 1980: a read AFTER the effect": [
+   10,
+   11
+  ],
+  "oracle-reject:g4 1980: a read from another handle": [
+   10,
+   12
+  ],
+  "oracle-reject:g4 1980: a read from another key": [
+   10,
+   12
+  ],
+  "oracle-reject:g4 1980: a restore of a name no read bound": [
+   10,
+   11
+  ],
+  "oracle-reject:g4 1980: a write to this key between the read and the effect": [
+   10,
+   14
+  ],
+  "oracle-reject:g4 2640: a defaulted read is not a presence check": [
+   16,
+   18
+  ],
+  "oracle-reject:g4 2640: a same-key write intervenes after the presence check": [
+   16,
+   20
+  ],
+  "oracle-reject:g4 2640: drop-last helper removes the wrong range": [
+   16,
+   18
+  ],
+  "oracle-reject:g4 2640: key is reassigned after the presence check": [
+   16,
+   20
+  ],
+  "oracle-reject:g4 2640: presence flag is overwritten after its check": [
+   16,
+   19
+  ],
+  "oracle-reject:g4 2640: presence key differs from the restored key": [
+   16,
+   18
+  ],
+  "oracle-reject:g4 method write whose undo is not its inverse": [
+   23,
+   24
+  ],
+  "tests/fixtures/canary_candidate_inverse.rvl": [
+   28,
+   29
+  ]
+ },
  "note": "Recorded by `python3 tools/gate_reference_census.py --record-lines` (issue #1965). Every entry is a refusal the gate and the reference agree on by tag and message but anchor at different lines: `[reference line, gate line]`. `--check` and tests/test_gate_reference_census.py fail on a mismatch that is not here, on an entry whose pair moved, and on an entry that no longer mismatches, so the list can only shrink. Names and line pairs only, no counts."
 }

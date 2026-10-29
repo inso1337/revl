@@ -2,7 +2,7 @@
 """Scoring for the FRAMEWORK-BENCH-1 third host: an MCP tool pack.
 
 The `mcp` variant asks the model for the same component every other host is
-asked for, written as a tool pack for `@modelcontextprotocol/sdk` 1.30.0
+asked for, written as a tool pack for `@modelcontextprotocol/sdk` 1.32.0
 (`bench/prompts/mcp.md`). Like raw Cordis TypeScript it always "compiles", so
 it is scored on what it leaves behind: `bench/mcp_host/probe.mjs` installs the
 pack on one live `McpServer` N times, unloads it the way the framework allows

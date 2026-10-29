@@ -1,10 +1,10 @@
-# Upstream fix draft — cordis-py: make `hmr.py`'s watchdog fallback reachable
+# Upstream fix draft: cordis-py: make `hmr.py`'s watchdog fallback reachable
 
 > **Status: DRAFT / BLOCKED.** `inso1337/cordis-py` has issues disabled (the
 > API answers `410 Gone` for issue creation), so this note is the record
 > instead of a filed issue. The defect is pinned in-repo by
 > `tests/test_cordis_wheel_declares_its_deps_946.py::test_the_zero_dependency_install_upstream_documents_cannot_work_yet`,
-> which fails the day the fix below lands — that failure is the signal to move
+> which fails the day the fix below lands; that failure is the signal to move
 > `watchdog` out of `site/build.py`'s hard requirements and back under the
 > `hmr` extra.
 >
@@ -18,7 +18,7 @@
 ## The defect
 
 `cordis/hmr.py` is written to degrade gracefully, and the degradation is
-implemented — and unreachable:
+implemented and unreachable:
 
 ```
 :28  try:
@@ -48,12 +48,12 @@ TypeError: NoneType takes no arguments
 
 `WATCHDOG_AVAILABLE` cannot be read in exactly the case it was written for, and
 the `else` branch is dead. `cordis/__init__.py` imports `.hmr` at module scope,
-so this is not an `import cordis.hmr` problem — it is `import cordis`, and it
+so this is not an `import cordis.hmr` problem; it is `import cordis`, and it
 names neither watchdog nor a fix.
 
-The comment at `:31` says `# pragma: no cover — exercised by the polling tests`.
-Those tests cannot be exercising this path, because the module raises before any
-test body runs: the coverage story is wrong in the same way the fallback is.
+The pragma at `:31` claims the `except ImportError` path is covered by the
+polling tests. Those tests cannot exercise this path because the module raises
+before any test body runs, so the coverage story is wrong too.
 
 ## Repro
 
@@ -67,7 +67,7 @@ python -m venv /tmp/c
 
 Measured against `site/vendor/cordis-4.0.0-py3-none-any.whl` (the wheel revl
 builds from the clone at the `harden-fiber-lifecycle` pin) and against
-`cordis` 4.0.0 from PyPI — identical.
+`cordis` 4.0.0 from PyPI; both are identical.
 
 ## Draft patch
 
@@ -90,7 +90,7 @@ zero-dependency install works.
 
 `site/build.py` declares `pyyaml` **and** `watchdog` as hard requirements,
 because until this lands a wheel that declares watchdog as an extra installs
-cleanly and then dies on `import cordis` — the bug it is meant to fix. The
+cleanly and then dies on `import cordis`, the bug it is meant to fix. The
 browser path is unaffected either way: `site/js/playground.js` installs the
 wheel with `deps=False`, takes `pyyaml` from the Pyodide distribution by name,
 and shims `watchdog` inertly (there is no filesystem to watch).

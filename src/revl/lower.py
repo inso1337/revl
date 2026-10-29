@@ -816,15 +816,28 @@ _UntrustedMark = _UntrustedProfile()
 
 class Env:
     def __init__(self, component: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
-                 types: dict | None = None):
+                 types: dict | None = None, module_fns: list[FnDecl] | None = None):
         self.component = component
         self.services = services
         self.filename = filename
         self.types = types or {}
+        # Module function bodies are needed only when a G4 proof crosses a
+        # named, statically recognized helper such as `drop_last`. The normal
+        # path never reads this table, and no helper is trusted by name alone.
+        self.module_fns = module_fns or []
         # item 274: whether this compile is under the untrusted-author profile, so
         # a body-level navigable refusal (approval, ownership, ...) redacts its
         # nearest-allowed map to the collapsed verdict. Set by `_lower_component`.
         self.untrusted = False
+        # issue #2972: the position flag for a PROVIDE-METHOD body. The direct
+        # acquisition is refused there ("only `spawn` may be acquired inside a
+        # provide-method body"), so the same `acquire` extern reached as a
+        # function VALUE is refused there too. The component's activation body
+        # admits the direct acquisition, so it keeps the value, and a module
+        # `fn` body gets its own refusal from
+        # `_refuse_effect_position_bound_externs_in_fn_body`. Set and restored
+        # per method by `_lower_provide`, where the body is lowered.
+        self.in_provide_method = False
         # names whose call reaches an irreversible host effect (set by
         # check_and_lower once externs/fns are lowered)
         self.emitting_fns: set = set()
@@ -2572,15 +2585,14 @@ def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> 
 def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
     type_name = _expr_static_type(expr.scrutinee, type_env, types)
     # item 516 slice 3: the model council's answer, checked BEFORE the general
-    # rule below and separately from it. Two reasons, both of which the
-    # general rule cannot serve without changing what it admits for programs
-    # that have nothing to do with councils:
+    # rule below. A program that names `Aggregate[Str]` seeds the provided
+    # `Aggregate` into `types` under that head, so the general rule now
+    # resolves this applied scrutinee too: a match that names `Split` and
+    # `Inquorate` but leaves out `Agreed` is refused there for the missing
+    # `Agreed` case. The one thing the general rule cannot serve, without
+    # changing what it admits for programs that have nothing to do with
+    # councils, is:
     #
-    #   * the scrutinee is `Aggregate[Str]`, and the general rule looks the
-    #     scrutinee up in `types` by its whole spelling, so it finds nothing
-    #     for any APPLIED generic. `Aggregate[T]` is never written without an
-    #     argument, so under the general rule alone the answer type would be
-    #     the one ADT in the language with no exhaustiveness at all;
     #   * a `_` arm satisfies the general rule and must not satisfy this one.
     #     `Split` is the case the construct exists to make un-ignorable, and a
     #     catch-all that swallows it is `on_tie allow` moved from the
@@ -2589,7 +2601,8 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
     model_answer.check_match(
         type_name, [pattern for pattern, _, _ in expr.arms], filename,
         expr.line)
-    spec = types.get(type_name or "")
+    type_head, _ = parse_type(type_name)
+    spec = types.get(type_head or "")
     if spec is None or spec.get("kind") != "variant":
         return
     # An arm naming something that is not a case of the scrutinee's ADT has no
@@ -2608,7 +2621,7 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
                 hint="a match arm names one of the ADT's declared cases, or `_` for "
                      "a catch-all — a bare name is not a binding pattern "
                      "(syntax-2.0 §3.3); check the spelling or add the case to "
-                     f"`type {type_name}`",
+                     f"`type {type_head}`",
             )
     covered = {pattern for pattern, _, _ in expr.arms if pattern != "_"}
     if "_" in {pattern for pattern, _, _ in expr.arms}:
@@ -4164,6 +4177,11 @@ def _refuse_effect_position_bound_externs_in_fn_body(
       named `emit` call site, so dispatching it would bypass the marker. That
       covers an arrow whose body calls one: the arrow is itself such a value.
       `emission_values` maps each callable to the extern its refusal names.
+    * an `acquire` extern reached as a function VALUE (issue #2972): the
+      acquisition it names has no effect bracket, so the declared `undo` is
+      never registered, exactly as for the direct call above. This is the value
+      twin of item 399 in a fn body, and the same rule a provide-method body
+      applies through `Env.in_provide_method`.
 
     Every extern is otherwise callable from a fn/test body (they seed the
     `callables` set), so these are explicit refusals, checked over the author's
@@ -4181,9 +4199,10 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     The original three rules were sequential walks over the same bodies
     (P-9, #543); this keeps them in one traversal and adds the #2842 value check
     to module functions. Diagnostic order stays witnessed-before-teardown-
-    before-emission-value. Tests keep their deferred/witnessed/acquire rules but
-    do not participate in the #2842 module-function check; component values are
-    resolved in `_lower_component_pure_expr`, where lexical scope is available."""
+    before-emission-value-before-acquire-value. Tests keep their
+    deferred/witnessed/acquire rules but do not participate in the #2842
+    module-function check; component values are resolved in
+    `_lower_component_pure_expr`, where lexical scope is available."""
     from .parser import ExprArrow, ExprCall, ExprVar
 
     witnessed = _witnessed_extern_names(program)
@@ -4198,10 +4217,13 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     first_witnessed: RevlError | None = None
     first_teardown: RevlError | None = None
     first_emission_value: RevlError | None = None
+    first_acquire_value: RevlError | None = None
 
     def _walk(node, where: str, in_arrow: bool = False, calls: bool = True,
-              check_emission_values: bool = True):
+              check_emission_values: bool = True,
+              check_acquire_values: bool = False):
         nonlocal first_witnessed, first_teardown, first_emission_value
+        nonlocal first_acquire_value
         if isinstance(node, ExprArrow):
             in_arrow = True
         if isinstance(node, ExprVar) and node.name in deferred \
@@ -4225,6 +4247,17 @@ def _refuse_effect_position_bound_externs_in_fn_body(
             if hit:
                 first_emission_value = _emission_arrow_refusal(
                     hit[0], emission_values[hit[0]], filename, node.line)
+        if check_acquire_values and isinstance(node, ExprVar) \
+                and node.name in acquire_undo and first_acquire_value is None:
+            # Issue #2972: the acquire class follows the value, exactly as the
+            # emission class does above. The direct call in a `fn` body is
+            # refused below (item 399) because the teardown accumulator that
+            # registers the declared `undo` does not exist there; a value has
+            # the same problem with no call site at all. Callee positions are
+            # skipped by the walk (the `callee` field is not visited), so a
+            # real call keeps its own refusal above.
+            first_acquire_value = _acquire_value_refusal(
+                node.name, f"in {where}", filename, node.line)
         if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
             name = node.callee.name
             if first_witnessed is None and name in witnessed:
@@ -4271,14 +4304,17 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 if f == "callee" and isinstance(node, ExprCall) \
                         and isinstance(child, ExprVar):
                     continue  # the callee position is a CALL, judged above
-                _walk(child, where, in_arrow, calls, check_emission_values)
+                _walk(child, where, in_arrow, calls, check_emission_values,
+                      check_acquire_values)
         elif isinstance(node, (list, tuple)):
             for x in node:
-                _walk(x, where, in_arrow, calls, check_emission_values)
+                _walk(x, where, in_arrow, calls, check_emission_values,
+                      check_acquire_values)
 
     for fn in program.fn_decls:
         for stmt in fn.body:
-            _walk(stmt, f"the body of fn `{fn.name}`")
+            _walk(stmt, f"the body of fn `{fn.name}`",
+                  check_acquire_values=True)
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`",
@@ -4296,6 +4332,8 @@ def _refuse_effect_position_bound_externs_in_fn_body(
         raise first_teardown
     if first_emission_value is not None:
         raise first_emission_value
+    if first_acquire_value is not None:
+        raise first_acquire_value
 
 
 def _deferred_value_refusal(name: str, where: str, filename: str,
@@ -4330,6 +4368,39 @@ def _emission_value_refusal(name: str, extern: str, filename: str,
         hint="an emission crossing is recorded and metered only at a named "
              "call site marked `emit`; bind its result, not the callable",
         code="G4", category="emission-value",
+    )
+
+
+def _acquire_value_refusal(name: str, where: str, filename: str,
+                           line: int, *, seam: bool = False) -> RevlError:
+    """An `acquire` extern reached as a function value (issue #2972).
+
+    The acquisition the value names has no effect bracket, so the `undo` its
+    declaration asserts is never registered on any teardown accumulator. That is
+    the same loss the direct call in a `fn` body is refused for, and inside a
+    provide-method body the acquisition itself is refused outright ("only
+    `spawn` may be acquired"), so the value inherits that refusal rather than
+    buying reach the direct spelling does not have. `where` is the position
+    clause, so the two call sites spell the same sentence with the position they
+    stand in; `seam` marks the provide-method position, whose reachable fix is a
+    different one."""
+    if seam:
+        hint = ("the acquisition belongs in the component's activation body, "
+                "where the teardown accumulator registers its declared `undo`; "
+                "bind the handle there and use it in the method, or use `spawn` "
+                "for a request-scoped instance (docs/design-v2-instances.md)")
+    else:
+        hint = ("an `acquire` extern's `undo` is auto-registered by the teardown "
+                "accumulator, which exists only in a component activation or a "
+                "provide-method body; acquire it from there so the teardown can "
+                "run (docs/design/243-witnessed-externs.md)")
+    return RevlError(
+        filename, line,
+        f"`acquire` extern `{name}` is used as a function value {where}; its "
+        f"declared `undo` teardown would be dropped, leaving the acquisition "
+        f"irreversible (G4)",
+        hint=hint,
+        code="G4", category="acquire",
     )
 
 
@@ -9252,7 +9323,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                             irreversible_fns=irreversible_fns,
                                             emission_value_externs=(
                                                 emission_value_externs),
-                                            errors=errors, untrusted=untrusted)
+                                            errors=errors, untrusted=untrusted,
+                                            module_fns=program.fn_decls)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
             # async coloring (docs/design/async-extern.md §3, "Component
@@ -10204,6 +10276,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             if extern is not None \
                     and name not in (getattr(env, "async_callables", None) or set()):
                 raise _emission_value_refusal(name, extern, filename, line)
+            # issue #2972: the acquire class follows the value. The direct
+            # acquisition is refused inside a provide-method body, so an
+            # `acquire` extern named there as a VALUE (not the callee of a
+            # call, which carries its own rule, and not the bracket's own
+            # acquisition root) is refused with the same category. The
+            # activation body and a module `fn` keep their own rules.
+            if (getattr(env, "in_provide_method", False)
+                    and expr is not getattr(env, "_host_acquire_root", None)
+                    and (getattr(env, "extern_class", None) or {}).get(name)
+                    == "acquire"):
+                raise _acquire_value_refusal(
+                    name, "inside a provide-method body, where only `spawn` "
+                          "may be acquired", filename, line, seam=True)
             return {"kind": "var", "name": name}
         if name in getattr(env, "stream_requires", {}):
             # item 130: the key IS declared — it is a required stream, and a
@@ -13467,6 +13552,215 @@ def _restore_shape(undo, receiver: str, key):
     return None
 
 
+def _empty_default_host_read(expr, env: "Env"):
+    """The exact empty-list defaulted `Map.get` shape used by issue #2640."""
+    if not (isinstance(expr, dict) and expr.get("kind") == "bin"
+            and expr.get("op") == "??"):
+        return None
+    fallback = expr.get("right")
+    if not (isinstance(fallback, dict) and fallback.get("kind") == "list"
+            and not fallback.get("items")):
+        return None
+    read = _host_read(expr, env)
+    if read is None or not read[2]:
+        return None
+    return read[0], read[1]
+
+
+def _is_presence_read(expr, env: "Env"):
+    """`(receiver, key)` for a raw `Map.get(key) != None` presence check."""
+    if not (isinstance(expr, dict) and expr.get("kind") == "bin"
+            and expr.get("op") == "!="):
+        return None
+    left, right = expr.get("left"), expr.get("right")
+    if (isinstance(right, dict) and right.get("kind") == "var"
+            and right.get("name") == "None"):
+        read = _host_read(left, env)
+    elif (isinstance(left, dict) and left.get("kind") == "var"
+          and left.get("name") == "None"):
+        read = _host_read(right, env)
+    else:
+        return None
+    if read is None or read[2]:
+        return None
+    return read[0], read[1]
+
+
+def _presence_bindings(before, env: "Env") -> dict:
+    """The latest local bindings that still hold a prior Map presence check."""
+    reads = {}
+    for index, step in enumerate(before or []):
+        if not isinstance(step, dict) or step.get("step") not in ("let", "assign"):
+            continue
+        name = step.get("name")
+        if not isinstance(name, str):
+            continue
+        read = _is_presence_read(step.get("value"), env)
+        if read is None:
+            reads.pop(name, None)
+        else:
+            reads[name] = (read[0], read[1], index)
+    return reads
+
+
+def _host_write_since(before, index: int, receiver: str, key, env: "Env",
+                      condition_name: str) -> bool:
+    """Whether a write or local rebind invalidated the presence proof."""
+    changed_names = {receiver, condition_name}
+    _ir_name_reads(key, changed_names)
+
+    def changed(steps) -> bool:
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            if step.get("step") == "assign" and step.get("name") in changed_names:
+                return True
+            if step.get("step") in ("effect", "let-effect"):
+                acquire = step.get("acquire")
+                write = _host_write(acquire, env)
+                if write is not None and write[0] == receiver \
+                        and (acquire.get("args") or [None])[0] == key:
+                    return True
+            if any(changed(step.get(slot)) for slot in ("then", "else", "body")):
+                return True
+        return False
+
+    return changed((before or [])[index + 1:])
+
+
+def _drop_last_body_is_proven(decl: FnDecl) -> bool:
+    """Recognize a pure helper whose body is exactly `xs.slice(0, xs.length()-1)`."""
+    if len(decl.params) != 1 or len(decl.body) != 1 \
+            or not isinstance(decl.body[0], ReturnStmt):
+        return False
+    parameter = decl.params[0].name
+    expr = decl.body[0].expr
+    if not (isinstance(expr, ExprCall) and isinstance(expr.callee, ExprField)
+            and isinstance(expr.callee.target, ExprVar)
+            and expr.callee.target.name == parameter
+            and expr.callee.name == "slice" and len(expr.args) == 2):
+        return False
+    start, stop = expr.args
+    if not (isinstance(start, ExprLit) and type(start.value) is int
+            and start.value == 0
+            and isinstance(stop, ExprBin) and stop.op == "-"):
+        return False
+    length, one = stop.left, stop.right
+    return (isinstance(length, ExprCall)
+            and isinstance(length.callee, ExprField)
+            and isinstance(length.callee.target, ExprVar)
+            and length.callee.target.name == parameter
+            and length.callee.name == "length" and not length.args
+            and isinstance(one, ExprLit) and type(one.value) is int
+            and one.value == 1)
+
+
+def _simple_computed_key(expr) -> bool:
+    """Keys admitted by the self-hosted mirror's exact structural comparator."""
+    if not isinstance(expr, dict):
+        return False
+    if expr.get("kind") in ("name", "var"):
+        return isinstance(expr.get("id", expr.get("name")), str)
+    return (expr.get("kind") == "lit"
+            and type(expr.get("value")) in (str, int, bool))
+
+
+def _computed_append_undo(undo, receiver: str, env: "Env"):
+    """Candidate shape: `present ? m.insert(k, helper(...)) : m.remove(k)`."""
+    if not (isinstance(undo, dict) and undo.get("kind") == "if"):
+        return None
+    then, otherwise = undo.get("then"), undo.get("else")
+    insert, remove = _host_write(then, env), _host_write(otherwise, env)
+    if (insert is None or remove is None or insert[0] != receiver
+            or remove[0] != receiver or insert[1] != "Map"
+            or remove[1] != "Map" or insert[2] != "insert"
+            or remove[2] != "remove"):
+        return None
+    return undo.get("cond"), then, otherwise
+
+
+def _computed_append_inverse(st: dict, env: "Env", filename: str, line: int,
+                             before=None) -> bool | None:
+    """Prove the bounded list-append inverse from issue #2640.
+
+    `None` means the undo is not this candidate shape. A candidate that fails
+    any proof obligation is refused by name, rather than receiving the generic
+    `remove(k)` advice that would discard an existing list.
+    """
+    acquire, undo = st.get("acquire"), st.get("undo")
+    write = _host_write(acquire, env)
+    if write is None or write[1:] != ("Map", "insert"):
+        return None
+    receiver, _, _ = write
+    shape = _computed_append_undo(undo, receiver, env)
+    if shape is None:
+        return None
+
+    condition, insert, remove = shape
+    effect_args = acquire.get("args") or []
+    insert_args = insert.get("args") or []
+    remove_args = remove.get("args") or []
+    key = effect_args[0] if effect_args else None
+    effect_value = effect_args[1] if len(effect_args) == 2 else None
+    condition_name = condition.get("id") if (isinstance(condition, dict)
+                                               and condition.get("kind") == "name") else None
+    reads = _presence_bindings(before, env)
+    presence = reads.get(condition_name) if condition_name else None
+
+    effect_push_read = None
+    if (isinstance(effect_value, dict) and effect_value.get("kind") == "builtin"
+            and effect_value.get("method") == "push"
+            and len(effect_value.get("args") or []) == 1):
+        effect_push_read = _empty_default_host_read(effect_value.get("target"), env)
+
+    undo_insert_value = insert_args[1] if len(insert_args) == 2 else None
+    undo_drop_read = None
+    drop_name = None
+    if (isinstance(undo_insert_value, dict) and undo_insert_value.get("kind") == "fn"
+            and len(undo_insert_value.get("args") or []) == 1):
+        drop_name = undo_insert_value.get("name")
+        undo_drop_read = _empty_default_host_read(
+            undo_insert_value["args"][0], env)
+    drop_last_fns = [fn for fn in env.module_fns if fn.name == drop_name]
+    drop_last_proven = (len(drop_last_fns) == 1
+                        and _drop_last_body_is_proven(drop_last_fns[0]))
+
+    valid = (
+        _simple_computed_key(key)
+        and (presence is not None and _simple_computed_key(presence[1]))
+        and (effect_push_read is None or _simple_computed_key(effect_push_read[1]))
+        and (undo_drop_read is None or _simple_computed_key(undo_drop_read[1]))
+        and (len(insert_args) != 2 or _simple_computed_key(insert_args[0]))
+        and (len(remove_args) != 1 or _simple_computed_key(remove_args[0]))
+    ) and (
+        condition_name is not None
+        and presence is not None
+        and presence[0] == receiver and presence[1] == key
+        and not _host_write_since(before, presence[2], receiver, key, env,
+                                  condition_name)
+        and len(effect_args) == 2
+        and effect_push_read == (receiver, key)
+        and len(insert_args) == 2 and insert_args[0] == key
+        and len(remove_args) == 1 and remove_args[0] == key
+        and undo_drop_read == (receiver, key)
+        and drop_last_proven
+    )
+    if valid:
+        return True
+
+    name = _source_spelling(receiver, env)
+    k = _key_spelling(key, env)
+    raise RevlError(
+        filename, line,
+        f"the `undo` of `effect {name}.insert(...)` is not a proven computed "
+        f"append inverse on the same handle and key `{k}`",
+        hint="the proof requires a prior `name.get(key) != None` presence check, "
+             "the effect to push onto that same key, and the `drop_last` helper "
+             "to return exactly `xs.slice(0, xs.length() - 1)`; no write to the "
+             "key may intervene (issue #2640)",
+        code="G4", category="inverse")
+
+
 def _restore_message(name: str, verb: str, bind: str, why: str, k: str) -> str:
     """The issue-#1980 refusal: a restore-shaped `undo` that is not the admitted
     form, with the reason and the `match` form the rule requires."""
@@ -13535,6 +13829,8 @@ def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int,
                          "key is not the value the `insert` overwrote "
                          "(issue #1980)",
                     code="G4", category="inverse")
+        if _computed_append_inverse(st, env, filename, line, before):
+            return "table"
         name = _source_spelling(receiver, env)
         k = _key_spelling(key, env)
         spelled = f"{name}.{inverse}({k})" if inverse == "remove" \
@@ -14014,8 +14310,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      irreversible_fns: set | None = None,
                      emission_value_externs: dict | None = None,
                      errors: list | None = None,
-                     untrusted: bool = False) -> dict:
-    env = Env(comp, services, filename, types)
+                     untrusted: bool = False,
+                     module_fns: list[FnDecl] | None = None) -> dict:
+    env = Env(comp, services, filename, types, module_fns)
     env.untrusted = untrusted
     env.emitting_fns = emitting_fns or set()
     env.extern_class = extern_class or {}
@@ -14823,6 +15120,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     decl.returns, method.returns)
 
         saved = env.params
+        # issue #2972: the body being lowered IS a provide-method body, so an
+        # `acquire` extern named here is in the position where the direct
+        # acquisition is refused (see `Env.in_provide_method`).
+        saved_in_method = env.in_provide_method
+        env.in_provide_method = True
         # item 470: the intent THIS operation declares, in scope for the whole
         # body and restored after it, so an `emit` reached while lowering the
         # body knows which declaration it must refine. Set only for an operation
@@ -15262,6 +15564,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     acquire = _lower_expr(mstmt.acquire, env, mode="setup")
                 result_type = _host_result_type(acquire, env)
                 if result_type is None:
+                    # issue #2972: `code`/`category` so the acquire class is
+                    # the SAME one its value spelling is refused under
+                    # (`_acquire_value_refusal`); the message is unchanged.
                     raise RevlError(
                         filename, mstmt.line,
                         "only `spawn` may be acquired inside a provide-method body",
@@ -15269,7 +15574,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                              "scope; other acquisitions belong in the activation "
                              "body (docs/design-v2-instances.md). A result-declared "
                              "host verb (a Bool compare-and-set like "
-                             "`insert_if_absent`) may be bound here")
+                             "`insert_if_absent`) may be bound here",
+                        code="G4", category="acquire")
                 _check_rebind(mstmt.bind, mstmt.line)
                 safe = _safe_name(mstmt.bind,
                                   set(env.params.values()) | set(method_locals.values())
@@ -15441,6 +15747,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # receiver, read while the method's types are still in scope
         env.resolved_crossings = _resolved_crossings(mbody, env)
         env.params = saved
+        env.in_provide_method = saved_in_method
         env.declared_intent = saved_intent
         env.stated_crossings = saved_stated
         env.type_env = saved_tenv

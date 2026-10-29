@@ -29,7 +29,9 @@ order, and each verb on it opens its description with "Authoring loop step N of
 4. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
    or removing a component. `revl_edit`, `revl_swap` and `revl_change` return
    it in `blastRadius` for the components they touch, and `revl_plan` shows
-   what a swap would do.
+   what a swap would do. For the test impact of changed repository files, pass
+   their paths to `revl_affected_tests`; it returns the same selection as the
+   pre-merge selector, including `FULL` and a reason when it cannot narrow.
 5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
    fail with the code and the fix. Called with no candidate it checks the
    composition the session holds, so the loop can verify what steps 1-4 built
@@ -328,6 +330,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_call` | no | no | `key`, `method` |
 | `revl_act` | no | no | `key`, `method` |
 | `revl_counterfactual` | yes | no | `at` |
+| `revl_affected_tests` | yes | no | `paths` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
 | `revl_knowledge` | no | no | `op` |
@@ -668,6 +671,25 @@ Defaults to the composition the server has loaded, so it is the rehearsal for
   held, a `usage` refusal); `manifest` (omit to
   plan against the loaded session, or against nothing for a cold start);
   `replacing`.
+
+### `revl_affected_tests`
+
+Map changed repository paths to the same fail-safe selection used by
+`tools/affected_tests.py --format machine`. This is the test impact answer that
+complements `blastRadius`: one describes touched components, the other says
+which tests and pre-merge gates cover the paths.
+
+- Inputs: `paths` (required array of up to 256 repo-relative paths, each at most
+  4096 characters).
+- Returns: the merge `base`, a structured `selection`, and `machine` with the
+  exact `FULL`, `REASON`, `PYTEST`, `BACKENDS` and `GATES` lines.
+- Selection runs from a Git worktree discovered under the operator-sanctioned
+  roots. A worktree outside those roots, a path outside the roots, a missing
+  test file, no merge base, or a selector that exceeds its 10-second limit
+  returns `FULL` with a reason.
+
+It reports a plan; it does not execute tests. Run the selected targets or
+`sh tools/pre_merge.sh --affected` before opening a PR.
 
 ### `revl_ship`
 

@@ -33,13 +33,13 @@ On main, the WAL reader recomputes reach; it does not re-decide the crossing and
 |---|---|---|
 | OPA / Rego (`opa eval`, conftest) policy testing | Evaluates a policy on supplied input documents | Input is the logged incident plus a compiled candidate; output names the first crossing of that incident, in logged order |
 | AWS IAM policy simulator and Access Analyzer | Simulates requests against attached policies, reasons about reachability of resource policies | Works over an agent's logged crossings and a candidate composition; refuses to answer when the token is not recoverable instead of guessing |
-| Cedar policy analysis (SMT-based) (citation to be checked) | Proves properties of policy sets, e.g. one set subsumes another | revl does not prove equivalence; it grades a concrete log and states what the log lacks |
+| Cedar policy equivalence analysis (see the checked [related-work table](../related-work.md)) | Reduces policy-equivalence questions to SMT and can produce a counterexample request when two policy sets differ | revl does not prove policy equivalence; it grades a concrete log and states what the log lacks |
 | Pernosco / rr replay debugging | Replays a deterministic execution to inspect it | The replay here is not an execution at all; no component runs |
 | Chaos-engineering and incident replays (traffic replay) | Re-send logged traffic to a staging system | No system receives traffic; re-grading is offline |
 | Counterfactual explanations in ML (Wachter et al.) (citation to be checked) | Smallest input change that flips a model output | Here the change is chosen by the operator (one action, one policy) and the oracle is a pure gate, not a model |
 | Datalog policy analysis | Static queries over policy and configuration | Combines a static query with a logged incident ordering |
 
-None of the above was checked against a specific paper; every row needs a proper citation pass.
+The Cedar row was checked against its primary paper in the [related-work table](../related-work.md); the other rows still need a proper citation pass.
 
 ## Evidence on main
 Tree: revl main at commit 45bec431f.

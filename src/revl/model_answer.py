@@ -56,8 +56,7 @@ level up: a council declared with every safe word still tells its caller
 nothing if the caller is allowed to write a match that only mentions `Agreed`.
 
 So a `match` on an `Aggregate[T]` must NAME `Split` and `Inquorate`. Two
-things make that rule bite, and both of them are gaps in the general
-exhaustiveness check rather than new opinions about matching:
+things make that rule bite:
 
 1. **A `_` catch-all does not discharge them.** For an ordinary ADT a
    wildcard is a fine way to say "everything else", and `revl.lower`'s
@@ -66,15 +65,15 @@ exhaustiveness check rather than new opinions about matching:
    `_ => proceed` arm is `on_tie allow` written at the call site. The author
    who wants one outcome for both dissent arms writes both arms; that costs a
    line and says which line it is.
-2. **A parameterised scrutinee is checked.** The general check reads
-   `types[<scrutinee type>]`, which misses `Aggregate[Str]` because the table
-   is keyed by the bare head. `Aggregate[T]` is never written without an
-   argument, so without this the rule would be vacuous on every real program.
-   The fix here is deliberately scoped to the provided types (see
-   `ANSWER_TYPES`) rather than applied to every generic ADT: widening the
-   general check is a change to what the compiler admits for programs that
-   have nothing to do with councils, and it belongs to whoever owns that
-   check.
+2. **A parameterised scrutinee is checked here.** The lowering pass now
+   resolves an applied user variant by its declared head, so a program that
+   names `Aggregate[Str]` has the provided `Aggregate` seeded into `types`
+   under that head, and the general check refuses a match that names `Split`
+   and `Inquorate` but leaves out `Agreed`. What remains specific to this rule
+   is the dissent arms' own message and the refusal of a `_` arm; it stays
+   scoped to the provided types (see `ANSWER_TYPES`) rather than being
+   imposed on every user variant, because a `_` over an ordinary ADT is a
+   fine way to say "everything else".
 
 NOT ITEM 471, AND NOT BY CONVENTION
 -----------------------------------
@@ -266,12 +265,10 @@ def applied_spec(type_name: str | None) -> dict | None:
     everything else, including a bare `Aggregate`, which is not a use of a
     generic type.
 
-    Both the checker's match inference and the lowering's exhaustiveness pass
-    look a scrutinee's spec up by its WHOLE spelling, which finds nothing for
-    any applied generic. That is a general gap and this is not a general fix:
-    it resolves the two provided types and leaves every user ADT exactly as it
-    was, because widening the lookup for user ADTs changes what the compiler
-    admits for programs that have nothing to do with councils.
+    The general lowering pass resolves applied user variants by their declared
+    head for exhaustiveness. This helper remains specific to the two provided
+    model-answer types: it supplies their generic payload types for inference,
+    without broadening this council-specific rule to user ADTs.
     """
     head, args = _applied(type_name)
     spec = ANSWER_TYPES.get(head or "")

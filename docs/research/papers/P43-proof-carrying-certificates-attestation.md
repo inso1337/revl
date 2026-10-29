@@ -39,7 +39,9 @@ We do not claim the proofs are correct, that the ledger prose matches the Lean d
 | Reproducible builds (Debian) | Same inputs give bit-identical outputs | `revl verify` recompiles bundled source and compares each emitted backend artifact; evidence carrying timestamps is verified by signature, not by byte reproduction (`docs/bundle.md:155-158`) |
 | TUF | Key roles and rollback protection for update metadata | Not addressed; asymmetric upgrade deferred |
 
-Citations to be checked: in-toto (Torres-Arias et al., USENIX Security 2019) (citation to be checked); SLSA spec (citation to be checked); Necula POPL 1997 (citation to be checked); Leroy CACM 2009 for CompCert (citation to be checked).
+Other citations to be checked: in-toto (Torres-Arias et al., USENIX Security 2019); SLSA spec; Necula POPL 1997.
+
+CompCert's checked primary sources are in the [related-work table](../related-work.md).
 
 ## Evidence on main
 | Claim | path:line or test | Status | Note |

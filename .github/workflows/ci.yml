@@ -692,8 +692,15 @@ jobs:
     # resolve cordis-rs from crates.io. If cargo or that resolution ever goes
     # missing, the repository-root conftest.py turns their skip into a failure
     # instead of a green run that measured nothing.
+    #
+    # Java is required for the same reason (#2734). This job runs the root
+    # suite, which collects tests/test_java_crash_recovery.py, and the per-tier
+    # support table credits java's durable-recovery cell off that collection.
+    # The job installs temurin 21 below; if that setup breaks, the skip the
+    # test would otherwise take becomes a failure rather than a `proved` cell
+    # resting on a green that measured nothing.
     env:
-      REVL_REQUIRE_TIERS: "go,rust"
+      REVL_REQUIRE_TIERS: "go,rust,java"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -2179,7 +2186,11 @@ jobs:
       # collecting it here is what makes those tests real in CI instead of
       # skips. Its other tests build the component framing by hand and run
       # everywhere.
-      - run: pytest backends/wasm/ tests/test_wasm_backend.py tests/test_wasm_confined_default_2729.py -q --junitxml=/tmp/wasm-junit.xml
+      - name: wasm tests, including durable crash recovery
+        run: >-
+          pytest backends/wasm/ tests/test_wasm_backend.py
+          tests/test_wasm_confined_default_2729.py
+          tests/test_wasm_crash_recovery.py -q --junitxml=/tmp/wasm-junit.xml
         env:
           # turns "wasmtime not installed" from a silent skip into a failure;
           # unset locally, so offline dev still skips cleanly
@@ -2387,6 +2398,13 @@ jobs:
     # `lint` still stops it, as `needs: [lint]` alone did.
     needs: [lint, changes]
     if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
+    # Issue #2734: this job installs a JDK 21 and compiles the real cordis4j
+    # classes below, so a java test that skips for a missing toolchain here is
+    # a broken setup step, not an environment fact. The repository-root
+    # conftest.py turns the hand-probed skip into a failure and revl.test's
+    # runners do the same for the tier-driven ones.
+    env:
+      REVL_REQUIRE_TIERS: "java"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0

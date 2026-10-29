@@ -2444,18 +2444,48 @@ GENERIC_VARIANT_LOUD_REFUSALS: dict[str, str] = {
         "REFUSED|T1|this function's return expects `Ei[Int, Str]`, got `Ei`",
 }
 
-# The reference REFUSES these (an arm over `Mb[Int]` binds `Int`, so returning
-# it as `Str` is a mismatch) and the native chain still ADMITS and emits them:
-# a silent verdict difference, recorded so it cannot read as agreement. Both
-# were admitted by the reference too before the fix.
-GENERIC_VARIANT_SILENT_ADMITS = ("arm_binds_second_parameter",
+# The reference REFUSES these and the native chain still ADMITS and emits
+# them: silent verdict differences, recorded so they cannot read as agreement.
+# The `arm_binds_*` pair (issue #2402) is refused on payload typing (an arm
+# over `Mb[Int]` binds `Int`, so returning it as `Str` is a mismatch); both
+# were admitted by the reference too before the fix. `aggregate_missing_agreed`
+# is issue #2981: the reference refuses the program (a match over a provided
+# `Aggregate[Str]` that leaves out `Agreed`, PR #2934's
+# `test_aggregate_missing_agreed_is_refused`) while the self-host gate admits
+# it. Each entry fails in either direction, on the reference or on the gate.
+GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",
+                                 "arm_binds_second_parameter",
                                  "arm_binds_substituted_payload")
+
+# The reference's program for a difference the docs table does not carry:
+# tests/test_generic_variant_construction.py spells the exhaustiveness case
+# inline in `test_aggregate_missing_agreed_is_refused` rather than in
+# `REFUSED`, so its source and message are recorded here beside the registry.
+GENERIC_VARIANT_INLINE_REFUSED = {
+    "aggregate_missing_agreed": (
+        """fn settle(a: Aggregate[Str]) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""",
+        "non-exhaustive match: missing case `Agreed`",
+    ),
+}
 
 
 def _generic_variant_docs():
     return load_by_path(
         "test_generic_variant_construction",
         ROOT / "tests" / "test_generic_variant_construction.py")
+
+
+def _generic_variant_silent_admit_doc(name):
+    docs = _generic_variant_docs()
+    if name in docs.REFUSED:
+        return docs.REFUSED[name]
+    return GENERIC_VARIANT_INLINE_REFUSED[name]
 
 
 @pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_LOUD_REFUSALS))
@@ -2473,10 +2503,10 @@ def test_generic_variant_program_is_refused_loudly_by_the_native_chain(
 
 
 @pytest.mark.parametrize("name", GENERIC_VARIANT_SILENT_ADMITS)
-def test_generic_variant_arm_binding_is_a_known_silent_admit(compile_to, name):
-    """Issue #2402: the reference refuses it, the native chain still emits.
-    Fails the day the native chain refuses too, so the entry is removed."""
-    source, message = _generic_variant_docs().REFUSED[name]
+def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
+    """Issues #2402 and #2981: the reference refuses it, the native chain still
+    emits. Fails the day the native chain refuses too, so the entry is removed."""
+    source, message = _generic_variant_silent_admit_doc(name)
     with pytest.raises(RevlError) as refused:
         compile_source(source)
     assert message in str(refused.value)

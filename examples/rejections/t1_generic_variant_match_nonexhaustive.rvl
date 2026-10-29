@@ -1,0 +1,13 @@
+// REJECTED — exhaustiveness applies to a generic variant's instantiated
+// type as well as to a non-generic variant (issue #2926).
+//
+// expected error:
+//   non-exhaustive match: missing case `Jj`
+
+type Mb[T] = Jj(T) | Nn
+
+fn f(m: Mb[Int]) -> Int {
+  return match m {
+    Nn => 0,
+  }
+}

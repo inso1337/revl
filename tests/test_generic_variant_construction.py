@@ -5,13 +5,10 @@ value of it could be built: `Jj(1)` for `Mb[Int]` was refused with "payload
 expects `T`, got `Int`" and `Nn` with "expects `Mb[Int]`, got `Mb`". The
 checker compared the declared payload and the bare ADT head without
 substituting the type arguments, which generic records already get through
-`nominal_record_fields`. A match over an applied generic had the same gap from
-the other side: the arm bound an unknown-typed payload, so `Jj(x) => x`
-compiled in a function returning `Str` over an `Mb[Int]`.
-
-Exhaustiveness over an applied generic is a separate gap (lowering looks the
-scrutinee up by its whole spelling), pinned as an agreed admit in
-tests/test_selfhost_lower.py, so it is not covered here.
+`nominal_record_fields`. Payload typing for a match over an applied generic
+remains a separate gap. Issue #2926 fixes exhaustiveness in both the native and
+self-host checkers by resolving the declared variant head. Payload substitution
+remains a separate issue.
 """
 
 import sys
@@ -72,6 +69,21 @@ fn deep(m: Mb[Mb[Int]]) -> Int {
   }
 }
 """,
+    "exhaustive_match": MB + """
+fn f(m: Mb[Int]) -> Int {
+  return match m {
+    Jj(x) => x,
+    Nn => 0,
+  }
+}
+""",
+    "wildcard_match": MB + """
+fn f(m: Mb[Int]) -> Int {
+  return match m {
+    _ => 0,
+  }
+}
+""",
     # `Nn` alone names no `T`: it is `Mb[Any]`, the placeholder `None` gets as
     # `Opt[Any]`, which a sibling arm fills and a declared boundary accepts
     "nullary_without_expectation": MB + """
@@ -115,6 +127,15 @@ REFUSED = {
     "wrong_second_parameter": (
         EI + "fn r() -> Ei[Int, Str] { return Ri(1) }\n",
         "`Ri(...)` payload expects `Str`, got `Int`"),
+    "nonexhaustive_match": (
+        MB + """
+fn f(m: Mb[Int]) -> Int {
+  return match m {
+    Nn => 0,
+  }
+}
+""",
+        "non-exhaustive match: missing case `Jj`"),
     "wrong_list_payload": (
         "type Bag[T] = Many(List[T]) | NoBag\n\n"
         "fn g() -> Bag[Int] { return Many(3) }\n",
@@ -166,3 +187,19 @@ def test_case_table_payload_keeps_the_declared_spelling(tmp_path):
     spec = ir["types"]["Mb"]
     assert spec["params"] == ["T"]
     assert [c["payload"] for c in spec["cases"]] == ["T", None]
+
+
+def test_aggregate_missing_agreed_is_refused(tmp_path):
+    """Issue #2926: resolving the applied head reaches the provided
+    `Aggregate` as well, so a consumer that names both dissent arms but
+    leaves out `Agreed` is refused (main admitted it)."""
+    source = """fn settle(a: Aggregate[Str]) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+"""
+    with pytest.raises(RevlError) as excinfo:
+        _compile(tmp_path, source)
+    assert "non-exhaustive match: missing case `Agreed`" in str(excinfo.value)

@@ -202,9 +202,7 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_builtin_return_type", 1, 1]
 
-["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_empty_vec_elem_types", 66, 66]
-
-["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_empty_vec_elem_types.collect", 1, 1]
+["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_empty_vec_elem_types", 25, 25]
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_infer_type", 2, 2]
 
@@ -220,7 +218,7 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_match_expr", 2, 2]
 
-["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_stmt", 5, 5]
+["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_stmt", 2, 2]
 
 ["reason", "realm-routing-and-child-instances-require-intercept-json", "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_intercept_json_lit` 18 -> 2, `_intercept_json_type` 34 -> 3."]
 

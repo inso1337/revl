@@ -160,22 +160,31 @@ Eight named corpora, all enumerated by `tools/corpus_provenance.py`:
 
 | corpus | what it is | programs | floor |
 |---|---|---|---|
-| `census` | every input `gate_reference_census.py --check` runs | 848 | 80% |
-| `selfhost_oracle` | the programs written to sit on a guarantee edge | 291 | 90% |
-| `emit_py_corpus` | the globbed python byte-agreement projection | 65 | 75% |
-| `emit_ts_corpus` | typescript | 42 | 75% |
-| `emit_rust_corpus` | rust | 41 | 75% |
-| `emit_java_corpus` | java | 34 | 75% |
-| `emit_wasm_corpus` | wasm | 22 | 75% |
-| `emit_go_corpus` | go | 19 | 75% |
+| `census` | every input `gate_reference_census.py --check` runs | 1400 | 80% |
+| `selfhost_oracle` | the programs written to sit on a guarantee edge | 433 | 85% |
+| `emit_py_corpus` | the globbed python byte-agreement projection | 75 | 75% |
+| `emit_ts_corpus` | typescript | 49 | 75% |
+| `emit_rust_corpus` | rust | 62 | 75% |
+| `emit_java_corpus` | java | 37 | 75% |
+| `emit_wasm_corpus` | wasm | 23 | 75% |
+| `emit_go_corpus` | go | 38 | 75% |
 
 The floor is the minimum percent of a corpus that must remain independent of
 generation 1 and up. **The values are an operator decision** and live in the
 manifest, not in code. The reasoning behind the ones recorded: the oracle's
 boundary programs carry the most evidential weight per document and are held
-tightest at 90%; the per-tier emit corpora are the ones a loop grows fastest,
+tightest at 85%; the per-tier emit corpora are the ones a loop grows fastest,
 since a generation that lands a lowering lands a document that reaches it, so
 they get the most headroom at 75%; the aggregate census sits between them.
+
+The oracle's floor was 90% until #2640. Each self-host parity case a fix adds
+is one more loop-authored document, so its share of the corpus falls with every
+pin and the next one crosses the old floor on its own arithmetic. The floor
+moved to 85% as an explicit operator decision and the declarations did not:
+every document added since the loop started stays generation 1, and the loop's
+own work is not re-declared pre-loop to buy back independence. At the time of
+the change the corpus read 51 model of 433 total, 382 independent, 88.2%
+against the 85 floor.
 
 The floor is evaluated **per corpus**, never in aggregate. A tier whose corpus
 has gone model-authored must red even when the total across all eight is

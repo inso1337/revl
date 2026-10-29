@@ -62,6 +62,10 @@ EXEMPT = {
     # widens `--root`; no single call is the remedy. Unconverted.
     ("server.py", "_jail_refusal"):
         "rewrite paths or widen --root; no single call",
+    # A: NUL bytes in a caller path. The caller rewrites its own path
+    # values; no revl call can strip a NUL from what was sent.
+    ("server.py", "_nul_path_refusal"):
+        "rewrite the path values you sent; no single call",
     # B: `revl_edit` raised with nothing loaded. The server's load gate answers
     # first (with a `next`), so this is the library-level backstop.
     ("edit.py", "apply_edit"):

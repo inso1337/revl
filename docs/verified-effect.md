@@ -118,6 +118,7 @@ A method effect has no round trip, so its `undo` is judged statically instead
 | activation body, host acquisition (`Map.new`, `Pool.open`, `Stream.source`) | its family's release on the bound handle (#1859) | proven |
 | provide method, host Map `insert(k, v)` / `insert_if_absent(k, v)` | `remove(k)` on the same handle and key | `inverse: table`; `insert` also needs the key absent before it, which the runtime checks |
 | provide method, host Map `insert(k, new)` undone by the value read back | that read, restored in the `Opt` shape it has (#1980) | `inverse: table`: `prev` is read from the same handle and key in the same body before the effect, with no write to `m` at `k` in between |
+| provide method, host Map list append with a computed inverse (#2640) | a raw key-presence flag plus `drop_last` of the same empty-list-defaulted read | `inverse: table`; proves the appended item is removed without capturing the old list, and requires no intervening same-key write or proof-name reassignment |
 | provide method, host Map `remove(k)` | `insert(k, e)` on the same handle and key | `inverse: asserted`: the restored value `e` is the author's word |
 | provide method, an extern with a declared `undo` | that declared inverse | `inverse: declared`: what the host body reverts is the declaration's word |
 | provide method, a service call, `Pool.execute`, any other effect | receiver, non-emission and by-value capture only | `inverse: asserted`: trust-the-author |
@@ -128,7 +129,14 @@ inverse it needs. A restore whose `prev` is a *defaulted* read
 (`let prev = m.get(k) ?? []`) erases the `Opt`, so the read no longer says
 whether the key was there: that `undo` is refused too, naming the `match`
 form (`undo match prev { Some(v) => m.insert(k, v), None => m.remove(k) }`)
-that restores the absence as well as the value. The session's teardown report
+that restores the absence as well as the value. Issue #2640 admits one bounded
+exception for appending to a stored list: preserve the old key's presence in a
+Boolean from raw `m.get(k) != None`, append to `(m.get(k) ?? []).push(v)`, then
+either insert `drop_last(m.get(k) ?? [])` or remove the key. The helper must be
+exactly `xs.slice(0, xs.length() - 1)`, all compared keys must have the same
+simple shape, and the presence, handle, and key cannot be reassigned or written
+between the presence check and the effect. This records `inverse: table` while
+keeping the old list off the teardown frame. The session's teardown report
 lists every `asserted` and `declared` method effect of the composition it tore
 down under `trustTheAuthor` (`{component, method, inverse}`), beside the
 verdict and never counted against it: `noResidue` judges what the runtime can

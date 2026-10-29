@@ -1,6 +1,6 @@
-# Upstream PR draft — cordis (TS): refuse effect registration while a fiber is UNLOADING
+# Upstream PR draft: cordis (TS): refuse effect registration while a fiber is UNLOADING
 
-> **Status: DRAFT — do NOT open this PR without the coordinator's explicit
+> **Status: DRAFT: do NOT open this PR without the coordinator's explicit
 > confirmation.** This is the roadmap 74(a) deliverable: the fix is pinned in
 > the revl fork (`inso1337/cordis@harden-assert-active`, commit
 > `c8b94b2`), the PR text below is what would go upstream once confirmed.
@@ -15,17 +15,17 @@
 
 ## Summary
 
-`Fiber.assertActive()` only checked `uid !== null` — "not disposed", not
+`Fiber.assertActive()` only checked `uid !== null`, meaning "not disposed", not
 "not unloading". During a *deactivation* (a requirement is withdrawn and the
 fiber survives as `PENDING`), an undo that calls `ctx.effect(...)` was
 accepted, and the resulting disposer leaked permanently:
 
 1. the new effect executed and its disposer was pushed into
-   `fiber._disposables` — *after* `_unload` already `clear()`ed the list;
+   `fiber._disposables` *after* `_unload` already `clear()`ed the list;
 2. the fiber ended `PENDING` while still holding an effect
    (`fiber.getEffects().length > 0` on an inactive fiber);
 3. even a later `fiber.dispose()` never ran that disposer, because the epoch
-   is already `INACTIVE` and no further unload is triggered — **permanent
+   is already `INACTIVE` and no further unload is triggered, leaving **permanent
    residue**.
 
 The fix adds the `UNLOADING` lifecycle state to the guard:
@@ -39,7 +39,7 @@ assertActive() {
 
 `effect()`, `ctx.on()`, `ctx.plugin()`, `restart()` and `update()` all route
 through `assertActive`, so every effect/listener/plugin registration during
-teardown is now refused with `INACTIVE_EFFECT` — the same error a
+teardown is now refused with `INACTIVE_EFFECT`, the same error a
 fully-disposed fiber already raises, closing the reentrancy asymmetry where
 the guard worked on full disposal but not on deactivation.
 
@@ -86,7 +86,7 @@ console.log('effects:', rogue.getEffects().length) // before fix: 1 (residue)
 console.log('state:', FiberState[rogue.state])     // PENDING both ways
 
 await rogue.dispose()
-console.log('leakDisposed:', leakDisposed) // before fix: false — permanent residue
+console.log('leakDisposed:', leakDisposed) // before fix: false (permanent residue)
 ```
 
 After the fix the undo's `ctx.effect` throws `INACTIVE_EFFECT` (swallowed

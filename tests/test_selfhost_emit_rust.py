@@ -359,6 +359,10 @@ CORPUS = [
     # A plain-return method with the same `let` measures nothing there, so the
     # effect bracket is what the document is for.
     "comp_provide_generic_let.rvl",
+    "unread_empty_list.rvl",  # issue #2911: a `let` bound to an empty list no
+                             #   later use reads or assigns is annotated
+                             #   `Vec<()>`, so rustc is not left with `Vec<_>`
+                             #   (E0282). The port carries the same rule.
 ]
 
 
@@ -420,6 +424,20 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
         f"self-hosted emitter diverged from the reference on {rel}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---"
     )
+
+
+def test_unread_empty_list_emitter_matches_reference(emitted, reference, tmp_path):
+    """An unread empty list stays byte-identical in the self-hosted Rust port."""
+    source = tmp_path / "unread_empty_list.rvl"
+    source.write_text(
+        "pub fn unused() -> Int {\n  let values = []\n  return 1\n}\n",
+        encoding="utf-8",
+    )
+    ir = compile_files([str(source)])
+    want = reference.emit(ir)
+    got = emitted["emit_rust_src"](ir)
+    assert "let values: Vec<()> = vec![];" in got
+    assert got == want
 
 
 def test_list_ops_prelude_splits_the_partialeq_bound(emitted, reference):
@@ -1494,6 +1512,16 @@ NAMED_REFUSALS = [
       for t in ("go", "java", "py", "rust", "ts")],
     ("emit_rust_refusals/required_stream_coeffect.rvl",
      "a required `Stream\\[T\\]` coeffect", "<<UNSUPPORTED-REQUIRED-STREAM:Fulfiller.feed>>"),
+    # issue #2911: an empty list literal nothing pins is refused by name
+    # instead of emitting `Vec<_>` for rustc to reject (E0282).
+    ("emit_rust_refusals/untyped_empty_list.rvl",
+     "an untyped empty list literal needs an element type",
+     "<<UNSUPPORTED-EMPTY-LIST-TYPE:values>>"),
+    # issue #2911: the nested shape, where every item of the literal is itself
+    # empty, so no sibling carries the inner `vec![]`'s element type.
+    ("emit_rust_refusals/nested_empty_list.rvl",
+     "an untyped nested empty list literal needs an element type",
+     "<<UNSUPPORTED-EMPTY-LIST-TYPE:xs>>"),
 ]
 
 

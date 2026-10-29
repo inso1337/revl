@@ -433,6 +433,15 @@ def test_unknown_match_case_rejected_even_with_a_wildcard_arm():
     assert "`Actve` is not a case of `Status`" in err
 
 
+def test_unknown_match_case_hint_names_the_declared_head_of_an_applied_variant():
+    # the case table is keyed by the declared head, so the hint must spell the
+    # declaration (`type Mb`) and not the use (`type Mb[Int]`)
+    err = _err("type Mb[T] = Jj(T) | Nn\n"
+               "fn f(m: Mb[Int]) -> Int { return match m { Nn => 0, Qq => 1 } }")
+    assert "`Qq` is not a case of `Mb[Int]` (cases: `Jj`, `Nn`)" in err
+    assert "add the case to `type Mb`" in err
+
+
 def test_wildcard_and_payload_arms_stay_accepted():
     ir = compile_source("""
 type Status = Active | Retired

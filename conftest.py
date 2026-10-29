@@ -20,8 +20,12 @@ It lives at the repository root so it covers ``tests/`` and ``backends/go/``
 alike. It never fires where the toolchain is installed, and never fires where
 the tier is not required: a laptop without go still skips with a reason. Rust
 is handled the same way (issue #2210), and also when cargo is present but a
-test skips because cordis-rs does not resolve.
-``tests/test_go_tier_required_2264.py`` runs it end to end.
+test skips because cordis-rs does not resolve. Java (issue #2734, the per-tier
+support table) probes for a working JDK the same way: without that, the java
+crash-recovery cell could read `proved` on a job whose JDK setup had broken and
+whose test had quietly skipped.
+``tests/test_go_tier_required_2264.py`` runs the go shapes end to end, and
+``tests/test_java_tier_required_2734.py`` does the same for java.
 """
 
 from __future__ import annotations
@@ -42,11 +46,14 @@ _REQUIRE_ENV = "REVL_REQUIRE_TIERS"
 #: file uses to look for it). go is the tier whose tests probe the toolchain
 #: directly and that CI has required longest; rust (issue #2210) probes with
 #: `which("cargo")` or `rust_runtime_reason(` the same way, in a `skipif`
-#: marker or a test body, and bypasses the `revl.test` runners.
+#: marker or a test body, and bypasses the `revl.test` runners. java probes
+#: with `java_runtime_reason(` (src/revl/run_java.py), which reports a missing
+#: JDK as a skip reason for the same reason.
 _PROBES: dict[str, tuple[str, re.Pattern[str]]] = {
     "go": ("go", re.compile(r"""which\(\s*["']go["']\s*\)|go_runtime_reason\(""")),
     "rust": ("cargo", re.compile(
         r"""which\(\s*["']cargo["']\s*\)|rust_runtime_reason\(""")),
+    "java": ("javac", re.compile(r"java_runtime_reason\(")),
 }
 
 #: tier -> what a skip reason says when the toolchain is on PATH but unusable.
@@ -58,10 +65,15 @@ _PROBES: dict[str, tuple[str, re.Pattern[str]]] = {
 #: needs a warm ~/.cargo, say) stays a skip. "not in the local cargo registry"
 #: is the one phrase two spellings share ("cordis-rs is not in ..." from
 #: `rust_runtime_reason`, "cordis-rs: not in ..." in test_realm_conformance.py).
+#: Java's `java_runtime_reason` (src/revl/run_java.py) reports a binary that is
+#: present but not a working JDK (`/usr/bin/javac` is a shim that errors until
+#: one is installed) and a JDK older than the 21 the emitter targets; both are
+#: unusable provisioning, not an environment fact.
 _UNUSABLE: dict[str, re.Pattern[str]] = {
     "rust": re.compile(r"cargo could not resolve cordis-rs"
                        r"|not in the local cargo registry"
                        r"|cargo not on PATH"),
+    "java": re.compile(r"no working JDK found|older than 21"),
 }
 
 #: tier -> was its toolchain absent when the session started. Measured once,

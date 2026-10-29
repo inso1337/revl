@@ -74,10 +74,6 @@
 
 ["function", "remaining-guards-reject-malformed-emitted-constant-text-miss", "const_numeral", 3, 3]
 
-["reason", "remaining-list-int-fallback-is-for-an-empty", "Remaining List[Int] fallback is for an empty literal without inferred/expected element type; canonical frontend empty lists require a type context."]
-
-["function", "remaining-list-int-fallback-is-for-an-empty", "list_type_of", 1, 1]
-
 ["reason", "remaining-literal-pool-loop-visits-in-file-tests", "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does"]
 
 ["function", "remaining-literal-pool-loop-visits-in-file-tests", "emit_wasm_src", 2, 2]
