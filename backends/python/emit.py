@@ -1528,48 +1528,84 @@ def _ceiling_capabilities(capabilities) -> tuple:
                  and any(marker in spelling for marker in _CEILING_MARKERS))
 
 
-def _collect_extern_reach(node: Any, externs: dict, functions: dict,
-                          out: set, seen: set) -> None:
-    """Collect the extern NAMES a function body reaches in forward evaluation.
+def _direct_callee_names(node: Any, out: set) -> None:
+    """Collect the names a node CALLS, without following a local body.
 
     Both IR call shapes count: a component-body extern call is `kind: "fn"`,
     while a module-function call is `kind: "call"` with a `var` callee (the
-    shape `_lower_fns` produces). A call to another local function recurses, so
-    a wrapper reached through a wrapper is resolved too. Inverse slots (`undo`,
-    `compensate`) are skipped: they run on unwind, not as part of the crossing
-    the budget meters."""
+    shape `_lower_fns` produces). Inverse slots (`undo`, `compensate`) are
+    skipped: they run on unwind, not as part of the crossing the budget
+    meters."""
     if isinstance(node, dict):
         kind = node.get("kind")
         if kind == "fn" and isinstance(node.get("name"), str):
-            _resolve_reach(node["name"], externs, functions, out, seen)
+            out.add(node["name"])
         elif kind == "call":
             callee = node.get("callee")
             if isinstance(callee, dict) and callee.get("kind") == "var" \
                     and isinstance(callee.get("name"), str):
-                _resolve_reach(callee["name"], externs, functions, out, seen)
+                out.add(callee["name"])
         for key, value in node.items():
             if key not in _INVERSE_KEYS:
-                _collect_extern_reach(value, externs, functions, out, seen)
+                _direct_callee_names(value, out)
     elif isinstance(node, list):
         for item in node:
-            _collect_extern_reach(item, externs, functions, out, seen)
+            _direct_callee_names(item, out)
 
 
-def _resolve_reach(name: str, externs: dict, functions: dict,
-                   out: set, seen: set) -> None:
-    """Resolve ONE callee name: an extern contributes itself, a local function
-    contributes the externs its body reaches. `seen` breaks recursion."""
-    if name in externs:
-        out.add(name)
-        return
-    fn = functions.get(name)
-    if fn is None or name in seen:
-        return
-    seen.add(name)
-    try:
-        _collect_extern_reach(fn.get("body"), externs, functions, out, seen)
-    finally:
-        seen.discard(name)
+def _function_reach_table(externs: dict, functions: dict) -> dict:
+    """Map each local function name to the extern names its body reaches.
+
+    A least fixed point over the document's call graph, not a walk of every
+    call path: a chain where each function calls the next one twice has 2**n
+    simple paths, and enumerating them hung emission on the self-hosted parser
+    (issue #2688). Each function starts with the externs it calls directly and
+    absorbs the externs of every local function it calls, until no set grows,
+    so a recursive cycle also terminates.
+
+    `externs` and `functions` are the by-name maps the ceiling tables build."""
+    direct: dict = {}
+    reached: dict = {}
+    for name, fn in functions.items():
+        names: set = set()
+        _direct_callee_names(fn.get("body"), names)
+        direct[name] = names
+        reached[name] = {callee for callee in names if callee in externs}
+    changed = True
+    while changed:
+        changed = False
+        for name in functions:
+            externs_reached = reached[name]
+            for callee in direct[name]:
+                if callee in externs:
+                    # old precedence: a callee whose name also names an extern
+                    # resolves to the extern, and the local body is not walked
+                    # for that edge. The collision is not provably impossible,
+                    # so keep the table exactly the set the path walk produced.
+                    continue
+                nested = reached.get(callee)
+                if nested and not nested <= externs_reached:
+                    externs_reached |= nested
+                    changed = True
+    return {name: frozenset(names) for name, names in reached.items()}
+
+
+def _collect_extern_reach(node: Any, externs: dict, functions: dict,
+                          out: set, reach: dict | None = None) -> None:
+    """Collect the extern NAMES a function body reaches in forward evaluation.
+
+    The body's own calls are read once; a local function call contributes the
+    externs the shared reach table already closed over, so a wrapper reached
+    through a wrapper is resolved without re-walking it at every call site."""
+    if reach is None:
+        reach = _function_reach_table(externs, functions)
+    names: set = set()
+    _direct_callee_names(node, names)
+    for name in names:
+        if name in externs:
+            out.add(name)
+        else:
+            out.update(reach.get(name, ()))
 
 
 def _function_ceiling_caps(functions: list, externs: list) -> dict:
@@ -1589,16 +1625,20 @@ def _function_ceiling_caps(functions: list, externs: list) -> dict:
     `_emit_functions`, so the caps a `_extern_emit_fire` sends and the
     `_revl_declared_caps` backstop tag on the function itself cannot drift."""
     externs_by_name = {ext["name"]: ext for ext in externs or []}
+    if not any(_ceiling_capabilities(ext.get("capabilities"))
+               for ext in externs_by_name.values()):
+        # no declared budget: every cap is empty and no reach work is owed,
+        # so a corpus of budget-free programs does not pay for the resolver
+        return {}
     functions_by_name = {fn["name"]: fn for fn in functions or []
                          if isinstance(fn.get("name"), str)}
+    reach_table = _function_reach_table(externs_by_name, functions_by_name)
     caps_by_function: dict = {}
     for fn in functions or []:
         name = fn.get("name")
         if not isinstance(name, str) or name in externs_by_name:
             continue
-        reached: set = set()
-        _collect_extern_reach(fn.get("body"), externs_by_name,
-                              functions_by_name, reached, {name})
+        reached = reach_table.get(name, frozenset())
         caps: list = []
         for extern_name in sorted(reached):
             declarations = _ceiling_capabilities(
@@ -1650,7 +1690,8 @@ def _call_callee_name(node: Any) -> Optional[str]:
 
 
 def _value_reference_ceilings(name: str, externs: dict,
-                              functions: dict) -> tuple:
+                              functions: dict,
+                              reach: dict | None = None) -> tuple:
     """The ceiling declarations a function VALUE named `name` reaches.
 
     `let f = call` and `apply(call)` hand a budgeted extern onward as a value,
@@ -1661,8 +1702,9 @@ def _value_reference_ceilings(name: str, externs: dict,
     is empty for a parameter or local that names no budgeted extern."""
     if name in externs:
         return tuple(_ceiling_capabilities(externs[name].get("capabilities")))
-    reached: set = set()
-    _resolve_reach(name, externs, functions, reached, set())
+    if reach is None:
+        reach = _function_reach_table(externs, functions)
+    reached = reach.get(name, frozenset())
     caps: list = []
     for extern_name in sorted(reached):
         for spelling in _ceiling_capabilities(
@@ -1695,7 +1737,8 @@ def _function_value_refs(node: Any, out: set) -> None:
 
 
 def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
-                           seen: "frozenset[str]" = frozenset()) -> tuple:
+                           seen: "frozenset[str]" = frozenset(),
+                           reach: dict | None = None) -> tuple:
     """Classify ONE local function that reaches a budgeted extern: how many
     host-extern crossings one invocation of it makes, and the first shape the
     runtime meter cannot attribute exactly (issue #2688).
@@ -1713,6 +1756,8 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
         # a recursive invocation may cross the extern any number of times
         return 2, _SHAPE_RECURSIVE
     path = seen | {name} if isinstance(name, str) else seen
+    if reach is None:
+        reach = _function_reach_table(externs, functions)
     params = [p.get("name") for p in fn.get("params") or []]
     crossings = 0
     reason: Optional[str] = None
@@ -1740,7 +1785,8 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
             # is applied to, so this wrapper's own arguments are not the ones
             # the meter charges. The callee-position var of a named call is the
             # attributable path and never reaches this branch.
-            if _value_reference_ceilings(node["name"], externs, functions):
+            if _value_reference_ceilings(node["name"], externs, functions,
+                                         reach):
                 miss(_SHAPE_FUNCTION_VALUE)
             return
         target = _call_callee_name(node)
@@ -1759,12 +1805,12 @@ def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
                 callee = functions[target]
                 reached: set = set()
                 _collect_extern_reach(callee.get("body"), externs, functions,
-                                      reached, {target})
+                                      reached, reach)
                 if any(_ceiling_capabilities(
                         externs[other].get("capabilities"))
                        for other in reached):
                     nested, nested_reason = _wrapper_ceiling_shape(
-                        callee, externs, functions, path)
+                        callee, externs, functions, path, reach)
                     count(nested)
                     if nested_reason is not None:
                         miss(nested_reason)
@@ -1844,15 +1890,18 @@ def _function_ceiling_shapes(functions: list, externs: list,
     budgeted_externs = {
         name for name, ext in externs_by_name.items()
         if _ceiling_capabilities(ext.get("capabilities"))}
+    if not budgeted_externs and not ceilings:
+        # no declared budget anywhere: no function can be refused and no
+        # reach work is owed, so a budget-free document pays nothing
+        return {}
+    reach_table = _function_reach_table(externs_by_name, functions_by_name)
     budgeted_names = budgeted_externs | set(ceilings)
     shapes: dict = {}
     for fn in functions or []:
         name = fn.get("name")
         if not isinstance(name, str) or name in externs_by_name:
             continue
-        reached: set = set()
-        _collect_extern_reach(fn.get("body"), externs_by_name,
-                              functions_by_name, reached, {name})
+        reached = reach_table.get(name, frozenset())
         reached_budgeted = {other for other in reached
                             if _ceiling_capabilities(
                                 externs_by_name[other].get("capabilities"))}
@@ -1861,13 +1910,13 @@ def _function_ceiling_shapes(functions: list, externs: list,
         if not reached_budgeted and not (value_refs & budgeted_names):
             continue
         _crossings, reason = _wrapper_ceiling_shape(
-            fn, externs_by_name, functions_by_name)
+            fn, externs_by_name, functions_by_name, reach=reach_table)
         if reason is None:
             continue
         caps: list = list(ceilings.get(name, ()))
         for ref in sorted(value_refs & budgeted_names):
             for spelling in _value_reference_ceilings(
-                    ref, externs_by_name, functions_by_name):
+                    ref, externs_by_name, functions_by_name, reach_table):
                 if spelling not in caps:
                     caps.append(spelling)
         shapes[name] = (reason, tuple(caps))

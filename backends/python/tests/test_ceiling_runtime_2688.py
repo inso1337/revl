@@ -1117,3 +1117,108 @@ def test_an_mcp_session_call_surfaces_the_typed_refusal(tmp_path):
     assert "declared calls ceiling 1" in str(caught.value)
     host = importlib.import_module(host_name)
     assert host.CALLS == ["a"], "the refused MCP crossing must not fire"
+
+
+def _calls_twice_chain(depth: int):
+    """`f0` .. `f_depth`, each calling the next one twice; the last calls the
+    one budgeted extern. The call graph has 2**depth simple paths and a single
+    reachable extern set."""
+    functions = [
+        {"name": f"f{step}",
+         "body": [{"kind": "fn", "name": f"f{step + 1}"},
+                  {"kind": "fn", "name": f"f{step + 1}"}]}
+        for step in range(depth)
+    ]
+    functions.append({"name": f"f{depth}",
+                      "body": [{"kind": "fn", "name": "call"}]})
+    return functions
+
+
+def test_reach_resolution_builds_one_table_per_document(monkeypatch):
+    """Reaching a budgeted extern is one closure build over the call graph.
+
+    A chain where each function calls the next one twice has 2**14 call paths
+    but only one reachable extern set. Walking the paths hung
+    `tools/census_artifact.py --verify --strict` on the self-hosted parser, so
+    the caps path must build the reach table exactly once and read each body
+    once. Patching `_collect_extern_reach` proved nothing: the caps path never
+    calls it, so the count stays zero either way."""
+    externs = [{"name": "call", "capabilities": ["net(time=1)"]}]
+    functions = _calls_twice_chain(14)
+    builds = []
+    body_reads = []
+    legacy_walks = []
+    original_table = getattr(emit, "_function_reach_table", None)
+    original_callees = getattr(emit, "_direct_callee_names", None)
+    original_walk = getattr(emit, "_collect_extern_reach", None)
+
+    def counted_table(*args, **kwargs):
+        builds.append(1)
+        if original_table is None:
+            return {}
+        return original_table(*args, **kwargs)
+
+    bodies = {id(fn["body"]) for fn in functions}
+
+    def counted_callees(node, *args, **kwargs):
+        if id(node) in bodies:
+            body_reads.append(1)
+        if original_callees is None:
+            return set()
+        return original_callees(node, *args, **kwargs)
+
+    def counted_walk(*args, **kwargs):
+        legacy_walks.append(1)
+        if original_walk is None:
+            return None
+        return original_walk(*args, **kwargs)
+
+    monkeypatch.setattr(emit, "_function_reach_table", counted_table,
+                        raising=False)
+    monkeypatch.setattr(emit, "_direct_callee_names", counted_callees,
+                        raising=False)
+    monkeypatch.setattr(emit, "_collect_extern_reach", counted_walk,
+                        raising=False)
+    caps = emit._function_ceiling_caps(functions, externs)
+    assert caps == {f"f{step}": ("net(time=1)",)
+                    for step in range(len(functions))}
+    assert builds == [1], (
+        f"reach table built {len(builds)} times, bodies read "
+        f"{len(body_reads)} times, path-walk calls {len(legacy_walks)}: "
+        "the resolver must build one table per document")
+    assert len(body_reads) == len(functions), (
+        f"{len(body_reads)} body reads for {len(functions)} functions: "
+        "a body must be read once, not once per call path")
+    assert len(legacy_walks) == 0, "the caps path must not walk paths"
+
+
+def test_a_document_without_a_budgeted_extern_builds_no_reach_table(monkeypatch):
+    """Every cap is empty when no extern declares a ceiling, so the resolver
+    must not even build the reach table.
+
+    Most of the census corpus is budget-free; walking it there is what made the
+    census run hang. Patching `_collect_extern_reach` proved nothing, because
+    the caps path never calls it: only the table build shows the early return."""
+    no_budget = [{"name": "log", "capabilities": ['fs.write(path="/tmp")']}]
+    budgeted = [{"name": "call", "capabilities": ["net(time=1)"]}]
+    functions = _calls_twice_chain(6)
+    builds = []
+    original_table = getattr(emit, "_function_reach_table", None)
+
+    def counted_table(*args, **kwargs):
+        builds.append(1)
+        if original_table is None:
+            return {}
+        return original_table(*args, **kwargs)
+
+    monkeypatch.setattr(emit, "_function_reach_table", counted_table,
+                        raising=False)
+    assert emit._function_ceiling_caps(functions, no_budget) == {}
+    assert emit._function_ceiling_shapes(functions, no_budget, {}) == {}
+    assert builds == [], (
+        f"reach table built {len(builds)} times for a document with no "
+        "budgeted extern: the early return must skip it")
+    assert emit._function_ceiling_caps(functions, budgeted) != {}
+    assert builds == [1], (
+        f"reach table built {len(builds)} times for a document with a "
+        "budgeted extern: the early return must not skip it")
