@@ -454,7 +454,8 @@ def _runtime_ceiling_surface(wal_path: str) -> dict:
     from .wal import read_wal  # noqa: PLC0415 — only when a WAL was requested
 
     loaded = read_wal(wal_path)
-    outcomes = {"emission-complete", "emission-refused", "emission-failed"}
+    outcomes = {"emission-complete", "emitted-then-refused",
+                "emission-refused", "emission-failed"}
     records = []
     for entry in loaded["records"]:
         if not isinstance(entry, dict) or entry.get("record") not in outcomes:
