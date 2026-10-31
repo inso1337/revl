@@ -375,7 +375,7 @@ revl mcp proxy -- node server.js        # gate an MCP server, no .rvl written
 python3 tools/conformance.py             # every construct x every backend
 ```
 
-The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+) — the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
+The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+): the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
 
 `run --backend py` needs the cordis-py runtime (`backends/python/setup.sh`);
 without it the command says so and exits nonzero, and the end-to-end tests in
