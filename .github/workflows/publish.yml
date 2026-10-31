@@ -112,3 +112,39 @@ jobs:
       #       password: ${{ secrets.PYPI_API_TOKEN }}
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1 (v1.14.2)
+
+  # The updater reads a release's manifest, not its tag. This job publishes
+  # the same distribution PyPI gets, plus release.json with the sha256 of every
+  # artifact and the manifest the updater validates. It is independent of the
+  # PyPI publish step on purpose: an unconfigured Trusted Publisher must not
+  # also cost the release its GitHub assets, which are what `revl update`
+  # reads, and a tag whose CI is green is the only claim the release makes.
+  github-release:
+    needs: [ci, check-version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Build the release artifacts
+        run: |
+          python -m pip install build==1.2.2.post1
+          python -m build
+      - name: Generate the release manifest
+        run: python3 tools/release_manifest.py --out release.json dist/*
+      - name: Validate the manifest the updater will read
+        run: python3 tools/release_manifest.py --validate release.json
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --title "revl ${tag#v}" \
+              --notes "Release ${tag}. See CHANGELOG.md for the changes."
+          fi
+          gh release upload "$tag" dist/* release.json --clobber

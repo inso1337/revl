@@ -461,6 +461,10 @@ UNGATED = {
     "revl_query_drift": "static query",
     "revl_query_withdraw": "static query",
     "revl_live_query": "reads the live composition",
+    "revl_update_check": "reads the release feed and compares identities; "
+                         "fetches and compiles nothing (docs/updates.md)",
+    "revl_update_status": "reports update state, staged releases and the "
+                          "journal; mutates nothing (docs/updates.md)",
     "revl_history_emitted_between": "reads the recording",
     "revl_history_lifetime": "reads the recording",
     "revl_timeline": "reads the recording",

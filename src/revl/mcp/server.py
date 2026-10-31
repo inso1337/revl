@@ -82,6 +82,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
 from . import unknownargs as _unknownargs
+from . import update_tools as _update_tools
 from . import artifacts as _artifacts
 from . import fillspec
 from . import draft as _draft
@@ -7704,6 +7705,13 @@ _BY_NAME["revl_change"]["inputSchema"]["properties"]["edit"]["properties"] = {
     "target": {"type": "string"},
     "edits": _BY_NAME["revl_edit"]["inputSchema"]["properties"]["edits"]}
 del _BY_NAME
+# the operator update surface (docs/updates.md): check a release feed and
+# apply a verified release through the same admission and swap gates the
+# authoring verbs use. Off unless the operator started the server with
+# `--update`; the verbs are appended additively, like the query surface, so the
+# core verb literal above stays owned by the authoring loop.
+TOOLS.extend(_update_tools.TOOLS)
+
 # issue #2532: every schema says what the dispatch enforces: a top-level key
 # the verb does not declare is refused by name, not ignored. Set here, once,
 # over the assembled list, so a verb added anywhere above cannot miss it.

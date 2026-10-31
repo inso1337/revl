@@ -179,6 +179,7 @@ regenerated rather than edited.
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 3 |  |
 | ts-runtime-contract.md | needs-work | 4 |  |
+| updates.md | needs-work | 0 |  |
 | verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 0 |  |
