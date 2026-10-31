@@ -65,18 +65,15 @@ fn field(n: Int) -> Bx[Int] {
   let b = { v: a.v }
   return b
 }
-// `cased` and `generic` bind their record and return an Int because the
-// self-host checker refuses both literals as a returned `Bx[..]` where the
-// reference admits them: `Full(n)` as "got `{v: Box}`" (issue #2472), and
-// `wrap(n)` as "got `{v: Opt[U]}`", the generic fn's result keeping its type
-// parameter (issue #2928).
+// `cased` binds its record and returns an Int because the self-host checker
+// still refuses the reference's accepted `Full(n)` literal as "got `{v: Box}`"
+// (issue #2472).
 fn cased(n: Int) -> Int {
   let b = { v: Full(n) }
   return 0
 }
-fn generic(n: Int) -> Int {
-  let b = { v: wrap(n) }
-  return 0
+fn generic(n: Int) -> Bx[Opt[Int]] {
+  return { v: wrap(n) }
 }
 fn rebound_box(n: Int, o: Opt[Int]) -> Bx[Int] {
   let b = { v: n }

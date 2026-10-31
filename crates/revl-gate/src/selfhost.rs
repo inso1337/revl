@@ -21367,14 +21367,16 @@ fn tk_items(xs: &[Expr], i: i64, env: Vec<Bind>, ty: String) -> TInf {
 
 fn tk_rec(fields: &[InitN], env: Vec<Bind>) -> TInf {
     let mut i = 0i64;
+    let mut tys: Vec<Bind> = vec![];
     while (i < fields.revl_length()) {
         let r = tk_infer((fields)[(i) as usize].value.clone(), env.clone());
         if (r.v != "") {
             return r;
         }
+        tys.push(Bind { name: (fields)[(i) as usize].name.clone(), ty: r.ty.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    return tk_ok(infer_record_ty(fields, env));
+    return tk_ok(record_ty_from(fields, &tys));
 }
 
 fn tk_recupd(base: Expr, upds: &[InitN], env: Vec<Bind>) -> TInf {
@@ -34223,7 +34225,7 @@ fn infer_call_ty(c: CallN, env: Vec<Bind>) -> String {
     return infer_callee(c.target.clone(), env);
 }
 
-fn infer_record_ty(fields: &[InitN], env: Vec<Bind>) -> String {
+fn record_ty_from(fields: &[InitN], tys: &[Bind]) -> String {
     let mut names: Vec<String> = vec![];
     let mut i = 0i64;
     while (i < fields.revl_length()) {
@@ -34239,7 +34241,7 @@ fn infer_record_ty(fields: &[InitN], env: Vec<Bind>) -> String {
         let mut k = 0i64;
         while (k < fields.revl_length()) {
             if ((fields)[(k) as usize].name == nm) {
-                ty = infer((fields)[(k) as usize].value.clone(), env.clone());
+                ty = (tys)[(k) as usize].ty.clone();
             }
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -34248,6 +34250,16 @@ fn infer_record_ty(fields: &[InitN], env: Vec<Bind>) -> String {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     return out.revl_concat("}");
+}
+
+fn infer_record_ty(fields: &[InitN], env: Vec<Bind>) -> String {
+    let mut tys: Vec<Bind> = vec![];
+    let mut i = 0i64;
+    while (i < fields.revl_length()) {
+        tys.push(Bind { name: (fields)[(i) as usize].name.clone(), ty: tk_infer((fields)[(i) as usize].value.clone(), env.clone()).ty });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return record_ty_from(fields, &tys);
 }
 
 fn infer_list_ty(items: &[Expr], env: Vec<Bind>) -> String {

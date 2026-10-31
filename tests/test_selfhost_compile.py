@@ -3405,6 +3405,53 @@ def test_the_review_controls_of_issue_2399_compile_on_both_sides(compile_rvl, ad
     assert not got.startswith("REFUSED|"), got[:160]
 
 
+# Issue #2928: checking a generic record's fields must substitute its type
+# arguments before checking a generic function call used as a field value.
+_ISSUE_2928_GENERIC_RECORD_CALLS = {
+    "direct_return": (
+        "type Bx[T] = { v: T }\n"
+        "fn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "fn g(n: Int) -> Bx[Opt[Int]] { return { v: wrap(n) } }\n"),
+    "identity_return": (
+        "type Bx[T] = { v: T }\n"
+        "fn id[U](x: U) -> U { return x }\n"
+        "fn g(n: Int) -> Bx[Int] { return { v: id(n) } }\n"),
+    "annotated_let": (
+        "type Bx[T] = { v: T }\n"
+        "fn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "fn g(n: Int) -> Bx[Opt[Int]] {\n"
+        "  let b: Bx[Opt[Int]] = { v: wrap(n) }\n"
+        "  return b\n"
+        "}\n"),
+    "wrong_field": (
+        "type Bx[T] = { v: T }\n"
+        "fn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "fn g(n: Int) -> Bx[Opt[Str]] { return { v: wrap(n) } }\n"),
+}
+
+
+@pytest.mark.parametrize(
+    "case", ["annotated_let", "direct_return", "identity_return"])
+@pytest.mark.parametrize("tier", [tier for tier in TIERS if tier != "wasm"])
+def test_generic_record_fields_substitute_generic_call_results(
+        compile_rvl, reference_emit, case, tier):
+    text = _ISSUE_2928_GENERIC_RECORD_CALLS[case]
+    assert compile_rvl["admit"](text) == ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    ir = compile_source(text, "x.rvl")
+    assert got == reference_emit[tier](ir), got[:200]
+
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_generic_record_fields_still_refuse_a_wrong_generic_call_result(
+        compile_rvl, tier):
+    text = _ISSUE_2928_GENERIC_RECORD_CALLS["wrong_field"]
+    want = _reference_refusal(text)
+    assert want != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + want, got[:200]
+
+
 # Documents the reference compiles, each next to one of the rules above: the
 # gate must not refuse any of them.
 _ISSUE_2399_ADMITTED = {
