@@ -1,0 +1,1492 @@
+// The revl stdlib JOSE module - local JWS/JWT verification for OAuth/OIDC.
+//
+// ---------------------------------------------------------------- what this is
+// An OAuth/OIDC id token is a signed JWT: a compact JWS whose payload is a JSON
+// claims object. A relying party that accepts one has exactly one question to
+// answer, and it must answer it CLIENT-SIDE, without a round trip to the
+// provider: "did the issuer's key really sign these exact bytes, and do the
+// claims say what I asked for?". This module is that verification, once, as a
+// primitive kit:
+//
+//   * parse the compact JWS (three strict base64url segments);
+//   * parse the protected header, pin the algorithm to RS256 or ES256;
+//   * parse a JWK Set and select the verification key by `kid`, `alg`, `use`
+//     and key type, refusing instead of guessing when the match is ambiguous;
+//   * verify the signature locally (RSA PKCS#1 v1.5 SHA-256, ECDSA P-256
+//     SHA-256) over the exact signing input;
+//   * parse the payload claims (`iss`, `aud`, `sub`, `exp`, `nbf`, `iat`) and
+//     check the registered claims against a caller-supplied expectation and a
+//     caller-supplied clock.
+//
+// Everything is error-as-data: every fallible door returns
+// `Result[..., JoseError]` with a named `code`. Nothing here raises, and no
+// failure is expressed as a sentinel (an empty `Str` is a legitimate value).
+//
+// --------------------------------------------------------------- what it is NOT
+// Deliberately out of scope, so the surface stays one auditable thing:
+//
+//   * NOT a signer and NOT a minter. A service mints its OWN session token; the
+//     signing half belongs behind a key-holding component, not in a verifier.
+//   * NOT an HMAC verifier. HS256 verifies with `ct_equal` over
+//     `stdlib/crypto.rvl`'s `hmac_sha256`, and a verifier that accepted both an
+//     asymmetric alg and HS256 from one key-document is the classic
+//     algorithm-confusion defect. This module accepts exactly RS256 and ES256.
+//   * NOT JWE and NOT AES. Encrypted tokens are a different format and a
+//     different set of primitives; none of that is here.
+//   * NOT a policy layer. Whether the `sub`/`email`/`email_verified` claims are
+//     acceptable, and whether the OAuth `state`/`nonce` match the flow that
+//     started it, are the CALLER's decisions: this kit returns the verified
+//     claims and refuses only the signature and the registered claims it names.
+//   * NOT a fetcher and NOT a cache. `parse_jwks` takes the JWK Set as a `Str`.
+//     Fetching it, caching it, and rotating it on the provider's schedule are
+//     the caller's job; the outbound HTTP client is `stdlib/net.rvl` (R1). A
+//     verifier that fetched on demand would turn an unauthenticated token into
+//     network traffic, which is exactly what a relying party must not do.
+//
+// ------------------------------------------------------------------ contract
+// A token is the compact JWS `base64url(header) "." base64url(payload) "."
+// base64url(signature)` as a `Str`. A JWK Set is its JSON document as a `Str`.
+// `now` is Unix seconds, passed BY THE CALLER: reading a clock is an effect,
+// and a verifier that reads one cannot be tested at a fixed instant. The
+// leeway is explicit data for the same reason, and is bounded to one day
+// (`bad-options` above it) so a configuration slip cannot extend every token.
+//
+//   verify(token, jwks_json, { issuer: ..., audience: ..., leeway_seconds: 0 },
+//          now) -> Result[Verified, JoseError]
+//
+// `Verified` carries the parsed header, the checked claims and the raw payload
+// JSON text, so a caller never re-parses the token it just verified.
+//
+// `verify` is the ONLY door that authenticates. `header_of`, `claims_of` and
+// `parse_jwks` are parse-only doors, useful to inspect a token or a key set and
+// to test a caller's own logic; a claim read through them is UNVERIFIED data and
+// a decision made on it is a decision made on an attacker's input.
+//
+// ------------------------------------------------------------- the strictness
+// Verification is only as strong as its parser, so the parser is strict, and
+// each strictness has a reason:
+//
+//   * base64url is RFC 4648 section 5, UNPADDED, and strictly canonical (the
+//     same rules stdlib/base64.rvl carries): `=` padding, `+`/`/`, whitespace,
+//     a length of 1 mod 4 and non-zero trailing bits are refused. Two accepted
+//     textual spellings of one byte string would make the signed TEXT
+//     malleable even though the bytes are fixed.
+//   * the protected header must be a JSON object with an `alg` string, and
+//     `alg` must be RS256 or ES256. `none` and HS256 are refused by name; there
+//     is no `alg` from the token that widens the key set.
+//   * JSON is parsed by this module (below), not by a host JSON decoder, with
+//     duplicate `alg`/claim/JWK members REFUSED. "Last member wins" is how a
+//     token carries one `exp` for a signature check and another for the reader.
+//   * a JWK is usable for an alg only when `kty`, `crv` and (when present)
+//     `alg` and `use` agree. A key with `use: "enc"` is never a signature key.
+//   * key selection by `kid` is exact; a token with no `kid` is accepted only
+//     when EXACTLY ONE key is usable, and more than one match is refused as
+//     `ambiguous-key` rather than picking the first. `key-not-found` and
+//     `ambiguous-key` are separate codes for that reason.
+//   * RSA keys shorter than 2048 bits are refused (`bad-key`); the id-token
+//     providers sign with 2048-bit or larger moduli, and accepting a short
+//     modulus would lower the bar for every caller of this kit.
+//   * claim checks are positive: `exp` must still be in the future
+//     (`now >= exp + leeway` refuses), `nbf` in the past, `iss` an exact match,
+//     and a configured `audience` must be PRESENT in `aud` (string or array).
+//     A claim that is present with the wrong TYPE is `malformed-claims`, never
+//     silently ignored.
+//
+// ------------------------------------------------------------- tier status
+// The parsing, key selection and claim checks above are PURE REVL, so they
+// lower on every tier. The two signature verifications are `extern pure fn`
+// bodies in Python ONLY (`backends/python/emit.py` embeds the body), built on
+// that host's integer arithmetic and `hashlib` and nothing else: no third-party
+// package, no network, no clock, no state. A tier without a body refuses the
+// module AT EMIT TIME by naming the extern, never by silently skipping a
+// signature check (for example `extern `rs256_verify` has no @rs body`).
+//
+//   * py - RS256 and ES256 implemented in integers, executed by the test suite
+//          against the published vectors named at the bottom of this header.
+//   * ts - DEFERRED. WebCrypto's `subtle.verify` is async, so a portable ts
+//          body needs an async extern and an async verification door; landing
+//          it half-way (a sync wrapper that cannot await) would be a lie. The
+//          deferral is stated so no caller assumes ts verification works.
+//   * rs / go / java / wasm - DEFERRED; each adds its own body beside the
+//          signature when a caller needs that tier, and until then the emit
+//          refusal above keeps a missing check from shipping.
+//
+// ---------------------------------------------------------------- base64url
+// The strict decoder below is private to this module because stdlib/base64.rvl
+// is a sibling lane's new module (R2) and is not on this branch's base yet.
+// When it lands, `decode_text` and the segment checks switch to its
+// `b64url_decode` and `b64url_check`; the JOSE-facing contract does not move.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/jose.rvl" {
+//       JoseError, JwsHeader, Claims, VerifyOptions, Jwk, Verified,
+//       parse_jwks, header_of, claims_of, check_claims, select_key, verify,
+//     }
+
+// ------------------------------------------------ the published vectors pinned
+// tests/test_jose_stdlib.py names its vectors; they are:
+//   * RFC 7515 Appendix A.2, the RS256 compact JWS example (RSA JWK n/e and the
+//     RSA private key d used only by the TEST helper to mint variants);
+//   * RFC 7515 Appendix A.3, the ES256 compact JWS example (P-256 JWK x/y);
+//   * RFC 7515 Appendix A.1, the HS256 compact JWS example, used to prove an
+//     HS256 token is refused with `unsupported-alg` and never reaches a key;
+//   * RFC 7517 Appendix A.1, a published JWK Set (one EC encryption key and one
+//     RSA signing key), used to prove `use`/`kty`/`alg` filtering and a
+//     wrong-key signature refusal.
+// The claim-check tests mint extra tokens with the RFC 7515 A.2 private key at
+// fixed instants; each such helper is named "minted (not published)".
+
+// Why a token or a JWK Set was refused. `code` is a stable machine tag from the
+// closed set below; `message` is the human half and names the offending offset
+// or value where the parser knows it.
+//
+//   malformed-token      not three non-empty `.`-separated segments
+//   invalid-base64url    a segment is not strict canonical unpadded base64url
+//   invalid-utf8         a decoded segment is not valid UTF-8
+//   malformed-json       a header, payload or JWK Set is not the required JSON
+//   malformed-claims     a claim has the wrong type, or a duplicated member
+//   unsupported-alg      `alg` is not RS256 or ES256
+//   key-not-found        no usable key matches `kid`/`alg`/key type
+//   ambiguous-key        more than one usable key matches, so none is chosen
+//   bad-key              the selected key's material is unusable (short RSA
+//                        modulus, wrong P-256 coordinate width, empty value)
+//   signature-invalid    the signature does not verify for this key
+//   token-expired        `exp` is at or before `now` (allowing the leeway)
+//   token-not-yet-valid  `nbf` is after `now` (allowing the leeway)
+//   wrong-issuer         `iss` is not the configured issuer
+//   wrong-audience       `aud` does not contain the configured audience
+//   bad-options          a negative leeway, which would make expiry uncheckable
+pub type JoseError = { code: Str, message: Str }
+
+// The JWS Protected Header members this kit reads. Unread members are parsed
+// and dropped (a JWT header may legally carry any other parameter); a repeated
+// member is refused by the parser.
+pub type JwsHeader = { alg: Str, typ: Str, kid: Str }
+
+// The registered claims this kit checks. `aud` is normalised to a list: RFC
+// 7519 allows a string or an array, and a caller should not branch on which
+// spelling the provider chose. The `has_*` flags keep "absent" distinct from a
+// numeric zero, so `exp: 0` is not confused with "no exp claim".
+pub type Claims = {
+  iss: Str,
+  sub: Str,
+  aud: List[Str],
+  exp: Int,
+  has_exp: Bool,
+  nbf: Int,
+  has_nbf: Bool,
+  iat: Int,
+  has_iat: Bool,
+}
+
+// What the caller expects. `issuer`/`audience` of "" mean "not checked": that
+// is for local tests and diagnostics only; an id-token acceptance path sets
+// both. `leeway_seconds` absorbs small clock skew and is bounded
+// to 0..86400 (one day): a larger value is not skew, it is a second lifetime.
+pub type VerifyOptions = { issuer: Str, audience: Str, leeway_seconds: Int }
+
+// One JSON Web Key, as the JWK Set document spells it. A field the document
+// omits is "". RSA keys carry `n`/`e`; EC keys carry `crv`/`x`/`y`.
+pub type Jwk = {
+  kty: Str,
+  kid: Str,
+  alg: Str,
+  key_use: Str,
+  crv: Str,
+  n: Str,
+  e: Str,
+  x: Str,
+  y: Str,
+}
+
+// A token that verified. `payload` is the decoded payload JSON text, so a
+// caller that needs an unregistered claim re-parses exactly the bytes that were
+// signed rather than the caller's memory of them.
+pub type Verified = { header: JwsHeader, claims: Claims, payload: Str }
+
+// ------------------------------------------------------------- error building
+
+fn err(code: Str, message: Str) -> JoseError {
+  return { code: code, message: message }
+}
+
+fn err_at(code: Str, why: Str, at: Int) -> JoseError {
+  var message = why
+  message = message.concat(" at offset ")
+  message = message.concat(at.to_str())
+  return err(code, message)
+}
+
+fn json_err(why: Str, at: Int) -> JoseError {
+  return err_at("malformed-json", why, at)
+}
+
+// ---------------------------------------------------------------- base64url
+// Strict canonical unpadded base64url, RFC 4648 section 5. This is a private
+// copy of the rules stdlib/base64.rvl will publish (see the header): values
+// 62/63 are `-`/`_`, the length is 0, 2 or 3 mod 4, and the unused trailing
+// bits of a short last group must be zero. Returns the decoded BYTES as a
+// `List[Int]`; the text door below decodes those as UTF-8.
+
+fn alphabet_value(code: Int) -> Int {
+  if (code >= 65 && code <= 90) { return code - 65 }
+  if (code >= 97 && code <= 122) { return code - 71 }
+  if (code >= 48 && code <= 57) { return code + 4 }
+  if (code == 45) { return 62 }
+  if (code == 95) { return 63 }
+  return 0 - 1
+}
+
+fn b64url_bytes(text: Str) -> Result[List[Int], JoseError] {
+  let n = text.length()
+  if (n.mod(4) == 1) {
+    return Err(err("invalid-base64url",
+                   "a base64url text ends after 0, 2 or 3 characters of its last group; this one ends after 1"))
+  }
+  var out: List[Int] = []
+  var acc = 0
+  var held = 0
+  var i = 0
+  while (i < n) {
+    let code = text.charCodeAt(i)
+    if (code == 61) {
+      return Err(err_at("invalid-base64url",
+                        "this decoder reads UNPADDED base64url; '=' is not part of the value",
+                        i))
+    }
+    let v = alphabet_value(code)
+    if (v < 0) {
+      var message = "character `"
+      message = message.concat(text.slice(i, i + 1))
+      message = message.concat("` is not in the RFC 4648 base64url alphabet (A-Z a-z 0-9 - _)")
+      return Err(err_at("invalid-base64url", message, i))
+    }
+    acc = acc * 64 + v
+    held += 1
+    if (held == 4) {
+      out = out.push(acc.div_floor(65536))
+      out = out.push(acc.div_floor(256).mod(256))
+      out = out.push(acc.mod(256))
+      acc = 0
+      held = 0
+    }
+    i += 1
+  }
+  if (held == 2) {
+    if (acc.mod(16) != 0) {
+      return Err(err("invalid-base64url",
+                     "the last group's 4 unused low bits are not zero, so this text is not the canonical spelling of its bytes"))
+    }
+    out = out.push(acc.div_floor(16))
+  } else if (held == 3) {
+    if (acc.mod(4) != 0) {
+      return Err(err("invalid-base64url",
+                     "the last group's 2 unused low bits are not zero, so this text is not the canonical spelling of its bytes"))
+    }
+    out = out.push(acc.div_floor(1024))
+    out = out.push(acc.div_floor(4).mod(256))
+  }
+  return Ok(out)
+}
+
+// The number of bytes a canonical unpadded base64url text decodes to, from its
+// length alone. Callers use it to check a signature width without decoding.
+fn b64url_byte_len(text: Str) -> Int {
+  let n = text.length()
+  let whole = n.div_floor(4) * 3
+  let tail = n.mod(4)
+  if (tail == 2) { return whole + 1 }
+  if (tail == 3) { return whole + 2 }
+  return whole
+}
+
+fn is_continuation(b: Int) -> Bool {
+  return b >= 128 && b <= 191
+}
+
+// Strict UTF-8 decode of base64url-decoded segment bytes.
+fn utf8_decode(bytes: List[Int]) -> Result[Str, JoseError] {
+  var out = ""
+  var i = 0
+  let n = bytes.length()
+  while (i < n) {
+    let b0 = bytes[i]
+    if (b0 < 128) {
+      out = out.concat(b0.to_char())
+      i += 1
+    } else if (b0 >= 194 && b0 <= 223) {
+      if (i + 1 >= n) {
+        return Err(err_at("invalid-utf8", "a 2-byte sequence is truncated", i))
+      }
+      let b1 = bytes[i + 1]
+      if (!is_continuation(b1)) {
+        return Err(err_at("invalid-utf8", "a continuation byte is missing", i + 1))
+      }
+      out = out.concat(((b0 - 192) * 64 + (b1 - 128)).to_char())
+      i += 2
+    } else if (b0 >= 224 && b0 <= 239) {
+      if (i + 2 >= n) {
+        return Err(err_at("invalid-utf8", "a 3-byte sequence is truncated", i))
+      }
+      let b1 = bytes[i + 1]
+      let b2 = bytes[i + 2]
+      if (!is_continuation(b1)) {
+        return Err(err_at("invalid-utf8", "a continuation byte is missing", i + 1))
+      }
+      if (!is_continuation(b2)) {
+        return Err(err_at("invalid-utf8", "a continuation byte is missing", i + 2))
+      }
+      let cp = (b0 - 224) * 4096 + (b1 - 128) * 64 + (b2 - 128)
+      if (cp < 2048) {
+        return Err(err_at("invalid-utf8", "a 3-byte sequence encodes an overlong form", i))
+      }
+      if (cp >= 55296 && cp <= 57343) {
+        return Err(err_at("invalid-utf8",
+                          "a surrogate code point (U+D800..U+DFFF) is not a Unicode scalar",
+                          i))
+      }
+      out = out.concat(cp.to_char())
+      i += 3
+    } else if (b0 >= 240 && b0 <= 244) {
+      if (i + 3 >= n) {
+        return Err(err_at("invalid-utf8", "a 4-byte sequence is truncated", i))
+      }
+      let b1 = bytes[i + 1]
+      let b2 = bytes[i + 2]
+      let b3 = bytes[i + 3]
+      if (!is_continuation(b1)) {
+        return Err(err_at("invalid-utf8", "a continuation byte is missing", i + 1))
+      }
+      if (!is_continuation(b2)) {
+        return Err(err_at("invalid-utf8", "a continuation byte is missing", i + 2))
+      }
+      if (!is_continuation(b3)) {
+        return Err(err_at("invalid-utf8", "a continuation byte is missing", i + 3))
+      }
+      let cp = (b0 - 240) * 262144 + (b1 - 128) * 4096 + (b2 - 128) * 64 + (b3 - 128)
+      if (cp < 65536) {
+        return Err(err_at("invalid-utf8", "a 4-byte sequence encodes an overlong form", i))
+      }
+      if (cp > 1114111) {
+        return Err(err_at("invalid-utf8",
+                          "a 4-byte sequence encodes a scalar above U+10FFFF",
+                          i))
+      }
+      out = out.concat(cp.to_char())
+      i += 4
+    } else {
+      return Err(err_at("invalid-utf8",
+                        "a byte that cannot start a UTF-8 sequence",
+                        i))
+    }
+  }
+  return Ok(out)
+}
+
+// The UTF-8 text of canonical base64url `text`.
+fn decode_text(text: Str) -> Result[Str, JoseError] {
+  let bytes = try b64url_bytes(text)
+  return utf8_decode(bytes)
+}
+
+// Validate canonical base64url `text` without decoding it, returning the text
+// so a caller can chain into the next check.
+fn check_b64(text: Str) -> Result[Str, JoseError] {
+  let _bytes = try b64url_bytes(text)
+  return Ok(text)
+}
+
+// The compact serialization split into its three segments. A compact JWS has
+// exactly two periods; a token with 2 or 4 segments, or an empty segment, is
+// refused here rather than by a decoder later.
+type Segments = { header: Str, payload: Str, signature: Str }
+
+fn split_compact(token: Str) -> Result[Segments, JoseError] {
+  let n = token.length()
+  var first = 0 - 1
+  var second = 0 - 1
+  var i = 0
+  while (i < n) {
+    if (token.charCodeAt(i) == 46) {
+      if (first < 0) {
+        first = i
+      } else if (second < 0) {
+        second = i
+      } else {
+        return Err(err("malformed-token",
+                       "a compact JWS has exactly three period-separated segments, so a fourth segment is not a token"))
+      }
+    }
+    i += 1
+  }
+  if (first < 0 || second < 0) {
+    return Err(err("malformed-token",
+                   "a compact JWS has three period-separated segments; this text has fewer"))
+  }
+  let header = token.slice(0, first)
+  let payload = token.slice(first + 1, second)
+  let signature = token.slice(second + 1, n)
+  if (header == "") {
+    return Err(err("malformed-token", "the header segment is empty"))
+  }
+  if (payload == "") {
+    return Err(err("malformed-token", "the payload segment is empty"))
+  }
+  if (signature == "") {
+    return Err(err("malformed-token", "the signature segment is empty"))
+  }
+  return Ok({ header: header, payload: payload, signature: signature })
+}
+
+// ------------------------------------------------------------------ JSON
+// A small strict JSON reader, because the JOSE parser's strictness IS the
+// verification's strength (duplicate members, wrong types and trailing garbage
+// must be refusals, not host-decoder quirks). It handles the full JSON value
+// grammar so an UNKNOWN header/claim member of any shape can be skipped, and it
+// refuses a duplicate member wherever a duplicated member could matter.
+//
+// revl has no escapes in string literals and no bitwise operators, so the
+// parser compares CODE POINTS (34 is `"`, 92 is `\`, 123 is `{`, ...) and
+// builds text with `to_char`.
+type StrAt = { value: Str, pos: Int }
+
+type NumAt = { value: Int, is_int: Bool, pos: Int }
+
+type KeyAt = { key: Jwk, pos: Int }
+
+fn is_ws(code: Int) -> Bool {
+  return code == 32 || code == 9 || code == 10 || code == 13
+}
+
+fn skip_ws(text: Str, start: Int) -> Int {
+  var p = start
+  let n = text.length()
+  while (p < n && is_ws(text.charCodeAt(p))) { p += 1 }
+  return p
+}
+
+fn is_digit(code: Int) -> Bool {
+  return code >= 48 && code <= 57
+}
+
+fn is_hex(code: Int) -> Bool {
+  if (code >= 48 && code <= 57) { return true }
+  if (code >= 65 && code <= 70) { return true }
+  return code >= 97 && code <= 102
+}
+
+fn hex_value(code: Int) -> Int {
+  if (code >= 48 && code <= 57) { return code - 48 }
+  if (code >= 65 && code <= 70) { return code - 55 }
+  return code - 87
+}
+
+// Read one JSON string at `p`. The returned `Str` is the DECODED value; the
+// returned `pos` is just past the closing quote.
+fn parse_string(text: Str, start: Int) -> Result[StrAt, JoseError] {
+  let n = text.length()
+  var p = start
+  if (p >= n || text.charCodeAt(p) != 34) {
+    return Err(json_err("expected a JSON string", p))
+  }
+  p += 1
+  var out = ""
+  while (p < n) {
+    let code = text.charCodeAt(p)
+    if (code == 34) {
+      return Ok({ value: out, pos: p + 1 })
+    }
+    if (code == 92) {
+      if (p + 1 >= n) {
+        return Err(json_err("the string ends inside an escape", p))
+      }
+      let esc = text.charCodeAt(p + 1)
+      if (esc == 34 || esc == 92 || esc == 47) {
+        out = out.concat(esc.to_char())
+        p += 2
+      } else if (esc == 98) {
+        out = out.concat(8.to_char())
+        p += 2
+      } else if (esc == 102) {
+        out = out.concat(12.to_char())
+        p += 2
+      } else if (esc == 110) {
+        out = out.concat(10.to_char())
+        p += 2
+      } else if (esc == 114) {
+        out = out.concat(13.to_char())
+        p += 2
+      } else if (esc == 116) {
+        out = out.concat(9.to_char())
+        p += 2
+      } else if (esc == 117) {
+        if (p + 5 >= n) {
+          return Err(json_err("a \\u escape is truncated", p))
+        }
+        let h1 = text.charCodeAt(p + 2)
+        let h2 = text.charCodeAt(p + 3)
+        let h3 = text.charCodeAt(p + 4)
+        let h4 = text.charCodeAt(p + 5)
+        if (!is_hex(h1) || !is_hex(h2) || !is_hex(h3) || !is_hex(h4)) {
+          return Err(json_err("a \\u escape is not four hex digits", p))
+        }
+        var cp = hex_value(h1) * 4096 + hex_value(h2) * 256 + hex_value(h3) * 16 + hex_value(h4)
+        var next = p + 6
+        if (cp >= 55296 && cp <= 56319) {
+          // a high surrogate must be followed by a low surrogate, spelled as a
+          // second \u escape; a lone half is not a Unicode scalar
+          if (next + 5 >= n) {
+            return Err(json_err("a high surrogate has no low surrogate", p))
+          }
+          if (text.charCodeAt(next) != 92 || text.charCodeAt(next + 1) != 117) {
+            return Err(json_err("a high surrogate has no low surrogate", p))
+          }
+          let l1 = text.charCodeAt(next + 2)
+          let l2 = text.charCodeAt(next + 3)
+          let l3 = text.charCodeAt(next + 4)
+          let l4 = text.charCodeAt(next + 5)
+          if (!is_hex(l1) || !is_hex(l2) || !is_hex(l3) || !is_hex(l4)) {
+            return Err(json_err("a low surrogate is not four hex digits", next))
+          }
+          let lo = hex_value(l1) * 4096 + hex_value(l2) * 256 + hex_value(l3) * 16 + hex_value(l4)
+          if (lo < 56320 || lo > 57343) {
+            return Err(json_err("a high surrogate is not followed by a low surrogate", p))
+          }
+          cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+          next += 6
+        } else if (cp >= 56320 && cp <= 57343) {
+          return Err(json_err("a lone low surrogate is not a Unicode scalar", p))
+        }
+        out = out.concat(cp.to_char())
+        p = next
+      } else {
+        return Err(json_err("an unknown string escape", p))
+      }
+    } else if (code < 32) {
+      return Err(json_err("a raw control character in a JSON string", p))
+    } else {
+      out = out.concat(text.slice(p, p + 1))
+      p += 1
+    }
+  }
+  return Err(json_err("the string is unterminated", start))
+}
+
+// Read one JSON number at `p`. `is_int` is false for a value carrying a
+// fraction or an exponent: the registered claims must be integers, while an
+// unknown member of either shape is still skippable.
+fn parse_number(text: Str, start: Int) -> Result[NumAt, JoseError] {
+  let n = text.length()
+  var p = start
+  var negative = false
+  if (p < n && text.charCodeAt(p) == 45) {
+    negative = true
+    p += 1
+  }
+  if (p >= n || !is_digit(text.charCodeAt(p))) {
+    return Err(json_err("expected a JSON number", start))
+  }
+  var value = 0
+  if (text.charCodeAt(p) == 48) {
+    p += 1
+    if (p < n && is_digit(text.charCodeAt(p))) {
+      return Err(json_err("a JSON number has no leading zero", start))
+    }
+  } else {
+    while (p < n && is_digit(text.charCodeAt(p))) {
+      if (value > 92233720368547758) {
+        return Err(json_err("an integer here is wider than 18 digits; a NumericDate is not", start))
+      }
+      value = value * 10 + (text.charCodeAt(p) - 48)
+      p += 1
+    }
+  }
+  var is_int = true
+  if (p < n && text.charCodeAt(p) == 46) {
+    is_int = false
+    p += 1
+    if (p >= n || !is_digit(text.charCodeAt(p))) {
+      return Err(json_err("a JSON fraction has no digits", p))
+    }
+    while (p < n && is_digit(text.charCodeAt(p))) { p += 1 }
+  }
+  if (p < n && (text.charCodeAt(p) == 101 || text.charCodeAt(p) == 69)) {
+    is_int = false
+    p += 1
+    if (p < n && (text.charCodeAt(p) == 43 || text.charCodeAt(p) == 45)) { p += 1 }
+    if (p >= n || !is_digit(text.charCodeAt(p))) {
+      return Err(json_err("a JSON exponent has no digits", p))
+    }
+    while (p < n && is_digit(text.charCodeAt(p))) { p += 1 }
+  }
+  if (negative) { value = 0 - value }
+  return Ok({ value: value, is_int: is_int, pos: p })
+}
+
+// Skip one JSON value of ANY shape, with a depth ceiling so a hostile document
+// cannot drive the recursion unbounded. Returns the position just past it.
+fn skip_value(text: Str, start: Int, depth: Int) -> Result[Int, JoseError] {
+  if (depth > 32) {
+    return Err(json_err("JSON nesting is deeper than 32", start))
+  }
+  let n = text.length()
+  let p = skip_ws(text, start)
+  if (p >= n) {
+    return Err(json_err("expected a JSON value", p))
+  }
+  let code = text.charCodeAt(p)
+  if (code == 34) {
+    let s = try parse_string(text, p)
+    return Ok(s.pos)
+  }
+  if (code == 123) {
+    return skip_object(text, p, depth)
+  }
+  if (code == 91) {
+    return skip_array(text, p, depth)
+  }
+  if (code == 116) {
+    if (text.slice(p, p + 4) == "true") { return Ok(p + 4) }
+    return Err(json_err("expected `true`", p))
+  }
+  if (code == 102) {
+    if (text.slice(p, p + 5) == "false") { return Ok(p + 5) }
+    return Err(json_err("expected `false`", p))
+  }
+  if (code == 110) {
+    if (text.slice(p, p + 4) == "null") { return Ok(p + 4) }
+    return Err(json_err("expected `null`", p))
+  }
+  if (code == 45 || is_digit(code)) {
+    let num = try parse_number(text, p)
+    return Ok(num.pos)
+  }
+  return Err(json_err("expected a JSON value", p))
+}
+
+fn skip_object(text: Str, start: Int, depth: Int) -> Result[Int, JoseError] {
+  let n = text.length()
+  var p = skip_ws(text, start + 1)
+  if (p < n && text.charCodeAt(p) == 125) { return Ok(p + 1) }
+  var done = false
+  while (!done) {
+    let key = try parse_string(text, p)
+    p = skip_ws(text, key.pos)
+    if (p >= n || text.charCodeAt(p) != 58) {
+      return Err(json_err("expected ':' after an object member name", p))
+    }
+    let next_skip = try skip_value(text, p + 1, depth + 1)    p = next_skip
+    p = skip_ws(text, p)
+    if (p >= n) {
+      return Err(json_err("the object is unterminated", p))
+    }
+    let code = text.charCodeAt(p)
+    if (code == 44) {
+      p = skip_ws(text, p + 1)
+    } else if (code == 125) {
+      p += 1
+      done = true
+    } else {
+      return Err(json_err("expected ',' or '}' in an object", p))
+    }
+  }
+  return Ok(p)
+}
+
+fn skip_array(text: Str, start: Int, depth: Int) -> Result[Int, JoseError] {
+  let n = text.length()
+  var p = skip_ws(text, start + 1)
+  if (p < n && text.charCodeAt(p) == 93) { return Ok(p + 1) }
+  var done = false
+  while (!done) {
+    let next_skip = try skip_value(text, p, depth + 1)    p = next_skip
+    p = skip_ws(text, p)
+    if (p >= n) {
+      return Err(json_err("the array is unterminated", p))
+    }
+    let code = text.charCodeAt(p)
+    if (code == 44) {
+      p = skip_ws(text, p + 1)
+    } else if (code == 93) {
+      p += 1
+      done = true
+    } else {
+      return Err(json_err("expected ',' or ']' in an array", p))
+    }
+  }
+  return Ok(p)
+}
+
+fn expect_char(text: Str, p: Int, code: Int, what: Str) -> Result[Int, JoseError] {
+  if (p >= text.length() || text.charCodeAt(p) != code) {
+    return Err(json_err(what, p))
+  }
+  return Ok(p + 1)
+}
+
+fn expect_end(text: Str, p: Int, what: Str) -> Result[Bool, JoseError] {
+  let n = text.length()
+  let end = skip_ws(text, p)
+  if (end != n) {
+    return Err(json_err(what, end))
+  }
+  return Ok(true)
+}
+
+// ------------------------------------------------------------ header JSON
+// The protected header: a JSON object whose `alg` member is a non-empty
+// string. `typ` and `kid` are read when present. Any other member is skipped,
+// as RFC 7515 permits.
+pub fn header_of(token: Str) -> Result[JwsHeader, JoseError] {
+  let segments = try split_compact(token)
+  let text = try decode_text(segments.header)
+  return parse_header_json(text)
+}
+
+fn parse_header_json(text: Str) -> Result[JwsHeader, JoseError] {
+  let n = text.length()
+  var p = skip_ws(text, 0)
+  if (p >= n || text.charCodeAt(p) != 123) {
+    return Err(json_err("the protected header is not a JSON object", p))
+  }
+  p = skip_ws(text, p + 1)
+  var alg = ""
+  var typ = ""
+  var kid = ""
+  var has_alg = false
+  var has_typ = false
+  var has_kid = false
+  if (p < n && text.charCodeAt(p) == 125) {
+    p += 1
+  } else {
+    var done = false
+    while (!done) {
+      let key = try parse_string(text, p)
+      let next_char = try expect_char(text, skip_ws(text, key.pos), 58, "expected ':' after a header member name")      p = next_char
+      if (key.value == "alg") {
+        if (has_alg) {
+          return Err(json_err("a duplicated `alg` member in the protected header", p))
+        }
+        let value = try parse_string(text, skip_ws(text, p))
+        alg = value.value
+        has_alg = true
+        p = value.pos
+      } else if (key.value == "typ") {
+        if (has_typ) {
+          return Err(json_err("a duplicated `typ` member in the protected header", p))
+        }
+        let value = try parse_string(text, skip_ws(text, p))
+        typ = value.value
+        has_typ = true
+        p = value.pos
+      } else if (key.value == "kid") {
+        if (has_kid) {
+          return Err(json_err("a duplicated `kid` member in the protected header", p))
+        }
+        let value = try parse_string(text, skip_ws(text, p))
+        kid = value.value
+        has_kid = true
+        p = value.pos
+      } else {
+        let next_skip = try skip_value(text, p, 0)        p = next_skip
+      }
+      p = skip_ws(text, p)
+      if (p >= n) {
+        return Err(json_err("the protected header is unterminated", p))
+      }
+      let code = text.charCodeAt(p)
+      if (code == 44) {
+        p = skip_ws(text, p + 1)
+      } else if (code == 125) {
+        p += 1
+        done = true
+      } else {
+        return Err(json_err("expected ',' or '}' in the protected header", p))
+      }
+    }
+  }
+  let _end = try expect_end(text, p, "trailing content after the protected header")
+  if (!has_alg || alg == "") {
+    return Err(err("malformed-json", "the protected header has no `alg` string"))
+  }
+  return Ok({ alg: alg, typ: typ, kid: kid })
+}
+
+// ------------------------------------------------------------ claims JSON
+// The payload claims: a JSON object. `iss`/`sub` are strings, `aud` is a string
+// or an array of strings, and `exp`/`nbf`/`iat` are integer NumericDates. A
+// member present with the wrong type, or a duplicated member, is refused: a
+// verifier that ignored a malformed `exp` would be checking nothing.
+pub fn claims_of(payload_json: Str) -> Result[Claims, JoseError] {
+  let n = payload_json.length()
+  var p = skip_ws(payload_json, 0)
+  if (p >= n || payload_json.charCodeAt(p) != 123) {
+    return Err(json_err("the payload claims are not a JSON object", p))
+  }
+  p = skip_ws(payload_json, p + 1)
+  var iss = ""
+  var sub = ""
+  var aud: List[Str] = []
+  var exp = 0
+  var nbf = 0
+  var iat = 0
+  var has_iss = false
+  var has_sub = false
+  var has_aud = false
+  var has_exp = false
+  var has_nbf = false
+  var has_iat = false
+  if (p < n && payload_json.charCodeAt(p) == 125) {
+    p += 1
+  } else {
+    var done = false
+    while (!done) {
+      let key = try parse_string(payload_json, p)
+      let next_char = try expect_char(payload_json, skip_ws(payload_json, key.pos), 58, "expected ':' after a claim name")      p = next_char
+      p = skip_ws(payload_json, p)
+      if (key.value == "iss" || key.value == "sub") {
+        if (key.value == "iss" && has_iss) {
+          return Err(err("malformed-claims", "a duplicated `iss` claim"))
+        }
+        if (key.value == "sub" && has_sub) {
+          return Err(err("malformed-claims", "a duplicated `sub` claim"))
+        }
+        if (p >= n || payload_json.charCodeAt(p) != 34) {
+          return Err(claim_type_err(key.value, "must be a JSON string", p))
+        }
+        let value = try parse_string(payload_json, p)
+        if (key.value == "iss") {
+          iss = value.value
+          has_iss = true
+        } else {
+          sub = value.value
+          has_sub = true
+        }
+        p = value.pos
+      } else if (key.value == "aud") {
+        if (has_aud) {
+          return Err(err("malformed-claims", "a duplicated `aud` claim"))
+        }
+        if (p < n && payload_json.charCodeAt(p) == 34) {
+          let value = try parse_string(payload_json, p)
+          aud = [value.value]
+          p = value.pos
+        } else if (p < n && payload_json.charCodeAt(p) == 91) {
+          let parsed = try parse_aud_array(payload_json, p)
+          aud = parsed.values
+          p = parsed.pos
+        } else {
+          return Err(err_at("malformed-claims",
+                            "`aud` must be a string or an array of strings",
+                            p))
+        }
+        has_aud = true
+      } else if (key.value == "exp" || key.value == "nbf" || key.value == "iat") {
+        if (key.value == "exp" && has_exp) {
+          return Err(err("malformed-claims", "a duplicated `exp` claim"))
+        }
+        if (key.value == "nbf" && has_nbf) {
+          return Err(err("malformed-claims", "a duplicated `nbf` claim"))
+        }
+        if (key.value == "iat" && has_iat) {
+          return Err(err("malformed-claims", "a duplicated `iat` claim"))
+        }
+        if (p >= n) {
+          return Err(claim_type_err(key.value, "must be an integer NumericDate", p))
+        }
+        let first = payload_json.charCodeAt(p)
+        if (first != 45 && !is_digit(first)) {
+          return Err(claim_type_err(key.value, "must be an integer NumericDate", p))
+        }
+        let num = try parse_number(payload_json, p)
+        if (!num.is_int) {
+          var message = "`"
+          message = message.concat(key.value)
+          message = message.concat("` must be an integer NumericDate, not a fraction or an exponent")
+          return Err(err_at("malformed-claims", message, p))
+        }
+        if (key.value == "exp") {
+          exp = num.value
+          has_exp = true
+        } else if (key.value == "nbf") {
+          nbf = num.value
+          has_nbf = true
+        } else {
+          iat = num.value
+          has_iat = true
+        }
+        p = num.pos
+      } else {
+        let next_skip = try skip_value(payload_json, p, 0)        p = next_skip
+      }
+      p = skip_ws(payload_json, p)
+      if (p >= n) {
+        return Err(json_err("the claims object is unterminated", p))
+      }
+      let code = payload_json.charCodeAt(p)
+      if (code == 44) {
+        p = skip_ws(payload_json, p + 1)
+      } else if (code == 125) {
+        p += 1
+        done = true
+      } else {
+        return Err(json_err("expected ',' or '}' in the claims object", p))
+      }
+    }
+  }
+  let _end = try expect_end(payload_json, p, "trailing content after the claims object")
+  return Ok({
+    iss: iss,
+    sub: sub,
+    aud: aud,
+    exp: exp,
+    has_exp: has_exp,
+    nbf: nbf,
+    has_nbf: has_nbf,
+    iat: iat,
+    has_iat: has_iat,
+  })
+}
+
+type StrListAt = { values: List[Str], pos: Int }
+
+// A `List[Str]` value for `aud`: every element must be a string, so a mixed
+// array is a refusal rather than a filtered audience.
+fn parse_aud_array(text: Str, start: Int) -> Result[StrListAt, JoseError] {
+  let n = text.length()
+  var p = skip_ws(text, start + 1)
+  var values: List[Str] = []
+  if (p < n && text.charCodeAt(p) == 93) {
+    return Ok({ values: values, pos: p + 1 })
+  }
+  var done = false
+  while (!done) {
+    p = skip_ws(text, p)
+    if (p >= n || text.charCodeAt(p) != 34) {
+      return Err(err_at("malformed-claims",
+                        "`aud` array elements must be strings",
+                        p))
+    }
+    let value = try parse_string(text, p)
+    values = values.push(value.value)
+    p = skip_ws(text, value.pos)
+    if (p >= n) {
+      return Err(json_err("the `aud` array is unterminated", p))
+    }
+    let code = text.charCodeAt(p)
+    if (code == 44) {
+      p += 1
+    } else if (code == 93) {
+      p += 1
+      done = true
+    } else {
+      return Err(json_err("expected ',' or ']' in the `aud` array", p))
+    }
+  }
+  return Ok({ values: values, pos: p })
+}
+
+// ------------------------------------------------------------ JWK Set JSON
+// The JWK Set: a JSON object with a `keys` array whose entries are JWK
+// objects. Known members are read as strings; a JWK member of the wrong type is
+// a refusal (a numeric `n` cannot be a key), while an unknown member of any
+// shape is skipped.
+pub fn parse_jwks(jwks_json: Str) -> Result[List[Jwk], JoseError] {
+  let n = jwks_json.length()
+  var p = skip_ws(jwks_json, 0)
+  if (p >= n || jwks_json.charCodeAt(p) != 123) {
+    return Err(json_err("the JWK Set is not a JSON object", p))
+  }
+  p = skip_ws(jwks_json, p + 1)
+  var keys: List[Jwk] = []
+  var has_keys = false
+  if (p < n && jwks_json.charCodeAt(p) == 125) {
+    p += 1
+  } else {
+    var done = false
+    while (!done) {
+      let key = try parse_string(jwks_json, p)
+      let next_char = try expect_char(jwks_json, skip_ws(jwks_json, key.pos), 58, "expected ':' after a JWK Set member name")      p = next_char
+      if (key.value == "keys") {
+        if (has_keys) {
+          return Err(json_err("a duplicated `keys` member in the JWK Set", p))
+        }
+        let parsed = try parse_keys_array(jwks_json, skip_ws(jwks_json, p))
+        keys = parsed.keys
+        has_keys = true
+        p = parsed.pos
+      } else {
+        let next_skip = try skip_value(jwks_json, p, 0)        p = next_skip
+      }
+      p = skip_ws(jwks_json, p)
+      if (p >= n) {
+        return Err(json_err("the JWK Set is unterminated", p))
+      }
+      let code = jwks_json.charCodeAt(p)
+      if (code == 44) {
+        p = skip_ws(jwks_json, p + 1)
+      } else if (code == 125) {
+        p += 1
+        done = true
+      } else {
+        return Err(json_err("expected ',' or '}' in the JWK Set", p))
+      }
+    }
+  }
+  let _end = try expect_end(jwks_json, p, "trailing content after the JWK Set")
+  if (!has_keys) {
+    return Err(err("malformed-json", "the JWK Set has no `keys` array"))
+  }
+  return Ok(keys)
+}
+
+// Where the array parsed by `parse_keys_array` ended. Kept separate so
+// `parse_jwks` can continue its object loop without re-walking the array.
+type KeysAt = { keys: List[Jwk], pos: Int }
+
+fn parse_keys_array(jwks_json: Str, start: Int) -> Result[KeysAt, JoseError] {
+  let n = jwks_json.length()
+  var p = skip_ws(jwks_json, start)
+  if (p >= n || jwks_json.charCodeAt(p) != 91) {
+    return Err(json_err("`keys` is not a JSON array", p))
+  }
+  p = skip_ws(jwks_json, p + 1)
+  var keys: List[Jwk] = []
+  if (p < n && jwks_json.charCodeAt(p) == 93) {
+    return Ok({ keys: keys, pos: p + 1 })
+  }
+  var done = false
+  while (!done) {
+    let parsed = try parse_jwk_object(jwks_json, skip_ws(jwks_json, p))
+    keys = keys.push(parsed.key)
+    p = skip_ws(jwks_json, parsed.pos)
+    if (p >= n) {
+      return Err(json_err("the `keys` array is unterminated", p))
+    }
+    let code = jwks_json.charCodeAt(p)
+    if (code == 44) {
+      p += 1
+    } else if (code == 93) {
+      p += 1
+      done = true
+    } else {
+      return Err(json_err("expected ',' or ']' in the `keys` array", p))
+    }
+  }
+  return Ok({ keys: keys, pos: p })
+}
+
+fn parse_jwk_object(jwks_json: Str, start: Int) -> Result[KeyAt, JoseError] {
+  let n = jwks_json.length()
+  var p = skip_ws(jwks_json, start)
+  if (p >= n || jwks_json.charCodeAt(p) != 123) {
+    return Err(json_err("a JWK is not a JSON object", p))
+  }
+  p = skip_ws(jwks_json, p + 1)
+  var kty = ""
+  var kid = ""
+  var alg = ""
+  var key_use = ""
+  var crv = ""
+  var n_b64 = ""
+  var e_b64 = ""
+  var x_b64 = ""
+  var y_b64 = ""
+  var seen: List[Str] = []
+  if (p < n && jwks_json.charCodeAt(p) == 125) {
+    p += 1
+  } else {
+    var done = false
+    while (!done) {
+      let key = try parse_string(jwks_json, p)
+      let next_char = try expect_char(jwks_json, skip_ws(jwks_json, key.pos), 58, "expected ':' after a JWK member name")      p = next_char
+      p = skip_ws(jwks_json, p)
+      if (key.value == "kty" || key.value == "kid" || key.value == "alg" || key.value == "use" || key.value == "crv" || key.value == "n" || key.value == "e" || key.value == "x" || key.value == "y") {
+        if (list_has(seen, key.value)) {
+          var dup = "a duplicated `"
+          dup = dup.concat(key.value)
+          dup = dup.concat("` member in a JWK")
+          return Err(json_err(dup, p))
+        }
+        seen = seen.push(key.value)
+        if (p < n && jwks_json.charCodeAt(p) == 34) {
+          let value = try parse_string(jwks_json, p)
+          if (key.value == "kty") {
+            kty = value.value
+          } else if (key.value == "kid") {
+            kid = value.value
+          } else if (key.value == "alg") {
+            alg = value.value
+          } else if (key.value == "use") {
+            key_use = value.value
+          } else if (key.value == "crv") {
+            crv = value.value
+          } else if (key.value == "n") {
+            n_b64 = value.value
+          } else if (key.value == "e") {
+            e_b64 = value.value
+          } else if (key.value == "x") {
+            x_b64 = value.value
+          } else {
+            y_b64 = value.value
+          }
+          p = value.pos
+        } else {
+          var message = "the JWK member `"
+          message = message.concat(key.value)
+          message = message.concat("` must be a string")
+          return Err(err_at("malformed-json", message, p))
+        }
+      } else {
+        let next_skip = try skip_value(jwks_json, p, 0)        p = next_skip
+      }
+      p = skip_ws(jwks_json, p)
+      if (p >= n) {
+        return Err(json_err("a JWK object is unterminated", p))
+      }
+      let code = jwks_json.charCodeAt(p)
+      if (code == 44) {
+        p = skip_ws(jwks_json, p + 1)
+      } else if (code == 125) {
+        p += 1
+        done = true
+      } else {
+        return Err(json_err("expected ',' or '}' in a JWK object", p))
+      }
+    }
+  }
+  return Ok({
+    key: {
+      kty: kty,
+      kid: kid,
+      alg: alg,
+      key_use: key_use,
+      crv: crv,
+      n: n_b64,
+      e: e_b64,
+      x: x_b64,
+      y: y_b64,
+    },
+    pos: p,
+  })
+}
+
+fn claim_type_err(name: Str, why: Str, at: Int) -> JoseError {
+  var message = "`"
+  message = message.concat(name)
+  message = message.concat("` ")
+  message = message.concat(why)
+  return err_at("malformed-claims", message, at)
+}
+
+fn list_has(xs: List[Str], want: Str) -> Bool {
+  for (x of xs) {
+    if (x == want) { return true }
+  }
+  return false
+}
+
+// ------------------------------------------------------------ key selection
+// Can `key` verify `alg`? Only when every attribute the JWK declares agrees:
+// a usage purpose other than `sig` excludes it, a pinned `alg` must be this
+// alg, and the key type (and P-256 curve) must match the alg. An EC key with
+// `crv` absent is not a P-256 key, so it is excluded.
+fn key_alg_ok(key: Jwk, alg: Str) -> Bool {
+  if (key.key_use != "" && key.key_use != "sig") {
+    return false
+  }
+  if (key.alg != "" && key.alg != alg) {
+    return false
+  }
+  if (alg == "RS256") {
+    return key.kty == "RSA"
+  }
+  if (alg == "ES256") {
+    return key.kty == "EC" && key.crv == "P-256"
+  }
+  return false
+}
+
+// Pick the one key that verifies `header.alg`. With a `kid`, the match is exact
+// and a miss is `key-not-found`; without one, the alg-compatible set must have
+// exactly one member. In every case two matches are `ambiguous-key`, not a
+// first-match pick: which key verified a token must not depend on document
+// order.
+pub fn select_key(keys: List[Jwk], header: JwsHeader) -> Result[Jwk, JoseError] {
+  var candidates: List[Jwk] = []
+  for (key of keys) {
+    if (key_alg_ok(key, header.alg)) {
+      candidates = candidates.push(key)
+    }
+  }
+  if (header.kid != "") {
+    var matched: List[Jwk] = []
+    for (candidate of candidates) {
+      if (candidate.kid == header.kid) {
+        matched = matched.push(candidate)
+      }
+    }
+    if (matched.length() == 0) {
+      var message = "no key in the JWK Set matches `kid` `"
+      message = message.concat(header.kid)
+      message = message.concat("` for `")
+      message = message.concat(header.alg)
+      message = message.concat("`")
+      return Err(err("key-not-found", message))
+    }
+    if (matched.length() > 1) {
+      return Err(err("ambiguous-key",
+                     "more than one key matches this `kid` and algorithm, so none is chosen"))
+    }
+    return Ok(matched[0])
+  }
+  if (candidates.length() == 0) {
+    return Err(err("key-not-found",
+                   "the token has no `kid` and no key in the JWK Set is usable for this algorithm"))
+  }
+  if (candidates.length() > 1) {
+    return Err(err("ambiguous-key",
+                   "the token has no `kid` and more than one key is usable for this algorithm, so none is chosen"))
+  }
+  return Ok(candidates[0])
+}
+
+// ------------------------------------------------------- signature bodies
+// RSASSA-PKCS1-v1_5 with SHA-256 (RS256). Pure: the inputs are the public key
+// (base64url big-endian n and e), the signing input text and the signature
+// (base64url), all already validated as canonical base64url by the caller. The
+// body compares the full expected encoded message, not a substring, so no
+// malformed signature can slide through on a trailing-bytes technicality.
+pub extern pure fn rs256_verify(n_b64: Str, e_b64: Str, signing_input: Str, sig_b64: Str) -> Bool = @py {
+    import base64
+    import hashlib
+    import hmac
+
+    def _unb64(s):
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+    try:
+        n = int.from_bytes(_unb64(n_b64), "big")
+        e = int.from_bytes(_unb64(e_b64), "big")
+        sig = _unb64(sig_b64)
+    except Exception:
+        return False
+    if n <= 0 or e < 3:
+        return False
+    k = (n.bit_length() + 7) // 8
+    if len(sig) != k:
+        return False
+    s = int.from_bytes(sig, "big")
+    if s >= n:
+        return False
+    em = pow(s, e, n).to_bytes(k, "big")
+    digest = hashlib.sha256(signing_input.encode("utf-8")).digest()
+    # DigestInfo for SHA-256 (RFC 8017 section 9.2, note 1)
+    t = bytes.fromhex("3031300d060960864801650304020105000420") + digest
+    if k < len(t) + 11:
+        return False
+    expected = b"\x00\x01" + b"\xff" * (k - len(t) - 3) + b"\x00" + t
+    return hmac.compare_digest(em, expected)
+  }
+
+// ECDSA P-256 with SHA-256 (ES256), signature as the JOSE fixed 64-byte
+// `r || s`. Pure: public key (base64url x and y) against the curve, no
+// dependency beyond Python's integers and `hashlib`. The point is checked to be
+// ON the curve before use, and `r`/`s` are range-checked, because a small-order
+// or off-curve point can otherwise yield a signature that verifies for more
+// messages than the signer intended.
+pub extern pure fn es256_verify(x_b64: Str, y_b64: Str, signing_input: Str, sig_b64: Str) -> Bool = @py {
+    import base64
+    import hashlib
+
+    def _unb64(s):
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+    # P-256 (secp256r1), FIPS 186-4
+    p = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+    a = p - 3
+    b = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+    group_n = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+    gx = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
+    gy = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+
+    try:
+        x = int.from_bytes(_unb64(x_b64), "big")
+        y = int.from_bytes(_unb64(y_b64), "big")
+        sig = _unb64(sig_b64)
+    except Exception:
+        return False
+    if len(sig) != 64:
+        return False
+    r = int.from_bytes(sig[:32], "big")
+    s = int.from_bytes(sig[32:], "big")
+    if not (1 <= r < group_n and 1 <= s < group_n):
+        return False
+    if not (0 <= x < p and 0 <= y < p):
+        return False
+    if (y * y - (x * x * x + a * x + b)) % p != 0:
+        return False
+
+    def add(P, Q):
+        if P is None:
+            return Q
+        if Q is None:
+            return P
+        x1, y1 = P
+        x2, y2 = Q
+        if x1 == x2 and (y1 + y2) % p == 0:
+            return None
+        if P == Q:
+            lam = (3 * x1 * x1 + a) * pow(2 * y1, -1, p) % p
+        else:
+            lam = (y2 - y1) * pow(x2 - x1, -1, p) % p
+        x3 = (lam * lam - x1 - x2) % p
+        y3 = (lam * (x1 - x3) - y1) % p
+        return (x3, y3)
+
+    def mul(P, k):
+        R = None
+        while k:
+            if k & 1:
+                R = add(R, P)
+            P = add(P, P)
+            k >>= 1
+        return R
+
+    z = int.from_bytes(hashlib.sha256(signing_input.encode("utf-8")).digest(), "big")
+    w = pow(s, -1, group_n)
+    X = add(mul((gx, gy), (z * w) % group_n),
+            mul((x, y), (r * w) % group_n))
+    if X is None:
+        return False
+    return X[0] % group_n == r
+  }
+
+// Verify `signature` over `signing_input` with the selected key. The key
+// material is checked in PURE revl before an extern body is reached, so an
+// unusable key is `bad-key` rather than a false signature verdict.
+fn verify_with_key(header: JwsHeader, key: Jwk, signing_input: Str, signature: Str) -> Result[Bool, JoseError] {
+  if (header.alg == "RS256") {
+    let modulus_bytes = b64url_byte_len(key.n)
+    let exponent_bytes = b64url_byte_len(key.e)
+    let signature_bytes = b64url_byte_len(signature)
+    if (key.n == "" || key.e == "") {
+      return Err(err("bad-key", "an RSA JWK in the set has no `n` or no `e`"))
+    }
+    if (modulus_bytes < 256) {
+      return Err(err("bad-key",
+                     "the RSA modulus is shorter than 2048 bits; id-token keys are 2048 bits or larger"))
+    }
+    if (exponent_bytes == 0) {
+      return Err(err("bad-key", "the RSA public exponent is empty"))
+    }
+    if (signature_bytes != modulus_bytes) {
+      var message = "an RS256 signature is "
+      message = message.concat(modulus_bytes.to_str())
+      message = message.concat(" bytes for this modulus; this one is ")
+      message = message.concat(signature_bytes.to_str())
+      return Err(err("signature-invalid", message))
+    }
+    let ok = rs256_verify(key.n, key.e, signing_input, signature)
+    if (ok) { return Ok(true) }
+    return Err(err("signature-invalid", "the RS256 signature does not verify for this key"))
+  }
+  let x_bytes = b64url_byte_len(key.x)
+  let y_bytes = b64url_byte_len(key.y)
+  let signature_bytes = b64url_byte_len(signature)
+  if (key.x == "" || key.y == "") {
+    return Err(err("bad-key", "a P-256 JWK in the set has no `x` or no `y`"))
+  }
+  if (x_bytes != 32 || y_bytes != 32) {
+    return Err(err("bad-key", "a P-256 coordinate must be 32 bytes"))
+  }
+  if (signature_bytes != 64) {
+    var message = "an ES256 signature is the fixed 64-byte `r || s`; this one is "
+    message = message.concat(signature_bytes.to_str())
+    message = message.concat(" bytes")
+    return Err(err("signature-invalid", message))
+  }
+  let ok = es256_verify(key.x, key.y, signing_input, signature)
+  if (ok) { return Ok(true) }
+  return Err(err("signature-invalid", "the ES256 signature does not verify for this key"))
+}
+
+// ------------------------------------------------------------- the claim wait
+// Check the registered claims against the caller's expectation and clock. The
+// order is deliberate: time first (the cheapest and the most common refusal),
+// then issuer, then audience.
+pub fn check_claims(claims: Claims, options: VerifyOptions, now: Int) -> Result[Claims, JoseError] {
+  if (options.leeway_seconds < 0) {
+    return Err(err("bad-options",
+                   "`leeway_seconds` must not be negative; a negative leeway would shorten the token's life silently"))
+  }
+  if (options.leeway_seconds > 86400) {
+    return Err(err("bad-options",
+                   "`leeway_seconds` above 86400 (one day) is not clock skew; it would silently extend every token's life"))
+  }
+  if (claims.has_exp) {
+    if (now >= claims.exp + options.leeway_seconds) {
+      var message = "the token expired at `exp` "
+      message = message.concat(claims.exp.to_str())
+      message = message.concat(" (with a leeway of ")
+      message = message.concat(options.leeway_seconds.to_str())
+      message = message.concat(" seconds), and now is ")
+      message = message.concat(now.to_str())
+      return Err(err("token-expired", message))
+    }
+  }
+  if (claims.has_nbf) {
+    if (now + options.leeway_seconds < claims.nbf) {
+      var message = "the token is not valid until `nbf` "
+      message = message.concat(claims.nbf.to_str())
+      message = message.concat(" (with a leeway of ")
+      message = message.concat(options.leeway_seconds.to_str())
+      message = message.concat(" seconds), and now is ")
+      message = message.concat(now.to_str())
+      return Err(err("token-not-yet-valid", message))
+    }
+  }
+  if (options.issuer != "" && claims.iss != options.issuer) {
+    var message = "the token's `iss` is not the expected issuer `"
+    message = message.concat(options.issuer)
+    message = message.concat("`")
+    return Err(err("wrong-issuer", message))
+  }
+  if (options.audience != "" && !list_has(claims.aud, options.audience)) {
+    var message = "the token's `aud` does not contain the expected audience `"
+    message = message.concat(options.audience)
+    message = message.concat("`")
+    return Err(err("wrong-audience", message))
+  }
+  return Ok(claims)
+}
+
+// --------------------------------------------------------------- the door
+// The one verification door: parse the compact JWS, refuse an unsupported
+// algorithm, select the key, verify the signature over the exact signing input,
+// then parse and check the claims. The payload is decoded only AFTER the
+// signature verifies, so no claim from an unauthenticated payload is used for
+// any decision.
+pub fn verify(token: Str, jwks_json: Str, options: VerifyOptions, now: Int) -> Result[Verified, JoseError] {
+  let segments = try split_compact(token)
+  let header_json = try decode_text(segments.header)
+  let header = try parse_header_json(header_json)
+  if (header.alg != "RS256" && header.alg != "ES256") {
+    var message = "the protected header names `alg` `"
+    message = message.concat(header.alg)
+    message = message.concat("`; this kit verifies RS256 and ES256 only")
+    return Err(err("unsupported-alg", message))
+  }
+  let keys = try parse_jwks(jwks_json)
+  let key = try select_key(keys, header)
+  let signature = try check_b64(segments.signature)
+  var signing_input = segments.header
+  signing_input = signing_input.concat(".")
+  signing_input = signing_input.concat(segments.payload)
+  let _signature_ok = try verify_with_key(header, key, signing_input, signature)
+  let payload = try decode_text(segments.payload)
+  let claims = try claims_of(payload)
+  let checked = try check_claims(claims, options, now)
+  return Ok({ header: header, claims: checked, payload: payload })
+}
