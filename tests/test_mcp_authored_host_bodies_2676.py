@@ -210,6 +210,44 @@ def test_repair_gate_carries_the_candidate_bodies(monkeypatch):
     }
 
 
+def test_repair_approval_ticket_uses_candidate_provenance(monkeypatch):
+    from revl.mcp import gauntlet
+    from revl.mcp.approval import ApprovalRequired
+
+    ir, modules, _report, _authored = _compiled_candidate()
+    monkeypatch.setattr(gauntlet, "run", lambda *_args, **_kwargs: {
+        "verdict": "admissible",
+    })
+    monkeypatch.setattr(repair, "_realm_removal_refusal", lambda *_args: None)
+    monkeypatch.setattr(repair, "_load_boundary_policy", lambda *_args: None)
+    monkeypatch.setattr(repair, "_capabilities_reached", lambda *_args: [])
+
+    class RefusedRemediation(repair.RemediationStrategy):
+        name = "test-refusal"
+
+        def remediate(self, *_args, **_kwargs):
+            raise ApprovalRequired({"hash": "sha256:repair",
+                                    "capabilities": []})
+
+    policy = repair.SelfRepairPolicy(
+        eligibility=(repair.Eligibility("component", "C"),),
+        ack_on_widen=False,
+    )
+    result = repair.run_repair(
+        SimpleNamespace(ir=None, loaded=False),
+        {"component": "C",
+         "candidate": {"source": _CANDIDATE, "modules": modules},
+         "selfRepairPolicy": policy},
+        strategy=RefusedRemediation(),
+    )
+
+    assert result["incident"]["status"] == repair.STATUS_REJECTED, result
+    ticket = result["remediation"]["approval"]["ticket"]
+    assert _body_names(ticket["unreviewedHostCode"]) == {
+        "candidate_helper", "candidate_root",
+    }
+
+
 def test_restore_stores_provenance_on_the_live_generation_and_history(
         monkeypatch):
     from revl.mcp.persist import _recompile, admitted_name
