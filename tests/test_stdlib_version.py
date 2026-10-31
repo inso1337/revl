@@ -57,8 +57,9 @@ def test_stamp_is_the_expected_bumped_counter():
     # The stamp is a monotonic counter bumped once per public stdlib change
     # (add/remove/signature). Pinning the literal here makes every future bump
     # DELIBERATE: a public addition that forgets to bump reds this test instead
-    # of shipping a stale stamp. It is "10" as of `stdlib/net.rvl` (R1 of the
-    # SaaS back-end plan, issue #2997: `NetOptions`, `NetField`, `NetResponse`,
+    # of shipping a stale stamp. It is "10" as of `stdlib/net.rvl` (the SaaS
+    # back-end plan, section 7.2, issue #2997: `NetOptions`, `NetField`,
+    # `NetResponse`,
     # `NetError`, `NetCall`, `NetReply`, `get`, `post_json`, `post_form`, the
     # `call_*` builders and `reply_to_result`); "9" was the item-459 F2
     # insertion-site source map on `stdlib/template.rvl` (`Pos`, `Segment`,

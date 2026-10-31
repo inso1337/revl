@@ -1,5 +1,5 @@
 // The revl stdlib NET module - outbound HTTPS for application code.
-// Plan slice R1 (revl-sp SaaS back end plan, section 7.2, batch A).
+// The SaaS back-end plan (section 7.2, batch A) needs it for provider calls.
 //
 // ---------------------------------------------------------------- what this is
 // The missing primitive behind every provider integration: a typed outbound
@@ -89,9 +89,9 @@
 // token from `net(host=host)`: capability tokens are compared by identity, not
 // by hierarchy (docs/capabilities.md), so a provider declaring the constant
 // cannot call this module's argument-bound extern through G4. A static named
-// reach therefore has to sit on its own extern, declared in a TRUSTED stdlib
-// module next to this one, with a one-line host body that delegates to the same
-// shared engine:
+// reach whose token is BACKED by the runtime destination check is supported on
+// its own extern, declared in a TRUSTED stdlib module next to this one, with a
+// one-line host body that delegates to the same shared engine:
 //
 //     // stdlib/example_http.rvl, a trusted module shipped beside net.rvl
 //     use "stdlib/net.rvl" { NetCall, NetReply }
@@ -120,17 +120,22 @@
 // and calls the wrapper: `revl audit` prints the named token, and an approval
 // can be bounded to that host.
 //
-// IMPORTANT LIMIT of this pin, stated because it decides WHERE a wrapper lives.
-// The one-line host body must be trusted. Capability tokens compare by identity
-// (above), and a user-origin `@py` body may not import a backend support module
-// (`compiler._check_user_py_body_imports`), so application code alone CANNOT
-// mint a static host reach on top of this module. A static named reach is a
-// trusted-module contribution that ships beside net.rvl; the
-// tests/test_net_stdlib.py suite builds a stand-in trusted module tree, proves
-// `revl audit` prints the host, and proves the runtime refuses another host.
-// Application code that cannot add a trusted module gets the argument-bound reach
-// `net(host=host)`, which still records that the destination is caller data
-// instead of hiding it behind a bare `net`.
+// IMPORTANT LIMIT of this pin, stated so the audit claim is not over-read. A
+// static named reach is a CONVENTION, not a compile-time guarantee. The
+// compiler checks two things and no more: capability tokens compare by identity
+// (above), so a named token cannot be DERIVED from this module's argument-bound
+// extern; and the user-origin `@py` import rule refuses only a static
+// `import`/`from ... import` STATEMENT of a backend module
+// (`compiler._check_user_py_body_imports`). A user-origin body can therefore
+// still declare any static token with an unchecked body (`importlib.
+// import_module`, `__import__`, or a raw standard-library HTTP body), and the
+// compiler will admit it and print the token. The SUPPORTED application shape
+// is the argument-bound reach `net(host=host)`, whose destination this module's
+// shared engine checks. The static wrapper documented above is the shape a
+// TRUSTED module follows so that the same runtime check backs the literal
+// token. The tests/test_net_stdlib.py suite builds a stand-in trusted module
+// tree and proves the audit name and the runtime refusal, and it also pins the
+// unchecked user-body case, so the limit is visible rather than claimed away.
 //
 // ------------------------------------------------ py tier: the reference
 //   * py  - `http.client.HTTPSConnection` with the stdlib `ssl` context, and
@@ -152,7 +157,10 @@
 //     does it implicitly.
 //   * It does not retry, back off, pool connections or de-duplicate requests.
 //   * It does not speak plain http. `http://` is refused before a socket opens.
-//   * It does not put secrets in URLs: a URL carrying userinfo is refused.
+//   * It refuses a URL that carries userinfo (a credential in the authority
+//     is never sent). It cannot distinguish a secret from ordinary data in a
+//     query string, so callers must not put secrets there; error text never
+//     echoes a path or a query, which is the redaction this module owns.
 //   * It does not decode compression. `Accept-Encoding: identity` is sent by
 //     default, a caller-supplied `Accept-Encoding` is refused (see reserved
 //     headers), and the response body is returned as the bytes the server sent.

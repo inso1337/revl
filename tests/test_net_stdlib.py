@@ -1,5 +1,5 @@
-"""The stdlib NET module - the outbound HTTPS client (plan slice R1,
-stdlib/net.rvl, docs/capabilities.md for the capability scope).
+"""The stdlib NET module - the outbound HTTPS client (the SaaS back-end plan,
+section 7.2; stdlib/net.rvl, docs/capabilities.md for the capability scope).
 
 The module is the missing provider-integration primitive: a typed HTTPS client
 for JSON and application/x-www-form-urlencoded bodies, with custom headers, a
@@ -24,9 +24,11 @@ error returned AS DATA. What this suite pins:
     `emission[net(host="127.0.0.1")]`, the documented pattern) is named on the
     `revl audit` surface, and its runtime destination check refuses another
     host before a socket opens;
-  * the honest limit of this pin is pinned too: application code alone cannot
-    mint a static host reach, because a user-origin `@py` body may not import
-    the backend engine.
+  * the honest limits of this pin are pinned too: a static named reach is a
+    trusted-module CONVENTION, not a compiler guarantee (a user-origin body can
+    declare one with an unchecked body), and the shared engine is preloaded on
+    the paths that withdraw the backend loader, so `revl run` works rather than
+    only the test harness.
 
 Every test in this file fails on the base commit for the same reason: the
 module does not exist there, so the compile step cannot resolve
@@ -40,6 +42,7 @@ import json
 import shutil
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -361,6 +364,9 @@ def test_module_file_is_the_documented_surface():
     assert "application/x-www-form-urlencoded" in text
     assert 'emission[net(host="api.example.com")]' in text
     assert "expected_host" in text
+    # the static-token limit is stated as a convention, not a guarantee.
+    assert "CONVENTION, not a compile-time guarantee" in text
+    assert "CANNOT mint" not in text
     # no em dashes (house style, docs/DOC-STATUS.md).
     assert "\u2014" not in text
 
@@ -415,8 +421,8 @@ def test_wasm_refuses_at_lowering_before_this_module_is_the_reason(tmp_path,
 # ---------------------------------------------------------------------------
 
 def test_py_tier_runs_the_loopback_contract(live):
-    """The canonical stdlib contract check: the module's own `test` block runs
-    on the py tier through the standard runner, against the fake server."""
+    """The canonical stdlib contract check: the CONSUMER's `test` block runs on
+    the py tier through the standard runner, against the fake server."""
     _loopback, _path, ir, _ns = live
     verdict, detail = run_py(ir)
     assert verdict == "pass", detail
@@ -694,14 +700,98 @@ def test_audit_names_the_host_for_the_static_wrapper(named, capsys):
     assert "host_request [net" not in text
 
 
-def test_application_code_cannot_mint_a_static_host_reach(tmp_path):
-    """The honest limit of this pin, pinned: a static named reach needs a
-    trusted module.
+# ---------------------------------------------------------------------------
+# the production path: `revl run` withdraws the backend loader path
+# ---------------------------------------------------------------------------
 
-    Capability tokens compare by identity, so a named reach cannot be derived
-    over the generic extern; and a user-origin `@py` body may not import a
-    backend support module. Application code that tries is refused at compile
-    time, which is exactly why the wrappers are trusted-module contributions."""
+#: A child process reproducing `revl run`'s ordering (src/revl/run.py): import
+#: `runtime` and the emitter while `backends/python` is on sys.path, optionally
+#: preload the trusted stdlib support modules, withdraw the path, then exec the
+#: generated module and call the net surface. In "no-preload" mode this is the
+#: pre-fix ordering: the call-time `from revl_net import perform` has no path to
+#: resolve from, and the call raises ModuleNotFoundError.
+_RUN_PATH_PROBE = r'''
+import json
+import sys
+from pathlib import Path
+
+root, app, base, mode = sys.argv[1:5]
+sys.path.insert(0, str(Path(root) / "src"))
+
+from revl._paths import backends_root, python_backend_emitter
+
+backend = str(backends_root() / "python")
+sys.path.insert(0, backend)
+import runtime  # noqa: F401  (run.py imports it before the withdrawal)
+emit = python_backend_emitter()
+if mode == "preload":
+    from revl.stdlib_hosts import preload_stdlib_host_modules
+    preload_stdlib_host_modules()
+sys.path.remove(backend)
+
+from revl import compile_files
+
+ir = compile_files([app])
+namespace = {}
+exec(compile(emit.emit(ir), "net_run.py", "exec"), namespace)
+result = namespace["do_get"]("127.0.0.1", base + "/json", [])
+print(json.dumps({"kind": type(result).__name__,
+                  "status": result.value.get("status")}))
+'''
+
+
+def test_py_body_works_after_run_withdraws_the_backend_path(tmp_path, loopback):
+    """The documented application path, not the test harness.
+
+    `revl run` imports the runtime and the emitter, then removes
+    `backends/python` from sys.path before a generated module executes; a body
+    that does `from revl_net import perform` at call time therefore has to find
+    the support module in sys.modules. The child runs the SAME ordering in both
+    directions: without the preload the call fails with ModuleNotFoundError for
+    `revl_net` (the defect this test exists for), and with
+    `revl.stdlib_hosts.preload_stdlib_host_modules()` it reaches the loopback
+    server. Running it in a child keeps this repository's own test process from
+    pre-importing revl_net and hiding the difference.
+    """
+    app = tmp_path / "app.rvl"
+    app.write_text(_live_consumer(loopback.url(""), loopback.ca), encoding="utf-8")
+    probe = tmp_path / "run_probe.py"
+    probe.write_text(_RUN_PATH_PROBE, encoding="utf-8")
+
+    def run(mode: str):
+        return subprocess.run(
+            [sys.executable, str(probe), str(ROOT), str(app),
+             loopback.url(""), mode],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=180)
+
+    broken = run("no-preload")
+    assert broken.returncode != 0, broken.stdout
+    assert "revl_net" in broken.stderr
+
+    fixed = run("preload")
+    assert fixed.returncode == 0, fixed.stderr
+    payload = json.loads(fixed.stdout.strip().splitlines()[-1])
+    assert payload == {"kind": "Ok", "status": 201}
+
+
+def test_both_runtime_paths_call_the_preload():
+    """The preload is wired at the two places that withdraw the loader path."""
+    for path in (ROOT / "src" / "revl" / "run.py",
+                 ROOT / "src" / "revl" / "_process_runner.py"):
+        text = path.read_text(encoding="utf-8")
+        assert "preload_stdlib_host_modules()" in text, path
+    from revl.stdlib_hosts import STDLIB_HOST_MODULES
+    assert "revl_net" in STDLIB_HOST_MODULES
+
+
+# ---------------------------------------------------------------------------
+# the compiler limit behind the static-token claim, pinned honestly
+# ---------------------------------------------------------------------------
+
+def test_a_static_import_of_the_engine_is_refused_and_hint_names_the_door(tmp_path):
+    """The refused shape: a user-origin body importing the backend module
+    directly is refused, and the issue #460 door names the stdlib surface it
+    should use instead."""
     source = '''\
 use "stdlib/net.rvl" { NetCall, NetReply }
 
@@ -718,3 +808,35 @@ extern emission[net(host="api.example.com")] fn app_http(call: NetCall) -> NetRe
     message = str(excinfo.value)
     assert "user-origin @py body" in message
     assert "revl_net" in message
+    hint = excinfo.value.hint or ""
+    assert 'use "stdlib/net.rvl"' in hint, hint
+
+
+def test_a_user_body_can_declare_a_static_token_with_an_unchecked_body(tmp_path):
+    """What the compiler does NOT guarantee, pinned so the audit claim is not
+    over-read.
+
+    The user @py import rule refuses a static `import`/`from ... import` of a
+    backend module. It is not a seal on the body: a user-origin body that never
+    names the backend module (here a raw `http.client` body) compiles, and the
+    compiler admits the declared constant token. Such a token is a declaration,
+    not an enforced destination; only a wrapper that calls the shared engine's
+    `perform(..., expected_host=...)` check makes it true at run time. That is
+    why a static named reach is documented as a trusted-module convention and
+    the supported application shape is the argument-bound `net(host=host)`."""
+    source = '''\
+use "stdlib/net.rvl" { NetCall, NetReply }
+
+extern emission[net(host="api.example.com")] fn app_http(call: NetCall) -> NetReply
+  = @py {
+    import http.client
+    return {"ok": True, "status": 200, "headers": [], "body": "",
+            "code": "", "message": ""}
+  }
+'''
+    path = tmp_path / "app_unchecked.rvl"
+    path.write_text(source, encoding="utf-8")
+    ir = compile_files([str(path)])
+    externs = {e["name"]: e for e in ir["externs"]}
+    assert externs["app_http"]["class"] == "emission"
+    assert externs["app_http"]["capabilities"] == ['net(host="api.example.com")']
