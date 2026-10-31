@@ -562,7 +562,20 @@ fn infer_val_ty(node: Any, s: Scope) -> Str {
 // cannot clobber this base pointer), store the count then one 8-byte slot each.
 fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let ty = list_type_of(node, s, expected)
+  // `_list_type` (issue #2911): an empty list literal the flow target or the
+  // author's annotation does not pin has no element type, and the reference
+  // REFUSES it by name (`an untyped empty list literal needs an expected List
+  // type`). This port has no refusal channel, so it REPORTS: the same marker,
+  // spelled the way the neighbouring refusals in this file are. The nested
+  // shape (`let xs = [[]]`) arrives here the same way, because the outer
+  // literal's element type comes from its first item and `[]` names none.
+  if (ty == "") {
+    return { wat: "<<UNSUPPORTED-EMPTY-LIST-TYPE>>", ty: "" }
+  }
   let elem = list_elem(ty)
+  if (elem == "") {
+    return { wat: "<<UNSUPPORTED-EMPTY-LIST-TYPE>>", ty: "" }
+  }
   let items = value_list(value_field(node, "items"))
   let tmp = tmp_name(s.tmp, depth)
   let n = items.length()

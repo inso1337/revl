@@ -487,7 +487,7 @@ written by hand. Precisely:
     gap: a per-call prompt is bounded by the number of crossings, while an applied
     rule is a standing authority the policy could not withdraw. The policy clause
     `capability <glob> may never be granted standing` marks a capability as
-    per-call-only, and both standing paths answer to it — `apply_distillation`
+    per-call-only, and both standing paths answer to it: `apply_distillation`
     refuses such a rule, and `revl_distillation_offers` withholds it rather than
     offering something the apply would reject. The distinction S4 draws is
     orthogonal to S2 and does not weaken it: an unmarked capability still

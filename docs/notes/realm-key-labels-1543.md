@@ -33,8 +33,8 @@ context's isolation map holds two distinct symbols:
 
 The collapse happened one level up, in **revl's own shim**: `realm_label(name)`
 interned one `_RealmLabel` per realm *string* and handed the same object to
-every key in that realm, which is what made cordis-py's store — correctly keyed
-by label — see one slot.
+every key in that realm, so cordis-py's store, correctly keyed by label, saw one
+slot.
 
 So the fix belongs in revl's shim (where #1549 put it), not upstream in
 cordis-py. No fork change and no pin bump is warranted: the vendored fork
@@ -50,7 +50,7 @@ program, loads it through `revl.run`, and dumps the live driver's
 key actually resolves to. BEFORE runs against the pre-fix commit
 `cd8876212` (`c6de6cdd1^`); AFTER runs against `main` `f2b1f1103`.
 
-BEFORE (`runtime.realm_label` takes one argument — realm only):
+BEFORE (`runtime.realm_label` takes one argument, for the realm only):
 
 ```
 == realm_label('wa') is realm_label('wa'): True -> <realm wa>
@@ -82,7 +82,7 @@ AFTER:
 
 Two observations worth keeping:
 
-- **`resolved_keys()` agreed with the truth in both worlds** — it listed
+- **`resolved_keys()` agreed with the truth in both worlds:** it listed
   `['api', 'db']` before and after. On the pre-fix tree that made it *wrong*
   (nothing resolved `api`; the store had no `api` slot), which is the
   "loaded means loaded" report the issue flags. It is correct now, but the
@@ -103,16 +103,16 @@ provision by.
 |---|---|---|---|
 | python | `_REALM_LABELS[(name, key)]` in `backends/python/runtime.py`; cordis-py's `_isolate` is one symbol per key | fixed by #1549 | BEFORE/AFTER transcripts above; 3 py tests |
 | typescript | `realmLabels: Map<string, symbol>` keyed by `JSON.stringify([name, key])` in `backends/typescript/runtime.ts` | fixed by #1549 | real `node` run of the emitted program: all three fibers ACTIVE, `ping == "db"`, `up == "api:db"` |
-| rust | `_revl_realm(realm, key)` mints one `cordis::Isolation` per `(realm, key)` **pair** (`REVL_REALM_TAG \| index`, `backends/rust/emit.py:5281`) | **fixed by #2014** — see below | at survey time: strict xfail, `api` collides with `db` (`DuplicateService`); now: the reproducer runs and passes |
+| rust | `_revl_realm(realm, key)` mints one `cordis::Isolation` per `(realm, key)` **pair** (`REVL_REALM_TAG \| index`, `backends/rust/emit.py:5281`) | **fixed by #2014** (see below) | at survey time: strict xfail, `api` collides with `db` (`DuplicateService`); now: the reproducer runs and passes |
 | go | `provKey{realm, key}` (`forks/stc-go/key.go`) | clean by construction | guard test passes |
-| java | `ServiceRegistry`'s store key is `ServiceKey.of(key.type(), realm)`; the realm override is `Map<Class<?>, String>` (`cordis4j-core/.../internal/ServiceRegistry.java:42,72,91-92,153-154`), and the emitted `ctx.isolate(Database.class, "wa")` / `ctx.isolate(Api.class, "wa")` binds it per service **class** | clean by construction — the key dimension is carried by the class | `cordis4j-core` compiled from `1na-ko/cordis4j@82072f4`; `tests/test_realm_conformance.py::test_cordis4j_realm_conformance` now runs for real and xfails on cordis4j's *other*, already-characterized divergence (equal realm strings share instead of refusing) |
+| java | `ServiceRegistry`'s store key is `ServiceKey.of(key.type(), realm)`; the realm override is `Map<Class<?>, String>` (`cordis4j-core/.../internal/ServiceRegistry.java:42,72,91-92,153-154`), and the emitted `ctx.isolate(Database.class, "wa")` / `ctx.isolate(Api.class, "wa")` binds it per service **class** | clean by construction; the key dimension is carried by the class | `cordis4j-core` compiled from `1na-ko/cordis4j@82072f4`; `tests/test_realm_conformance.py::test_cordis4j_realm_conformance` now runs for real and xfails on cordis4j's *other*, already-characterized divergence (equal realm strings share instead of refusing) |
 | wasm | there is no store: `_scoped_key` composes the realm into the capability address (`wa/db`, `wa/api`) | clean by construction | emitted `provide:wa/db.ping`, `coeffect:wa/db`, `provide:wa/api.up`; `test_cordis_wasm_realm_conformance` passes against the real cordis-wasm substrate |
 
 Two of these tiers deserve a sentence more than a table cell.
 
 **Java is a different defect, not this one.** cordis4j's realm override is
 per *type*, so `Database.class` and `Api.class` in realm `wa` are two distinct
-store keys and can never collide — the #1543 shape is structurally absent.
+store keys and can never collide. The #1543 shape is structurally absent.
 What cordis4j does get wrong is the *opposite* direction: two providers of the
 same type in the same realm string both load instead of conflicting (the (H)
 "equal strings share" expectation). That is already documented in
@@ -121,7 +121,7 @@ above, and tracked separately; it is not a regression of #1543 and is not
 touched here.
 
 **Wasm has no registry to confuse.** Because the realm is part of the
-capability address, `Front` — which consumes both keys in one realm — imports
+capability address, `Front`, which consumes both keys in one realm, imports
 two different coeffects. The guard test added alongside this note asserts
 exactly that, so the survey's claim is executable rather than prose.
 

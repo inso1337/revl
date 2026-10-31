@@ -1,6 +1,6 @@
 """`revl_source` can enumerate the packaged stdlib (issue #2173).
 
-`stdlib/` ships in the wheel — 20 modules — but nothing on the MCP surface
+`stdlib/` ships in the wheel as the packaged modules, but nothing on the MCP surface
 could name one of them: `revl_source {}` refused with "`symbol` is required"
 and `revl_source {symbol: 'concat'}` with "nothing is loaded", because the
 stdlib is not a loaded buffer. The only declaration reader therefore required
@@ -140,7 +140,9 @@ def test_the_index_and_the_reader_cannot_disagree(nothing_loaded):
     the name the index gives: a listed name that `revl_source` then refuses
     would send the caller straight back to the search this closes."""
     result = _call("revl_source", {})
-    assert len(result["modules"]) == 20, len(result["modules"])
+    expected = len(list(_paths.stdlib_root().glob("*.rvl")))
+    assert expected > 0, expected
+    assert len(result["modules"]) == expected, (len(result["modules"]), expected)
 
     for module in result["modules"]:
         name = next(iter(module["symbols"]))
@@ -174,7 +176,8 @@ def test_an_unknown_name_is_refused_by_the_stdlib_not_by_the_session(nothing_loa
     assert result["ok"] is False, result
     assert CONTENT_ERROR in _message(result), result
     assert str(_paths.stdlib_root()) in _message(result), result
-    assert "20 modules" in _message(result), result
+    modules = len(list(_paths.stdlib_root().glob("*.rvl")))
+    assert f"{modules} modules" in _message(result), result
     assert NOTHING_LOADED not in _message(result), result
 
 

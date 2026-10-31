@@ -43,11 +43,16 @@ no longer match a finding, so the ledger shrinks as anchors are repaired. The
 reason it writes for a new entry is a class-level triage label -- missing or
 stale -- not an individual justification, and the PR that adopts it says so.
 
-WHAT THIS SLICE DOES NOT DO. There is no `--write` repair mode. A bare
-`path:line` does not say which text it meant: renumbering it from the line
-alone would be guessing, and guessing is worse than a recorded finding. A
-repair mode needs the cited snippet or symbol as an input the reference
-syntax does not carry today, so it is deferred rather than faked.
+REPAIR MODE. `--write` is deliberately conservative. For a stale reference
+whose file exists, it finds the earliest revision containing the citation
+token in the citing file, reads the cited line from that revision, and searches
+for that exact line near the old location in the working tree. It rewrites the
+citing `path:line` only when the match is unique. A weak anchor, a no-match
+result, an ambiguous match, or an unavailable Git revision is reported with
+its distinct reason and left untouched. It
+never renumbers from the line number alone. This gives mechanical line moves
+a repair path while making changed-content anchors a visible finding rather
+than silently blessing the wrong line.
 
 ADVISORY. `tools/pre_pr.sh` runs this check but does not fail the pre-PR on
 it; CI does not run it at all yet. It becomes a hard check once the ledger is
@@ -56,7 +61,8 @@ small and the tree is used to it.
 Usage:
     python3 tools/check_doc_refs.py                 # report only
     python3 tools/check_doc_refs.py --check         # exit 1 on a new finding
-    python3 tools/check_doc_refs.py --write-ledger  # author the baseline
+    python3 tools/check_doc_refs.py --write             # repair unique moves
+    python3 tools/check_doc_refs.py --write-ledger      # author the baseline
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ import io
 import json
 import pathlib
 import re
+import subprocess
 import sys
 import tokenize
 from collections import Counter
@@ -408,6 +415,170 @@ def write_ledger(findings: list, path: pathlib.Path = LEDGER) -> list:
     return entries
 
 
+# --------------------------------------------------------------- conservative repair
+
+REPAIR_RADIUS = 200
+
+
+def _citation_line(root: pathlib.Path, reference: Reference) -> int | None:
+    """Return the physical line containing this unique citation."""
+    source = _text(root / reference.source)
+    token = f"{reference.cited}:{reference.line}"
+    matches = list(re.finditer(re.escape(token) + r"(?![0-9])", source))
+    if len(matches) != 1:
+        return None
+    return source[:matches[0].start()].count("\n") + 1
+
+
+def _citation_origin_revision(root: pathlib.Path, source: str,
+                              token: str) -> str | None:
+    """Return the earliest revision containing this citation token.
+
+    `git blame` identifies the last edit of a citing line, which is not
+    necessarily the commit that introduced the citation. Using the earliest
+    revision containing the exact token preserves the cited-file snapshot
+    that the reference originally named, even when the prose line was edited
+    later.
+    """
+    token_pattern = re.compile(re.escape(token) + r"(?![0-9])")
+    try:
+        history = subprocess.run(
+            ["git", "-C", str(root), "log", "--reverse", "-G",
+             re.escape(token) + r"([^0-9]|$)", "--format=%H", "--", source],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    for revision in history.stdout.split():
+        try:
+            snapshot = subprocess.run(
+                ["git", "-C", str(root), "show", f"{revision}:{source}"],
+                capture_output=True, text=True, check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if token_pattern.search(snapshot.stdout):
+            return revision
+    return None
+
+
+def _revision_line(root: pathlib.Path, revision: str, rel: str,
+                   line: int) -> tuple[str | None, str | None]:
+    """Return `(line, reason)` from a cited file at the citation-origin revision."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", f"{revision}:{rel}"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None, "unavailable-parent"
+    lines = result.stdout.splitlines()
+    if not 1 <= line <= len(lines):
+        return None, "changed-content"
+    return lines[line - 1], None
+
+
+def _repairable_line(line: str) -> bool:
+    """Reject anchors too weak to identify a moved piece of source."""
+    stripped = line.strip()
+    if len(stripped) < 8 or not re.search(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
+        return False
+    return stripped not in {"pass", "return", "return None", "continue",
+                            "break", "..."}
+
+
+def repair(root: pathlib.Path = REPO_ROOT, report: Report | None = None) -> tuple:
+    """Repair unique moved anchors and report non-repairable stale anchors.
+
+    Returns `(repaired, refused)`, where each item is a human-readable line.
+    Only stale references are candidates: an in-range reference is not
+    silently changed, even if its content differs from the pre-edit line.
+    """
+    if report is None:
+        files, references, findings = examine(root)
+        report = Report(files, references, findings, (), None)
+    references = report.references
+    findings = report.findings
+    stale = {(f.source, f.cited, f.line) for f in findings if f.kind == "stale"}
+    line_counts: dict = {}
+    known = {(entry["path"], entry["line"]) for entry in report.ledger}
+    repaired = []
+    refused = []
+    for finding in findings:
+        if finding.kind == "missing":
+            if (finding.cited, finding.line) in known:
+                continue
+            refused.append(f"missing-file: {finding.source} cites "
+                           f"{finding.cited}:{finding.line}")
+    for reference in references:
+        key = (reference.source, reference.cited, reference.line)
+        if key not in stale:
+            continue
+        _kind, _detail, rel = resolve(reference, root, line_counts)
+        citation_line = _citation_line(root, reference)
+        token = f"{reference.cited}:{reference.line}"
+        if citation_line is None:
+            token_pattern = re.compile(re.escape(token) + r"(?![0-9])")
+            occurrences = len(list(token_pattern.finditer(
+                _text(root / reference.source))))
+            if occurrences > 1:
+                if (reference.cited, reference.line) in known:
+                    continue
+                refused.append(f"ambiguous-citation: {reference.source} cites "
+                               f"{token} ({occurrences} occurrences)")
+                continue
+        revision = (_citation_origin_revision(root, reference.source, token)
+                    if citation_line is not None else None)
+        if revision is None:
+            if (reference.cited, reference.line) in known:
+                continue
+            refused.append(f"unavailable-parent: {reference.source} cites "
+                           f"{reference.cited}:{reference.line}")
+            continue
+        old_line, reason = _revision_line(root, revision, rel, reference.line)
+        if old_line is None:
+            if (reference.cited, reference.line) in known:
+                continue
+            refused.append(f"{reason}: {reference.source} cites "
+                           f"{reference.cited}:{reference.line}")
+            continue
+        if not _repairable_line(old_line):
+            if (reference.cited, reference.line) in known:
+                continue
+            refused.append(f"weak-anchor: {reference.source} cites "
+                           f"{reference.cited}:{reference.line}")
+            continue
+        target = root / rel
+        current = _text(target).splitlines()
+        lo = max(0, reference.line - 1 - REPAIR_RADIUS)
+        hi = min(len(current), reference.line - 1 + REPAIR_RADIUS + 1)
+        matches = [idx + 1 for idx in range(lo, hi) if current[idx] == old_line]
+        if len(matches) != 1:
+            label = "no-match" if not matches else "ambiguous"
+            if (reference.cited, reference.line) in known:
+                continue
+            refused.append(f"{label}: {reference.source} cites "
+                           f"{reference.cited}:{reference.line}")
+            continue
+        new_line = matches[0]
+        citing = root / reference.source
+        source = _text(citing)
+        token = f"{reference.cited}:{reference.line}"
+        replacement = f"{reference.cited}:{new_line}"
+        token_pattern = re.compile(re.escape(token) + r"(?![0-9])")
+        occurrences = len(list(token_pattern.finditer(source)))
+        if occurrences != 1:
+            label = "ambiguous-citation"
+            if (reference.cited, reference.line) in known:
+                continue
+            refused.append(f"{label}: {reference.source} cites "
+                           f"{token} ({occurrences} occurrences)")
+            continue
+        citing.write_text(token_pattern.sub(replacement, source), encoding="utf-8")
+        repaired.append(f"{reference.source}: {token} -> {replacement}")
+    return repaired, refused
+
+
 # ----------------------------------------------------------------- reporting
 
 def build_report(root: pathlib.Path = REPO_ROOT,
@@ -465,11 +636,14 @@ def report_text(report: Report, limit: int = 40) -> str:
 
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check hand-written path:line references (issue #2844).")
+        description="Check hand-written path:line references (issue #2844).",
+        allow_abbrev=False)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true",
                      help="exit 1 if a finding is not in the ledger")
-    mode.add_argument("--write-ledger", "--baseline", dest="write",
+    mode.add_argument("--write", dest="repair", action="store_true",
+                     help="repair stale references using the citation-origin revision from Git history")
+    mode.add_argument("--write-ledger", "--baseline", dest="write_ledger",
                      action="store_true",
                      help="record the current findings as the baseline")
     parser.add_argument("--root", type=pathlib.Path, default=REPO_ROOT,
@@ -480,7 +654,25 @@ def main(argv: list | None = None) -> int:
 
     report = build_report(args.root, args.ledger)
 
-    if args.write:
+    if args.repair:
+        repaired, refused = repair(args.root, report)
+        for item in repaired:
+            print("repaired: " + item)
+        for item in refused:
+            print("not repaired: " + item)
+        recorded = len(report.findings) - len(report.new_findings)
+        if recorded:
+            print(f"suppressed: {recorded} findings already recorded in the ledger")
+        if not repaired and not refused and not recorded:
+            print("no stale references to repair")
+        remaining = build_report(args.root, args.ledger)
+        if remaining.new_findings:
+            print("\nRED: some findings are not in the ledger; no guessed "
+                  "renumbering was written.", file=sys.stderr)
+            return 1
+        return 0
+
+    if args.write_ledger:
         entries = write_ledger(list(report.findings), args.ledger)
         print(report_text(Report(report.files, report.references,
                                  report.findings, tuple(entries), None)))
