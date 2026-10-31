@@ -57,8 +57,11 @@ def test_stamp_is_the_expected_bumped_counter():
     # The stamp is a monotonic counter bumped once per public stdlib change
     # (add/remove/signature). Pinning the literal here makes every future bump
     # DELIBERATE: a public addition that forgets to bump reds this test instead
-    # of shipping a stale stamp. It is "9" as of the item-459 F2 insertion-site
-    # source map on `stdlib/template.rvl` (`Pos`, `Segment`, `Rendered`,
+    # of shipping a stale stamp. It is "10" as of `stdlib/kdf.rvl` (the
+    # pure PBKDF2-HMAC-SHA256 password KDF: `KdfError`,
+    # `max_iterations`, `max_length`, `pbkdf2_sha256` and
+    # `pbkdf2_sha256_verify`); "9" was the item-459 F2 insertion-site source
+    # map on `stdlib/template.rvl` (`Pos`, `Segment`, `Rendered`,
     # `position_at`, `render_mapped`, `source_map`); "8" was the `header_value`
     # case-insensitivity fix and the new `pub fn header_name_eq` on
     # `stdlib/http.rvl`; "7" was `stdlib/framing.rvl`
@@ -68,8 +71,8 @@ def test_stamp_is_the_expected_bumped_counter():
     # that landed without a bump (fs.rvl is_dir/lexists/resolve_within,
     # shell.rvl plan_op_name). Raise it here in lock-step with the next public
     # change.
-    assert EXPECTED_STDLIB_VERSION == "9"
-    assert read_stamp(STDLIB) == "9"
+    assert EXPECTED_STDLIB_VERSION == "10"
+    assert read_stamp(STDLIB) == "10"
 
 
 def test_repo_stamp_matches_expected():

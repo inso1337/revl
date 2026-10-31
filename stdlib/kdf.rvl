@@ -1,0 +1,208 @@
+// The revl stdlib KDF module — PBKDF2-HMAC-SHA256 (RFC 8018), a classified
+// crypto PRIMITIVE for password storage.
+//
+// ---------------------------------------------------------------- why
+// Password storage is security-load-bearing, and every site that needs it
+// otherwise hand-rolls the same two defects: an iteration count that is a
+// literal copied from a blog post, and a comparison that leaks the first
+// differing byte through an early exit. The sibling `stdlib/crypto.rvl` module
+// deliberately ships no KDF and says so ("`hmac_sha256` is a MAC, not a password
+// hash: no work factor"), so this module is that missing primitive, ONCE, for
+// every revl service that stores a password.
+//
+// ------------------------------------------------- what it is, and what it is not
+// PBKDF2-HMAC-SHA256 as defined by RFC 8018 section 5.2 (PKCS #5 v2.1), with the
+// iteration count, the salt and the derived-key length passed by the CALLER. It
+// is a primitive kit, deliberately not an account system:
+//
+//   * NO iteration-count default and NO policy. The caller passes `iterations`
+//     because a login must re-derive with the count STORED for that account,
+//     not the count compiled today; a deployment default such as 600k (or
+//     whatever a rehash policy moves it to) is configuration, not a constant.
+//   * NO password policy. An empty password is a valid input to the PRIMITIVE;
+//     refusing weak or empty passwords is the account layer's rule, and baking
+//     one into the KDF would hide that rule from the code that owns it.
+//   * NO salt generation. Draw one with `random_token(16)` from
+//     `stdlib/crypto.rvl` (32 hex chars, 128 bits) and store it beside the
+//     digest. The salt is taken as the UTF-8 bytes of the string, so an ASCII
+//     hex token is the recommended material.
+//   * NO algorithm-agility record. This module derives and compares ONE
+//     algorithm, PBKDF2-HMAC-SHA256. The account row stores the algorithm id,
+//     the iteration count, the salt and the hex digest; re-deriving on login is
+//     a fresh CALL of this pure function, never a mutation.
+//   * NO storage encoding beyond the digest itself. `pbkdf2_sha256` returns
+//     LOWER-CASE HEX (two chars per derived byte, so a 32-byte key is 64 chars),
+//     the same hex convention `stdlib/crypto.rvl` uses, so one digest spelling
+//     round-trips through a database TEXT column and through `ct_equal`.
+//
+// --------------------------------------------------- classification: `pure`
+// `pure` is the honest classification: the same (password, salt, iterations,
+// length) yields the same hex value, with no effect, no entropy, no host state
+// to release and nothing to revert. A rehash is a fresh call, not a mutation.
+//
+// The iteration count is a COST parameter chosen by the caller, which is why the
+// module declares an upper bound (`max_iterations()`) and refuses above it. The
+// count travels in data (a stored row, a migration, a request-time rehash), so a
+// mis-parameterized value must be a typed refusal, not a multi-second stall in a
+// served process. The bound is a sanity/DoS limit, NOT a recommended strength:
+// the strength is the caller's stored value, and a deployed 600k default sits an
+// order of magnitude below the cap so a policy rehash has room.
+//
+// --------------------------------------- validation, as named errors
+// Every refusal is one `KdfError = { code, message }`, with a stable machine
+// `code` (the same split `ApiError`/`FsError` make) and a human message that
+// carries the offending value and the bound. Checks run in a fixed order, and
+// the first failure wins, so two call sites cannot disagree about WHICH refusal
+// a doubly-bad call earns:
+//
+//   1. `iterations_out_of_range`  iterations must be 1..max_iterations()
+//   2. `length_out_of_range`      length must be 1..max_length()
+//   3. `salt_empty`               the salt must not be empty
+//
+// ----------------------------------------- verification uses `ct_equal`
+// `pbkdf2_sha256_verify` re-derives the digest and compares it with
+// `stdlib/crypto.rvl`'s `ct_equal`, which always scans the full width and folds
+// every difference, so the compare leaks neither the first differing position
+// nor (through an early exit) the match. A wrong password, a wrong salt and a
+// wrong iteration count all answer `Ok(false)`: a MISMATCH is data, never an
+// error, so the caller cannot learn from the return which of the three
+// disagreed. Only invalid PARAMETERS are `Err`, and those are the caller's bug.
+// The digest width does not hide the password's length; PBKDF2's output length
+// is a public, stored parameter by design.
+//
+// ------------------------------------------------------------------ tiers
+// py and ts carry bodies:
+//   * py  — `hashlib.pbkdf2_hmac`, the reference. Both the digest and the
+//           UTF-8 encoding agree with the published vectors in
+//           `tests/test_kdf_stdlib.py`.
+//   * ts  — node's `crypto.pbkdf2Sync` over the UTF-8 bytes, reached through
+//           `process.getBuiltinModule("node:crypto")` (the emitted-ts runtime
+//           contract's way to a node builtin, never a bare import), and the hex
+//           rendered byte-by-byte so it matches py's lower-case spelling.
+//   * other tiers REFUSE BY NAME at emit time: the host body names the missing
+//           backend (`pbkdf2_sha256_raw` has no @rs body, and so on), rather
+//           than silently producing a different answer. A tier that later
+//           gains a KDF facility adds its own body here.
+//
+// ------------------------------------------------------------ what to import
+//   use "stdlib/kdf.rvl" { pbkdf2_sha256, pbkdf2_sha256_verify }
+//
+//   match pbkdf2_sha256(password, salt, iterations, 32) {
+//     Ok(hex) => store(hex),
+//     Err(e)  => refuse(e.code),
+//   }
+//
+//   match pbkdf2_sha256_verify(password, stored_salt, stored_iterations, 32,
+//                              stored_hex) {
+//     Ok(true)  => login_ok(),
+//     Ok(false) => login_refused_without_saying_why(),
+//     Err(e)    => log_operator_bug(e.code),
+//   }
+
+use "stdlib/crypto.rvl" { ct_equal }
+
+// ------------------------------------------------------------- the bounds
+
+// The largest iteration count this module will derive. A stored count above
+// this is refused as `iterations_out_of_range` instead of being executed: the
+// cap bounds one call's work in a served process, and sits far above any
+// deployed PBKDF2-HMAC-SHA256 policy (a 600k default is common).
+pub fn max_iterations() -> Int {
+  return 2000000
+}
+
+// The largest derived-key length, in bytes. 64 bytes is twice SHA-256's natural
+// width, so a 64-byte key still round-trips as 128 hex chars in a TEXT column.
+pub fn max_length() -> Int {
+  return 64
+}
+
+// ------------------------------------------------------------- the error
+
+// A typed KDF refusal: a stable machine `code` and a human `message` that names
+// the offending value and the bound. Never carries the password or the salt.
+pub type KdfError = { code: Str, message: Str }
+
+// ------------------------------------------------------------- the kit
+
+// PBKDF2-HMAC-SHA256 (RFC 8018 section 5.2) of `password` under `salt`, with
+// `iterations` rounds, producing `length` bytes as lower-case hex (2*length
+// chars). The salt and the password are taken as their UTF-8 bytes. Parameters
+// are the CALLER's, never a module default; invalid ones are the named `Err`
+// above, checked in the documented order.
+pub fn pbkdf2_sha256(password: Str, salt: Str, iterations: Int, length: Int)
+-> Result[Str, KdfError] {
+  let cap = max_iterations()
+  if (iterations < 1 || iterations > cap) {
+    return Err({
+        code: "iterations_out_of_range",
+        message: "iterations must be 1.." + cap.to_str() + ", got " + iterations.to_str(),
+    })
+  }
+  let width = max_length()
+  if (length < 1 || length > width) {
+    return Err({
+        code: "length_out_of_range",
+        message: "length must be 1.." + width.to_str() + " bytes, got " + length.to_str(),
+    })
+  }
+  if (salt.length() == 0) {
+    return Err({
+        code: "salt_empty",
+        message: "the salt must not be empty; draw one with random_token(16)",
+    })
+  }
+  return Ok(pbkdf2_sha256_raw(password, salt, iterations, length))
+}
+
+// Re-derive `pbkdf2_sha256(password, salt, iterations, length)` and compare it
+// with `expected_hex` using the kit's constant-time `ct_equal`. `Ok(true)` is a
+// match, `Ok(false)` is a MISMATCH (wrong password, wrong salt or wrong count,
+// indistinguishable to the caller by design), and `Err` means the PARAMETERS
+// are invalid rather than that the credential is wrong.
+pub fn pbkdf2_sha256_verify(password: Str, salt: Str, iterations: Int,
+  length: Int, expected_hex: Str)
+-> Result[Bool, KdfError] {
+  return match pbkdf2_sha256(password, salt, iterations, length) {
+    Ok(actual) => Ok(ct_equal(actual, expected_hex)),
+    Err(e) => Err(e),
+  }
+}
+
+// ------------------------------------------------------------- the host body
+
+// The single boundary crossing, validated by `pbkdf2_sha256` above before it is
+// reached. NOT public: the wrapper is the module's door, so a caller cannot
+// bypass the bounds or the error spelling. Deterministic and effect-free, so the
+// extern is `pure`, exactly like the hash primitives in `stdlib/crypto.rvl`.
+extern pure fn pbkdf2_sha256_raw(password: Str, salt: Str, iterations: Int,
+  length: Int) -> Str
+= @py {
+    import hashlib
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+        length,
+    ).hex()
+  }
+= @ts {
+    // node:crypto via the emitted-ts runtime contract (process.getBuiltinModule,
+    // never a bare import). revl `Int` is a JS bigint on the ts backend, so the
+    // two numeric parameters are widened to JS numbers before the call; the
+    // wrapper's bounds keep them well inside 2^31.
+    const nodeCrypto = (process as any).getBuiltinModule("node:crypto");
+    const rounds = Number(iterations);
+    const width = Number(length);
+    const digest: Uint8Array = nodeCrypto.pbkdf2Sync(
+      new TextEncoder().encode(password),
+      new TextEncoder().encode(salt),
+      rounds,
+      width,
+      "sha256",
+    );
+    let hex = "";
+    for (const byte of digest) hex += byte.toString(16).padStart(2, "0");
+    return hex;
+  }

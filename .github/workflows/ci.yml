@@ -2769,6 +2769,7 @@ jobs:
           tests/test_cluster_c_emitter_hijack_553.py
           tests/test_component_arith_cross_tier_2198.py
           tests/test_crypto_stdlib.py
+          tests/test_kdf_stdlib.py
           tests/test_fn_param_call_signature_2311.py
           tests/test_go_component_checked_arith_2259.py
           tests/test_go_component_int32_trap_2262.py
