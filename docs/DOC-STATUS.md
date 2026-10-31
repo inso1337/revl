@@ -106,7 +106,7 @@ regenerated rather than edited.
 | generics.md | needs-work | 9 |  |
 | guarantees.md | needs-work | 2 |  |
 | guide-ai-agents.md | stale-fixed | 4 |  |
-| guide-humans.md | stale-fixed | 1 | yes |
+| guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 5 |  |
 | holes.md | needs-work | 29 |  |
 | import-a2a.md | current | 16 |  |
