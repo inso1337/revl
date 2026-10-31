@@ -1,0 +1,381 @@
+// The revl stdlib NET module - outbound HTTPS for application code.
+// Plan slice R1 (revl-sp SaaS back end plan, section 7.2, batch A).
+//
+// ---------------------------------------------------------------- what this is
+// The missing primitive behind every provider integration: a typed outbound
+// HTTPS client that speaks JSON and application/x-www-form-urlencoded bodies,
+// carries custom headers, refuses plain http, has a timeout and a bounded
+// response body, does not follow redirects, and returns the status, the
+// response headers and an error AS DATA. It exists so application code never
+// hand-writes an `@py` network body inside a `.rvl` file, and so the crossing
+// it makes is a NAMED, classified one on the `revl audit` surface.
+//
+// It is a PRIMITIVE kit, not an HTTP framework. It is three request builders,
+// one result decoder, two record shapes, one generic extern and one documented
+// pattern for a per-host wrapper. It knows no provider names, no OAuth flows,
+// no retry policy, no JSON schema and no application API: a caller composes an
+// integration from it.
+//
+// Import with a named `use` (the `Header` type lives in stdlib/http.rvl):
+//
+//     use "stdlib/http.rvl" { Header }
+//     use "stdlib/net.rvl" {
+//       NetOptions, NetField, NetResponse, NetError,
+//       get, post_json, post_form,
+//     }
+//
+// The call site is explicit about its destination and its bounds:
+//
+//     let opts = { timeout_ms: 5000, max_bytes: 1048576, ca_file: None }
+//     let answer = post_json(
+//       "api.example.com",
+//       "https://api.example.com/v1/token",
+//       json_stringify(payload),
+//       [{ name: "Authorization", value: "Bearer " + token }],
+//       opts)
+//
+// The first two arguments are the capability DESTINATION and the URL, and the
+// runtime refuses a mismatch (see "naming the destination" below).
+// `json_stringify` is stdlib/json.rvl; this module deliberately does not import
+// it, so the dependency graph stays `net -> http` (types only).
+//
+// ------------------------------------------------ classification: `emission`
+// A network request LEAVES the system: it is not a local read, it cannot be
+// reverted, and the reply depends on a machine this program does not own. So
+// the crossing is an `emission` (docs/capabilities.md), never `pure`, never
+// `witnessed` (there is no inverse for "the remote already saw the request"),
+// and never `acquire` (there is no handle to release).
+//
+// ------------------------------------- naming the destination: net(host=host)
+// The crossing declares a capability SCOPE whose destination is the caller's
+// own `host` argument, not a bare name:
+//
+//     pub extern emission[net(host=host)] fn host_request(host: Str,
+//                                                         call: NetCall) -> NetReply
+//
+// Item 294's parameterized capabilities and issue #1985's argument binding are
+// the language's answer for "the declared destination is caller-supplied
+// data". The token is `net(host=host)`: the reach is the network, and the
+// destination is the value the caller passed in `host`. `revl audit` prints
+// that token, so an operator can see that a component crosses to a caller-named
+// host instead of an unnamed boundary; a bare `emission` would have reported
+// `*` (the unnameable reach), which is strictly less information.
+//
+// The claim is ENFORCED at run time, not merely declared: the extern's host
+// body passes `host` to the shared engine as `expected_host`, and the engine
+// refuses a URL whose host is not that value (`host_mismatch`) before a socket
+// opens. A caller cannot declare `host="api.example.com"` and send the bytes
+// to another machine by swapping the URL. The public functions take both `host`
+// and `url`, so the two cannot drift silently.
+//
+// A service method in application code that reaches this module declares the
+// same token with its own `host` parameter. The binding names the declaration's
+// parameter BY NAME (issue #1985), so the parameter must be spelled `host`:
+//
+//     service ProviderApi {
+//       emission[net(host=host)] fn token(host: Str, url: Str) -> ...
+//     }
+//
+//     component Provider requires ... provides provider: ProviderApi {
+//       provide provider {
+//         fn token(host, url) { return emit post_form(host, url, ...) }
+//       }
+//     }
+//
+// ------------------------------------- a STATIC host on the audit surface
+// Sometimes an approval should be bounded to ONE host known at compile time:
+// `net(host="api.example.com")` rather than "whatever the caller passes". That
+// is a CONSTANT destination (item 246/294), and it is a DIFFERENT capability
+// token from `net(host=host)`: capability tokens are compared by identity, not
+// by hierarchy (docs/capabilities.md), so a provider declaring the constant
+// cannot call this module's argument-bound extern through G4. A static named
+// reach therefore has to sit on its own extern, declared in a TRUSTED stdlib
+// module next to this one, with a one-line host body that delegates to the same
+// shared engine:
+//
+//     // stdlib/example_http.rvl, a trusted module shipped beside net.rvl
+//     use "stdlib/net.rvl" { NetCall, NetReply }
+//
+//     extern emission[net(host="api.example.com")] fn example_http(call: NetCall)
+//         -> NetReply
+//       = @py {
+//         from revl_net import perform
+//         return perform(call, expected_host="api.example.com")
+//       }
+//
+// and the application wraps it with the module's builders:
+//
+//     use "stdlib/http.rvl" { Header }
+//     use "stdlib/net.rvl" { NetError, NetOptions, NetResponse,
+//                            NetField, call_post_json, reply_to_result }
+//     use "stdlib/example_http.rvl" { example_http }
+//
+//     pub fn example_post(url: Str, body_json: Str, headers: List[Header],
+//                         opts: NetOptions) -> Result[NetResponse, NetError] {
+//       return reply_to_result(example_http(call_post_json(url, body_json,
+//                                                          headers, opts)))
+//     }
+//
+// An application component then declares `emission[net(host="api.example.com")]`
+// and calls the wrapper: `revl audit` prints the named token, and an approval
+// can be bounded to that host.
+//
+// IMPORTANT LIMIT of this pin, stated because it decides WHERE a wrapper lives.
+// The one-line host body must be trusted. Capability tokens compare by identity
+// (above), and a user-origin `@py` body may not import a backend support module
+// (`compiler._check_user_py_body_imports`), so application code alone CANNOT
+// mint a static host reach on top of this module. A static named reach is a
+// trusted-module contribution that ships beside net.rvl; the
+// tests/test_net_stdlib.py suite builds a stand-in trusted module tree, proves
+// `revl audit` prints the host, and proves the runtime refuses another host.
+// Application code that cannot add a trusted module gets the argument-bound reach
+// `net(host=host)`, which still records that the destination is caller data
+// instead of hiding it behind a bare `net`.
+//
+// ------------------------------------------------ py tier: the reference
+//   * py  - `http.client.HTTPSConnection` with the stdlib `ssl` context, and
+//           `urllib.parse` for URL splitting and form encoding. Zero required
+//           runtime dependency. The HTTP engine lives once in
+//           `backends/python/revl_net.py`; this file's `@py` body is the
+//           one-line bridge to it. Executed by tests/test_net_stdlib.py.
+//   * ts, rs, go, java, wasm - NO body. Emitting a composition that calls this
+//           module is refused at compile time, naming `host_request` and the
+//           backend (the stdlib/auth.rvl pattern for a per-tier body). A ts
+//           port lands against that tier's fetch/undici story when it is
+//           wanted; it is not emulated here.
+//
+// ------------------------------------------------------------- what it does NOT do
+//   * It does not follow redirects. A 3xx is returned as an ordinary response:
+//     the caller reads `status` and the `Location` header and decides. There is
+//     no redirect allowlist: a client that follows redirects after an approval
+//     has crossed to a host the approval did not name, so this primitive never
+//     does it implicitly.
+//   * It does not retry, back off, pool connections or de-duplicate requests.
+//   * It does not speak plain http. `http://` is refused before a socket opens.
+//   * It does not put secrets in URLs: a URL carrying userinfo is refused.
+//   * It does not decode compression. `Accept-Encoding: identity` is sent by
+//     default, a caller-supplied `Accept-Encoding` is refused (see reserved
+//     headers), and the response body is returned as the bytes the server sent.
+//   * It does not stream. The whole body is read up to `max_bytes`; a
+//     response body is data, not a reader.
+//   * It does not manage cookies, proxies, client certificates, DNS pinning,
+//     certificate pinning, multipart bodies or arbitrary methods. Only GET and
+//     POST ship here. The trusted system store, or the single `ca_file` a
+//     private deployment points at, is the whole TLS trust story.
+//   * It does not export a JSON codec. A JSON request body is the caller's
+//     already-serialized document (`json_stringify` from stdlib/json.rvl); a
+//     JSON response body is a string the caller parses.
+//
+// ---------------------------------------------------------------- limits
+//   * `timeout_ms` is one socket operation's timeout (connect, and each read),
+//     not a whole-request deadline. Range 1 to 600000.
+//   * `max_bytes` bounds the RESPONSE BODY. Range 1 to 67108864 (64 MiB). The
+//     body is decoded as strict UTF-8; non-UTF-8 is `response_not_utf8`, never
+//     a lossy replacement. Response headers are not counted against
+//     `max_bytes`; `http.client` caps them at 100 fields, and that stdlib cap
+//     is the limit.
+//   * Header names must be RFC 9110 tokens; names and values may not contain
+//     CR, LF or NUL. `Host`, `Content-Length`, `Transfer-Encoding`,
+//     `Connection`, `Content-Type` and `Accept-Encoding` are computed by the
+//     module; a caller-supplied one is refused with `invalid_header`.
+//   * Request bodies are sent as UTF-8. A JSON body is not validated, it is
+//     only labelled `application/json`. Form fields are encoded by the stdlib
+//     `urllib.parse.urlencode`, so the wire body is an urlencoded form.
+//   * The capability destination is the `host` argument; it must equal the
+//     URL's host (the host body refuses a mismatch with `host_mismatch`). A
+//     host comparison is on the URL host name only: the port, path, query
+//     string and fragment do not participate, so `net(host="api.example.com")`
+//     permits any port on that host.
+//   * A secret belongs in a header. Error text NEVER carries a header value, a
+//     request body, a URL path or a URL query string; at most it names the
+//     host and the failure class. tests/test_net_stdlib.py pins that an
+//     `Authorization` value never appears in an error.
+//
+// ------------------------------------------------------------- error codes
+// `NetError.code` is one of:
+//   insecure_scheme, credentials_in_url, url_not_parseable, host_mismatch,
+//   invalid_request, invalid_timeout, invalid_size_bound, invalid_header,
+//   ca_file_unreadable, timeout, tls_verification, tls_error, network_error,
+//   protocol_error, response_too_large, response_not_utf8, internal_error.
+// A code is stable; the message is for a human and is not parsed.
+//
+// ------------------------------------------------------------------ tiers
+// py is the reference and the only tier with a body. `revl audit` on a py
+// composition names each reach: `host_request [net(host=host)]` for the generic
+// call, and `example_http [net(host="api.example.com")]` for a trusted per-host
+// wrapper.
+
+use "stdlib/http.rvl" { Header }
+
+// ---------------------------------------------------------------- public types
+
+// The bounds and TLS trust a single request gets. All three are explicit at the
+// call site (no module-level default that a caller could forget):
+//   timeout_ms  one socket operation's timeout, 1 to 600000 ms.
+//   max_bytes   response body ceiling, 1 to 67108864 bytes.
+//   ca_file     `None` uses the process trust store; `Some(path)` adds that PEM
+//               file as the ONLY verification anchor, for a private deployment
+//               or a loopback test certificate. A path that cannot be read is
+//               `ca_file_unreadable`, never a silent fallback to the system
+//               store.
+pub type NetOptions = { timeout_ms: Int, max_bytes: Int, ca_file: Opt[Str] }
+
+// One application/x-www-form-urlencoded field. A field set is a list, not a
+// map, because a form may repeat a name and the wire order is observable.
+pub type NetField = { name: Str, value: Str }
+
+// A response as data: the HTTP status, every response header in wire order,
+// and the body decoded as UTF-8 text. A caller decides what a status means;
+// this module never raises for a 4xx or 5xx.
+pub type NetResponse = { status: Int, headers: List[Header], body: Str }
+
+// A refusal as data. `code` is the stable token enumerated in the header;
+// `message` is a human string that never contains a header value, a body, a
+// URL path or a URL query string.
+pub type NetError = { code: Str, message: Str }
+
+// ---------------------------------------------------------------- the wire
+//
+// `NetCall` and `NetReply` are the record shapes the py host body reads and
+// writes. They are public because a trusted per-host wrapper has to name them:
+// the wrapper's extern takes a `NetCall`, forwards it to `revl_net.perform`,
+// and the application decodes the `NetReply` with `reply_to_result`. Building
+// one by hand is not the supported path; the `call_*` constructors below are.
+
+// One request as the host body sees it. `content_type` chooses how `body`/
+// `form` are interpreted: "" sends no body (GET) or the raw `body` (POST),
+// "application/json" labels `body` as JSON, "application/x-www-form-urlencoded"
+// encodes `form` and ignores `body`. The URL's host is NOT part of this record:
+// it is the extern's `host` argument, the capability destination.
+pub type NetCall = {
+  method: Str,
+  url: Str,
+  headers: List[Header],
+  body: Str,
+  content_type: Str,
+  form: List[NetField],
+  timeout_ms: Int,
+  max_bytes: Int,
+  ca_file: Opt[Str],
+}
+
+// One reply as the host body sees it. Exactly one of `ok` and the error fields
+// is meaningful: `ok` is true on a received response (including 4xx/5xx, which
+// are data) and false on a refusal. `status` is 0 on a refusal.
+pub type NetReply = {
+  ok: Bool,
+  status: Int,
+  headers: List[Header],
+  body: Str,
+  code: Str,
+  message: Str,
+}
+
+// ---------------------------------------------------------------- the crossing
+
+// The generic outbound crossing. `emission[net(host=host)]` is the honest
+// general class with its destination bound: the request leaves the system, and
+// the destination is the caller's `host` argument (issue #1985). `revl audit`
+// reports exactly that token, and the host body enforces it before connecting.
+//
+// The body is one line because the engine is shared: HTTPS-only, no redirects,
+// timeout, bounded body and redaction are implemented once in
+// `backends/python/revl_net.py`, not per wrapper.
+pub extern emission[net(host=host)] fn host_request(host: Str, call: NetCall)
+    -> NetReply
+  = @py {
+    from revl_net import perform
+    return perform(call, expected_host=host)
+  }
+
+// ---------------------------------------------------------------- call builders
+//
+// A builder fills every field of a `NetCall` so a caller cannot leave a bound
+// implicit. The destination `host` is passed to the extern, not stored here.
+
+// A GET with no body. Headers are whatever the caller needs (an
+// `Authorization` header belongs here, never in the URL).
+pub fn call_get(url: Str, headers: List[Header], opts: NetOptions) -> NetCall {
+  return {
+    method: "GET",
+    url: url,
+    headers: headers,
+    body: "",
+    content_type: "",
+    form: [],
+    timeout_ms: opts.timeout_ms,
+    max_bytes: opts.max_bytes,
+    ca_file: opts.ca_file,
+  }
+}
+
+// A POST whose body is an already-serialized JSON document. The module labels
+// it `application/json` and does not validate it; use `json_stringify` to
+// produce it from a revl value.
+pub fn call_post_json(url: Str, body_json: Str, headers: List[Header],
+                      opts: NetOptions) -> NetCall {
+  return {
+    method: "POST",
+    url: url,
+    headers: headers,
+    body: body_json,
+    content_type: "application/json",
+    form: [],
+    timeout_ms: opts.timeout_ms,
+    max_bytes: opts.max_bytes,
+    ca_file: opts.ca_file,
+  }
+}
+
+// A POST whose body is an application/x-www-form-urlencoded form. The encoder
+// is the stdlib `urllib.parse.urlencode` behind the host body, so the wire
+// bytes are the standard form encoding (a space is `+`, reserved bytes are
+// percent-encoded).
+pub fn call_post_form(url: Str, fields: List[NetField], headers: List[Header],
+                      opts: NetOptions) -> NetCall {
+  return {
+    method: "POST",
+    url: url,
+    headers: headers,
+    body: "",
+    content_type: "application/x-www-form-urlencoded",
+    form: fields,
+    timeout_ms: opts.timeout_ms,
+    max_bytes: opts.max_bytes,
+    ca_file: opts.ca_file,
+  }
+}
+
+// Turn the wire reply into the module's public Result. A response that arrived
+// (any status, redirects included) is an `Ok`; a refusal before or during the
+// exchange is the `Err`.
+pub fn reply_to_result(reply: NetReply) -> Result[NetResponse, NetError] {
+  if (reply.ok) {
+    return Ok({ status: reply.status, headers: reply.headers, body: reply.body })
+  }
+  return Err({ code: reply.code, message: reply.message })
+}
+
+// ---------------------------------------------------------------- the surface
+
+// GET `url` from `host`. `host` is the capability destination: the runtime
+// refuses a URL whose host is not it.
+pub fn get(host: Str, url: Str, headers: List[Header], opts: NetOptions)
+    -> Result[NetResponse, NetError] {
+  return reply_to_result(host_request(host, call_get(url, headers, opts)))
+}
+
+// POST `body_json` to `url` on `host` as `application/json`. `body_json` is the
+// serialized document (see `call_post_json`).
+pub fn post_json(host: Str, url: Str, body_json: Str, headers: List[Header],
+                 opts: NetOptions) -> Result[NetResponse, NetError] {
+  return reply_to_result(
+    host_request(host, call_post_json(url, body_json, headers, opts)))
+}
+
+// POST `fields` to `url` on `host` as `application/x-www-form-urlencoded`.
+pub fn post_form(host: Str, url: Str, fields: List[NetField],
+                 headers: List[Header], opts: NetOptions)
+    -> Result[NetResponse, NetError] {
+  return reply_to_result(host_request(host, call_post_form(url, fields, headers, opts)))
+}
