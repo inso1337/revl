@@ -51,8 +51,15 @@
 // leeway is explicit data for the same reason, and is bounded to one day
 // (`bad-options` above it) so a configuration slip cannot extend every token.
 //
-//   verify(token, jwks_json, { issuer: ..., audience: ..., leeway_seconds: 0 },
+//   verify(token, jwks_json,
+//          { issuer: ..., audience: ..., leeway_seconds: 0, require_exp: true },
 //          now) -> Result[Verified, JoseError]
+//
+// `require_exp` defaults to TRUE on the verifying door, because an OIDC id
+// token without `exp` is not a valid id token: a verifier that only checked a
+// PRESENT `exp` would accept a never-expiring token. A non-OIDC caller that
+// really means a timeless token opts out explicitly with `require_exp: false`;
+// `nbf` stays optional (OIDC does not require it).
 //
 // `Verified` carries the parsed header, the checked claims and the raw payload
 // JSON text, so a caller never re-parses the token it just verified.
@@ -86,7 +93,12 @@
 //   * RSA keys shorter than 2048 bits are refused (`bad-key`); the id-token
 //     providers sign with 2048-bit or larger moduli, and accepting a short
 //     modulus would lower the bar for every caller of this kit.
-//   * claim checks are positive: `exp` must still be in the future
+//   * the JWK key material (`n`, `e`, `x`, `y`) is held to the SAME canonical
+//     base64url rule as a token segment. A padded or non-canonical member is
+//     `malformed-json`, not a value the lenient host decoder would silently
+//     accept while the token segments stayed strict.
+//   * claim checks are positive: `exp` must be PRESENT (the default), `exp`
+//     must still be in the future
 //     (`now >= exp + leeway` refuses), `nbf` in the past, `iss` an exact match,
 //     and a configured `audience` must be PRESENT in `aud` (string or array).
 //     A claim that is present with the wrong TYPE is `malformed-claims`, never
@@ -114,8 +126,9 @@
 // ---------------------------------------------------------------- base64url
 // The strict decoder below is private to this module because stdlib/base64.rvl
 // is a sibling lane's new module (R2) and is not on this branch's base yet.
-// When it lands, `decode_text` and the segment checks switch to its
-// `b64url_decode` and `b64url_check`; the JOSE-facing contract does not move.
+// FOLLOW-UP: when it lands, `decode_text` switches to its `b64url_decode` (the
+// UTF-8 text door) and the raw-byte checks of the signature and of the JWK
+// members use its `b64url_decode_bytes`; the JOSE-facing contract does not move.
 //
 // Import with a named `use`:
 //
@@ -152,6 +165,8 @@
 //   bad-key              the selected key's material is unusable (short RSA
 //                        modulus, wrong P-256 coordinate width, empty value)
 //   signature-invalid    the signature does not verify for this key
+//   missing-exp          `exp` is absent and `require_exp` is true (the
+//                        default on the verifying door, as OIDC requires)
 //   token-expired        `exp` is at or before `now` (allowing the leeway)
 //   token-not-yet-valid  `nbf` is after `now` (allowing the leeway)
 //   wrong-issuer         `iss` is not the configured issuer
@@ -182,9 +197,16 @@ pub type Claims = {
 
 // What the caller expects. `issuer`/`audience` of "" mean "not checked": that
 // is for local tests and diagnostics only; an id-token acceptance path sets
-// both. `leeway_seconds` absorbs small clock skew and is bounded
-// to 0..86400 (one day): a larger value is not skew, it is a second lifetime.
-pub type VerifyOptions = { issuer: Str, audience: Str, leeway_seconds: Int }
+// both. `leeway_seconds` absorbs small clock skew and is bounded to 0..86400
+// (one day): a larger value is not skew, it is a second lifetime.
+// `require_exp` is true for an OIDC id token (see the contract above); set it
+// false only for a token that is deliberately timeless, and say so at the call.
+pub type VerifyOptions = {
+  issuer: Str,
+  audience: Str,
+  leeway_seconds: Int,
+  require_exp: Bool,
+}
 
 // One JSON Web Key, as the JWK Set document spells it. A field the document
 // omits is "". RSA keys carry `n`/`e`; EC keys carry `crv`/`x`/`y`.
@@ -1077,6 +1099,25 @@ fn parse_keys_array(jwks_json: Str, start: Int) -> Result[KeysAt, JoseError] {
   return Ok({ keys: keys, pos: p })
 }
 
+// A JWK key-material member must be canonical unpadded base64url, the same
+// rule a token segment carries: otherwise the document would have two accepted
+// encodings while the token segments are strict, and a padded `n` would decode
+// differently in a lenient host decoder than the canonical text claims.
+fn canonical_jwk_member(name: Str, value: Str) -> Result[Str, JoseError] {
+  return match check_b64(value) {
+    Ok(canonical) => Ok(canonical),
+    Err(e) => Err(jwk_member_error(name, e)),
+  }
+}
+
+fn jwk_member_error(name: Str, inner: JoseError) -> JoseError {
+  var message = "the JWK member `"
+  message = message.concat(name)
+  message = message.concat("` is not canonical unpadded base64url: ")
+  message = message.concat(inner.message)
+  return err("malformed-json", message)
+}
+
 fn parse_jwk_object(jwks_json: Str, start: Int) -> Result[KeyAt, JoseError] {
   let n = jwks_json.length()
   var p = skip_ws(jwks_json, start)
@@ -1130,6 +1171,10 @@ fn parse_jwk_object(jwks_json: Str, start: Int) -> Result[KeyAt, JoseError] {
             x_b64 = value.value
           } else {
             y_b64 = value.value
+          }
+          if (key.value == "n" || key.value == "e" || key.value == "x" || key.value == "y") {
+            let canonical = try canonical_jwk_member(key.value, value.value)
+            let _kept = canonical
           }
           p = value.pos
         } else {
@@ -1291,8 +1336,9 @@ pub extern pure fn rs256_verify(n_b64: Str, e_b64: Str, signing_input: Str, sig_
   }
 
 // ECDSA P-256 with SHA-256 (ES256), signature as the JOSE fixed 64-byte
-// `r || s`. Pure: public key (base64url x and y) against the curve, no
-// dependency beyond Python's integers and `hashlib`. The point is checked to be
+// `r || s`. Pure: public key (base64url x and y, already validated as canonical
+// by the caller) against the curve, no dependency beyond Python's integers and
+// `hashlib`. The point is checked to be
 // ON the curve before use, and `r`/`s` are range-checked, because a small-order
 // or off-curve point can otherwise yield a signature that verifies for more
 // messages than the signer intended.
@@ -1424,6 +1470,10 @@ pub fn check_claims(claims: Claims, options: VerifyOptions, now: Int) -> Result[
   if (options.leeway_seconds > 86400) {
     return Err(err("bad-options",
                    "`leeway_seconds` above 86400 (one day) is not clock skew; it would silently extend every token's life"))
+  }
+  if (options.require_exp && !claims.has_exp) {
+    return Err(err("missing-exp",
+                   "the token has no `exp` claim and `require_exp` is true; an OIDC id token must expire"))
   }
   if (claims.has_exp) {
     if (now >= claims.exp + options.leeway_seconds) {

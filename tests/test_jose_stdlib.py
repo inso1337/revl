@@ -227,7 +227,11 @@ use "stdlib/jose.rvl" {
 }
 
 fn opts(issuer: Str, audience: Str, leeway: Int) -> VerifyOptions {
-  return { issuer: issuer, audience: audience, leeway_seconds: leeway }
+  return { issuer: issuer, audience: audience, leeway_seconds: leeway, require_exp: true }
+}
+
+fn opts_lax(issuer: Str, audience: Str, leeway: Int) -> VerifyOptions {
+  return { issuer: issuer, audience: audience, leeway_seconds: leeway, require_exp: false }
 }
 
 fn code_of(r: Result[Verified, JoseError]) -> Str {
@@ -241,6 +245,10 @@ fn bool_str(b: Bool) -> Str {
 
 fn verify_code(token: Str, jwks: Str, issuer: Str, audience: Str, leeway: Int, now: Int) -> Str {
   return code_of(verify(token, jwks, opts(issuer, audience, leeway), now))
+}
+
+fn verify_code_lax(token: Str, jwks: Str, issuer: Str, audience: Str, leeway: Int, now: Int) -> Str {
+  return code_of(verify(token, jwks, opts_lax(issuer, audience, leeway), now))
 }
 
 fn verify_payload(token: Str, jwks: Str, issuer: Str, audience: Str, leeway: Int, now: Int) -> Str {
@@ -299,6 +307,16 @@ fn claims_check(payload_json: Str, issuer: Str, audience: Str, leeway: Int, now:
   }
 }
 
+fn claims_check_lax(payload_json: Str, issuer: Str, audience: Str, leeway: Int, now: Int) -> Str {
+  return match claims_of(payload_json) {
+    Ok(c) => match check_claims(c, opts_lax(issuer, audience, leeway), now) {
+      Ok(v) => "ok",
+      Err(e) => e.code,
+    },
+    Err(e) => e.code,
+  }
+}
+
 fn header_summary(token: Str) -> Str {
   return match header_of(token) {
     Ok(h) => h.alg.concat("|").concat(h.typ).concat("|").concat(h.kid),
@@ -310,6 +328,13 @@ fn jwks_count(jwks: Str) -> Int {
   return match parse_jwks(jwks) {
     Ok(keys) => keys.length(),
     Err(e) => 0 - 1,
+  }
+}
+
+fn jwks_message(jwks: Str) -> Str {
+  return match parse_jwks(jwks) {
+    Ok(keys) => "",
+    Err(e) => e.message,
   }
 }
 
@@ -367,7 +392,9 @@ def test_module_file_is_the_documented_surface():
     text = MODULE.read_text(encoding="utf-8")
     assert "pub type JoseError = { code: Str, message: Str }" in text
     assert "pub type JwsHeader = { alg: Str, typ: Str, kid: Str }" in text
-    assert "pub type VerifyOptions = { issuer: Str, audience: Str, leeway_seconds: Int }" in text
+    assert "pub type VerifyOptions = {" in text
+    assert "require_exp: Bool," in text
+    assert "missing-exp" in text
     assert "pub fn verify(token: Str, jwks_json: Str, options: VerifyOptions, now: Int) -> Result[Verified, JoseError]" in text
     assert "pub fn parse_jwks(jwks_json: Str) -> Result[List[Jwk], JoseError]" in text
     assert "pub fn select_key(keys: List[Jwk], header: JwsHeader) -> Result[Jwk, JoseError]" in text
@@ -597,6 +624,50 @@ def test_minted_wrong_kid_refused(ns):
 def test_minted_missing_kid_uses_the_single_key(ns):
     token = _minted_rs256({"alg": "RS256"}, '{"iss":"minted","exp":1400000000}')
     assert _verify(ns, token, JWKS_A2, issuer="minted", now=1350000000) == "ok"
+
+
+def test_verify_refuses_a_token_without_exp(ns):
+    # through the authenticating door, not just check_claims: an id token with a
+    # valid signature but no `exp` must be refused by name
+    token = _minted_rs256(MINT_HEADER, '{"iss":"minted"}')
+    assert _verify(ns, token, JWKS_A2, issuer="minted", now=1350000000) == "missing-exp"
+
+
+def test_verify_require_exp_false_accepts_a_timeless_token(ns):
+    token = _minted_rs256(MINT_HEADER, '{"iss":"minted","nbf":100}')
+    assert ns["verify_code_lax"](token, JWKS_A2, "minted", "", 0, 1350000000) == "ok"
+
+
+# ---- JWK key material must be canonical base64url too ----------------------
+
+JWK_NON_CANONICAL = [
+    # padding, the shape a lenient host decoder would strip
+    ("n", RFC7515_A2_N + "=", "n"),
+    # non-zero trailing bits: the last `Q` of n is canonical (value 16); `R` is
+    # the same bytes with two non-canonical extra bits
+    ("n", RFC7515_A2_N[:-1] + "R", "n"),
+    ("e", RFC7515_A2_E + "==", "e"),
+    ("x", RFC7515_A3_X[:-1] + "B", "x"),
+]
+
+
+@pytest.mark.parametrize("member,value,name", JWK_NON_CANONICAL)
+def test_jwk_key_material_must_be_canonical(ns, member, value, name):
+    if member == "x":
+        key = {"kty": "EC", "kid": "k", "crv": "P-256",
+               "x": RFC7515_A3_X, "y": RFC7515_A3_Y}
+    else:
+        key = {"kty": "RSA", "kid": "k", "n": RFC7515_A2_N, "e": RFC7515_A2_E}
+    key[member] = value
+    assert ns["jwks_code"](_jwks(key)) == "malformed-json"
+    # the refusal names the offending member, so a bad JWK document is debuggable
+    assert f"`{name}`" in ns["jwks_message"](_jwks(key))
+
+
+def test_jwk_member_standard_base64_alphabet_refused(ns):
+    key = {"kty": "RSA", "kid": "k", "n": RFC7515_A2_N[:-1] + "+",
+           "e": RFC7515_A2_E}
+    assert ns["jwks_code"](_jwks(key)) == "malformed-json"
 
 
 # ---- malformed compact serializations -------------------------------------
@@ -838,18 +909,24 @@ def test_claims_check_expiry_boundaries(ns):
 
 
 def test_claims_check_not_before_boundaries(ns):
-    payload = '{"nbf":100}'
+    payload = '{"nbf":100,"exp":200}'
     assert ns["claims_check"](payload, "", "", 0, 100) == "ok"
     assert ns["claims_check"](payload, "", "", 0, 99) == "token-not-yet-valid"
     assert ns["claims_check"](payload, "", "", 10, 90) == "ok"
 
 
-def test_claims_check_absent_exp_and_nbf_are_not_checked(ns):
-    assert ns["claims_check"]('{"iss":"joe"}', "joe", "", 0, 0) == "ok"
+def test_claims_check_requires_exp_by_default(ns):
+    # an OIDC id token must expire: a verifier that only checks a PRESENT `exp`
+    # accepts a never-expiring token, so the default door refuses absence
+    assert ns["claims_check"]('{"iss":"joe"}', "joe", "", 0, 0) == "missing-exp"
+    # the opt-out is explicit, for a deliberately timeless non-OIDC token
+    assert ns["claims_check_lax"]('{"iss":"joe"}', "joe", "", 0, 0) == "ok"
+    # `nbf` stays optional, and an absent nbf is not a refusal
+    assert ns["claims_check"]('{"exp":100}', "", "", 0, 0) == "ok"
 
 
 def test_claims_check_issuer_and_audience(ns):
-    payload = '{"iss":"joe","aud":["app","other"]}'
+    payload = '{"iss":"joe","aud":["app","other"],"exp":200}'
     assert ns["claims_check"](payload, "joe", "other", 0, 0) == "ok"
     assert ns["claims_check"](payload, "joe", "app", 0, 0) == "ok"
     assert ns["claims_check"](payload, "evil", "app", 0, 0) == "wrong-issuer"
