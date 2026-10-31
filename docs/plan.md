@@ -16,6 +16,12 @@ composition just grew a way to touch the outside world.
 
 A plan is that answer, computed without producing any of it.
 
+When a library caller supplies operator-approved provider modules through
+`modules`, it can pass their paths in `operator_sources`. Apply artifacts then
+keep those providers out of the candidate-authored host-body disclosure list.
+The command-line planner treats the files named directly as candidate sources;
+`use`-reached files not named as candidates are already excluded.
+
 ```bash
 revl compile app.rvl -o running.json     # what is live
 revl plan candidate.rvl --manifest running.json

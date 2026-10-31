@@ -454,27 +454,39 @@ def _applied_host_bodies(running_ir: dict | None,
 
 
 def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
-                               resulting_ir: dict | None) -> dict:
+                               resulting_ir: dict | None,
+                               authored_host_bodies: list | None = None) -> dict:
     """The origin of an applied generation, with post-apply provenance.
 
     The admission inputs stay on the origin so a snapshot or a later edit can
     still see what the session holds; only the disclosure member is replaced.
     It records the bodies the pre-apply generation already disclosed and the
     resulting composition still holds (refreshed from the resulting IR, so a
-    changed classification does not stay stale), plus the bodies the apply
-    installed or changed. A plain apply has no candidate compile report to
-    attribute from, so the resulting IR is the only provenance available.
+    changed classification does not stay stale), plus the candidate bodies
+    carried by the plan artifact. A prior disclosure is carried only when the
+    body itself is unchanged. Older artifacts have no source map, so their
+    changed bodies retain the conservative comparison fallback.
     """
     live = {entry.get("name"): entry
             for entry in (resulting_ir or {}).get("externs") or []}
+    running = {entry.get("name"): entry
+               for entry in (running_ir or {}).get("externs") or []}
     carried = []
     for entry in ((origin or {}).get(AUTHORED_HOST_BODIES_KEY) or []):
         current = live.get(entry.get("extern")) or {}
-        if not current.get("bodies"):
+        previous = running.get(entry.get("extern")) or {}
+        if (not current.get("bodies")
+                or (previous.get("bodies") or {}) != current["bodies"]):
             continue
         carried.append(host_body_entry(current))
     merged = {entry.get("extern"): entry for entry in carried}
-    for entry in _applied_host_bodies(running_ir, resulting_ir):
+    applied = (_applied_host_bodies(running_ir, resulting_ir)
+               if authored_host_bodies is None else authored_host_bodies)
+    for entry in applied:
+        current = live.get(entry.get("extern")) or {}
+        if not current.get("bodies"):
+            continue
+        entry = host_body_entry(current)
         merged[entry["extern"]] = entry
     return {**(origin or {}), AUTHORED_HOST_BODIES_KEY: sorted(
         merged.values(), key=lambda entry: str(entry.get("extern")))}
@@ -3675,7 +3687,8 @@ class Session:
         # to be visible there (#2676). The pre-apply origin describes sources
         # that no longer run, so it is replaced rather than carried whole.
         self.origin = _applied_generation_origin(
-            self.origin, running_ir, resulting_ir)
+            self.origin, running_ir, resulting_ir,
+            authored_host_bodies=artifact.get("authoredHostBodies"))
         # an apply is an admitted change, so it is a generation in the history
         # (item 65). It was executed from a plan *artifact* (an IR, not sources),
         # so it has no source origin to re-admit its result: the entry snapshots

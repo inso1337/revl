@@ -553,3 +553,120 @@ def test_apply_records_the_resulting_provenance_as_the_live_generation():
     finally:
         if session.loaded:
             session.unload()
+
+
+def test_apply_artifact_preserves_candidate_source_attribution():
+    """An operator provider changed by a plan is not candidate-authored.
+
+    Compare-based apply attribution treats every changed extern as candidate
+    code. The plan compiler knows which file declared each host body, so the
+    artifact should carry that source attribution through apply instead.
+    """
+    from revl import compile_source
+    from revl.apply import build_artifact
+    from revl.mcp.session import AUTHORED_HOST_BODIES_KEY, _applied_generation_origin
+    from revl.plan import plan
+
+    provider_path = os.path.abspath("operator-provider-2676-apply.rvl")
+    modules = {
+        provider_path: (
+            "pub extern pure fn operator_helper(x: Int) -> Int = "
+            "@py { return x }\n"),
+    }
+    candidate = (
+        'use "operator-provider-2676-apply.rvl" { operator_helper }\n'
+        "extern pure fn candidate_note(x: Int) -> Int = @py { return x }\n"
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = operator_helper(1) }\n"
+        "}\n"
+    )
+    running = compile_source(
+        "extern pure fn operator_helper(x: Int) -> Int = "
+        "@py { return x + 10 }\n"
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = operator_helper(1) }\n"
+        "}\n")
+    result = plan(source=candidate, manifest=running, modules=modules,
+                  operator_sources={provider_path}, include_ir=True)
+    artifact = build_artifact(result, running)
+
+    assert _body_names(artifact["authoredHostBodies"]) == {"candidate_note"}
+    origin = _applied_generation_origin(
+        {AUTHORED_HOST_BODIES_KEY: [{
+            "extern": "operator_helper", "classification": "pure",
+            "backends": ["py"],
+        }]}, running, artifact["resultingIR"],
+        authored_host_bodies=artifact["authoredHostBodies"])
+    assert _body_names(origin[AUTHORED_HOST_BODIES_KEY]) == {"candidate_note"}
+
+
+@needs_cordis
+def test_apply_keeps_operator_provider_out_of_later_call_and_act_tickets(
+        monkeypatch):
+    """A changed operator provider is absent from post-apply disclosures."""
+    from revl import compile_source
+    from revl.apply import build_artifact
+    from revl.mcp.approval import ApprovalRequired
+    from revl.mcp.session import Session
+    from revl.plan import plan
+
+    provider_path = os.path.abspath("operator-provider-2676-live.rvl")
+    running_source = (
+        "extern pure fn operator_helper(x: Int) -> Int = "
+        "@py { return x + 10 }\n"
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = operator_helper(1) }\n"
+        "}\n"
+    )
+    candidate = (
+        'use "operator-provider-2676-live.rvl" { operator_helper }\n'
+        "extern pure fn candidate_note(x: Int) -> Int = @py { return x }\n"
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = operator_helper(1) }\n"
+        "}\n"
+    )
+    running = compile_source(running_source)
+    result = plan(
+        source=candidate,
+        manifest=running,
+        modules={provider_path: (
+            "pub extern pure fn operator_helper(x: Int) -> Int = "
+            "@py { return x + 20 }\n")},
+        operator_sources={provider_path},
+        include_ir=True,
+    )
+    artifact = build_artifact(result, running)
+    assert _body_names(artifact["authoredHostBodies"]) == {"candidate_note"}
+
+    session = Session()
+    try:
+        session.load(running, origin={"source": running_source})
+        applied = session.apply(artifact)
+        assert applied["applied"] is True, applied
+
+        server.SESSION = session
+        server._remember_live_host_bodies()
+        expected = {"candidate_note"}
+        assert _body_names(server._LIVE_HOST_BODIES) == expected
+
+        def refused(*_args, **_kwargs):
+            raise ApprovalRequired({"hash": "sha256:post-apply",
+                                    "capabilities": []})
+
+        monkeypatch.setattr(session, "call", refused)
+        call_result = server._run_handler(
+            "revl_call", {"key": "s", "method": "ping", "args": []})
+        assert _body_names(call_result["ticket"]["unreviewedHostCode"]) == expected
+
+        monkeypatch.setattr(session, "act", refused)
+        act_result = server._tool_act(
+            {"key": "s", "method": "ping", "args": []})
+        assert act_result["outcome"] == "ticket"
+        assert _body_names(act_result["ticket"]["unreviewedHostCode"]) == expected
+    finally:
+        if session.loaded:
+            session.unload()
