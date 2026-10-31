@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -41,7 +42,11 @@ def test_a_complete_manifest_parses():
     assert manifest.semver == manifest_module.Version.parse("2.1.0")
     assert manifest.artifacts[0].sha256 == "b" * 64
     assert manifest.compat["gateApi"] == "1.0.0"
-    assert manifest.digest() == manifest.digest()
+    # the digest is the sha256 of the canonical document, so a reader can
+    # recompute it from the same bytes the release published
+    canonical = json.dumps(manifest.document(), sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+    assert manifest.digest() == hashlib.sha256(canonical).hexdigest()
 
 
 def test_the_digest_changes_with_the_artifact_hash():

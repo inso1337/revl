@@ -26,8 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import UpdateError
-from .feed import ResolvedRelease, source_archive_url
+from .feed import ResolvedRelease, open_response, \
+    source_archive_url
 from .manifest import Artifact
+from .semver import Version
 
 DEFAULT_HOME = Path.home() / ".revl" / "updates"
 MAX_BYTES = 300 * 1024 * 1024
@@ -98,13 +100,12 @@ def _error(code: str, message: str, *, fix: str | None = None,
 
 def _download(url: str, dest: Path, *, token: str | None, timeout: float,
               max_bytes: int = MAX_BYTES) -> None:
-    headers = {"User-Agent": _USER_AGENT}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers, method="GET")
     written = 0
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        # The feed's opener: the token only travels to an allowlisted host, and
+        # a cross-host redirect drops it. A manifest may name any http(s) URL,
+        # so this is what keeps a private feed's token on the release host.
+        with open_response(url, token, timeout=timeout) as response:
             with open(dest, "wb") as handle:
                 while True:
                     chunk = response.read(1024 * 1024)
@@ -152,8 +153,8 @@ def _member_name(name: str) -> str:
             f"the release archive names {name!r} with a backslash; an archive "
             "entry is a POSIX path, and a backslash is how a Windows host "
             "reads a traversal")
-    drive = name.split(":", 1)[0]
-    if len(drive) == 1 and drive.isalpha() and name.split(":", 1)[1].startswith(("/", "\\")):
+    head, colon, tail = name.partition(":")
+    if colon and len(head) == 1 and head.isalpha() and tail.startswith(("/", "\\")):
         raise _error("STAGE_ARCHIVE_PATH",
                      f"the release archive names a drive path {name!r}")
     parts = name.split("/")
@@ -164,8 +165,10 @@ def _member_name(name: str) -> str:
     return name
 
 
-def _extract_tar(archive: Path, destination: Path) -> int:
+def _extract_tar(archive: Path, destination: Path,
+                 max_bytes: int = MAX_BYTES) -> int:
     count = 0
+    written = 0
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
             name = _member_name(member.name)
@@ -190,12 +193,24 @@ def _extract_tar(archive: Path, destination: Path) -> int:
                 raise _error("STAGE_ARCHIVE_ENTRY",
                              f"the release archive entry {name!r} has no body")
             with source, open(target, "wb") as handle:
-                shutil.copyfileobj(source, handle)
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise _error(
+                            "STAGE_TOO_LARGE",
+                            f"the release archive expands past the {max_bytes} "
+                            "byte staging limit")
+                    handle.write(chunk)
     return count
 
 
-def _extract_zip(archive: Path, destination: Path) -> int:
+def _extract_zip(archive: Path, destination: Path,
+                 max_bytes: int = MAX_BYTES) -> int:
     count = 0
+    written = 0
     with zipfile.ZipFile(archive) as zipped:
         for entry in zipped.infolist():
             name = _member_name(entry.filename)
@@ -221,17 +236,33 @@ def _extract_zip(archive: Path, destination: Path) -> int:
             target = destination / name
             target.parent.mkdir(parents=True, exist_ok=True)
             with zipped.open(entry) as source, open(target, "wb") as handle:
-                shutil.copyfileobj(source, handle)
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise _error(
+                            "STAGE_TOO_LARGE",
+                            f"the release archive expands past the {max_bytes} "
+                            "byte staging limit")
+                    handle.write(chunk)
     return count
 
 
-def extract_archive(archive: Path, destination: Path) -> int:
-    """Extract a tar or zip release archive safely, returning the file count."""
+def extract_archive(archive: Path, destination: Path,
+                    max_bytes: int = MAX_BYTES) -> int:
+    """Extract a tar or zip release archive safely, returning the file count.
+
+    ``max_bytes`` bounds the DECOMPRESSED bytes written, not the download: a
+    compressed artifact can expand without limit, and a source tree this
+    updater stages is small by definition.
+    """
     destination.mkdir(parents=True, exist_ok=True)
     if tarfile.is_tarfile(archive):
-        return _extract_tar(archive, destination)
+        return _extract_tar(archive, destination, max_bytes)
     if zipfile.is_zipfile(archive):
-        return _extract_zip(archive, destination)
+        return _extract_zip(archive, destination, max_bytes)
     raise _error(
         "STAGE_ARCHIVE_FORMAT",
         f"the release artifact {archive.name!r} is neither a tar nor a zip "
@@ -388,6 +419,10 @@ def find_staged(home_dir: str | os.PathLike | None = None,
             found.append(_staged(directory, provenance))
         except UpdateError:
             continue
-    found.sort(key=lambda release: (release.project, release.version),
-               reverse=True)
+    def _order(release: "StagedRelease") -> tuple:
+        parsed = Version.parse_or_none(release.version)
+        return (release.project,
+                (0, parsed) if parsed is not None else (1, Version.parse("0.0.0")))
+
+    found.sort(key=_order, reverse=True)
     return found

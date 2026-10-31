@@ -70,6 +70,13 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_test_run": ({"selection": ["tests/no_such_2843_run.py"],
                        "cwd": "."}, None),
     "revl_brief": ({}, None),
+    # the operator update surface is off unless --update was given, so these
+    # answer WITH a named refusal on any interpreter: static, not runtime
+    # verbs. The disabled refusal is the measured form.
+    "revl_update_check": ({}, None),
+    "revl_update_apply": ({}, None),
+    "revl_update_status": ({}, None),
+    "revl_update_rollback": ({}, None),
     "revl_quarantine": ({"source": SOURCE2}, None),
     "revl_repair": ({"component": "C"}, None),
     "revl_rollback": ({}, None),

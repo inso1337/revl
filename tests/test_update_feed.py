@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import http.server
 import json
+import threading
 
 import pytest
 
 from _update_feed_fixture import COMMIT, manifest_for, serve_feed
+from revl.update import feed as feed_module
 from revl.update.errors import UpdateError
 from revl.update.feed import resolve_manifest_source, resolve_release
 
@@ -108,3 +111,72 @@ def test_an_invalid_api_base_is_refused():
     with pytest.raises(UpdateError) as raised:
         resolve_release("owner/app", api_base_override="ftp://example.invalid")
     assert raised.value.code == "FEED_API_BASE"
+
+
+def test_the_token_never_travels_to_an_artifact_host_outside_the_allowlist(
+        tmp_path):
+    """A manifest may name any http(s) artifact URL. The token only goes to
+    the feed's own host, so a hostile manifest cannot exfiltrate it."""
+    feed = serve_feed(token="s3cret")
+    try:
+        release = resolve_release("owner/app", token="s3cret",
+                                  api_base_override=feed.base_url)
+    finally:
+        feed.close()
+    # the fixture serves the artifact on the same server; a genuinely foreign
+    # host is not allowlisted
+    import urllib.parse
+    port = urllib.parse.urlsplit(feed.base_url).port
+    assert feed_module.token_host_allowed(f"http://127.0.0.1:{port}/asset") is True
+    assert feed_module.token_host_allowed(f"http://localhost:{port}/asset") is False
+    assert feed_module.token_host_allowed("https://evil.example/asset") is False
+    assert release.version == "1.2.0"
+
+
+def _http_server(handler_cls):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_a_cross_host_redirect_drops_the_authorization_header(monkeypatch):
+    """urllib forwards request headers on redirect; a redirect from the feed
+    host to another host must not carry the bearer token."""
+    seen: list = []
+    port_b: list[int] = []
+
+    class B(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_GET(self):  # noqa: N802
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(204)
+            self.end_headers()
+
+    class A(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_GET(self):  # noqa: N802
+            self.send_response(302)
+            self.send_header("Location",
+                             f"http://localhost:{port_b[0]}/end")
+            self.end_headers()
+
+    server_b = _http_server(B)
+    port_b.append(server_b.server_address[1])
+    server_a = _http_server(A)
+    try:
+        monkeypatch.setattr(feed_module, "_ACTIVE_API_HOST", "127.0.0.1")
+        with feed_module.open_response(
+                f"http://127.0.0.1:{server_a.server_address[1]}/start",
+                "s3cret") as response:
+            response.read()
+    finally:
+        server_a.shutdown()
+        server_a.server_close()
+        server_b.shutdown()
+        server_b.server_close()
+    assert seen == [None]

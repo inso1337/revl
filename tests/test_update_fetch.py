@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import json
 import tarfile
 import zipfile
 
@@ -140,3 +141,36 @@ def test_extract_archive_accepts_a_plain_tar(tmp_path):
     count = extract_archive(archive, tmp_path / "out")
     assert count == 2
     assert (tmp_path / "out" / "app-1.2.0" / "app.rvl").is_file()
+
+
+def test_extraction_bounds_the_decompressed_bytes(tmp_path):
+    archive = tmp_path / "big.tar.gz"
+    archive.write_bytes(source_tar())
+    with pytest.raises(UpdateError) as raised:
+        extract_archive(archive, tmp_path / "out", max_bytes=10)
+    assert raised.value.code == "STAGE_TOO_LARGE"
+
+
+def test_a_single_letter_entry_is_not_a_drive_path(tmp_path):
+    archive = tmp_path / "single.tar.gz"
+    archive.write_bytes(_malicious_tar([_entry("a")]))
+    count = extract_archive(archive, tmp_path / "out")
+    assert count == 1
+    assert (tmp_path / "out" / "a").is_file()
+
+
+def test_staged_releases_are_ordered_by_version_not_by_string(tmp_path):
+    root = tmp_path / "staged"
+    for version in ("10.0.0", "2.0.0"):
+        directory = root / f"app-{version}-abcdef123456"
+        (directory / "source").mkdir(parents=True)
+        (directory / "source" / "app.rvl").write_text("service S {}", encoding="utf-8")
+        (directory / "provenance.json").write_text(json.dumps({
+            "schema": "revl.update.provenance/1", "project": "app",
+            "version": version, "tag": f"v{version}", "commit": "a" * 40,
+            "artifact": {"name": "x.tar.gz", "kind": "source",
+                         "sha256": "b" * 64},
+            "manifestDigest": None, "tagFallback": True,
+        }), encoding="utf-8")
+    found = find_staged(tmp_path, project="app")
+    assert [release.version for release in found[:2]] == ["10.0.0", "2.0.0"]

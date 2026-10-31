@@ -103,15 +103,24 @@ are all operator flags; a caller cannot name them). Four verbs:
    staged bytes, compiles and admits the release against the running
    manifest, plans the swap and returns a `planHash`. Nothing is mutated.
 3. `revl_update_apply` with that `planHash` refuses if the running generation
-   moved, requires `acknowledgeWidening` when the release adds or widens the
-   composition's irreversible reach, swaps the release in and verifies the
+   or composition moved (the plan is bound to both), refuses if the staged
+   bytes changed after they were admitted (the plan is bound to their digest),
+   requires `acknowledgeWidening` when the release widens any authority axis
+   (crossings, reach, capability scopes, host backends, recovery inverses,
+   registers or emission cardinality), swaps the release in and verifies the
    successor serves the running keys. A successor that does not is reverted
-   automatically.
+   automatically. A release that declares `live: false` is refused for a
+   running composition unless the operator passes `force`; its plan answer
+   reports `live` and `restartRequired`.
 4. `revl_update_rollback` returns to the generation before the last applied
    release, through the same admitted undo any generation change uses.
 
 A release with no manifest (tag fallback) is never applied unless the
-operator explicitly enabled `--update-trust-tags`: it has no declared sha256.
+operator explicitly enabled `--update-trust-tags`: it has no declared sha256,
+and a plan never reuses a tag-fallback staging when a manifest names the
+sha256 the bytes must have. A private-feed token is sent only to the feed's
+own host (and GitHub's release hosts), never to an artifact host a manifest
+names, and a cross-host redirect drops it.
 A release that is not a composition source tree (an installer, a toolchain
 sdist) is refused as a live apply with `UPDATE_NOT_COMPOSITION`; the CLI can
 still check and stage it.

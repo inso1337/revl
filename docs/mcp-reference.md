@@ -2497,10 +2497,13 @@ Apply a verified release to the running composition, or rehearse that apply.
 With no `planHash` it stages the newest release, compiles and admits it
 against the running manifest, plans the swap and returns a server-side
 `planHash`; nothing is mutated. With `planHash` it refuses a stale plan
-(another generation is running), requires `acknowledgeWidening` when the
-release adds or widens the composition's irreversible reach, swaps the
-release in, and verifies the successor serves the running keys. A successor
-that does not is reverted automatically and the answer says so.
+(another generation or composition is running, or the staged bytes changed
+after admission), requires `acknowledgeWidening` when the release widens any
+authority axis, swaps the release in, and verifies the successor serves the
+running keys. A successor that does not is reverted automatically and the
+answer says so. A release declaring `live: false` is refused for a running
+composition unless `force` is passed; the plan answer reports `live` and
+`restartRequired`.
 
 - Inputs: `planHash` (the plan to apply), `force` (plan even when already up
   to date), `acknowledgeWidening` (accept the reported widening).

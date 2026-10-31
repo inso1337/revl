@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -84,6 +85,75 @@ def api_base(value: str | None = None) -> str:
     return base.rstrip("/")
 
 
+#: Hosts a release token may travel to. GitHub's own hosts plus the configured
+#: API base (a mirror, or a test fixture server). A manifest may name any
+#: http(s) URL for an artifact; the token is not attached to a host outside
+#: this set, and a redirect to another host is followed WITHOUT it.
+_TOKEN_HOSTS = frozenset({"api.github.com", "github.com",
+                          "objects.githubusercontent.com",
+                          "codeload.github.com"})
+
+
+def _host(url: str) -> str:
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+#: The host of the feed being resolved. A mirror (or a test fixture server) is
+#: an allowed token host for its own requests, which is what lets a private
+#: mirror work without allowlisting every artifact host it names.
+_ACTIVE_API_HOST: str | None = None
+
+
+def _token_hosts() -> frozenset[str]:
+    hosts = set(_TOKEN_HOSTS)
+    if _ACTIVE_API_HOST:
+        hosts.add(_ACTIVE_API_HOST)
+    try:
+        hosts.add(_host(api_base()))
+    except UpdateError:
+        pass
+    return frozenset(hosts)
+
+
+def token_host_allowed(url: str) -> bool:
+    """Whether the configured token may be sent to ``url``."""
+    return _host(url) in _token_hosts()
+
+
+class _NoCrossHostAuth(urllib.request.HTTPRedirectHandler):
+    """A redirect to another host never carries the Authorization header.
+
+    urllib forwards request headers on redirect unless the handler removes
+    them; a manifest that names a URL which redirects off the release host
+    would otherwise hand a private-feed token to whoever runs that host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _host(new.full_url) != _host(req.full_url):
+            try:
+                new.remove_header("Authorization")
+            except KeyError:
+                pass
+        return new
+
+
+_OPENER = urllib.request.build_opener(_NoCrossHostAuth)
+
+
+def open_response(url: str, token: str | None, *, accept: str | None = None,
+                  timeout: float = 20.0):
+    """Open ``url`` with the token only where it may travel, and no redirect
+    forwarding it. Callers own the returned response."""
+    headers = {"User-Agent": USER_AGENT}
+    if accept:
+        headers["Accept"] = accept
+    if token and token_host_allowed(url):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    return _OPENER.open(request, timeout=timeout)
+
+
 def _token(token: str | None, token_env: str | None = None) -> str | None:
     if token:
         return token
@@ -96,12 +166,8 @@ def _token(token: str | None, token_env: str | None = None) -> str | None:
 
 def _request(url: str, token: str | None, *, accept: str,
              timeout: float) -> bytes:
-    headers = {"User-Agent": USER_AGENT, "Accept": accept}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_response(url, token, accept=accept, timeout=timeout) as response:
             return response.read()
     except urllib.error.HTTPError as error:
         remaining = error.headers.get("X-RateLimit-Remaining") if error.headers else None
@@ -259,7 +325,9 @@ def resolve_release(repo: str, *, channel: str = "stable",
     that manifest; it exists for an operator mirror and for tests, and it still
     passes the same validation.
     """
+    global _ACTIVE_API_HOST
     base = api_base(api_base_override)
+    _ACTIVE_API_HOST = _host(base)
     token = _token(token, token_env)
     if manifest_source is not None:
         return resolve_manifest_source(manifest_source, repo=repo,
@@ -312,7 +380,7 @@ def _tag_fallback_from_tags(repo: str, *, channel: str, project: str,
             fix="publish a release manifest, or check a repository that does")
     version, entry = selected
     commit = ((entry.get("commit") or {}).get("sha") or "").lower()
-    if len(commit) != 40:
+    if len(commit) != 40 or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise UpdateError("FEED_TAG_MISSING",
                           f"tag {entry.get('name')} of {repo} names no commit")
     return ResolvedRelease(

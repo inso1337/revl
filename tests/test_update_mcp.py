@@ -83,7 +83,8 @@ def test_a_disabled_server_refuses_the_mutating_update_verbs_by_name():
         assert payload["refusal"]["code"] == "UPDATE_DISABLED"
 
 
-def test_status_answers_even_when_disabled_and_names_the_config():
+def test_status_answers_even_when_disabled_and_names_the_config(tmp_path):
+    update_tools.configure(home=str(tmp_path))
     payload = _call("revl_update_status", {})
     assert payload["ok"] is True
     assert payload["enabled"] is False
@@ -92,8 +93,8 @@ def test_status_answers_even_when_disabled_and_names_the_config():
     assert payload["identity"]["version"]
 
 
-def test_rollback_without_an_applied_release_is_refused():
-    update_tools.configure(enabled=True)
+def test_rollback_without_an_applied_release_is_refused(tmp_path):
+    update_tools.configure(enabled=True, home=str(tmp_path))
     payload = _call("revl_update_rollback", {})
     assert payload["ok"] is False
     assert payload["refusal"]["code"] == "UPDATE_NOTHING_APPLIED"
@@ -225,5 +226,66 @@ def test_a_refused_admission_leaves_the_running_composition_serving(tmp_path):
         assert _call("revl_call", {"key": "cache",
                                    "method": "size"})["result"] == 0
         assert _call("revl_state", {})["generation"] == 1
+    finally:
+        feed.close()
+
+
+@needs_runtime
+def test_a_release_that_is_not_live_is_refused_for_apply(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+    finally:
+        feed.close()
+    # a feed whose manifest says live: false
+    not_live = serve_feed(version="9.9.9",
+                          artifact_bytes=tar_gz({"cache.rvl": CACHE_V2.encode()},
+                                                top="app-9.9.9"),
+                          live=False)
+    try:
+        _configure(not_live, tmp_path)
+        planned = _call("revl_update_apply", {})
+        assert planned["ok"] is False
+        assert planned["refusal"]["code"] == "UPDATE_NOT_LIVE"
+        # force opts into applying a release the feed has not certified live
+        forced = _call("revl_update_apply", {"force": True})
+        assert forced["ok"] is True
+        assert forced["live"] is False
+    finally:
+        not_live.close()
+
+
+@needs_runtime
+def test_a_staged_file_changed_after_the_plan_is_refused(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        planned = _call("revl_update_apply", {})
+        staged = Path(planned["staged"]["sources"]["root"]) / "cache.rvl"
+        staged.write_text(CACHE_V2.replace("43", "99"), encoding="utf-8")
+        tampered = _call("revl_update_apply", {"planHash": planned["planHash"]})
+        assert tampered["ok"] is False
+        assert tampered["refusal"]["code"] == "UPDATE_PLAN_TAMPERED"
+        assert _call("revl_call", {"key": "cache",
+                                   "method": "size"})["result"] == 0
+    finally:
+        feed.close()
+
+
+@needs_runtime
+def test_a_plan_does_not_survive_a_different_running_composition(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        planned = _call("revl_update_apply", {})
+        _call("revl_unload", {})
+        _call("revl_load", {"source": CACHE.replace("fn size() = 0",
+                                                    "fn size() = 7")})
+        stale = _call("revl_update_apply", {"planHash": planned["planHash"]})
+        assert stale["ok"] is False
+        assert stale["refusal"]["code"] == "UPDATE_PLAN_STALE"
     finally:
         feed.close()

@@ -51,6 +51,10 @@ _CONFIG: dict = {
 }
 _PLANS: dict[str, dict] = {}
 _LOCK = threading.RLock()
+#: Identifies this server process in the journal and in a plan: a second
+#: server sharing the update home must not consume another session's rollback
+#: target, and a plan is bound to the session it was made in.
+_SESSION_ID = f"{os.getpid()}:{time.time_ns()}"
 
 
 def configure(**values: object) -> None:
@@ -128,6 +132,18 @@ def _generation() -> int | None:
     return server.SESSION.state(drain=False).get("generation")
 
 
+def _ir_digest(ir: dict | None) -> str | None:
+    """The running composition's document digest, so a plan is bound to it.
+
+    The generation counter alone is not enough: a session that unloads and
+    loads a different composition starts again at generation 1.
+    """
+    if ir is None:
+        return None
+    encoded = json.dumps(ir, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _provided_keys() -> list[str]:
     server = _server()
     if not server.SESSION.loaded:
@@ -161,13 +177,18 @@ def _plan_hash(binding: dict) -> str:
 
 
 def _widening(old_ir: dict, files: list[str]) -> dict:
-    """What the release widens about the composition's irreversible reach.
+    """Every authority axis the release widens, not only its crossings.
 
-    Conservative on a failed comparison: an unreadable candidate reports
-    `widened: true` with the reason, so an apply pends rather than proceeds on
-    a guess.
+    `audit_diff` carries seven differs: the crossing set and its reach,
+    per-emission capability scopes, host backends, recovery inverses,
+    capability registers and emission cardinality. A release can widen any of
+    them while adding no crossing, so all of them feed the acknowledgement
+    decision. A comparison that cannot be computed is reported as widened: an
+    apply pends rather than proceeding on a guess.
     """
-    from ..audit_diff import audit_report, diff_crossings  # noqa: PLC0415
+    from ..audit_diff import (audit_report, diff_backends,  # noqa: PLC0415
+                              diff_capability_scopes, diff_cardinality,
+                              diff_recovery, diff_registers, evaluate)
     from .server import compile_under_authoring  # noqa: PLC0415
 
     try:
@@ -177,14 +198,26 @@ def _widening(old_ir: dict, files: list[str]) -> dict:
         candidate_ir = compile_under_authoring(None, list(files))
         before = audit_report(old_ir)
         after = audit_report(candidate_ir)
-        diff = diff_crossings(before, after)
+        drift = evaluate(before, after)
+        scopes = diff_capability_scopes(before, after)
+        backends = diff_backends(before, after)
+        recovery = diff_recovery(before, after)
+        registers = diff_registers(before, after)
+        cardinality = diff_cardinality(before, after)
     except Exception as error:  # noqa: BLE001 - fail closed, name the reason
-        return {"widened": True, "added": [], "reachWeakened": [],
-                "unknown": f"the audit diff could not be computed: {error}"}
-    added = list(diff.get("added") or [])
-    weakened = list(diff.get("reach_weakened") or [])
-    return {"widened": bool(added or weakened), "added": added,
-            "reachWeakened": weakened}
+        return {"widened": True, "unknown":
+                f"the audit diff could not be computed: {error}"}
+    buckets = {
+        "added": list(drift["added"]),
+        "reachWeakened": list(drift["reach_weakened"]),
+        "scopesWidened": list(scopes["scope_widened"]),
+        "backendsAdded": list(backends["backends_added"]),
+        "recoveryDropped": list(recovery["recovery_dropped"]),
+        "recoveryWeakened": list(recovery["recovery_weakened"]),
+        "registersWeakened": list(registers["registers_weakened"]),
+        "cardinalityWidened": list(cardinality["cardinality_widened"]),
+    }
+    return {"widened": any(buckets.values()), **buckets}
 
 
 def _store_plan(plan: dict) -> None:
@@ -256,6 +289,7 @@ def _tag_fallback_refusal() -> dict:
 
 
 def _stage_for_apply(resolved, cfg: dict, journal: Journal):
+    artifact = None
     if resolved.manifest is None:
         if not cfg["trust_tags"]:
             return None, _tag_fallback_refusal()
@@ -271,6 +305,12 @@ def _stage_for_apply(resolved, cfg: dict, journal: Journal):
     for staged in find_staged(cfg["home"], project=resolved.project):
         if (staged.version == resolved.version
                 and staged.commit == resolved.commit):
+            if resolved.manifest is not None:
+                # a staging is reused only when its bytes are the ones the
+                # manifest names. A tag-fallback fetch of the same commit was
+                # never checked against a declared sha256, so it is not.
+                if staged.tag_fallback or staged.digest != artifact.sha256:
+                    continue
             return staged, None
     try:
         staged = stage_release(resolved, home_dir=cfg["home"],
@@ -341,9 +381,21 @@ def _plan_apply(arguments: dict) -> dict:
     comparison = compare_release(resolved, identity, cfg["channel"])
     if not comparison.get("updateAvailable") and not arguments.get("force"):
         return {"ok": True, "planned": False, "applied": False,
-                "comparison": comparison,
+                "comparison": comparison, "live": comparison.get("live"),
+                "restartRequired": comparison.get("restartRequired"),
                 "note": "the running version is the newest release on the "
                         "channel; nothing was staged or planned"}
+    if (resolved.manifest is not None and not resolved.manifest.live
+            and not arguments.get("force")):
+        return _refusal(
+            UpdateError(
+                "UPDATE_NOT_LIVE",
+                f"release {resolved.version} does not declare itself live-safe "
+                "(`live` is false), so this host may stage it but not apply it "
+                "to a running composition",
+                fix="stage it and apply it at the next start, or pass force to "
+                    "apply a release the feed has not certified live"),
+            comparison=comparison)
     staged, refusal = _stage_for_apply(resolved, cfg, journal)
     if refusal is not None:
         return refusal
@@ -360,7 +412,7 @@ def _plan_apply(arguments: dict) -> dict:
                                     "replacing": replacing})
     if not admission.get("ok"):
         journal.append("refusal", stage="admit", project=resolved.project,
-                       version=resolved.version)
+                       version=resolved.version, sessionId=_SESSION_ID)
         return {"ok": False, "planned": False, "applied": False,
                 "stoppedAt": "admit", "admission": admission,
                 "note": "the running admission gate refused the release; the "
@@ -369,6 +421,7 @@ def _plan_apply(arguments: dict) -> dict:
     widening = _widening(server.SESSION.ir, files)
     records_digest, entries = _files_digest(files)
     generation = _generation()
+    ir_digest = _ir_digest(server.SESSION.ir)
     binding = {
         "protocol": "revl.update.plan/1",
         "feed": {"repo": cfg["repo"], "channel": cfg["channel"]},
@@ -381,8 +434,10 @@ def _plan_apply(arguments: dict) -> dict:
                      "name": staged.artifact_name},
         "sources": records_digest,
         "generation": generation,
+        "irDigest": ir_digest,
         "replacing": replacing,
         "trustTags": bool(cfg["trust_tags"]),
+        "sessionId": _SESSION_ID,
     }
     plan_hash = _plan_hash(binding)
     plan = {
@@ -395,15 +450,21 @@ def _plan_apply(arguments: dict) -> dict:
                     "manifestDigest": binding["release"]["manifestDigest"],
                     "artifactSha256": staged.digest},
         "files": files,
+        "sourcesDigest": records_digest,
+        "entries": entries,
         "replacing": replacing,
         "generation": generation,
+        "irDigest": ir_digest,
+        "sessionId": _SESSION_ID,
         "widening": widening,
+        "live": comparison.get("live", False),
+        "restartRequired": comparison.get("restartRequired", True),
         "createdAt": time.time(),
     }
     _store_plan(plan)
     journal.append("plan", planHash=plan_hash, project=resolved.project,
                    version=resolved.version, generation=generation,
-                   widening=widening["widened"])
+                   sessionId=_SESSION_ID, widening=widening["widened"])
     return {
         "ok": True,
         "planned": True,
@@ -411,7 +472,10 @@ def _plan_apply(arguments: dict) -> dict:
         "planHash": plan_hash,
         "release": plan["release"],
         "staged": staged.as_report(),
+        "comparison": comparison,
         "generation": generation,
+        "live": plan["live"],
+        "restartRequired": plan["restartRequired"],
         "admission": {"ok": True,
                       "note": "the running gate admitted the release against "
                               "the running manifest"},
@@ -425,7 +489,8 @@ def _plan_apply(arguments: dict) -> dict:
                  "acknowledgeWidening true" if widening["widened"] else
                  f"call revl_update_apply with planHash {plan_hash}"),
         "note": "nothing was applied; the plan is bound to the running "
-                "generation and the staged bytes",
+                "generation and composition, to the staged bytes, and to this "
+                "server session",
     }
 
 
@@ -444,12 +509,14 @@ def _apply_plan(arguments: dict) -> dict:
             "nothing is running now; the plan was made against a loaded "
             "composition", fix="plan the update again"))
     generation = _generation()
-    if generation != plan["generation"]:
+    if (generation != plan["generation"]
+            or plan.get("sessionId") != _SESSION_ID
+            or _ir_digest(server.SESSION.ir) != plan["irDigest"]):
         return _refusal(UpdateError(
             "UPDATE_PLAN_STALE",
-            f"the plan was made against generation {plan['generation']}, the "
-            f"running generation is {generation}; what would be applied is no "
-            "longer what was planned",
+            f"the plan was made against generation {plan['generation']} of a "
+            f"different running composition (now generation {generation}); "
+            "what would be applied is no longer what was planned",
             fix="call revl_update_apply with no planHash to plan against the "
                 "running generation"), stalePlan=plan_hash)
     if plan["widening"]["widened"] and not arguments.get("acknowledgeWidening"):
@@ -462,19 +529,34 @@ def _apply_plan(arguments: dict) -> dict:
                     "irreversible reach; apply needs that acknowledged",
                     fix="call revl_update_apply again with the same planHash "
                         "and acknowledgeWidening true").as_dict()}
+    # The plan binds the bytes, not just the path: a staged file edited after
+    # the plan was admitted is refused here, never swapped.
+    try:
+        current_digest, _entries = _files_digest(plan["files"])
+    except UpdateError as error:
+        return _refusal(error)
+    if current_digest != plan["sourcesDigest"]:
+        return _refusal(UpdateError(
+            "UPDATE_PLAN_TAMPERED",
+            "the staged release changed after it was admitted and planned; "
+            "what would be applied is not what the gate admitted",
+            fix="discard the staging and plan the verified release again"),
+            stalePlan=plan_hash)
     before_generation = generation
     before_keys = _provided_keys()
     swap = server._tool_swap({"files": plan["files"],
                               "replacing": plan["replacing"]})
     if not swap.get("ok"):
-        journal.append("refusal", stage="swap", planHash=plan_hash)
+        journal.append("refusal", stage="swap", planHash=plan_hash,
+                       sessionId=_SESSION_ID)
         return {"ok": False, "applied": False, "stoppedAt": "swap",
                 "swap": swap,
                 "note": "the swap was refused; the running composition is "
                         "untouched"}
     after_generation = _generation()
     after_keys = _provided_keys()
-    healthy = bool(after_keys) and set(before_keys).issubset(set(after_keys))
+    healthy = (server.SESSION.loaded
+               and set(before_keys).issubset(set(after_keys)))
     if not healthy:
         reverted = False
         try:
@@ -484,6 +566,7 @@ def _apply_plan(arguments: dict) -> dict:
             reverted = False
         journal.append("auto-revert", planHash=plan_hash,
                        release=plan["release"], reverted=reverted,
+                       sessionId=_SESSION_ID,
                        before=before_generation, after=after_generation)
         return {"ok": False, "applied": False, "autoReverted": reverted,
                 "stoppedAt": "health",
@@ -495,6 +578,7 @@ def _apply_plan(arguments: dict) -> dict:
     with _LOCK:
         _PLANS.pop(plan_hash, None)
     journal.append("apply", planHash=plan_hash, **plan["release"],
+                   sessionId=_SESSION_ID,
                    generationBefore=before_generation,
                    generationAfter=after_generation)
     return {
@@ -505,6 +589,8 @@ def _apply_plan(arguments: dict) -> dict:
         "generationBefore": before_generation,
         "generation": after_generation,
         "widening": plan["widening"],
+        "live": plan.get("live"),
+        "restartRequired": plan.get("restartRequired"),
         "providedKeys": after_keys,
         "note": "the release is the running generation; the previous "
                 "generation is retained, so revl_update_rollback can restore it",
@@ -532,14 +618,20 @@ def _tool_update_rollback(arguments: dict) -> dict:
     server = _server()
     cfg = _CONFIG
     journal = _journal(cfg)
-    record = journal.last("apply")
+    record = None
+    for entry in reversed(journal.read()):
+        if (entry.get("event") == "apply"
+                and entry.get("sessionId") == _SESSION_ID):
+            record = entry
+            break
     if record is None:
         return _refusal(UpdateError(
             "UPDATE_NOTHING_APPLIED",
-            "the update journal records no applied release, so there is no "
-            "release generation to roll back to",
+            "this server session has applied no release recorded in this "
+            "update home, so there is no release generation to roll back to",
             fix="apply a release first, or use revl_undo for a hand-made "
-                "generation"))
+                "generation. A plan or apply recorded by another server "
+                "session is not this session's to undo"))
     target = record.get("generationBefore")
     if not server.SESSION.loaded:
         return _refusal(UpdateError(
@@ -558,6 +650,7 @@ def _tool_update_rollback(arguments: dict) -> dict:
     journal.append("rollback", release={
         key: record.get(key) for key in
         ("project", "version", "tag", "commit", "manifestDigest")},
+        sessionId=_SESSION_ID,
         generationBefore=record.get("generationAfter"),
         generationTo=target)
     return {
