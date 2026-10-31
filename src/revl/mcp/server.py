@@ -4828,6 +4828,7 @@ def _tool_plan(arguments: dict) -> dict:
     # issue #1707: the class diff reads the resulting composition; the IR
     # itself is not part of a plan's answer.
     resulting = result.pop("resultingIR", None)
+    result.pop("candidateHostBodies", None)
     if resulting is not None:
         result.update(_effect_classes.report(resulting, running, against=True))
     # component leases (item 61): advise — never block — when this swap would
