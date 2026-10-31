@@ -57,11 +57,14 @@ def test_stamp_is_the_expected_bumped_counter():
     # The stamp is a monotonic counter bumped once per public stdlib change
     # (add/remove/signature). Pinning the literal here makes every future bump
     # DELIBERATE: a public addition that forgets to bump reds this test instead
-    # of shipping a stale stamp. It is "10" as of `stdlib/jose.rvl` (local
+    # of shipping a stale stamp. It is "13" as of `stdlib/jose.rvl` (local
     # JWT/JWKS verification: `JoseError`, `JwsHeader`, `Claims`, `VerifyOptions`,
     # `Jwk`, `Verified`, `parse_jwks`, `header_of`, `claims_of`, `check_claims`,
-    # `select_key`, `verify`); "9" was the item-459 F2 insertion-site source map
-    # on `stdlib/template.rvl` (`Pos`, `Segment`, `Rendered`, `position_at`,
+    # `select_key`, `verify`); "12" was `stdlib/net.rvl` (the py-tier outbound
+    # HTTPS client, issue #2997); "11" was `stdlib/kdf.rvl` (the pure
+    # PBKDF2-HMAC-SHA256 password KDF); "10" was `stdlib/base64.rvl` (RFC 4648
+    # base64url); "9" was the item-459 F2 insertion-site source map on
+    # `stdlib/template.rvl` (`Pos`, `Segment`, `Rendered`, `position_at`,
     # `render_mapped`, `source_map`); "8" was the `header_value`
     # case-insensitivity fix and the new `pub fn header_name_eq` on
     # `stdlib/http.rvl`; "7" was `stdlib/framing.rvl`
@@ -71,8 +74,8 @@ def test_stamp_is_the_expected_bumped_counter():
     # that landed without a bump (fs.rvl is_dir/lexists/resolve_within,
     # shell.rvl plan_op_name). Raise it here in lock-step with the next public
     # change.
-    assert EXPECTED_STDLIB_VERSION == "10"
-    assert read_stamp(STDLIB) == "10"
+    assert EXPECTED_STDLIB_VERSION == "13"
+    assert read_stamp(STDLIB) == "13"
 
 
 def test_repo_stamp_matches_expected():

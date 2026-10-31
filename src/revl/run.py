@@ -3076,6 +3076,13 @@ def run_command(args, hold_once: bool = False) -> int:
             f"{type(exc).__name__}: {exc}\n"
             f"       reinstall it with its dependencies:  sh {backend_dir / 'setup.sh'}",
             lifecycle.BOOT, code=3)
+    # Trusted stdlib support modules (`revl_net` and the other py support
+    # modules) are imported HERE, while the backend loader path still exists:
+    # their `@py` bodies execute at call time, after the path is removed below,
+    # and the body's `import` then resolves from sys.modules
+    # (src/revl/stdlib_hosts.py).
+    from .stdlib_hosts import preload_stdlib_host_modules  # noqa: PLC0415
+    preload_stdlib_host_modules()
     # The backend directory is a trusted loader path, not an import capability
     # for generated user bodies. Keep the already-loaded runtime modules alive,
     # but remove the ambient path before any generated module is executed.
