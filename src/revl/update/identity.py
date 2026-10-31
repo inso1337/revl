@@ -104,3 +104,39 @@ def compare_identity(manifest, identity: dict | None = None) -> dict:
         "restartRequired": bool(manifest.host_changes) or not live,
         "manifestDigest": manifest.digest(),
     }
+
+
+def _tag_fallback_comparison(resolved, identity: dict, channel: str) -> dict:
+    current = Version.parse_or_none(identity.get("version"))
+    latest = Version.parse(resolved.version)
+    available = current is not None and latest > current
+    return {
+        "current": identity,
+        "latest": {"version": resolved.version, "tag": resolved.tag,
+                   "commit": resolved.commit, "channel": channel},
+        "updateAvailable": available,
+        "bump": bump_kind(current, latest) if available else "none",
+        "compatible": None,
+        "requirements": [],
+        "live": False,
+        "hostChanges": True,
+        "restartRequired": True,
+        "manifestDigest": None,
+        "tagFallback": True,
+    }
+
+
+def compare_release(resolved, identity: dict | None = None,
+                    channel: str = "stable") -> dict:
+    """Compare a resolved release with the running identity.
+
+    A tag fallback carries no compatibility statement; it is reported as
+    compatible ``None`` and never live, which is the honest answer rather than
+    a guessed yes.
+    """
+    identity = identity or current_identity()
+    if resolved.manifest is None:
+        return _tag_fallback_comparison(resolved, identity, channel)
+    report = compare_identity(resolved.manifest, identity)
+    report["tagFallback"] = False
+    return report

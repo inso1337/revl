@@ -1,8 +1,9 @@
 # Updates: check a release, verify it, apply it through the gate
 
-**Status:** language side implemented (`revl update check|fetch|status`). The
-operator MCP surface (`revl_update_apply`) follows in the MCP slice of the
-same work; this page states the boundary it inherits.
+**Status:** implemented: `revl update check|fetch|status` on the CLI, and
+`revl_update_check`, `revl_update_apply`, `revl_update_status` and
+`revl_update_rollback` on `revl mcp serve` when the operator starts it with
+`--update`.
 
 Revl systems already know how to replace a running component: the admission
 gate, the swap, the generation history and the undo are the machinery a
@@ -89,6 +90,31 @@ journal, which is an append-only JSONL file in the update home.
 
 `--manifest PATH_OR_URL` bypasses the feed and reads that manifest directly.
 The same validation runs, so a mirror document is not a second code path.
+
+## Applying a release to a running composition
+
+The operator surface is `revl mcp serve --update --update-repo OWNER/NAME`
+(the repository, channel, token environment, staging home and an API mirror
+are all operator flags; a caller cannot name them). Four verbs:
+
+1. `revl_update_check` reads the feed and compares identities. Nothing is
+   fetched or compiled.
+2. `revl_update_apply` with no `planHash` stages the release, hashes the
+   staged bytes, compiles and admits the release against the running
+   manifest, plans the swap and returns a `planHash`. Nothing is mutated.
+3. `revl_update_apply` with that `planHash` refuses if the running generation
+   moved, requires `acknowledgeWidening` when the release adds or widens the
+   composition's irreversible reach, swaps the release in and verifies the
+   successor serves the running keys. A successor that does not is reverted
+   automatically.
+4. `revl_update_rollback` returns to the generation before the last applied
+   release, through the same admitted undo any generation change uses.
+
+A release with no manifest (tag fallback) is never applied unless the
+operator explicitly enabled `--update-trust-tags`: it has no declared sha256.
+A release that is not a composition source tree (an installer, a toolchain
+sdist) is refused as a live apply with `UPDATE_NOT_COMPOSITION`; the CLI can
+still check and stage it.
 
 ## Trust boundary
 

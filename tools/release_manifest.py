@@ -21,7 +21,6 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -57,17 +56,17 @@ def _commit(root: Path, explicit: str | None) -> str:
         if not re.fullmatch(r"[0-9a-f]{40}", commit):
             raise SystemExit(f"error: --commit {explicit!r} is not a 40 character sha")
         return commit
-    try:
-        result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                                capture_output=True, text=True, timeout=30,
-                                check=False)
-    except (OSError, subprocess.SubprocessError):
-        result = None
-    if result is None or result.returncode != 0:
+    # One definition of "the commit this tree is at": revl.cert's helper is the
+    # certificate surface's answer to the same question, and two copies of a
+    # git invocation are how the two answers drift.
+    from revl.cert import tree_commit  # noqa: PLC0415
+
+    found = tree_commit(root)
+    if found is None:
         raise SystemExit(
             "error: cannot read the release commit; pass --commit (a release "
             "manifest always names the tree it was built from)")
-    return result.stdout.strip().lower()
+    return found.lower()
 
 
 def _compat(min_python: str | None) -> dict:

@@ -82,6 +82,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
 from . import unknownargs as _unknownargs
+from . import update_tools as _update_tools
 from . import artifacts as _artifacts
 from . import fillspec
 from . import draft as _draft
@@ -7710,6 +7711,13 @@ del _BY_NAME
 for _tool in TOOLS:
     _tool["inputSchema"]["additionalProperties"] = False
 del _tool
+# the operator update surface (docs/updates.md): check a release feed and
+# apply a verified release through the same admission and swap gates the
+# authoring verbs use. Off unless the operator started the server with
+# `--update`; the verbs are appended additively, like the query surface, so the
+# core verb literal above stays owned by the authoring loop.
+TOOLS.extend(_update_tools.TOOLS)
+
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 #: issues #2239/#2532: each verb's declared arguments, checked once at dispatch
 _SCHEMAS = {tool["name"]: tool.get("inputSchema") for tool in TOOLS}

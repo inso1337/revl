@@ -1288,6 +1288,48 @@ def build_parser() -> argparse.ArgumentParser:
                                 "interpreter that can import revl and cordis, and "
                                 "the module invocation) and exit without serving "
                                 "(issue #2281)")
+    # the operator update surface (docs/updates.md): off unless enabled here.
+    # The flags are the grant: a caller over the transport cannot point the
+    # session at another repository, token or staging directory.
+    mcp_serve.add_argument("--update", action="store_true",
+                           help="enable the operator update surface: "
+                                "revl_update_check/apply/status/rollback may "
+                                "read the configured release feed and apply a "
+                                "verified release to the running composition")
+    mcp_serve.add_argument("--update-repo", default="inso1337/revl",
+                           metavar="OWNER/NAME",
+                           help="the release feed repository (default "
+                                "inso1337/revl)")
+    mcp_serve.add_argument("--update-project", default=None, metavar="NAME",
+                           help="the project name the release manifest must "
+                                "declare (default: the feed repository name)")
+    mcp_serve.add_argument("--update-channel", default="stable",
+                           choices=("stable", "prerelease"),
+                           help="release channel (default stable)")
+    mcp_serve.add_argument("--update-token-env", default="REVL_UPDATE_TOKEN",
+                           metavar="VAR",
+                           help="the environment variable holding a GitHub token "
+                                "for a private feed (default "
+                                "REVL_UPDATE_TOKEN)")
+    mcp_serve.add_argument("--update-home", default=None, metavar="DIR",
+                           help="update home for staged releases and the "
+                                "journal (default $REVL_UPDATE_HOME or "
+                                "~/.revl/updates)")
+    mcp_serve.add_argument("--update-api-base", default=None, metavar="URL",
+                           help="GitHub REST base for a mirror (default "
+                                "$REVL_UPDATE_API_BASE or "
+                                "https://api.github.com)")
+    mcp_serve.add_argument("--update-trust-tags", action="store_true",
+                           help="accept a release with no manifest (tag "
+                                "fallback) as applicable; such a release has no "
+                                "declared sha256 and is never applied "
+                                "automatically")
+    mcp_serve.add_argument("--update-replacing", action="append", default=[],
+                           metavar="COMPONENT",
+                           help="a provider the release takes over, repeated "
+                                "for each (the same `replacing` a provider "
+                                "swap needs; omit for a whole-composition "
+                                "release)")
     mcp_serve.add_argument("--all-tools", action="store_true",
                            help="advertise every verb in tools/list, not only the "
                                 "core tier plus revl_verbs (also: "

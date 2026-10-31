@@ -20,9 +20,8 @@ import sys
 from .errors import UpdateError
 from .feed import resolve_release
 from .fetch import find_staged, stage_release, update_home
-from .identity import compare_identity, current_identity
+from .identity import compare_release, current_identity
 from .journal import Journal
-from .semver import Version, bump_kind
 
 DEFAULT_REPO = "inso1337/revl"
 DEFAULT_CHANNEL = "stable"
@@ -55,35 +54,6 @@ def _resolve(args):
         token_env=token_env, api_base_override=getattr(args, "api_base", None),
         manifest_source=getattr(args, "manifest", None),
         timeout=float(getattr(args, "timeout", 20.0)))
-
-
-def _tag_fallback_comparison(resolved, identity: dict,
-                             channel: str) -> dict:
-    current = Version.parse_or_none(identity.get("version"))
-    latest = Version.parse(resolved.version)
-    available = current is not None and latest > current
-    return {
-        "current": identity,
-        "latest": {"version": resolved.version, "tag": resolved.tag,
-                   "commit": resolved.commit, "channel": channel},
-        "updateAvailable": available,
-        "bump": bump_kind(current, latest) if available else "none",
-        "compatible": None,
-        "requirements": [],
-        "live": False,
-        "hostChanges": True,
-        "restartRequired": True,
-        "manifestDigest": None,
-        "tagFallback": True,
-    }
-
-
-def _comparison(resolved, identity: dict, channel: str) -> dict:
-    if resolved.manifest is None:
-        return _tag_fallback_comparison(resolved, identity, channel)
-    report = compare_identity(resolved.manifest, identity)
-    report["tagFallback"] = False
-    return report
 
 
 def _error(args, error: UpdateError) -> int:
@@ -131,7 +101,7 @@ def _check(args) -> int:
     report = {
         "ok": True,
         "feed": {"repo": resolved.repo, "channel": _channel(args)},
-        **_comparison(resolved, identity, _channel(args)),
+        **compare_release(resolved, identity, _channel(args)),
         "release": resolved.as_report(),
     }
     if getattr(args, "json", False):

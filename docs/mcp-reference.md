@@ -385,6 +385,10 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
 | `revl_verbs` | no | yes | - |
+| `revl_update_check` | yes | no | - |
+| `revl_update_apply` | no | yes | - |
+| `revl_update_status` | yes | no | - |
+| `revl_update_rollback` | no | yes | - |
 <!-- docgen:mcp-verbs end -->
 
 ---
@@ -2464,6 +2468,61 @@ for that run.
   JSONL, for the lifecycle); `timeline`.
 
 ---
+
+## Update a running composition
+
+The operator update surface (docs/updates.md). Off unless the server was
+started with `--update` and a feed; the flags are the grant, so a caller over
+the transport cannot point the session at another repository, token or staging
+directory. The release is verified against its manifest, compiled and admitted
+against the running manifest, planned as a swap, and only then applied. The
+source of a release with a valid manifest is operator-sanctioned code and
+compiles as files, exactly as the operator's own checkout would.
+
+### `revl_update_check`
+
+Check the configured release feed for a newer release and compare it with the
+running toolchain. Reports the release, the semver bump, whether the release
+declares itself live-safe (`live`), whether it changes host bytes
+(`hostChanges`), and whether this host satisfies the declared gate, language
+and Python requirements. Reads only: fetches no artifact and compiles
+nothing. `applyAvailable` says whether a live apply is possible right now
+(a composition is loaded and the release carries a `source` artifact).
+
+- Inputs: none. The feed is the server's configuration.
+
+### `revl_update_apply`
+
+Apply a verified release to the running composition, or rehearse that apply.
+With no `planHash` it stages the newest release, compiles and admits it
+against the running manifest, plans the swap and returns a server-side
+`planHash`; nothing is mutated. With `planHash` it refuses a stale plan
+(another generation is running), requires `acknowledgeWidening` when the
+release adds or widens the composition's irreversible reach, swaps the
+release in, and verifies the successor serves the running keys. A successor
+that does not is reverted automatically and the answer says so.
+
+- Inputs: `planHash` (the plan to apply), `force` (plan even when already up
+  to date), `acknowledgeWidening` (accept the reported widening).
+
+### `revl_update_status`
+
+What the update surface knows: whether it is enabled, the feed
+configuration, the running identity and generation, the staged releases under
+the update home, the plans held server side, and the tail of the journal.
+Answers even when updates are disabled, so an operator can see why a verb
+refuses.
+
+- Inputs: none.
+
+### `revl_update_rollback`
+
+Roll the running composition back to the generation that ran before the last
+applied release, through the same admitted undo a hand-made generation uses.
+Reads the journal for the target generation and refuses by name when no
+release was applied or the target has aged out of the bounded history.
+
+- Inputs: none.
 
 ## See also
 
