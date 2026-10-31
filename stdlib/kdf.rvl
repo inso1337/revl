@@ -1,4 +1,4 @@
-// The revl stdlib KDF module — PBKDF2-HMAC-SHA256 (RFC 8018), a classified
+// The revl stdlib KDF module: PBKDF2-HMAC-SHA256 (RFC 8018), a classified
 // crypto PRIMITIVE for password storage.
 //
 // ---------------------------------------------------------------- why
@@ -45,10 +45,10 @@
 // count travels in data (a stored row, a migration, a request-time rehash), so a
 // mis-parameterized value must be a typed refusal, not a multi-second stall in a
 // served process. The bound is a sanity/DoS limit, NOT a recommended strength:
-// the strength is the caller's stored value, and a deployed 600k default sits an
-// order of magnitude below the cap so a policy rehash has room.
+// the strength is the caller's stored value, and a deployed 600k default sits
+// about 3.3 times below the cap so a policy rehash has room.
 //
-// --------------------------------------- validation, as named errors
+// ---------------------------------- validation, at the boundary
 // Every refusal is one `KdfError = { code, message }`, with a stable machine
 // `code` (the same split `ApiError`/`FsError` make) and a human message that
 // carries the offending value and the bound. Checks run in a fixed order, and
@@ -58,6 +58,17 @@
 //   1. `iterations_out_of_range`  iterations must be 1..max_iterations()
 //   2. `length_out_of_range`      length must be 1..max_length()
 //   3. `salt_empty`               the salt must not be empty
+//
+// The BOUNDARY EXTERN validates its own inputs and returns the same typed
+// error, so both doors answer identically: the public wrapper `pbkdf2_sha256`
+// and the extern. That is deliberate. The import site refuses a NAMED import of
+// the non-pub extern (`use "stdlib/kdf.rvl" { pbkdf2_sha256_raw }` is refused as
+// module-private), but this compiler still resolves a BARE unqualified call to
+// it from a consuming module (issue #3004), so the bound lives inside the
+// extern: no caller, named or bare, can execute above max_iterations() or with
+// an invalid parameter. The cap literals appear in each host body because a body
+// cannot call revl code; `tests/test_kdf_stdlib.py` pins both bodies to the
+// bounds the public functions declare.
 //
 // ----------------------------------------- verification uses `ct_equal`
 // `pbkdf2_sha256_verify` re-derives the digest and compares it with
@@ -72,17 +83,17 @@
 //
 // ------------------------------------------------------------------ tiers
 // py and ts carry bodies:
-//   * py  — `hashlib.pbkdf2_hmac`, the reference. Both the digest and the
-//           UTF-8 encoding agree with the published vectors in
-//           `tests/test_kdf_stdlib.py`.
-//   * ts  — node's `crypto.pbkdf2Sync` over the UTF-8 bytes, reached through
-//           `process.getBuiltinModule("node:crypto")` (the emitted-ts runtime
-//           contract's way to a node builtin, never a bare import), and the hex
-//           rendered byte-by-byte so it matches py's lower-case spelling.
+//   * py:  `hashlib.pbkdf2_hmac`, the reference. Both the digest and the
+//          UTF-8 encoding agree with the published vectors in
+//          `tests/test_kdf_stdlib.py`.
+//   * ts:  node's `crypto.pbkdf2Sync` over the UTF-8 bytes, reached through
+//          `process.getBuiltinModule("node:crypto")` (the emitted-ts runtime
+//          contract's way to a node builtin, never a bare import), and the hex
+//          rendered byte-by-byte so it matches py's lower-case spelling.
 //   * other tiers REFUSE BY NAME at emit time: the host body names the missing
-//           backend (`pbkdf2_sha256_raw` has no @rs body, and so on), rather
-//           than silently producing a different answer. A tier that later
-//           gains a KDF facility adds its own body here.
+//          backend (`pbkdf2_sha256_raw` has no @rs body, and so on), rather
+//          than silently producing a different answer. A tier that later
+//          gains a KDF facility adds its own body here.
 //
 // ------------------------------------------------------------ what to import
 //   use "stdlib/kdf.rvl" { pbkdf2_sha256, pbkdf2_sha256_verify }
@@ -105,8 +116,8 @@ use "stdlib/crypto.rvl" { ct_equal }
 
 // The largest iteration count this module will derive. A stored count above
 // this is refused as `iterations_out_of_range` instead of being executed: the
-// cap bounds one call's work in a served process, and sits far above any
-// deployed PBKDF2-HMAC-SHA256 policy (a 600k default is common).
+// cap bounds one call's work in a served process, and sits about 3.3 times
+// above a common 600k default.
 pub fn max_iterations() -> Int {
   return 2000000
 }
@@ -129,30 +140,10 @@ pub type KdfError = { code: Str, message: Str }
 // `iterations` rounds, producing `length` bytes as lower-case hex (2*length
 // chars). The salt and the password are taken as their UTF-8 bytes. Parameters
 // are the CALLER's, never a module default; invalid ones are the named `Err`
-// above, checked in the documented order.
+// above, checked in the documented order at the boundary.
 pub fn pbkdf2_sha256(password: Str, salt: Str, iterations: Int, length: Int)
 -> Result[Str, KdfError] {
-  let cap = max_iterations()
-  if (iterations < 1 || iterations > cap) {
-    return Err({
-        code: "iterations_out_of_range",
-        message: "iterations must be 1.." + cap.to_str() + ", got " + iterations.to_str(),
-    })
-  }
-  let width = max_length()
-  if (length < 1 || length > width) {
-    return Err({
-        code: "length_out_of_range",
-        message: "length must be 1.." + width.to_str() + " bytes, got " + length.to_str(),
-    })
-  }
-  if (salt.length() == 0) {
-    return Err({
-        code: "salt_empty",
-        message: "the salt must not be empty; draw one with random_token(16)",
-    })
-  }
-  return Ok(pbkdf2_sha256_raw(password, salt, iterations, length))
+  return pbkdf2_sha256_raw(password, salt, iterations, length)
 }
 
 // Re-derive `pbkdf2_sha256(password, salt, iterations, length)` and compare it
@@ -171,30 +162,76 @@ pub fn pbkdf2_sha256_verify(password: Str, salt: Str, iterations: Int,
 
 // ------------------------------------------------------------- the host body
 
-// The single boundary crossing, validated by `pbkdf2_sha256` above before it is
-// reached. NOT public: the wrapper is the module's door, so a caller cannot
-// bypass the bounds or the error spelling. Deterministic and effect-free, so the
-// extern is `pure`, exactly like the hash primitives in `stdlib/crypto.rvl`.
+// The boundary crossing. Non-pub, so a NAMED import is refused; a bare
+// unqualified call still resolves to it today (issue #3004), which is exactly
+// why the extern VALIDATES ITS OWN INPUTS and returns the typed error instead of
+// trusting any caller. Deterministic and effect-free, so the extern is `pure`,
+// exactly like the hash primitives in `stdlib/crypto.rvl`.
 extern pure fn pbkdf2_sha256_raw(password: Str, salt: Str, iterations: Int,
-  length: Int) -> Str
+  length: Int) -> Result[Str, KdfError]
 = @py {
     import hashlib
-    return hashlib.pbkdf2_hmac(
+
+    MAX_ITERATIONS = 2000000
+    MAX_LENGTH = 64
+
+    if iterations < 1 or iterations > MAX_ITERATIONS:
+        return Err({
+            "code": "iterations_out_of_range",
+            "message": "iterations must be 1.." + str(MAX_ITERATIONS)
+                       + ", got " + str(iterations),
+        })
+    if length < 1 or length > MAX_LENGTH:
+        return Err({
+            "code": "length_out_of_range",
+            "message": "length must be 1.." + str(MAX_LENGTH)
+                       + " bytes, got " + str(length),
+        })
+    if not salt:
+        return Err({
+            "code": "salt_empty",
+            "message": "the salt must not be empty; draw one with random_token(16)",
+        })
+    return Ok(hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
         iterations,
         length,
-    ).hex()
+    ).hex())
   }
 = @ts {
     // node:crypto via the emitted-ts runtime contract (process.getBuiltinModule,
-    // never a bare import). revl `Int` is a JS bigint on the ts backend, so the
-    // two numeric parameters are widened to JS numbers before the call; the
-    // wrapper's bounds keep them well inside 2^31.
-    const nodeCrypto = (process as any).getBuiltinModule("node:crypto");
+    // never a bare import). The checks below are the SAME three rules, in the
+    // same order, as the py body: the boundary validates its own inputs, so a
+    // bare-name call cannot reach pbkdf2Sync with an out-of-bound value. revl
+    // `Int` is a JS bigint on the ts backend, so the numeric parameters are
+    // widened once and the original bigint is used only in the message.
+    const MAX_ITERATIONS = 2000000;
+    const MAX_LENGTH = 64;
     const rounds = Number(iterations);
     const width = Number(length);
+    if (rounds < 1 || rounds > MAX_ITERATIONS) {
+      return { kind: "Err", value: {
+        code: "iterations_out_of_range",
+        message: "iterations must be 1.." + MAX_ITERATIONS
+                 + ", got " + String(iterations),
+      } };
+    }
+    if (width < 1 || width > MAX_LENGTH) {
+      return { kind: "Err", value: {
+        code: "length_out_of_range",
+        message: "length must be 1.." + MAX_LENGTH
+                 + " bytes, got " + String(length),
+      } };
+    }
+    if (salt.length === 0) {
+      return { kind: "Err", value: {
+        code: "salt_empty",
+        message: "the salt must not be empty; draw one with random_token(16)",
+      } };
+    }
+    const nodeCrypto = (process as any).getBuiltinModule("node:crypto");
     const digest: Uint8Array = nodeCrypto.pbkdf2Sync(
       new TextEncoder().encode(password),
       new TextEncoder().encode(salt),
@@ -204,5 +241,5 @@ extern pure fn pbkdf2_sha256_raw(password: Str, salt: Str, iterations: Int,
     );
     let hex = "";
     for (const byte of digest) hex += byte.toString(16).padStart(2, "0");
-    return hex;
+    return { kind: "Ok", value: hex };
   }

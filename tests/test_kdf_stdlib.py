@@ -8,8 +8,12 @@ ONCE, as a classified `pure` kit.
 
 Checked here:
   * the module imports through `use`; its one extern reaches the IR as `pure`
-    with py + ts bodies (the module's tier bar), and the wrapper is the only door
-    (the raw extern is not `pub`);
+    with py + ts bodies (the module's tier bar), and it is NON-PUB: a named
+    import is refused;
+  * module privacy is not enforced on the bare-reference path (revl issue
+    #3004), so a consumer importing only `KdfError` can still call
+    `pbkdf2_sha256_raw` by bare name: the boundary extern validates its own
+    inputs and those bare-name calls above the cap are REFUSED, not executed;
   * the bound constants are pinned (`max_iterations` 2000000, `max_length` 64),
     so a future policy change is a deliberate edit rather than a silent one;
   * the py tier EXECUTES the published PBKDF2-HMAC-SHA256 vectors and the
@@ -203,6 +207,29 @@ test "verify passes invalid parameters through as the named errors" {
                       "iterations_out_of_range")
   assert verify_codes(pbkdf2_sha256_verify("p", "", 1, 32, "00"), "salt_empty")
 }
+
+// ------------------------------------- the boundary cannot be bypassed
+// Module privacy is not enforced for BARE references today (revl issue #3004):
+// a consumer that imports only `KdfError` can still call the non-pub extern by
+// bare name. These tests drive that door, so the boundary itself must refuse.
+
+test "a bare-name raw call above the iteration cap refuses, never executes" {
+  assert code_of(pbkdf2_sha256_raw("p", "s", max_iterations() + 1, 32))
+    == "iterations_out_of_range"
+}
+
+test "a bare-name raw call with an invalid length or empty salt refuses" {
+  assert code_of(pbkdf2_sha256_raw("p", "s", 1, 0)) == "length_out_of_range"
+  assert code_of(pbkdf2_sha256_raw("p", "s", 1, 65)) == "length_out_of_range"
+  assert code_of(pbkdf2_sha256_raw("p", "", 1, 32)) == "salt_empty"
+}
+
+test "a bare-name raw call below the bounds still computes the vector" {
+  assert match pbkdf2_sha256_raw("password", "salt", 1, 32) {
+    Ok(hex) => hex == "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
+    Err(_) => false,
+  }
+}
 """
 
 
@@ -227,11 +254,11 @@ def test_module_file_is_the_documented_surface():
     assert "pub fn max_iterations() -> Int" in text
     assert "pub fn max_length() -> Int" in text
     assert "pub type KdfError = { code: Str, message: Str }" in text
-    # the classification decision is the design: the boundary is `pure`
+    # the classification decision is the design: the boundary is `pure`, and it
+    # returns the same typed error the wrapper does (enforced inside the body)
     assert "extern pure fn pbkdf2_sha256_raw(" in text
+    assert "-> Result[Str, KdfError]" in text
     assert "extern emission" not in text
-    # the raw extern is the wrapper's door only, so no caller can skip the bounds
-    assert "\npub extern" not in text
     # the verify path compares through the kit's constant-time primitive
     assert "Ok(ct_equal(actual, expected_hex))" in text
 
@@ -240,7 +267,7 @@ def test_module_imports_and_the_extern_reaches_the_ir(kdf_ir):
     externs = {e["name"]: e for e in kdf_ir["externs"]}
     raw = externs["pbkdf2_sha256_raw"]
     assert raw["class"] == "pure"
-    assert raw["returns"] == "Str"
+    assert raw["returns"] == "Result[Str, KdfError]"
     assert [p["name"] for p in raw["params"]] == [
         "password", "salt", "iterations", "length"]
     # py + ts are the tier bar; every other tier refuses by name (tested below)
@@ -263,6 +290,48 @@ def test_the_caller_passes_the_parameters_no_module_default():
             "length: Int)") in text
     # the recommended 600k default lives in deployment configuration, not here
     assert "600000" not in text
+
+
+def test_the_boundary_bodies_enforce_the_declared_bounds(kdf_ir):
+    """Both bodies validate the same rules, so neither door trusts the other.
+
+    This is the property the review's repro falsified for the wrapper-only
+    design: a consumer can call the non-pub extern by bare name (issue #3004),
+    so the body itself must carry the three checks and the two bounds.
+    """
+    raw = {e["name"]: e for e in kdf_ir["externs"]}["pbkdf2_sha256_raw"]
+    for tier, body in raw["bodies"].items():
+        assert "MAX_ITERATIONS = 2000000" in body, tier
+        assert "MAX_LENGTH = 64" in body, tier
+        for code in ("iterations_out_of_range", "length_out_of_range",
+                     "salt_empty"):
+            assert code in body, (tier, code)
+
+
+def test_named_import_of_the_boundary_extern_is_refused(tmp_path):
+    """The import site already refuses the non-pub name, and must keep doing so.
+
+    The compiler gap issue #3004 is the BARE-reference path, not this one; this
+    test pins the half that is enforced so a later privacy fix does not silently
+    publish the raw extern.
+    """
+    from revl.errors import RevlError
+
+    d = tmp_path
+    (d / "stdlib").mkdir()
+    shutil.copy(STDLIB, d / "stdlib" / "kdf.rvl")
+    shutil.copy(CRYPTO, d / "stdlib" / "crypto.rvl")
+    consumer = d / "main.rvl"
+    consumer.write_text(
+        'use "stdlib/kdf.rvl" { pbkdf2_sha256_raw }\n'
+        'test "x" { assert true }\n',
+        encoding="utf-8")
+    with pytest.raises(RevlError) as raised:
+        compile_files([str(consumer)])
+    message = str(raised.value)
+    assert "pbkdf2_sha256_raw" in message
+    assert "module-private" in message
+    assert "cannot be imported" in message
 
 
 # ---------------------------------------------------------------- py tier
