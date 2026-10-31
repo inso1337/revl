@@ -20,6 +20,8 @@ from _update_feed_fixture import serve_feed, tar_gz  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp import update_tools  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
+from revl.update.feed import resolve_release  # noqa: E402
+from revl.update.journal import Journal  # noqa: E402
 
 CACHE = """
 service Cache { fn get(key: Str) -> Opt[Str]
@@ -289,3 +291,93 @@ def test_a_plan_does_not_survive_a_different_running_composition(tmp_path):
         assert stale["refusal"]["code"] == "UPDATE_PLAN_STALE"
     finally:
         feed.close()
+
+
+# ------------------------------------------------- widening axes (unit)
+
+def _audit(**overrides):
+    audit = {"boundary": {}, "externs": [], "capability_registers": {},
+             "recovery_surface": [], "cardinality": {}}
+    audit.update(overrides)
+    return audit
+
+
+def test_each_authority_axis_can_widen_on_its_own():
+    base = _audit()
+    crossing = _audit(boundary={"C": {"emissions": ["send.mail"]}})
+    backend = _audit(externs=[{"name": "send", "backends": ["py", "ts"]}])
+    backend_base = _audit(externs=[{"name": "send", "backends": ["py"]}])
+    recovery = _audit(recovery_surface=[{"name": "s", "kind": "effect",
+                                         "register": "keyed"}])
+    registers = _audit(capability_registers={"net": None})
+    registers_base = _audit(capability_registers={"net": "keyed"})
+    cardinality = _audit(cardinality={"C": {"per_capability": {
+        "send.mail": {"kind": "bounded", "bound": 5}}}})
+    cardinality_base = _audit(cardinality={"C": {"per_capability": {
+        "send.mail": {"kind": "bounded", "bound": 2}}}})
+
+    def widened(before, after):
+        return update_tools._widening_from_audits(before, after)["widened"]
+
+    assert widened(base, base) is False
+    assert widened(base, crossing) is True
+    assert widened(backend_base, backend) is True
+    assert widened(recovery, base) is True
+    assert widened(registers_base, registers) is True
+    assert widened(cardinality_base, cardinality) is True
+
+
+def test_an_empty_key_set_is_a_healthy_successor():
+    assert update_tools._keys_served([], []) is True
+    assert update_tools._keys_served(["cache"], ["cache", "extra"]) is True
+    assert update_tools._keys_served(["cache"], []) is False
+
+
+def test_the_token_is_never_sent_over_cleartext_off_loopback(monkeypatch):
+    from revl.update import feed as feed_module
+
+    monkeypatch.setattr(feed_module, "_ACTIVE_API_HOST", "127.0.0.1")
+    assert feed_module.token_host_allowed("https://github.com/a") is True
+    assert feed_module.token_host_allowed("http://127.0.0.1:5555/a") is True
+    assert feed_module.token_host_allowed("http://github.com/a") is False
+    assert feed_module.token_host_allowed("http://localhost:5555/a") is True
+
+
+def test_rollback_ignores_an_apply_recorded_by_another_session(tmp_path):
+    update_tools.configure(enabled=True, home=str(tmp_path))
+    journal = Journal(str(tmp_path))
+    journal.append("apply", sessionId="another-server:123", project="app",
+                   version="9.9.9", generationBefore=1, generationAfter=2)
+    payload = _call("revl_update_rollback", {})
+    assert payload["ok"] is False
+    assert payload["refusal"]["code"] == "UPDATE_NOTHING_APPLIED"
+
+
+def test_a_tag_fallback_staging_is_not_reused_for_a_manifest(tmp_path):
+    tag_feed = serve_feed(tag_only=True, version="9.9.9")
+    try:
+        tag_release = resolve_release("owner/app",
+                                      api_base_override=tag_feed.base_url)
+        cfg = {"home": str(tmp_path), "trust_tags": True,
+               "api_base": tag_feed.base_url, "token_env": None}
+        tag_staged, refusal = update_tools._stage_for_apply(
+            tag_release, cfg, Journal(str(tmp_path)))
+        assert refusal is None and tag_staged.tag_fallback is True
+        manifest_feed = serve_feed(
+            version="9.9.9",
+            artifact_bytes=tar_gz({"cache.rvl": CACHE_V2.encode()},
+                                  top="app-9.9.9"))
+        try:
+            manifest_release = resolve_release(
+                "owner/app", api_base_override=manifest_feed.base_url)
+            cfg["api_base"] = manifest_feed.base_url
+            staged, refusal = update_tools._stage_for_apply(
+                manifest_release, cfg, Journal(str(tmp_path)))
+        finally:
+            manifest_feed.close()
+    finally:
+        tag_feed.close()
+    assert refusal is None
+    assert staged.tag_fallback is False
+    assert staged.directory != tag_staged.directory
+    assert staged.digest == manifest_release.manifest.artifacts[0].sha256

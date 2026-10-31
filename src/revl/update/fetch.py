@@ -421,8 +421,10 @@ def find_staged(home_dir: str | os.PathLike | None = None,
             continue
     def _order(release: "StagedRelease") -> tuple:
         parsed = Version.parse_or_none(release.version)
-        return (release.project,
-                (0, parsed) if parsed is not None else (1, Version.parse("0.0.0")))
+        # newest first; a version this updater cannot parse sorts last, never
+        # first, because a corrupt provenance must not outrank a real one.
+        return (release.project, 1 if parsed is not None else 0,
+                parsed if parsed is not None else Version.parse("0.0.0"))
 
     found.sort(key=_order, reverse=True)
     return found

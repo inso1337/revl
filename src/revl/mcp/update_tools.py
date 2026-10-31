@@ -176,37 +176,25 @@ def _plan_hash(binding: dict) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _widening(old_ir: dict, files: list[str]) -> dict:
-    """Every authority axis the release widens, not only its crossings.
+def _widening_from_audits(before: dict, after: dict) -> dict:
+    """Every authority axis that widened between two audits.
 
     `audit_diff` carries seven differs: the crossing set and its reach,
     per-emission capability scopes, host backends, recovery inverses,
     capability registers and emission cardinality. A release can widen any of
     them while adding no crossing, so all of them feed the acknowledgement
-    decision. A comparison that cannot be computed is reported as widened: an
-    apply pends rather than proceeding on a guess.
+    decision.
     """
-    from ..audit_diff import (audit_report, diff_backends,  # noqa: PLC0415
+    from ..audit_diff import (diff_backends,  # noqa: PLC0415
                               diff_capability_scopes, diff_cardinality,
                               diff_recovery, diff_registers, evaluate)
-    from .server import compile_under_authoring  # noqa: PLC0415
 
-    try:
-        # The same compiler door every verb uses. Release sources are files,
-        # so they compile as operator-sanctioned code, exactly as the admit
-        # and swap stages above compiled them.
-        candidate_ir = compile_under_authoring(None, list(files))
-        before = audit_report(old_ir)
-        after = audit_report(candidate_ir)
-        drift = evaluate(before, after)
-        scopes = diff_capability_scopes(before, after)
-        backends = diff_backends(before, after)
-        recovery = diff_recovery(before, after)
-        registers = diff_registers(before, after)
-        cardinality = diff_cardinality(before, after)
-    except Exception as error:  # noqa: BLE001 - fail closed, name the reason
-        return {"widened": True, "unknown":
-                f"the audit diff could not be computed: {error}"}
+    drift = evaluate(before, after)
+    scopes = diff_capability_scopes(before, after)
+    backends = diff_backends(before, after)
+    recovery = diff_recovery(before, after)
+    registers = diff_registers(before, after)
+    cardinality = diff_cardinality(before, after)
     buckets = {
         "added": list(drift["added"]),
         "reachWeakened": list(drift["reach_weakened"]),
@@ -218,6 +206,33 @@ def _widening(old_ir: dict, files: list[str]) -> dict:
         "cardinalityWidened": list(cardinality["cardinality_widened"]),
     }
     return {"widened": any(buckets.values()), **buckets}
+
+
+def _widening(old_ir: dict, files: list[str]) -> dict:
+    """The widening report for a staged release, conservative on failure."""
+    from ..audit_diff import audit_report  # noqa: PLC0415
+    from .server import compile_under_authoring  # noqa: PLC0415
+
+    try:
+        # The same compiler door every verb uses. Release sources are files,
+        # so they compile as operator-sanctioned code, exactly as the admit
+        # and swap stages above compiled them.
+        candidate_ir = compile_under_authoring(None, list(files))
+        return _widening_from_audits(audit_report(old_ir),
+                                     audit_report(candidate_ir))
+    except Exception as error:  # noqa: BLE001 - fail closed, name the reason
+        return {"widened": True, "unknown":
+                f"the audit diff could not be computed: {error}"}
+
+
+def _keys_served(before: list[str], after: list[str]) -> bool:
+    """Whether the successor still serves every key the predecessor served.
+
+    An EMPTY run is healthy: a composition that provides no keys is not a
+    failed successor. Only a key the predecessor served and the successor no
+    longer does counts.
+    """
+    return set(before).issubset(set(after))
 
 
 def _store_plan(plan: dict) -> None:
@@ -407,6 +422,11 @@ def _plan_apply(arguments: dict) -> dict:
             ".rvl sources, so it is not a composition tree",
             fix="publish the release's composition source files"))
     replacing = list(cfg["replacing"])
+    # Hash the staged bytes BEFORE anything reads them, and bind those bytes:
+    # the plan admits the digest it was made from, and apply re-hashes. Hashing
+    # only after admit/plan/widening would bind an edit made during planning
+    # without that edit ever being the bytes the gate admitted.
+    records_digest, entries = _files_digest(files)
     admission = server._tool_admit({"files": files,
                                     "manifest": server.SESSION.ir,
                                     "replacing": replacing})
@@ -419,7 +439,13 @@ def _plan_apply(arguments: dict) -> dict:
                         "running composition is untouched"}
     rehearsal = server._tool_plan({"files": files, "replacing": replacing})
     widening = _widening(server.SESSION.ir, files)
-    records_digest, entries = _files_digest(files)
+    # a change during planning is caught here, before the plan is minted
+    if _files_digest(files)[0] != records_digest:
+        return _refusal(UpdateError(
+            "UPDATE_PLAN_RACED",
+            "the staged release changed while it was being admitted and "
+            "planned; the plan would not describe the bytes the gate saw",
+            fix="stage the release again, then plan it again"))
     generation = _generation()
     ir_digest = _ir_digest(server.SESSION.ir)
     binding = {
@@ -556,7 +582,7 @@ def _apply_plan(arguments: dict) -> dict:
     after_generation = _generation()
     after_keys = _provided_keys()
     healthy = (server.SESSION.loaded
-               and set(before_keys).issubset(set(after_keys)))
+               and _keys_served(before_keys, after_keys))
     if not healthy:
         reverted = False
         try:

@@ -42,9 +42,11 @@ running composition and carries only a server-side plan hash, so the target
 cannot be derived from the call; under a profile, only a literal
 `may swap on *` grant authorizes it, which is the honest scope for replacing
 everything. `revl_update_check` and `revl_update_status` are read-only and
-ungated. The verbs are always advertised, and refuse by name with
-`UPDATE_DISABLED` unless the server was started with `--update`; that flag is
-the grant that no caller over the transport can supply.
+ungated. The mutating update verbs are always advertised and refuse by name
+with `UPDATE_DISABLED` unless the server was started with `--update`; that
+flag is the grant that no caller over the transport can supply.
+`revl_update_status` also answers when updates are disabled, so an operator
+can see why.
 
 ## The operator profile
 

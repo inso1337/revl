@@ -115,9 +115,24 @@ def _token_hosts() -> frozenset[str]:
     return frozenset(hosts)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
 def token_host_allowed(url: str) -> bool:
-    """Whether the configured token may be sent to ``url``."""
-    return _host(url) in _token_hosts()
+    """Whether the configured token may be sent to ``url``.
+
+    The host must be allowlisted AND the transport secure: https, or http to a
+    loopback host (a local mirror or a test fixture server). A manifest that
+    names ``http://github.com/...`` must not receive a bearer token in
+    cleartext, however familiar the hostname looks.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https":
+        return host in _token_hosts()
+    # cleartext is only acceptable to the loopback interface: a local mirror
+    # or a test fixture server, never a remote host however familiar its name.
+    return parsed.scheme == "http" and host in _LOOPBACK_HOSTS
 
 
 class _NoCrossHostAuth(urllib.request.HTTPRedirectHandler):

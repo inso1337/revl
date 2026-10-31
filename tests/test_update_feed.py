@@ -128,8 +128,10 @@ def test_the_token_never_travels_to_an_artifact_host_outside_the_allowlist(
     import urllib.parse
     port = urllib.parse.urlsplit(feed.base_url).port
     assert feed_module.token_host_allowed(f"http://127.0.0.1:{port}/asset") is True
-    assert feed_module.token_host_allowed(f"http://localhost:{port}/asset") is False
+    # loopback cleartext is allowed; a remote host over http never is
+    assert feed_module.token_host_allowed(f"http://localhost:{port}/asset") is True
     assert feed_module.token_host_allowed("https://evil.example/asset") is False
+    assert feed_module.token_host_allowed("http://github.com/asset") is False
     assert release.version == "1.2.0"
 
 

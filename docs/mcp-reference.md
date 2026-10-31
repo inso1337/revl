@@ -2527,6 +2527,12 @@ release was applied or the target has aged out of the bounded history.
 
 - Inputs: none.
 
+The feed token (a private repository's bearer token) is sent only to the feed
+host and GitHub's release hosts, and only over https or loopback http; a
+cross-host redirect drops it. A release with no manifest (tag fallback) is
+never applied unless the operator explicitly enabled `--update-trust-tags`.
+A stage is reused only when its digest is the manifest's sha256.
+
 ## See also
 
 - [commands-reference.md](commands-reference.md) - every `revl` CLI subcommand.
