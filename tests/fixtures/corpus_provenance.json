@@ -728,6 +728,7 @@
    "stdlib/http.rvl",
    "stdlib/json.rvl",
    "stdlib/list.rvl",
+   "stdlib/net.rvl",
    "stdlib/reflect.rvl",
    "stdlib/render.rvl",
    "stdlib/router.rvl",
