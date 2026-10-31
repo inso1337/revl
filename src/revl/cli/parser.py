@@ -85,6 +85,35 @@ def _add_mcp_http_arguments(sub) -> None:
     _add_exposure_arguments(sub)
 
 
+def _add_update_feed_arguments(sub) -> None:
+    """The release-feed options shared by `revl update check|fetch`."""
+    sub.add_argument("--repo", default=None, metavar="OWNER/NAME",
+                     help="the GitHub release feed (default $REVL_UPDATE_REPO or "
+                          "inso1337/revl)")
+    sub.add_argument("--project", default=None, metavar="NAME",
+                     help="the project name the release manifest must declare "
+                          "(default: the feed repository name)")
+    sub.add_argument("--channel", default=None,
+                     choices=("stable", "prerelease"),
+                     help="release channel (default $REVL_UPDATE_CHANNEL or "
+                          "stable)")
+    sub.add_argument("--token-env", default=None, metavar="VAR",
+                     help="the environment variable holding a GitHub token for "
+                          "a private feed (default REVL_UPDATE_TOKEN)")
+    sub.add_argument("--api-base", default=None, metavar="URL",
+                     help="GitHub REST base, for a mirror (default "
+                          "$REVL_UPDATE_API_BASE or https://api.github.com)")
+    sub.add_argument("--manifest", default=None, metavar="PATH_OR_URL",
+                     help="read the release manifest from this file or URL "
+                          "instead of resolving the feed; the same validation "
+                          "runs")
+    sub.add_argument("--home", default=None, metavar="DIR",
+                     help="update home (default $REVL_UPDATE_HOME or "
+                          "~/.revl/updates)")
+    sub.add_argument("--timeout", type=float, default=20.0, metavar="SECONDS",
+                     help="network timeout (default 20)")
+
+
 def _add_serve_operator_arguments(serve) -> None:
     """`revl serve --http`'s approval policy and its operator listener (issue
     #1553, design 569 C2). The app face keeps its own exposure options; the
@@ -631,6 +660,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--title", metavar="TEXT", default=None,
         help="an opaque header line for the Markdown note (e.g. a version and "
              "date); never enters a derived line")
+
+    # `revl update check|fetch|status` (docs/updates.md): the language-side
+    # half of the update mechanism. It reads the release feed, verifies the
+    # artifact against the manifest and stages it; applying a staged release to
+    # a running composition is the operator MCP verb `revl_update_apply`.
+    update = sub.add_parser(
+        "update",
+        help="check a GitHub release feed for a newer revl, verify the release "
+             "and stage it (docs/updates.md); applying it to a running "
+             "composition is the operator MCP surface")
+    update_sub = update.add_subparsers(dest="update_command", required=True)
+    update_check = update_sub.add_parser(
+        "check",
+        help="compare the running toolchain with the newest release on the "
+             "channel; exit 10 when an update is available")
+    _add_update_feed_arguments(update_check)
+    update_check.add_argument("--json", action="store_true",
+                              help="machine-readable report")
+    update_fetch = update_sub.add_parser(
+        "fetch",
+        help="download, verify (sha256) and stage the newest release under the "
+             "update home; nothing is compiled or executed")
+    _add_update_feed_arguments(update_fetch)
+    update_fetch.add_argument("--json", action="store_true",
+                              help="machine-readable report")
+    update_status = update_sub.add_parser(
+        "status",
+        help="what is running, what is staged, and what the update journal "
+             "recorded")
+    update_status.add_argument("--home", default=None, metavar="DIR",
+                               help="update home (default $REVL_UPDATE_HOME or "
+                                    "~/.revl/updates)")
+    update_status.add_argument("--json", action="store_true",
+                               help="machine-readable report")
 
     version_cmd = sub.add_parser(
         "version",

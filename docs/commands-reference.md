@@ -11,12 +11,12 @@ The verb set, in the order the parser declares it:
 <!-- docgen:cli-verbs begin -->
 ```text
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
-layer  audit  goal  policy  simulate  diff  changelog  version  contract
-erase-report  retention-receipt  plan  apply  undo  canary  promote
-query  fmt  quarantine  analyze  test  mcp  gen-types  import  export
-sourcemap  serve  run  dev  recover  act  estop  slo  branch  compare
-replay  why  metrics  trace  profile  pool  attest  dash  repair  bundle
-emit  verify  deploy  deploy-admit  truc
+layer  audit  goal  policy  simulate  diff  changelog  update  version
+contract  erase-report  retention-receipt  plan  apply  undo  canary
+promote  query  fmt  quarantine  analyze  test  mcp  gen-types  import
+export  sourcemap  serve  run  dev  recover  act  estop  slo  branch
+compare  replay  why  metrics  trace  profile  pool  attest  dash
+repair  bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -804,6 +804,52 @@ diff `revl version` uses.
 revl changelog --from v1.ir.json --to v2.ir.json --current-version 1.4.0
 revl changelog --from old.rvl --to new.rvl --json
 ```
+
+### `revl update`
+
+Check a GitHub release feed for a newer revl, verify the release and stage it
+under the update home ([updates.md](updates.md)). Applying a staged release to
+a running composition is the operator MCP surface, not a CLI side effect.
+
+Each release carries a `release.json` asset beside its artifacts: version, tag,
+commit, artifact sha256 values, pins, and a compatibility statement
+(`gateApi`, `irVersion`, `minPython`, `live`, `hostChanges`). A repository with
+no manifest resolves through its newest semantic tag and is marked
+`tagFallback`, which is never applied automatically.
+
+Common feed options:
+
+- `--repo OWNER/NAME` - the feed (default `$REVL_UPDATE_REPO` or `inso1337/revl`).
+- `--project NAME` - the project the manifest must declare (default: the feed's name).
+- `--channel stable|prerelease` - the release channel (default `$REVL_UPDATE_CHANNEL` or `stable`).
+- `--token-env VAR` - the environment variable holding a token for a private feed (default `REVL_UPDATE_TOKEN`).
+- `--api-base URL` - GitHub REST base for a mirror (default `$REVL_UPDATE_API_BASE` or `https://api.github.com`).
+- `--manifest PATH_OR_URL` - read that manifest instead of resolving the feed; validation is identical.
+- `--home DIR` - the update home (default `$REVL_UPDATE_HOME` or `~/.revl/updates`).
+- `--timeout SECONDS` - network timeout (default 20).
+- `--json` - machine-readable report.
+
+#### `revl update check`
+
+Compares `compiler_version()`, `gate_version()`, the running IR revision and
+the interpreter with the newest release. Reports the semver bump, whether the
+release declares itself live-safe, whether the host satisfies its declared
+gate, language and Python requirements, and the artifact names and sizes.
+Exit codes: 0 up to date, 10 update available, 2 error.
+
+#### `revl update fetch`
+
+Downloads the release artifact, verifies its sha256 against the manifest,
+extracts it safely under the update home and writes a `provenance.json` beside
+the sources. A corrupt artifact, a hash mismatch, or an archive entry that is
+absolute, climbs with `..`, carries a backslash or drive, or is a link is a
+refusal; nothing is written outside the staging directory. Nothing is compiled
+or executed.
+
+#### `revl update status`
+
+Prints the running identity, the staged releases and the tail of the update
+journal in the update home.
 
 ### `revl contract`
 
