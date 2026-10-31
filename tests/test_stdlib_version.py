@@ -57,23 +57,27 @@ def test_stamp_is_the_expected_bumped_counter():
     # The stamp is a monotonic counter bumped once per public stdlib change
     # (add/remove/signature). Pinning the literal here makes every future bump
     # DELIBERATE: a public addition that forgets to bump reds this test instead
-    # of shipping a stale stamp. It is "11" as of `stdlib/kdf.rvl` (the pure
-    # PBKDF2-HMAC-SHA256 password KDF: `KdfError`, `max_iterations`,
-    # `max_length`, `pbkdf2_sha256` and `pbkdf2_sha256_verify`); "10" was
-    # `stdlib/base64.rvl` (RFC 4648 base64url: `Base64Error`, `b64url_encode`,
-    # `b64url_decode`, `b64url_encode_bytes`, `b64url_decode_bytes`); "9" was
-    # the item-459 F2 insertion-site source map on `stdlib/template.rvl` (`Pos`,
-    # `Segment`, `Rendered`, `position_at`, `render_mapped`, `source_map`); "8"
-    # was the `header_value` case-insensitivity fix and the new
-    # `pub fn header_name_eq` on `stdlib/http.rvl`; "7" was `stdlib/framing.rvl`
+    # of shipping a stale stamp. It is "12" as of `stdlib/net.rvl` (the SaaS
+    # back-end plan, section 7.2, issue #2997: `NetOptions`, `NetField`,
+    # `NetResponse`, `NetError`, `NetCall`, `NetReply`, `get`, `post_json`,
+    # `post_form`, the `call_*` builders and `reply_to_result`); "11" was
+    # `stdlib/kdf.rvl` (the pure PBKDF2-HMAC-SHA256 password KDF: `KdfError`,
+    # `max_iterations`, `max_length`, `pbkdf2_sha256` and
+    # `pbkdf2_sha256_verify`); "10" was `stdlib/base64.rvl` (RFC 4648
+    # base64url: `Base64Error`, `b64url_encode`, `b64url_decode`,
+    # `b64url_encode_bytes`, `b64url_decode_bytes`); "9" was the item-459 F2
+    # insertion-site source map on `stdlib/template.rvl` (`Pos`, `Segment`,
+    # `Rendered`, `position_at`, `render_mapped`, `source_map`); "8" was the
+    # `header_value` case-insensitivity fix and the new `pub fn header_name_eq`
+    # on `stdlib/http.rvl`; "7" was `stdlib/framing.rvl`
     # (issue #867); "6" was `stdlib/template.rvl` (item 459, issue #722); "5" (item 459,
     # issue #722); "5" was `stdlib/escape.rvl` (item 459, issue #722); "4" was
     # `stdlib/a2a.rvl` (item 439, issue #118); it was "3" for the two additions
     # that landed without a bump (fs.rvl is_dir/lexists/resolve_within,
     # shell.rvl plan_op_name). Raise it here in lock-step with the next public
     # change.
-    assert EXPECTED_STDLIB_VERSION == "11"
-    assert read_stamp(STDLIB) == "11"
+    assert EXPECTED_STDLIB_VERSION == "12"
+    assert read_stamp(STDLIB) == "12"
 
 
 def test_repo_stamp_matches_expected():

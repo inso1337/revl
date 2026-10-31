@@ -87,13 +87,20 @@
 //        vendored copy under the old stamp has no encoder, so its author is
 //        still hand-rolling one, and the hand-rolled copy is where the `+`/`/`
 //        alphabet and the `=` padding leak into a URL.
-//  11 -> adds `stdlib/kdf.rvl`: the pure-revl PBKDF2-HMAC-SHA256
-//        password KDF with parameters at the call site: `KdfError`,
-//        `max_iterations`, `max_length`, `pbkdf2_sha256` and
-//        `pbkdf2_sha256_verify` over a py/ts host body. Same reason as item 104:
-//        a consumer that VENDORS the stdlib under the old stamp predates the
-//        primitive, so its author is still hand-rolling a password KDF (and the
-//        too-low iteration count that goes with it).
+//  11 -> adds `stdlib/kdf.rvl`: the pure-revl PBKDF2-HMAC-SHA256 password KDF
+//        with parameters at the call site: `KdfError`, `max_iterations`,
+//        `max_length`, `pbkdf2_sha256` and `pbkdf2_sha256_verify` over a py/ts
+//        host body. Same reason as item 104: a consumer that VENDORS the
+//        stdlib under the old stamp predates the primitive, so its author is
+//        still hand-rolling a password KDF (and the too-low iteration count
+//        that goes with it).
+//  12 -> adds `stdlib/net.rvl` (the SaaS back-end plan, section 7.2,
+//        issue #2997): the py-tier outbound HTTPS client -- `NetOptions`,
+//        `NetField`, `NetResponse`, `NetError`, `NetCall`, `NetReply`, `get`,
+//        `post_json`, `post_form`, the three `call_*` builders and
+//        `reply_to_result`. Same reason as item 104: a vendored copy under the
+//        old stamp has no outbound client, so its author is still hand-writing
+//        an `@py` network body whose destination host `revl audit` cannot name.
 pub fn stdlib_version() -> Str {
-  return "11"
+  return "12"
 }
