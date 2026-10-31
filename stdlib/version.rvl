@@ -87,6 +87,13 @@
 //        vendored copy under the old stamp has no encoder, so its author is
 //        still hand-rolling one, and the hand-rolled copy is where the `+`/`/`
 //        alphabet and the `=` padding leak into a URL.
+//  11 -> adds `stdlib/kdf.rvl`: the pure-revl PBKDF2-HMAC-SHA256
+//        password KDF with parameters at the call site: `KdfError`,
+//        `max_iterations`, `max_length`, `pbkdf2_sha256` and
+//        `pbkdf2_sha256_verify` over a py/ts host body. Same reason as item 104:
+//        a consumer that VENDORS the stdlib under the old stamp predates the
+//        primitive, so its author is still hand-rolling a password KDF (and the
+//        too-low iteration count that goes with it).
 pub fn stdlib_version() -> Str {
-  return "10"
+  return "11"
 }
