@@ -727,6 +727,7 @@
    "stdlib/framing.rvl",
    "stdlib/fs.rvl",
    "stdlib/http.rvl",
+   "stdlib/jose.rvl",
    "stdlib/json.rvl",
    "stdlib/kdf.rvl",
    "stdlib/list.rvl",

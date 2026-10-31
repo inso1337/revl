@@ -101,6 +101,18 @@
 //        `reply_to_result`. Same reason as item 104: a vendored copy under the
 //        old stamp has no outbound client, so its author is still hand-writing
 //        an `@py` network body whose destination host `revl audit` cannot name.
+//  13 -> adds `stdlib/jose.rvl`: local JWT/JWKS verification for OAuth/OIDC id
+//        tokens. `JoseError`, `JwsHeader`, `Claims`, `VerifyOptions`, `Jwk` and
+//        `Verified`, plus `parse_jwks`, `header_of`, `claims_of`,
+//        `check_claims`, `select_key` and `verify`. Strict canonical base64url,
+//        strict JSON (duplicate members refused), algorithm pinning to RS256
+//        and ES256, key selection by `kid`/`alg`/`use`/key type, and the
+//        registered claim checks against a caller-supplied clock. The parsing,
+//        selection and claim checks are pure revl; only the two signature
+//        verifications carry a host body (py, integer arithmetic). Same reason
+//        as item 104: a vendored copy under the old stamp has no id-token
+//        verifier, so its author is hand-rolling one, and the hand-rolled
+//        verifier is where `alg` confusion and non-canonical base64url live.
 pub fn stdlib_version() -> Str {
-  return "12"
+  return "13"
 }
