@@ -7034,6 +7034,36 @@ def _v3_empty_vec_elem_types(body: object, ctx: "_V3Ctx") -> dict:
         ctx.var_types = saved
 
 
+def _v3_pinned_empty_vecs(body: object, ctx: "_V3Ctx") -> set:
+    """Names bound to an empty list whose element type a LATER typed use pins
+    even though `_v3_empty_vec_elem_types` cannot name it (issue #2911): a
+    non-empty assignment (`lines = lines.concat(r.lines)`), a bare `return`
+    under a declared `List[T]`, or a bare name passed into a declared `List[T]`
+    parameter. Rustc takes the type from such a use, so `_v3_stmt` leaves those
+    bindings unannotated instead of refusing; everything else is refused.
+    """
+    nodes = list(_v3_walk_nodes(body or []))
+    assigned = {n.get("name") for n in nodes
+                if n.get("step") == "assign"
+                and not _v3_is_empty_list(n.get("value"))}
+    returned = {n["expr"].get("name") for n in nodes
+                if n.get("step") == "return"
+                and isinstance(n.get("expr"), dict)
+                and isinstance(ctx.current_return, str)
+                and ctx.current_return.startswith("List[")}
+    called: set = set()
+    for node in nodes:
+        if node.get("kind") != "call":
+            continue
+        callee = node.get("callee") or {}
+        params = ctx.fn_param_types.get(callee.get("name")) or []
+        for i, arg in enumerate(node.get("args") or []):
+            if (isinstance(arg, dict) and arg.get("kind") in ("var", "name")
+                    and i < len(params) and str(params[i]).startswith("List[")):
+                called.add(arg.get("name"))
+    return assigned | returned | called
+
+
 # The stdlib method table's UNCONDITIONAL result types — the builtins whose
 # surface result does not depend on the receiver (a mirror of
 # `revl.typecheck._BUILTIN_SIG`'s third column, restricted to the rows that name
@@ -7326,6 +7356,11 @@ class _V3Ctx:
         # `vec![]` (E0282 annotation); reset per fn by `_emit_v3_functions`, empty
         # in every other emit context (no empty-vec annotation needed there).
         self.vec_elems: dict = {}
+        # Names bound to an empty `vec![]` whose element type a LATER typed use
+        # pins even though this emitter cannot name it (issue #2911). Rustc
+        # infers those, so they are emitted unannotated; a binding in neither
+        # this set nor `vec_elems` is refused by `_v3_stmt`.
+        self.vec_pinned: set = set()
         # Free function name -> set of parameter INDICES lowered to `&str`
         # (read-only `Str` params, item 282). Computed once from the whole
         # function list so a call site knows which argument slots take a borrow;
@@ -8928,6 +8963,9 @@ def _v3_refuse_unbound_case(value: dict, binding, ctx: _V3Ctx) -> None:
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
+    raw_name = node.get("name")
+    dead_binding = (ctx.read_counts.get(raw_name, 0) == 0
+                    and raw_name not in ctx.assigned_names)
 
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
@@ -8965,11 +9003,36 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
             # pushes/aliases make it knowable, annotate so the accumulator idiom
             # (`let mut out = []; .. out = out.push(x)`) compiles (E0282).
             if _v3_is_empty_list(node.get("value")):
-                elem = ctx.vec_elems.get(node.get("name"))
+                elem = ctx.vec_elems.get(raw_name) or ("Unit" if dead_binding else None)
                 if isinstance(elem, str):
                     annot = f": Vec<{_rust_type(elem, ctx.types)}>"
-            elif (ctx.read_counts.get(node.get("name"), 0) == 0
-                    and node.get("name") not in ctx.assigned_names):
+                elif raw_name not in ctx.vec_pinned:
+                    # Nothing pushes into this binding, aliases it, declares
+                    # its `List[T]`, or pins it from a later typed use, so
+                    # rustc is left with `Vec<_>` and reports E0282 wherever a
+                    # read does not carry an element type (`.length()`, `==`, a
+                    # `for` iterable, a plain reload). Refuse by name rather
+                    # than emit a module cargo rejects (issue #2911).
+                    raise EmitError(
+                        "an untyped empty list literal needs an element type: "
+                        f"nothing pins `{raw_name} = []` - annotate it "
+                        f"(`let {raw_name}: List[T] = []`) or push a typed "
+                        "element into it (rustc reports E0282 otherwise)")
+            elif (isinstance(node.get("value"), dict)
+                    and node["value"].get("kind") == "list"
+                    and node["value"].get("items")
+                    and all(_v3_is_empty_list(item)
+                            for item in node["value"]["items"])
+                    and raw_name not in ctx.vec_pinned):
+                # `let xs = [[]]` leaves the inner `vec![]` unconstrained too:
+                # no sibling item carries a type for rustc to unify the empty
+                # lists with (issue #2911).
+                raise EmitError(
+                    "an untyped nested empty list literal needs an element type: "
+                    f"nothing pins `{raw_name} = [[]]` - annotate it "
+                    f"(`let {raw_name}: List[List[T]] = []`) or push a typed "
+                    "element into it (rustc reports E0282 otherwise)")
+            elif dead_binding:
                 annot = _v3_dead_let_annotation(node, ctx)
             out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
@@ -9300,6 +9363,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         # annotated `Vec<T>` (E0282). Computed before the body renders and after
         # `var_types` is seeded with the params it reads.
         ctx.vec_elems = _v3_empty_vec_elem_types(fn.get("body") or [], ctx)
+        ctx.vec_pinned = _v3_pinned_empty_vecs(fn.get("body") or [], ctx)
         # A read-only `Str` param lowers to a borrowed `&str` (item 282): the
         # caller lends the string instead of cloning it. `_render_param_type`
         # spells the borrow, and `ctx.borrowed_params` tells the body renderer
@@ -9814,6 +9878,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
             ctx.movable_for_iterables = _movable_for_iterables(
                 test["body"], ctx.multi_use)
             ctx.vec_elems = _v3_empty_vec_elem_types(test["body"], ctx)
+            ctx.vec_pinned = _v3_pinned_empty_vecs(test["body"], ctx)
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
         out.append("}")

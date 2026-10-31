@@ -2657,6 +2657,85 @@ def test_vec_iterated_twice_cargo_builds(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# An empty list no later expression constrains still needs a concrete Rust
+# element type; `Vec<_>` alone is rejected by rustc with E0282.
+_UNREAD_EMPTY_LIST_RVL = """
+pub fn unused() -> Int {
+  let values = []
+  return 1
+}
+"""
+
+
+@needs_cargo
+def test_unread_untyped_empty_list_builds_as_unit_vec(tmp_path):
+    src = emit.emit(compile_source(_UNREAD_EMPTY_LIST_RVL))
+    assert "let values: Vec<()> = vec![];" in src
+    result = _cargo_test(
+        tmp_path,
+        src,
+        "#[test]\nfn unused_empty_list_does_not_block_build() { assert_eq!(unused(), 1); }\n",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_java_branch_shapes_fixture_builds_on_rust(tmp_path):
+    """The shared unused-empty-list fixture is valid for the Rust tier too."""
+    ir = compile_files([str(ROOT / "tests/fixtures/emit_java_corpus/branch_shapes.rvl")])
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+# issue #2911: the empty-list shapes rustc leaves as `Vec<_>` (E0282) when no
+# push, alias, declared type or typed context pins the element type. The tier
+# refuses each by name instead of emitting a module cargo rejects.
+_UNTYPED_EMPTY_LIST_SHAPES = {
+    "length": (
+        "pub fn length() -> Int {\n"
+        "  let values = []\n"
+        "  let n = values.length()\n"
+        "  return n\n"
+        "}\n"),
+    "equality": (
+        "pub fn equality() -> Bool {\n"
+        "  let a = []\n"
+        "  let b = []\n"
+        "  return a == b\n"
+        "}\n"),
+    "for_iterable": (
+        "pub fn walk() -> Int {\n"
+        "  let values = []\n"
+        "  var s = 0\n"
+        "  for (v of values) { s = s + 1 }\n"
+        "  return s\n"
+        "}\n"),
+    "reassigned": (
+        "pub fn reassigned() -> Int {\n"
+        "  var values = []\n"
+        "  values = []\n"
+        "  return 1\n"
+        "}\n"),
+    "nested": (
+        "pub fn nested() -> Int {\n"
+        "  let xs = [[]]\n"
+        "  return xs.length()\n"
+        "}\n"),
+    "read_in_if": (
+        "pub fn guarded(c: Bool) -> Int {\n"
+        "  let values = []\n"
+        "  if (c) { return values.length() }\n"
+        "  return 0\n"
+        "}\n"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_UNTYPED_EMPTY_LIST_SHAPES))
+def test_an_untypeable_empty_list_is_a_named_refusal(shape):
+    with pytest.raises(emit.EmitError, match="needs an element type"):
+        emit.emit(compile_source(_UNTYPED_EMPTY_LIST_SHAPES[shape]))
+
+
 # item 437(f): a `for` iterable that is DEAD after the loop MOVES instead of
 # cloning. The multi-use clone above is a whole-body reference count with no
 # liveness, so the accumulate-then-walk shape the self-host emitters use — build

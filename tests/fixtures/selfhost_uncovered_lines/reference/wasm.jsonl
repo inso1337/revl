@@ -212,7 +212,7 @@
 
 ["function", "remaining-raises-reject-void-list-elements-empty-lists", "_V3Emitter._list_expr", 1, 1]
 
-["function", "remaining-raises-reject-void-list-elements-empty-lists", "_V3Emitter._list_type", 3, 3]
+["function", "remaining-raises-reject-void-list-elements-empty-lists", "_V3Emitter._list_type", 2, 2]
 
 ["reason", "remaining-raises-reject-void-operands-and-unsupported-unary", "Remaining raises reject void operands and unsupported unary operators; canonical numeric negation, Bool not and Int32 complement are covered."]
 

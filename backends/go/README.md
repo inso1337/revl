@@ -167,6 +167,31 @@ fixture under `examples/regressions/` and a test in `tests/test_run_go.py`.
   `-vet=off` rather than distorting revl's semantics to match a go-specific
   linter. Fixture: `fuzz_go_vet_redundant_bool.rvl`.
 
+## A panicking provide method (issue #2481)
+
+A go panic is the go form of a py or ts exception, so each entry point into
+author code recovers it the way those tiers catch a raise:
+
+| Entry point | Outcome | Error text |
+|---|---|---|
+| an activation (`Apply`) | the load fails | `panic: <v>`, one line |
+| a lifecycle test step or `advance` timer body | that test fails, the next one runs | the step, `panic: <v>`, then the go stack |
+| a bridge crossing (`bridge.Serve`) | the caller gets `{"ok":false,"error":…}`, the process keeps serving | `panic: <v>` through `bridge.SeamFailure` |
+| a compensation or a witnessed inverse | recorded as teardown residue | `panic` and `<v>`, one line |
+
+Only the lifecycle report carries a stack: it reaches the author's own test
+run. Every other error reaches the placement runner's log, a seam reply or a
+FATAL line, which hold one redacted record per line (issue #814); the py, ts
+and java runners print no traceback there either.
+
+A goroutine that an `@go` extern body starts itself is outside every recover:
+go has no process-wide panic hook, and the emitter splices the body verbatim,
+so a panic there still ends the process with the runtime's own report. Recover
+inside that goroutine.
+
+A go runtime fatal error (a concurrent map write, a stack overflow) is not a
+panic: no recover sees it, and it ends the process wherever it happens.
+
 ## Verify
 
 ```bash

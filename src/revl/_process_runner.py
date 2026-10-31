@@ -909,6 +909,11 @@ async def run(spec: dict, spec_path=None) -> None:
     _install_model_schedule(spec)
     wal = _ProcessWal(spec["wal"], spec["components"]) if spec.get("wal") else None
     module = _load_module(running_ir, wal)
+    # Trusted stdlib support modules are imported while the loader path still
+    # exists; their `@py` bodies run at call time, after the removal below, so
+    # the body's `import` must resolve from sys.modules (src/revl/stdlib_hosts.py).
+    from revl.stdlib_hosts import preload_stdlib_host_modules  # noqa: PLC0415
+    preload_stdlib_host_modules()
     # The backend directory is a trusted LOADER path for the runtime's own
     # first-party modules (`emit`, `runtime`, `bridge`), not an ambient import
     # capability for user-authored `@py` bodies. Keep it on sys.path through the

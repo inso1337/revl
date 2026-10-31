@@ -2691,6 +2691,39 @@ fn self_append_plus(target: &str, recv: &str, valnode: Value, ctx_: Ctx__m1) -> 
     return format!("{}.push_str({});", recv, borrow_str_arg(rn.clone(), render_expr(rn.clone(), ctx_.clone()), ctx_.clone()));
 }
 
+fn self_append_concat(target: String, recv: &str, valnode: Value, ctx_: Ctx__m1) -> String {
+    if (node_kind(valnode.clone()) != "builtin") {
+        return String::from("");
+    }
+    if (value_str(value_field(valnode.clone(), String::from("method"))) != "concat") {
+        return String::from("");
+    }
+    let tn = value_field(valnode.clone(), String::from("target"));
+    if (node_kind(tn.clone()) != "var") {
+        return String::from("");
+    }
+    if (value_str(value_field(tn.clone(), String::from("name"))) != target) {
+        return String::from("");
+    }
+    let args = value_list(value_field(valnode.clone(), String::from("args")));
+    if ((args.revl_length() != 1i64) || mentions_name((args)[(0i64) as usize].clone(), &target)) {
+        return String::from("");
+    }
+    let an = (args)[(0i64) as usize].clone();
+    let mut recv_ty = map_get(ctx_.vt.clone(), target.clone());
+    if ((recv_ty == "") && v3_is_str(an.clone(), ctx_.clone())) {
+        recv_ty = String::from("Str");
+    }
+    let rendered = render_expr(an.clone(), ctx_.clone());
+    if (recv_ty == "Str") {
+        return format!("{}.push_str({});", recv, borrow_str_arg(an, rendered, ctx_));
+    }
+    if (strip_spaces(&((recv_ty.revl_split("[")))[(0i64) as usize]) == "List") {
+        return format!("{}.extend(({}).iter().cloned());", recv, rendered);
+    }
+    return String::from("");
+}
+
 fn is_copy_type(ty: &str) -> bool {
     let head = strip_spaces(&((ty.revl_split("[")))[(0i64) as usize]);
     return (((head == "Int") || (head == "Bool")) || (head == "Float"));
@@ -4111,6 +4144,26 @@ fn emit_stmts(nodes: Vec<Value>, ctx_: Ctx__m1, indent: i64) -> Sout {
     return Sout { lines: lines, ctx_: c };
 }
 
+fn is_empty_list_lit(n: Value) -> bool {
+    return ((node_kind(n.clone()) == "list") && (value_list(value_field(n.clone(), String::from("items"))).revl_length() == 0i64));
+}
+
+fn is_nested_empty_list_lit(n: Value) -> bool {
+    if (node_kind(n.clone()) != "list") {
+        return false;
+    }
+    let items = value_list(value_field(n.clone(), String::from("items")));
+    if (items.revl_length() == 0i64) {
+        return false;
+    }
+    for it in items {
+        if (!is_empty_list_lit(it.clone())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
     let step = value_str(value_field(node.clone(), String::from("step")));
     if ((step == "let") || (step == "assign")) {
@@ -4129,13 +4182,24 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
             if value_bool(value_field(node.clone(), String::from("mutable"))) {
                 kw = String::from("let mut");
             }
-            let mut annot = String::from("");
-            if ((ctx_.dz.contains_key(&raw) && (node_kind(valnode.clone()) == "var")) && (ref_name(valnode.clone()) == "None")) {
-                annot = String::from(": Option<Value>");
+            if ((!ctx_.dz.contains_key(&raw)) && (value == "vec![]")) {
+                out.push(format!("<<UNSUPPORTED-EMPTY-LIST-TYPE:{}>>", raw));
+            } else {
+                if is_nested_empty_list_lit(valnode.clone()) {
+                    out.push(format!("<<UNSUPPORTED-EMPTY-LIST-TYPE:{}>>", raw));
+                } else {
+                    let mut annot = if (ctx_.dz.contains_key(&raw) && (value == "vec![]")) { String::from(": Vec<()>") } else { String::from("") };
+                    if ((ctx_.dz.contains_key(&raw) && (node_kind(valnode.clone()) == "var")) && (ref_name(valnode.clone()) == "None")) {
+                        annot = String::from(": Option<Value>");
+                    }
+                    out.push(line(indent, &(format!("{} {}{} = {};", kw, nm, annot, value))));
+                }
             }
-            out.push(line(indent, &(format!("{} {}{} = {};", kw, nm, annot, value))));
         } else {
-            let ip = self_append_plus(&raw, &nm, valnode.clone(), ctx_.clone());
+            let mut ip = self_append_plus(&raw, &nm, valnode.clone(), ctx_.clone());
+            if (ip == "") {
+                ip = self_append_concat(raw.clone(), &nm, valnode.clone(), ctx_.clone());
+            }
             if (ip != "") {
                 out.push(line(indent, &ip));
             } else {

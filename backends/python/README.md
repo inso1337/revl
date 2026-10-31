@@ -28,6 +28,7 @@ crash-recovery and backwards replay (`replay.py`, `docs/replay.md`), declared
 | `revl_fs_workspace.py` | session workspace-root confinement for the witnessed `stdlib/fs.rvl` externs (item 244); imported by the `@py` fs bodies |
 | `revl_shell_classify.py` | pure, total shell-command classifier (item 252): lowers a provably-fs-local command onto the witnessed catalog, else one honest `emission` |
 | `revl_shell_host.py` | py-tier host bodies for `stdlib/shell.rvl` (item 252): the opaque `sh -c` fallback plus the re-exported classifier |
+| `revl_net.py` | the stdlib-only HTTPS engine imported by the `stdlib/net.rvl` `@py` bodies: JSON and urlencoded bodies, custom headers, HTTPS only, timeout, bounded response, no redirect following, errors as data |
 | `golden/user_cache.py` | emitter output for `examples/user_cache.ir.json`, checked in |
 | `demo.py` | load → put/get → hot-swap the Database provider → unload, with event log |
 | `tests/` | pytest suite; each test names the R1–R5 requirement it covers |

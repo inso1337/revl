@@ -134,8 +134,9 @@ def build_artifact(plan_result: dict, running_ir: dict | None) -> dict:
 
     # the plan payload is kept for `apply`'s summary and for re-rendering, but
     # the heavy IR lives once at the top of the artifact, not twice.
-    payload = {k: v for k, v in plan_result.items() if k != "resultingIR"}
-    return {
+    payload = {k: v for k, v in plan_result.items()
+               if k not in {"resultingIR", "candidateHostBodies"}}
+    artifact = {
         PLAN_KEY: PLAN_FORMAT,
         "basis": fingerprint(running_ir),
         "resulting": fingerprint(resulting_ir),
@@ -145,6 +146,9 @@ def build_artifact(plan_result: dict, running_ir: dict | None) -> dict:
         "replacing": list(plan_result.get("candidate", {}).get("replacing") or []),
         "plan": payload,
     }
+    if "candidateHostBodies" in plan_result:
+        artifact["authoredHostBodies"] = plan_result["candidateHostBodies"]
+    return artifact
 
 
 def validate_artifact(artifact: object) -> dict:
@@ -161,6 +165,18 @@ def validate_artifact(artifact: object) -> dict:
         if field not in artifact:
             raise ApplyError(f"the plan artifact is missing `{field}` — it is "
                              "corrupt or truncated")
+    if "authoredHostBodies" in artifact:
+        bodies = artifact["authoredHostBodies"]
+        if (not isinstance(bodies, list)
+                or any(not isinstance(body, dict)
+                       or not isinstance(body.get("extern"), str)
+                       or not isinstance(body.get("classification"), str)
+                       or not isinstance(body.get("backends"), list)
+                       or any(not isinstance(backend, str)
+                              for backend in body["backends"])
+                       for body in bodies)):
+            raise ApplyError("the plan artifact has invalid `authoredHostBodies` "
+                             "provenance")
     return artifact
 
 

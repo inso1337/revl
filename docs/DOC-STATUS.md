@@ -54,7 +54,7 @@ regenerated rather than edited.
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 76 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
-| attested-tee-placement.md | needs-work | 1 |  |
+| attested-tee-placement.md | needs-work | 0 |  |
 | audit-diff.md | needs-work | 14 |  |
 | authoring-for-agents.md | needs-work | 2 |  |
 | auto-mocks.md | needs-work | 16 |  |
@@ -106,7 +106,7 @@ regenerated rather than edited.
 | generics.md | needs-work | 9 |  |
 | guarantees.md | needs-work | 2 |  |
 | guide-ai-agents.md | stale-fixed | 4 |  |
-| guide-humans.md | stale-fixed | 1 | yes |
+| guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 5 |  |
 | holes.md | needs-work | 29 |  |
 | import-a2a.md | current | 16 |  |

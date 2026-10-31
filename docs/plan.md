@@ -16,6 +16,16 @@ composition just grew a way to touch the outside world.
 
 A plan is that answer, computed without producing any of it.
 
+When a library caller supplies operator-approved provider modules through
+`modules`, it can pass their paths in `operator_sources`. Apply artifacts then
+keep those providers out of the candidate-authored host-body disclosure list.
+Attribution covers the sources the caller names directly and the user-origin
+files the compile reaches from them through `use`; shipped `stdlib` sources are
+not attributed to the candidate. Library callers exclude other trusted operator
+providers by listing their paths in `operator_sources`. The command-line planner
+has no operator-source option, so an operator file reached from the candidate
+tree remains in the candidate-authored disclosure list.
+
 ```bash
 revl compile app.rvl -o running.json     # what is live
 revl plan candidate.rvl --manifest running.json
