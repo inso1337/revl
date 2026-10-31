@@ -126,11 +126,15 @@ def _refuse(code: str, message: str, fix: str | None = None) -> UpdateError:
     return UpdateError(code, message, fix=fix)
 
 
-def _string(document: dict, key: str, *, code: str = "MANIFEST_FIELD",
+def _string(document: dict, key: str, *, refusal: str = "MANIFEST_FIELD",
             where: str = "manifest") -> str:
+    # `refusal=`, not `code=`: the updater's refusal codes are its own surface
+    # (UpdateError), not compiler diagnostics, and the diagnostic-code scanner
+    # reads `code=` as an emission. The compiler's diagnostic vocabulary is not
+    # the updater's, and `revl explain` does not answer for these.
     value = document.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise _refuse(code, f"`{key}` must be a non-empty string in the {where}")
+        raise _refuse(refusal, f"`{key}` must be a non-empty string in the {where}")
     return value
 
 
@@ -146,23 +150,23 @@ def _parse_artifact(entry: object, index: int) -> Artifact:
     if not isinstance(entry, dict):
         raise _refuse("MANIFEST_ARTIFACT",
                       f"artifact {index} must be an object")
-    name = _string(entry, "name", code="MANIFEST_ARTIFACT",
+    name = _string(entry, "name", refusal="MANIFEST_ARTIFACT",
                    where=f"artifact {index}")
-    kind = _string(entry, "kind", code="MANIFEST_ARTIFACT",
+    kind = _string(entry, "kind", refusal="MANIFEST_ARTIFACT",
                    where=f"artifact {index}")
     if kind not in ARTIFACT_KINDS:
         raise _refuse(
             "MANIFEST_ARTIFACT",
             f"artifact {name!r} has kind {kind!r}; expected one of "
             + ", ".join(ARTIFACT_KINDS))
-    url = _string(entry, "url", code="MANIFEST_ARTIFACT",
+    url = _string(entry, "url", refusal="MANIFEST_ARTIFACT",
                   where=f"artifact {index}")
     if _URL.match(url) is None:
         raise _refuse(
             "MANIFEST_ARTIFACT",
             f"artifact {name!r} has url {url!r}; only http(s) and file URLs "
             "are accepted, so a fetched release is never a relative path")
-    digest = _string(entry, "sha256", code="MANIFEST_ARTIFACT",
+    digest = _string(entry, "sha256", refusal="MANIFEST_ARTIFACT",
                      where=f"artifact {index}")
     if _HEX64.match(digest) is None:
         raise _refuse(
@@ -202,7 +206,7 @@ def _parse_pins(document: object) -> dict:
 def _parse_compat(document: object) -> dict:
     if not isinstance(document, dict):
         raise _refuse("MANIFEST_COMPAT", "`compat` must be an object")
-    language = _string(document, "language", code="MANIFEST_COMPAT",
+    language = _string(document, "language", refusal="MANIFEST_COMPAT",
                        where="compat")
     try:
         Version.parse(language)
@@ -265,23 +269,23 @@ def parse_manifest(document: object) -> ReleaseManifest:
             f"release manifest schema is {schema!r}; this updater reads "
             f"{SCHEMA!r}. A newer manifest needs a newer updater",
             fix="upgrade the toolchain that reads the release feed")
-    project = _string(document, "project", code="MANIFEST_PROJECT")
+    project = _string(document, "project", refusal="MANIFEST_PROJECT")
     if _PROJECT.match(project) is None:
         raise _refuse("MANIFEST_PROJECT",
                       f"`project` is {project!r}; expected a repository name "
                       "such as `revl` or `owner/name`")
-    version_text = _string(document, "version", code="MANIFEST_VERSION")
+    version_text = _string(document, "version", refusal="MANIFEST_VERSION")
     try:
         version = Version.parse(version_text)
     except VersionError as error:
         raise _refuse("MANIFEST_VERSION", f"manifest version: {error}") from None
-    tag = _string(document, "tag", code="MANIFEST_TAG")
+    tag = _string(document, "tag", refusal="MANIFEST_TAG")
     if tag not in (f"v{version}", str(version)):
         raise _refuse(
             "MANIFEST_TAG",
             f"`tag` is {tag!r} but `version` is {version}; a release tag names "
             f"its version (`v{version}`)")
-    commit = _string(document, "commit", code="MANIFEST_COMMIT")
+    commit = _string(document, "commit", refusal="MANIFEST_COMMIT")
     if _HEX40.match(commit) is None:
         raise _refuse("MANIFEST_COMMIT",
                       "`commit` must be a 40 character lowercase commit sha")
