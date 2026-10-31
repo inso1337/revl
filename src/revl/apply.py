@@ -134,7 +134,8 @@ def build_artifact(plan_result: dict, running_ir: dict | None) -> dict:
 
     # the plan payload is kept for `apply`'s summary and for re-rendering, but
     # the heavy IR lives once at the top of the artifact, not twice.
-    payload = {k: v for k, v in plan_result.items() if k != "resultingIR"}
+    payload = {k: v for k, v in plan_result.items()
+               if k not in {"resultingIR", "candidateHostBodies"}}
     artifact = {
         PLAN_KEY: PLAN_FORMAT,
         "basis": fingerprint(running_ir),

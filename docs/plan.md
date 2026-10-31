@@ -19,8 +19,11 @@ A plan is that answer, computed without producing any of it.
 When a library caller supplies operator-approved provider modules through
 `modules`, it can pass their paths in `operator_sources`. Apply artifacts then
 keep those providers out of the candidate-authored host-body disclosure list.
-The command-line planner treats the files named directly as candidate sources;
-`use`-reached files not named as candidates are already excluded.
+The compiler reports host bodies from every source file it reads, including
+files reached through `use`; library callers exclude trusted operator providers
+by listing their paths in `operator_sources`. The command-line planner has no
+operator-source option, so its `use`-reached host bodies remain in the
+candidate-authored disclosure list.
 
 ```bash
 revl compile app.rvl -o running.json     # what is live

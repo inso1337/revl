@@ -77,28 +77,26 @@ def _compile(source: str | None, files: list[str] | None,
                          report=report)
 
 
-def _candidate_host_bodies(ir: dict, report: dict, candidate_sources: set[str],
+def _candidate_host_bodies(ir: dict, report: dict,
                            operator_sources: set[str]) -> list[dict]:
-    """Host bodies declared by the plan's candidate sources.
+    """Host bodies from every compiled source except operator providers.
 
-    A plan can include operator-provided modules beside the candidate. Keep
-    those out of the apply artifact's disclosure provenance even when their
-    IR body differs from the running version.
+    The compile report includes files reached through ``use`` as well as
+    paths named directly by the caller. Only the explicit operator-source
+    opt-out excludes a body from candidate disclosure provenance.
     """
+    from .mcp.session import host_body_entry  # noqa: PLC0415
+
     excluded = {os.path.abspath(path) for path in operator_sources}
     names = {
         name
         for path, externs in (report.get("host_extern_sources") or {}).items()
-        if os.path.abspath(path) in candidate_sources
-        and os.path.abspath(path) not in excluded
+        if os.path.abspath(path) not in excluded
         for name in externs
     }
-    return sorted(({
-        "extern": extern.get("name"),
-        "classification": extern.get("class"),
-        "backends": sorted(extern.get("bodies") or {}),
-    } for extern in (ir.get("externs") or [])
-        if extern.get("name") in names and extern.get("bodies")),
+    return sorted((host_body_entry(extern)
+                   for extern in (ir.get("externs") or [])
+                   if extern.get("name") in names and extern.get("bodies")),
         key=lambda entry: str(entry.get("extern")))
 
 
@@ -526,14 +524,8 @@ def plan(source: str | None = None, files: list[str] | None = None,
     # plan; only the admitted path has them, and only when asked (the plan's
     # prose output never carries an IR).
     if include_ir and basis == "admitted" and candidate_ir is not None:
-        candidate_sources = {
-            *(os.path.abspath(path) for path in (files or [])),
-            *(os.path.abspath(path) for path in (modules or {})),
-        }
-        if source is not None:
-            candidate_sources.add(os.path.abspath("<candidate>.rvl"))
         result["candidateHostBodies"] = _candidate_host_bodies(
-            candidate_ir, compile_report, candidate_sources,
+            candidate_ir, compile_report,
             {os.path.abspath(path) for path in (operator_sources or set())})
         result["resultingIR"] = _merge_resulting_ir(running_ir, candidate_ir, dropped)
     return result

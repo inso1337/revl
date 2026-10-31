@@ -593,6 +593,20 @@ def test_apply_artifact_preserves_candidate_source_attribution():
     artifact = build_artifact(result, running)
 
     assert _body_names(artifact["authoredHostBodies"]) == {"candidate_note"}
+    assert "candidateHostBodies" not in artifact["plan"]
+
+    legacy_plan = dict(artifact["plan"])
+    legacy_plan.pop("candidateHostBodies", None)
+    legacy_artifact = {**artifact, "plan": legacy_plan}
+    legacy_artifact.pop("authoredHostBodies", None)
+    legacy_origin = _applied_generation_origin(
+        {AUTHORED_HOST_BODIES_KEY: []}, running,
+        legacy_artifact["resultingIR"],
+        authored_host_bodies=legacy_artifact.get("authoredHostBodies"))
+    assert _body_names(legacy_origin[AUTHORED_HOST_BODIES_KEY]) == {
+        "candidate_note", "operator_helper",
+    }
+
     origin = _applied_generation_origin(
         {AUTHORED_HOST_BODIES_KEY: [{
             "extern": "operator_helper", "classification": "pure",
@@ -600,6 +614,37 @@ def test_apply_artifact_preserves_candidate_source_attribution():
         }]}, running, artifact["resultingIR"],
         authored_host_bodies=artifact["authoredHostBodies"])
     assert _body_names(origin[AUTHORED_HOST_BODIES_KEY]) == {"candidate_note"}
+
+
+def test_files_plan_attributes_host_bodies_from_use_reached_sources(tmp_path):
+    """Every file the compiler reaches contributes unless marked operator."""
+    from revl import compile_source
+    from revl.apply import build_artifact
+    from revl.plan import plan
+
+    used = tmp_path / "used.rvl"
+    used.write_text(
+        "pub extern pure fn used_note(x: Int) -> Int = "
+        "@py { return x }\n",
+        encoding="utf-8")
+    root = tmp_path / "root.rvl"
+    root.write_text(
+        'use "./used.rvl" { used_note }\n'
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = used_note(1) }\n"
+        "}\n",
+        encoding="utf-8")
+    running = compile_source(
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = 0 }\n"
+        "}\n")
+
+    result = plan(files=[str(root)], manifest=running, include_ir=True)
+    artifact = build_artifact(result, running)
+
+    assert _body_names(artifact["authoredHostBodies"]) == {"used_note"}
 
 
 @needs_cordis
