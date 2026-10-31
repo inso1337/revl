@@ -29784,7 +29784,14 @@ fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
     var ty = ""
     var k = 0
     while (k < fields.length()) {
-      if (fields[k].name == nm) { ty = infer(fields[k].value, env) }
+      // The reference `infer_ast` builds a record's structural shape from each
+      // field's inferred type. `infer` is the lowerer's annotation projection:
+      // for a generic call it keeps the marked declaration result (`Opt[?U]`)
+      // rather than the call's substituted result (`Opt[Int]`). The typed
+      // checker above already walks these fields through `tk_infer`; reuse that
+      // same result here so checking `{ v: wrap(n) }` against `Bx[Opt[Int]]`
+      // compares the instantiated field shape.
+      if (fields[k].name == nm) { ty = tk_infer(fields[k].value, env).ty }
       k += 1
     }
     let seg = nm.concat(": ").concat(ty == "" ? "Any" : ty)

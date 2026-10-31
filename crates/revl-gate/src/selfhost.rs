@@ -34239,7 +34239,7 @@ fn infer_record_ty(fields: &[InitN], env: Vec<Bind>) -> String {
         let mut k = 0i64;
         while (k < fields.revl_length()) {
             if ((fields)[(k) as usize].name == nm) {
-                ty = infer((fields)[(k) as usize].value.clone(), env.clone());
+                ty = tk_infer((fields)[(k) as usize].value.clone(), env.clone()).ty;
             }
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
