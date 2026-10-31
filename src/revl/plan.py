@@ -77,13 +77,14 @@ def _compile(source: str | None, files: list[str] | None,
                          report=report)
 
 
-def _candidate_host_bodies(ir: dict, report: dict,
+def _candidate_host_bodies(ir: dict, report: dict, candidate_sources: set[str],
                            operator_sources: set[str]) -> list[dict]:
-    """Host bodies from every compiled source except operator providers.
+    """Host bodies declared by the caller's sources or the files they reached.
 
-    The compile report includes files reached through ``use`` as well as
-    paths named directly by the caller. Only the explicit operator-source
-    opt-out excludes a body from candidate disclosure provenance.
+    `candidate_sources` is the paths the caller named plus the user-origin
+    modules the compile read from disk, so a `use`-reached file in the caller's
+    tree is attributed while a shipped `stdlib` module is not. The explicit
+    operator-source opt-out wins over both.
     """
     from .mcp.session import host_body_entry  # noqa: PLC0415
 
@@ -91,7 +92,8 @@ def _candidate_host_bodies(ir: dict, report: dict,
     names = {
         name
         for path, externs in (report.get("host_extern_sources") or {}).items()
-        if os.path.abspath(path) not in excluded
+        if os.path.abspath(path) in candidate_sources
+        and os.path.abspath(path) not in excluded
         for name in externs
     }
     return sorted((host_body_entry(extern)
@@ -524,8 +526,16 @@ def plan(source: str | None = None, files: list[str] | None = None,
     # plan; only the admitted path has them, and only when asked (the plan's
     # prose output never carries an IR).
     if include_ir and basis == "admitted" and candidate_ir is not None:
+        candidate_sources = {
+            *(os.path.abspath(path) for path in (files or [])),
+            *(os.path.abspath(path) for path in (modules or {})),
+            *(os.path.abspath(path)
+              for path in (compile_report.get("dependencies") or {})),
+        }
+        if source is not None:
+            candidate_sources.add(os.path.abspath("<candidate>.rvl"))
         result["candidateHostBodies"] = _candidate_host_bodies(
-            candidate_ir, compile_report,
+            candidate_ir, compile_report, candidate_sources,
             {os.path.abspath(path) for path in (operator_sources or set())})
         result["resultingIR"] = _merge_resulting_ir(running_ir, candidate_ir, dropped)
     return result

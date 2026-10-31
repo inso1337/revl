@@ -647,6 +647,55 @@ def test_files_plan_attributes_host_bodies_from_use_reached_sources(tmp_path):
     assert _body_names(artifact["authoredHostBodies"]) == {"used_note"}
 
 
+def test_files_plan_keeps_shipped_stdlib_bodies_out_of_candidate_disclosure(
+        tmp_path):
+    """A stdlib host-body module the candidate imports is not candidate code.
+
+    The compile report names every source file it read. Attribution follows the
+    files the caller supplied and the user-origin files those reached through
+    `use`, so the shipped stdlib bodies stay out of the artifact and the
+    post-apply disclosure set, matching the load and swap doors.
+    """
+    from revl import compile_source
+    from revl.apply import build_artifact
+    from revl.mcp.session import (AUTHORED_HOST_BODIES_KEY,
+                                  _applied_generation_origin)
+    from revl.plan import plan
+
+    used = tmp_path / "used.rvl"
+    used.write_text(
+        "pub extern pure fn used_note(x: Int) -> Int = "
+        "@py { return x }\n",
+        encoding="utf-8")
+    root = tmp_path / "root.rvl"
+    root.write_text(
+        'use "./used.rvl" { used_note }\n'
+        'use "stdlib/fs.rvl" { resolve_within }\n'
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = used_note(1) }\n"
+        "}\n",
+        encoding="utf-8")
+    running = compile_source(
+        "service Ping { fn ping() -> Int }\n"
+        "component Pinger provides ping: Ping {\n"
+        "  provide ping { fn ping() = 0 }\n"
+        "}\n")
+
+    result = plan(files=[str(root)], manifest=running, include_ir=True)
+    artifact = build_artifact(result, running)
+
+    assert _body_names(artifact["authoredHostBodies"]) == {"used_note"}
+    # the compile really did read the stdlib module, so the exclusion is
+    # attributed rather than a missing source
+    assert any(extern.get("name") == "resolve_within"
+               for extern in artifact["resultingIR"].get("externs") or [])
+    origin = _applied_generation_origin(
+        {}, running, artifact["resultingIR"],
+        authored_host_bodies=artifact["authoredHostBodies"])
+    assert _body_names(origin[AUTHORED_HOST_BODIES_KEY]) == {"used_note"}
+
+
 @needs_cordis
 def test_apply_keeps_operator_provider_out_of_later_call_and_act_tickets(
         monkeypatch):
