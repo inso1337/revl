@@ -117,6 +117,19 @@ def test_backend_lock_pins_cryptography_by_version_and_hash():
         "the cryptography entry carries too few wheel hashes to cover the "
         f"supported platforms: {len(hashes)}"
     )
+    # The README records one wheel per platform, and CI's fresh venv only
+    # installs on Linux, so a lock truncated to its Linux hashes would still
+    # pass here without these named hashes. They are the cp311-abi3 wheels the
+    # recorded macOS arm64, Linux x86_64 and Windows entries resolve to.
+    recorded = {
+        "macosx_11_0_arm64": "fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb",
+        "manylinux2014_x86_64": "630ebfea3bf689d075f82316324ff7433dc447fe6bc1bfc76524b74b4a9567d2",
+        "win_amd64": "7afa5a6602a9f29af1f3a2965f831bae7c9d5d597b7cbb716d41ab3b7d89879c",
+    }
+    dropped = sorted(name for name, sha in recorded.items() if sha not in hashes)
+    assert not dropped, (
+        f"the lock dropped the recorded platform wheel(s): {dropped}"
+    )
 
 
 def test_setup_installs_the_hashed_lock_before_the_test_dependencies():
