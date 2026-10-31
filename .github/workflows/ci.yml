@@ -907,6 +907,47 @@ jobs:
       # 1 skipped without cordis-py, 7 passed with the pinned fork installed.
       - run: backends/python/.venv/bin/python -m pytest tck/tests/test_tck.py -q
 
+  # Issue #3008: the signature verification dependency is a pinned, hashed lock
+  # rather than a floating wheel. This job proves a fresh venv installs that
+  # lock under `--require-hashes` and verifies one Ed25519 and one RSA RS256
+  # known-answer vector with it. The heavy `backend-python` job above keeps
+  # running setup.sh and the whole backend suite; this one is small and
+  # isolated so a broken or unhashed lock is a fast, named failure.
+  #
+  # Deliberately non-required, and the required-check partition records that
+  # as an asserted choice: branch protection names the seven contexts it has
+  # always named, and `backend-python` still covers the same suite.
+  backend-python-signatures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Same selection rule as `backend-python`: a pull request that no backend
+    # job can observe skips both.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
+      # A fresh venv, not setup.sh: this job measures the lock on its own, so a
+      # transitive dependency that the lock forgot cannot be masked by the
+      # backend suite's other installs.
+      - name: install the hashed lock into a fresh venv
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/signatures-venv"
+          uv pip install --python "$RUNNER_TEMP/signatures-venv/bin/python" \
+            --require-hashes -r backends/python/requirements.txt
+          uv pip install --python "$RUNNER_TEMP/signatures-venv/bin/python" pytest
+      # --noconftest: the backend pytest root's conftest loads the emitted
+      # runtime, which this lean venv does not install. This file needs only
+      # `cryptography` and reads the lock and setup.sh by path.
+      - name: verify the Ed25519 and RSA RS256 known-answer vectors
+        run: >-
+          "$RUNNER_TEMP/signatures-venv/bin/python" -m pytest
+          backends/python/tests/test_signature_verification.py
+          --noconftest -q
+
   # The root `tests/` suite, WITH the cordis-py runtime.
   #
   # `pytest tests/ -q` ran in exactly one job (`frontend`), which installs only
