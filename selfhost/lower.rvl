@@ -15718,12 +15718,14 @@ fn tk_items(xs: List[Expr], i: Int, env: List[Bind], ty: Str) -> TInf {
 
 fn tk_rec(fields: List[InitN], env: List[Bind]) -> TInf {
   var i = 0
+  var tys: List[Bind] = []
   while (i < fields.length()) {
     let r = tk_infer(fields[i].value, env)
     if (r.v != "") { return r }
+    tys = tys.push({ name: fields[i].name, ty: r.ty })
     i += 1
   }
-  return tk_ok(infer_record_ty(fields, env))
+  return tk_ok(record_ty_from(fields, tys))
 }
 
 // item 71: an update on a record literal is field-checked against the literal's
@@ -29772,7 +29774,12 @@ fn infer_call_ty(c: CallN, env: List[Bind]) -> Str {
   return infer_callee(c.target, env)
 }
 
-fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
+// The structural shape `{a: T, b: U}` of a record literal, from one inferred type
+// per field in declaration order. Both callers below hold those types BEFORE the
+// shape is assembled; building it here means neither of them walks a field twice.
+// The name lookup keeps the LAST declaration of a duplicated name, which is what
+// the previous single loop did.
+fn record_ty_from(fields: List[InitN], tys: List[Bind]) -> Str {
   var names: List[Str] = []
   var i = 0
   while (i < fields.length()) { names = names.push(fields[i].name)  i += 1 }
@@ -29784,14 +29791,7 @@ fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
     var ty = ""
     var k = 0
     while (k < fields.length()) {
-      // The reference `infer_ast` builds a record's structural shape from each
-      // field's inferred type. `infer` is the lowerer's annotation projection:
-      // for a generic call it keeps the marked declaration result (`Opt[?U]`)
-      // rather than the call's substituted result (`Opt[Int]`). The typed
-      // checker above already walks these fields through `tk_infer`; reuse that
-      // same result here so checking `{ v: wrap(n) }` against `Bx[Opt[Int]]`
-      // compares the instantiated field shape.
-      if (fields[k].name == nm) { ty = tk_infer(fields[k].value, env).ty }
+      if (fields[k].name == nm) { ty = tys[k].ty }
       k += 1
     }
     let seg = nm.concat(": ").concat(ty == "" ? "Any" : ty)
@@ -29799,6 +29799,23 @@ fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
     j += 1
   }
   return out.concat("}")
+}
+
+// The reference `infer_ast` builds a record's structural shape from each field's
+// inferred type. `infer` is the lowerer's annotation projection: for a generic
+// call it keeps the marked declaration result (`Opt[?U]`) rather than the call's
+// substituted result (`Opt[Int]`), so it reads the typed result here and the
+// record shape carries the instantiated field type. `tk_rec` builds the same
+// shape from the types it inferred itself, which is why neither path descends a
+// field twice: doing both cost 2^depth on a nested record literal.
+fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
+  var tys: List[Bind] = []
+  var i = 0
+  while (i < fields.length()) {
+    tys = tys.push({ name: fields[i].name, ty: tk_infer(fields[i].value, env).ty })
+    i += 1
+  }
+  return record_ty_from(fields, tys)
 }
 
 fn infer_list_ty(items: List[Expr], env: List[Bind]) -> Str {
