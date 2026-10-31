@@ -826,7 +826,8 @@ def test_rsa_missing_key_material_refused_as_bad_key(ns):
 def test_p256_coordinate_width_refused_as_bad_key(ns):
     jwks = _jwks({"kty": "EC", "kid": "ec", "alg": "ES256", "crv": "P-256",
                   "x": _b64e(b"\x01" * 31), "y": RFC7515_A3_Y})
-    token = f"{_hdr('{\"alg\":\"ES256\",\"kid\":\"ec\"}')}.{RFC7515_A3_PAYLOAD}.{RFC7515_A3_SIGNATURE}"
+    header = _hdr('{"alg":"ES256","kid":"ec"}')
+    token = f"{header}.{RFC7515_A3_PAYLOAD}.{RFC7515_A3_SIGNATURE}"
     assert _verify(ns, token, jwks, issuer="joe") == "bad-key"
 
 
