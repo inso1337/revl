@@ -48,7 +48,7 @@ Rules the parser enforces, each with its own refusal code:
 | `project` | the feed may only ship its own project |
 | `version` / `tag` | semver; the tag names the version (`v2.1.0`) |
 | `commit` | 40 character commit sha |
-| `artifacts` | at least one; unique names; http(s) or file URL; 64 character sha256 |
+| `artifacts` | at least one; unique names; http(s) or file URL (http(s) only in a manifest fetched over the network); 64 character sha256; `size`, when given, is enforced on download |
 | `compat` | `language` is required semver; `gateApi`, `irVersion`, `minPython`, `frontier` are optional host facts |
 | `live` | true only when the release was tested as a live update over the previous release |
 | `hostChanges` | true when the release also changes host Python, compiler or venv bytes |
@@ -79,9 +79,12 @@ codes are stable for automation:
 | 2 | error or refusal |
 
 `fetch` downloads the release artifact, verifies it against the manifest
-sha256, extracts it safely under the update home
+sha256 and declared size, extracts it safely under the update home
 (`$REVL_UPDATE_HOME`, default `~/.revl/updates`) and writes a
-`provenance.json` beside the sources. Nothing is compiled and nothing is
+`provenance.json` beside the sources, with the sha256 of every extracted
+file. A staging is reused only while every file still has that digest and
+none was added or removed; otherwise the release is fetched and extracted
+again. Nothing is compiled and nothing is
 executed. Extraction refuses absolute paths, `..`, backslashes, drive paths,
 links and device entries, and bounds the archive at 300 MB and 50,000 files.
 
@@ -89,7 +92,8 @@ links and device entries, and bounds the archive at 300 MB and 50,000 files.
 journal, which is an append-only JSONL file in the update home.
 
 `--manifest PATH_OR_URL` bypasses the feed and reads that manifest directly.
-The same validation runs, so a mirror document is not a second code path.
+The same validation runs, so a mirror document is not a second code path. A
+path that cannot be read is the `MANIFEST_UNREADABLE` refusal, exit 2.
 
 ## Applying a release to a running composition
 
@@ -98,7 +102,13 @@ The operator surface is `revl mcp serve --update --update-repo OWNER/NAME`
 are all operator flags; a caller cannot name them). Four verbs:
 
 1. `revl_update_check` reads the feed and compares identities. Nothing is
-   fetched or compiled.
+   fetched or compiled. The release version is compared with the release the
+   running composition was last updated to in this server session
+   (`runningRelease`), never with the toolchain's own version: an
+   application feed versions the application. A composition no release was
+   applied to (or one swapped or reloaded by hand since) has no known release
+   version, so any verified release is a candidate for it
+   (`relation: unknown`). An applied release is not offered again.
 2. `revl_update_apply` with no `planHash` stages the release, hashes the
    staged bytes, compiles and admits the release against the running
    manifest, plans the swap and returns a `planHash`. Nothing is mutated.
@@ -109,11 +119,28 @@ are all operator flags; a caller cannot name them). Four verbs:
    (crossings, reach, capability scopes, host backends, recovery inverses,
    registers or emission cardinality), swaps the release in and verifies the
    successor serves the running keys. A successor that does not is reverted
-   automatically. A release that declares `live: false` is refused for a
-   running composition unless the operator passes `force`; its plan answer
-   reports `live` and `restartRequired`.
+   automatically. The swap compiles the bytes apply hashed, written to a
+   fresh private directory under the update home, so a write to the staging
+   after the check cannot reach the running composition.
+
+   Each departure from a plain upgrade needs its own consent on the planning
+   call, and the plan answer reports them under `consents`:
+
+   | argument | consents to |
+   | --- | --- |
+   | `force` | planning the release the composition already runs, again |
+   | `allowDowngrade` | a release older than the running one (`force` alone is `UPDATE_DOWNGRADE`) |
+   | `acceptNotLive` | a release whose manifest says `live: false` (`UPDATE_NOT_LIVE` otherwise) |
+   | `acceptIncompatible` | a release whose declared gate, language or Python requirements this host does not meet (`UPDATE_INCOMPATIBLE` otherwise); the running gate still admits or refuses it |
+
+   The plan answer reports `live` and `restartRequired`.
 4. `revl_update_rollback` returns to the generation before the last applied
-   release, through the same admitted undo any generation change uses.
+   release, through the same admitted undo `revl_undo` runs (the same
+   authoring profile, and an `approvalRequired` ticket answered the same
+   way). A rollback consumes its apply, so a second rollback is
+   `UPDATE_NOTHING_APPLIED`, and it is `UPDATE_ROLLBACK_STALE` when a later
+   generation than the one the apply started is running: going back would
+   also discard that change, so `revl_undo` is the tool for it.
 
 A release with no manifest (tag fallback) is never applied unless the
 operator explicitly enabled `--update-trust-tags`: it has no declared sha256,
@@ -139,6 +166,14 @@ replaces the gate:
    generation that is running;
 5. a post-apply health check reverts automatically when the successor does
    not serve its keys.
+
+There is no signature. The manifest and the artifact are as authentic as the
+channel that served them: TLS to the release host, and the account that
+publishes releases on the feed repository. Whoever can publish a release
+there can publish a manifest whose sha256 matches their own artifact; the
+sha256 binds the artifact to the manifest, not to an author. A manifest
+fetched over the network may not name a `file://` artifact, so a publisher
+cannot choose a file on the host to stage.
 
 A release whose bytes are verified is operator-sanctioned code: it may carry
 host bodies, exactly as a checkout the operator compiled would. A release

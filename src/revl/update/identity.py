@@ -35,7 +35,36 @@ def _python_at_least(have: str, want: str) -> bool:
     return have_parts[:len(want_parts)] >= want_parts
 
 
-def compare_identity(manifest, identity: dict | None = None) -> dict:
+#: ``running`` default: compare the release with the running toolchain, which
+#: is what ``revl update check`` asks about the toolchain's own feed.
+TOOLCHAIN = object()
+
+
+def _relation(running: Version | None, latest: Version) -> str:
+    if running is None:
+        return "unknown"
+    if latest > running:
+        return "newer"
+    if latest == running:
+        return "same"
+    return "older"
+
+
+def _running_version(identity: dict, running) -> tuple[Version | None, str]:
+    """The version a release is compared with, and what that version is of.
+
+    The toolchain basis is the compiler's own version. The composition basis
+    is the release a running composition was last updated to: a session that
+    has applied none runs a composition of no known release version, so any
+    verified release is a candidate for it (``relation`` is ``unknown``).
+    """
+    if running is TOOLCHAIN:
+        return Version.parse_or_none(identity.get("version")), "toolchain"
+    return (Version.parse_or_none(running) if running else None), "composition"
+
+
+def compare_identity(manifest, identity: dict | None = None, *,
+                     running=TOOLCHAIN) -> dict:
     """Compare a release manifest with the running identity.
 
     The answer separates three questions, because they are three answers:
@@ -52,13 +81,10 @@ def compare_identity(manifest, identity: dict | None = None) -> dict:
     """
     identity = identity or current_identity()
     latest = manifest.semver
-    running = Version.parse_or_none(identity.get("version"))
-    if running is None:
-        update_available = False
-        bump = "none"
-    else:
-        update_available = latest > running
-        bump = bump_kind(running, latest) if update_available else "none"
+    toolchain = Version.parse_or_none(identity.get("version"))
+    current, basis = _running_version(identity, running)
+    relation = _relation(current, latest)
+    update_available, bump = _availability(current, latest, basis)
     requirements: list[str] = []
     release_compat = manifest.compat
     declared_gate = release_compat.get("gateApi")
@@ -68,12 +94,12 @@ def compare_identity(manifest, identity: dict | None = None) -> dict:
             f"gateApi: the release was built for gate {declared_gate}, this "
             f"toolchain serves gate {running_gate}")
     declared_language = release_compat.get("language")
-    if declared_language and running is not None:
+    if declared_language and toolchain is not None:
         try:
-            if Version.parse(declared_language) > running:
+            if Version.parse(declared_language) > toolchain:
                 requirements.append(
                     f"language: the release declares language "
-                    f"{declared_language}, this toolchain is {running}")
+                    f"{declared_language}, this toolchain is {toolchain}")
         except VersionError:
             requirements.append(
                 f"language: the release declares {declared_language!r}, which "
@@ -89,6 +115,9 @@ def compare_identity(manifest, identity: dict | None = None) -> dict:
     live = bool(manifest.live) and compatible and update_available
     return {
         "current": identity,
+        "basis": basis,
+        "running": str(current) if current is not None else None,
+        "relation": relation,
         "latest": {
             "version": manifest.version,
             "tag": manifest.tag,
@@ -106,16 +135,32 @@ def compare_identity(manifest, identity: dict | None = None) -> dict:
     }
 
 
-def _tag_fallback_comparison(resolved, identity: dict, channel: str) -> dict:
-    current = Version.parse_or_none(identity.get("version"))
+def _availability(current: Version | None, latest: Version,
+                  basis: str) -> tuple[bool, str]:
+    if current is None:
+        # an unknown toolchain version offers nothing; a composition no
+        # release was applied to may take any verified release
+        return basis == "composition", "unknown" if basis == "composition" \
+            else "none"
+    if latest > current:
+        return True, bump_kind(current, latest)
+    return False, "none"
+
+
+def _tag_fallback_comparison(resolved, identity: dict, channel: str,
+                             running=TOOLCHAIN) -> dict:
+    current, basis = _running_version(identity, running)
     latest = Version.parse(resolved.version)
-    available = current is not None and latest > current
+    available, bump = _availability(current, latest, basis)
     return {
         "current": identity,
+        "basis": basis,
+        "running": str(current) if current is not None else None,
+        "relation": _relation(current, latest),
         "latest": {"version": resolved.version, "tag": resolved.tag,
                    "commit": resolved.commit, "channel": channel},
         "updateAvailable": available,
-        "bump": bump_kind(current, latest) if available else "none",
+        "bump": bump,
         "compatible": None,
         "requirements": [],
         "live": False,
@@ -127,8 +172,14 @@ def _tag_fallback_comparison(resolved, identity: dict, channel: str) -> dict:
 
 
 def compare_release(resolved, identity: dict | None = None,
-                    channel: str = "stable") -> dict:
+                    channel: str = "stable", *, running=TOOLCHAIN) -> dict:
     """Compare a resolved release with the running identity.
+
+    ``running`` is the version the release would replace: the toolchain's
+    own by default (the CLI), or the release a running composition was last
+    updated to (the operator verbs pass it, ``None`` when no release was
+    applied). The language, gate and Python requirements are always checked
+    against the toolchain.
 
     A tag fallback carries no compatibility statement; it is reported as
     compatible ``None`` and never live, which is the honest answer rather than
@@ -136,7 +187,7 @@ def compare_release(resolved, identity: dict | None = None,
     """
     identity = identity or current_identity()
     if resolved.manifest is None:
-        return _tag_fallback_comparison(resolved, identity, channel)
-    report = compare_identity(resolved.manifest, identity)
+        return _tag_fallback_comparison(resolved, identity, channel, running)
+    report = compare_identity(resolved.manifest, identity, running=running)
     report["tagFallback"] = False
     return report

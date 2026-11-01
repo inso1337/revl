@@ -25,12 +25,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import threading
 import time
 
 from ..update.errors import UpdateError
 from ..update.feed import resolve_release
-from ..update.fetch import find_staged, stage_release
+from ..update.fetch import (find_staged, stage_release, staged_intact,
+                            update_home)
 from ..update.identity import compare_release, current_identity
 from ..update.journal import Journal
 
@@ -50,6 +52,10 @@ _CONFIG: dict = {
     "replacing": (),
 }
 _PLANS: dict[str, dict] = {}
+#: The releases this server session applied, oldest first. A release is the
+#: running one while the session's composition is the one that apply produced
+#: (its document digest), so a hand swap or a reload forgets it.
+_APPLIED: list[dict] = []
 _LOCK = threading.RLock()
 #: Identifies this server process in the journal and in a plan: a second
 #: server sharing the update home must not consume another session's rollback
@@ -84,6 +90,7 @@ def reset() -> None:
             "home": None, "api_base": None, "trust_tags": False,
             "replacing": ()})
         _PLANS.clear()
+        _APPLIED.clear()
 
 
 def _server():
@@ -151,9 +158,39 @@ def _provided_keys() -> list[str]:
     return list(server.SESSION.state(drain=False).get("providedKeys") or [])
 
 
-def _files_digest(paths: list[str]) -> tuple[str, list[dict]]:
+def _running_release() -> dict | None:
+    """The release the running composition was updated to by this session.
+
+    ``None`` when nothing is loaded, when this session applied no release, or
+    when the running composition is no longer one an apply produced. The
+    comparison is with the composition, never with the toolchain's own
+    version: an application feed versions the application.
+    """
+    server = _server()
+    if not server.SESSION.loaded:
+        return None
+    digest = _ir_digest(server.SESSION.ir)
+    with _LOCK:
+        for entry in reversed(_APPLIED):
+            if entry["irDigest"] == digest:
+                return dict(entry)
+    return None
+
+
+def _running_version() -> str | None:
+    running = _running_release()
+    return running["version"] if running is not None else None
+
+
+def _files_digest(paths: list[str]) -> tuple[str, list[dict], dict]:
+    """Read each staged file ONCE: its digest, and the bytes that digest is of.
+
+    A caller that goes on to use the files uses these bytes, never a second
+    read of the path, so what is used is what was hashed.
+    """
     digest = hashlib.sha256()
     entries: list[dict] = []
+    bodies: dict[str, bytes] = {}
     for path in sorted(paths):
         try:
             with open(path, "rb") as handle:
@@ -165,10 +202,40 @@ def _files_digest(paths: list[str]) -> tuple[str, list[dict]]:
                 fix="stage the release again, then plan it again") from None
         sha = hashlib.sha256(body).hexdigest()
         entries.append({"path": path, "sha256": sha, "size": len(body)})
+        bodies[path] = body
         digest.update(path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(body)
-    return digest.hexdigest(), entries
+    return digest.hexdigest(), entries, bodies
+
+
+def _materialise(plan: dict, bodies: dict[str, bytes]) -> list[str]:
+    """Write the hashed bytes into a fresh private directory, return its files.
+
+    The swap compiles from these paths, so a write to the staging directory
+    after the digest check cannot reach the swap. The directory is kept: it
+    is the on-disk source of the generation the swap starts.
+    """
+    root = update_home(_CONFIG["home"]) / "applied"
+    root.mkdir(parents=True, exist_ok=True)
+    target = tempfile.mkdtemp(prefix=f"{plan['planHash'][:16]}-", dir=root)
+    source_root = plan["sourceRoot"]
+    paths: list[str] = []
+    for path in plan["files"]:
+        relative = os.path.relpath(path, source_root)
+        if relative.startswith(os.pardir) or os.path.isabs(relative):
+            raise UpdateError(
+                "UPDATE_FILES",
+                f"the planned source {path} is outside its staging root",
+                fix="stage the release again, then plan it again")
+        destination = os.path.join(target, relative)
+        os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+        descriptor = os.open(destination,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(bodies[path])
+        paths.append(destination)
+    return paths
 
 
 def _plan_hash(binding: dict) -> str:
@@ -262,7 +329,10 @@ def _check_arguments(arguments: dict) -> dict:
     journal = _journal(cfg)
     resolved = _resolve(cfg)
     identity = current_identity()
-    comparison = compare_release(resolved, identity, cfg["channel"])
+    running = _running_release()
+    comparison = compare_release(
+        resolved, identity, cfg["channel"],
+        running=running["version"] if running is not None else None)
     journal.append("check", repo=cfg["repo"], channel=cfg["channel"],
                    version=resolved.version, updateAvailable=bool(
                        comparison.get("updateAvailable")))
@@ -273,6 +343,7 @@ def _check_arguments(arguments: dict) -> dict:
         server.SESSION.loaded
         and resolved.manifest is not None
         and comparison.get("updateAvailable", False)
+        and comparison.get("compatible") is not False
         and artifact is not None
         and artifact.kind == "source")
     return {
@@ -280,13 +351,16 @@ def _check_arguments(arguments: dict) -> dict:
         "feed": {"repo": cfg["repo"], "channel": cfg["channel"]},
         "identity": identity,
         "release": resolved.as_report(),
+        "runningRelease": running,
         "comparison": comparison,
         "applyAvailable": apply_available,
         "applyReason": None if apply_available else (
             "nothing is loaded" if not server.SESSION.loaded else
             "the release carries no composition source artifact" if (
                 artifact is None or artifact.kind != "source") else
-            "no newer release on the channel"),
+            "no newer release on the channel" if not comparison.get(
+                "updateAvailable") else
+            "the release declares requirements this host does not meet"),
         "note": "check reads the feed and compares identities; it fetches and "
                 "compiles nothing. revl_update_apply with no planHash stages "
                 "and plans the release",
@@ -326,6 +400,14 @@ def _stage_for_apply(resolved, cfg: dict, journal: Journal):
                 # never checked against a declared sha256, so it is not.
                 if staged.tag_fallback or staged.digest != artifact.sha256:
                     continue
+            # the extracted files are what compiles, so they are checked
+            # against the digests recorded when the verified archive was
+            # extracted; a staging edited since is fetched again, not used
+            if not staged_intact(staged):
+                journal.append("refusal", stage="reuse",
+                               project=staged.project, version=staged.version,
+                               directory=str(staged.directory))
+                continue
             return staged, None
     try:
         staged = stage_release(resolved, home_dir=cfg["home"],
@@ -372,10 +454,84 @@ def _tool_update_status(arguments: dict) -> dict:
         "identity": current_identity(),
         "loaded": loaded,
         "generation": _generation(),
+        "runningRelease": _running_release(),
         "staged": staged,
         "plans": plan_documents,
         "journal": _journal(cfg).tail(20) if cfg["enabled"] else [],
     }
+
+
+#: The caller's explicit consents, each to one thing. `force` only re-plans the
+#: release that is already running; it opts into nothing else.
+_CONSENTS = ("force", "allowDowngrade", "acceptNotLive", "acceptIncompatible")
+
+
+def _consents(arguments: dict) -> dict:
+    return {name: arguments.get(name) is True for name in _CONSENTS}
+
+
+def _nothing_to_plan(comparison: dict, note: str) -> dict:
+    return {"ok": True, "planned": False, "applied": False,
+            "comparison": comparison, "live": comparison.get("live"),
+            "restartRequired": comparison.get("restartRequired"),
+            "note": note}
+
+
+def _ordering_gate(resolved, comparison: dict, consents: dict) -> dict | None:
+    relation = comparison.get("relation")
+    running = comparison.get("running")
+    if relation == "older" and not consents["allowDowngrade"]:
+        if consents["force"]:
+            return _refusal(
+                UpdateError(
+                    "UPDATE_DOWNGRADE",
+                    f"release {resolved.version} is older than release "
+                    f"{running}, which the running composition was updated "
+                    "to; force re-plans the running release and never "
+                    "consents to a downgrade",
+                    fix="pass allowDowngrade true to plan the older release"),
+                comparison=comparison)
+        return _nothing_to_plan(
+            comparison, f"the running composition is on release {running}, "
+                        f"newer than the channel's {resolved.version}; nothing "
+                        "was staged or planned (allowDowngrade plans it)")
+    if relation == "same" and not consents["force"]:
+        return _nothing_to_plan(
+            comparison, f"the running composition is already on release "
+                        f"{running}, the newest on the channel; nothing was "
+                        "staged or planned")
+    return None
+
+
+def _plan_gate(resolved, comparison: dict, consents: dict) -> dict | None:
+    """Refuse, before anything is staged, what the caller did not consent to."""
+    refusal = _ordering_gate(resolved, comparison, consents)
+    if refusal is not None:
+        return refusal
+    if comparison.get("compatible") is False and not consents[
+            "acceptIncompatible"]:
+        return _refusal(
+            UpdateError(
+                "UPDATE_INCOMPATIBLE",
+                f"release {resolved.version} declares requirements this host "
+                "does not meet: " + "; ".join(comparison.get("requirements")
+                                              or ()),
+                fix="update the toolchain or the host first, or pass "
+                    "acceptIncompatible true to let the running gate decide"),
+            comparison=comparison)
+    if (resolved.manifest is not None and not resolved.manifest.live
+            and not consents["acceptNotLive"]):
+        return _refusal(
+            UpdateError(
+                "UPDATE_NOT_LIVE",
+                f"release {resolved.version} does not declare itself live-safe "
+                "(`live` is false), so this host may stage it but not apply it "
+                "to a running composition",
+                fix="stage it and apply it at the next start, or pass "
+                    "acceptNotLive true to apply a release the feed has not "
+                    "certified live"),
+            comparison=comparison)
+    return None
 
 
 def _plan_apply(arguments: dict) -> dict:
@@ -393,24 +549,12 @@ def _plan_apply(arguments: dict) -> dict:
     except UpdateError as error:
         return _refusal(error)
     identity = current_identity()
-    comparison = compare_release(resolved, identity, cfg["channel"])
-    if not comparison.get("updateAvailable") and not arguments.get("force"):
-        return {"ok": True, "planned": False, "applied": False,
-                "comparison": comparison, "live": comparison.get("live"),
-                "restartRequired": comparison.get("restartRequired"),
-                "note": "the running version is the newest release on the "
-                        "channel; nothing was staged or planned"}
-    if (resolved.manifest is not None and not resolved.manifest.live
-            and not arguments.get("force")):
-        return _refusal(
-            UpdateError(
-                "UPDATE_NOT_LIVE",
-                f"release {resolved.version} does not declare itself live-safe "
-                "(`live` is false), so this host may stage it but not apply it "
-                "to a running composition",
-                fix="stage it and apply it at the next start, or pass force to "
-                    "apply a release the feed has not certified live"),
-            comparison=comparison)
+    comparison = compare_release(resolved, identity, cfg["channel"],
+                                 running=_running_version())
+    consents = _consents(arguments)
+    refusal = _plan_gate(resolved, comparison, consents)
+    if refusal is not None:
+        return refusal
     staged, refusal = _stage_for_apply(resolved, cfg, journal)
     if refusal is not None:
         return refusal
@@ -426,7 +570,7 @@ def _plan_apply(arguments: dict) -> dict:
     # the plan admits the digest it was made from, and apply re-hashes. Hashing
     # only after admit/plan/widening would bind an edit made during planning
     # without that edit ever being the bytes the gate admitted.
-    records_digest, entries = _files_digest(files)
+    records_digest, entries, _bodies = _files_digest(files)
     admission = server._tool_admit({"files": files,
                                     "manifest": server.SESSION.ir,
                                     "replacing": replacing})
@@ -463,6 +607,7 @@ def _plan_apply(arguments: dict) -> dict:
         "irDigest": ir_digest,
         "replacing": replacing,
         "trustTags": bool(cfg["trust_tags"]),
+        "consents": consents,
         "sessionId": _SESSION_ID,
     }
     plan_hash = _plan_hash(binding)
@@ -476,6 +621,7 @@ def _plan_apply(arguments: dict) -> dict:
                     "manifestDigest": binding["release"]["manifestDigest"],
                     "artifactSha256": staged.digest},
         "files": files,
+        "sourceRoot": str(staged.source_root),
         "sourcesDigest": records_digest,
         "entries": entries,
         "replacing": replacing,
@@ -499,6 +645,7 @@ def _plan_apply(arguments: dict) -> dict:
         "release": plan["release"],
         "staged": staged.as_report(),
         "comparison": comparison,
+        "consents": consents,
         "generation": generation,
         "live": plan["live"],
         "restartRequired": plan["restartRequired"],
@@ -558,7 +705,7 @@ def _apply_plan(arguments: dict) -> dict:
     # The plan binds the bytes, not just the path: a staged file edited after
     # the plan was admitted is refused here, never swapped.
     try:
-        current_digest, _entries = _files_digest(plan["files"])
+        current_digest, _entries, bodies = _files_digest(plan["files"])
     except UpdateError as error:
         return _refusal(error)
     if current_digest != plan["sourcesDigest"]:
@@ -570,7 +717,14 @@ def _apply_plan(arguments: dict) -> dict:
             stalePlan=plan_hash)
     before_generation = generation
     before_keys = _provided_keys()
-    swap = server._tool_swap({"files": plan["files"],
+    try:
+        swap_files = _materialise(plan, bodies)
+    except (OSError, UpdateError) as error:
+        return _refusal(error if isinstance(error, UpdateError) else
+                        UpdateError("UPDATE_FILES",
+                                    f"the verified sources could not be "
+                                    f"written for the swap: {error}"))
+    swap = server._tool_swap({"files": swap_files,
                               "replacing": plan["replacing"]})
     if not swap.get("ok"):
         journal.append("refusal", stage="swap", planHash=plan_hash,
@@ -603,6 +757,11 @@ def _apply_plan(arguments: dict) -> dict:
                                  "session is in the updated generation"))}
     with _LOCK:
         _PLANS.pop(plan_hash, None)
+        _APPLIED.append({"planHash": plan_hash,
+                         "version": plan["release"]["version"],
+                         "release": dict(plan["release"]),
+                         "irDigest": _ir_digest(server.SESSION.ir),
+                         "generation": after_generation})
     journal.append("apply", planHash=plan_hash, **plan["release"],
                    sessionId=_SESSION_ID,
                    generationBefore=before_generation,
@@ -636,6 +795,41 @@ def _tool_update_apply(arguments: dict) -> dict:
         return _refusal(error)
 
 
+def _pending_apply(journal: Journal) -> dict | None:
+    """This session's newest applied release that no rollback consumed."""
+    entries = journal.read()
+    consumed = {entry.get("consumes") for entry in entries
+                if entry.get("event") == "rollback"
+                and entry.get("sessionId") == _SESSION_ID}
+    for entry in reversed(entries):
+        if (entry.get("event") == "apply"
+                and entry.get("sessionId") == _SESSION_ID
+                and entry.get("planHash") not in consumed):
+            return entry
+    return None
+
+
+def _forget_applied(plan_hash: str | None) -> None:
+    with _LOCK:
+        _APPLIED[:] = [entry for entry in _APPLIED
+                       if entry["planHash"] != plan_hash]
+
+
+def _rollback_refused(answer: dict, record: dict) -> dict:
+    """The undo's own answer, kept whole so an approval two-step reads as it
+    does from revl_undo; a plain refusal also carries the update code."""
+    payload = {**answer, "ok": False, "rolledBack": False, "stoppedAt": "undo",
+               "planHash": record.get("planHash")}
+    if not answer.get("approvalRequired") and "refusal" not in answer:
+        payload["refusal"] = UpdateError(
+            "UPDATE_ROLLBACK_REFUSED",
+            "the undo to the generation before the applied release was "
+            "refused; the running composition is untouched",
+            fix="the previous generation may have aged out of the bounded "
+                "history; inspect revl_state and recover by hand").as_dict()
+    return payload
+
+
 def _tool_update_rollback(arguments: dict) -> dict:
     del arguments
     disabled = _require_enabled()
@@ -644,17 +838,12 @@ def _tool_update_rollback(arguments: dict) -> dict:
     server = _server()
     cfg = _CONFIG
     journal = _journal(cfg)
-    record = None
-    for entry in reversed(journal.read()):
-        if (entry.get("event") == "apply"
-                and entry.get("sessionId") == _SESSION_ID):
-            record = entry
-            break
+    record = _pending_apply(journal)
     if record is None:
         return _refusal(UpdateError(
             "UPDATE_NOTHING_APPLIED",
-            "this server session has applied no release recorded in this "
-            "update home, so there is no release generation to roll back to",
+            "this server session has no applied release left to roll back in "
+            "this update home (none was applied, or its rollback already ran)",
             fix="apply a release first, or use revl_undo for a hand-made "
                 "generation. A plan or apply recorded by another server "
                 "session is not this session's to undo"))
@@ -664,16 +853,25 @@ def _tool_update_rollback(arguments: dict) -> dict:
             "UPDATE_NOTHING_LOADED",
             "nothing is running now; the generation to roll back to is not "
             "live", fix="load the composition first"))
-    from .session import SessionError  # noqa: PLC0415
-
-    try:
-        result = server.SESSION.undo(to=target)
-    except SessionError as error:
+    generation = _generation()
+    if generation != record.get("generationAfter"):
         return _refusal(UpdateError(
-            "UPDATE_ROLLBACK_REFUSED", str(error),
-            fix="the previous generation may have aged out of the bounded "
-                "history; inspect revl_state and recover by hand"))
-    journal.append("rollback", release={
+            "UPDATE_ROLLBACK_STALE",
+            f"release {record.get('version')} started generation "
+            f"{record.get('generationAfter')}, but generation {generation} is "
+            "running; rolling back to the generation before the release would "
+            "also discard every change made since",
+            fix="use revl_undo to choose the generation to return to"),
+            planHash=record.get("planHash"))
+    # revl_undo's own path: the authoring profile, and an approval ticket
+    # answered as the two-step it is
+    answer = server._tool_undo({"to": target})
+    if not answer.get("ok"):
+        journal.append("refusal", stage="rollback",
+                       planHash=record.get("planHash"), sessionId=_SESSION_ID)
+        return _rollback_refused(answer, record)
+    _forget_applied(record.get("planHash"))
+    journal.append("rollback", consumes=record.get("planHash"), release={
         key: record.get(key) for key in
         ("project", "version", "tag", "commit", "manifestDigest")},
         sessionId=_SESSION_ID,
@@ -685,7 +883,7 @@ def _tool_update_rollback(arguments: dict) -> dict:
         "generation": _generation(),
         "release": {key: record.get(key) for key in
                     ("project", "version", "tag", "commit")},
-        "undo": result,
+        "undo": answer,
         "note": "the generation before the applied release is running again; "
                 "the rollback was itself admitted through the gate",
     }
@@ -731,8 +929,23 @@ TOOLS = [
                                             "bound to it and to the running "
                                             "generation"},
                 "force": {"type": "boolean",
-                          "description": "plan even when the running version "
-                                         "is already the newest on the channel"},
+                          "description": "plan the release the running "
+                                         "composition is already on again; "
+                                         "consents to nothing else"},
+                "allowDowngrade": {"type": "boolean",
+                                   "description": "plan a release older than "
+                                                  "the one the running "
+                                                  "composition was updated to"},
+                "acceptNotLive": {"type": "boolean",
+                                  "description": "plan a release whose "
+                                                 "manifest says live false"},
+                "acceptIncompatible": {"type": "boolean",
+                                       "description": "plan a release whose "
+                                                      "declared gate, language "
+                                                      "or Python requirements "
+                                                      "this host does not meet; "
+                                                      "the running gate still "
+                                                      "admits or refuses it"},
                 "acknowledgeWidening": {"type": "boolean",
                                         "description": "true: apply a release "
                                                        "whose irreversible "
@@ -762,10 +975,12 @@ TOOLS = [
         "name": "revl_update_rollback",
         "description": "Roll the running composition back to the generation "
                        "that ran before the last applied release, through the "
-                       "same admitted undo a hand-made generation uses. Reads "
-                       "the update journal for the target generation and "
-                       "refuses by name when no release was applied or the "
-                       "target has aged out of the bounded history.",
+                       "same admitted undo revl_undo runs. Reads the update "
+                       "journal for the target generation, consumes the apply "
+                       "it rolls back, and refuses by name when no release is "
+                       "left to roll back, when a later generation is running, "
+                       "or when the target has aged out of the bounded "
+                       "history.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_update_rollback,
