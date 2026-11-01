@@ -35,6 +35,10 @@ component MemCache provides cache: Cache {
 
 CACHE_V2 = CACHE.replace("fn size() = 0", "fn size() = 43")
 
+#: a composition no release was applied to has no known release version, so
+#: its first plan consents to that explicitly
+FIRST = {"acceptUnknownVersion": True}
+
 needs_runtime = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
     reason="the update apply verbs need the cordis-py runtime")
@@ -110,7 +114,7 @@ def test_check_compares_the_feed_against_the_running_identity(tmp_path):
     finally:
         feed.close()
     assert payload["ok"] is True
-    assert payload["comparison"]["updateAvailable"] is True
+    assert payload["comparison"]["updateAvailable"] is None
     # nothing loaded: no running release, so the release is compared with
     # the composition (unknown), never with the toolchain's own version
     assert payload["comparison"]["basis"] == "composition"
@@ -138,7 +142,7 @@ def test_a_tag_fallback_is_refused_for_apply(tmp_path):
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
-        payload = _call("revl_update_apply", {})
+        payload = _call("revl_update_apply", FIRST)
     finally:
         feed.close()
     assert payload["ok"] is False
@@ -156,8 +160,9 @@ def test_plan_apply_and_rollback_through_the_gate(tmp_path):
         assert _call("revl_call", {"key": "cache",
                                    "method": "size"})["result"] == 0
         check = _call("revl_update_check", {})
-        assert check["applyAvailable"] is True
-        planned = _call("revl_update_apply", {})
+        assert check["applyAvailable"] is False
+        assert "acceptUnknownVersion" in check["applyReason"]
+        planned = _call("revl_update_apply", FIRST)
         assert planned["ok"] is True and planned["planned"] is True
         assert planned["applied"] is False
         assert planned["generation"] == 1
@@ -183,7 +188,7 @@ def test_a_stale_plan_hash_is_refused(tmp_path):
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         plan_hash = planned["planHash"]
         # the running composition moves after the plan: the plan is stale.
         assert _call("revl_swap", {"source": CACHE_V2})["swapped"] is True
@@ -205,7 +210,7 @@ def test_widening_requires_acknowledgement(monkeypatch, tmp_path):
                                 "widened": True,
                                 "added": ["emit:MemCache:send"],
                                 "reachWeakened": []})
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         plan_hash = planned["planHash"]
         refused = _call("revl_update_apply", {"planHash": plan_hash})
         assert refused["ok"] is False
@@ -226,7 +231,7 @@ def test_a_refused_admission_leaves_the_running_composition_serving(tmp_path):
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         assert planned["ok"] is False
         assert planned["stoppedAt"] == "admit"
         assert _call("revl_call", {"key": "cache",
@@ -251,14 +256,14 @@ def test_a_release_that_is_not_live_is_refused_for_apply(tmp_path):
                           live=False)
     try:
         _configure(not_live, tmp_path)
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         assert planned["ok"] is False
         assert planned["refusal"]["code"] == "UPDATE_NOT_LIVE"
         # force is not consent to a release the feed has not certified live
-        forced = _call("revl_update_apply", {"force": True})
+        forced = _call("revl_update_apply", {**FIRST, "force": True})
         assert forced["ok"] is False
         assert forced["refusal"]["code"] == "UPDATE_NOT_LIVE"
-        accepted = _call("revl_update_apply", {"acceptNotLive": True})
+        accepted = _call("revl_update_apply", {**FIRST, "acceptNotLive": True})
         assert accepted["ok"] is True
         assert accepted["live"] is False
     finally:
@@ -271,7 +276,7 @@ def test_a_staged_file_changed_after_the_plan_is_refused(tmp_path):
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         staged = Path(planned["staged"]["sources"]["root"]) / "cache.rvl"
         staged.write_text(CACHE_V2.replace("43", "99"), encoding="utf-8")
         tampered = _call("revl_update_apply", {"planHash": planned["planHash"]})
@@ -289,7 +294,7 @@ def test_a_plan_does_not_survive_a_different_running_composition(tmp_path):
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         _call("revl_unload", {})
         _call("revl_load", {"source": CACHE.replace("fn size() = 0",
                                                     "fn size() = 7")})
@@ -393,7 +398,7 @@ def test_a_tag_fallback_staging_is_not_reused_for_a_manifest(tmp_path):
 # ------------------------------------------- review fixes (PR #3002)
 
 def _apply(planned: dict | None = None) -> dict:
-    planned = planned or _call("revl_update_apply", {})
+    planned = planned or _call("revl_update_apply", FIRST)
     assert planned["ok"] is True and planned["planned"] is True, planned
     applied = _call("revl_update_apply", {"planHash": planned["planHash"]})
     assert applied["ok"] is True and applied["applied"] is True, applied
@@ -414,7 +419,7 @@ def test_an_application_release_below_the_toolchain_version_is_planned(
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
         check = _call("revl_update_check", {})
-        assert check["applyAvailable"] is True
+        assert check["comparison"]["relation"] == "unknown"
         _apply()
         assert _size() == 43
     finally:
@@ -477,11 +482,12 @@ def test_an_incompatible_release_is_refused_unless_accepted(tmp_path):
         check = _call("revl_update_check", {})
         assert check["comparison"]["compatible"] is False
         assert check["applyAvailable"] is False
-        refused = _call("revl_update_apply", {})
+        refused = _call("revl_update_apply", FIRST)
         assert refused["ok"] is False
         assert refused["refusal"]["code"] == "UPDATE_INCOMPATIBLE"
         assert not (tmp_path / "staged").exists()
-        accepted = _call("revl_update_apply", {"acceptIncompatible": True})
+        accepted = _call("revl_update_apply",
+                         {**FIRST, "acceptIncompatible": True})
         assert accepted["ok"] is True and accepted["planned"] is True
     finally:
         feed.close()
@@ -532,8 +538,10 @@ def test_a_rollback_consumes_its_apply(tmp_path):
         assert twice["ok"] is False
         assert twice["refusal"]["code"] == "UPDATE_NOTHING_APPLIED"
         assert _call("revl_state", {})["generation"] == generation
-        # the rolled-back release is a candidate again
-        assert _call("revl_update_check", {})["applyAvailable"] is True
+        # the rollback consumed the only apply: the version is unknown again
+        check = _call("revl_update_check", {})
+        assert check["comparison"]["relation"] == "unknown"
+        assert check["lastApplied"] is None
     finally:
         feed.close()
 
@@ -581,7 +589,7 @@ def test_the_swap_compiles_the_bytes_that_were_hashed(monkeypatch, tmp_path):
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
-        planned = _call("revl_update_apply", {})
+        planned = _call("revl_update_apply", FIRST)
         staged = Path(planned["staged"]["sources"]["root"]) / "cache.rvl"
         real_swap = server_mod._tool_swap
 
@@ -596,3 +604,80 @@ def test_the_swap_compiles_the_bytes_that_were_hashed(monkeypatch, tmp_path):
         assert _size() == 43
     finally:
         feed.close()
+
+
+# ------------------------------------- re-review fixes (PR #3002, round 2)
+
+@needs_runtime
+def test_a_first_apply_needs_consent_to_an_unknown_version(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        refused = _call("revl_update_apply", {})
+        assert refused["ok"] is False
+        assert refused["refusal"]["code"] == "UPDATE_VERSION_UNKNOWN"
+        assert not (tmp_path / "staged").exists()
+        _apply(_call("revl_update_apply", FIRST))
+        assert _size() == 43
+    finally:
+        feed.close()
+
+
+@needs_runtime
+def test_a_hand_swap_after_an_apply_leaves_the_version_unknown_since_it(
+        tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        _apply()
+        later = CACHE_V2.replace("43", "7")
+        assert _call("revl_swap", {"source": later})["swapped"] is True
+    finally:
+        feed.close()
+    older = _release_feed(version="1.0.0", source=CACHE)
+    try:
+        _configure(older, tmp_path)
+        check = _call("revl_update_check", {})
+        assert check["comparison"]["relation"] == "unknown"
+        assert check["comparison"]["since"] == "9.9.9"
+        assert check["applyAvailable"] is False
+        refused = _call("revl_update_apply", {})
+        assert refused["refusal"]["code"] == "UPDATE_VERSION_UNKNOWN"
+        # consent to the unknown version is not consent to a downgrade
+        still = _call("revl_update_apply", FIRST)
+        assert still["refusal"]["code"] == "UPDATE_DOWNGRADE"
+        consented = _call("revl_update_apply",
+                          {**FIRST, "allowDowngrade": True})
+        assert consented["ok"] is True and consented["planned"] is True
+        assert _size() == 7
+    finally:
+        older.close()
+
+
+@needs_runtime
+def test_the_applied_release_survives_a_server_restart(monkeypatch, tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        _apply()
+    finally:
+        feed.close()
+    # a restarted server: a new session id, no in-memory state, the same
+    # update home and running composition
+    monkeypatch.setattr(update_tools, "_SESSION_ID", "restarted:1")
+    update_tools.reset()
+    older = _release_feed(version="1.0.0", source=CACHE)
+    try:
+        _configure(older, tmp_path)
+        check = _call("revl_update_check", {})
+        assert check["runningRelease"]["version"] == "9.9.9"
+        assert check["comparison"]["relation"] == "older"
+        assert _call("revl_update_apply", {})["planned"] is False
+        forced = _call("revl_update_apply", {"force": True})
+        assert forced["refusal"]["code"] == "UPDATE_DOWNGRADE"
+        assert _call("revl_update_apply", FIRST)["planned"] is False
+    finally:
+        older.close()

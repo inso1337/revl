@@ -52,10 +52,6 @@ _CONFIG: dict = {
     "replacing": (),
 }
 _PLANS: dict[str, dict] = {}
-#: The releases this server session applied, oldest first. A release is the
-#: running one while the session's composition is the one that apply produced
-#: (its document digest), so a hand swap or a reload forgets it.
-_APPLIED: list[dict] = []
 _LOCK = threading.RLock()
 #: Identifies this server process in the journal and in a plan: a second
 #: server sharing the update home must not consume another session's rollback
@@ -90,7 +86,6 @@ def reset() -> None:
             "home": None, "api_base": None, "trust_tags": False,
             "replacing": ()})
         _PLANS.clear()
-        _APPLIED.clear()
 
 
 def _server():
@@ -158,28 +153,75 @@ def _provided_keys() -> list[str]:
     return list(server.SESSION.state(drain=False).get("providedKeys") or [])
 
 
-def _running_release() -> dict | None:
-    """The release the running composition was updated to by this session.
+def _applied_releases(journal: Journal) -> list[dict]:
+    """Every apply in the update journal no rollback consumed, oldest first.
 
-    ``None`` when nothing is loaded, when this session applied no release, or
-    when the running composition is no longer one an apply produced. The
-    comparison is with the composition, never with the toolchain's own
+    The journal, not server memory, is the record: it survives a restart,
+    and it is read for every server session sharing the update home, because
+    the composition a release was applied to outlives the session that
+    applied it.
+    """
+    entries = journal.read()
+    consumed = {entry.get("consumes") for entry in entries
+                if entry.get("event") == "rollback"}
+    project = _CONFIG["project"]
+    return [entry for entry in entries
+            if entry.get("event") == "apply"
+            and entry.get("planHash") not in consumed
+            and (project is None or entry.get("project") == project)]
+
+
+def _release_state() -> dict:
+    """What the journal says about the running composition's release.
+
+    ``running`` is the applied release whose composition digest is the one
+    running now. ``lastApplied`` is the newest applied release either way: a
+    composition swapped or reloaded by hand since runs a release of unknown
+    version, but it is unknown SINCE that release, not unknown from nothing.
+    The comparison is with the composition, never with the toolchain's own
     version: an application feed versions the application.
     """
     server = _server()
+    applied = _applied_releases(_journal(_CONFIG))
+    last = _release_summary(applied[-1]) if applied else None
     if not server.SESSION.loaded:
-        return None
+        return {"running": None, "lastApplied": last}
     digest = _ir_digest(server.SESSION.ir)
-    with _LOCK:
-        for entry in reversed(_APPLIED):
-            if entry["irDigest"] == digest:
-                return dict(entry)
-    return None
+    for entry in reversed(applied):
+        if entry.get("irDigest") == digest:
+            return {"running": _release_summary(entry), "lastApplied": last}
+    return {"running": None, "lastApplied": last}
 
 
-def _running_version() -> str | None:
-    running = _running_release()
-    return running["version"] if running is not None else None
+def _release_summary(entry: dict) -> dict:
+    return {key: entry.get(key) for key in
+            ("planHash", "project", "version", "tag", "commit", "irDigest",
+             "sessionId", "generationAfter")}
+
+
+def _compare(resolved, identity: dict, cfg: dict, state: dict) -> dict:
+    running = state["running"]
+    comparison = compare_release(
+        resolved, identity, cfg["channel"],
+        running=running["version"] if running is not None else None)
+    last = state["lastApplied"]
+    comparison["since"] = None
+    comparison["sinceRelation"] = None
+    if comparison.get("relation") == "unknown" and last is not None:
+        comparison["since"] = last["version"]
+        comparison["sinceRelation"] = _relation_to(last["version"],
+                                                   resolved.version)
+    return comparison
+
+
+def _relation_to(since: str | None, latest: str) -> str | None:
+    from ..update.semver import Version  # noqa: PLC0415
+
+    before = Version.parse_or_none(since)
+    after = Version.parse_or_none(latest)
+    if before is None or after is None:
+        return None
+    return "newer" if after > before else "same" if after == before else "older"
 
 
 def _files_digest(paths: list[str]) -> tuple[str, list[dict], dict]:
@@ -329,17 +371,15 @@ def _check_arguments(arguments: dict) -> dict:
     journal = _journal(cfg)
     resolved = _resolve(cfg)
     identity = current_identity()
-    running = _running_release()
-    comparison = compare_release(
-        resolved, identity, cfg["channel"],
-        running=running["version"] if running is not None else None)
+    state = _release_state()
+    comparison = _compare(resolved, identity, cfg, state)
     journal.append("check", repo=cfg["repo"], channel=cfg["channel"],
                    version=resolved.version, updateAvailable=bool(
                        comparison.get("updateAvailable")))
     server = _server()
     artifact = (resolved.manifest.unpackable_artifact()
                 if resolved.manifest is not None else None)
-    apply_available = (
+    apply_available = bool(
         server.SESSION.loaded
         and resolved.manifest is not None
         and comparison.get("updateAvailable", False)
@@ -351,13 +391,16 @@ def _check_arguments(arguments: dict) -> dict:
         "feed": {"repo": cfg["repo"], "channel": cfg["channel"]},
         "identity": identity,
         "release": resolved.as_report(),
-        "runningRelease": running,
+        "runningRelease": state["running"],
+        "lastApplied": state["lastApplied"],
         "comparison": comparison,
         "applyAvailable": apply_available,
         "applyReason": None if apply_available else (
             "nothing is loaded" if not server.SESSION.loaded else
             "the release carries no composition source artifact" if (
                 artifact is None or artifact.kind != "source") else
+            _unknown_reason(comparison) if comparison.get(
+                "relation") == "unknown" else
             "no newer release on the channel" if not comparison.get(
                 "updateAvailable") else
             "the release declares requirements this host does not meet"),
@@ -365,6 +408,14 @@ def _check_arguments(arguments: dict) -> dict:
                 "compiles nothing. revl_update_apply with no planHash stages "
                 "and plans the release",
     }
+
+
+def _unknown_reason(comparison: dict) -> str:
+    since = comparison.get("since")
+    return ("the running composition's release version is unknown" + (
+        f" since release {since} (it was swapped or reloaded after that "
+        "apply)" if since else " (no release was ever applied to it)")
+        + "; revl_update_apply needs acceptUnknownVersion")
 
 
 def _tag_fallback_refusal() -> dict:
@@ -454,7 +505,7 @@ def _tool_update_status(arguments: dict) -> dict:
         "identity": current_identity(),
         "loaded": loaded,
         "generation": _generation(),
-        "runningRelease": _running_release(),
+        "releaseState": _release_state() if cfg["enabled"] else None,
         "staged": staged,
         "plans": plan_documents,
         "journal": _journal(cfg).tail(20) if cfg["enabled"] else [],
@@ -463,7 +514,8 @@ def _tool_update_status(arguments: dict) -> dict:
 
 #: The caller's explicit consents, each to one thing. `force` only re-plans the
 #: release that is already running; it opts into nothing else.
-_CONSENTS = ("force", "allowDowngrade", "acceptNotLive", "acceptIncompatible")
+_CONSENTS = ("force", "allowDowngrade", "acceptNotLive", "acceptIncompatible",
+             "acceptUnknownVersion")
 
 
 def _consents(arguments: dict) -> dict:
@@ -495,11 +547,44 @@ def _ordering_gate(resolved, comparison: dict, consents: dict) -> dict | None:
             comparison, f"the running composition is on release {running}, "
                         f"newer than the channel's {resolved.version}; nothing "
                         "was staged or planned (allowDowngrade plans it)")
+    if relation == "unknown":
+        return _unknown_gate(resolved, comparison, consents)
     if relation == "same" and not consents["force"]:
         return _nothing_to_plan(
             comparison, f"the running composition is already on release "
                         f"{running}, the newest on the channel; nothing was "
                         "staged or planned")
+    return None
+
+
+def _unknown_gate(resolved, comparison: dict, consents: dict) -> dict | None:
+    """Fail closed when the running release version is not known.
+
+    Nothing then says whether the release is newer, so the caller consents to
+    that explicitly. A downgrade from the last applied release still needs
+    its own consent on top.
+    """
+    if not consents["acceptUnknownVersion"]:
+        return _refusal(
+            UpdateError(
+                "UPDATE_VERSION_UNKNOWN",
+                f"release {resolved.version} cannot be ordered against the "
+                "running composition: " + _unknown_reason(comparison),
+                fix="pass acceptUnknownVersion true to plan the release "
+                    "anyway"),
+            comparison=comparison)
+    if (comparison.get("sinceRelation") == "older"
+            and not consents["allowDowngrade"]):
+        return _refusal(
+            UpdateError(
+                "UPDATE_DOWNGRADE",
+                f"release {resolved.version} is older than release "
+                f"{comparison.get('since')}, the last one applied to this "
+                "composition; acceptUnknownVersion does not consent to a "
+                "downgrade",
+                fix="pass allowDowngrade true as well to plan the older "
+                    "release"),
+            comparison=comparison)
     return None
 
 
@@ -549,8 +634,7 @@ def _plan_apply(arguments: dict) -> dict:
     except UpdateError as error:
         return _refusal(error)
     identity = current_identity()
-    comparison = compare_release(resolved, identity, cfg["channel"],
-                                 running=_running_version())
+    comparison = _compare(resolved, identity, cfg, _release_state())
     consents = _consents(arguments)
     refusal = _plan_gate(resolved, comparison, consents)
     if refusal is not None:
@@ -757,12 +841,8 @@ def _apply_plan(arguments: dict) -> dict:
                                  "session is in the updated generation"))}
     with _LOCK:
         _PLANS.pop(plan_hash, None)
-        _APPLIED.append({"planHash": plan_hash,
-                         "version": plan["release"]["version"],
-                         "release": dict(plan["release"]),
-                         "irDigest": _ir_digest(server.SESSION.ir),
-                         "generation": after_generation})
     journal.append("apply", planHash=plan_hash, **plan["release"],
+                   irDigest=_ir_digest(server.SESSION.ir),
                    sessionId=_SESSION_ID,
                    generationBefore=before_generation,
                    generationAfter=after_generation)
@@ -807,12 +887,6 @@ def _pending_apply(journal: Journal) -> dict | None:
                 and entry.get("planHash") not in consumed):
             return entry
     return None
-
-
-def _forget_applied(plan_hash: str | None) -> None:
-    with _LOCK:
-        _APPLIED[:] = [entry for entry in _APPLIED
-                       if entry["planHash"] != plan_hash]
 
 
 def _rollback_refused(answer: dict, record: dict) -> dict:
@@ -870,7 +944,6 @@ def _tool_update_rollback(arguments: dict) -> dict:
         journal.append("refusal", stage="rollback",
                        planHash=record.get("planHash"), sessionId=_SESSION_ID)
         return _rollback_refused(answer, record)
-    _forget_applied(record.get("planHash"))
     journal.append("rollback", consumes=record.get("planHash"), release={
         key: record.get(key) for key in
         ("project", "version", "tag", "commit", "manifestDigest")},
@@ -936,6 +1009,15 @@ TOOLS = [
                                    "description": "plan a release older than "
                                                   "the one the running "
                                                   "composition was updated to"},
+                "acceptUnknownVersion": {"type": "boolean",
+                                         "description": "plan a release that "
+                                                        "cannot be ordered "
+                                                        "against the running "
+                                                        "composition, whose "
+                                                        "release version is "
+                                                        "unknown (never "
+                                                        "updated, or swapped "
+                                                        "by hand since)"},
                 "acceptNotLive": {"type": "boolean",
                                   "description": "plan a release whose "
                                                  "manifest says live false"},

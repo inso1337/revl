@@ -112,7 +112,8 @@ def compare_identity(manifest, identity: dict | None = None, *,
             f"python: the release needs Python {min_python}, this host runs "
             f"{running_python}")
     compatible = not requirements
-    live = bool(manifest.live) and compatible and update_available
+    live = (bool(manifest.live) and compatible
+            and update_available is not False)
     return {
         "current": identity,
         "basis": basis,
@@ -138,10 +139,11 @@ def compare_identity(manifest, identity: dict | None = None, *,
 def _availability(current: Version | None, latest: Version,
                   basis: str) -> tuple[bool, str]:
     if current is None:
-        # an unknown toolchain version offers nothing; a composition no
-        # release was applied to may take any verified release
-        return basis == "composition", "unknown" if basis == "composition" \
-            else "none"
+        # an unknown version cannot be ordered: the toolchain reports no
+        # update, and a composition's answer is None (cannot tell), which
+        # the operator verbs refuse unless the caller consents
+        return (None, "unknown") if basis == "composition" else (False,
+                                                                 "none")
     if latest > current:
         return True, bump_kind(current, latest)
     return False, "none"

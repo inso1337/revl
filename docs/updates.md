@@ -83,8 +83,8 @@ sha256 and declared size, extracts it safely under the update home
 (`$REVL_UPDATE_HOME`, default `~/.revl/updates`) and writes a
 `provenance.json` beside the sources, with the sha256 of every extracted
 file. A staging is reused only while every file still has that digest and
-none was added or removed; otherwise the release is fetched and extracted
-again. Nothing is compiled and nothing is
+none was added or removed, and no link was planted in the tree; otherwise
+the release is fetched and extracted again. Nothing is compiled and nothing is
 executed. Extraction refuses absolute paths, `..`, backslashes, drive paths,
 links and device entries, and bounds the archive at 300 MB and 50,000 files.
 
@@ -103,12 +103,16 @@ are all operator flags; a caller cannot name them). Four verbs:
 
 1. `revl_update_check` reads the feed and compares identities. Nothing is
    fetched or compiled. The release version is compared with the release the
-   running composition was last updated to in this server session
-   (`runningRelease`), never with the toolchain's own version: an
-   application feed versions the application. A composition no release was
-   applied to (or one swapped or reloaded by hand since) has no known release
-   version, so any verified release is a candidate for it
-   (`relation: unknown`). An applied release is not offered again.
+   running composition was updated to (`runningRelease`), never with the
+   toolchain's own version: an application feed versions the application.
+   Each apply is recorded in the update journal with the digest of the
+   composition it produced, so the record survives a server restart and a
+   rollback consumes it. A composition no release was applied to has no known
+   release version; one swapped or reloaded by hand after an apply has a
+   version unknown since that apply (`since`, `lastApplied`). Either way
+   `relation` is `unknown`, `updateAvailable` is null and the check fails
+   closed: `applyAvailable` is false and a plan needs `acceptUnknownVersion`.
+   An applied release is not offered again.
 2. `revl_update_apply` with no `planHash` stages the release, hashes the
    staged bytes, compiles and admits the release against the running
    manifest, plans the swap and returns a `planHash`. Nothing is mutated.
@@ -121,7 +125,8 @@ are all operator flags; a caller cannot name them). Four verbs:
    successor serves the running keys. A successor that does not is reverted
    automatically. The swap compiles the bytes apply hashed, written to a
    fresh private directory under the update home, so a write to the staging
-   after the check cannot reach the running composition.
+   after the check cannot reach the running composition. The swap copies only
+   the release's `.rvl` source files.
 
    Each departure from a plain upgrade needs its own consent on the planning
    call, and the plan answer reports them under `consents`:
@@ -129,6 +134,7 @@ are all operator flags; a caller cannot name them). Four verbs:
    | argument | consents to |
    | --- | --- |
    | `force` | planning the release the composition already runs, again |
+   | `acceptUnknownVersion` | a release that cannot be ordered against the running composition, including the first apply to a composition never updated (`UPDATE_VERSION_UNKNOWN` otherwise); a release older than the last applied one still needs `allowDowngrade` |
    | `allowDowngrade` | a release older than the running one (`force` alone is `UPDATE_DOWNGRADE`) |
    | `acceptNotLive` | a release whose manifest says `live: false` (`UPDATE_NOT_LIVE` otherwise) |
    | `acceptIncompatible` | a release whose declared gate, language or Python requirements this host does not meet (`UPDATE_INCOMPATIBLE` otherwise); the running gate still admits or refuses it |
