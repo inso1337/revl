@@ -206,3 +206,24 @@ def test_an_artifact_that_is_not_its_declared_size_is_refused(tmp_path):
     assert raised.value.code == "FETCH_SIZE"
     assert not (tmp_path / "staged").exists() or \
         not list((tmp_path / "staged").iterdir())
+
+
+def test_a_link_planted_in_a_staging_is_not_intact(tmp_path):
+    from revl.update.fetch import staged_intact
+
+    outside = tmp_path / "outside.rvl"
+    outside.write_text("service Planted { fn x() -> Int }\n", encoding="utf-8")
+    feed = serve_feed()
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        first = stage_release(release, home_dir=tmp_path / "home")
+        planted = first.source_root / "planted.rvl"
+        planted.symlink_to(outside)
+        found = find_staged(tmp_path / "home", project="app")[0]
+        assert "planted.rvl" not in found.files
+        assert staged_intact(found) is False
+        second = stage_release(release, home_dir=tmp_path / "home")
+    finally:
+        feed.close()
+    assert not (second.source_root / "planted.rvl").is_symlink()
+    assert staged_intact(second) is True

@@ -284,13 +284,32 @@ def extract_archive(archive: Path, destination: Path,
         "archive, so there is no source tree to stage")
 
 
+def _walk_files(root: Path) -> tuple[list[Path], bool]:
+    """Every regular file under ``root``, never following a link, and whether
+    the tree holds a link at all (extraction refuses links, so one found
+    later was planted)."""
+    files: list[Path] = []
+    linked = False
+    for directory, dirs, names in os.walk(root, followlinks=False):
+        base = Path(directory)
+        for name in list(dirs):
+            if (base / name).is_symlink():
+                linked = True
+                dirs.remove(name)
+        for name in names:
+            path = base / name
+            if path.is_symlink():
+                linked = True
+            elif path.is_file():
+                files.append(path)
+    return sorted(files), linked
+
+
 def _source_digests(root: Path) -> dict[str, str]:
     """The sha256 of every regular file under an extracted source tree."""
-    digests: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and not path.is_symlink():
-            digests[path.relative_to(root).as_posix()] = _sha256(path)
-    return digests
+    files, _linked = _walk_files(root)
+    return {path.relative_to(root).as_posix(): _sha256(path)
+            for path in files}
 
 
 def staged_intact(staged: "StagedRelease") -> bool:
@@ -306,17 +325,17 @@ def staged_intact(staged: "StagedRelease") -> bool:
     if not isinstance(recorded, dict):
         return False
     try:
+        if _walk_files(staged.source_root)[1]:
+            return False
         return _source_digests(staged.source_root) == recorded
     except OSError:
         return False
 
 
 def _rvl_files(root: Path) -> tuple[str, ...]:
-    names: list[str] = []
-    for path in sorted(root.rglob("*.rvl")):
-        if path.is_file():
-            names.append(path.relative_to(root).as_posix())
-    return tuple(names)
+    files, _linked = _walk_files(root)
+    return tuple(path.relative_to(root).as_posix() for path in files
+                 if path.suffix == ".rvl")
 
 
 def _pick_artifact(release: ResolvedRelease) -> Artifact:
