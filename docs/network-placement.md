@@ -83,18 +83,19 @@ server_hostname = "provider.internal"   # optional; defaults to the address host
 ### Conductor-minted sandbox-seam identities
 
 A **sandbox** seam (item 411) is a different case from either of the above. When
-a seam crosses an isolation boundary — a container, and later a microVM — its two
-ends authenticate to each other over item-56 TCP+mTLS, so each end needs a
+a seam crosses an isolation boundary, such as a container or later a microVM,
+its two ends authenticate to each other over item-56 TCP+mTLS, so each end needs a
 certificate. These are **not** the operator-opted-in `generate_test_certs`
 loopback material, and they are not explicit `[tls]` paths either: the conductor
 mints one throwaway CA and one short-lived leaf per sandbox-seam participant
 **per boot**, with the same trust as the per-boot correlation secret, and lays
 each process's own leaf, key, and the CA certificate into a per-process directory
-that is the *only* placement material the sandbox driver mounts (never the CA key,
-never a sibling's key — the whole-directory mount that would have leaked them is
-gone). Identity defaults to the process name; under an `operator_profile` item
-55's attribution rule holds, so each participant must declare a `[tls]` identity
-that names a declared operator, refused otherwise. A placement with no
+that is the *only* placement material the sandbox driver mounts. It never
+includes the CA key or a sibling's key, so the whole-directory mount that would
+have leaked them is gone. Identity defaults to the process name. Under an
+`operator_profile`, item 55's attribution rule holds, so each participant must
+declare a `[tls]` identity that names a declared operator; otherwise placement
+is refused. A placement with no
 cross-boundary sandbox seam mints nothing.
 
 ## The transport
