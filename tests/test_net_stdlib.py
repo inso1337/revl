@@ -840,3 +840,40 @@ extern emission[net(host="api.example.com")] fn app_http(call: NetCall) -> NetRe
     externs = {e["name"]: e for e in ir["externs"]}
     assert externs["app_http"]["class"] == "emission"
     assert externs["app_http"]["capabilities"] == ['net(host="api.example.com")']
+
+
+def test_seam_certs_verify_under_strict_x509(tmp_path):
+    """The minted loopback material must verify with VERIFY_X509_STRICT set, the
+    flag Python 3.13's `ssl.create_default_context` turns on. Set explicitly so
+    the check holds on every Python the suite runs on, and so a regression in
+    the minted extensions (CA keyUsage, leaf key identifiers) is caught on the
+    older ones too."""
+    from revl.placement import generate_seam_certs
+
+    if shutil.which("openssl") is None:
+        pytest.skip("needs the openssl CLI")
+    material = generate_seam_certs(tmp_path, ["server"])["server"]
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(material["cert"], material["key"])
+    client_ctx = ssl.create_default_context(cafile=material["ca"])
+    client_ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve():
+        try:
+            conn, _ = listener.accept()
+            server_ctx.wrap_socket(conn, server_side=True).close()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        raw = socket.create_connection(listener.getsockname(), timeout=10)
+        with client_ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+            assert tls.version()
+    finally:
+        listener.close()
+        thread.join(timeout=10)
