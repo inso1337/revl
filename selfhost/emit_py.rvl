@@ -2522,6 +2522,32 @@ fn extern_emit_fire(expr: Any) -> Str {
   return `${runtime_ref("extern_emit")}(_revl_ctx, ${py_repr(name)}, ${name}, (${args}))`
 }
 
+// issue #2688: a compensated direct host-extern crossing hands its compensation
+// to the recording seam instead of yielding it after the fire. The seam
+// registers it when the host body returns and before a `time` refusal is
+// decided, so a crossing that fired and was then refused stays compensable
+// (a `time` overrun is only observable on the return). A crossing refused
+// before it fires and a host body that raises both register nothing. `crossing`
+// pairs the entry with the recorded emission now that registration sits on the
+// fire line rather than the next one.
+fn extern_emit_fire_compensated(expr: Any, compensation: Str) -> Str {
+  let name = mangle(value_str(value_field(expr, "name")))
+  var args = ccommajoin(value_list(value_field(expr, "args")))
+  if (args.length() > 0) { args = args.concat(",") }
+  return `${runtime_ref("extern_emit")}(_revl_ctx, ${py_repr(name)}, ${name}, (${args}), compensate=lambda: _revl_frame.compensation(${compensation}, crossing=${py_repr(name)}))`
+}
+
+// The compensation thunk a compensated `emit` step owes: a site-spelled
+// `compensate` REPLACES the extern's declared one (issue #1902).
+fn step_compensation(step: Any, ext_comp: Any) -> Str {
+  if (!value_is_null(value_field(step, "compensate"))) {
+    let node = value_field(step, "compensate")
+    return `lambda: ${cexpr(node)}${call_kwarg(node, "")}`
+  }
+  let node = value_field(ext_comp, "compensate")
+  return `lambda: ${cexpr(node)}${call_kwarg(node, "")}`
+}
+
 // The single shape decision every FIRING site shares (the reference's
 // `_emission_fire`, and the reason a firing site cannot pick up one emission
 // shape and miss the other). A DIRECT host extern is the one shape with no
@@ -3438,6 +3464,23 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     if (!value_is_null(deferred)) {
       return { lines: [line(indent, deferred_enqueue(value_field(step, "expr"), deferred)), ""], counter: counter }
     }
+    let ext_comp = compensated_extern(value_field(step, "expr"), externs)
+    let owed = !value_is_null(value_field(step, "compensate")) || !value_is_null(ext_comp)
+    // issue #2688: a compensated DIRECT host-extern crossing registers its
+    // compensation at the seam, when the host body returns and before the
+    // outcome (completion or a `time` refusal) is decided, and yields the
+    // returned entry here. Registering in the body afterwards lost the
+    // compensation of a crossing the `time` check refused on its return. An
+    // `await emit` step uses the same seam: the await is the host body.
+    if (owed && node_kind(value_field(step, "expr")) == "fn") {
+      let c = counter + 1
+      let tmp = `_revl_emit${c}`
+      let comp = step_compensation(step, ext_comp)
+      var seam = [line(indent, `${tmp} = ${await_prefix(step)}${extern_emit_fire_compensated(value_field(step, "expr"), comp)}`)]
+      seam = seam.push(line(indent, `yield ${tmp}.compensation`))
+      seam = seam.push("")
+      return { lines: seam, counter: c }
+    }
     var out = [line(indent, `${await_prefix(step)}${emission_fire(value_field(step, "expr"))}`)]
     if (!value_is_null(value_field(step, "compensate"))) {
       // item 247 (docs/design/teardown-contract.md): a compensation is a
@@ -3453,7 +3496,6 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     // item 254: the reversal an emission extern declares on itself, registered
     // as the same Phase-2 compensation a site-spelled one is. One per crossing
     // (issue #1902): a site-spelled `compensate` replaces it.
-    let ext_comp = compensated_extern(value_field(step, "expr"), externs)
     if (!value_is_null(ext_comp) && value_is_null(value_field(step, "compensate"))) {
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(ext_comp, "compensate"))}${call_kwarg(value_field(ext_comp, "compensate"), "")})`))
     }

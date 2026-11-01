@@ -446,6 +446,103 @@ The attestation (the audit `--json` externs/boundary surface) carries every
 declared budget verbatim as the capability's valuation, so a consumer reads the
 enforced ceiling off the same document as the reach.
 
+**Enforcement status (issue #2688).** This slice is deliberately scoped to one
+seam: the Python tier's host-extern crossing (`backends/python/runtime.py`,
+`extern_emit`). It does not claim that every declared ceiling is enforced
+anywhere; what follows is exactly the enforced set and the deferred set.
+
+| kind    | observed                                        | fault                            |
+|---------|-------------------------------------------------|----------------------------------|
+| `calls` | per-activation crossing count, per capability   | `CeilingExceeded(kind="calls")`  |
+| `size`  | per-activation canonical payload-byte count     | `CeilingExceeded(kind="size")`   |
+| `time`  | deadline from the first crossing, monotonic clock, checked before each crossing and again on its return | `CeilingExceeded(kind="time")` |
+
+The unit is per ACTIVATION, as §3 specifies, and that is intended: one
+component activation may spend the declared budget, and a re-activation is a
+new spend. The counters live on `Frame`, so they do not leak across
+activations.
+
+`calls` and `size` are checked BEFORE the WAL record and the host body, so a
+crossing they refuse never fires: no emission step is written for it, the trace
+line ends in `refused`, and the fault carries the observed count. `time` is
+checked before every crossing and again when the crossing returns. A
+synchronous host call cannot be preempted on this tier, so a host body that
+itself outruns the deadline is caught on return: that crossing DID fire, and
+its WAL outcome is `emitted-then-refused`, never `emission-complete` and never
+`emission-refused` (which would claim the crossing never happened). A `time`
+refusal of a crossing whose deadline was already spent happens before the fire,
+like `calls` and `size`.
+
+A compensation for a direct host-extern crossing is registered at the seam
+when the host body RETURNS, before the outcome (completion or a `time`
+refusal) is decided, and the emitted body yields it onto the activation's
+compensation stack. That is what keeps a fired-then-refused crossing
+compensable: the refusal enqueues the registered entry for Phase 2 instead of
+losing it. A host body that RAISES registers nothing: the runtime cannot
+confirm that the crossing happened, item 247's rule is that a compensation is
+owed for an emission that crossed, and compensating a crossing that never
+acted is as wrong as dropping one that did. A crossing refused before it fires
+registers nothing either.
+
+The same ordering covers `await emit` and an `emit ... with a` edge. For an
+async extern the await IS the host body, so registration follows the settled
+await: a successful await returns the entry for the emitted yield, and a
+fired-then-refused await enqueues it for Phase 2. An async activation body
+unwinds through cordis's asynchronous dispose path, so `install`'s synchronous
+hook does not run; `begin`, yielded first and disposed last, is its post-unwind
+hook and drains the queue after Phase 1. For an approval edge the token is
+checked and consumed before the fire, and the registration inside that fire
+still starts only when the body returns.
+
+A metered crossing writes a `ceiling <token> <kind>=<observed>/<limit>` run
+trace event, and a refusal writes the same line with `refused` after it
+(never-reached is the absence of either). The WAL outcome record for a metered
+crossing carries the observed counts under `ceiling`,
+`{token: {calls, bytes, elapsed}}`. The static `revl audit --json` surface
+carries the DECLARED ceiling spelling; observed counts in the audit JSON itself
+are deferred to #2794.
+
+Two fail-closed backstops sit at the same seam. A budgeted crossing that
+reaches it with no activation frame is refused (`CeilingUnmetered`), and a
+callee the emitter tagged as declaring a ceiling but whose arrived `caps=` is
+empty is refused by name (`CeilingCapsMissing`) rather than fired unmetered.
+The second backstop also covers the wrapper bypass found in security review:
+`fn go(x) = call(x)` emitted as `emit go(x)` names the wrapper, so a direct
+declaration lookup found no ceiling. The emitter resolves the callee through
+the document's local functions (`_function_ceiling_caps`, recursive with a
+cycle guard) and sends the reached extern's declarations; the emitted extern
+and wrapper functions also carry `_revl_declared_caps`, which is what the
+runtime backstop compares against.
+
+Emit-time attribution is a named, bounded refusal, not a general compile-time
+guarantee. The meter charges one crossing with the arguments it is handed, so
+the emitter meters a named call and the statement-form identity wrapper
+(`emit go(x)` where `fn go(x) = call(x)`), and refuses with the named
+`CeilingUnattributable` the wrapper shapes it cannot charge exactly: a
+value-position wrapper, a payload-transforming wrapper, a wrapper that crosses
+the extern more than once in one invocation (including in a loop or a
+conditional), and a recursive wrapper. A function value (`let f = call return
+f(x)`, `let g = h return g(x)`, `apply(call)`) is refused earlier, at
+admission, by the `emission-value` rule from #2979, which closed #2834.
+Enabling the multi-call wrapper shape later needs per-crossing metering inside
+module functions and is tracked in #2793.
+
+Not enforced by this slice, tracked rather than implied:
+
+* a `size`/`time` ceiling on a direct REQUIRED-SERVICE method crossing (the
+  statically-counted `calls` case is a compile refusal already);
+* a `deferred` extern (enqueued and fired at session commit) and a spawn-handle
+  emission (`s.inner.method()`), which do not pass this seam;
+* the self-hosted Python emitter (`selfhost/emit_py.rvl`), which does not yet
+  forward a declared ceiling spelling (`caps=`) or tag the extern
+  (`_revl_declared_caps`), so a program emitted through it reaches this seam
+  unmetered. The reference emitter (`backends/python/emit.py`) is the one this
+  slice covers; the self-host port of the ceiling forwarding is part of #2688;
+* the other five tiers.
+
+Tier list: the Python host-extern crossing only. Every other tier and every
+other crossing kind is out of scope here and remains part of #2688.
+
 ### 3.3 Attenuation on delegation
 
 **Correction (HIGH finding).** A prior draft claimed this composes "for free"

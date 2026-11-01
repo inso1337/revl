@@ -123,6 +123,28 @@ class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
 
 
+class CeilingUnattributable(EmitError):
+    """An emission reaches a budgeted extern through a shape the runtime meter
+    cannot attribute exactly (issue #2688).
+
+    The meter at `runtime.extern_emit` charges ONE crossing and the arguments
+    it is handed. A value-position emission never reaches that seam at all, a
+    wrapper that transforms the payload hands the meter the outer arguments,
+    and a wrapper that crosses more than once in one invocation is charged
+    once. Each would leave a declared `calls`/`size`/`time` ceiling silently
+    unenforced, so the emitter refuses the program by name instead of emitting
+    a crossing the declaration cannot bound."""
+
+    def __init__(self, capability: str, shape: str) -> None:
+        self.capability = capability
+        self.shape = shape
+        super().__init__(
+            f"declared ceiling on `{capability}` cannot be enforced at emit "
+            f"time: the emission reaches the budgeted extern through {shape}, "
+            f"which the runtime meter cannot attribute exactly; emit the "
+            f"extern call directly")
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -1488,12 +1510,441 @@ def _is_map_cas(acquire: Any) -> bool:
             and acquire.get("method") in _MAP_CAS_VERBS)
 
 
+#: The canonical capability spellings that carry a ceiling parameter (issue
+#: #2688). `requests`/`bytes` are resolved to `calls`/`size` by `cap_order`
+#: before the IR is written, so these three names are the whole surface.
+_CEILING_MARKERS = ("calls=", "size=", "time=")
+
+
+def _ceiling_capabilities(capabilities) -> tuple:
+    """The spellings among `capabilities` that DECLARE a ceiling.
+
+    Returns () for an absent list or one with no ceiling parameter, so an
+    extern that only scopes a capability (`fs.write(path="/tmp")`) keeps the
+    pre-#2688 emission exactly. Order is preserved: the spellings are the
+    declaration text a reviewer reads and the runtime token it traces."""
+    return tuple(spelling for spelling in (capabilities or ())
+                 if isinstance(spelling, str)
+                 and any(marker in spelling for marker in _CEILING_MARKERS))
+
+
+def _direct_callee_names(node: Any, out: set) -> None:
+    """Collect the names a node CALLS, without following a local body.
+
+    Both IR call shapes count: a component-body extern call is `kind: "fn"`,
+    while a module-function call is `kind: "call"` with a `var` callee (the
+    shape `_lower_fns` produces). Inverse slots (`undo`, `compensate`) are
+    skipped: they run on unwind, not as part of the crossing the budget
+    meters."""
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind == "fn" and isinstance(node.get("name"), str):
+            out.add(node["name"])
+        elif kind == "call":
+            callee = node.get("callee")
+            if isinstance(callee, dict) and callee.get("kind") == "var" \
+                    and isinstance(callee.get("name"), str):
+                out.add(callee["name"])
+        for key, value in node.items():
+            if key not in _INVERSE_KEYS:
+                _direct_callee_names(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _direct_callee_names(item, out)
+
+
+def _function_reach_table(externs: dict, functions: dict) -> dict:
+    """Map each local function name to the extern names its body reaches.
+
+    A least fixed point over the document's call graph, not a walk of every
+    call path: a chain where each function calls the next one twice has 2**n
+    simple paths, and enumerating them hung emission on the self-hosted parser
+    (issue #2688). Each function starts with the externs it calls directly and
+    absorbs the externs of every local function it calls, until no set grows,
+    so a recursive cycle also terminates.
+
+    `externs` and `functions` are the by-name maps the ceiling tables build."""
+    direct: dict = {}
+    reached: dict = {}
+    for name, fn in functions.items():
+        names: set = set()
+        _direct_callee_names(fn.get("body"), names)
+        direct[name] = names
+        reached[name] = {callee for callee in names if callee in externs}
+    changed = True
+    while changed:
+        changed = False
+        for name in functions:
+            externs_reached = reached[name]
+            for callee in direct[name]:
+                if callee in externs:
+                    # old precedence: a callee whose name also names an extern
+                    # resolves to the extern, and the local body is not walked
+                    # for that edge. The collision is not provably impossible,
+                    # so keep the table exactly the set the path walk produced.
+                    continue
+                nested = reached.get(callee)
+                if nested and not nested <= externs_reached:
+                    externs_reached |= nested
+                    changed = True
+    return {name: frozenset(names) for name, names in reached.items()}
+
+
+def _collect_extern_reach(node: Any, externs: dict, functions: dict,
+                          out: set, reach: dict | None = None) -> None:
+    """Collect the extern NAMES a function body reaches in forward evaluation.
+
+    The body's own calls are read once; a local function call contributes the
+    externs the shared reach table already closed over, so a wrapper reached
+    through a wrapper is resolved without re-walking it at every call site."""
+    if reach is None:
+        reach = _function_reach_table(externs, functions)
+    names: set = set()
+    _direct_callee_names(node, names)
+    for name in names:
+        if name in externs:
+            out.add(name)
+        else:
+            out.update(reach.get(name, ()))
+
+
+def _function_ceiling_caps(functions: list, externs: list) -> dict:
+    """Map each local function that reaches a BUDGETED extern to the ceiling
+    declarations of the extern(s) it reaches (issue #2688).
+
+    This is the wrapper case: `extern emission[net(calls=1)] fn call(...)`,
+    `fn go(x) = call(x)`, `emit go(x)`. The `emit` expression names `go`, a
+    `kind: "fn"` node with no declaration of its own, so a direct
+    `extern_by_name` lookup finds no ceiling and the crossing fired unmetered.
+    Resolving the callee through the local-function bodies restores the
+    declaration. A wrapper that reaches several budgeted externs gets the union
+    (conservatively metered token by token); a wrapper that reaches none gets no
+    entry, so its emission stays byte-identical.
+
+    One table is built per document and shared by the component emitters and
+    `_emit_functions`, so the caps a `_extern_emit_fire` sends and the
+    `_revl_declared_caps` backstop tag on the function itself cannot drift."""
+    externs_by_name = {ext["name"]: ext for ext in externs or []}
+    if not any(_ceiling_capabilities(ext.get("capabilities"))
+               for ext in externs_by_name.values()):
+        # no declared budget: every cap is empty and no reach work is owed,
+        # so a corpus of budget-free programs does not pay for the resolver
+        return {}
+    functions_by_name = {fn["name"]: fn for fn in functions or []
+                         if isinstance(fn.get("name"), str)}
+    reach_table = _function_reach_table(externs_by_name, functions_by_name)
+    caps_by_function: dict = {}
+    for fn in functions or []:
+        name = fn.get("name")
+        if not isinstance(name, str) or name in externs_by_name:
+            continue
+        reached = reach_table.get(name, frozenset())
+        caps: list = []
+        for extern_name in sorted(reached):
+            declarations = _ceiling_capabilities(
+                externs_by_name[extern_name].get("capabilities"))
+            for spelling in declarations:
+                if spelling not in caps:
+                    caps.append(spelling)
+        if caps:
+            caps_by_function[name] = tuple(caps)
+    return caps_by_function
+
+
+#: The reasons a wrapper emission is refused at emit time. The runtime meter
+#: sees one crossing and the outer arguments, so each of these shapes would
+#: leave its declared ceiling under- or over-charged.
+_SHAPE_VALUE_POSITION = "a value-position emission"
+_SHAPE_TRANSFORMING = "a payload-transforming call"
+_SHAPE_MULTIPLE = "more than one call"
+_SHAPE_LOOPED = "a call inside a loop"
+_SHAPE_CONDITIONAL = "a conditional call"
+_SHAPE_RECURSIVE = "a recursive call"
+_SHAPE_FUNCTION_VALUE = "a call through a function value"
+
+
+def _identity_payload(args: Any, params: list) -> bool:
+    """Whether a call passes the enclosing function's parameters through
+    unchanged and in the same order, the only wrapper shape whose outer
+    arguments ARE the extern's payload."""
+    if not isinstance(args, list) or len(args) != len(params):
+        return False
+    return all(isinstance(arg, dict) and arg.get("kind") == "var"
+               and arg.get("name") == param
+               for arg, param in zip(args, params))
+
+
+def _call_callee_name(node: Any) -> Optional[str]:
+    """The callee name of a module-fn call node (`kind: "call"` with a `var`
+    callee) or a host-extern crossing (`kind: "fn"`), else None."""
+    if not isinstance(node, dict):
+        return None
+    if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+        return node["name"]
+    if node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var" \
+                and isinstance(callee.get("name"), str):
+            return callee["name"]
+    return None
+
+
+def _value_reference_ceilings(name: str, externs: dict,
+                              functions: dict,
+                              reach: dict | None = None) -> tuple:
+    """The ceiling declarations a function VALUE named `name` reaches.
+
+    `let f = call` and `apply(call)` hand a budgeted extern onward as a value,
+    so the crossing happens through the callee the value is applied to and the
+    runtime meter cannot attribute it to the enclosing wrapper's arguments. A
+    local function used this way contributes the externs its body reaches, the
+    same resolution `_function_ceiling_caps` applies to a named call. The tuple
+    is empty for a parameter or local that names no budgeted extern."""
+    if name in externs:
+        return tuple(_ceiling_capabilities(externs[name].get("capabilities")))
+    if reach is None:
+        reach = _function_reach_table(externs, functions)
+    reached = reach.get(name, frozenset())
+    caps: list = []
+    for extern_name in sorted(reached):
+        for spelling in _ceiling_capabilities(
+                externs[extern_name].get("capabilities")):
+            if spelling not in caps:
+                caps.append(spelling)
+    return tuple(caps)
+
+
+def _function_value_refs(node: Any, out: set) -> None:
+    """Collect every name a function body uses as a value (a `kind: "var"`
+    node), skipping inverse slots: `undo`/`compensate` run on unwind, not as
+    part of the crossing the budget meters, matching `_collect_extern_reach`.
+
+    The set feeds `_function_ceiling_shapes` against the caps table, so a
+    function that only reaches a budgeted extern through a value is classified
+    instead of silently skipped. Passing it through the CAPS table rather than
+    adding value references to `_collect_extern_reach` keeps the reach resolver
+    on named calls, the path a runtime crossing can be attributed to."""
+    if isinstance(node, dict):
+        if node.get("kind") == "var" and isinstance(node.get("name"), str):
+            out.add(node["name"])
+            return
+        for key, value in node.items():
+            if key not in _INVERSE_KEYS:
+                _function_value_refs(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _function_value_refs(item, out)
+
+
+def _wrapper_ceiling_shape(fn: dict, externs: dict, functions: dict,
+                           seen: "frozenset[str]" = frozenset(),
+                           reach: dict | None = None) -> tuple:
+    """Classify ONE local function that reaches a budgeted extern: how many
+    host-extern crossings one invocation of it makes, and the first shape the
+    runtime meter cannot attribute exactly (issue #2688).
+
+    The meter charges one crossing with the arguments handed to the emission,
+    so a wrapper is exact only when it passes its own parameters unchanged to
+    exactly one budgeted crossing: `fn go(x) = call(x)`. Everything else is
+    refused at emit time because the declaration would otherwise be silently
+    under- or over-charged: a transformed payload, more than one call, a call
+    inside a loop or a conditional, recursion, or a budgeted extern carried as a
+    function value. Crossings saturate at two, since only "one" and "more than
+    one" decide attributability."""
+    name = fn.get("name")
+    if isinstance(name, str) and name in seen:
+        # a recursive invocation may cross the extern any number of times
+        return 2, _SHAPE_RECURSIVE
+    path = seen | {name} if isinstance(name, str) else seen
+    if reach is None:
+        reach = _function_reach_table(externs, functions)
+    params = [p.get("name") for p in fn.get("params") or []]
+    crossings = 0
+    reason: Optional[str] = None
+
+    def miss(found: str) -> None:
+        nonlocal reason
+        if reason is None:
+            reason = found
+
+    def count(value: int) -> None:
+        nonlocal crossings
+        crossings = min(2, crossings + min(2, value))
+
+    def visit(node: Any, looped: bool, conditional: bool) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item, looped, conditional)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("kind") == "var" and isinstance(node.get("name"), str):
+            # a budgeted extern, or a local function that reaches one, handed
+            # onward as a VALUE (`let f = call`, `apply(call)`, a list/record
+            # element): the crossing happens through whatever callee the value
+            # is applied to, so this wrapper's own arguments are not the ones
+            # the meter charges. The callee-position var of a named call is the
+            # attributable path and never reaches this branch.
+            if _value_reference_ceilings(node["name"], externs, functions,
+                                         reach):
+                miss(_SHAPE_FUNCTION_VALUE)
+            return
+        target = _call_callee_name(node)
+        if target is not None:
+            args = node.get("args") or []
+            if target in externs:
+                if _ceiling_capabilities(externs[target].get("capabilities")):
+                    count(1)
+                    if looped:
+                        miss(_SHAPE_LOOPED)
+                    if conditional:
+                        miss(_SHAPE_CONDITIONAL)
+                    if not _identity_payload(args, params):
+                        miss(_SHAPE_TRANSFORMING)
+            elif target in functions:
+                callee = functions[target]
+                reached: set = set()
+                _collect_extern_reach(callee.get("body"), externs, functions,
+                                      reached, reach)
+                if any(_ceiling_capabilities(
+                        externs[other].get("capabilities"))
+                       for other in reached):
+                    nested, nested_reason = _wrapper_ceiling_shape(
+                        callee, externs, functions, path, reach)
+                    count(nested)
+                    if nested_reason is not None:
+                        miss(nested_reason)
+                    if looped:
+                        miss(_SHAPE_LOOPED)
+                    if conditional:
+                        miss(_SHAPE_CONDITIONAL)
+                    if not _identity_payload(args, params):
+                        miss(_SHAPE_TRANSFORMING)
+            visit(args, looped, conditional)
+            return
+        step = node.get("step")
+        if step in ("while", "for"):
+            for key, value in node.items():
+                if key == "body":
+                    continue
+                # a `while` condition is re-evaluated every iteration; a `for`
+                # iterable is evaluated once
+                visit(value, True if step == "while" else looped, conditional)
+            visit(node.get("body"), True, conditional)
+            return
+        if step == "if":
+            visit(node.get("cond"), looped, conditional)
+            visit(node.get("then"), looped, True)
+            visit(node.get("else"), looped, True)
+            return
+        kind = node.get("kind")
+        if kind == "if":
+            # the conditional EXPRESSION runs exactly one branch
+            visit(node.get("cond"), looped, conditional)
+            visit(node.get("then"), looped, True)
+            visit(node.get("else"), looped, True)
+            return
+        if kind == "match":
+            # exactly one arm runs, so the crossing count depends on the value
+            visit(node.get("scrutinee"), looped, conditional)
+            visit(node.get("arms"), looped, True)
+            return
+        if kind == "arrow":
+            # deferred to a call site: it may run zero or many times
+            visit(node.get("body"), looped, True)
+            return
+        for key, value in node.items():
+            # an inverse slot runs on unwind, not as part of the crossing the
+            # budget meters, so it is not counted (matches the reach resolver)
+            if key not in _INVERSE_KEYS:
+                visit(value, looped, conditional)
+
+    visit(fn.get("body"), False, False)
+    if crossings > 1 and reason is None:
+        reason = _SHAPE_MULTIPLE
+    if crossings == 0 and reason is None:
+        # the reach resolver saw a budgeted extern but the forward walk did
+        # not, which only a recursive wrapper can produce: refuse, never skip
+        reason = _SHAPE_RECURSIVE
+    return crossings, reason
+
+
+def _function_ceiling_shapes(functions: list, externs: list,
+                             ceilings: dict) -> dict:
+    """Map each local function whose emission cannot be metered exactly to the
+    shape reason that refuses it and the ceiling declarations to name (issue
+    #2688).
+
+    A function appears when it reaches a budgeted extern by name (the paths
+    `_function_ceiling_caps` already resolves) OR when its body holds such a
+    function as a VALUE (`_function_value_refs`, fed against `ceilings`): a
+    value reference is invisible to the reach resolver, so the previous skip
+    left `let f = call return f(x)` with no reason and the emit-site guard never
+    fired. An exact pass-through (the identity wrapper `fn go(x) = call(x)`) is
+    ABSENT, so its emission keeps the metered shape the existing tests pin; the
+    other shapes are refused by :class:`CeilingUnattributable` at the firing
+    site, which names the capabilities carried beside the reason."""
+    externs_by_name = {ext["name"]: ext for ext in externs or []}
+    functions_by_name = {fn["name"]: fn for fn in functions or []
+                         if isinstance(fn.get("name"), str)}
+    budgeted_externs = {
+        name for name, ext in externs_by_name.items()
+        if _ceiling_capabilities(ext.get("capabilities"))}
+    if not budgeted_externs and not ceilings:
+        # no declared budget anywhere: no function can be refused and no
+        # reach work is owed, so a budget-free document pays nothing
+        return {}
+    reach_table = _function_reach_table(externs_by_name, functions_by_name)
+    budgeted_names = budgeted_externs | set(ceilings)
+    shapes: dict = {}
+    for fn in functions or []:
+        name = fn.get("name")
+        if not isinstance(name, str) or name in externs_by_name:
+            continue
+        reached = reach_table.get(name, frozenset())
+        reached_budgeted = {other for other in reached
+                            if _ceiling_capabilities(
+                                externs_by_name[other].get("capabilities"))}
+        value_refs: set = set()
+        _function_value_refs(fn.get("body"), value_refs)
+        if not reached_budgeted and not (value_refs & budgeted_names):
+            continue
+        _crossings, reason = _wrapper_ceiling_shape(
+            fn, externs_by_name, functions_by_name, reach=reach_table)
+        if reason is None:
+            continue
+        caps: list = list(ceilings.get(name, ()))
+        for ref in sorted(value_refs & budgeted_names):
+            for spelling in _value_reference_ceilings(
+                    ref, externs_by_name, functions_by_name, reach_table):
+                if spelling not in caps:
+                    caps.append(spelling)
+        shapes[name] = (reason, tuple(caps))
+    return shapes
+
+
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
                  plan_groups: list | None = None,
                  scopes: dict | None = None,
-                 decorated: set | None = None) -> None:
+                 decorated: set | None = None,
+                 function_ceilings: dict | None = None,
+                 function_shapes: dict | None = None) -> None:
         self.ir = component
+        # issue #2688: the ceiling declarations of the externs each local
+        # function reaches (`_function_ceiling_caps`). A wrapper emission names
+        # the wrapper, not the extern, so this is the only way its declared
+        # budget reaches the seam. Empty for a document with no budgeted extern,
+        # so every existing emission is byte-identical.
+        self._function_ceilings: dict = dict(function_ceilings or {})
+        # the wrapper shapes the runtime meter cannot attribute
+        # (`_function_ceiling_shapes`): a value-position, payload-transforming,
+        # multi-call, looped, conditional, recursive or function-value wrapper
+        # is refused by name at the firing site instead of emitting an
+        # unmeterable crossing. Each entry carries the reached declarations
+        # beside the reason, since a function-value reference is absent from
+        # `_function_ceilings` by construction.
+        self._function_shapes: dict = dict(function_shapes or {})
         # the externs `declared_crossing` decorates (computer-use crossings):
         # they register their own compensation, so a provide-method site does
         # not write the explicit line for them (`_method_compensated_extern`)
@@ -2330,12 +2781,44 @@ class _ComponentEmitter:
                 self._deferred_step(out, indent, step, deferred, where)
                 out.add(0)
                 return
-            # item 131: `await emit …` awaits the boundary crossing so the
+            # item 131: `await emit ...` awaits the boundary crossing so the
             # emission actually fires (a bare async emit builds a coroutine that
-            # never runs). The compensation registers AFTER, exactly as the sync
-            # spelling registers after the fire (design §4 clause 1).
+            # never runs).
+            #
+            # issue #2688: a compensated direct host-extern crossing registers
+            # its compensation AT THE SEAM, when the host body returns and
+            # before the outcome (completion or a `time` refusal) is decided,
+            # and the body yields the entry the seam returns here. A `time`
+            # overrun is only observable when the host call returns, so the
+            # refusal raises after the crossing already happened; registering
+            # in the body afterwards lost that fired crossing's compensation.
+            # A crossing refused BEFORE it fired (calls/size, or a deadline
+            # already spent) registers nothing, and a host body that raises
+            # registers nothing either (item 247's rule: the compensation is
+            # owed for an emission that crossed), so the entry exists exactly
+            # when the crossing emitted.
+            #
+            # The same seam shape covers `await emit` and an `emit ... with a`
+            # edge. For an async extern the await IS the host body, so the seam
+            # registers when it settles: a successful await returns the entry
+            # for this yield, and a fired-then-refused await enqueues it for
+            # Phase 2, which the frame's begin hook drains after Phase 1 (an
+            # async activation body unwinds through the asynchronous dispose
+            # path, so install's synchronous hook does not run; begin, yielded
+            # first and disposed last, is that body's post-unwind hook). An
+            # approval edge wraps only the fire (the token is checked and
+            # consumed first), so the registration inside that lambda still
+            # starts after the token check and when the body returns.
             aw = "await " if step.get("async") else ""
-            if (step.get("async") and step.get("approval") is None
+            compensation = self._step_compensation(step, where)
+            seam = (compensation is not None
+                    and self._emission_shape(step.get("expr")) == "extern")
+            if seam:
+                temp = self._emit_temp()
+                out.add(indent, f"{temp} = {aw}"
+                                 f"{self._emit_fire(step, where, compensate=compensation)}")
+                out.add(indent, f"yield {temp}.compensation")
+            elif (step.get("async") and step.get("approval") is None
                     and self._validated_call(step.get("expr")) is not None):
                 # A `validated` async operation checks the SETTLED response
                 # (item 257), so the await belongs inside the seam:
@@ -2350,41 +2833,24 @@ class _ComponentEmitter:
                 finally:
                     self._in_async = prev_async
                 out.add(indent, fire)
+                if compensation is not None:
+                    out.add(indent,
+                            f"yield _revl_frame.compensation({compensation})")
             else:
                 out.add(indent, f"{aw}{self._emit_fire(step, where)}")
-            if step.get("compensate") is not None:
-                # item 247 (docs/design/teardown-contract.md): a compensation
-                # is a first-class COMPENSATION entry on the frame's shared
-                # per-activation LIFO stack, not a bare disposer — it
-                # discharges (never runs) on a clean commit and runs
-                # best-effort in PHASE 2 of an abort, only after every proof
-                # inverse (bracket + transactional) in this activation has
-                # completed. This is the two-phase model, not the old
-                # single-interleaved-LIFO ordering the A5 TCK case predates
-                # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
-                # compensation, not inversion (§6.1).
-                out.add(indent, "yield _revl_frame.compensation(lambda: "
-                                 f"{self._expr(step.get('compensate'), where)}"
-                                 f"{self._compensation_call(step.get('compensate'), where)})")
-            # issue #1902: one compensation per crossing. A site-spelled
-            # `compensate` REPLACES the extern's declared one; the declared one
-            # is the default only when the site spells none.
-            ext_comp = (self._compensated_extern(step.get("expr"))
-                        if step.get("compensate") is None else None)
-            if ext_comp is not None:
-                # item 254: the emitted extern DECLARES its own `compensate` (the
-                # extern owns the reversal, so no site spelling is required — the
-                # item-254 network case is `emit put_endpoint(...)` with the
-                # compensating restore carried on the extern). Register it as the
-                # SAME first-class COMPENSATION entry as a site-spelled compensate
-                # (item 247, two-phase): discharged on a clean commit, best-effort
-                # in Phase 2 of an abort after every proof inverse. The reversal
-                # expression is the extern's lowered `compensate` slot (a bare
-                # call, no `result` binding — lower.py `_check_extern_undo`), the
-                # same shape `_witnessed_step` renders for a witnessed `undo`.
-                out.add(indent, "yield _revl_frame.compensation(lambda: "
-                                 f"{self._expr(ext_comp['compensate'], where)}"
-                                 f"{self._compensation_call(ext_comp['compensate'], where)})")
+                if compensation is not None:
+                    # item 247 (docs/design/teardown-contract.md): a compensation
+                    # is a first-class COMPENSATION entry on the frame's shared
+                    # per-activation LIFO stack, not a bare disposer. It
+                    # discharges (never runs) on a clean commit and runs
+                    # best-effort in PHASE 2 of an abort, only after every proof
+                    # inverse (bracket + transactional) in this activation has
+                    # completed. This is the two-phase model, not the old
+                    # single-interleaved-LIFO ordering the A5 TCK case predates
+                    # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
+                    # compensation, not inversion (§6.1).
+                    out.add(indent,
+                            f"yield _revl_frame.compensation({compensation})")
         elif kind == "approval":
             self._approval_step(out, indent, step, where)
         elif kind == "await":
@@ -2645,7 +3111,18 @@ class _ComponentEmitter:
         # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
         out.add(indent, "_revl_raise_first(_revl_group)")
 
-    def _extern_emit_fire(self, expr: dict, where: str) -> str:
+    def _refuse_unattributable(self, raw_name: str, caps: tuple,
+                               shape: str) -> None:
+        """Refuse an emission whose callee reaches a budgeted extern in a shape
+        the runtime meter cannot attribute exactly (issue #2688), naming the
+        capability and the shape rather than emitting a crossing the declared
+        ceiling cannot bound."""
+        capability = ", ".join(caps) if caps else str(raw_name)
+        raise CeilingUnattributable(capability, shape)
+
+    def _extern_emit_fire(self, expr: dict, where: str,
+                          compensate: Optional[str] = None,
+                          method_compensate: Optional[str] = None) -> str:
         """The Python expression that fires a DIRECT host-extern emission
         (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
         (item 414).
@@ -2658,12 +3135,77 @@ class _ComponentEmitter:
 
         The `await` stays OUTSIDE the helper: calling an async extern returns a
         coroutine, and the same rule `_expr`'s `fn` branch applies decides whether
-        this context settles it."""
+        this context settles it.
+
+        Issue #2688: when the extern DECLARES a `calls`/`size`/`time` budget, its
+        canonical capability spellings ride to the seam as `caps=`, where the
+        runtime parses them and the activation frame meters the crossing before
+        the host body runs. An extern with no budget passes nothing, so its
+        emitted call is byte-identical and no trace line is added.
+
+        `compensate` (issue #2688) rides to the seam as a zero-arg factory that
+        registers the step's compensation. The seam calls it when the host body
+        returns and before the outcome is decided, so a crossing that fires and
+        is then refused on its return (a `time` overrun is only observable when
+        the host call returns) still has its compensation registered, while a
+        crossing refused before it fires and a host body that raises both
+        register nothing. The seam returns a wrapper the emitted body yields
+        the entry off; `crossing` names the recorded emission so the
+        compensation is paired with it even though the registration moved off
+        the next source line.
+
+        `method_compensate` is the same ordering for a provide-method site,
+        where there is no generator to yield the entry into: it is the full
+        `_revl_frame.compensation_method(...)` registration expression, which
+        parks the entry on the activation frame itself. It is handed to the
+        seam verbatim as its zero-arg factory, so a provide-method crossing
+        that fires and is then refused keeps the compensation it owes exactly
+        as the activation-body, async and approval sites do.
+
+        The callee is resolved through the document's local functions, not only
+        through `_extern_by_name`: `emit go(..)` where `fn go(x) = call(x)`
+        names a wrapper, and a direct lookup found no declaration for `go`, so
+        the crossing reached the runtime with empty caps and fired unmetered.
+        `_function_ceilings` carries the declaration of the extern a wrapper
+        reaches (`_function_ceiling_caps`), so an identity wrapper emission is
+        metered exactly as the direct one.
+
+        A wrapper the meter cannot attribute exactly is REFUSED here instead
+        (`_function_ceiling_shapes`): a payload-transforming wrapper would be
+        charged on the outer args, a multi-call, looped, conditional or
+        recursive wrapper would be charged for one crossing however many it
+        makes, and a wrapper holding the extern as a function value (`let f =
+        call`, `apply(call)`) hides the callee the meter would charge entirely.
+        Emitting it would leave the declaration silently unenforced, so the
+        fail-closed choice is a named emit-time refusal (issue #2688)."""
         self.uses.add("extern_emit")
-        name = _ident(expr.get("name"), f"{where}: function")
+        raw_name = expr.get("name")
+        name = _ident(raw_name, f"{where}: function")
         args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+        direct = self._extern_by_name.get(raw_name)
+        if direct is not None:
+            caps = tuple(direct.get("capabilities") or ())
+        else:
+            caps = self._function_ceilings.get(raw_name, ())
+            entry = self._function_shapes.get(raw_name)
+            if entry is not None:
+                # a function-value reference is invisible to the reach
+                # resolver, so `caps` is empty for that shape; the reason
+                # carries the declarations it reaches so the refusal still
+                # names the ceiling it would leave unenforced
+                reason, reached_caps = entry
+                self._refuse_unattributable(
+                    raw_name, caps or reached_caps, reason)
+        budget = (f", caps={caps!r}"
+                  if _ceiling_capabilities(caps) else "")
+        register = ""
+        if method_compensate is not None:
+            register = f", compensate=lambda: {method_compensate}"
+        elif compensate is not None:
+            register = (f", compensate=lambda: _revl_frame.compensation("
+                        f"{compensate}, crossing={name!r})")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
-                f"({args}{',' if args else ''}))")
+                f"({args}{',' if args else ''}){budget}{register})")
         if self._in_async and not self._in_arrow \
                 and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
             return f"(await {call})"
@@ -2672,15 +3214,20 @@ class _ComponentEmitter:
     def _value_emission_fire(self, expr: dict, where: str) -> str:
         """A provide-method value emission, fired through the recording seam
         (#1603). When its extern DECLARES a `compensate` (item 254, #1592), the
-        compensation registers on the frame right after the fire and before the
-        rest of the expression, as an `emit` statement registers it:
-        `(<fire>, _revl_frame.compensation_method(lambda: <comp>))[0]` keeps
-        the emission's value. A fire that raises registers nothing."""
-        fire = self._extern_emit_fire(expr, where)
+        compensation rides the same seam an `emit` statement's does: it
+        registers when the host body returns and before a `time` refusal is
+        decided, so a crossing that fires and is then refused keeps it. The
+        factory returns None, so the seam hands back the host value itself and
+        the value keeps its meaning. A fire that raises before it acted
+        registers nothing."""
         ext_comp = self._method_compensated_extern(expr)
         if ext_comp is None:
-            return fire
-        return f"({fire}, {self._method_compensation(ext_comp, where)})[0]"
+            return self._extern_emit_fire(expr, where)
+        crossing = _ident(expr.get("name"), f"{where}: function")
+        registration = self._method_compensation(ext_comp, where, crossing)
+        return self._extern_emit_fire(
+            expr, where,
+            method_compensate=self._method_compensate_factory(registration))
 
     def _inverse_expr(self, expr: Any, where: str) -> str:
         """`_expr` for an undo or a compensation inside a provide-method body:
@@ -2695,25 +3242,51 @@ class _ComponentEmitter:
     def _is_value_emission(self, expr: dict) -> bool:
         """A value-position call of an `emission` extern inside a provide-method
         body (`return emit f(x)`, `let r = emit f(x)`), see
-        `_route_value_emissions`. A deferred emission is an `emit` step only."""
+        `_route_value_emissions`. A deferred emission is an `emit` step only.
+
+        Issue #2688: a value-position emission never reaches `extern_emit`, so
+        it carries no `caps=` and the empty-caps backstop never sees it. A
+        DIRECT extern is routed through `_value_emission_fire` (and therefore
+        metered); a LOCAL function call in that position is a value-position
+        wrapper, which the runtime meter cannot attribute at all, so it is
+        refused by name at emit time (`_function_ceilings`)."""
         if not self._route_value_emissions:
             return False
         name = expr.get("name")
-        decl = self._extern_by_name.get(name) or {}
-        return decl.get("class") == "emission" and name not in (self.deferred or {})
+        decl = self._extern_by_name.get(name)
+        if decl is not None:
+            return decl.get("class") == "emission" and name not in (self.deferred or {})
+        caps = self._function_ceilings.get(name)
+        entry = self._function_shapes.get(name)
+        if caps or entry is not None:
+            self._refuse_unattributable(
+                name, caps or entry[1], _SHAPE_VALUE_POSITION)
+        return False
 
-    def _emission_fire(self, expr: dict, where: str) -> str:
+    def _emission_fire(self, expr: dict, where: str,
+                       compensate: Optional[str] = None,
+                       method_compensate: Optional[str] = None) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
         host-extern crossing (`_emission_shape` == "extern", the one emission
         shape with no receiver to route it) fires through `_extern_emit_fire`, so
         the crossing reaches the runtime recording seam (item 414); every other
         shape renders exactly as before. The single shape decision every firing
-        site shares, so a new firing site cannot pick up one and miss the other."""
+        site shares, so a new firing site cannot pick up one and miss the other.
+
+        `compensate` (issue #2688) is the rendered compensation thunk to hand the
+        seam, which registers it when the host body returns and before a `time`
+        refusal is decided. `method_compensate` is the provide-method
+        registration expression for that same seam. Only the extern shape can
+        carry either; every other shape renders exactly as before."""
         if self._emission_shape(expr) == "extern":
-            return self._extern_emit_fire(expr, where)
+            return self._extern_emit_fire(
+                expr, where, compensate=compensate,
+                method_compensate=method_compensate)
         return self._expr(expr, where)
 
-    def _emit_fire(self, step: dict, where: str) -> str:
+    def _emit_fire(self, step: dict, where: str,
+                   compensate: Optional[str] = None,
+                   method_compensate: Optional[str] = None) -> str:
         """The Python expression that fires an `emit` step's host body. When the
         step carries a `with a` approval edge (item 246), the fire is wrapped in
         `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
@@ -2723,8 +3296,18 @@ class _ComponentEmitter:
         item 414: a DIRECT host-extern crossing (`_emission_shape` == "extern",
         the one emission shape with no receiver to route it) fires through
         `_extern_emit_fire` instead of a bare module-level call. Nothing else
-        changes shape."""
-        fire = self._emission_fire(step.get("expr"), where)
+        changes shape.
+
+        `compensate` (issue #2688) reaches `_extern_emit_fire` under the same
+        wrapping: an approval edge wraps the fire in a lambda, so the
+        registration starts only after the token check consumed the approval,
+        and the seam registers when the host body returns. The emitted body
+        yields the returned entry. `method_compensate` is the provide-method
+        form of the same registration; it is a no-op for every non-extern
+        shape, which registers after the fire as before."""
+        fire = self._emission_fire(step.get("expr"), where,
+                                   compensate=compensate,
+                                   method_compensate=method_compensate)
         approval = step.get("approval")
         if approval is None:
             return fire
@@ -2732,6 +3315,33 @@ class _ComponentEmitter:
         cap = approval.get("capability")
         return (f"_revl_frame.approval_crossing({handle}, {cap!r}, "
                 f"lambda: {fire})")
+
+    def _step_compensation(self, step: dict, where: str) -> Optional[str]:
+        """The compensation an `emit` step owes, rendered as the thunk
+        `_revl_frame.compensation(...)` takes, or None (issue #1902: a
+        site-spelled `compensate` REPLACES the extern's declared one, and the
+        declared one is the default only when the site spells none).
+
+        Returned rather than written straight into an after-the-fire `yield` so
+        the host-extern path can hand it to the seam instead, where it registers
+        when the host body returns and before a `time` refusal is decided
+        (issue #2688)."""
+        if step.get("compensate") is not None:
+            node = step.get("compensate")
+            return (f"lambda: {self._expr(node, where)}"
+                    f"{self._compensation_call(node, where)}")
+        ext_comp = self._compensated_extern(step.get("expr"))
+        if ext_comp is None:
+            return None
+        node = ext_comp["compensate"]
+        return (f"lambda: {self._expr(node, where)}"
+                f"{self._compensation_call(node, where)}")
+
+    def _emit_temp(self) -> str:
+        """A reserved temp for the value a seam-registered crossing returns, so
+        the body can yield its compensation entry after the fire."""
+        self._counter += 1
+        return f"_revl_emit{self._counter}"
 
     def _approval_step(self, out: "_Lines", indent: int, step: dict,
                        where: str) -> None:
@@ -2811,14 +3421,71 @@ class _ComponentEmitter:
         return (isinstance(expr, dict) and expr.get("kind") == "fn"
                 and expr.get("name") in self._decorated)
 
-    def _method_compensation(self, ext_comp: dict, where: str) -> str:
+    def _method_registration(self, thunk: str, call: str,
+                             crossing: Optional[str] = None) -> str:
+        """A provide-method `_revl_frame.compensation_method(...)` call.
+
+        `crossing`, when the fire goes through the host-extern seam, names the
+        recorded emission the compensation offsets (issue #1369). The
+        registration and the fire share one emitted line now, so the recorder's
+        source-adjacency rule (the registration sits on the line above) no
+        longer reaches the emission; the named lookup pairs them the way the
+        activation-body seam does, and the WAL discharge descriptor keeps the
+        emission seq in `offsets`."""
+        named = f", crossing={crossing!r}" if crossing is not None else ""
+        return (f"_revl_frame.compensation_method({thunk}"
+                f"{call or ''}{named})")
+
+    def _method_compensation(self, ext_comp: dict, where: str,
+                             crossing: Optional[str] = None) -> str:
         """The compensation an extern declares, registered at a provide-method
         site: the thunk and the named call a fresh process re-issues
         (`_named_call_kwarg`), both rendered as an inverse."""
         comp = ext_comp["compensate"]
-        return (f"_revl_frame.compensation_method(lambda: "
-                f"{self._inverse_expr(comp, where)}"
-                f"{_named_call_kwarg(comp, lambda a: self._inverse_expr(a, where))})")
+        return self._method_registration(
+            f"lambda: {self._inverse_expr(comp, where)}",
+            _named_call_kwarg(comp, lambda a: self._inverse_expr(a, where)),
+            crossing)
+
+    def _method_compensate_factory(self, registration: str) -> str:
+        """The seam's zero-arg factory for a provide-method registration.
+
+        It registers and returns None. The entry is already parked on the
+        frame's deferred list by `compensation_method`, so the body has nothing
+        to yield (a provide method is not a generator), and returning the entry
+        would make the seam enqueue a second copy for Phase 2 when a fired
+        crossing is then refused."""
+        return f"({registration}, None)[1]"
+
+    def _method_compensated_fire(self, out: "_Lines", indent: int, step: dict,
+                                 where: str,
+                                 registration: "Callable[[Optional[str]], str]"
+                                 ) -> None:
+        """Fire a provide-method `emit` step that owes a compensation, with the
+        registration ordered so a crossing that fired is never left without an
+        entry (issue #2688).
+
+        A DIRECT host-extern crossing hands the registration to the seam, which
+        runs it when the host body RETURNS and before the outcome (completion
+        or a `time` refusal) is decided: a refusal raises out of the fire, so a
+        next-line registration would be skipped exactly when the crossing is
+        owed. The registration is built with the crossing's name so the
+        recorder still pairs it (see `_method_registration`), and the factory
+        returns None so the seam does not enqueue a second copy (see
+        `_method_compensate_factory`). A crossing refused before it fires and a
+        host body that raises register nothing either way. Every other shape (a
+        required-service emission) does not pass this seam: it fires first and
+        registers on the next line, byte-identically to before."""
+        expr = step.get("expr")
+        if self._emission_shape(expr) == "extern":
+            crossing = _ident(expr.get("name"), f"{where}: function")
+            out.add(indent, self._emit_fire(
+                step, where,
+                method_compensate=self._method_compensate_factory(
+                    registration(crossing))))
+        else:
+            out.add(indent, self._emit_fire(step, where))
+            out.add(indent, registration(None))
 
     def _compensated_extern(self, expr: Any) -> Optional[dict]:
         """The emission extern (one DECLARING a `compensate`) an `emit` step's
@@ -3384,12 +4051,19 @@ class _ComponentEmitter:
                 # `Frame.compensation_method` (the compensation analog of item
                 # 318's `transactional_method`) makes it abort-only: discharged on
                 # a clean commit, drained in Phase 2 after every proof inverse,
-                # guarded and residue-collected. Fire the emission first, then
-                # register — the sync spelling of the activation body's
-                # `<fire>; yield _revl_frame.compensation(...)`.
-                site = (f"{_inverse_lambda(step, 'compensate')}: "
-                        f"{self._inverse_expr(step.get('compensate'), where)}"
-                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))}")
+                # guarded and residue-collected. A DIRECT host-extern crossing
+                # hands that registration to the seam, which runs it when the
+                # host body RETURNS and before a `time` refusal is decided
+                # (issue #2688): the method body has no generator to register
+                # from afterwards, and a refusal that raises out of the fire
+                # would skip a next-line registration. Every other shape fires
+                # first and registers on the next line, as it always has.
+                thunk = (f"{_inverse_lambda(step, 'compensate')}: "
+                         f"{self._inverse_expr(step.get('compensate'), where)}")
+                call = _named_call_kwarg(
+                    step.get("compensate"),
+                    lambda a: self._inverse_expr(a, where))
+                site = f"{thunk}{call}"
                 if (self._decorated_crossing(step.get("expr"))
                         and self._compensated_extern(step.get("expr")) is not None):
                     # issue #1902: a decorated crossing registers its extern's
@@ -3400,16 +4074,22 @@ class _ComponentEmitter:
                     out.add(indent, f"with {_runtime_ref('site_compensation')}({site}):")
                     out.add(indent + 1, self._emit_fire(step, where))
                 else:
-                    out.add(indent, self._emit_fire(step, where))
-                    out.add(indent, f"_revl_frame.compensation_method({site})")
+                    self._method_compensated_fire(
+                        out, indent, step, where,
+                        lambda crossing: self._method_registration(
+                            thunk, call, crossing))
             else:
-                out.add(indent, self._emit_fire(step, where))
-            ext_comp = self._method_compensated_extern(step.get("expr"))
-            if deferred is None and ext_comp is not None and step.get("compensate") is None:
-                # item 254 / #1592: the extern DECLARES its own `compensate`,
-                # registered after the fire. A site-spelled one replaces it
-                # (issue #1902), as at the activation body.
-                out.add(indent, self._method_compensation(ext_comp, where))
+                ext_comp = self._method_compensated_extern(step.get("expr"))
+                if ext_comp is None:
+                    out.add(indent, self._emit_fire(step, where))
+                else:
+                    # item 254 / #1592: the extern DECLARES its own
+                    # `compensate`. A site-spelled one replaces it (issue
+                    # #1902), as at the activation body.
+                    self._method_compensated_fire(
+                        out, indent, step, where,
+                        lambda crossing: self._method_compensation(
+                            ext_comp, where, crossing))
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")
@@ -4644,15 +5324,22 @@ def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
     return out
 
 
-def _emit_functions(functions: list) -> "_Lines":
+def _emit_functions(functions: list, function_ceilings: dict | None = None) -> "_Lines":
     global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
+    # issue #2688: the runtime backstop tag. A local function that reaches a
+    # budgeted extern carries the declaration it inherits, so a crossing that
+    # reaches `extern_emit` with empty caps is REFUSED by the runtime instead of
+    # firing unmetered. Emitted only for such a function, so every other module's
+    # text is byte-identical.
+    ceilings = function_ceilings or {}
     # issue #2204: reset on every exit, not only the normal one. An `EmitError`
     # from a body used to leave the last function's colour in these module
     # globals, which the next `emit` on the same (now shared) module inherited.
     try:
         for fn in functions:
-            name = _ident(fn["name"], "function name")
+            public_name = _ident(fn["name"], "function name")
+            name = public_name
             params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
             # item 92: a phase-2 async-colored fn emits `async def`; its body renders
             # in an async context with its async-typed parameters as the await-locals
@@ -4677,6 +5364,9 @@ def _emit_functions(functions: list) -> "_Lines":
             if memoized:
                 out.extend(_emit_memo_wrapper(
                     _ident(fn["name"], "function name"), fn["params"], is_async))
+            caps = ceilings.get(fn.get("name"))
+            if caps:
+                out.add(0, f"{public_name}._revl_declared_caps = {caps!r}")
     finally:
         _PY_IN_ASYNC = False
         _PY_IN_ARROW = False
@@ -4824,6 +5514,12 @@ def _emit_externs(externs: list, crossings: dict | None = None,
                            for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
+        # issue #2688: the declared-ceiling tag the runtime backstop reads. A
+        # budgeted extern reached with empty caps must NOT be treated as
+        # unbounded, so the function object carries the declaration the emitter
+        # would have sent. Absent for an extern with no ceiling, so every other
+        # `def` is byte-identical.
+        ceiling_caps = _ceiling_capabilities(ext.get("capabilities"))
         # item 421 F6: the extern's declared return carried `Secret[T]`, so its
         # result is where a confidential value ENTERS the value world (item 256
         # §7a). A decorator marks it there, the narrowest place: one wrapper per
@@ -4873,6 +5569,8 @@ def _emit_externs(externs: list, crossings: dict | None = None,
                        f"({ext['name']!r}, {thunk}{ui}{call})")
         if "py" in refs and "py" not in bodies:
             out.extend(_emit_py_ref_thunk(name, params, ext, refs["py"]))
+            if ceiling_caps:
+                out.add(0, f"{name}._revl_declared_caps = {ceiling_caps!r}")
             continue
         if "py" not in bodies:
             raise EmitError(
@@ -4923,6 +5621,8 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         # an injected secret or config local is a statement in its own right;
         # a body of only comments is not (issue #2284)
         out.close_block(mark, 1)
+        if ceiling_caps:
+            out.add(0, f"{name}._revl_declared_caps = {ceiling_caps!r}")
         out.add(0)
     return out
 
@@ -6109,10 +6809,22 @@ def emit(ir: dict) -> str:
     # and byte-identical to before).
     plan_groups = _parallel_step_groups(ir)
     crossings, scopes = _crossing_facts(ir)
+    # issue #2688: the ceiling declaration of the extern each local function
+    # reaches, shared by every component emitter and by `_emit_functions` (which
+    # tags the function itself as the runtime backstop). Empty when no extern
+    # declares a ceiling, so existing emissions and module text are unchanged.
+    function_ceilings = _function_ceiling_caps(functions, externs)
+    # issue #2688: the wrappers whose emission the runtime meter cannot
+    # attribute exactly, refused by name at the firing site. Empty when every
+    # wrapper reaching a budgeted extern is an exact pass-through.
+    function_shapes = _function_ceiling_shapes(
+        functions, externs, function_ceilings)
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),
-                          scopes.get(component.get("name")), set(crossings))
+                          scopes.get(component.get("name")), set(crossings),
+                          function_ceilings=function_ceilings,
+                          function_shapes=function_shapes)
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]
@@ -6539,7 +7251,7 @@ def emit(ir: dict) -> str:
             out.add(0)
         out.extend(_emit_types(types))
     if functions:
-        out.extend(_emit_functions(functions))
+        out.extend(_emit_functions(functions, function_ceilings))
     if externs:
         out.extend(_emit_externs(externs, crossings, gated=bool(components)))
     if tests:
