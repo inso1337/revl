@@ -14,7 +14,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from revl.mcp import edit, repair, server  # noqa: E402
+from revl.mcp import repair, server  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -35,6 +35,37 @@ _CANDIDATE = (
     "service S { fn f(x: Str) -> Str }\n"
     "component C provides s: S {\n"
     "  provide s { fn f(x) = operator_helper(candidate_helper(candidate_root(x))) }\n"
+    "}\n"
+)
+_CANDIDATE_WITH_BOOT = (
+    "extern emission fn candidate_boot(msg: Str) = @py { return }\n"
+    + _CANDIDATE.replace(
+        "component C provides s: S {\n",
+        "component C provides s: S {\n"
+        '  emit candidate_boot("boot")\n',
+    )
+)
+_CANDIDATE_BOOT_STANDALONE = (
+    _CANDIDATE_WITH_BOOT
+    .replace('use "operator-provider-2631.rvl" { operator_helper }\n', "")
+    .replace("operator_helper(candidate_helper(candidate_root(x)))",
+             "candidate_helper(candidate_root(x))")
+)
+_CALL_CANDIDATE = (
+    'use "operator-provider-2631.rvl" { operator_helper }\n'
+    'use "candidate-helper-2631.rvl" { candidate_helper }\n'
+    "extern emission[notify] fn candidate_notify(msg: Str) = @py { return }\n"
+    "extern pure fn candidate_root(x: Str) -> Str = @py { return x }\n"
+    "service Ops { emission[notify] fn f(msg: Str) }\n"
+    "component C provides ops: Ops {\n"
+    "  provide ops { fn f(msg) { emit candidate_notify("
+    "operator_helper(candidate_helper(candidate_root(msg)))) } }\n"
+    "}\n"
+)
+_PLAIN_CANDIDATE = (
+    "service S { fn f(x: Str) -> Str }\n"
+    "component C provides s: S {\n"
+    "  provide s { fn f(x) = x }\n"
     "}\n"
 )
 
@@ -78,66 +109,73 @@ def _body_names(bodies):
     return {entry["extern"] for entry in bodies}
 
 
-def test_live_call_and_act_tickets_use_only_the_running_authored_set(monkeypatch):
-    from revl.mcp.approval import ApprovalRequired
+@needs_cordis
+def test_live_call_and_act_tickets_use_only_the_running_authored_set():
+    modules = {
+        os.path.abspath("candidate-helper-2631.rvl"): _CANDIDATE_MODULE,
+    }
+    server.SESSION.approval_policy = "auto"
+    loaded = server._run_handler("revl_load", {
+        "source": _CALL_CANDIDATE, "modules": modules, "record": True,
+    })
+    assert loaded["ok"] is True, loaded
 
-    ir, _modules, _report, authored = _compiled_candidate()
-    server.SESSION.ir = ir
-    server.SESSION.origin = {}
-    server._with_authored_host_bodies(server.SESSION.origin, authored)
-    server._remember_live_host_bodies()
-
-    def refused(*_args, **_kwargs):
-        error = ApprovalRequired({"hash": "sha256:live", "capabilities": []})
-        raise error
-
-    monkeypatch.setattr(server.SESSION, "call", refused)
     call_result = server._run_handler(
-        "revl_call", {"key": "s", "method": "f", "args": ["x"]})
-    assert _body_names(call_result["ticket"]["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
-    }
+        "revl_call", {"key": "ops", "method": "f", "args": ["x"]})
+    assert call_result.get("approvalRequired") is True, call_result
+    expected = {"candidate_notify", "candidate_helper", "candidate_root"}
+    assert _body_names(call_result["ticket"]["unreviewedHostCode"]) == expected
 
-    monkeypatch.setattr(server.SESSION, "act", refused)
-    act_result = server._tool_act(
-        {"key": "s", "method": "f", "args": ["x"]})
-    assert act_result["outcome"] == "ticket"
-    assert _body_names(act_result["ticket"]["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
-    }
+    act_result = server._run_handler(
+        "revl_act", {"key": "ops", "method": "f", "args": ["x"]})
+    assert act_result["outcome"] == "ticket", act_result
+    assert _body_names(act_result["ticket"]["unreviewedHostCode"]) == expected
 
 
-def test_server_side_swap_ticket_uses_the_compile_report(monkeypatch):
-    from revl.mcp.approval import ApprovalRequired
+@needs_cordis
+def test_server_side_swap_ticket_uses_the_compile_report(tmp_path):
+    candidate_path = tmp_path / "candidate-2676.rvl"
+    provider_path = tmp_path / "operator-provider-2631.rvl"
+    candidate_helper_path = tmp_path / "candidate-helper-2631.rvl"
+    candidate_path.write_text(_PLAIN_CANDIDATE, encoding="utf-8")
+    provider_path.write_text(_OPERATOR_PROVIDER, encoding="utf-8")
+    candidate_helper_path.write_text(_CANDIDATE_MODULE, encoding="utf-8")
+    server.set_authoring_trust(
+        host_code=True, granted=None,
+        providers={str(provider_path): _OPERATOR_PROVIDER},
+        roots=(str(tmp_path),),
+    )
 
-    ir, modules, report, authored = _compiled_candidate()
-    working = {"source": _CANDIDATE, "modules": modules}
-    fake = SimpleNamespace(ir=ir, origin=working, loaded=True)
+    loaded = server._run_handler("revl_load", {
+        "files": [str(candidate_path)], "record": True,
+    })
+    assert loaded["ok"] is True, loaded
+    snapshot_result = server._run_handler("revl_snapshot", {})
+    assert snapshot_result["ok"] is True, snapshot_result
+    snapshot = snapshot_result["snapshot"]
+    # Older snapshots contain the file paths but not a copied file buffer. A
+    # server-side swap legitimately re-reads that source from disk.
+    snapshot["sources"].pop("files_content", None)
+    unloaded = server._run_handler("revl_unload", {})
+    assert unloaded["ok"] is True, unloaded
+    restored = server._run_handler("revl_restore", {"snapshot": snapshot})
+    assert restored["ok"] is True, restored
 
-    def compile_virtual(_vs, *, report=None, **_kwargs):
-        if report is not None:
-            report.update(report_data)
-        return ir
-
-    report_data = dict(report)
-
-    def swap(candidate, **_kwargs):
-        error = ApprovalRequired({"hash": "sha256:server-swap",
-                                  "capabilities": []})
-        error.candidate = candidate
-        raise error
-
-    fake.swap = swap
-    monkeypatch.setattr(server, "SESSION", fake)
-    monkeypatch.setattr(edit, "compile_virtual", compile_virtual)
-    monkeypatch.setattr(server, "_realm_removal_refused", lambda *_args: None)
-    monkeypatch.setattr(server._authoring_loop, "blast_radius", lambda *_args: {})
-
-    result = server._swap_server_side(())
-    assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
-    }
-    assert _body_names(authored) == {"candidate_helper", "candidate_root"}
+    session = server.SESSION
+    before = session.ir
+    try:
+        candidate_path.write_text(_CANDIDATE_WITH_BOOT, encoding="utf-8")
+        session.approval_policy = "auto"
+        result = server._run_handler("revl_swap", {})
+        assert result.get("approvalRequired") is True, result
+        assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
+            "candidate_boot", "candidate_helper", "candidate_root",
+        }
+        assert session.ir is before
+        assert session._generation == 1
+    finally:
+        if session.loaded:
+            session.unload()
 
 
 _EDIT_A = (
@@ -152,37 +190,41 @@ _EDIT_B = (
 )
 
 
+@pytest.mark.parametrize("verb", ["revl_edit", "revl_change"])
 @needs_cordis
-def test_edit_ticket_names_every_loaded_file_body_beside_the_edited_module(
-        tmp_path):
-    """The real edit door, with the mixed candidate #2675 is about.
+def test_edit_and_change_tickets_name_every_loaded_file_body_beside_the_edited_module(
+        tmp_path, verb):
+    """The real edit doors preserve attribution for two loaded files.
 
     Editing one of two loaded files makes that file an edited buffer in
-    `modules` beside `files`. The trusted-files attribution was skipped
-    whenever `modules` was non-empty, so at the carrier this ticket named only
-    the edited file's `note_a` and dropped `note_b`. Both files are the
-    trusted author's text, so a yes admits both and the ticket names both.
-    The load, compile, admission, swap and activation gate are all real; only
-    the approval answer is absent, which is what makes the ticket.
+    `modules` beside `files`. Both files are candidate text, so an approval
+    ticket must name their host bodies. The load, compile, admission, swap and
+    activation gate are real; only the approval answer is absent.
     """
     first = tmp_path / "edit-a-2676.rvl"
     second = tmp_path / "edit-b-2676.rvl"
     first.write_text(_EDIT_A, encoding="utf-8")
     second.write_text(_EDIT_B, encoding="utf-8")
     loaded = server._run_handler("revl_load", {
-        "files": [str(first), str(second)], "record": True})
+        "files": [str(first), str(second)], "record": True,
+    })
     assert loaded["ok"] is True, loaded
     session = server.SESSION
     try:
         session.approval_policy = "auto"
-        result = server._run_handler("revl_edit", {"edits": [{
+        edits = [{
             "target": str(first),
             "anchor": "  provide ops { fn ping() = 1 }",
             "replacement": ('  emit note_a("edited")\n'
                             "  provide ops { fn ping() = 2 }"),
-        }]})
-        assert result["ok"] is False, result
-        assert result["approvalRequired"] is True, result
+        }]
+        if verb == "revl_change":
+            result = server._run_handler("revl_change", {
+                "commit": True, "edit": {"edits": edits},
+            })
+        else:
+            result = server._run_handler("revl_edit", {"edits": edits})
+        assert result.get("approvalRequired") is True, result
         assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
             "note_a", "note_b",
         }
@@ -283,64 +325,69 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
         server.SESSION._history[-1]["origin"])
 
 
-def test_restore_approval_ticket_uses_the_snapshot_compile_report(monkeypatch):
-    from revl.mcp.approval import ApprovalRequired
-    from revl.mcp.persist import _recompile, admitted_name
+@needs_cordis
+def test_restore_approval_ticket_uses_the_snapshot_compile_report():
+    from revl.mcp.session import Session
 
-    _ir, modules, _report, _authored = _compiled_candidate()
-    modules = {**modules,
-               os.path.abspath("operator-provider-2631.rvl"):
-                   _OPERATOR_PROVIDER}
-    sources = {"source": _CANDIDATE, "modules": modules}
-
-    def restore(snap, *, profile=None, report=None):
-        ir = _recompile(sources, admitted_name(snap), profile=profile,
-                        report=report)
-        error = ApprovalRequired({"hash": "sha256:restore",
-                                  "capabilities": []})
-        error.candidate = ir
-        raise error
-
-    monkeypatch.setattr(server.SESSION, "restore", restore)
-    monkeypatch.setattr(server._leases, "check", lambda *_args: None)
-    result = server._tool_restore({"snapshot": {"sources": sources}})
-
-    assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
+    modules = {
+        os.path.abspath("candidate-helper-2631.rvl"): _CANDIDATE_MODULE,
     }
+    loaded = server._run_handler("revl_load", {
+        "source": _CANDIDATE_BOOT_STANDALONE, "modules": modules, "record": True,
+    })
+    assert loaded["ok"] is True, loaded
+    snapshot_result = server._run_handler("revl_snapshot", {})
+    assert snapshot_result["ok"] is True, snapshot_result
+    snapshot = snapshot_result["snapshot"]
+    original = server.SESSION
+    try:
+        original.unload()
+        restored = Session()
+        restored.approval_policy = "auto"
+        server.SESSION = restored
+
+        result = server._run_handler("revl_restore", {"snapshot": snapshot})
+        assert result.get("approvalRequired") is True, result
+        assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
+            "candidate_boot", "candidate_helper", "candidate_root",
+        }
+        assert restored.loaded is False
+    finally:
+        if server.SESSION.loaded:
+            server.SESSION.unload()
+        if original.loaded:
+            original.unload()
 
 
-def test_rollback_and_undo_refusals_use_the_target_generation_set(monkeypatch):
-    from revl.mcp.approval import ApprovalRequired
-
-    ir, _modules, _report, authored = _compiled_candidate()
-    previous = {server._ORIGIN_AUTHORED_HOST_BODIES: authored}
-    server.SESSION.previous_origin = previous
-
-    def rollback(*, profile=None):
-        error = ApprovalRequired({"hash": "sha256:rollback",
-                                  "capabilities": []})
-        error.candidate = ir
-        raise error
-
-    monkeypatch.setattr(server.SESSION, "rollback", rollback)
-    rollback_result = server._tool_rollback({})
-    assert _body_names(rollback_result["ticket"]["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
+@pytest.mark.parametrize("verb", ["revl_rollback", "revl_undo"])
+@needs_cordis
+def test_rollback_and_undo_refusals_use_the_target_generation_set(verb):
+    modules = {
+        os.path.abspath("candidate-helper-2631.rvl"): _CANDIDATE_MODULE,
     }
-
-    def undo(_to=None, *, profile=None):
-        error = ApprovalRequired({"hash": "sha256:undo", "capabilities": []})
-        error.candidate = ir
-        error.host_bodies = authored
-        raise error
-
-    fake = SimpleNamespace(loaded=True, ir=ir, undo=undo)
-    monkeypatch.setattr(server, "SESSION", fake)
-    undo_result = server._tool_undo({})
-    assert _body_names(undo_result["ticket"]["unreviewedHostCode"]) == {
-        "candidate_helper", "candidate_root",
-    }
+    loaded = server._run_handler("revl_load", {
+        "source": _CANDIDATE_BOOT_STANDALONE, "modules": modules, "record": True,
+    })
+    assert loaded["ok"] is True, loaded
+    replaced = server._run_handler("revl_swap", {
+        "source": _PLAIN_CANDIDATE,
+    })
+    assert replaced.get("swapped") is True, replaced
+    session = server.SESSION
+    running_ir = session.ir
+    running_generation = session._generation
+    try:
+        session.approval_policy = "auto"
+        result = server._run_handler(verb, {})
+        assert result.get("approvalRequired") is True, result
+        assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
+            "candidate_boot", "candidate_helper", "candidate_root",
+        }
+        assert session.ir is running_ir
+        assert session._generation == running_generation
+    finally:
+        if session.loaded:
+            session.unload()
 
 
 def test_portable_snapshots_do_not_serialize_the_in_memory_provenance():
