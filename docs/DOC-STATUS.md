@@ -104,7 +104,7 @@ regenerated rather than edited.
 | gen-types.md | needs-work | 0 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 9 |  |
-| guarantees.md | needs-work | 2 |  |
+| guarantees.md | needs-work | 0 |  |
 | guide-ai-agents.md | stale-fixed | 4 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 5 |  |
