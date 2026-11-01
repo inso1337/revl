@@ -1624,33 +1624,33 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             module.program,
             loader._origin_install_root(module.path) is not None
             or _contained(module.path, loader.stdlib_real()))
-    # issue #3004: a body's bare names are its own module's fns and externs
-    # plus the ones its `use { ... }` lists name. Externs used to be left out of
-    # this set and resolved against EVERY extern of the merged program instead,
-    # and `test` / `prop test` blocks and components against every fn and
-    # extern, so a non-`pub` (or simply un-imported) declaration of a `use`d
-    # module was callable by bare name. The ROOT modules are one composition
-    # and keep the namespace they share (a composition's row file names the
-    # externs and services of the files the composition `use`s without a `use`
-    # of its own): a root fn body also sees every root's externs, and a root's
-    # blocks every root's declarations and imports, exactly as before.
-    def scope_of(module: _LoadedModule) -> set[str]:
-        return ({fn.name for fn in module.program.fn_decls}
-                | {ext.name for ext in module.program.externs}
-                | set(module.named_fns) | set(module.named_externs))
-
-    roots_scope: set[str] = set()
-    roots_externs: set[str] = set()
-    for module in root_modules:
-        roots_scope |= scope_of(module)
-        roots_externs |= ({ext.name for ext in module.program.externs}
-                          | set(module.named_externs))
+    # issue #3004: a non-`pub` fn or extern of a `use`d (non-root) module is
+    # that module's implementation, reachable by bare name only from its own
+    # bodies. Before, fn bodies resolved externs against EVERY extern of the
+    # merged program, and `test` / `prop test` blocks and components against
+    # every fn and extern of it, so another module's private extern (and, from a
+    # test or component, its private fn) was callable by bare name although
+    # importing it by name is refused. Each module's namespace is now the one it
+    # had, less the OTHER used modules' private declarations; the scopes carry
+    # the externs explicitly, so `_lower_fns` adds none of its own. The ROOT
+    # modules' declarations stay shared: they are one composition (a row file
+    # names the externs of the files its composition `use`s with no `use` of
+    # its own). A `pub` name that was not imported still resolves, as before.
+    hidden_of: dict[int, set[str]] = {}
     for module in included:
-        callables = scope_of(module)
-        blocks_scope = callables
-        if id(module) in root_ids:
-            callables = callables | roots_externs
-            blocks_scope = roots_scope
+        if id(module) not in root_ids:
+            hidden_of[id(module)] = (
+                {fn.name for fn in module.program.fn_decls if not fn.public}
+                | {ext.name for ext in module.program.externs if not ext.public})
+    all_hidden: set[str] = set().union(*hidden_of.values())
+    all_externs = {ext.name for ext in merged.externs}
+    all_fns = {fn.name for fn in merged.fn_decls}
+    for module in included:
+        hidden = all_hidden - hidden_of.get(id(module), set())
+        callables = ({fn.name for fn in module.program.fn_decls}
+                     | set(module.named_fns)
+                     | (all_externs - hidden))
+        blocks_scope = (all_fns | all_externs) - hidden
         alias_fns = {
             alias: set(used.public_fns)
             for alias, used in module.aliases.items()

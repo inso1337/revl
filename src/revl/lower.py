@@ -2369,6 +2369,15 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
             "defaults": defaults,
             "required": required,
         }
+        # issue #3004: a default expression belongs to the CALLEE's module, so
+        # it resolves its bare names in the callee's namespace (a private
+        # extern of that module may supply it), never in the caller's. Only a
+        # scoped (multi-file) fn with a default carries the set.
+        scope = program.fn_scopes.get(id(decl))
+        if scope is not None and required < len(defaults):
+            sigs[decl.name]["default_callables"] = frozenset(
+                _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
+                | set(scope))
     return sigs
 
 
@@ -7809,8 +7818,10 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                             f"call to `{callee_name}` gives {len(expr.args)} "
                             f"argument(s), but its signature takes {len(params)} "
                             f"and parameter {i + 1} has no default")
-                    dnode = _lower_pure_expr(dexpr, scope, callables, alias_fns,
-                                             filename, type_env, types)
+                    # issue #3004: resolved in the callee's namespace
+                    dnode = _lower_pure_expr(dexpr, scope,
+                                             sig.get("default_callables", callables),
+                                             alias_fns, filename, type_env, types)
                     _mark_widen(params[i], infer_ast(dexpr, type_env, types, None),
                                 dnode)
                     lowered_args.append(dnode)
@@ -8547,19 +8558,28 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
     # module), not one rebuild per fn
     per_scope: dict[int, frozenset] = {}
     for decl in program.fn_decls:
-        # exactly the namespace `_lower_fns` resolves this body's bare names in
-        scope = program.fn_scopes.get(id(decl), declared)
+        # exactly the namespace `_lower_fns` resolves this body's bare names
+        # in: a scoped body's `fn_scopes` entry already carries the externs it
+        # sees (issue #3004), only the single-source default adds them all
+        scope = program.fn_scopes.get(id(decl))
         visible = per_scope.get(id(scope))
         if visible is None:
-            visible = frozenset((set(scope) | externs) & declared)
+            visible = (frozenset(set(scope) & declared) if scope is not None
+                       else frozenset(declared))
             per_scope[id(scope)] = visible
         check(decl, visible, decl.source or filename)
-    # components and `test`/prop-test blocks resolve against the whole merged
-    # program (`component_callables` in `check_and_lower`), so their visible
-    # set is that same one.
+    # components and `test`/prop-test blocks resolve against their module's
+    # `fn_scopes` entry when `compile_files` recorded one (`_block_callables`),
+    # else against the whole merged program, so their visible set is that one.
     for decl in (list(program.components) + list(program.tests)
                  + list(program.prop_tests)):
-        check(decl, declared, getattr(decl, "source", "") or filename)
+        scope = program.fn_scopes.get(id(decl))
+        visible = per_scope.get(id(scope)) if scope is not None else None
+        if scope is not None and visible is None:
+            visible = frozenset(set(scope) & declared)
+            per_scope[id(scope)] = visible
+        check(decl, declared if scope is None else visible,
+              getattr(decl, "source", "") or filename)
 
 
 def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:
@@ -10606,10 +10626,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 # item 187: fill omitted trailing arguments with their default
                 # expressions before async coercion, so the module-fn call the
                 # emitters see is fully supplied (no per-tier default handling).
+                # issue #3004: a default resolves in the callee's namespace
+                callee_sig = (env.types.get(FNS_KEY) or {}).get(name) or {}
                 filled = _with_default_args(
                     name, args, env.types,
-                    lambda d: _lower_component_pure_expr(d, env, scope,
-                                                         callables, pure_only))
+                    lambda d: _lower_component_pure_expr(
+                        d, env, scope,
+                        callee_sig.get("default_callables", callables),
+                        pure_only))
                 node = {"kind": "fn", "name": name,
                         "args": _coerce_async_args(name, filled, env, line)}
                 _check_component_call(node, env, filename, line)

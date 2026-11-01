@@ -96,15 +96,13 @@ fn helper() -> Int { ... }                        // default: module-private
   renamed apart. Importing two same-named `pub` declarations into ONE file is a
   genuine clash and is refused with a `duplicate function` diagnostic naming
   both modules; so is one document whose two root files each declare the name.
-- **A bare name sees only what its module declares or imports (issue #3004).**
-  A `fn`, `test` or `prop test` body, or a component, resolves an unqualified
-  name against its own module's declarations and the names its `use { ... }`
-  lists import. A non-`pub` `fn` or `extern` of a `use`d module is refused by
-  bare name with the same G1 message its named import earns (`` `raw` is
-  module-private in `m.rvl` and cannot be imported (G1) ``), and a `pub` one
-  the module did not name is undeclared there. The files compiled together as
-  roots (a composition's rows and the files it `use`s) keep one shared
-  namespace for their externs, tests and components.
+- **Another module's non-`pub` declarations are not reachable by bare name
+  either (issue #3004).** A `fn`, `test` or `prop test` body, or a component,
+  that names a non-`pub` `fn` or `extern` of a `use`d module unqualified is
+  refused with the same G1 message the named import earns
+  (`` `raw` is module-private in `m.rvl` and cannot be imported (G1) ``). The
+  files compiled together as roots (a composition's rows and the files it
+  `use`s) keep one shared namespace.
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
 - **Resolution (roadmap 319).** `use` resolves the path relative to the

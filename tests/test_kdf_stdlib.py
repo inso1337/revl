@@ -206,6 +206,30 @@ test "verify passes invalid parameters through as the named errors" {
                       "iterations_out_of_range")
   assert verify_codes(pbkdf2_sha256_verify("p", "", 1, 32, "00"), "salt_empty")
 }
+
+// ------------------------------------- the boundary extern's own checks
+// The wrapper `pbkdf2_sha256` passes its arguments straight to the non-pub
+// boundary extern, which does the validating, so these drive the extern's own
+// checks. A bare call of the extern itself is refused as module-private (revl
+// issue #3004), so the wrapper is the one door.
+
+test "a call above the iteration cap refuses at the boundary, never executes" {
+  assert code_of(pbkdf2_sha256("p", "s", max_iterations() + 1, 32))
+    == "iterations_out_of_range"
+}
+
+test "a call with an invalid length or empty salt refuses at the boundary" {
+  assert code_of(pbkdf2_sha256("p", "s", 1, 0)) == "length_out_of_range"
+  assert code_of(pbkdf2_sha256("p", "s", 1, 65)) == "length_out_of_range"
+  assert code_of(pbkdf2_sha256("p", "", 1, 32)) == "salt_empty"
+}
+
+test "a call below the bounds still computes the vector through the boundary" {
+  assert match pbkdf2_sha256("password", "salt", 1, 32) {
+    Ok(hex) => hex == "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
+    Err(_) => false,
+  }
+}
 """
 
 

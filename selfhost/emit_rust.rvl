@@ -121,8 +121,7 @@
 // divergence, not a defect in this port.
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt,
-  value_list, value_at, value_str, value_int, value_bool, value_keys,
-  value_children
+  value_list, value_at, value_str, value_int, value_bool, value_keys
 }
 // The list kit (item 194): `list_sort` is the codepoint-lexicographic
 // `sorted(...)` the reference uses to canonicalise a record's field set into a

@@ -5,10 +5,9 @@ on the bare-name path exactly as on the named-import path.
 cannot be imported (G1)", but a consumer that imported only `E` from `m.rvl`
 could still call `raw(1)` by bare name: fn bodies resolved externs against
 every extern of the merged program, and `test` / `prop test` blocks and
-components against every fn and extern of it. A body now resolves its own
-module's declarations plus the names its `use` lists import, and a bare name
-that is another module's private declaration earns the G1 module-private
-diagnostic.
+components against every fn and extern of it. A bare name that is another
+`use`d module's private declaration now earns the G1 module-private
+diagnostic; `pub` names resolve as before.
 """
 
 import sys
@@ -115,14 +114,59 @@ def test_named_import_refusal_is_unchanged(tmp_path):
     assert PRIVATE in message, message
 
 
-def test_unimported_pub_extern_is_not_in_scope(tmp_path):
-    """A `pub` extern the consumer did not name is a missing import, not a
-    private one: the ordinary undeclared-name refusal, as for a `pub fn`."""
-    message = _refusal(tmp_path, (
+def test_unimported_pub_names_still_resolve_by_bare_name(tmp_path):
+    """Control: a `pub` extern the consumer did not name in its `use` list
+    still resolves by bare name from a fn body, and a `pub` fn from a test, as
+    on base (a fn body never saw an un-imported `pub fn`). Only NON-`pub` declarations
+    are cut off here; requiring the import for a `pub` name is a separate,
+    later change (follow-up to issue #3004), once downstream modules import
+    what they call."""
+    ir = _compile(tmp_path, (
         'use "m.rvl" { E }\n'
         'pub fn f() -> Str { return shown(1) }\n'
+        'test "t" {\n'
+        '  assert shown(1) == "1"\n'
+        '  assert wrap(1) == "2"\n'
+        "}\n"
     ))
-    assert "`shown` is not declared in this function" in message, message
+    assert "f" in {fn["name"] for fn in ir["functions"]}
+
+
+DEFAULTED = (
+    "extern pure fn seed() -> Int\n"
+    "  = @py { return 7 }\n"
+    "\n"
+    "fn base() -> Int { return 3 }\n"
+    "\n"
+    "pub fn f(x: Int = seed()) -> Int { return x }\n"
+    "\n"
+    "pub fn g(y: Int = base()) -> Int { return y }\n"
+)
+
+
+def test_a_default_resolves_in_the_callees_namespace(tmp_path):
+    """A default expression belongs to the callee's module: `f(x: Int =
+    seed())` with `seed` a private extern of m.rvl, and `g(y: Int = base())`
+    with `base` a private fn of it, are callable with the argument omitted
+    from a fn body, a test and a component of another module. The caller never
+    names `seed` or `base`, so nothing module-private is reached."""
+    (tmp_path / "m.rvl").write_text(DEFAULTED)
+    (tmp_path / "main.rvl").write_text(
+        'use "m.rvl" { f, g }\n'
+        "pub fn h() -> Int { return f() + g() }\n"
+        'test "t" {\n'
+        "  assert f() + g() == 10\n"
+        "}\n"
+        "service S {\n"
+        "  fn get() -> Int\n"
+        "}\n"
+        "component C provides s: S {\n"
+        "  provide s {\n"
+        "    fn get() = f() + g()\n"
+        "  }\n"
+        "}\n")
+    ir = compile_files([str(tmp_path / "main.rvl")])
+    assert "h" in {fn["name"] for fn in ir["functions"]}
 
 
 def test_imported_pub_symbols_stay_callable_by_bare_name(tmp_path):
