@@ -1,4 +1,4 @@
-# 525 exemplary web app — slice 1 (boring half): filed gaps
+# 525 exemplary web app: slice 1 (boring half): filed gaps
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 1 of N (the boring CRUD half) · **Status:** FINDINGS, 2026-09-08
 
@@ -36,7 +36,7 @@ neither is a bar-2 violation; both are ergonomic gaps in the store's CRUD
 vocabulary that a real persistence tier (the Minato/Cordis-Database alignment in
 docs/design/527-database-persistence-alignment.md) would close.
 
-### G1 — the store owns no primary-key assignment (id minting leaks into the handler)
+### G1: the store owns no primary-key assignment (id minting leaks into the handler)
 
 `NoteStore.create` keys a row by `row.id`, and a `NewNote` from a client carries
 no id (the server owns it). With no store verb that assigns a primary key, the
@@ -61,11 +61,11 @@ Routed around for this slice with the `size()`-based counter above, explicitly
 because the slice's job is the routed half; the counter is called out here rather
 than presented as the intended shape.
 
-### G2 — the store exposes no `values()` / typed `list`, so listing folds keys-then-get
+### G2: the store exposes no `values()` / typed `list`, so listing folds keys-then-get
 
 `GET /notes` returns every row. The host `Map` surface backing the memory driver
-is `new/drop/insert/insert_if_absent/remove/get/size/keys` — it has `keys()` but
-no `values()` — so `NoteStore.all` lists the VALUES with a keys-then-get fold:
+is `new/drop/insert/insert_if_absent/remove/get/size/keys`; it has `keys()` but
+no `values()`, so `NoteStore.all` lists the VALUES with a keys-then-get fold:
 
 ```revl fragment
 fn all() {
@@ -76,8 +76,8 @@ fn all() {
 ```
 
 This is idiomatic and needs no sentinel, so the app absorbs it. But a typed
-model-store surface (527) should expose the list/query directly — a driver-owned
-`fn all() -> List[Note]` (or a filtered `query`) — so a consumer never reconstructs
+model-store surface (527) should expose the list/query directly: a driver-owned
+`fn all() -> List[Note]` (or a filtered `query`), so a consumer never reconstructs
 a value list from keys, and a sqlite/postgres driver can answer it with one
 statement rather than N `get`s. Filed against **item 465** as a surface gap; low
 severity (the fold is correct, just not driver-independent at scale).
@@ -102,6 +102,6 @@ severity (the fold is correct, just not driver-independent at scale).
 - Slice 2: `stdlib/auth.rvl`, opaque `Principal`, the admission refusal for a
   dropped `auth.validate`, and a user-scoped store (item 457 Slice 2).
 - Later: the differentiated hot-swap half (admission, cancellation, residue-free
-  recovery — item 460) and the TS frontend behind a typed boundary (item 459).
+  recovery, item 460) and the TS frontend behind a typed boundary (item 459).
 - If G1/G2 land in item 465, `create_note`/`list_notes` simplify accordingly and
   this note's G1/G2 are closed.

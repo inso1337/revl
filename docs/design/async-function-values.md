@@ -1,7 +1,7 @@
 # Design: async function values (roadmap item 92)
 
-**Status:** design only — nothing here is implemented.
-**Base:** `origin/main` @ `007a6ff` — every `file:line` anchor below was
+**Status:** design only, nothing here is implemented.
+**Base:** `origin/main` @ `007a6ff`: every `file:line` anchor below was
 verified against that sha (the frontend and emitter files are byte-identical
 to `7b49b57`, where the survey was made; the delta is items 46/50 only).
 **Problem (harness finding #21, dogfood/findings-harness-async90.md §1;
@@ -10,7 +10,7 @@ transitive coloring for *direct* module-fn calls, but the harness's agent
 loop passes the async call through a callback arrow of **sync function
 type**: `agent_loop(msgs, complete: (List[Msg]) -> Str, ...)` with
 `msgs => emit model.complete(msgs)` at the call site. The compile is green;
-at runtime the emitted loop stays sync (`resp = complete(current)` — no
+at runtime the emitted loop stays sync (`resp = complete(current)`, no
 await, py and ts alike) and the arrow returns a coroutine/Promise that
 leaks into `json_parse` (`the JSON object must be str…, not coroutine`).
 Item 90's claim "the harness's `agent_loop` works unchanged" is falsified
@@ -21,8 +21,8 @@ require the emitter to `await` calls in contexts that may be sync, which
 is not writable" (docs/design/async-extern.md §3, "First-class values are
 refused, not widened"; the same fence is judgment call 4 of that document
 and the deliberate no-widening note at src/revl/emission_analysis.py:144-148).
-Item 92 lifts that refusal for the one case the harness needs — a callback
-whose **declared function type carries the color** — without ever creating
+Item 92 lifts that refusal for the one case the harness needs: a callback
+whose **declared function type carries the color**, without ever creating
 a maybe-sync await.
 
 Why the hole exists today, precisely:
@@ -35,7 +35,7 @@ Why the hole exists today, precisely:
   (`_async_callables`, emission_analysis.py:131-176) and the A1 method
   admission (src/revl/lower.py:3817-3880) simply never see
   `emit model.complete(...)` inside the arrow. Nothing fires; the leak is
-  silent — the exact wrong-answer class the checker exists to prevent.
+  silent: the exact wrong-answer class the checker exists to prevent.
 - Even if it were seen, the function type `(List[Msg]) -> Str`
   (docs/function-types.md; `FN_HEAD` normalisation at
   src/revl/typecheck.py:94-147) has no async variant, so there is nothing
@@ -46,13 +46,13 @@ Why the hole exists today, precisely:
 
 ## 1. Which fix direction
 
-**Recommended: (c) as the mechanism, with (b)'s propagation riding on it —
+**Recommended: (c) as the mechanism, with (b)'s propagation riding on it,
 a declared async-aware function type, checked into call-site arrows and
 folded into the item-90 fixpoint.** Concretely:
 
 - The *type* is the vehicle (the (a)/(c) axis): a function type may declare
   an async result, `(List[Msg]) -> Async[Str]`. This is what lets both
-  colored emitters place every `await` **statically** — the position that
+  colored emitters place every `await` **statically**: the position that
   killed pure inference in item 90 ("the emitter can't place awaits in
   maybe-sync contexts") is resolved by declaration, not by widening.
 - The *policy* is declaration at the parameter (direction (c)): the loop
@@ -69,16 +69,16 @@ folded into the item-90 fixpoint.** Concretely:
 
 Rejected alternatives, with reasons:
 
-- **(b) alone — infer the arrow's color from its body and retype the
+- **(b) alone, infer the arrow's color from its body and retype the
   callback parameter at each call site.** Two independent killers.
   (1) `agent_loop` is compiled once against its declared parameter type;
   whether its body's `complete(current)` awaits cannot depend on which
-  caller passed which arrow — that is whole-program bidirectional
+  caller passed which arrow, that is whole-program bidirectional
   inference across function boundaries, which revl deliberately does not
   do (the signature is the boundary; same principle as "the service
   declaration is the upper bound on its providers", lower.py:3814-3816).
   (2) On py an unconditional await of a maybe-sync result is a `TypeError`
-  (`await "str"` raises), so an inferred maybe-color is unemittable —
+  (`await "str"` raises), so an inferred maybe-color is unemittable,
   exactly the argument that made item 90 refuse the `*` trick
   (async-extern.md §3). A runtime `isawaitable` sniff would emit, but it
   trades a checked property for a dynamic one; refused.
@@ -98,8 +98,8 @@ Rejected alternatives, with reasons:
   well-formedness story. `(…) -> Async[Str]` parses **today** with zero
   parser change (`Async[Str]` is already a type application,
   parser.py:999-1009), is the roadmap's own sketch
-  (v2.0-roadmap.md:2871), and — because `parse_type` gives it a distinct
-  head — makes async-vs-sync mismatches *fall out* of the existing
+  (v2.0-roadmap.md:2871), and, because `parse_type` gives it a distinct
+  head, makes async-vs-sync mismatches *fall out* of the existing
   same-head recursion in `compatible` instead of needing new refusal code.
   **Judgment call 1 (human):** confirm the `Async[T]` spelling over the
   modifier spelling; the modifier is more consistent with the extern/method
@@ -108,8 +108,8 @@ Rejected alternatives, with reasons:
 Reconciliation with async-extern.md's rejection of `-> Async[Str]`: that
 rejection was for *extern* declarations, where a modifier slot exists and
 where the call expression's type would have carried the color. A first-class
-function value has no modifier slot — its type is the only place a color
-can live — and §2's elimination rule unwraps at the call, so the color
+function value has no modifier slot, its type is the only place a color
+can live, and §2's elimination rule unwraps at the call, so the color
 still never reaches an expression type. The two decisions are the same
 stance applied to two positions.
 
@@ -118,14 +118,14 @@ stance applied to two positions.
 ### `Async` is a position-restricted annotation, not a first-class type
 
 Invariant (the load-bearing sentence of this design): **no expression ever
-has type `Async[T]`.** `Async[T]` may appear in exactly one position — the
-return type of a function type — and it is eliminated at the only
+has type `Async[T]`.** `Async[T]` may appear in exactly one position, the
+return type of a function type, and it is eliminated at the only
 elimination site a function value has (calling it), where the call
 expression has type `T`. Enforced three ways:
 
 - **Well-formedness.** `check_type_wellformed`
   (src/revl/typecheck.py:199-217) gains: `Async` has arity 1, and it is
-  legal only as the *return of a function type* — the walk threads a
+  legal only as the *return of a function type*: the walk threads a
   position flag, so `let x: Async[Str]`, `List[Async[Str]]`,
   `Opt[Async[Str]]`, and `(Async[Str]) -> Int` (parameter position) are
   all refused with one message: *"`Async[T]` is not a value type — it may
@@ -134,14 +134,14 @@ expression has type `T`. Enforced three ways:
   added to `_GENERIC_ARITY` (typecheck.py:196) as an ordinary generic.
 - **v1 position fences (scope cut).** Even in the legal position, v1
   admits the async function type only in a **module `fn` parameter
-  annotation** — the harness's shape. Refused with "not yet" hints in:
-  `let`/`var` annotations (checking position at lower.py:1794-1802 —
+  annotation**: the harness's shape. Refused with "not yet" hints in:
+  `let`/`var` annotations (checking position at lower.py:1794-1802,
   also the IR `let` step carries no type, lower.py:1813-1815, so the
   emitters could not name the local to await), record fields, ADT
   payloads, type aliases, extern signatures, and **service method
   signatures** (a service op is already spelled `async fn`; letting its
   *parameters* carry async fn types crosses G8 and adds an admission
-  dimension — deferred, see §5/§7).
+  dimension, deferred, see §5/§7).
 - **Generics guard.** In `unify` (typecheck.py:342-365), a `?T` type
   parameter refuses to bind an `Async`-headed actual (and `substitute`
   can never produce one), so `fn retry(f: (Int) -> R) -> R` cannot smuggle
@@ -151,12 +151,12 @@ expression has type `T`. Enforced three ways:
 
 ### `compatible` / `unify` / `join`
 
-`parse_type("(A) -> Async[T]")` is `(FN_HEAD, ["A", "Async[T]"])` — the
+`parse_type("(A) -> Async[T]")` is `(FN_HEAD, ["A", "Async[T]"])`, the
 existing function-type variance branch (typecheck.py:419-429: parameters
 contravariant, result covariant) recurses into the return position and
 meets `Async[T]` vs the actual's return. Two new lines of policy there:
 
-- **Sync flows into async — accepted, as a checked coercion.**
+- **Sync flows into async, accepted, as a checked coercion.**
   `compatible("Async[T]", actual)` where `actual` is not `Async`-headed
   reduces to `compatible(T, actual)`. A function that never suspends is a
   degenerate async function; accepting it is the direction that can never
@@ -166,10 +166,10 @@ meets `Async[T]` vs the actual's return. Two new lines of policy there:
   coercion site the same way `T -> Opt[T]` injection already marks one
   (the injected `Some` call, lower.py:2440-2474 `_inject_opt` precedent),
   so both emitters read one truth instead of re-deriving it.
-  **Judgment call 2 (human):** accept-with-coercion (recommended — it is
+  **Judgment call 2 (human):** accept-with-coercion (recommended, it is
   what lets the harness's *mock* keep passing a plain sync arrow) vs.
   refuse for strict symmetry.
-- **Async flows into sync — refused.** `compatible("T", "Async[T]")`
+- **Async flows into sync, refused.** `compatible("T", "Async[T]")`
   falls out of the existing head-mismatch fall-through
   (typecheck.py:435-437) as `False` with no new code. This *is* the
   item-92 leak, refused at the type level.
@@ -186,11 +186,11 @@ meets `Async[T]` vs the actual's return. Two new lines of policy there:
 `call_function_value` (typecheck.py:1382-1405) types a call through a
 function-typed value and currently returns `returns` verbatim. New rule:
 when `returns` is `Async`-headed, the call expression's type is the
-**unwrapped** `T` — the tier-level await is implicit, exactly as `call
+**unwrapped** `T`: the tier-level await is implicit, exactly as `call
 key.op(...)` on an async operation "is awaited by the driver"
 (the A1 stance quoted throughout async-extern.md §2). The *admission* that
 such a call may only occur in an async context is lower's job, not the
-checker's (§3) — same split as emissions (typecheck types, lower admits).
+checker's (§3), same split as emissions (typecheck types, lower admits).
 
 ### Checking an arrow against an async function type
 
@@ -198,7 +198,7 @@ checker's (§3) — same split as emissions (typecheck types, lower admits).
 `want_return`; with `want_return = Async[Str]` the body is checked against
 the *unwrapped* `Str` (the color is not about the value's shape), and
 `_resolve_arrow` (typecheck.py:1345-1360) writes `Async[Str]` back onto
-the AST node as `expr.returns` — which lowering already copies into the
+the AST node as `expr.returns`, which lowering already copies into the
 arrow IR node's `returns` key verbatim (lower.py:2393-2398 pure path,
 3109-3111 component path). The color therefore reaches the IR through the
 existing pipe with no new plumbing; what is new is admission (§3) and the
@@ -213,27 +213,27 @@ admission gate already treats a method async flip as breaking,
 src/revl/admission.py:246-250). The emission machinery is untouched: an
 emitting arrow passed as a value still widens to `*`
 (emission_analysis.py:93-113, `_method_emissions`'s value branch at
-emission_analysis.py:366-373) — emission and async remain parallel
+emission_analysis.py:366-373), emission and async remain parallel
 analyses, never merged.
 
-## 3. Coloring — the fixpoint extended to declared first-class values
+## 3. Coloring: the fixpoint extended to declared first-class values
 
 ### New async-reach sources
 
 A body can now reach a suspension three ways; the analysis must see all
 three (today it sees only the first):
 
-1. a call of a **named** async callable — async externs and colored fns
+1. a call of a **named** async callable, async externs and colored fns
    (the existing seed/closure, emission_analysis.py:156-176);
 2. a call of a **function-typed value whose declared type returns
-   `Async[…]`** — in v1, only a *parameter* of the enclosing fn (the
+   `Async[…]`**, in v1, only a *parameter* of the enclosing fn (the
    param types are on the IR entry, lower.py:888-894, and on the decl);
 3. an `emit`/`call` of a **req-target service operation declared
    `async fn`** (`decl.async_` on the MethodDecl, parser.py:954-958;
    IR `"async": True` on the method at lower.py:2689). This closes the
    hole that let finding #21 through: it is added to the *arrow/method
    body* analysis in lower (which has `env.services`/`env.requires`),
-   **not** to `_async_callables` — module-fn bodies cannot touch req keys,
+   **not** to `_async_callables`, module-fn bodies cannot touch req keys,
    so the module-level fixpoint needs only rule 2.
 
 ### The fixpoint rule (module fns)
@@ -242,12 +242,12 @@ three (today it sees only the first):
 per fn alongside the existing "calls a colored name": *a fn is colored if
 its body calls one of its own parameters whose declared type is an async
 function type.* This is a **seed-shaped rule computed from declarations**
-— it adds no iteration dynamics; the closure stays the same monotone
+, it adds no iteration dynamics; the closure stays the same monotone
 least-fixed-point over a finite name set, and the termination and
 acyclic-witness arguments (emission_analysis.py:149-155, 195-207) carry
 unchanged. The witness for a fn colored this way is a self-evident one-hop
 step ("calls its parameter `complete`, declared
-`(List[Msg]) -> Async[Str]`") — a new `TraceStep` detail string, no new
+`(List[Msg]) -> Async[Str]`"): a new `TraceStep` detail string, no new
 witness-graph shape.
 
 So for the harness: `agent_loop` is colored by rule 2 → stamped
@@ -265,7 +265,7 @@ An arrow is classified at its lowering site, after its body is lowered.
 The async-reach of the body is computed by a helper in the
 `_async_reached_outside_provide` family (lower.py:3269-3286): calls into
 `async_colored` (rules 1–2) plus req-target async ops (rule 3, component
-path only — the pure path, lower.py:2380-2399, has no reqs by
+path only: the pure path, lower.py:2380-2399, has no reqs by
 construction). Then:
 
 - **checked against an async fn type** (`expr.returns` is `Async`-headed):
@@ -286,7 +286,7 @@ construction). Then:
   Fixture: `examples/rejections/a1_async_arrow_sync_type.rvl` (naming
   precedent: `examples/rejections/a1_async_extern_sync_method.rvl`).
   Ordering note: for pure-fn bodies this check must run in the post-pass
-  at lower.py:2540-2559 (where `async_colored` exists — `_lower_fns` at
+  at lower.py:2540-2559 (where `async_colored` exists, `_lower_fns` at
   2517 runs before the fixpoint at 2531), extended to walk arrow nodes;
   the component path (lowered from 2574 on) already has the colored set
   in hand.
@@ -297,11 +297,11 @@ construction). Then:
 
 Today `_calls_in` recurses through arrow bodies (emission_analysis.py:41-44
 walks every dict value), so an arrow-internal call is attributed to the
-enclosing body — which would (a) spuriously color a fn that merely
+enclosing body, which would (a) spuriously color a fn that merely
 *constructs* an async arrow without calling it, and (b) spuriously refuse
 the constructing sync context. The walks gain a stop-at-async-arrows mode:
 an arrow node carrying the async flag is a *value* whose suspension belongs
-to whoever awaits it — its internal calls are not the constructor's.
+to whoever awaits it, its internal calls are not the constructor's.
 Sync arrows keep bubbling exactly as today (conservative, and required for
 emission-analysis compatibility, which keeps its own walk untouched).
 This refinement applies to the fn post-pass (lower.py:2540-2559) and the
@@ -311,7 +311,7 @@ unaffected.
 
 ### What stays refused
 
-- **Named async callables in value position** — the v1 fence stays:
+- **Named async callables in value position**: the v1 fence stays:
   `function `f` uses async callable `http_post` as a function value…`
   (lower.py:2540-2557) and its method twin (lower.py:3837-3849) keep
   firing, messages byte-identical, with the hint extended by one clause:
@@ -321,15 +321,15 @@ unaffected.
   is mechanical once §2 exists but is deliberately a follow-up slice.
   **Judgment call 6 (human):** accept the v1 asymmetry (the arrow
   `s => http_post(s)` is admitted where the bare name is refused).
-- **Setup/activation bodies** — construction of an async arrow in a setup
+- **Setup/activation bodies**, construction of an async arrow in a setup
   body is fine (it is a value), but *calling* anything colored stays
   refused (lower.py:2584-2606, `_async_reached_outside_provide` pruning
   provide bodies at 3269-3286): divert/inertia semantics remain out of
   scope, unchanged from item 80.
-- **Pure tests, `undo`/`compensate` slots, `verified fn`** — unchanged
+- **Pure tests, `undo`/`compensate` slots, `verified fn`**, unchanged
   refusals; plus one new validity line: a `verified fn` may not declare an
   async-typed parameter (totality has no suspension story).
-- **Genuinely maybe-sync contexts** — there are none left by construction:
+- **Genuinely maybe-sync contexts**, there are none left by construction:
   a value either has an async-colored type (all its call sites await, the
   enclosing fn is colored) or a sync type (its body may not reach async).
   The maybe-sync case that killed inference cannot be *expressed*, which
@@ -340,30 +340,30 @@ unaffected.
 ### IR (additive; no new sections)
 
 - **Arrow node:** `"async": true` when the arrow was checked against an
-  async function type — mirroring the extern (lower.py:1348), colored-fn
+  async function type, mirroring the extern (lower.py:1348), colored-fn
   (lower.py:2558-2559), and method (lower.py:2689) spellings, so every
   emitter reads one shape (`.get("async")`) instead of parsing the
   `returns` string. The `returns` key already carries `Async[Str]`
   verbatim through the existing pipe (§2).
-- **Fn entries:** nothing new — params already carry the author's declared
+- **Fn entries:** nothing new, params already carry the author's declared
   type strings (lower.py:888-894), which now may read
   `(List[Msg]) -> Async[Str]`; the colored-fn `"async": True` stamp is
   item 90's.
 - **Coercion marker:** a sync value meeting an async-typed parameter is
   wrapped at the frontend in a marker call node (the `_inject_opt`
-  precedent, lower.py:2440-2474) — proposed spelling: a
+  precedent, lower.py:2440-2474), proposed spelling: a
   `{"kind": "as_async", "value": …}` node. Emitters that erase the color
   (rust/go/java) erase the node to its value.
-- **IR version: stays 3** — same reasoning and same tension as
+- **IR version: stays 3**, same reasoning and same tension as
   async-extern.md §4 (additive keys; old colored-tier emitters fail loud,
   blocking-tier emitters correctly ignore). **Judgment call 5 (human):**
   reconfirm, since this adds a *node kind* (`as_async`), which an old
-  emitter refuses loudly by its unknown-kind path — still not silent.
+  emitter refuses loudly by its unknown-kind path, still not silent.
 
-### typescript — backends/typescript/emit.py
+### typescript: backends/typescript/emit.py
 
 - **Type rendering:** `_ts_v3_type` (:1170-1203) gains an `Async` case in
-  the `[`-branch: `Async[T]` → `Promise<{T}>` — today it would fall to the
+  the `[`-branch: `Async[T]` → `Promise<{T}>`, today it would fall to the
   generic fallback `Async<unknown>` (:1202). A fn-type return position
   then renders `((a0: List<…>) => Promise<string>)` through the existing
   FN branch (:1179-1187).
@@ -371,57 +371,57 @@ unaffected.
   flag: prefix `async `, and render the body with `in_async=True` so
   internal async-extern calls are awaited by the existing machinery
   (:488-502). Equally important: a **sync** arrow must render its body
-  with `in_async=False` — today the body context inherits the enclosing
+  with `in_async=False`, today the body context inherits the enclosing
   `ctx.in_async` (:708-714), a latent bug that item 92 would make live
   (an `await` inside a non-async arrow is a tsc error). The IIFE capture
   snapshot (:715-732) is orthogonal and unchanged.
 - **Awaiting the callback:** `_Ctx.async_names` (:1226-1237) holds global
-  names only. Add a per-body set of **async value locals** — the enclosing
-  fn's parameters whose declared type is an async fn type — threaded where
+  names only. Add a per-body set of **async value locals**: the enclosing
+  fn's parameters whose declared type is an async fn type, threaded where
   `_emit_ts_functions` builds the fn context (:1962-1990, the
   `fn.get("async")` branch at :1977-1982) and where `_provide_impl` builds
   the method context (:904-925). The v3 call branch (:482-503) awaits when
   the var-callee names either set; the existing EmitError-on-sync-context
   contract (:496-501) covers both.
-- **Coercion:** the `as_async` node is a no-op wrapper (emit the value) —
+- **Coercion:** the `as_async` node is a no-op wrapper (emit the value),
   awaiting a non-Promise is the value in JS.
 - Req-target calls stay un-awaited inside method bodies (:474-481): inside
   an async arrow the tail-call Promise flattens into the arrow's own
-  Promise, which the (awaiting) caller settles — same reason the driver
+  Promise, which the (awaiting) caller settles, same reason the driver
   awaits at :2120 today.
 
-### python — backends/python/emit.py (the largest emitter slice)
+### python: backends/python/emit.py (the largest emitter slice)
 
 py currently has **no** fn-level async machinery at all: module fns emit
 plain `def` (:1266-1277), externs erase the flag into blocking bodies
-(:1280-1295 — correct on this tier, async-extern.md §8), and only provide
+(:1280-1295, correct on this tier, async-extern.md §8), and only provide
 methods go async (:660-672). Item 92's exit test needs `agent_loop` to be
 `async def` with `resp = await complete(current)`, so the py analog of
 item 90's ts slice must now be built:
 
 - **Colored fns:** `"async": True` fn entries emit `async def`; call sites
   award `await` when the callee is a **colored fn name or an async-typed
-  parameter name — deliberately NOT an extern name**. On py the async
+  parameter name, deliberately NOT an extern name**. On py the async
   extern erased to a blocking `def`; awaiting its (non-awaitable) result
   raises `TypeError`. The per-tier await seed differs from ts's and the
   design says so out loud: ts awaits {async externs, colored fns, async
   locals}; py awaits {colored fns, async locals}. A colored `async def`
-  fn whose only async reach is an erased extern simply contains no await —
+  fn whose only async reach is an erased extern simply contains no await,
   valid Python, correct A1 semantics.
 - **Async arrows:** py arrows are lambdas (:493-495, :1137-1141) and a
   lambda cannot be `async`. Three statically-decided shapes:
   1. body is a *tail call of an async callable* (the harness's
-     `msgs => emit model.complete(msgs)` — an `async def` method on this
+     `msgs => emit model.complete(msgs)`: an `async def` method on this
      tier): emit the plain lambda; it returns the coroutine, and the
      awaiting call site settles it. No wrapper needed.
   2. body is *statically sync* (the mock's arrow, and any sync→async
-     coercion of a named value): wrap — `_revl_as_async(lambda …: body)`
+     coercion of a named value): wrap, `_revl_as_async(lambda …: body)`
      where the helper is four lines of emitted preamble
      (`def _revl_as_async(f):` / `async def g(*a): return f(*a)` /
      `return g`). Static, no `isawaitable` sniffing.
   3. body needs an *internal* await (an async call in non-tail position,
      e.g. `msgs => json_parse(complete2(msgs))`): inexpressible in a
-     lambda; **refused honestly at emit** in v1 — *"an async arrow body on
+     lambda; **refused honestly at emit** in v1, *"an async arrow body on
      the py tier must be a single call of an async callable or fully sync
      — hoist the mixed body into a named fn (it will be async-colored)"*.
      **Judgment call 4 (human):** accept this v1 tier limit (ts has no
@@ -439,14 +439,14 @@ findings were the same rule violated in different emitter positions, both
 admitted green then dying at py exec time (the item-78 compiles-implies-runs
 class):
 
-- **item 263 — `match` in an async body.** The match binder rides one-shot
+- **item 263, `match` in an async body.** The match binder rides one-shot
   lambdas (`(lambda match: …)(scrut)`, `(lambda bind: …)(payload)`). An arm
   that crosses an async boundary (`Go => emit store.get(k)`) renders an
   `await`, which the lambda then traps. Fix: in an async frame `_match_expr`
   switches the binder to walrus assignments carried by `(<bind>, <body>)[1]`,
   so the arm helper hoisted out of the async body inherits the async color and
   the `await` lands at the enclosing `async def`'s top level.
-- **item 264 — an async arrow re-passed from an async frame.** Following the
+- **item 264: an async arrow re-passed from an async frame.** Following the
   wrap hint (`h => complete(h)`, `complete` an async local) inside an async
   caller hit shape 2's wrapper while the await-seed still fired in the arrow
   body, emitting `_revl_as_async(lambda h: (await complete(h)))`. The module
@@ -457,20 +457,20 @@ class):
   async locals, so the arrow renders as the plain coroutine lambda shape 1
   already prescribes.
 
-### rust, go, java — erasure
+### rust, go, java: erasure
 
 `Async[T]` erases to `T` in each backend's type rendering (rust:
-`_rust_fn_type`/`_rust_type`, backends/rust/emit.py:171-187 — the
+`_rust_fn_type`/`_rust_type`, backends/rust/emit.py:171-187, the
 position-aware `impl Fn` lowering from item 91 then applies unchanged; go
 and java strip it wherever fn types render at all), and the `as_async`
 node erases to its value. Sound for the same reason the extern flag erases
 (async-extern.md §2, family 2): on these tiers the async sources are
 blocking (externs) or synchronous (methods), so the awaitable the color
-tracks never exists — the callback returns the plain value. One-line strip
+tracks never exists: the callback returns the plain value. One-line strip
 per backend; the memory-noted rule applies: run each backend's own golden
 suite, `pytest tests/` does not (revl-wave-backend-golden-gap).
 
-### wasm — refuses
+### wasm: refuses
 
 A fn declaring an async-typed parameter, or an async arrow, is refused at
 emit with the async-extern shape (backends/wasm/emit.py's existing honest
@@ -484,32 +484,32 @@ refusals): the substrate has no host async seam beyond `await Job.run`.
   and the A1 method admission all run as today. Every test in
   tests/test_async_extern.py (parser validity through
   `test_ts_emits_colored_fn_as_async_with_awaited_transitive_call`) must
-  pass unmodified — that is the slice-exit bar for every frontend slice.
+  pass unmodified, that is the slice-exit bar for every frontend slice.
 - **Refusals that stay, verbatim:** `pure`/`acquire`/`compensate` validity
   (lower.py:1310-1330); sync-method-reaches-async with its witness chain
   (lower.py:3850-3880); the setup/activation-body refusal
   (lower.py:2597-2606); named-async-callable-in-value-position
-  (lower.py:2540-2557 and 3837-3849 — hint extended, message head
+  (lower.py:2540-2557 and 3837-3849, hint extended, message head
   unchanged); the wasm and no-@tier-body refusals.
 - **One deliberate behavior change:** a sync-typed arrow whose body reaches
   async flips from *compiles-then-leaks-a-coroutine* to *compile error*
-  (§3's new diagnostic). A program that compiled yesterday errors today —
+  (§3's new diagnostic). A program that compiled yesterday errors today,
   but yesterday's compile was a silent wrong answer at runtime, the
   contract-errata class, and the error names the one-line fix.
   **Judgment call 3 (human):** confirm this flip lands with no
-  grace/warning period. (Recommended: yes — finding #21 is the proof the
+  grace/warning period. (Recommended: yes, finding #21 is the proof the
   silent version costs more.)
 - Item 90's roadmap claim is corrected by item 92's entry already; the
   landing note should mark 92 ✅ and cross-reference the finding.
 
-## 6. Implementation plan — ordered, landable slices
+## 6. Implementation plan: ordered, landable slices
 
 Wave context: the frontend files (parser.py, lower.py, typecheck.py,
 admission.py) are item-53's this wave (hot-swap handoff), placement is
 item-46's, tools/mcp + bench are item-50's. **Slices 1–2 must land after
 item 53**; the emitter slices touch no live-agent files. Nothing here
 touches `backends/*/runtime.*` or `selfhost/**` (the selfhost checker
-trails as usual — filed follow-up).
+trails as usual, filed follow-up).
 
 | # | Slice | Files | Depends on | Tests / exit bar |
 | --- | --- | --- | --- | --- |
@@ -519,17 +519,17 @@ trails as usual — filed follow-up).
 | 4 | **py emitter** (largest). `async def` colored fns; call-site awaits (fns + async locals, not externs); the three arrow shapes + `_revl_as_async`; mixed-body refusal. | backends/python/emit.py, py goldens/tests | 2 (parallel with 3) | asyncio round-trip: mock arrow (coerced) and async-op arrow both settle; no `never awaited` warning |
 | 5 | **Blocking tiers + wasm + docs.** rust/go/java `Async` strip + `as_async` erasure; wasm refusal; docs/function-types.md §, docs/backend-ir-v3.md arrow-flag line, async-extern.md judgment-call-4 cross-ref, roadmap 92. | backends/rust/emit.py, backends/go/emit.py, backends/java/emit.py, backends/wasm/emit.py, docs/ | 2 (parallel with 3, 4) | per-backend golden suites (not just `pytest tests/`) |
 | 6 | **Exit test + dogfood.** The harness's real `agent_loop` (callback-arrow shape) with the one-line `-> Async[Str]` declaration: mock+loop lifecycle green on **py and ts**, no coroutine/Promise leak; dogfood findings entry; roadmap 92 ✅. | tests + dogfood/ + docs/v2.0-roadmap.md (pull-rebase first) | 3 + 4 | the finding-#21 repro, green |
-| 7 | **Follow-ups (filed, not sliced).** Named async callables in value position; `Async` in lets/fields/aliases/service signatures + the admission dimension; generics × `Async`; py mixed-body hoisting; selfhost checker; tree-sitter (none needed for `Async[T]` — it is a plain application — verify). | — | — | — |
+| 7 | **Follow-ups (filed, not sliced).** Named async callables in value position; `Async` in lets/fields/aliases/service signatures + the admission dimension; generics × `Async`; py mixed-body hoisting; selfhost checker; tree-sitter (none needed for `Async[T]` (it is a plain application) verify). | — | — | — |
 
 ### Parallelization / collision map
 
 - **Sequential spine: 53 → 1 → 2.** Slices 1 and 2 both live in item-53's
-  file set; run them as one agent (or strictly ordered — 1 is
+  file set; run them as one agent (or strictly ordered, 1 is
   typecheck.py-only, 2 is lower.py + emission_analysis.py, so two agents
   *can* interleave, but 2 consumes 1's API).
 - **Fan-out after 2: slices 3, 4, 5 are pairwise disjoint**
   (backends/typescript/**, backends/python/**, the four other backends +
-  docs) — three agents in parallel, no collisions with each other or with
+  docs), three agents in parallel, no collisions with each other or with
   items 46/50.
 - **Slice 6 last** (needs 3 + 4); roadmap edits pull-rebase-first
   (orchestrator owns the roadmap; 🚧 on spawn, ✅ on land).
@@ -557,7 +557,7 @@ form still lowers through item 91's `impl Fn` path.
 ## 7. Smallest first slice vs. the full feature
 
 **Smallest cut that greens the harness: slices 1 + 2 + 3 + 4, with the v1
-fences as specified** — `Async[T]` only in module-fn parameter positions;
+fences as specified**, `Async[T]` only in module-fn parameter positions;
 arrows colored only in checking position; named async callables still
 refused as values; py arrows tail-call-or-sync only; no service-signature
 or let positions; no generics interplay. The harness pays one declaration
@@ -566,8 +566,8 @@ mock are unchanged. Slice 5 (erasure/wasm/docs) should land in the same
 wave for six-tier honesty but the harness is green without it (rust/go
 already refuse via missing @tier bodies on the harness externs).
 
-An even smaller **slice 0 option** exists — land only §3's refusal (turn
-the silent coroutine leak into a compile error) without the `Async` type —
+An even smaller **slice 0 option** exists, land only §3's refusal (turn
+the silent coroutine leak into a compile error) without the `Async` type,
 but its hint would name a type that does not exist yet; recommended only
 if the wave needs to ship safety before the feature. Otherwise the refusal
 lands inside slice 2, where its hint is immediately actionable.

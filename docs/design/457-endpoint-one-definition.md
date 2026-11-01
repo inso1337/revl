@@ -96,7 +96,7 @@ openapi` and `revl export openapi` are inverses on the subset both express.
 
 The `Bearer` row's "at most one" is the arity of the *parameter*, not a claim
 about the wire: a request may present more than one `Authorization` field.
-When it does, `http_face` makes no claim at all rather than picking one — the
+When it does, `http_face` makes no claim at all rather than picking one; the
 same answer a missing credential gets, so the handler's `validate` denies and
 the router still grants nothing. Picking the first field instead would let
 `auth.token` and the `Request` escape hatch, which carries every header,
@@ -140,7 +140,7 @@ operations; they are 456's remaining scope (2) and get their own contract.
    trust: every routed input is an `Untrusted` source, the inbound twin of
    D-424c.9, so a request value reaching a G9 sink (a command, an authority
    selection, an instruction channel) is refused without an `endorse`. The
-   static lattice's origin class is `input` — the class `_origin_of` gives an
+   static lattice's origin class is `input`, the class `_origin_of` gives an
    inbound crossing that declares no capability scope, which is what a routed
    request is; the compiler is declaring `Untrusted[...]` on the author's
    behalf, keyed by the operation name so the provide method implementing it

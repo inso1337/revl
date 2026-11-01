@@ -29,7 +29,7 @@ the accounting, not the halt.
 ## The verdict
 
 `Verdict` gains a third constructor, `halted`. `commit` and `abort` are the
-SETTLING verdicts — under each of them every entry on the activation's stack
+SETTLING verdicts; under each of them every entry on the activation's stack
 ends up either replayed or discharged. `halted` settles nothing.
 
 | entry kind | `commit` | `abort` | **`halted`** |
@@ -55,7 +55,7 @@ Four things, and no more:
 
 1. **Bounded latency, not bounded state.** Once the latch is set, no NEW
    boundary crossing is dispatched by this process. The halt costs one latch
-   flip plus a walk of the live frames — never the cost of a teardown, a hung
+   flip plus a walk of the live frames: never the cost of a teardown, a hung
    compensation, or a Phase-2 budget.
 2. **Nothing is invented.** The halt runs zero inverses, zero compensations
    and zero deferred flushes, and writes no discharge record. It cannot make
@@ -66,7 +66,7 @@ Four things, and no more:
    books, and their union is the whole stack. (`RevL.G7.halt_books_are_total`.)
 4. **Ambiguity is named, never resolved.** At most one crossing per activation
    is dispatched-and-unconfirmed when the latch is read. It is recorded
-   `outcome: "unknown"` — item 440's ambiguous tier — not guessed.
+   `outcome: "unknown"` (item 440's ambiguous tier), not guessed.
    (`RevL.G7.halt_ambiguity_is_at_most_one`.)
 
 ### What it explicitly does NOT guarantee
@@ -90,10 +90,10 @@ Stated here rather than discovered in production:
 Two new `kind` values join the merged residue schema
 ([teardown-contract.md](teardown-contract.md), "The merged residue schema"):
 
-* **`estop-stranded`** — a registered entry whose inverse or compensation was
+* **`estop-stranded`**: a registered entry whose inverse or compensation was
   never attempted. `attemptedFlag: false`, `attempted: null`,
   `outcome: "not-attempted"`, `error.type: "estop"`.
-* **`estop-ambiguous`** — the at-most-one crossing that was already dispatched
+* **`estop-ambiguous`**: the at-most-one crossing that was already dispatched
   when the latch was read. `attemptedFlag: true`, `outcome: "unknown"`. This
   is item 440's ambiguous tier, and the E-Stop is precisely the event that
   CREATES that state deliberately: it lands between the journal entry and the
@@ -124,8 +124,8 @@ The halt names what it CAN name from each live frame: the witnessed
 resources the activation acquired. An emitted BRACKET inverse is a bare
 `lambda: <undo>` living in the cordis disposable list with no entry object
 behind it, so it is not reachable from the frame at halt time. It is stranded
-instead at `Frame._guard` — the one chokepoint every emitted disposer shape
-already passes through — as the process unwinds and hands it over.
+instead at `Frame._guard` (the one chokepoint every emitted disposer shape
+already passes through) as the process unwinds and hands it over.
 
 `runtime.estop_residue()` is the merged view, and the two halves are
 deduplicated by a per-entry flag so an entry named at the halt is not counted
@@ -149,7 +149,7 @@ assuming every verdict settles:
   says) now carries `hv : v.settles = true`. The E-Stop counter-instance is
   proved alongside it (`estop_strands_the_bracket`), so the hypothesis is
   exhibited as load-bearing rather than left as an unexplained weakening.
-* `RevL.Semantics.replays_or_discharges` — the replay/discharge dichotomy —
+* `RevL.Semantics.replays_or_discharges` (the replay/discharge dichotomy),
   likewise. It was true because every verdict settled; it is now stated over
   the verdicts that do, with `disposition_trichotomy` as the total statement
   that holds everywhere.
@@ -160,7 +160,7 @@ one verdict), `settles_iff_strands_nothing` (it excludes it because that is
 the verdict that strands, so `settles` is the property the dichotomy needs
 rather than a chosen side condition), `settling_strands_nothing` (a settling
 verdict owes nothing, on every stack), and
-`bracket_replays_exactly_when_settling` — the bracket row as an EQUATION
+`bracket_replays_exactly_when_settling`, the bracket row as an EQUATION
 with no hypothesis at all, so the restricted corollary is weaker than
 something proved rather than weaker than something claimed.
 `bracket_is_replayed_or_stranded` is then the total form over every verdict.
@@ -180,10 +180,10 @@ The inverse was dispatched and its completion was never recorded, so it may
 have released the handle or not. Formally the halt is a CUT at index `k` into
 the interrupted verdict's replay order:
 
-* `haltCompleted v k log = (replayed v log).take k` — completions recorded;
-* `haltAmbiguous v k log = ((replayed v log).drop k).take 1` — dispatched,
+* `haltCompleted v k log = (replayed v log).take k`: completions recorded;
+* `haltAmbiguous v k log = ((replayed v log).drop k).take 1`: dispatched,
   unconfirmed, and `length ≤ 1` is a theorem;
-* `haltUnattempted v k log = (replayed v log).drop (k + 1)` — never attempted.
+* `haltUnattempted v k log = (replayed v log).drop (k + 1)`: never attempted.
 
 A halt arriving during forward execution is the same shape with `k = 0`, and
 the ambiguous entry is then a forward crossing rather than an inverse. The
@@ -202,7 +202,7 @@ accident.
 
 The body was cut mid-step and the runtime cannot know whether the in-flight
 crossing landed, so resuming would re-enter a body whose preconditions are
-unknown — exactly the "pretend it did not happen" this design exists to
+unknown: exactly the "pretend it did not happen" this design exists to
 forbid. `Session.load`, `call`, `swap`, `commit_confirm` and `abort` all refuse
 after a halt. `unload` still works, and strands rather than unwinds: the
 process still has to drop its fibers.
@@ -213,7 +213,7 @@ The paths back, in order:
    every stranded `compensation` was WAL-logged as a named-call discharge
    descriptor at REGISTRATION, and the halt writes no `discharge` record. So
    the descriptors with no discharge behind them are exactly the entries still
-   owed — which is exactly what a CRASH leaves. **An E-Stop is deliberately
+   owed, which is exactly what a CRASH leaves. **An E-Stop is deliberately
    shaped to look like a crash to the recovery path**, because revl already
    has a proven answer for a crash. This is why stranding keeps the descriptor
    instead of discharging it.
@@ -243,7 +243,7 @@ not automatically trusted to strand two hundred brackets and leave every
 handle held.
 
 More importantly, this is the one verb a composition or an agent must never be
-able to invoke on itself — which is the whole point of an emergency stop. So:
+able to invoke on itself, which is the whole point of an emergency stop. So:
 
 * there is deliberately **no in-language surface**: no extern, no stdlib
   binding, nothing an `.rvl` body can reach;
@@ -259,7 +259,7 @@ able to invoke on itself — which is the whole point of an emergency stop. So:
 There is no control socket, and adding one would be a second thing to secure.
 The rendezvous is a **latch file**: `revl estop` writes it, and every crossing
 seam in an armed process reads it. The cost is one `open()` per crossing while
-armed, and NOTHING when no latch is armed — which is the default, so a
+armed, and NOTHING when no latch is armed, which is the default, so a
 composition that never arms one is byte-identical to the pre-443 runtime.
 
 A latch that exists but does not parse still HALTS. Failing open on a
@@ -276,26 +276,26 @@ argument.
 `_estop_check()` is called at every point that dispatches or accepts a new
 boundary crossing:
 
-* `plug` — an activation is a fresh batch of crossings, and refusing before
+* `plug`: an activation is a fresh batch of crossings, and refusing before
   `ctx.plugin` means no frame, no accumulator and nothing to strand;
-* `Frame.acquire` — a `let-effect` acquisition;
-* `Frame.transactional` / `transactional_method` — registration IS the
+* `Frame.acquire`: a `let-effect` acquisition;
+* `Frame.transactional` / `transactional_method`: registration IS the
   crossing here, since the emitted call site yields on the `Ok` branch;
 * `Frame.compensation` / `compensation_method`;
-* `Frame.enqueue_deferred` and `_Deferred.fire` — the class-(b) queue;
-* `Frame.request_approval` and `Frame.approval_crossing` — the class-(c) seam,
+* `Frame.enqueue_deferred` and `_Deferred.fire`: the class-(b) queue;
+* `Frame.request_approval` and `Frame.approval_crossing`: the class-(c) seam,
   refused before the token is spent, so a halt never leaves an approval
   consumed-but-unfired.
 
-`_InFlight` brackets the calls that are genuinely dispatched — the approval
-crossing, a deferred flush, and a teardown inverse — so the halt can name the
+`_InFlight` brackets the calls that are genuinely dispatched: the approval
+crossing, a deferred flush, and a teardown inverse, so the halt can name the
 one that was out.
 
 ## The conductor (`revl run --placement`)
 
 A composition split across processes had no operator halt at all: every stop
 `run_placement` had was `_stop_all`, which asks each child to unwind and waits
-on its own `DOWN` line — the child's statement that its LIFO walk covered every
+on its own `DOWN` line, the child's statement that its LIFO walk covered every
 registered entry (G7) and its no-residue proof printed (R4). That is the
 graceful path, and it is the one an operator emergency cannot use.
 
@@ -304,7 +304,7 @@ when it appears the conductor does four things, in this order:
 
 1. **Says it**, on the trace, before anything that can take time. The operator
    sees the halt at the instant it lands rather than after the inventory.
-2. **Stops every child**, in two populations — see below. It asks no child to
+2. **Stops every child**, in two populations (see below). It asks no child to
    unwind, waits for no `DOWN`, and does not call `_stop_all`.
 3. **Reports**, on stderr, naming every component left un-torn-down and every
    outstanding obligation, including the ones it cannot enumerate.
@@ -315,13 +315,13 @@ when it appears the conductor does four things, in this order:
 ### The two populations, and why the report has to distinguish them
 
 * A child on a tier that **honors the latch** (today: `py`) is already
-  refusing new crossings at its own seams by the time the conductor acts —
+  refusing new crossings at its own seams by the time the conductor acts;
   the conductor hands it the latch path in its environment AND in its process
   spec, because a sandboxed child (item 411) need not inherit the conductor's
   environment and an emergency stop a confined process cannot see is not one.
   Its runner watches the latch on a timer (`runtime.estop_from_latch`), since
   `_estop_check` engages lazily at the next crossing and an IDLE process
-  crosses nothing — it would notice the emergency only when work next arrived.
+  crosses nothing; it would notice the emergency only when work next arrived.
   On the button it prints `[<name>] HALTED <inventory>` and calls `os._exit`:
   no teardown, no inverse, no residue proof. The conductor merges that
   inventory into its report by name.
@@ -329,7 +329,7 @@ when it appears the conductor does four things, in this order:
   exists for it is a SIGKILL, and the conductor sends one immediately. It may
   have dispatched a crossing microseconds before it died and nothing recorded
   that, so its residue is **UNKNOWN**. The report says exactly that, per
-  component, rather than folding it into a group line — a halt that hid which
+  component, rather than folding it into a group line, a format that hid which
   processes were merely killed would be reporting a stop it did not perform.
 
 `REVL_ESTOP_HALT_WINDOW` (default 2s) bounds how long a latch-honoring child
@@ -377,7 +377,7 @@ directions: the file does not name the synthesized successor
 (`<component>__t<n>`) the halt just killed, and it still names the predecessor
 that unwound with a no-residue proof on the cutover, before the button was ever
 pressed. A report driven off the file therefore omits the one process holding
-residue and attributes residue to one holding none — both of them the exact
+residue and attributes residue to one holding none; that pair is the exact
 failure this verb exists to prevent, since the reporting is the deliverable and
 the stop is not.
 

@@ -1,4 +1,4 @@
-# 530 — the webui-entry surface: enabling slice and the decision the full close needs
+# 530: the webui-entry surface: enabling slice and the decision the full close needs
 
 **Roadmap:** item 459 (issue #722), part of the 462 web-platform arc · **Builds on:** docs/design/526-webui-asset-alignment.md · **Status:** DECISION A RESOLVED (ambient coeffect, shipped) · B RESOLVED AND SHIPPED (typed `data` channel + `--face webui`) · FULL CLOSE 462-GATED
 
@@ -20,9 +20,9 @@ This moves the frontend boundary off JS-in-strings today. It does not fully clos
 
 459's exit test is "462's UI is built from external assets and a real TS frontend behind a typed boundary, with no JS extracted from revl strings and source maps pointing at the original files." Full closure needs the exemplary app (462), which does not exist yet. Two pieces are also underspecified at the language surface and want an architect decision before they are built:
 
-### Decision A — how a revl component reaches the ambient `ctx.webui` service — RESOLVED: ambient coeffect
+### Decision A: how a revl component reaches the ambient `ctx.webui` service (RESOLVED: ambient coeffect)
 
-**Resolved: option 1, the ambient-service coeffect, shipped (builds on the #761 slice).** `examples/webui-entry/` now declares `service WebUI { emission fn add_entry(...) }` and `component ConsoleUI requires webui: WebUI { emit webui.add_entry(...) }`, on reviewed language surface only (`service` + `requires`, no new syntax). The emitted artifact resolves `webui` through Cordis' own `inject` (`inject: ["webui"]`, the body reads `ctx.webui`), so the host-provided ambient service satisfies the coeffect at wiring time. `examples/webui-entry/webui_host.ts` is now embedder setup that `provide`s the `webui` key (adapting the revl contract to Cordis `addEntry`); the revl artifact no longer imports it, and `globalThis.__revlWebui` is gone. `revl audit` reports the crossing as a first-class boundary: the `webui` requirement on `ConsoleUI` (G1) and the `webui.add_entry` emission (the trusted host boundary, G8). `tests/test_webui_entry_asset_ref_459.py` pins those properties and the absence of the global bridge. The remaining checker refinement — teaching a full composition GATE to admit an ambient/host-provided key without a revl `provides` (today an unprovided `requires` is a composition error at that gate, though `audit` already treats it as an outward reach) — is item-186/462 work, wanted once the exemplary app composes a real host: the reference and its audit surface do not need it, and inventing an ambient-provider syntax ahead of 462 was declined.
+**Resolved: option 1, the ambient-service coeffect, shipped (builds on the #761 slice).** `examples/webui-entry/` now declares `service WebUI { emission fn add_entry(...) }` and `component ConsoleUI requires webui: WebUI { emit webui.add_entry(...) }`, on reviewed language surface only (`service` + `requires`, no new syntax). The emitted artifact resolves `webui` through Cordis' own `inject` (`inject: ["webui"]`, the body reads `ctx.webui`), so the host-provided ambient service satisfies the coeffect at wiring time. `examples/webui-entry/webui_host.ts` is now embedder setup that `provide`s the `webui` key (adapting the revl contract to Cordis `addEntry`); the revl artifact no longer imports it, and `globalThis.__revlWebui` is gone. `revl audit` reports the crossing as a first-class boundary: the `webui` requirement on `ConsoleUI` (G1) and the `webui.add_entry` emission (the trusted host boundary, G8). `tests/test_webui_entry_asset_ref_459.py` pins those properties and the absence of the global bridge. The remaining checker refinement, teaching a full composition GATE to admit an ambient/host-provided key without a revl `provides` (today an unprovided `requires` is a composition error at that gate, though `audit` already treats it as an outward reach), is item-186/462 work, wanted once the exemplary app composes a real host: the reference and its audit surface do not need it, and inventing an ambient-provider syntax ahead of 462 was declined.
 
 The two candidate surfaces that were weighed:
 
@@ -31,12 +31,12 @@ The two candidate surfaces that were weighed:
 
 Recommendation: option 1, because it makes the entry's published surface an enumerable declared coeffect (the property 526 argues revl adds over the untyped `data: T`), and because 457's "one definition" work will want the same ambient-service treatment for `ctx.server` and `ctx.sso`.
 
-### Decision B — the typed reactive-state / RPC contract — RESOLVED: declared in revl, projected to TS
+### Decision B: the typed reactive-state / RPC contract (RESOLVED: declared in revl, projected to TS)
 
 **Resolved and shipped as 457 slice S4.** Cordis `addEntry(files, data)` takes an untyped `data: T` that becomes both the reactive state broadcast to the browser and, for each function on it, an RPC method the browser can call (526). 459's typed-boundary requirement is that this surface be a typed contract shared between the revl component and the TS client, so the browser's `useRpc<T>()` type and the server's published fields are one declaration. It now is, with each half declared exactly once on reviewed language surface:
 
 - **The reactive state** is the record type of a new `data` parameter on `add_entry`. The component publishes a record literal, which the compiler checks against that declared type, so the published fields and the declared ones cannot drift.
-- **The RPC method set** is the services the component `provides` — 526's "an entry's exposed methods are exactly the component's declared provisions", the same surface `revl audit` reports as G1.
+- **The RPC method set** is the services the component `provides`: 526's "an entry's exposed methods are exactly the component's declared provisions", the same surface `revl audit` reports as G1.
 
 `revl export client --lang ts --face webui --component NAME` projects both into `<Component>State`, `<Component>Rpc` and `<Component>Channel`, the type the client extension reads with `useRpc<T>()`. `examples/app/frontend/contract.ts` is that generated artifact, the way `notes.client.ts` is the generated REST client; `examples/webui-entry/` carries the reference shape and `examples/webui-entry/webui_host.ts` adapts it to Cordis (the state passes through as the reactive object, the provision's methods are attached to it so Cordis exposes them as RPC). This closes gap G3 of `docs/design/525-webapp-slice4-frontend.md` and deferrals F5 and F7 of the 459 note.
 
@@ -44,8 +44,8 @@ What it does not decide: a MUTATION path driven from revl (the component publish
 
 ## Requested of the architect
 
-1. ~~Pick Decision A's surface (ambient-service coeffect vs. blessed stdlib module) so the ambient `ctx.webui` binding stops being a `globalThis` bridge.~~ RESOLVED: the ambient-service coeffect (option 1), shipped — see Decision A above.
-2. ~~Confirm Decision B is folded into 457's "one definition" scope (typed reactive-state/RPC as a shared declaration) rather than a separate surface.~~ RESOLVED: folded into 457 as slice S4 and shipped — see Decision B above.
+1. ~~Pick Decision A's surface (ambient-service coeffect vs. blessed stdlib module) so the ambient `ctx.webui` binding stops being a `globalThis` bridge.~~ RESOLVED: the ambient-service coeffect (option 1), shipped; see Decision A above.
+2. ~~Confirm Decision B is folded into 457's "one definition" scope (typed reactive-state/RPC as a shared declaration) rather than a separate surface.~~ RESOLVED: folded into 457 as slice S4 and shipped; see Decision B above.
 3. With A and B decided, 459 closes as part of 462: the exemplary frontend is a Vite/Vue project registered through the chosen boundary, and this reference is the shape it copies.
 
 No roadmap edit is made here (the roadmap is architect-owned); this note records the shipped slice and the exact decisions the close waits on.

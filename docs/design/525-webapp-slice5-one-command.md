@@ -1,4 +1,4 @@
-# 525 exemplary web app — slice 5 (the one dev command, proven): findings
+# 525 exemplary web app: slice 5 (the one dev command, proven): findings
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 5 of N (acceptance bar 1,
 run with the frontend attached) · **Status:** FINDINGS, 2026-09-13
@@ -15,7 +15,7 @@ Building the project for the first time found two defects and one obsolete
 workaround. All three were invisible to a file-shape scan, which is the point:
 acceptance bar 1 is a claim about a command, not about a checked-in tree.
 
-### D1 — the client extension passed an option Cordis' `ctx.page` does not accept
+### D1: the client extension passed an option Cordis' `ctx.page` does not accept
 
 `entry.client.ts` registered the page as
 
@@ -52,7 +52,7 @@ that strings appeared in the assets; it never compiled them against the real
 it, and `tests/test_app_frontend_725.py` now does
 (`test_the_frontend_typechecks_against_the_real_cordis_client`).
 
-### D2 — `npm install` needed `--legacy-peer-deps`, and the conflict was ours
+### D2: `npm install` needed `--legacy-peer-deps`, and the conflict was ours
 
 `package.json` pinned `vite ^7` next to `@vitejs/plugin-vue ^5.2.0`, whose peer
 range is `vite ^5 || ^6`. Documented as "the `npm install` trap" in
@@ -63,7 +63,7 @@ resolve, and `npm ci` now installs from a committed `package-lock.json`. The
 frontend half of the one dev command is reproducible rather than
 escape-hatched, which is item 461's toolchain-resolution clause.
 
-### D3 — the build was never run, so the source-map claim was untested
+### D3: the build was never run, so the source-map claim was untested
 
 It holds. `npm run build` emits `dist/notes-console.js` with a map whose
 `sources` are `../entry.client.ts`, `../NotesConsole.vue` and
@@ -84,7 +84,7 @@ Pinned by
 
 ## New gaps filed
 
-### G4 — the generated TS client does not compile under a strict tsconfig *(item 457, `export_client`)*
+### G4: the generated TS client does not compile under a strict tsconfig *(item 457, `export_client`)*
 
 `revl export client --lang ts --service NotesApi` emits
 
@@ -102,7 +102,7 @@ declare it `private`, when no operation is unrouted. Filed against **item 457**
 (`src/revl/export_client.py`, the routed-client constructor). Filtered by name in
 the typecheck test, so closing it needs no test change.
 
-### G5 — no CI leg builds or typechecks the frontend
+### G5: no CI leg builds or typechecks the frontend
 
 The two toolchain legs skip unless a contributor has run `npm ci` in
 `examples/app/frontend`; the required checks are the six backend matrices plus

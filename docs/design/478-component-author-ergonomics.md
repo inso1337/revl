@@ -1,4 +1,4 @@
-# 478: Component-author ergonomics — the language gaps behind #548
+# 478: Component-author ergonomics: the language gaps behind #548
 
 Provisional id. This note is filed under 478 pending a roadmap item number; the
 issue it tracks is #548 ("language: component-author gaps"). Renumber the file
@@ -50,11 +50,11 @@ templates).
 Ordered by value over cost. "Bounded" means a single reviewer can scope and
 land it without a design decision that touches the effect calculus.
 
-### Group 1 — surface bugs (bounded, do these next)
+### Group 1: surface bugs (bounded, do these next)
 
 1. **Template scope in block match arms (review item 8).** DONE, this note.
    The template of the group: a walk that misses one node kind. LATER: the same
-   wall had a **component-path twin** — a `${...}` template in a *provide-method*
+   wall had a **component-path twin**: a `${...}` template in a *provide-method*
    match arm lowered through the env-only `_lower_expr`, so the arm binding was
    invisible and ``Ident(w) => `word:${w}` `` refused with "`w` is not a
    declared requirement". Fixed in the realistic-components slice (#548): the
@@ -75,7 +75,7 @@ land it without a design decision that touches the effect calculus.
    either thread a sink into the position or give the clear refusal a fix-it
    that names the module-`fn` workaround.
 
-### Group 2 — missing stdlib (bounded each, but each needs all six emitters)
+### Group 2: missing stdlib (bounded each, but each needs all six emitters)
 
 4. **Str methods: `trim`/`upper`/`lower`/`replace`/`contains` (review item,
    roadmap 155 area).** Each is a `_BUILTIN_SIG` row plus a `_BUILTIN_METHODS`
@@ -97,20 +97,20 @@ land it without a design decision that touches the effect calculus.
    alone. **`abs` LANDED** already (it type-checks and emits on every Float
    tier). **`to_str` LANDED** in the realistic-components slice (#548): the
    `to_str` builtin gained a `Float` receiver row that emits each tier's
-   canonical ECMAScript Number::toString — the very `ftoa` a `${aFloat}`
+   canonical ECMAScript Number::toString: the very `ftoa` a `${aFloat}`
    interpolation already used (`_revl_ftoa`/`revlFtoa`/`revl_ftoa`; go's
    component tier matches its `%v` float interp via
    `strconv.FormatFloat(x, 'g', -1, 64)`). So `x.to_str()` and `${x}` agree.
    Pinned by `tests/test_548_realistic_components.py` (the statistics
    component). REMAINDER: `to_int`/`floor`/`round`/`min`/`max`/`pow` (each needs
-   a rounding/overflow contract fixed cross-tier — deferred, no clean spec yet).
+   a rounding/overflow contract fixed cross-tier; it is deferred because no clean spec exists yet).
 
 7. **Opt/Result methods (review item 13).** `map`/`unwrap_or`/`ok_or` and
    friends. Function-value callbacks like the List methods, so it inherits
    their per-tier cost. Sequence it after List so the callback-crossing
    machinery is settled once.
 
-### Group 3 — new grammar and semantics (design efforts, not bounded)
+### Group 3: new grammar and semantics (design efforts, not bounded)
 
 These change the provide/activation grammar, the lowering, all six emitters,
 the self-host port, and the gate crates. Each deserves its own design note and

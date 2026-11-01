@@ -1,4 +1,4 @@
-# 478 — Eval honesty protocol: the report-honesty layer
+# 478: Eval honesty protocol: the report-honesty layer
 
 **Report-schema version: EVAL-REPORT-1. Status: FROZEN (2026-09-07).**
 
@@ -35,7 +35,7 @@ That guard sits at the point a number is *produced*.
 It says nothing about the point a number is *stated*. A number produced
 correctly can still be over-claimed the moment a human writes it into a headline
 as a durable capability rather than a fact about one corpus at one commit. The
-gap EVAL-1 section 5 names in prose — measured is not supported — is exactly a
+gap EVAL-1 section 5 names in prose (measured is not supported) is exactly a
 claim-side gap, and prose is not enforceable. This layer closes it by making the
 claim itself a checkable object: a claim declares the rung it stands on, and the
 checker refuses a claim that stands higher than the evidence attached to it.
@@ -134,7 +134,7 @@ justifies.
 
 | rung | index | what it asserts | evidence the checker requires |
 |---|---|---|---|
-| `claimed` | 0 | a bare assertion; no evidence offered | none — but a `claimed` claim may not be marked `public` |
+| `claimed` | 0 | a bare assertion; no evidence offered | none: but a `claimed` claim may not be marked `public` |
 | `measured` | 1 | a fact about one corpus at one commit | `compiler_commit`, `run`, and `protocol`, and the report as a whole passes noSelfScore (section 3) |
 | `demonstrated` | 2 | the measured number reproduced independently | everything `measured` needs, plus a `reproduced_by` that is not the generator |
 | `supported` | 3 | a durable public capability claim | everything `demonstrated` needs, plus a `review` naming a promoting protocol version and a `reviewer` that is not the generator |
@@ -167,7 +167,7 @@ Rung by rung, what "justifies" means:
 
 Downgrades need no ceremony, matching EVAL-1: a report may always claim a lower
 rung than its evidence would allow. Only claiming *higher* than the evidence is
-refused. This keeps the asymmetry EVAL-1 wants — promotion is gated, correction
+refused. This keeps the asymmetry EVAL-1 wants: promotion is gated, correction
 is free.
 
 ## 6. What the checker decides, and what it does not

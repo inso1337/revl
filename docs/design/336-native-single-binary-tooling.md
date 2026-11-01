@@ -539,7 +539,7 @@ direction the design cares about.
 **The diagnostics accelerator is not implementable on the `revl-gate` crate that
 landed, and the reason is a layer, not a schedule.** The plan above was: for a
 document the frontier pin proves fully covered, native `admit` produces the
-diagnostics at native speed. The crate 332 shipped issues NO admissions — its
+diagnostics at native speed. The crate 332 shipped issues NO admissions: its
 non-refusing arm is `NoObjection`, "this gate found nothing it is able to
 refuse", because it decides the composition and guarantee layer and does not run
 the reference type layer (`COVERED_LAYER`, measured in
@@ -552,8 +552,8 @@ shipped instead is the sound half of the same rule, agree-or-ADD: a native
 refusal the reference did not report is appended to the publish (tagged
 `source: "revl-native"`), never replacing anything, and on the covered corpus
 the add path stays silent, which the oracle asserts. One exclusion is
-load-bearing: a native `BAD` is the self-host's own parse failure — a frontier
-gap wearing a refusal's clothes — and surfacing it would put a meaningless
+load-bearing: a native `BAD` is the self-host's own parse failure, a frontier
+gap wearing a refusal's clothes, and surfacing it would put a meaningless
 second squiggle on `examples/rejections/v2_verified_direct_recursion.rvl`, which
 the reference diagnoses correctly as `G7`.
 
@@ -563,12 +563,12 @@ real corpus it is sometimes MORE capable: the reference PARSER raises on a large
 class of refusals (an `effect` with no `undo` raises `G4` inside
 `Parser.parse`), and after a parse failure `analysis.build_symbols` yields an
 empty table, so the reference resolves NOTHING anywhere in that document. The
-self-host parser reads the same document happily and would answer — an extra
+self-host parser reads the same document happily and would answer, an extra
 answer where `python -m revl.lsp` returns null, still a divergence, and one an
 in-frontier corpus would never show. The rule that closes it: native navigation
 answers only a document with NO diagnostics, which is exactly the set where the
 reference's own parse is known to have succeeded. Within that set the native
-table declines anything it cannot answer exactly — a construct the self-host
+table declines anything it cannot answer exactly, a construct the self-host
 parser does not model (`pub`, `verified`, a `fn` type-parameter list) makes the
 whole document undecided; a name a parameter or `let` might shadow is dropped,
 because the reference resolves the innermost scope and the native path cannot
@@ -588,7 +588,7 @@ are in `crates/revl-lsp/tests/reference_agreement.rs`:
 blocker, zero rows in the fewer direction) and
 `native_navigation_answers_and_never_disagrees`, which re-runs the binary with
 the reference fallback switched off so the NATIVE answers are observable alone,
-and asserts each is the reference's answer or null — never a third thing — and
+and asserts each is the reference's answer or null (never a third thing) and
 that the native path answered every declaration kind, signature included, so
 agreement cannot be bought by silence.
 
@@ -598,14 +598,14 @@ for diagnostics, explain-hover and code actions over the whole language, and the
 interpreter is still a child process (slice 0's bundling spike is still open).
 Widening native navigation past declarations, or moving diagnostics at all, wants
 the self-host front end to carry scopes, parameters, `type` declarations, `pub`
-and `verified` — which is item 391, the same gate slice 3 waits on.
+and `verified`, which is item 391, the same gate slice 3 waits on.
 
 ## What the one-file bundling slice landed (as implemented)
 
 Recorded after the fact. Slice 1 delivered A2's honest fallback (the reference as
 a child process against an installed `revl`); the "one distributable file" half
 this note calls slice 0 is where this slice picks up. The PyOxidizer spike
-(issue #102, 2026-09-05) came back a measured no-go — a 67,651,176-byte arm64
+(issue #102, 2026-09-05) came back a measured no-go, a 67,651,176-byte arm64
 Mach-O with no external Python linkage, but pinned to unsupported Python 3.10 and
 an in-memory importer that omits `__file__`, which Revl's filesystem-backed
 runtime assets require. The path that spike left standing is the current
@@ -625,13 +625,13 @@ imported only from the runtime's own site. `REVL_LSP_PYTHON` still wins over it
 engine diagnostic, never a silent degrade to a `python3` on PATH. The engine's
 `embedding` (`private-runtime` / `system-python`) rides `revl/gateVersion`, so a
 client can tell a self-contained artifact from one leaning on an installed `revl`
-alongside it — the distribution twin of the A3 skew surface.
+alongside it, the distribution twin of the A3 skew surface.
 
 **What it did NOT buy.** Not Python removal, and not the shipped single file yet.
 Two pieces stay out, on purpose, and both are the interpreter-embedding half this
 slice deliberately does not conflate with runtime management: shipping the pinned
 `python-build-standalone` archive with the crate (a distribution/build step, 338,
-so the resolver is a no-op until a distributable actually carries one — the
+so the resolver is a no-op until a distributable actually carries one: the
 current-PATH behavior stands and nothing in a `cargo` build changes), and the
 in-process PyO3 link (`libpython`, `PyConfig.isolated`,
 `Py_InitializeFromConfig`) that replaces the child process with a linked
@@ -649,7 +649,7 @@ wraps is a real self-contained interpreter with `revl` in its own site, so the
 extraction, caching and isolation paths are the production ones; only the shipped
 `python-build-standalone` bytes are the deferred piece, which is why the test
 sources its interpreter from `REVL_LSP_TEST_RUNTIME_PYTHON` (or `REVL_LSP_PYTHON`)
-and skips with a stated reason when neither is set — never a hollow green.
+and skips with a stated reason when neither is set, never a hollow green.
 
 **The follow-on: the runtime baked into the binary's own bytes (the single
 distributed FILE).** The runtime-management contract above resolves a private
@@ -661,7 +661,7 @@ literal, is to carry the archive INSIDE the executable. What landed
 `REVL_LSP_EMBED_RUNTIME` to a pinned runtime archive (and optionally
 `REVL_LSP_EMBED_RUNTIME_PIN` to its pin) compiles the archive into the binary via
 `include_bytes!`, and `runtime::locate` extracts those bytes through the very same
-atomic, versioned, isolated-mode cache path a beside-exe archive takes — the
+atomic, versioned, isolated-mode cache path a beside-exe archive takes: the
 child process reads its bytes from the binary instead of a sibling file. It is
 the baked-in DEFAULT, resolved only after the env and beside-exe sources so a
 distributor can still override it, and `None` for a bare `cargo` build, so
@@ -680,22 +680,22 @@ Recorded after the fact. The runtime-management slice above surfaced an
 `embedding` (`private-runtime` / `system-python`) over `revl/gateVersion` so a
 client could tell a self-contained artifact from one leaning on an installed
 `revl`. That is WHETHER the runtime is private, not HOW it ships, and the one
-distinction the one-file item is ABOUT — a genuinely single distributed FILE
+distinction the one-file item is ABOUT (a genuinely single distributed FILE
 (the runtime baked into the binary's own bytes) versus a self-contained PAIR (a
-runtime archive beside the executable) — was invisible at that surface: both
+runtime archive beside the executable)) was invisible at that surface: both
 report `private-runtime`. So a fleet or install audit could not verify from the
 binary that a shipped artifact really is one file, and the runtime's own pin
 (the A3 skew comparand for the interpreter pairing, distinct from the native
 gate's frontier pin) was keyed into the cache but reported nowhere.
 
 **What landed** (`crates/revl-lsp/src/runtime.rs`, `engine.rs`, `server.rs`):
-`runtime::locate` now stamps each resolved runtime with the SHAPE it came from —
+`runtime::locate` now stamps each resolved runtime with the SHAPE it came from:
 `embedded` (baked into the binary), `beside-exe` (a sibling archive or tree),
-`env` (named by `REVL_LSP_RUNTIME`/`_ARCHIVE`) — and the versioned-cache pin it
+`env` (named by `REVL_LSP_RUNTIME`/`_ARCHIVE`), and the versioned-cache pin it
 landed under, and `revl/gateVersion` carries a `runtime` `{source, pin}` block
 (with `source: "system-python"`, `pin: null` when no private runtime is
 resolved). `GATE_API` bumps to `2` for the added surface. The block is purely
-additive — it changes not one byte the reference server emits (the reference has
+additive: it changes not one byte the reference server emits (the reference has
 no `revl/gateVersion` at all) and nothing about which engine computes an answer;
 it makes the distribution shape and the runtime pin legible, which is the same
 "skew and distribution made detectable, not solved" posture A3 fixes for the

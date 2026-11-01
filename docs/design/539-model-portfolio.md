@@ -846,11 +846,11 @@ needs, and where each stands:
    conductor at plan time; the timeline lives in the child. Either the child
    reports it (a new line or spec channel back to the conductor), or the
    conductor asks each managed binding's server `/api/ps` at plan time for
-   what is resident now. That second half — the conductor *consuming* the
-   residency at plan time — is built: `revl.providers.plan_time_residency()`
+   what is resident now. That second half: the conductor *consuming* the
+   residency at plan time, is built: `revl.providers.plan_time_residency()`
    asks each managed binding's server `/api/ps` for what it holds, and the
-   conductor hands that to the scheduler it already had. Nothing is asked —
-   not even the configuration read — unless `--providers` names the bindings
+   conductor hands that to the scheduler it already had. Nothing is asked,
+   not even the configuration read, unless `--providers` names the bindings
    and an arm this placement schedules wrote the clause, so a composition that
    does not use it plans byte for byte as it did; a server that cannot be
    asked refuses by host and server before anything spawns rather than

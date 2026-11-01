@@ -20,7 +20,7 @@ what it extends. Measured, that is only partly the seam that exists:
 
 - `revl recover` (`src/revl/recovery.py`) reads the same tier-agnostic WAL core
   this slice reads, but its whole job is the roll-forward/roll-back decision, and
-  roll-forward RESUME and roll-back inverse execution both fire live effects — the
+  roll-forward RESUME and roll-back inverse execution both fire live effects: the
   one authority a counterfactual must not hold. Reusing `recover` would mean
   borrowing an executor to answer a question that needs none.
 - `revl trace` (`src/revl/cli/parser.py`, `revl trace` / `revl why` / `revl
@@ -30,8 +30,8 @@ what it extends. Measured, that is only partly the seam that exists:
 - The surface that already frames this question, offline and with no executor, is
   `revl replay` (item 250, Slice 3b, `docs/design/250-slice3b-replay-modes.md`):
   it reads the WAL, runs nothing, and already names a `counterfactual` mode among
-  the four replay modes. That mode asks the PLANNING question — would the record
-  be enough to inform a counterfactual run — and answers `plannable: true,
+  the four replay modes. That mode asks the PLANNING question: would the record
+  be enough to inform a counterfactual run, and answers `plannable: true,
   executable: false`. Item 467 is the concrete question underneath that
   planning answer, so `--under` extends `replay` instead of adding a verb beside
   it, and the two readings of the word "counterfactual" in this repository are
@@ -63,7 +63,7 @@ the question needs can be read:
 
 So `--under` with no `--candidate` is not a degraded answer, it is not an answer:
 every crossing reads `not-answerable`, the admission reads the same, and the
-process exits 1. The alternative — guessing the token from the label — would
+process exits 1. The alternative (guessing the token from the label) would
 report a denial that never happened and miss every one that did, because the label
 (`sink.shout`) and the token (`sink_cap`) are different strings by design.
 
@@ -135,7 +135,7 @@ the design of the WAL; the second is a filed gap in it.
   crossing the incident never made. The mitigation is visibility, not a fix: the
   candidate's reached host externs are listed, per component, under `reached host
   externs the record cannot confirm`. The `NOTIFY` policy in the test file is the
-  worked example — every recorded crossing passes, and the candidate is still
+  worked example: every recorded crossing passes, and the candidate is still
   refused because it reaches `db` through host code the record holds no crossing
   for, which the report prints as a refusal with no recorded crossing behind it.
 - **Only emission records are crossings here.** Recorded crossings are the WAL's
@@ -146,8 +146,8 @@ the design of the WAL; the second is a filed gap in it.
 - **The per-crossing verdict is the reach leg only**, as above. The admission
   verdict runs every rule family.
 - **The admission verdict is the policy leg of the gate**, which is the leg
-  `revl.admission.admit_under_policy` forwards to. The gate's other legs —
-  service-replacement correctness, and the registry and evidence checks — read a
+  `revl.admission.admit_under_policy` forwards to. The gate's other legs (
+  service-replacement correctness, and the registry and evidence checks) read a
   live composition and a registry the caller holds, not a recording, and are not
   run here. "Admitted" in this report means the boundary policy admits the
   candidate; it is not a claim that the gate would boot it.

@@ -1,4 +1,4 @@
-# 528 — Cordis capability (runtime) vs. revl G1 reach (compile-time)
+# 528: Cordis capability (runtime) vs. revl G1 reach (compile-time)
 
 **Roadmap:** DESIGN.md G1 (declared access, Def. 25) and item 294 parameterized capabilities; relevant to the explicit-authorization requirement of 457 (#720) · **Source:** cordiverse/capability study, 2026-09-08 · **Status:** DESIGN DRAFT
 

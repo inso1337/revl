@@ -76,7 +76,7 @@ the new kind slots in without touching them, and any producer built by the
 follow-ups below emits into a vocabulary that already exists and is already
 tested.
 
-## Follow-up 1: the declared liveness expectation (grammar and gate) — LANDED
+## Follow-up 1: the declared liveness expectation (grammar and gate): LANDED
 
 Operator-visible and gate-enforced means a source-level declaration, a lease
 ceiling attached per activation, in the shape `cache ... ttl` already
@@ -106,7 +106,7 @@ into the vocabulary the note above added:
 * **The runtime producer.** `run._Driver._perform_liveness_expiry(component,
   silent_ms)` reads the declared ceiling from the IR, consults the landed
   `why_runtime.liveness_expired` gate (so a partial world fabricates no expiry),
-  and — when the silence genuinely breaks the ceiling — withdraws the hung
+  and (when the silence genuinely breaks the ceiling) withdraws the hung
   provider with a `cause_liveness_expired` ROOT while its dependents cascade
   through the ordinary `provider-withdrawn` edge. `_withdraw_cause` gained an
   optional `root_cause` override for the target so the QUIET root replaces the
@@ -124,17 +124,17 @@ fault (which carries a diagnostic `code`) while the dependent still cascades. Th
 producer's firing path runs with the fiber-settle boundary stubbed (the boundary
 cordis owns); a `@needs_cordis` end-to-end boots it on the real driver in CI.
 
-Silence DETECTION — a running heartbeat that measures `silent_ms` and calls the
-producer on its own — was deliberately not in the slice above. It is now WIRED
+Silence DETECTION (a running heartbeat that measures `silent_ms` and calls the
+producer on its own) was deliberately not in the slice above. It is now WIRED
 (issue #622).
 
-## Production silence detection — LANDED (issue #622)
+## Production silence detection: LANDED (issue #622)
 
 `run._LivenessMonitor` is the OWNED observer. It enrols every declared-ceiling
 provider the composition can be watched for, times each against an injectable
 clock (`time.monotonic` in production, a hand-advanced clock under test), and
 when a provider makes no sign of life for longer than its declared ceiling it
-invokes `_perform_liveness_expiry` with a `silent_ms` IT computes — no test
+invokes `_perform_liveness_expiry` with a `silent_ms` IT computes: no test
 supplies the duration. The driver arms it BEFORE `_load` so its background poll
 interleaves with each `_drive_activation` await and can time a provider that
 never reaches ACTIVE; `_dispose_all` cancels and AWAITS the poll task, so a
@@ -148,27 +148,27 @@ silence (that hang is the peer's), and steady-state per-call silence is out of
 scope (it needs a per-call progress signal the runtime does not emit). Two shapes
 are REFUSED rather than watched with a clock that would lie about them
 (`_liveness_observability`): a multi-realm `routes` bind (its liveness spans
-realms this process does not drive — a **shared-clock** case), and an activation
+realms this process does not drive, a **shared-clock** case), and an activation
 that can hang on a cross into a required service (a **blocking** wait on a peer,
 not this provider's own silence). `tests/test_622_liveness_monitor.py` pins the
 classifier, the enrolment/refusal split, the compute-its-own-duration expiry, the
 healthy/unrelated/waiting non-expiry, and the no-watcher-left settle.
 
-## Follow-up 2: reconcileLivenessFromWorld on restart — LANDED (issue #624)
+## Follow-up 2: reconcileLivenessFromWorld on restart: LANDED (issue #624)
 
 On restart the in-memory expected-liveness map is stale: it describes the world
 the crashed process believed in, not the one now running.
 `reconcile.reconcile_liveness_from_world` (the design's `reconcileLivenessFromWorld`)
 rebuilds only the EXPECTED liveness of the restarting composition's
-declared-ceiling providers from durable world evidence — the tier-agnostic WAL
+declared-ceiling providers from durable world evidence: the tier-agnostic WAL
 (`wal.read_wal`), the E-Stop latch (`estop.read_latch`, item 443) and a durable
-causal trace (`why_runtime`) — rather than trusting the stale map. It is pure and
+causal trace (`why_runtime`), rather than trusting the stale map. It is pure and
 side-effect free: it reads the world and returns a verdict, withdrawing nothing
 and adopting nothing.
 
 The one rule: it never re-adopts a provider as freshly live and never touches an
 owner it does not manage. The strongest thing durable evidence yields about a
-managed provider is a NEGATIVE or an UNKNOWN — `expired` (a durable trace attests
+managed provider is a NEGATIVE or an UNKNOWN: `expired` (a durable trace attests
 a `LIVENESS_EXPIRED` withdrawal), `halted` (an armed E-Stop latch), or
 `unresolved` (everything else: valid, stale, partial and contradictory state all
 collapse here and must be re-observed by the #622 observer once the generation

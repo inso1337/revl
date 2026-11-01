@@ -114,21 +114,21 @@ teardown(stack, committed, budget):
 
 Amendment ([443-estop.md](443-estop.md)): an OPERATOR HALT is a third verdict,
 `halted`, and the table's third row above is its whole content. It replays
-nothing, discharges nothing, and STRANDS every registered entry — a third
+nothing, discharges nothing, and STRANDS every registered entry: a third
 disposition meaning registered, not run, and NOT dropped.
 
 Stranded is not a synonym for discharged, and the difference is the point.
 Discharge releases the inverse and the witness so no rollback state survives;
 stranding KEEPS both, because `revl recover` is what reads them back. Since the
 halt also writes no `discharge` record, the discharge descriptors with nothing
-behind them are exactly the entries still owed — which is exactly what a crash
+behind them are exactly the entries still owed, which is exactly what a crash
 leaves. An E-Stop is deliberately shaped to look like a crash to the recovery
 path.
 
 The teardown algorithm below is therefore NOT run at all under `halted`. There
 is no Phase 1, no Phase 2, no budget: the halt's cost is a latch flip, which is
 the entire reason the verb exists. What it produces instead is the in-flight
-inventory — two residue kinds, in the merged schema below.
+inventory: two residue kinds, in the merged schema below.
 
 Mechanism is free, observable order is not. A tier may implement the phase
 split as two literal stack walks, or (natural on cordis tiers, where the
@@ -254,7 +254,7 @@ each is a sentence the tier's loop is built against, not a new decision):
 - **wasm.** Two qualifications. First, the wasm accumulator is fixed at
   ACTIVATION TIME; a `compensate` SITE-SPELLED inside a method body is a hard
   `EmitError` on this tier today. Exit test 3's "mixed-entry LIFO in both
-  phases" therefore reads, on wasm, over activation-registered entries — plus,
+  phases" therefore reads, on wasm, over activation-registered entries, plus,
   since issue #1979 (item 564), the per-call entries a method body registers for
   an extern's DECLARED `compensate` (a runtime linked list, `mc_live`), which
   replay ahead of the activation chain in the same Phase 2. The method-time half
@@ -275,23 +275,23 @@ Landed in `backends/wasm/emit.py` (the compiled accumulator) and
 
 1. **The abort-vs-commit discriminator is "did the body run to every
    segment."** `activate_step` flips a new `$__committed` global the moment
-   the LAST segment completes without trapping — a mid-activation trap never
+   the LAST segment completes without trapping: a mid-activation trap never
    reaches that line, so an abort leaves it at its default 0. A new
    `committed()` export reads it back, the wasm analogue of the py reference
    tier's `Frame._committed` ("did `drain` run").
 2. **Additive: the whole scaffold is gated on actually needing it.** A
    component with no `witnessed` extern and no `emit ... compensate ...`
    step registers only `bracket` entries, which replay on commit AND abort
-   alike — nothing for a commit/abort split to distinguish. `_module`
+   alike, nothing for a commit/abort split to distinguish. `_module`
    computes `needs_teardown_scaffold` (any `transactional`/`compensation`
    entry present) and, when false, renders `deactivate` in the EXACT
    pre-Slice-2b single-pass shape (no `$__committed`/`$__dstep` globals, no
-   `committed()`/`deactivate_step()` exports) — byte-identical emission for
+   `committed()`/`deactivate_step()` exports), byte-identical emission for
    every program that does not use the feature, mirroring the go tier's
    `_COMP_NEEDS_TEARDOWN` and the rust tier's `_body_has_witnessed`/
    `_body_has_compensate` gates. Verified against `origin/main`: Beacon,
    Auditor, Pulse and canonical_service's goldens are byte-identical.
-3. **Three entry kinds, one LIFO stack, no second list** — carried exactly as
+3. **Three entry kinds, one LIFO stack, no second list**, carried exactly as
    the shared table above specifies. A witnessed acquisition's registration
    is genuinely Ok-conditional at RUNTIME (not just compile time): two
    globals per entry (`$g_wit_val_<n>`, `$g_wit_flag_<n>`) hold the extracted
@@ -302,12 +302,12 @@ Landed in `backends/wasm/emit.py` (the compiled accumulator) and
    codegen.
 4. **The two-phase abort is a compiled dispatch chain, not a single pass.**
    `deactivate_step() -> i32` processes exactly one accumulator entry per
-   call — the same per-call idiom `activate_step` already used for the
-   forward path — with `$__dstep` advanced BEFORE the entry's own
+   call: the same per-call idiom `activate_step` already used for the
+   forward path, with `$__dstep` advanced BEFORE the entry's own
    inverse/compensate runs, so a trap inside one entry leaves the cursor
    already past it. `deactivate()` keeps its old signature (a host like
    cordis-wasm's `Runtime.unplug` needs no changes) and is now a thin loop
-   calling `deactivate_step` to completion in one call — same all-or-nothing
+   calling `deactivate_step` to completion in one call, same all-or-nothing
    trap behavior as before this slice for that path, since core wasm still
    has no catch/continue across an internal `call`; genuine per-entry
    continue-and-record needs the caller driving `deactivate_step` itself,
@@ -315,7 +315,7 @@ Landed in `backends/wasm/emit.py` (the compiled accumulator) and
 5. **Epoch/fuel is wired first-party, at the per-entry granularity the
    compiled dispatch makes possible**, closing the open capability gap the
    paragraph above named: `lifecycle.drive_teardown` arms a wasmtime epoch
-   deadline around each Phase-2 (compensation) call individually — real
+   deadline around each Phase-2 (compensation) call individually, real
    in-call guest-code preemption, verified against a live spin-loop
    compensation (`test_epoch_deadline_bounds_a_hung_compensation`), not
    merely the between-compensation check. The honest limitation stands as
@@ -325,7 +325,7 @@ Landed in `backends/wasm/emit.py` (the compiled accumulator) and
 6. **The WAL descriptor is a static compile-time index, not a runtime log.**
    `_teardown_section` emits a `revl:teardown` custom section (seq, kind,
    `deactivate_step` dispatch position per transactional/compensation entry)
-   — the honest ceiling on a tier whose teardown loop is compiled state with
+  : the honest ceiling on a tier whose teardown loop is compiled state with
    zero host bookkeeping (backends/wasm/README.md): runtime witness/argument
    VALUES live in the component's own linear memory, and nothing here claims
    to persist them durably. A host wanting genuine crash recovery on this
@@ -645,8 +645,8 @@ discharged seqs), then Phase 2 re-issues compensation descriptors against the
 `World` adapter through its DEDICATED `apply_compensation` path (recovery.py):
 that path always records a compensation as a further crossing and never clears
 its referent. The correction the review flagged: the GENERIC `World.apply_inverse`
-(recovery.py, `DictWorld`) name-matches a `_REMOVE` verb set — and several
-compensation verbs live in it (`delete`, `revoke`, `rollback`, `compensate`) —
+(recovery.py, `DictWorld`) name-matches a `_REMOVE` verb set, and several
+compensation verbs live in it (`delete`, `revoke`, `rollback`, `compensate`),
 so routing a compensation through it would POP the forward referent and report a
 best-effort offset as CLEAN. Phase 2 therefore uses `apply_compensation`, not
 `apply_inverse`. Reporting is honest, in recovery.py's existing voice: a
@@ -747,10 +747,10 @@ dedicated compensation apply path, and the merged residue records above are a
 single OWNED migration on the py reference tier, not something each Slice-2b tier
 re-derives. It is landed by the `agent/witnessed-wal-recover` slice in:
 
-- `backends/python/replay.py` — the writer: `WriteAheadLog.record_discharge_descriptor`
+- `backends/python/replay.py`: the writer: `WriteAheadLog.record_discharge_descriptor`
   (a `transactional` inverse or a `compensation` as a named-call descriptor) and
   `WriteAheadLog.record_discharge` (`{"record":"discharge","discharged":[seq...]}`);
-- `src/revl/recovery.py` — the reader: `_roll_back` walks the descriptors in two
+- `src/revl/recovery.py`: the reader: `_roll_back` walks the descriptors in two
   phases (Phase 1 transactional inverses reverse-seq, SKIPPING discharged seqs;
   Phase 2 owed compensations through `DictWorld.apply_compensation`), and emits
   the merged residue records (`restore-residue` / `bracket-fault` /
