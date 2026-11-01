@@ -439,7 +439,7 @@ findings were the same rule violated in different emitter positions, both
 admitted green then dying at py exec time (the item-78 compiles-implies-runs
 class):
 
-- **item 263, `match` in an async body.** The match binder rides one-shot
+- **item 263: `match` in an async body.** The match binder rides one-shot
   lambdas (`(lambda match: …)(scrut)`, `(lambda bind: …)(payload)`). An arm
   that crosses an async boundary (`Go => emit store.get(k)`) renders an
   `await`, which the lambda then traps. Fix: in an async frame `_match_expr`

@@ -1,4 +1,4 @@
-# 478: Component-author ergonomics: the language gaps behind #548
+# 478: Component-author ergonomics (the language gaps behind #548)
 
 Provisional id. This note is filed under 478 pending a roadmap item number; the
 issue it tracks is #548 ("language: component-author gaps"). Renumber the file

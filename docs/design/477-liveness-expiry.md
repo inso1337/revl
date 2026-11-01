@@ -76,7 +76,7 @@ the new kind slots in without touching them, and any producer built by the
 follow-ups below emits into a vocabulary that already exists and is already
 tested.
 
-## Follow-up 1: the declared liveness expectation (grammar and gate): LANDED
+## Follow-up 1: the declared liveness expectation (grammar and gate) (LANDED)
 
 Operator-visible and gate-enforced means a source-level declaration, a lease
 ceiling attached per activation, in the shape `cache ... ttl` already

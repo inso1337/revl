@@ -731,7 +731,7 @@ Three things the declaration does NOT change:
 * **Rule 3.1 is unchanged.** Single-consumer holds across the requirement key, so
   two subscriptions to one required stream are refused exactly as two
   subscriptions to one local source are (including the case where one of them is
-  a handler's implicit one.
+  a handler's implicit one).
 * **Rule 3.6 moves, it does not vanish.** There is no local acquisition to read an
   inverse off, so the no-silent-vanish obligation is discharged at the coeffect
   boundary: §4.3 already assigns the terminal to that layer, and the reference

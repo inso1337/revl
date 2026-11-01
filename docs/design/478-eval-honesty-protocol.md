@@ -1,4 +1,4 @@
-# 478: Eval honesty protocol: the report-honesty layer
+# 478: Eval honesty protocol (the report-honesty layer)
 
 **Report-schema version: EVAL-REPORT-1. Status: FROZEN (2026-09-07).**
 

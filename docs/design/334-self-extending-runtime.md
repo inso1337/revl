@@ -850,7 +850,7 @@ so the turn's fibers were torn down and re-activated and the handle no longer
 addresses the instance it was minted onto. `Gate.call` keeps serving gen N
 throughout, which is EDGE 1's guarantee and is untouched. Seven tests.
 
-**Slice 5 (LANDED): what a proposal INHERITS by NAME: the reviewed blast set.**
+**Slice 5: what a proposal INHERITS by NAME (the reviewed blast set) (LANDED).**
 Slice 2 looked at the `(component glob, realm)` pair the item-246/251 approval
 policy scopes a standing approval and an auto-approve rule by, closed the realm
 half (`no_realm_placement`, G9), and dismissed the other half in one clause: "an

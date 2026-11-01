@@ -1,4 +1,4 @@
-# 525 exemplary web app: slice 5 (the one dev command, proven): findings
+# 525 exemplary web app: slice 5 (the one dev command, proven), findings
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 5 of N (acceptance bar 1,
 run with the frontend attached) · **Status:** FINDINGS, 2026-09-13

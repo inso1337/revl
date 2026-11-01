@@ -53,8 +53,9 @@ Slice S6 (§11), distribution, is BUILT: the mandatory `truc.lock` pin and the
 vendored-dir jail at resolution, reproducibility across differing registry
 indexes (`tests/test_composition_distribution.py`), and truc's two distribution
 CLI verbs (`truc stack check` (header-only resolution, a collision reported at
-edit time) and `truc apply` (resolve + admit, all-or-nothing write), as thin
-front doors onto the composition engine (decision 7). The verbs live in truc's
+edit time) and `truc apply` (resolve + admit, all-or-nothing write)),
+as thin front doors onto the composition engine (decision 7). The verbs live
+in truc's
 bootstrapped `.rvl` toolchain (`src/revl/truc/components/`, host bodies in
 `src/revl/truc/_host.py`); `tests/test_truc_apply_stack_check.py` covers the
 host behaviour directly and the real CLI end to end under the cordis-py runtime.

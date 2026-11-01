@@ -145,8 +145,9 @@ tiers (Slice 2b) follow this contract.
 2. **The transactional entry is a distinct disposer, not a distinct list.**
    `Frame.transactional(undo, witness)` returns a `_Transactional` disposer that
    joins the same LIFO disposer stack as every bracket inverse (so mixed-entry
-   LIFO is preserved for free, for effects fired from the ACTIVATION body;
-   point 5 states the rule for effects fired mid-session, from a provide method)
+   LIFO is preserved for free, but only for effects fired from the ACTIVATION
+   body; point 5 states the rule for effects fired mid-session, from a provide
+   method)
    and, at disposal time, replays `undo(witness)`
    iff `not frame._committed` (abort) and otherwise discharges, dropping both
    the inverse and the witness references (witness GC). A bracket (`acquire`)
@@ -194,7 +195,7 @@ tiers (Slice 2b) follow this contract.
    it newest-FIRST (`reversed`). On a commit the order is immaterial (every
    entry no-op discharges); on an ABORT it is load-bearing: two inverses whose
    paths OVERLAP must undo newest-first or (because every stdlib/fs.rvl
-   inverse is idempotent-and-total ("a second replay is a no-op") the oldest
+   inverse is idempotent-and-total ("a second replay is a no-op")) the oldest
    inverse runs first, finds nothing, silently no-ops, and the newer inverse
    then undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
    pre-session data while abort still reports `noResidue: true`, silently

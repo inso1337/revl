@@ -1,4 +1,4 @@
-# 525 exemplary web app: slice 1 (boring half): filed gaps
+# 525 exemplary web app: slice 1 (boring half), filed gaps
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 1 of N (the boring CRUD half) · **Status:** FINDINGS, 2026-09-08
 

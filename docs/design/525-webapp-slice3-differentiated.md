@@ -1,4 +1,4 @@
-# 525 exemplary web app: slice 3 (the differentiated half): findings
+# 525 exemplary web app: slice 3 (the differentiated half), findings
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 3 of N (the differentiated,
 hot-swap half) · **Status:** FINDINGS, 2026-09-08

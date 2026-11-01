@@ -1,4 +1,4 @@
-# 525 exemplary web app: slice 4 (the TS frontend): wiring and filed gap
+# 525 exemplary web app: slice 4 (the TS frontend), wiring and filed gap
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 4 of N (the TS frontend
 behind a typed boundary, item 459) · **Status:** FINDINGS, 2026-09-08 · **G3 CLOSED 2026-09-13** (the typed `data` channel is declared and projected)

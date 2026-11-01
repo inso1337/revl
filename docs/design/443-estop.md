@@ -329,7 +329,7 @@ when it appears the conductor does four things, in this order:
   exists for it is a SIGKILL, and the conductor sends one immediately. It may
   have dispatched a crossing microseconds before it died and nothing recorded
   that, so its residue is **UNKNOWN**. The report says exactly that, per
-  component, rather than folding it into a group line, a format that hid which
+  component, rather than folding it into a group line. A halt that hid which
   processes were merely killed would be reporting a stop it did not perform.
 
 `REVL_ESTOP_HALT_WINDOW` (default 2s) bounds how long a latch-honoring child

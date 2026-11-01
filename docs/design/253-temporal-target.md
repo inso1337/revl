@@ -332,8 +332,9 @@ return "declared"
 ```
 
 So a declaration written `... undo pure chk(result)` carries `register: "read"`.
-It is the TOP of the partial order and a member of item 440's `REDISPATCH_FREE`,
-while saying nothing whatever about re-delivering the FORWARD crossing. A
+It is the TOP of the partial order and a member of item 440's `REDISPATCH_FREE`.
+The declaration says nothing whatever about re-delivering the FORWARD
+crossing. A
 retry policy asks exactly one question ("may this call be issued again?") and
 it asks it about the forward. So `emit_temporal._forward_register` reads the
 two forward-side facts (`idempotency_key`, `idempotent`) DIRECTLY and never
