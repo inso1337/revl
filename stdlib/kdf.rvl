@@ -61,12 +61,12 @@
 //
 // The BOUNDARY EXTERN validates its own inputs and returns the same typed
 // error, so both doors answer identically: the public wrapper `pbkdf2_sha256`
-// and the extern. That is deliberate. The import site refuses a NAMED import of
-// the non-pub extern (`use "stdlib/kdf.rvl" { pbkdf2_sha256_raw }` is refused as
-// module-private), but this compiler still resolves a BARE unqualified call to
-// it from a consuming module (issue #3004), so the bound lives inside the
-// extern: no caller, named or bare, can execute above max_iterations() or with
-// an invalid parameter. The cap literals appear in each host body because a body
+// and the extern. That is deliberate. The extern is non-pub, so a consuming
+// module can reach it neither by a NAMED import (`use "stdlib/kdf.rvl"
+// { pbkdf2_sha256_raw }`) nor by a BARE unqualified call (issue #3004): both are
+// refused as module-private. The bound still lives inside the extern as defence
+// in depth, so no caller, inside this module or out, can execute above
+// max_iterations() or with an invalid parameter. The cap literals appear in each host body because a body
 // cannot call revl code; `tests/test_kdf_stdlib.py` pins both bodies to the
 // bounds the public functions declare.
 //
@@ -162,10 +162,10 @@ pub fn pbkdf2_sha256_verify(password: Str, salt: Str, iterations: Int,
 
 // ------------------------------------------------------------- the host body
 
-// The boundary crossing. Non-pub, so a NAMED import is refused; a bare
-// unqualified call still resolves to it today (issue #3004), which is exactly
-// why the extern VALIDATES ITS OWN INPUTS and returns the typed error instead of
-// trusting any caller. Deterministic and effect-free, so the extern is `pure`,
+// The boundary crossing. Non-pub, so a NAMED import and a bare unqualified call
+// from another module are both refused (issue #3004). The extern still
+// VALIDATES ITS OWN INPUTS and returns the typed error instead of trusting any
+// caller. Deterministic and effect-free, so the extern is `pure`,
 // exactly like the hash primitives in `stdlib/crypto.rvl`.
 extern pure fn pbkdf2_sha256_raw(password: Str, salt: Str, iterations: Int,
   length: Int) -> Result[Str, KdfError]

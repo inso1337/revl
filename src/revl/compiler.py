@@ -1505,6 +1505,13 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # too: a root module's own declaration is the composition's own name, not a
     # module's (issue #1908).
     root_ids = {id(module) for module in root_modules}
+    # issue #3004: the bare spellings of every non-`pub` fn/extern a `use`d
+    # module declares, recorded BEFORE the privacy pass renames a clashing one
+    # apart, so a body that names one it cannot see is refused with the same
+    # G1 module-private diagnostic a named import of it earns. A spelling some
+    # included module declares `pub` is left out: that body is missing an
+    # import, not reaching into another module's implementation.
+    merged.module_private = _module_private_spellings(included, root_ids)
     _apply_module_privacy(included, carried, root_ids)
 
     for module in included:
@@ -1617,9 +1624,33 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             module.program,
             loader._origin_install_root(module.path) is not None
             or _contained(module.path, loader.stdlib_real()))
+    # issue #3004: a body's bare names are its own module's fns and externs
+    # plus the ones its `use { ... }` lists name. Externs used to be left out of
+    # this set and resolved against EVERY extern of the merged program instead,
+    # and `test` / `prop test` blocks and components against every fn and
+    # extern, so a non-`pub` (or simply un-imported) declaration of a `use`d
+    # module was callable by bare name. The ROOT modules are one composition
+    # and keep the namespace they share (a composition's row file names the
+    # externs and services of the files the composition `use`s without a `use`
+    # of its own): a root fn body also sees every root's externs, and a root's
+    # blocks every root's declarations and imports, exactly as before.
+    def scope_of(module: _LoadedModule) -> set[str]:
+        return ({fn.name for fn in module.program.fn_decls}
+                | {ext.name for ext in module.program.externs}
+                | set(module.named_fns) | set(module.named_externs))
+
+    roots_scope: set[str] = set()
+    roots_externs: set[str] = set()
+    for module in root_modules:
+        roots_scope |= scope_of(module)
+        roots_externs |= ({ext.name for ext in module.program.externs}
+                          | set(module.named_externs))
     for module in included:
-        own_fns = {fn.name for fn in module.program.fn_decls}
-        callables = own_fns | set(module.named_fns)
+        callables = scope_of(module)
+        blocks_scope = callables
+        if id(module) in root_ids:
+            callables = callables | roots_externs
+            blocks_scope = roots_scope
         alias_fns = {
             alias: set(used.public_fns)
             for alias, used in module.aliases.items()
@@ -1627,6 +1658,10 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         for fn in module.program.fn_decls:
             merged.fn_scopes[id(fn)] = callables
             merged.fn_alias_scopes[id(fn)] = alias_fns
+        for block in (list(module.program.tests)
+                      + list(module.program.prop_tests)
+                      + list(module.program.components)):
+            merged.fn_scopes[id(block)] = blocks_scope
 
     # Declaration provenance for why-traces: every module the loader touched,
     # so a trace hop into an imported fn names the file it was declared in.
@@ -2029,6 +2064,23 @@ def _module_scopes_apart(decl, module: _LoadedModule, owners: dict[str, set[int]
     if not decl.public:
         return len(owners.get(decl.name, ())) > 1
     return decl.name in scoped and id(module) not in scoped[decl.name]
+
+
+def _module_private_spellings(included: list[_LoadedModule],
+                              root_ids: set[int]) -> dict[str, str]:
+    """{bare name: declaring file} for every non-`pub` fn/extern of a `use`d
+    (non-root) module of `included` that no included module declares `pub`
+    (issue #3004). A root's declaration is the composition's own, never an
+    import, so it is left to the ordinary undeclared-name refusal."""
+    public: set[str] = set()
+    private: dict[str, str] = {}
+    for module in included:
+        for decl in list(module.program.fn_decls) + list(module.program.externs):
+            if decl.public:
+                public.add(decl.name)
+            elif id(module) not in root_ids:
+                private.setdefault(decl.name, relpath_or_abs(module.path))
+    return {name: where for name, where in private.items() if name not in public}
 
 
 def _apply_module_privacy(included: list[_LoadedModule],

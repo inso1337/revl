@@ -241,6 +241,27 @@ _FOREIGN_NAME_REDIRECTS = {
 }
 
 
+# issue #3004: {bare name: declaring file} of the non-`pub` fns/externs of the
+# modules a multi-file composition included (`Program.module_private`), stashed
+# in the type table so a body that names one out of its reach is refused the way
+# a named import of it is. Absent for a single-source program.
+MODULE_PRIVATE_KEY = "__module_private__"
+
+
+def _reject_module_private(name, filename, line, types):
+    """If `name` is a non-`pub` fn/extern of a module the current body does not
+    belong to, raise the G1 module-private diagnostic the named-import path
+    raises (`compiler._import_named`). The caller has already established that
+    `name` is not in this body's scope. Returns None for any other name."""
+    where = ((types or {}).get(MODULE_PRIVATE_KEY) or {}).get(name)
+    if where is not None:
+        raise RevlError(filename, line,
+                        f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
+                        hint=f"mark `{name}` as `pub` in {where} and import it by "
+                             f"name: `use \"...\" {{ {name} }}`",
+                        code="G1", category="binding")
+
+
 def _reject_foreign_name(name, filename, line):
     """If `name` is a known foreign idiom that lexes as an identifier, raise
     the specific redirect instead of the generic, misleading G1 (item 384).
@@ -2225,8 +2246,13 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         module_callables = program.fn_scopes.get(id(decl), default_callables)
         callables = body_callables.get(id(module_callables))
         if callables is None:
+            # issue #3004: a scoped body (compile_files) already names its own
+            # module's externs and the imported ones; only the single-source
+            # default sees every extern of the program
+            scoped = id(decl) in program.fn_scopes
             callables = frozenset(_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
-                                  | set(module_callables) | extern_names)
+                                  | set(module_callables)
+                                  | (frozenset() if scoped else extern_names))
             body_callables[id(module_callables)] = callables
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         check_list_index_bounds(decl.body, decl_file)
@@ -6071,6 +6097,26 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
             check_invalidated_by(cache, m.line, what)
 
 
+def _block_callables(program: Program, decl, merged_callables,
+                     cache: dict | None = None) -> frozenset:
+    """The bare names a `test` / `prop test` / component body resolves (issue
+    #3004): its own module's fns and externs plus what that module imports by
+    name, exactly a `fn` body's set, when `compile_files` scoped it; the whole
+    program's for a single-source program. Every block of one module shares one
+    scope value, so `cache` (keyed by its identity, as `_lower_fns` keys its
+    own) builds each module's set once."""
+    scope = program.fn_scopes.get(id(decl))
+    if scope is None:
+        return merged_callables
+    cache = {} if cache is None else cache
+    built = cache.get(id(scope))
+    if built is None:
+        built = frozenset(_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+                          | _DECLASSIFY_BUILTINS | set(scope))
+        cache[id(scope)] = built
+    return built
+
+
 def _lower_tests(program: Program, filename: str, types: dict,
                  services: dict | None = None) -> list:
     """Lower `test` and `lifecycle test` blocks to IR v3 test units (§7/§7.1).
@@ -6087,12 +6133,14 @@ def _lower_tests(program: Program, filename: str, types: dict,
     # Without the externs an in-module `extern pure fn` visible to fn bodies was
     # invisible inside a `test`, forcing every extern-backed helper to be
     # wrapped in a `fn` just to be unit-tested in-file (roadmap item 182).
-    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
-                 | {fn.name for fn in program.fn_decls}
-                 | {ext.name for ext in program.externs})
+    merged_callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
+                        | {fn.name for fn in program.fn_decls}
+                        | {ext.name for ext in program.externs})
     tests: list[dict] = []
     seen: set[str] = set()
+    scoped: dict = {}
     for decl in program.tests:
+        callables = _block_callables(program, decl, merged_callables, scoped)
         # issue #1904: a test merged in from an imported module is lowered here,
         # inside the importer's program, so every diagnostic below would name
         # the IMPORTER's file with the imported file's line. The block's own
@@ -6202,12 +6250,14 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
     if not program.prop_tests:
         return []
-    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
-                 | {fn.name for fn in program.fn_decls}
-                 | {ext.name for ext in program.externs})
+    merged_callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
+                        | {fn.name for fn in program.fn_decls}
+                        | {ext.name for ext in program.externs})
     units: list[dict] = []
     seen: set[str] = set()
+    scoped: dict = {}
     for decl in program.prop_tests:
+        callables = _block_callables(program, decl, merged_callables, scoped)
         # issue #1904, as in `_lower_tests`: a prop test carried in from an
         # imported module names its OWN file, never the importer's.
         decl_file = program.decl_files.get(id(decl), filename)
@@ -7557,6 +7607,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
+            _reject_module_private(expr.name, filename, expr.line, types)
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)",
                             code="G1", category="binding")
@@ -9073,6 +9124,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _check_ui_target_provenance(program, types, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
+    if program.module_private:
+        types[MODULE_PRIVATE_KEY] = program.module_private
     # item 130 Slice 5: the typed-event contracts. Built after the record table
     # (an event IS a record, §6) and stashed under a `__`-prefixed key, so a
     # program with no event declaration reaches every downstream section — and
@@ -9304,7 +9357,9 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
             # line number (roadmap 312).
             lowered_comp = _lower_component(comp, services,
                                             comp.source or program.filename,
-                                            component_callables, types, emitting_fns,
+                                            _block_callables(program, comp,
+                                                             component_callables),
+                                            types, emitting_fns,
                                             emitting_caps, emission_evidence, spawn_reg,
                                             async_colored, witnessed_externs,
                                             colour_polymorphic, sync_monomorphs,
@@ -10296,6 +10351,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             _refuse_stream_requirement_read(env, name, filename, line)
         if getattr(env, "_plain_body", False) and name in _BUILTIN_TYPE_NAMES:
             _refuse_builtin_type_value(name, env, filename, line)
+        # issue #3004: another module's non-`pub` fn/extern, named bare
+        _reject_module_private(name, filename, line, getattr(env, "types", None))
         if getattr(env, "_plain_body", False):
             declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
             raise RevlError(
@@ -17839,6 +17896,8 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                    env.filename, expr.line)
         node = {"kind": "host", "fn": f"{head}.{call.name}", "args": host_args}
     else:
+        # issue #3004: another module's non-`pub` fn/extern, named bare
+        _reject_module_private(head, env.filename, expr.line, env.types)
         declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
         raise RevlError(
             env.filename, expr.line,
