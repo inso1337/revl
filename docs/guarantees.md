@@ -166,10 +166,10 @@ A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
 authorises disclosure to the receiver it names; it says nothing about a durable
 copy taken beside the call. The one place that matters for a witnessed extern is
 its discharge descriptor: the inverse is reconstructed from the `Ok` witness, so
-the witness is the field a crash log keeps, and an author who declared the
-witness confidential — on either end of the call, `Result[Secret[W], E]` on the
-extern or `Secret[W]` on the inverse's parameter — gets the placeholder there
-too. See `docs/design/243-witnessed-externs.md` rule 4.
+the witness is the field a crash log keeps. The placeholder also appears when
+the author marks the witness confidential on either end of the call:
+`Result[Secret[W], E]` on the extern or `Secret[W]` on the inverse's parameter.
+See `docs/design/243-witnessed-externs.md` rule 4.
 
 ## Sandbox isolation rungs
 
