@@ -105,7 +105,7 @@ regenerated rather than edited.
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 9 |  |
 | guarantees.md | needs-work | 2 |  |
-| guide-ai-agents.md | stale-fixed | 4 |  |
+| guide-ai-agents.md | stale-fixed | 0 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 5 |  |
 | holes.md | needs-work | 29 |  |
