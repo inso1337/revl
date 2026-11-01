@@ -53,7 +53,9 @@ def test_private_helpers_are_emitted_but_not_callable_cross_module(tmp_path):
         'use "./lib.rvl" { add }\n'
         "pub fn twice(x: Int) -> Int { return add(x, helper()) }\n"
     )
-    with pytest.raises(RevlError, match="`helper` is not declared"):
+    # issue #3004: the bare reference earns the named import's G1 wording
+    with pytest.raises(RevlError,
+                       match="`helper` is module-private in .* and cannot be imported"):
         compile_files([str(tmp_path / "main.rvl")])
 
 
