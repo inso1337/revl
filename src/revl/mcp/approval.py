@@ -120,8 +120,33 @@ def _sha(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+class UnencodableTicketArgs(TypeError):
+    """A call argument with no canonical encoding, so no ticket can name it."""
+
+
+def _canonical_arg(value):
+    """`json.dumps` `default` hook for `_args_digest`: a value JSON cannot
+    serialize is digested as its canonical wire encoding (the HTTP face's
+    `_encode_value`, the bridge's twin), so a routed face's NATIVE variant case
+    (`Method.Get`, `Empty`) digests exactly as the `{"$kind": ...}` form the
+    canonical path carries (issue #3005). Only reached for a non-JSON value, so a
+    JSON-able argument list digests byte for byte as before. An opaque host value
+    or live handle has no canonical form and is refused by name, never
+    stringified: a `str`/`repr` digest could make two different values equal."""
+    from .http_face import _encode_value  # noqa: PLC0415 - http_face imports us
+
+    try:
+        return _encode_value(value)
+    except TypeError as exc:
+        raise UnencodableTicketArgs(
+            f"cannot digest a {type(value).__name__!r} argument for an approval "
+            f"ticket: {exc}") from None
+
+
 def _args_digest(args) -> str:
-    return _sha(_canon(list(args or [])))
+    text = json.dumps(list(args or []), sort_keys=True, separators=(",", ":"),
+                      default=_canonical_arg)
+    return _sha(text)
 
 
 class ApprovalRequired(Exception):
