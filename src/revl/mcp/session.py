@@ -98,21 +98,21 @@ class SessionError(RuntimeError):
         self.repair = repair
 
 
-def _unencodable_args(key: str, method: str, exc: Exception) -> SessionError:
-    """issue #3005: an argument the approval digest cannot canonicalise refuses
-    the call by name (a session error, a 4xx on a face), never a crash."""
-    return SessionError(
-        f"cannot decide `{key}.{method}`: {exc}. The approval ticket binds its "
-        f"arguments by their canonical encoding, and an opaque host value or "
-        f"live handle has none, so the call is refused rather than digested by "
-        f"a lossy spelling")
+def _unencodable_args(key: str, method: str, purpose: str,
+                      exc: Exception) -> SessionError:
+    """issue #3005: an argument with no canonical encoding refuses the call by
+    name (a session error, a 4xx on a face), never a crash. `purpose` names what
+    the digest was for, so a no-policy `cache pure` call is not told about an
+    approval ticket."""
+    return SessionError(f"`{key}.{method}` is refused: its {purpose} is keyed "
+                        f"by an argument digest, and {exc}")
 
 
-def _session_args_digest(args, key: str, method: str) -> str:
+def _session_args_digest(args, key: str, method: str, purpose: str) -> str:
     try:
         return _args_digest(args)
     except UnencodableTicketArgs as exc:
-        raise _unencodable_args(key, method, exc) from None
+        raise _unencodable_args(key, method, purpose, exc) from None
 
 
 class NothingLoaded(SessionError):
@@ -5681,7 +5681,8 @@ class Session:
             # reach crosses nothing), so it hits in any session, policy or not, and
             # a hit is observationally equivalent to the call (G6: equal args, equal
             # result). Generation-scoped: a swap drops the memo.
-            pure_key = (key, method, _session_args_digest(args, key, method))
+            pure_key = (key, method, _session_args_digest(
+                args, key, method, "`cache pure` memo"))
             if pure_key in self._cache_pure:
                 self._cache_hits += 1
                 return {"result": render(self._cache_pure[pure_key]),
@@ -5692,7 +5693,8 @@ class Session:
             and self._class_map is not None)
         entry_key = None
         if cache_active:
-            entry_key = (key, method, _session_args_digest(args, key, method))
+            entry_key = (key, method, _session_args_digest(
+                args, key, method, "seam cache entry"))
             entry = self._cache_entries.get(entry_key)
             if entry is not None and self._cache_entry_live(entry):
                 # LIVE HIT: the seam checks liveness BEFORE it consumes, so a hit
@@ -5801,7 +5803,8 @@ class Session:
                 "revl_call to invoke an operation with no gate")
         reach = self._class_map.classify_call(key, method)
         receipt = {"seq": len(self._actions), "key": key, "method": method,
-                   "argsDigest": _session_args_digest(args, key, method),
+                   "argsDigest": _session_args_digest(args, key, method,
+                                                     "action receipt"),
                    "class": reach["class"] if reach is not None else None}
         before = self._act_marks()
         call = {"key": key, "method": method, "args": copy.deepcopy(args or []),
@@ -6578,7 +6581,8 @@ class Session:
             ticket = self._class_map.build_ticket(
                 reach, args, record_values=self.approval_record_values)
         except UnencodableTicketArgs as exc:
-            raise _unencodable_args(key, method, exc) from None
+            raise _unencodable_args(key, method, "approval ticket",
+                                    exc) from None
         self._refuse_unbounded_approval(ticket)   # issue #1755, opt-in
         # issue #1553: an operator's NO to this question refuses the re-issue it
         # was holding, once, before anything could cover it

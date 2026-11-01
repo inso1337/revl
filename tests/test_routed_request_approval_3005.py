@@ -14,6 +14,8 @@ The live tests drive a real cordis-py composition and skip without the pinned
 fork; a skip is not a pass.
 """
 
+import datetime
+import decimal
 import hashlib
 import importlib.util
 import json
@@ -228,5 +230,50 @@ def test_an_unencodable_argument_is_refused_by_name_not_stringified():
 def test_the_session_refuses_an_unencodable_argument_as_a_session_error():
     from revl.mcp.session import SessionError, _session_args_digest
 
-    with pytest.raises(SessionError, match=r"`probe\.fire`.*_Opaque"):
-        _session_args_digest([_Opaque()], "probe", "fire")
+    with pytest.raises(SessionError,
+                       match=r"`probe\.fire`.*approval ticket.*_Opaque"):
+        _session_args_digest([_Opaque()], "probe", "fire", "approval ticket")
+    # a no-policy `cache pure` call is not told about an approval ticket
+    with pytest.raises(SessionError) as caught:
+        _session_args_digest([_Opaque()], "probe", "fire", "`cache pure` memo")
+    assert "cache pure" in str(caught.value)
+    assert "approval" not in str(caught.value)
+
+
+# a builtin with no `__dict__` passes the instance-level case check and would
+# encode as a constant `{"$kind": "<type>"}` that ignores the value: two
+# different values of the type would digest equal. Each must be refused.
+_BUILTIN_PAIRS = [
+    (b"aaa", b"bbb"),
+    (bytearray(b"a"), bytearray(b"b")),
+    ({1}, {2}),
+    (frozenset({1}), frozenset({2})),
+    (datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)),
+    (datetime.date(2020, 1, 1), datetime.date(2021, 1, 1)),
+    (decimal.Decimal("1"), decimal.Decimal("2")),
+    (1j, 2j),
+    (range(1), range(2)),
+]
+
+
+@pytest.mark.parametrize("pair", _BUILTIN_PAIRS,
+                         ids=[type(a).__name__ for a, _ in _BUILTIN_PAIRS])
+def test_a_builtin_without_a_canonical_form_is_refused_not_digested(pair):
+    from revl.mcp.approval import UnencodableTicketArgs
+
+    for value in pair:
+        with pytest.raises(UnencodableTicketArgs, match=type(value).__name__):
+            _args_digest([value])
+        # nested inside a case payload or a record, too
+        with pytest.raises(UnencodableTicketArgs):
+            _args_digest([_req(Get(), Text(value))])
+
+
+def test_a_native_case_as_a_map_key_is_refused_not_a_crash():
+    from revl.mcp.approval import UnencodableTicketArgs
+
+    with pytest.raises(UnencodableTicketArgs, match="'Get' map key"):
+        _args_digest([{Get(): 1}])
+    # a scalar key still digests as JSON writes it
+    assert _args_digest([{1: "a"}]) == "sha256:" + hashlib.sha256(
+        b'[{"1":"a"}]').hexdigest()
