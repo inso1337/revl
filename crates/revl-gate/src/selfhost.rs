@@ -27788,7 +27788,7 @@ fn sg_stmt(ts: Vec<Token>, i: i64, in_method: bool, in_async: bool, loops: i64) 
         if (in_method && (!in_async)) {
             return sg_err(String::from("`await` is only allowed in a component body"), ln);
         }
-        if ((!in_method) && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "emit")) {
+        if atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "emit") {
             return sg_emit(ts, (i).checked_add(2i64).expect("revl: Int overflow"));
         }
         return sg_expr(ts, (i).checked_add(1i64).expect("revl: Int overflow"));

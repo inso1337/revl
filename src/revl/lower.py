@@ -4371,6 +4371,47 @@ def _emission_value_refusal(name: str, extern: str, filename: str,
     )
 
 
+def _refuse_unrecorded_async_wrapper_emit(node: dict, env: Env,
+                                          filename: str, line: int,
+                                          *, emit_expr=None) -> None:
+    """A marked `emit` of an async-colored wrapper `fn` in VALUE position
+    (issue #2969).
+
+    `fn helper(m) { return aext(m) }` is async-colored (A1), and both emitters
+    leave async fns out of the emission reach: settling a coroutine through the
+    recording seam is the self-host port's deferred async slice. So
+    `let r = emit helper(m)` would emit a bare call, run the host body and
+    record no emission step, the unrecorded crossing #2969 is about. Refuse it
+    rather than admit a crossing the WAL cannot see. The STATEMENT form still
+    records the wrapper under its own name, so it is left alone; a direct async
+    extern (`emit aext(m)`) is recorded and left alone too.
+
+    An ASYNC ACQUISITION is not value position either: in
+    `let c = effect await emit bad_open(u) undo ...` the emitted call is the
+    bracket's own acquire expression (item 131), so the refusal is keyed to the
+    emit node not being the bracket root. `_acquire_position` already marks that
+    root by identity."""
+    name = node.get("name")
+    if node.get("kind") != "fn" or not isinstance(name, str):
+        return
+    if emit_expr is not None and \
+            getattr(env, "_host_acquire_root", None) is emit_expr:
+        return
+    if name in (getattr(env, "extern_class", None) or {}):
+        return
+    if name not in (getattr(env, "async_callables", None) or set()):
+        return
+    raise RevlError(
+        filename, line,
+        f"`emit` of async wrapper `{name}` in value position records no "
+        f"emission step (G4)",
+        hint="the async wrapper cannot be settled through the recording seam, "
+             "so its host crossing would run unrecorded; call the host extern "
+             "directly under `emit` in an async method, or make the wrapper sync",
+        code="G4", category="emission-value",
+    )
+
+
 def _acquire_value_refusal(name: str, where: str, filename: str,
                            line: int, *, seam: bool = False) -> RevlError:
     """An `acquire` extern reached as a function value (issue #2972).
@@ -10179,6 +10220,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                      "drop the `emit` marker (G4)",
                 code="G4", category="emission",
             )
+        _refuse_unrecorded_async_wrapper_emit(node, env, filename, expr.line,
+                                              emit_expr=expr)
         _require_declared_approval(node, None, env, expr.line, value_form=True)
         return node
     if isinstance(expr, ExprMatch):
