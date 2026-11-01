@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import UpdateError
-from .manifest import ReleaseManifest, parse_manifest
+from .manifest import (ReleaseManifest, parse_manifest,
+                       require_remote_artifacts)
 from .semver import Version
 
 DEFAULT_API = "https://api.github.com"
@@ -282,6 +283,7 @@ def _manifest_from_release(release: dict, *, repo: str, project: str,
     document = _get_bytes(url, token, timeout=timeout,
                           accept="application/octet-stream")
     manifest = parse_manifest(document)
+    require_remote_artifacts(manifest)
     expected = _expected_project(repo, project)
     if manifest.project != expected:
         raise UpdateError(
@@ -408,14 +410,24 @@ def resolve_manifest_source(source: str, *, repo: str | None = None,
                             project: str | None = None, token: str | None = None,
                             timeout: float = 20.0) -> ResolvedRelease:
     """Read a manifest from a URL or a path and wrap it as a resolved release."""
-    if source.startswith("file://"):
-        path = Path(urllib.parse.urlparse(source).path)
-        document = path.read_bytes()
-    elif source.startswith(("http://", "https://")):
+    remote = source.startswith(("http://", "https://"))
+    if remote:
         document = _get_bytes(source, token, timeout=timeout)
     else:
-        document = Path(source).read_bytes()
+        path = (Path(urllib.parse.urlparse(source).path)
+                if source.startswith("file://") else Path(source))
+        try:
+            document = path.read_bytes()
+        except OSError as error:
+            raise UpdateError(
+                "MANIFEST_UNREADABLE",
+                f"the manifest {source} cannot be read: "
+                f"{error.strerror or error}",
+                fix="pass --manifest a path or URL that names a release "
+                    "manifest") from None
     manifest = parse_manifest(document)
+    if remote:
+        require_remote_artifacts(manifest)
     expected = project or manifest.project
     if manifest.project != expected:
         raise UpdateError(

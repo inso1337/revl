@@ -174,3 +174,35 @@ def test_staged_releases_are_ordered_by_version_not_by_string(tmp_path):
         }), encoding="utf-8")
     found = find_staged(tmp_path, project="app")
     assert [release.version for release in found[:2]] == ["10.0.0", "2.0.0"]
+
+
+def test_a_reused_staging_whose_files_changed_is_extracted_again(tmp_path):
+    feed = serve_feed()
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        first = stage_release(release, home_dir=tmp_path)
+        original = (first.source_root / "app.rvl").read_bytes()
+        (first.source_root / "app.rvl").write_text("tampered", encoding="utf-8")
+        second = stage_release(release, home_dir=tmp_path)
+    finally:
+        feed.close()
+    assert (second.source_root / "app.rvl").read_bytes() == original
+    assert second.provenance["sources"]["files"]["app.rvl"]
+
+
+def test_an_artifact_that_is_not_its_declared_size_is_refused(tmp_path):
+    feed = serve_feed()
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        declared = release.manifest.artifacts[0]
+        artifact = dataclasses.replace(declared, size=declared.size - 1)
+        short = dataclasses.replace(
+            release, manifest=dataclasses.replace(
+                release.manifest, artifacts=(artifact,)))
+        with pytest.raises(UpdateError) as raised:
+            stage_release(short, home_dir=tmp_path)
+    finally:
+        feed.close()
+    assert raised.value.code == "FETCH_SIZE"
+    assert not (tmp_path / "staged").exists() or \
+        not list((tmp_path / "staged").iterdir())

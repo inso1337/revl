@@ -78,3 +78,11 @@ def test_status_on_a_fresh_home_is_empty(capsys, tmp_path):
     assert report["staged"] == []
     assert report["journal"] == []
     assert report["current"]["version"]
+
+
+def test_a_missing_manifest_path_is_a_named_refusal_exit_2(capsys, tmp_path):
+    missing = tmp_path / "no-such-release.json"
+    rc = main(["update", "check", "--manifest", str(missing)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "MANIFEST_UNREADABLE" in err

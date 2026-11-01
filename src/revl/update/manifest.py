@@ -242,6 +242,23 @@ _KNOWN = frozenset({
 })
 
 
+def require_remote_artifacts(manifest: ReleaseManifest) -> None:
+    """Refuse a fetched manifest that names a local artifact.
+
+    A manifest read from the operator's own disk may point at a local file. A
+    manifest that arrived over the network may not: a ``file://`` URL there
+    would make the release's publisher choose a file on this host to stage.
+    """
+    for artifact in manifest.artifacts:
+        if not artifact.url.startswith(("http://", "https://")):
+            raise _refuse(
+                "MANIFEST_URL",
+                f"artifact {artifact.name!r} of a fetched manifest names "
+                f"{artifact.url!r}; a manifest fetched over the network may "
+                "only name http(s) artifacts",
+                fix="publish the artifact at an https URL")
+
+
 def parse_manifest(document: object) -> ReleaseManifest:
     """Validate and parse a release manifest document.
 

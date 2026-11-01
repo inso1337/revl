@@ -182,3 +182,21 @@ def test_a_cross_host_redirect_drops_the_authorization_header(monkeypatch):
         server_b.shutdown()
         server_b.server_close()
     assert seen == [None]
+
+
+def test_a_fetched_manifest_may_not_name_a_local_artifact(tmp_path):
+    local = {"name": "app-1.2.0.tar.gz", "kind": "source",
+             "url": "file:///etc/hosts", "sha256": "0" * 64, "size": 1}
+    feed = serve_feed(manifest_extra={"artifacts": [local]})
+    try:
+        with pytest.raises(UpdateError) as raised:
+            resolve_release("owner/app", api_base_override=feed.base_url)
+    finally:
+        feed.close()
+    assert raised.value.code == "MANIFEST_URL"
+    # the operator's own manifest on disk may still name a local artifact
+    document = manifest_for(artifact_url="file:///etc/hosts",
+                            artifact_sha="0" * 64)
+    path = tmp_path / "release.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert resolve_manifest_source(str(path), project="app").manifest

@@ -98,8 +98,19 @@ def _error(code: str, message: str, *, fix: str | None = None,
     return UpdateError(code, message, fix=fix, details=details)
 
 
+def _size_refusal(url: str, expected: int, written: int) -> UpdateError:
+    return _error(
+        "FETCH_SIZE",
+        f"the release artifact at {url} is not the {expected} bytes its "
+        f"manifest declares ({'more than ' if written > expected else ''}"
+        f"{written} bytes were served)",
+        fix="do not retry blindly; the feed or the mirror served different "
+            "bytes than the release names")
+
+
 def _download(url: str, dest: Path, *, token: str | None, timeout: float,
-              max_bytes: int = MAX_BYTES) -> None:
+              max_bytes: int = MAX_BYTES,
+              expected_size: int | None = None) -> None:
     written = 0
     try:
         # The feed's opener: the token only travels to an allowlisted host, and
@@ -112,6 +123,8 @@ def _download(url: str, dest: Path, *, token: str | None, timeout: float,
                     if not chunk:
                         break
                     written += len(chunk)
+                    if expected_size is not None and written > expected_size:
+                        raise _size_refusal(url, expected_size, written)
                     if written > max_bytes:
                         raise _error(
                             "FETCH_TOO_LARGE",
@@ -119,6 +132,8 @@ def _download(url: str, dest: Path, *, token: str | None, timeout: float,
                             "byte staging limit; a release that large is not "
                             "a source tree this updater stages")
                     handle.write(chunk)
+        if expected_size is not None and written != expected_size:
+            raise _size_refusal(url, expected_size, written)
     except UpdateError:
         raise
     except urllib.error.HTTPError as error:
@@ -269,6 +284,33 @@ def extract_archive(archive: Path, destination: Path,
         "archive, so there is no source tree to stage")
 
 
+def _source_digests(root: Path) -> dict[str, str]:
+    """The sha256 of every regular file under an extracted source tree."""
+    digests: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            digests[path.relative_to(root).as_posix()] = _sha256(path)
+    return digests
+
+
+def staged_intact(staged: "StagedRelease") -> bool:
+    """Whether a staged tree still holds exactly the files extracted from the
+    verified archive.
+
+    The archive's sha256 is checked once, at staging; the extracted files are
+    what compiles, so a reused staging is trusted only when every file still
+    has the digest recorded then, and no file was added or removed. A staging
+    that recorded no digests (an older updater's) is not trusted.
+    """
+    recorded = (staged.provenance.get("sources") or {}).get("files")
+    if not isinstance(recorded, dict):
+        return False
+    try:
+        return _source_digests(staged.source_root) == recorded
+    except OSError:
+        return False
+
+
 def _rvl_files(root: Path) -> tuple[str, ...]:
     names: list[str] = []
     for path in sorted(root.rglob("*.rvl")):
@@ -315,8 +357,10 @@ def stage_release(release: ResolvedRelease, *, home_dir: str | os.PathLike | Non
                       f"{os.getpid()}-{time.time_ns()}"
     work.mkdir(parents=True)
     artifact_path = work / _safe_name(artifact.name)
+    expected_size = (artifact.size if release.manifest is not None else None)
     try:
-        _download(url, artifact_path, token=token, timeout=timeout)
+        _download(url, artifact_path, token=token, timeout=timeout,
+                  expected_size=expected_size)
         actual = _sha256(artifact_path)
         if release.manifest is not None and actual != artifact.sha256:
             raise _error(
@@ -349,7 +393,8 @@ def stage_release(release: ResolvedRelease, *, home_dir: str | os.PathLike | Non
                          "url": url, "sha256": actual},
             "tagFallback": release.tag_fallback,
             "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "sources": {"count": len(files)},
+            "sources": {"count": len(files),
+                        "files": _source_digests(source_root)},
         }
         (work / "provenance.json").write_text(
             json.dumps(provenance, indent=2, sort_keys=True) + "\n",
@@ -357,9 +402,11 @@ def stage_release(release: ResolvedRelease, *, home_dir: str | os.PathLike | Non
         final = staged_root / _slug(release, actual)
         if final.exists():
             existing = _read_provenance(final)
-            if existing.get("artifact", {}).get("sha256") == actual:
+            reused = _staged(final, existing)
+            if (existing.get("artifact", {}).get("sha256") == actual
+                    and staged_intact(reused)):
                 shutil.rmtree(work, ignore_errors=True)
-                return _staged(final, existing)
+                return reused
             shutil.rmtree(final)
         os.replace(work, final)
         return _staged(final, provenance)
