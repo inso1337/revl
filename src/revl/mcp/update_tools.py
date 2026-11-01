@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 
+from .._paths import relpath_or_abs
 from ..update.errors import UpdateError
 from ..update.feed import resolve_release
 from ..update.fetch import (find_staged, stage_release, staged_intact,
@@ -264,7 +265,9 @@ def _materialise(plan: dict, bodies: dict[str, bytes]) -> list[str]:
     source_root = plan["sourceRoot"]
     paths: list[str] = []
     for path in plan["files"]:
-        relative = os.path.relpath(path, source_root)
+        # the absolute fallback (another drive on Windows) is outside the
+        # staging root, so it is refused with a climbing path
+        relative = relpath_or_abs(path, source_root)
         if relative.startswith(os.pardir) or os.path.isabs(relative):
             raise UpdateError(
                 "UPDATE_FILES",
