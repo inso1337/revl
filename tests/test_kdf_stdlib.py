@@ -10,10 +10,9 @@ Checked here:
   * the module imports through `use`; its one extern reaches the IR as `pure`
     with py + ts bodies (the module's tier bar), and it is NON-PUB: a named
     import is refused;
-  * module privacy is not enforced on the bare-reference path (revl issue
-    #3004), so a consumer importing only `KdfError` can still call
-    `pbkdf2_sha256_raw` by bare name: the boundary extern validates its own
-    inputs and those bare-name calls above the cap are REFUSED, not executed;
+  * a consumer importing only the public surface cannot call
+    `pbkdf2_sha256_raw` by bare name either (revl issue #3004): the call is
+    refused as module-private, like the named import;
   * the bound constants are pinned (`max_iterations` 2000000, `max_length` 64),
     so a future policy change is a deliberate edit rather than a silent one;
   * the py tier EXECUTES the published PBKDF2-HMAC-SHA256 vectors and the
@@ -208,24 +207,25 @@ test "verify passes invalid parameters through as the named errors" {
   assert verify_codes(pbkdf2_sha256_verify("p", "", 1, 32, "00"), "salt_empty")
 }
 
-// ------------------------------------- the boundary cannot be bypassed
-// Module privacy is not enforced for BARE references today (revl issue #3004):
-// a consumer that imports only `KdfError` can still call the non-pub extern by
-// bare name. These tests drive that door, so the boundary itself must refuse.
+// ------------------------------------- the boundary extern's own checks
+// The wrapper `pbkdf2_sha256` passes its arguments straight to the non-pub
+// boundary extern, which does the validating, so these drive the extern's own
+// checks. A bare call of the extern itself is refused as module-private (revl
+// issue #3004), so the wrapper is the one door.
 
-test "a bare-name raw call above the iteration cap refuses, never executes" {
-  assert code_of(pbkdf2_sha256_raw("p", "s", max_iterations() + 1, 32))
+test "a call above the iteration cap refuses at the boundary, never executes" {
+  assert code_of(pbkdf2_sha256("p", "s", max_iterations() + 1, 32))
     == "iterations_out_of_range"
 }
 
-test "a bare-name raw call with an invalid length or empty salt refuses" {
-  assert code_of(pbkdf2_sha256_raw("p", "s", 1, 0)) == "length_out_of_range"
-  assert code_of(pbkdf2_sha256_raw("p", "s", 1, 65)) == "length_out_of_range"
-  assert code_of(pbkdf2_sha256_raw("p", "", 1, 32)) == "salt_empty"
+test "a call with an invalid length or empty salt refuses at the boundary" {
+  assert code_of(pbkdf2_sha256("p", "s", 1, 0)) == "length_out_of_range"
+  assert code_of(pbkdf2_sha256("p", "s", 1, 65)) == "length_out_of_range"
+  assert code_of(pbkdf2_sha256("p", "", 1, 32)) == "salt_empty"
 }
 
-test "a bare-name raw call below the bounds still computes the vector" {
-  assert match pbkdf2_sha256_raw("password", "salt", 1, 32) {
+test "a call below the bounds still computes the vector through the boundary" {
+  assert match pbkdf2_sha256("password", "salt", 1, 32) {
     Ok(hex) => hex == "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
     Err(_) => false,
   }
@@ -332,6 +332,32 @@ def test_named_import_of_the_boundary_extern_is_refused(tmp_path):
     assert "pbkdf2_sha256_raw" in message
     assert "module-private" in message
     assert "cannot be imported" in message
+
+
+def test_a_bare_name_call_of_the_non_pub_extern_is_refused(tmp_path, monkeypatch):
+    """Issue #3004: importing only the public surface and calling the boundary
+    extern by bare name is refused with the named import's G1 message, so the
+    wrapper is the only door out of the module."""
+    from revl.errors import RevlError
+
+    (tmp_path / "stdlib").mkdir()
+    shutil.copy(STDLIB, tmp_path / "stdlib" / "kdf.rvl")
+    shutil.copy(CRYPTO, tmp_path / "stdlib" / "crypto.rvl")
+    consumer = tmp_path / "main.rvl"
+    consumer.write_text(
+        'use "stdlib/kdf.rvl" { KdfError, max_iterations }\n'
+        'test "x" {\n'
+        '  assert match pbkdf2_sha256_raw("p", "s", max_iterations() + 1, 32) {\n'
+        '    Ok(_) => true,\n'
+        '    Err(_) => false,\n'
+        '  }\n'
+        '}\n',
+        encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RevlError) as raised:
+        compile_files([str(consumer)])
+    assert ("`pbkdf2_sha256_raw` is module-private in `stdlib/kdf.rvl` and "
+            "cannot be imported (G1)") in str(raised.value)
 
 
 # ---------------------------------------------------------------- py tier

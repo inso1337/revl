@@ -1583,6 +1583,29 @@ def test_native_driver_resolves_a_use_on_the_import_path(
     assert got == want
 
 
+def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3004, pinned self-host gap: the reference refuses a BARE call to
+    another module's non-`pub` fn as module-private (G1), as it refuses the
+    named import of it. The native driver does not yet: its module admission
+    (`ad_imports_refusal`, selfhost/compile.rvl) reads only the names a `use`
+    list spells, and selfhost/lower.rvl's name resolver switches off for a text
+    with a `use`. This test turns red when the rule is ported; flip it then."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    # `one` is imported so lib.rvl's pure declarations join the program; a
+    # module reached only for a service contributes no fn at all
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE + "pub fn one() -> Int { return 1 }\n"
+        "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store, one }\n\n'
+                   + _STORE_COMPONENT % "helper(one())", encoding="utf-8")
+    with pytest.raises(RevlError, match="`helper` is module-private in"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert "module-private" not in got, got[:300]
+
+
 def test_native_import_check_passes_every_stdlib_and_truc_module(compile_rvl):
     """Issue #2363, the positive control: every `use` of every stdlib module
     and truc component resolves and names only what its module exports, so the
