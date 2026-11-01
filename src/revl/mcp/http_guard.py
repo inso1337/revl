@@ -34,6 +34,7 @@ listener's own (`http_transport.Authenticator`).
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 import ssl
 import threading
@@ -186,6 +187,23 @@ CONNECTION_TIMEOUT = 30.0
 LINGER_SECONDS = 2.0
 LINGER_BYTES = 1 << 20
 
+#: The listen backlog a `Listener` binds with. `socketserver` defaults to 5, so
+#: a burst of simultaneous connects (a load generator opening 64 at once, a page
+#: loading many assets) leaves most of them waiting in `connect` for seconds
+#: while each request is served in about 100 ms. The threaded listener drains
+#: the queue quickly; the default only makes the start of a burst look slow. The
+#: kernel caps the effective queue at its `somaxconn`, so a larger value is
+#: harmless, and the face accepts bursts.
+DEFAULT_BACKLOG = 128
+
+#: The most `REVL_HTTP_BACKLOG` may ask for. A larger value is clamped to it:
+#: the kernel caps the queue at `somaxconn` anyway, and a value beyond a C int
+#: would make `listen` raise instead of binding.
+MAX_BACKLOG = 65535
+
+#: The environment variable that overrides `DEFAULT_BACKLOG`.
+BACKLOG_ENV = "REVL_HTTP_BACKLOG"
+
 
 def close_after_draining(sock) -> None:
     """Close a connection without destroying the answer just written to it.
@@ -219,10 +237,29 @@ def close_after_draining(sock) -> None:
             pass
 
 
+def listen_backlog(environ=None) -> int:
+    """The listen backlog a `Listener` binds with: `REVL_HTTP_BACKLOG`, or
+    `DEFAULT_BACKLOG` when it is unset or not a positive integer (a typo in a
+    deployment setting must not refuse the start). A value above `MAX_BACKLOG`
+    is clamped to it. The kernel caps the effective queue at its `somaxconn`."""
+    env = os.environ if environ is None else environ
+    raw = (env.get(BACKLOG_ENV) or "").strip()
+    if raw:
+        try:
+            value = int(raw, 10)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return min(value, MAX_BACKLOG)
+    return DEFAULT_BACKLOG
+
+
 class Listener(ThreadingHTTPServer):
     """A threaded HTTP listener that applies `Exposure`: TLS (and mutual TLS)
     when configured, with the handshake done in the connection's own worker
-    thread so one slow client cannot stall `accept`."""
+    thread so one slow client cannot stall `accept`. It binds with
+    `REVL_HTTP_BACKLOG` (default `DEFAULT_BACKLOG`) rather than socketserver's
+    default of 5, so a connection burst waits in the queue, not in `connect`."""
 
     daemon_threads = True
 
@@ -232,6 +269,8 @@ class Listener(ThreadingHTTPServer):
         self.address_family = family
         self.exposure = exposure
         self.tls_context = server_tls_context(exposure)
+        # read before `super().__init__`, which binds and listens with it
+        self.request_queue_size = listen_backlog()
         super().__init__((exposure.host.strip("[]"), exposure.port), handler_class)
         exposure.bound_port = self.server_address[1]
 

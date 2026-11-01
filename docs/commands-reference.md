@@ -2599,7 +2599,12 @@ that composes `stdlib/auth.rvl` for them is refused at compile time.
 - `--host HOST` - `--http` bind address (default: `127.0.0.1`). Any address
   other than loopback needs `--tls-cert` and `--tls-key`, or the server refuses
   to start.
-- `--port PORT` - `--http` bind port (default: `8080`).
+- `--port PORT` - `--http` bind port (default: `8080`). The listener binds
+  with a socket listen backlog of 128, not socketserver's default of 5, so a
+  burst of simultaneous connects waits in the queue rather than in `connect`;
+  `REVL_HTTP_BACKLOG` overrides the value (a non-positive or non-numeric value
+  keeps 128, values above 65535 are clamped, and the kernel caps the queue at
+  `somaxconn`).
 - `--tls-cert PEM`, `--tls-key PEM` - serve HTTPS.
 - `--allow-host NAME` - a Host value to answer besides the bind address
   (repeatable). A request with any other Host is refused (403), which stops DNS
