@@ -2661,6 +2661,14 @@ def build_parser() -> argparse.ArgumentParser:
                       help="a boundary policy file (item 33); its violations over "
                            "the current audit are the policy-exception queue, "
                            "each with its why-trace as evidence")
+    # issue #2756: opt in to the rejected-candidates section. The profile the
+    # sources compile under decides whether the navigation is the full operator
+    # record or the collapsed author verdict (observe._run_dash).
+    dash.add_argument("--rejected", action="store_true",
+                      help="add the rejected-candidates section: for each "
+                           "candidate `--policy` refuses, the refused edge, the "
+                           "guarantee it broke and the repairs `navigate` "
+                           "allows. Read-only; nothing here runs or admits")
     dash.add_argument("--mcp-scope", action="append", default=[], metavar="COMPONENT",
                       help="treat COMPONENT as MCP/agent-admitted for the policy's "
                            "`mcp` sandbox (repeatable); `*` = every component")

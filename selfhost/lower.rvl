@@ -8363,9 +8363,16 @@ fn value_method_head(h: Str) -> Bool {
 // `(pool) => pool.length()` as a verb on the component's `pool` (measured).
 // A `subscribe` head's stages are not verb calls (`ct_sub_head`), but a verb
 // inside a stage's arrow is judged as anywhere else.
-// A subscription local (the `Subscription` family) is not tracked.
+// A subscription local IS tracked: `let <h> = subscribe <stream> undo
+// <h>.close()` sets `env.host_locals[<h>] = "Subscription"` in the reference
+// (item 130's bracket), so `h.next()`/`h.close()` are host verbs held to the
+// reserved family's surface and arity, and `h.frob()` is HOST-METHOD. The
+// binding is an acquisition (`kind` "effect", `edge` "subscribe" marks the
+// head), not a `Root.verb()` constructor call, so its family is named here
+// rather than read off `s.e`.
 fn hv_family(s: Stmt) -> Str {
-  if (s.kind != "effect" || s.bind == "" || s.edge == "subscribe") { return "" }
+  if (s.kind != "effect" || s.bind == "") { return "" }
+  if (s.edge == "subscribe") { return "Subscription" }
   return match s.e {
     Call(c) => match c.target {
       // a stub verb of the root's family: `Map.empty()` is a value literal

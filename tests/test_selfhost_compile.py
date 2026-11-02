@@ -4262,6 +4262,17 @@ _STORE = "let store = effect Map.new() undo store.drop()"
 _JOBS_PROVIDER = ("service Jobs { fn run(sql: Str) -> Int }\n"
                   "component C provides jobs: Jobs {\n  " + _POOL + "\n"
                   "  provide jobs {\n    fn run(sql) %s\n  }\n}\n")
+# A `subscribe` bracket is an acquisition too: the reference records its handle
+# as a `Subscription` host local (item 130), so every verb on it meets the
+# reserved family's surface (`close`, `next`) and its zero-argument arity.
+_SUBHANDLE_BODY = ("  let src = effect Stream.source() undo src.close()\n"
+                   "  let sub = subscribe src\n              undo sub.close()\n")
+_SUBHANDLE_COMP = ("service Sink { emission fn write(v: Str) }\n"
+                   "component C requires sink: Sink {\n" + _SUBHANDLE_BODY)
+_SUBHANDLE_EVERY = "  every o in sub {\n    emit sink.write(o)\n  }\n}\n"
+_JOBS_SUBHANDLE = ("service Jobs { fn run(sql: Str) -> Int }\n"
+                   "component C provides jobs: Jobs {\n" + _SUBHANDLE_BODY +
+                   "  provide jobs {\n    fn run(sql) %s\n  }\n}\n")
 _HOST_LOCAL_VERBS = {
     "activation_wrong_type": (
         "component C {\n  " + _POOL + "\n  effect pool.query(1)\n"
@@ -4335,6 +4346,26 @@ _HOST_LOCAL_VERBS = {
         _JOBS_PROVIDER % ("{\n      let o: Opt[Str] = Some(sql)\n"
                           "      let n = match o { Some(pool) => pool.length(), None => 0 }\n"
                           "      return n\n    }"), ""),
+    # issue #2569: a `subscribe` local is a `Subscription` host local
+    "subscription_off_surface": (
+        _SUBHANDLE_COMP + "  effect sub.frob()\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, "HOST-METHOD"),
+    "subscription_next_count": (
+        _SUBHANDLE_COMP + "  effect sub.next(1)\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, "HOST-ARITY"),
+    "subscription_close_count": (
+        _SUBHANDLE_COMP + "  effect sub.close(1)\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, "HOST-ARITY"),
+    "method_subscription_off_surface": (
+        _JOBS_SUBHANDLE % "= sub.frob()", "HOST-METHOD"),
+    "method_subscription_next_count": (
+        _JOBS_SUBHANDLE % "= sub.next(1)", "HOST-ARITY"),
+    "method_subscription_close_count": (
+        _JOBS_SUBHANDLE % "= sub.close(1)", "HOST-ARITY"),
+    # the surface's own verbs are still admitted on the tracked local
+    "subscription_next_admitted": (
+        _SUBHANDLE_COMP + "  effect sub.next()\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, ""),
 }
 
 

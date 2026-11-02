@@ -166,6 +166,34 @@ def recheck(entry: dict, report: dict | None) -> str:
     return "live"
 
 
+# ---------------------------------------------------------------- reads
+
+def _program(text: str, name: str):
+    """`nested.parse`, through the one parse of `(text, name)` an MCP tool call
+    shares (issue #2194): the index reads a text as a program and, for a member
+    span, as tokens, and those two reads are one lex rather than two. None when
+    the text does not parse, as `nested.parse` gives."""
+    from . import nested, shared_parse  # noqa: PLC0415
+
+    try:
+        return shared_parse.program(text, name)
+    except nested.RevlError:
+        return None
+
+
+def _tokens(text: str, name: str) -> list:
+    """`nested.tokens_of`, through that same shared parse (issue #2194): a
+    program an earlier read already parsed contributes its tokens instead of
+    lexing the text again. Raises `NestedError` when the text does not lex, as
+    `nested.tokens_of` does."""
+    from . import nested, shared_parse  # noqa: PLC0415
+
+    try:
+        return shared_parse.tokens(text, name)
+    except nested.RevlError as error:
+        raise nested.NestedError(f"{name} does not lex: {error}") from None
+
+
 # ---------------------------------------------------------------- anchor
 
 def _first_code_line(text: str, after: int) -> int | None:
@@ -188,8 +216,9 @@ def anchor_of(text: str, name: str, block: Block, decls: list,
     block describes. `decls` are the file's top-level declarations, `nodes`
     a cache, for one text, of their parsed nodes and of the text's tokens once
     lexed (so the file is lexed once, not once per member comment, issue
-    #2250), and `program` the file already parsed (so a declaration is looked
-    up in it rather than parsed again, issue #2191)."""
+    #2250; the tokens come from the shared parse of `program` when there is
+    one, issue #2194), and `program` the file already parsed (so a declaration
+    is looked up in it rather than parsed again, issue #2191)."""
     from . import nested  # noqa: PLC0415
 
     line = _first_code_line(text, block.last)
@@ -211,7 +240,7 @@ def anchor_of(text: str, name: str, block: Block, decls: list,
         for member in nested.members(node, decl.kind):
             if member.line == line:
                 if _TOKENS not in nodes:
-                    nodes[_TOKENS] = nested.tokens_of(text, name)
+                    nodes[_TOKENS] = _tokens(text, name)
                 first, last = nested.span(text, name, node, decl.kind, member,
                                           nodes[_TOKENS])
                 return ".".join((decl.name,) + member.path), first, last
@@ -238,12 +267,14 @@ def fingerprint(text: str, name: str, first: int, last: int) -> str:
 def index_text(path: str, text: str, report: dict | None, known_codes) -> list[dict]:
     """Every comment block of one file as an index entry. `report` is the
     structured diagnostic of compiling it, or None when it compiled clean."""
-    from . import nested, symbols  # noqa: PLC0415
+    from . import symbols  # noqa: PLC0415
 
     # parse once: every comment's anchor is looked up in this one program, and
-    # a span several comments share is fingerprinted once (issue #2191); the
-    # text is lexed at most once for every member span (issue #2250)
-    program = nested.parse(text, path)
+    # a span several comments share is fingerprinted once (issue #2191); a
+    # member span reads that parse's own tokens, so the text is lexed once, not
+    # once per member comment and not once more for the tokens (issues #2250,
+    # #2194)
+    program = _program(text, path)
     decls = symbols.declarations(text, path, program) if program is not None else []
     nodes: dict = {}
     prints: dict = {}

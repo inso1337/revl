@@ -68,6 +68,7 @@ def repo(tmp_path, monkeypatch):
                     root / "tools" / "affected_tests.py")
     (root / "src" / "revl" / "__init__.py").write_text("", encoding="utf-8")
     (root / "src" / "revl" / "foo.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "src" / "revl" / "lexer.py").write_text("TOKEN = 1\n", encoding="utf-8")
     (root / "tests" / "test_foo.py").write_text("import revl.foo\n", encoding="utf-8")
     (root / "docs" / "mcp-reference.md").write_text("# mcp\n", encoding="utf-8")
     _commit_repo(root)
@@ -140,6 +141,18 @@ def test_missing_merge_base_returns_full_with_a_reason(monkeypatch):
     assert result["selection"]["full"] is True
     assert "no merge base" in result["selection"]["reason"]
     assert result["machine"].startswith("FULL 1\nREASON ")
+
+
+def test_core_graph_change_cannot_narrow_the_selection(repo):
+    """The fail-safe direction issue #2799's acceptance pins: a change to a file
+    on the compile graph (here the documented-core `src/revl/lexer.py`) answers
+    FULL with a core reason, never a narrow selection."""
+    result = _call(["src/revl/lexer.py"])
+
+    assert result["selection"]["full"] is True, result["selection"]
+    assert "is core" in result["selection"]["reason"], result["selection"]
+    assert "src/revl/lexer" in result["selection"]["reason"]
+    assert result["machine"].startswith("FULL 1\nREASON "), result["machine"]
 
 
 def test_unmapped_path_returns_full_with_the_selector_reason(repo):

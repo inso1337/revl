@@ -110,11 +110,20 @@ def _run_dash(args) -> int:
     # refused by that same policy under `revl audit --policy`. An empty
     # decision queue is read as an absence of decisions, so it failed OPEN, and
     # the dependency-graph pane above it was empty for the same reason.
-    resolved = _composition_document(args, label="dash")
+    # issue #2756: when the opt-in section is requested, collect the export
+    # rule's decision through issue #1779's report out-parameter. A source under
+    # `.revl/export/` is author-written (issue #2547) and puts the whole compile
+    # under the authoring profile, and the section has to follow it. The report
+    # never enters the IR, so its bytes are unchanged.
+    compile_report = ({} if getattr(args, "rejected", False)
+                      and not getattr(args, "trust_exported", False) else None)
+    resolved = _composition_document(args, label="dash",
+                                     read_report=compile_report)
     if isinstance(resolved, int):
         return resolved
     try:
-        ir = compile_files(args.files) if resolved is None else resolved
+        ir = (compile_files(args.files, report=compile_report)
+              if resolved is None else resolved)
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -141,10 +150,23 @@ def _run_dash(args) -> int:
                   file=sys.stderr)
             return 1
 
+    # issue #2756: the rejected-candidates view carries the profile the sources
+    # were compiled under. A file under `.revl/export/` is author-written
+    # (issue #2547), so its compile uses the authoring profile and this view
+    # must be the collapsed author verdict: the full `navigate` record would
+    # rebuild the operator's policy topology. `--trust-exported` says the file
+    # is the operator's own, so the full record is shown. Only the opt-in
+    # section reads this; the default model and `--json` output stay unchanged.
+    profile = None
+    if compile_report is not None and compile_report.get("export_authored"):
+        from ..export_area import author_profile  # noqa: PLC0415
+        profile = author_profile()
+
     board = dash.Dashboard(
         ir, live_state=live_state, trace=trace, timeline=timeline,
         prev_audit=prev_audit, accepted=set(args.accept),
-        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope)
+        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope,
+        rejected=args.rejected, profile=profile)
 
     if args.json:
         print(json.dumps(board.snapshot(), indent=2))

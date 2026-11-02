@@ -129,6 +129,50 @@ def _is_emitted_case(value) -> bool:
     return slots <= {"value"}
 
 
+#: A UTF-16 surrogate code point. It is not a Unicode scalar value, so a `Str`
+#: carrying one alone has no UTF-8 spelling (`docs/strings.md`) and
+#: `str.encode("utf-8")` raises for it. A handler can still be handed one: a
+#: peer's JSON decoder builds it from a `"\ud83d"` escape with no partner.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _json_body_bytes(text: str) -> bytes:
+    """A handler-supplied `Json` body as UTF-8, with a lone surrogate escaped.
+
+    `Body::Json` is JSON text the handler already serialized and the face writes
+    verbatim, so the one thing that must hold of it is that it has a byte
+    spelling. JSON itself has one for an unpaired UTF-16 code unit, the
+    ``\\ud83d`` escape that produced it, so the raw unit is written as that
+    escape: the body stays text a peer can read, and the answer stays on the
+    wire instead of `UnicodeEncodeError` closing the connection with none. A
+    pair a JSON decoder read is already one astral scalar by the time it is
+    text; two adjacent surrogate code units a handler built itself are escaped
+    as two ``\\uXXXX``, which is still one valid JSON pair. Either way only a
+    unit with no standalone spelling is rewritten, and valid content is left
+    untouched.
+
+    `errors="backslashreplace"` is exactly that spelling, and under UTF-8 the
+    only error it can catch is a surrogate, so the escape cannot be an
+    approximation: `str.encode` writes ``\\ud83d`` for the unit.
+    """
+    return text.encode("utf-8", "backslashreplace")
+
+
+def _text_body_bytes(text: str) -> bytes:
+    """A handler-supplied `Text` body as UTF-8, a lone surrogate as U+FFFD.
+
+    Plain text has no escape mechanism to carry a code unit that names no
+    scalar, so the unit becomes the replacement character, the same U+FFFD a
+    UTF-8 decoder reports for bytes that name none: the two lossy directions
+    agree, and the reply is still written.
+
+    `errors="replace"` is deliberately not used: under UTF-8 it substitutes
+    `?` (U+003F) for an encoding error, not U+FFFD, so it would report a
+    literal question mark as if the handler had written one.
+    """
+    return _LONE_SURROGATE.sub("\ufffd", text).encode("utf-8")
+
+
 # ------------------------------------------------------------ item 457: routes
 
 _ROUTE_SCALARS = ("Str", "Int", "Bool")
@@ -805,7 +849,14 @@ class HttpComposedServer:
 
     def _encode_response_value(self, value) -> HttpReply:
         """A handler-owned `Response` (stdlib/http.rvl): the handler owns status,
-        headers and body, sent as-is."""
+        headers and body, sent as-is.
+
+        The one exception is a body with no UTF-8 spelling. A `Json` payload
+        writes a lone surrogate as its own JSON escape and a `Text` payload as
+        U+FFFD (`_json_body_bytes`, `_text_body_bytes`), because a reply that
+        could not be encoded used to close the connection with no status line.
+        A body that does encode is still written byte for byte as the handler
+        produced it."""
         enc = _encode_value(value)
         if not isinstance(enc, dict):
             return HttpReply.json(_SERVER_ERROR, {
@@ -835,10 +886,13 @@ class HttpComposedServer:
         if kind == "Empty":
             return HttpReply(status, b"", "application/json", extra_headers,
                              status_text)
-        content_type = "application/json" if kind == "Json" else \
-            "text/plain; charset=utf-8"
-        return HttpReply(status, str(payload).encode("utf-8"),
-                         content_type, extra_headers, status_text)
+        text = payload if isinstance(payload, str) else str(payload)
+        if kind == "Json":
+            return HttpReply(status, _json_body_bytes(text), "application/json",
+                             extra_headers, status_text)
+        return HttpReply(status, _text_body_bytes(text),
+                         "text/plain; charset=utf-8", extra_headers,
+                         status_text)
 
 
 def _opt_inner(type_name: str | None) -> str | None:
