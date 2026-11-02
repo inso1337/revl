@@ -325,6 +325,10 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
 | `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |
 | `revl_deploy` | push the running composition onto a **second host** through the ssh leg: admission-gated and approval-gated; without `apply:true` it rehearses | [deploy.md](deploy.md) |
+| `revl_update_check` | compare the running toolchain with the newest release on the operator's feed, its manifest and compatibility statement (no fetch, no compile) | [updates.md](updates.md) |
+| `revl_update_apply` | stage and admit a verified release against the running manifest and plan it, then apply the plan by hash: a stale plan or a widened irreversible reach is refused, and a successor that does not serve the running keys is reverted | [updates.md](updates.md) |
+| `revl_update_status` | feed configuration, running identity and generation, staged releases, held plans and the update journal | [updates.md](updates.md) |
+| `revl_update_rollback` | return to the generation before the last applied release through the admitted undo | [updates.md](updates.md) |
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
 | `revl_idiom` | the minimal admitted example of one construct (every hole's fillSpec carries its own) | [mcp-reference.md](mcp-reference.md#revl_idiom) |

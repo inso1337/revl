@@ -355,6 +355,22 @@ def _run_mcp(args) -> int:
             providers=providers or None,
             roots=tuple(getattr(args, "root", None) or ()) or None,
         )
+        # the operator update surface (docs/updates.md): the flags are the
+        # grant. A server started without --update refuses every update verb by
+        # name at the verb itself, so a caller cannot enable it over the wire.
+        if getattr(args, "update", False):
+            from ..mcp import update_tools  # noqa: PLC0415
+            update_tools.configure(
+                enabled=True,
+                repo=getattr(args, "update_repo", "inso1337/revl"),
+                project=getattr(args, "update_project", None),
+                channel=getattr(args, "update_channel", "stable"),
+                token_env=getattr(args, "update_token_env",
+                                  "REVL_UPDATE_TOKEN"),
+                home=getattr(args, "update_home", None),
+                api_base=getattr(args, "update_api_base", None),
+                trust_tags=bool(getattr(args, "update_trust_tags", False)),
+                replacing=tuple(getattr(args, "update_replacing", None) or ()))
         # issue #2524: the files this server reads as operator configuration.
         # No export may replace one, whichever directory it sits in.
         from ..mcp.export_jail import protect_operator_files  # noqa: PLC0415

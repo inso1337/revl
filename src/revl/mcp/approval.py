@@ -31,6 +31,7 @@ over the reach-closure semantic entries, and the outstanding-ticket table
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 
@@ -120,8 +121,100 @@ def _sha(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+class UnencodableTicketArgs(TypeError):
+    """A call argument with no canonical encoding, so no digest can name it."""
+
+
+# the key types `json.dumps` writes itself; any other key raises before the
+# `default` hook is consulted, so it is refused by `_check_canonical` instead
+_JSON_KEYS = (str, int, float, bool, type(None))
+
+
+def _is_case_class(cls) -> bool:
+    """Is `cls` an emitted ADT / `Result` case class? The class-level reading
+    `backends/python/bridge.py` `_is_case_class` uses to admit a wire `$kind`:
+    every class in the MRO but `object` declares its OWN `__slots__` (the ADT
+    base `()`, a nullary case `()`, a payload case `("value",)`), and the slots
+    are at most `value`. The instance-level `_is_emitted_case` would also admit
+    a builtin with no `__dict__` (`bytes`, `set`, `datetime`, `Decimal`) and
+    encode it as a constant `{"$kind": "bytes"}` that ignores the value, so two
+    different values would digest equal; the class-level reading refuses them,
+    since a builtin declares no `__slots__` of its own."""
+    if not isinstance(cls, type) or cls is object \
+            or getattr(cls, "__module__", None) == "builtins" \
+            or dataclasses.is_dataclass(cls):
+        return False
+    slots: set[str] = set()
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        declared = klass.__dict__.get("__slots__")
+        if declared is None:
+            return False
+        slots.update((declared,) if isinstance(declared, str) else declared)
+    return slots <= {"value"}
+
+
+def _refuse(what: str, why: str) -> UnencodableTicketArgs:
+    return UnencodableTicketArgs(
+        f"cannot digest {what}: {why}. Only scalars, lists, records, Opt and "
+        f"emitted cases have a canonical encoding; an opaque host value or live "
+        f"handle has none, and a `str`/`repr` spelling could make two different "
+        f"values digest equal")
+
+
+def _check_canonical(value) -> None:
+    """Refuse, by name, any value in an argument list that has no faithful
+    canonical encoding. It only raises: a list it admits is digested by the same
+    `json.dumps` text as before, so every JSON-able argument list keeps its
+    digest byte for byte."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _check_canonical(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, _JSON_KEYS):
+                raise _refuse(f"a {type(key).__name__!r} map key",
+                              "a key is written as JSON text and has no "
+                              "canonical form for a non-scalar")
+            _check_canonical(item)
+        return
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            _check_canonical(getattr(value, field.name))
+        return
+    if not _is_case_class(type(value)):
+        raise _refuse(f"a {type(value).__name__!r} argument",
+                      "it is not a scalar, list, record, Opt or emitted case")
+    if hasattr(value, "value"):
+        _check_canonical(value.value)
+
+
+def _canonical_arg(value):
+    """`json.dumps` `default` hook for `_args_digest`: a value JSON cannot
+    serialize is digested as its canonical wire encoding (the HTTP face's
+    `_encode_value`, the bridge's twin), so a routed face's NATIVE variant case
+    (`Method.Get`, `Empty`) digests exactly as the `{"$kind": ...}` form the
+    canonical path carries (issue #3005). Only reached for a non-JSON value that
+    `_check_canonical` admitted, so a JSON-able argument list digests byte for
+    byte as before."""
+    from .http_face import _encode_value  # noqa: PLC0415 - http_face imports us
+
+    try:
+        return _encode_value(value)
+    except TypeError as exc:
+        raise _refuse(f"a {type(value).__name__!r} argument", str(exc)) from None
+
+
 def _args_digest(args) -> str:
-    return _sha(_canon(list(args or [])))
+    listed = list(args or [])
+    _check_canonical(listed)
+    text = json.dumps(listed, sort_keys=True, separators=(",", ":"),
+                      default=_canonical_arg)
+    return _sha(text)
 
 
 class ApprovalRequired(Exception):

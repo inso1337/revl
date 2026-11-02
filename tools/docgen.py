@@ -300,9 +300,9 @@ def block_authoring_mcp_count(current: str) -> str:
     (#1768)."""
     mcp_tools()
     return (
-        "`revl mcp serve` lists its core tier by default and `revl_verbs`\n"
-        "finds the rest — and calls one, given `name` and `args`, so no verb\n"
-        "is out of reach; every verb is listed in full in\n"
+        "`revl mcp serve` lists its core tier by default. `revl_verbs` finds\n"
+        "the rest and can call any verb when given `name` and `args`; every\n"
+        "verb is listed in full in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 
