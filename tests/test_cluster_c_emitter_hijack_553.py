@@ -991,7 +991,11 @@ test "t" { assert pick({ name: "n", count: 2 }) == "n" }
 lifecycle test "u" { load C let z = call echo.echo("z") assert z == "z" }
 """
 _A3_PLAIN_DIGEST = {
-    "typescript": "8c5b126f3bb3c98ef19f3e7c4e32780068eb188b0cbfebc994db1d3edcd2d9e7",
+    # issue #2975 moved the typescript lifecycle driver's own locals to the
+    # `$revl_` sigil (the fn body below carries a `lifecycle test`, so its
+    # emitted bytes move with every such document). A program with no
+    # lifecycle test, or a binding outside that driver, is unchanged.
+    "typescript": "07b0bf8ace729df3cfde2b5974209e58c22aeab182ef8a3993819e9e4bceed29",
     "java": "954352a27d29f3ce72adbad77ae1ff2921899db6c2255d91a4f454c165149310",
 }
 
