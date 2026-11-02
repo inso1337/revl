@@ -3911,6 +3911,54 @@ def test_the_well_typed_generic_record_forms_are_admitted(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2942, the self-host half: a declared type applied to the wrong number
+# of type arguments. PR #2947 gave the reference checker the refusal where the
+# annotation is written; the native gate now counts a declared head's arguments
+# at its wellformed type sites and returns the same message and T1 tag.
+_TYPE_ARITY_2942_REFUSED = {
+    "zero_parameter_applied": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb[Int]) -> Int {\n"
+        "  return match m { Jj(x) => x, Nn => 0 }\n"
+        "}\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "generic_wrong_count": (
+        "type Box[T] = { v: T }\n"
+        "fn f(b: Box[Int, Int]) -> Int { return 1 }\n",
+        "`Box` takes 1 type argument(s), got 2 (`Box[Int, Int]`)",
+    ),
+}
+
+_TYPE_ARITY_2942_ADMITTED = {
+    "zero_parameter_bare": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb) -> Int {\n"
+        "  return match m { Jj(x) => x, Nn => 0 }\n"
+        "}\n"),
+    "generic_right_count": (
+        "type Box[T] = { v: T }\n"
+        "fn f(b: Box[Int]) -> Int { return b.v }\n"),
+}
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_REFUSED))
+def test_a_declared_type_with_the_wrong_argument_count_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text, message = _TYPE_ARITY_2942_REFUSED[name]
+    assert _reference_refusal(text) == message
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + message, got[:160]
+
+
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_ADMITTED))
+def test_the_right_declared_type_argument_count_is_admitted(admit, name):
+    text = _TYPE_ARITY_2942_ADMITTED[name]
+    assert _reference_refusal(text) == ""
+    assert admit(text) == ""
+
+
 # Issue #2460: an `if` whose branches join `Int` and `Float` is a `Float` in the
 # reference (`join`) and the native annotation engine answered unknown, so a
 # NESTED one fell back to `Int` on the outer join and the return-position widen
