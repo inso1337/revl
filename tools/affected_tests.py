@@ -18,8 +18,9 @@ the FULL gate, never fails open. Concretely:
     computed here from the real tree, one MODULE at a time (see
     `compile_reachable`), so a newly added core module cannot silently fall
     through to a narrow selection. A `src/revl` module off that graph selects the
-    tests that import it or a module that imports it directly, plus the tests
-    that name it (issue #2962).
+    tests that import it or any module whose imports reach it (the transitive
+    closure), plus the tests that name it or a command served by one of its
+    direct importers (issue #2962).
   * A changed file matching NO mapping rule -> FULL.
   * Structural changes (Makefile, tools/pre_merge.sh, CI config, tests/conftest.py,
     shared test helpers/fixtures, the reference IR, or a test file DELETED) -> FULL.
@@ -1373,17 +1374,41 @@ def module_of(path: str) -> str:
     return ".".join(Path(path[len("src/revl/"):]).with_suffix("").parts)
 
 
+def importers_of(root: Path, module: str) -> set[str]:
+    """Every `src/revl` module whose imports execute `module`, itself included.
+
+    Issue #2962 review. The import arm must take this whole closure: importing
+    `revl.run` executes `revl.metrics` when the chain of imports between them
+    reaches it, so a one-hop cut dropped tests that can run the changed module
+    and left the selector failing open. What made a leaf change select nearly
+    the whole suite was word-matching this closure's names, not following the
+    closure itself.
+    """
+    graph = import_graph(root) or {}
+    reverse: dict[str, set[str]] = {}
+    for src, targets in graph.items():
+        for target in targets:
+            reverse.setdefault(target, set()).add(src)
+    seen: set[str] = set()
+    stack = [module]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(reverse.get(current, set()) - seen)
+    return seen
+
+
 def direct_importers_of(root: Path, module: str) -> set[str]:
     """Every `src/revl` module with a direct import edge to `module`.
 
-    Issue #2962. The leaf arm used every TRANSITIVE importer (`revl.run`,
-    `revl.test`, `revl.gate`, ... for `revl.metrics`) and word-matched their
-    names, so `run` and `test` matched nearly every test. The transitive
-    closure is 585 tests for `revl.metrics` on this tree and cannot meet the
-    under-200 bound the issue requires, so the import arm narrows to one hop:
-    the tests that import the module or a module that imports it directly.
-    A test that reaches the module through a deeper importer is selected only
-    when it names the module, which the word arm below does.
+    Used for the word arm. A test can reach the module through a command that
+    one of the module's own direct importers serves (`revl slo` runs
+    `revl.slo`, which imports `revl.metrics`) without importing anything, so a
+    direct importer's LAST name goes through the word match. The first segment
+    is deliberately not added: for `cli.observe` that is the package `cli`,
+    which names a package rather than a command.
     """
     graph = import_graph(root) or {}
     return {src for src, targets in graph.items() if module in targets}
@@ -1397,12 +1422,13 @@ def test_module_imports(root: Path) -> dict[str, set[str]] | None:
     test cannot be read or parsed (the caller escalates).
 
     Issue #2962. The leaf arm must select a test that imports the changed
-    module or a module that imports it directly. Matching importer names as
-    words could not tell an import from prose, so the imports are read the same
-    way the `src/revl` graph reads them (`_import_nodes` + `_module_edges`): a
-    lazy import inside a function body counts because the test may call it.
-    Every module the import executes is recorded, so an import of
-    `revl.mcp.session` also answers yes for `mcp` and `mcp.__init__`.
+    module or any module whose imports reach it, directly or through a chain.
+    Matching importer names as words could not tell an import from prose, so
+    the imports are read the same way the `src/revl` graph reads them
+    (`_import_nodes` + `_module_edges`): a lazy import inside a function body
+    counts because the test may call it. Every module the import executes is
+    recorded, so an import of `revl.mcp.session` also answers yes for `mcp`
+    and `mcp.__init__`.
     """
     key = Path(root).resolve()
     if key not in _TEST_IMPORT_CACHE:
@@ -1675,16 +1701,13 @@ def select(changed, root) -> dict:
                 where = "core" if top in DOCUMENTED_CORE else "compile-reachable"
                 return _full(f"src/revl/{module.replace('.', '/')} is {where} -> full")
             # Not on the compile path. A test executes this module at import
-            # time by importing it or something on its import chain; the
-            # import arm takes the module itself and its DIRECT importers, and
-            # a test that reaches it through a deeper importer is selected
-            # when it names the module. The transitive closure was word-matched
-            # here instead and a change to a leaf selected 1072 of 1086 tests,
-            # because `revl.run` and `revl.test` are in that closure and
-            # `run`/`test` are words in nearly every test (issue #2962).
-            # Naming the module also covers a CLI subcommand named after it:
-            # `revl metrics` dispatches to `revl.metrics` without an import.
-            executors = {module} | direct_importers_of(root, module)
+            # time when any import on its chain reaches it, so the import arm
+            # takes the TRANSITIVE importers: importing `revl.run` executes
+            # `revl.metrics` when run's chain imports it. The over-selection
+            # this issue reports came from WORD-matching that closure's names
+            # (`revl.run` and `revl.test` put `run`/`test` into the word set),
+            # not from following the closure.
+            executors = importers_of(root, module)
             imports = test_module_imports(root)
             if imports is None:
                 return _full("cannot analyze the tests' revl imports -> full")
@@ -1696,6 +1719,15 @@ def select(changed, root) -> dict:
             # subpackage: a test naming `revl.mcp` may reach any `mcp` module
             # (issue #1780).
             names = set(parts[:1] + parts[-1:])
+            # A command served by a DIRECT importer (`revl slo` dispatches to
+            # `revl.slo`, which imports `revl.metrics`) is reached without any
+            # import, so that importer's last name joins the word match too.
+            for importer in direct_importers_of(root, module):
+                iparts = importer.split(".")
+                if iparts[-1] == "__init__":
+                    iparts = iparts[:-1]
+                if iparts:
+                    names.add(iparts[-1])
             hits |= set().union(*(_word_tests(root, n) for n in sorted(names)))
             if not hits:
                 return _full(f"src/revl/{module} (leaf) has no referencing test -> full")
