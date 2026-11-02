@@ -2,9 +2,9 @@
 """agent-ci-gate — a THIRD-PARTY CI gate over `revl.gate` (roadmap item 338).
 
 This file is not part of revl. It is what an external project looks like
-once it does `pip install revl` and depends on the gate as a library: its
-own `pyproject.toml` (in this directory) declares `revl` as a dependency,
-and the only revl import anywhere in this project is the one below.
+once it installs revl from source or a git tag and depends on the gate as a
+library: its own `pyproject.toml` (in this directory) declares `revl` as a
+dependency, and the only revl import anywhere in this project is the one below.
 
 READ THIS BEFORE YOU COPY IT: THE ASYMMETRIC SECURITY CONTRACT
 ================================================================
