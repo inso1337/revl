@@ -300,7 +300,7 @@ returns nothing).
 
 `revl mcp serve` exposes the compiler over MCP (the documented happy path;
 issues #317 and #336 note that a script entry point is window-free by design).
-absolute-interpreter fallback is `python -P -m revl mcp serve` (the `-P`
+The absolute-interpreter fallback is `python -P -m revl mcp serve` (the `-P`
 is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 `sys.path[0]`), and the loop it enables is the point: a draft component
 never has to touch the filesystem. This is your primary interface.
