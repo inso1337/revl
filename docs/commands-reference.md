@@ -1928,6 +1928,11 @@ trace streaming, and the pending-decisions queue with evidence attached
 - `--accept-all` - mark every added crossing as acknowledged.
 - `--policy POLICY` - a boundary policy file (item 33); its violations over the
   current audit are the policy-exception queue, each with its why-trace.
+- `--rejected` - add the rejected-candidates section (issue #2756): for each
+  candidate `--policy` refuses, the refused edge, the guarantee it broke and the
+  repairs `navigate` allows. Read-only. A source under `.revl/export/` is
+  author-written and shows the collapsed author verdict unless `--trust-exported`
+  is given.
 - `--mcp-scope COMPONENT` - treat `COMPONENT` as MCP/agent-admitted for the
   policy's `mcp` sandbox; repeatable, `*` = every component.
 - `--watch` - periodic-refresh loop: re-read the sources and reprint on an

@@ -113,8 +113,17 @@ def _run_dash(args) -> int:
     resolved = _composition_document(args, label="dash")
     if isinstance(resolved, int):
         return resolved
+    # issue #2756: when the opt-in section is requested, record what the compile
+    # read (issue #1779): a `use` of an author-written module under `.revl/export/`
+    # puts the whole compile under the authoring profile (issue #2547), and the
+    # section has to follow it. The report is a caller-supplied out-parameter, so
+    # the IR bytes are unchanged.
+    compile_report = ({} if resolved is None
+                      and getattr(args, "rejected", False)
+                      and not getattr(args, "trust_exported", False) else None)
     try:
-        ir = compile_files(args.files) if resolved is None else resolved
+        ir = (compile_files(args.files, report=compile_report)
+              if resolved is None else resolved)
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -141,10 +150,25 @@ def _run_dash(args) -> int:
                   file=sys.stderr)
             return 1
 
+    # issue #2756: the rejected-candidates view carries the profile the sources
+    # were compiled under. A file under `.revl/export/` is author-written
+    # (issue #2547), so its compile uses the authoring profile and this view
+    # must be the collapsed author verdict: the full `navigate` record would
+    # rebuild the operator's policy topology. `--trust-exported` says the file
+    # is the operator's own, so the full record is shown. Only the opt-in
+    # section reads this; the default model and `--json` output stay unchanged.
+    profile = None
+    if compile_report is not None:
+        from ..export_area import CliRule, author_profile  # noqa: PLC0415
+        sources = [*args.files, *(compile_report.get("dependencies") or ())]
+        if any(CliRule.exported(path) for path in sources):
+            profile = author_profile()
+
     board = dash.Dashboard(
         ir, live_state=live_state, trace=trace, timeline=timeline,
         prev_audit=prev_audit, accepted=set(args.accept),
-        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope)
+        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope,
+        rejected=args.rejected, profile=profile)
 
     if args.json:
         print(json.dumps(board.snapshot(), indent=2))

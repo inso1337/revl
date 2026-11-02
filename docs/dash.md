@@ -101,8 +101,9 @@ choice is being asked of them.
 
 The decisions queue says that a policy refused. The rejected-candidates section
 says why, edge by edge. It is off by default, so the default model and `--json`
-output are unchanged. It is enabled with `rejected=True` on `dash.build_model`
-or `dash.Dashboard`, together with a `policy`.
+output are unchanged. `revl dash --rejected` enables it (with `--policy`), and
+the Python API enables it with `rejected=True` on `dash.build_model` or
+`dash.Dashboard`, together with a `policy`.
 
 For each component the policy refuses, it lists every refused edge as
 `component -> capability: guarantee`, with the repairs the refusal's `navigate`
@@ -127,11 +128,17 @@ nothing else: no component, capability, guarantee or family. Every refusal
 renders the same bytes, so the section cannot be used to rebuild the operator's
 policy. The full detail is for the operator view only.
 
+On the command line the profile follows the source: a file under `.revl/export/`
+is author-written (issue #2547) and compiles under the authoring profile, so
+`--rejected` shows the collapsed verdict for it. `--trust-exported` says the
+file is the operator's own and restores the full record.
+
 Under that profile the policy exceptions in the decisions queue are collapsed to
 the same verdict, so nothing else in the output names the refused edge.
 
-There is no CLI flag for it yet, so `--json` output is unchanged. The Python
-API adds a `rejected` key to the model when it is enabled.
+The Python API adds a `rejected` key to the model when it is enabled;
+`revl dash --json --rejected` carries the same key, and the default `--json`
+output is unchanged.
 
 Tests: `tests/test_dash_rejected_2756.py`.
 
@@ -147,6 +154,7 @@ revl dash <sources.rvl...> [options]
   --accept CROSSING    mark one added crossing acknowledged (repeatable)
   --accept-all         mark every added crossing acknowledged
   --policy POLICY      a boundary policy; its violations are the exception queue
+  --rejected           add the rejected-candidates section (read-only; needs --policy)
   --mcp-scope NAME     a component under the policy's mcp sandbox (repeatable; * = all)
   --watch              periodic-refresh loop (read-only; Ctrl-C to stop)
   --interval SECONDS   refresh interval for --watch (default 2.0)
@@ -169,5 +177,6 @@ revl dash gen2.rvl --live-state now.json \
 ```
 
 Machine first, human second (see `docs/queries.md` §1): `--json` emits the
-structured model — `{ok, readOnly, mode, generation, graph, trace, decisions}` —
-and the text render is the courtesy window onto it.
+structured model — `{ok, readOnly, mode, generation, graph, trace, decisions}`,
+plus `rejected` when `--rejected` is given — and the text render is the courtesy
+window onto it.
