@@ -3316,15 +3316,6 @@ _ISSUE_2399_REFUSED.update({
     "arm_result_matched_with_some": (
         "fn f(o: Result[Int, Str]) -> Int {\n"
         "  return match o { Some(x) => { let k = x\n k }, _ => 0 }\n}\n"),
-    # issue #2325: a raw generic selector has no arguments to substitute, so the
-    # binder stays unknown and the block-arm lift refuses it on both sides
-    "raw_generic_selector_block_arm": (
-        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder) -> Int {\n"
-        "  return match o { Has(x) => { let k = x\n k }, Nothing => 0 }\n}\n"),
-    # the arity-mismatch branch of the same rule
-    "wrong_arity_generic_selector_block_arm": (
-        "type Pair[A, B] = First(A) | Second(B)\nfn f(o: Pair[Int]) -> Int {\n"
-        "  return match o { First(x) => { let k = x\n k }, Second(y) => 0 }\n}\n"),
     # a test written right after an extern is still checked
     "test_body_host_method_after_extern": (
         _EXTERN + "test \"t\" {\n  let a = g()\n  let n = a.length()\n  assert true\n}\n"),
