@@ -3987,10 +3987,13 @@ fn is_space_ch(c: Str) -> Bool {
 
 // Port of typecheck.check_type_wellformed: a builtin generic head used with
 // the wrong arity (bare `Opt`, `List[]`, `Map[Str]`) is not a type spelling;
-// recurses into arguments. User/nominal heads are not arity-checked.
+// recurses into arguments. A builtin scalar takes no type arguments (issue
+// #2963). User/nominal heads are not arity-checked.
 fn generic_arity(h: Str) -> Int {
   if (h == "Opt" || h == "List") { return 1 }
   if (h == "Map" || h == "Result") { return 2 }
+  if (h == "Int" || h == "Int32" || h == "Float" || h == "Str"
+      || h == "Bool" || h == "Bytes" || h == "Unit") { return 0 }
   return 0 - 1
 }
 
