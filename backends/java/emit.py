@@ -2937,37 +2937,18 @@ def _selector_type_args(scrutinee: object, owner: str, ctx: _V3Ctx,
 
 
 def _names_a_v3_class(type_name: object, ctx: _V3Ctx) -> bool:
-    """Whether ``_java_v3_type(type_name)`` names a class in scope.
+    """Whether a payload spelling names a class Java can declare.
 
     A raw-pattern match arm is declared at its payload type (`_arm_payload_type`
-    substitutes the selector's arguments), so the spelling must name something
-    Java can declare. A bare type parameter (`T`, or the checker's `?T`), an
-    inferred bottom (`Never`) and a structural record shape name no class;
-    those arms keep the untyped `final var` binding, as before.
+    substitutes the selector's arguments). A bare type parameter (`T`, or the
+    checker's `?T`), an inferred bottom (`Never`) and a structural record shape
+    name no class, so those arms keep the untyped `final var` binding.
     """
-    if not isinstance(type_name, str) or not type_name.strip():
-        return False
-    name = type_name.strip()
-    if name in ("Any", "Unit"):
-        return True
-    if name in TYPE_MAP:
-        return True
-    if "[" not in name:
-        return name in ctx.types
-    base = name[: name.index("[")]
-    inner = name[name.index("[") + 1 : name.rindex("]")]
-    args = _split_v3_types(inner)
-    if base in ("List", "Opt", "Set"):
-        return len(args) == 1 and _names_a_v3_class(args[0], ctx)
-    if base in ("Map", "Result"):
-        return len(args) == 2 and all(_names_a_v3_class(a, ctx) for a in args)
-    if base == "Stream":
-        return True
-    spec = ctx.types.get(base)
-    if spec is None:
-        return False
-    params = spec.get("params") or []
-    return len(args) == len(params) and all(_names_a_v3_class(a, ctx) for a in args)
+    name = type_name if isinstance(type_name, str) else ""
+    head = name.split("[", 1)[0]
+    shape = bool(name) and "{" not in name and "Never" not in name and "?" not in name
+    return shape and (head in TYPE_MAP or head in ctx.types or head in (
+        "Any", "Unit", "List", "Opt", "Map", "Result", "Set", "Stream"))
 
 
 def _infers_exactly(node: object, ctx: _V3Ctx) -> bool:

@@ -1339,30 +1339,19 @@ fn declarable_type(raw: Str, ctx: Ctx) -> Bool {
   return true
 }
 
-// `_names_a_v3_class`: whether `java_v3_type` names a class in scope. A
-// raw-pattern arm binding is declared at its payload type, so a bare type
-// parameter (`?T`), an inferred bottom (`Never`) or a structural shape must
-// keep the untyped `final var` binding instead.
+// `_names_a_v3_class`: whether a payload spelling names a class Java can
+// declare. A raw-pattern arm is declared at its payload type; a bare type
+// parameter (`?T`), an inferred bottom (`Never`) and a structural shape name no
+// class, so those arms keep the untyped `final var` binding.
 fn nameable_v3_type(raw: Str, ctx: Ctx) -> Bool {
   let name = trim(raw)
-  if (name == "") { return false }
-  if (name == "Any" || name == "Unit") { return true }
-  if (type_map(name) != "") { return true }
   let lb = name.indexOf("[")
-  if (lb < 0) { return bool_get(ctx.tys, name) }
-  let base = name.slice(0, lb)
-  let args = split_top(name.slice(lb + 1, last_index_of(name, "]")), ",")
-  if (base == "List" || base == "Opt" || base == "Set") {
-    return args.length() == 1 && nameable_v3_type(args[0], ctx)
-  }
-  if (base == "Map" || base == "Result") {
-    return args.length() == 2 && nameable_v3_type(args[0], ctx)
-      && nameable_v3_type(args[1], ctx)
-  }
-  if (base == "Stream") { return true }
-  if (!bool_get(ctx.tys, base)) { return false }
-  for (a of args) { if (!nameable_v3_type(a, ctx)) { return false } }
-  return true
+  let head = lb < 0 ? name : name.slice(0, lb)
+  let shape = name != "" && name.indexOf("{") < 0
+    && name.indexOf("Never") < 0 && name.indexOf("?") < 0
+  return shape && (type_map(head) != "" || bool_get(ctx.tys, head)
+    || head == "Any" || head == "Unit" || head == "List" || head == "Opt"
+    || head == "Map" || head == "Result" || head == "Set" || head == "Stream")
 }
 
 // `_let_keyword`: an empty list literal declares as the List type its
