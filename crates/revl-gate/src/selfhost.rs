@@ -15400,7 +15400,8 @@ fn mth_param_tys(pm: ProvM, decl: MSig, i: i64, acc: Vec<Bind>) -> Vec<Bind> {
         ty = taint_strip((decl.ps)[(i) as usize].ty.clone());
     }
     ty = tk_solid(ty.clone(), &acc);
-    return mth_param_tys(pm.clone(), decl, (i).checked_add(1i64).expect("revl: Int overflow"), if (ty == "") { acc.clone() } else { tenv_put(&acc, (pm.params)[(i) as usize].clone(), ty.clone()) });
+    let b = tenv_put(&acc, String::from("mp ").revl_concat(&(pm.params)[(i) as usize]), String::from("1"));
+    return mth_param_tys(pm.clone(), decl, (i).checked_add(1i64).expect("revl: Int overflow"), if (ty == "") { b.clone() } else { tenv_put(&b, (pm.params)[(i) as usize].clone(), ty.clone()) });
 }
 
 fn body_line(ss: &[Stmt], cx: Ctx__m2, fallback: i64) -> i64 {
@@ -21269,6 +21270,41 @@ fn tk_ty_has_tparam(t: &str, env: &[Bind]) -> bool {
     return true;
 }
 
+fn tk_names_fallthrough(n: &str, env: &[Bind]) -> bool {
+    if (tenv_get(env, &(String::from("case ").revl_concat(&n))) != "") {
+        return true;
+    }
+    return ((tenv_get(env, &(String::from("mp ").revl_concat(&n))) == "1") && sig_declared(env, n));
+}
+
+fn tk_non_function_call_msg(n: &str, ty: String) -> String {
+    return (((String::from("`").revl_concat(&n)).revl_concat("` is bound here as `")).revl_concat(&tk_render(ty))).revl_concat("`, which is not a function, so it cannot be called");
+}
+
+fn tk_non_function_call(c: CallN, env: &[Bind]) -> TInf {
+    let n = match c.target {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+};
+    if (n == "") {
+        return tk_ok(String::from(""));
+    }
+    let local = tenv_get(env, &n);
+    if (local == "") {
+        return tk_ok(String::from(""));
+    }
+    if (local == tenv_get(env, &sig_key("sigv", &n))) {
+        return tk_ok(String::from(""));
+    }
+    if is_callable_value_ty(local.clone()) {
+        return tk_ok(String::from(""));
+    }
+    if (!tk_names_fallthrough(&n, env)) {
+        return tk_ok(String::from(""));
+    }
+    return tk_no("T1", &tk_non_function_call_msg(&n, local));
+}
+
 fn tk_call(c: CallN, env: Vec<Bind>) -> TInf {
     let tv = tk_callee(c.target.clone(), env.clone());
     if (tv.v != "") {
@@ -21284,6 +21320,10 @@ fn tk_call(c: CallN, env: Vec<Bind>) -> TInf {
     let a = tk_arg_walk(&c.args, 0i64, env.clone(), vec![]);
     if (a.v != "") {
         return a.r;
+    }
+    let nfc = tk_non_function_call(c.clone(), &env);
+    if (nfc.v != "") {
+        return nfc;
     }
     let cpl = tk_case_payload(c.clone(), &env, &a.tys);
     if (cpl.v != "") {

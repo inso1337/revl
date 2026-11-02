@@ -8694,14 +8694,19 @@ fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind
 // (the two have already been held to each other by `a6_annotation_verdict`, so
 // they agree wherever both are present), and a parameter neither side spells
 // contributes nothing.
+//
+// The `mp` marker names the parameter, whether or not a type was available: the
+// one binder form the reference's item-445 scan cannot see, so the #2544 guard
+// may claim its module-`fn`/extern fall-through (`tk_names_fallthrough`).
 fn mth_param_tys(pm: ProvM, decl: MSig, i: Int, acc: List[Bind]) -> List[Bind] {
   if (i >= pm.params.length()) { return acc }
   var ty = ""
   if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
   if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
   ty = tk_solid(ty, acc)
+  let b = tenv_put(acc, "mp ".concat(pm.params[i]), "1")
   return mth_param_tys(pm, decl, i + 1,
-                       ty == "" ? acc : tenv_put(acc, pm.params[i], ty))
+                       ty == "" ? b : tenv_put(b, pm.params[i], ty))
 }
 
 fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
@@ -15569,6 +15574,54 @@ fn tk_ty_has_tparam(t: Str, env: List[Bind]) -> Bool {
   return true
 }
 
+// ------------------------------------------ the non-function call (#2544)
+//
+// `typecheck.refuse_call_on_non_function`: a bare-name call whose callee is a
+// BINDER the type environment holds a definitely-not-a-function type for, while
+// a module `fn`/extern or ADT case of the same name exists. Such a call names
+// the module callable instead and silently drops the binding, which the
+// reference refuses by TYPE. This is where that refusal belongs: `tk_call` is
+// the expression walk both the module-`fn` and the provide-method type layers
+// run, and the reference raises it while typing the call.
+//
+// The callable-existence half keeps the refusal true: with no case row and no
+// reachable module `fn`/extern there is no fall-through to name, and the call is
+// left to the ordinary checks. A function-typed binder (`->`, `Fn[...]`) is the
+// callee (issue #1823), and the open heads `Any`/`Value`/`Never` are not
+// "definitely not a function", so all of them stay admitted. The `sigv`
+// comparison comes first so a module `fn` called under its own declaration row
+// costs no type parse; a rebinding local never matches that row.
+//
+// THE METHOD-PARAMETER MARKER is what keeps the layer honest. The reference's
+// item-445 scan (`_refuse_callable_shadowing`, G6) runs before the type layer
+// and sees every binder except a provide method's PARAMETERS (its parameter list
+// is names, not typed nodes). So a same-named module `fn`/extern is the G6
+// sentence in every other body, even where this gate's token scan of module `fn`
+// bodies deliberately stood down (it bails on any `=>`), and this guard must not
+// spell the T1 sentence there. A CASE constructor is not in item 445's universe
+// at all, so the case half is decided in every stratum. `mth_param_tys` writes
+// the `mp` marker for the one form the fn/extern half owns.
+fn tk_names_fallthrough(n: Str, env: List[Bind]) -> Bool {
+  if (tenv_get(env, "case ".concat(n)) != "") { return true }
+  return tenv_get(env, "mp ".concat(n)) == "1" && sig_declared(env, n)
+}
+
+fn tk_non_function_call_msg(n: Str, ty: Str) -> Str {
+  return "`".concat(n).concat("` is bound here as `").concat(tk_render(ty))
+    .concat("`, which is not a function, so it cannot be called")
+}
+
+fn tk_non_function_call(c: CallN, env: List[Bind]) -> TInf {
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return tk_ok("") }
+  let local = tenv_get(env, n)
+  if (local == "") { return tk_ok("") }
+  if (local == tenv_get(env, sig_key("sigv", n))) { return tk_ok("") }
+  if (is_callable_value_ty(local)) { return tk_ok("") }
+  if (!tk_names_fallthrough(n, env)) { return tk_ok("") }
+  return tk_no("T1", tk_non_function_call_msg(n, local))
+}
+
 // A call: every argument is walked for the refusals inside it. Argument-vs-
 // signature checking is T2b's slice, so the call's own type comes from the
 // annotation engine.
@@ -15600,6 +15653,11 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }
+  // issue #2544: the reference types the arguments, then decides a bare-name
+  // callee against the type environment BEFORE the case payload and the
+  // signature table, so a call on a non-function binder is refused here.
+  let nfc = tk_non_function_call(c, env)
+  if (nfc.v != "") { return nfc }
   // Issue #2448: a variant CASE CONSTRUCTOR call checks its payload against the
   // case's declared type (`typecheck.infer_ast`'s ExprCall arm; the counterpart
   // is `selfhost/checker.rvl`'s `case_call_ty`). This walk resolved a case name
