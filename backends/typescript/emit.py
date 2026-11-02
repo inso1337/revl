@@ -5709,9 +5709,9 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         body: list[str] = []
         # issue #2975: every local the driver binds for ITSELF carries the
         # `$revl_` sigil. `$` is not in revl's identifier alphabet (the lexer
-        # admits `[A-Za-z_][A-Za-z0-9_]*`), so a user `let` can never spell one
-        # — the same collision-proof convention the assert temporaries use
-        # (`$revl_l`, `$revl_match_N`). Plain `root` was emitted bare and a
+        # admits `[A-Za-z_][A-Za-z0-9_]*`), so a user `let` can never spell one.
+        # This is the same collision-proof convention the assert temporaries
+        # use (`$revl_l`, `$revl_match_N`). Plain `root` was emitted bare and a
         # `let root = call ...` made the generated suite redeclare it, so the
         # whole file failed to parse and the run reported `Tests no tests`
         # instead of naming the binding. tests/test_2975_lifecycle_driver_locals.py

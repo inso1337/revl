@@ -1,26 +1,28 @@
 """issue #2975: a lifecycle test binding named like the driver's own local.
 
-The emitted lifecycle driver declares locals of its own: `root`, `events` and
-`baseline` on the python tier, `root` on the typescript tier. A `let` of the
-same spelling was emitted bare, so the two were one name:
+The emitted lifecycle driver binds names of its own: the locals `root`,
+`events` and `baseline` on the python tier, and the `Context` import that
+`_run` reads on its first line. A `let` of any of those spellings was emitted
+bare, so the driver and the binding were one name:
 
   * python silently rebound the driver's context and the NEXT step died inside
     the runtime (`'str' object has no attribute 'get'`), naming a runtime member
-    rather than the binding;
+    rather than the binding. A `let Context` was assigned inside `_run`, so it
+    shadowed the enclosing import and the first line raised UnboundLocalError;
   * typescript emitted a second `const root`, the generated suite did not parse,
-    and `revl test` reported `Tests no tests` — the shape a reader is most
+    and `revl test` reported `Tests no tests`, the shape a reader is most
     likely to read as "nothing to run".
 
-Every driver local now lives in a namespace a revl binding cannot enter:
+Every driver name now lives in a namespace a revl binding cannot enter:
 python's `_revl*` (which `_ident` refuses by name) and typescript's `$revl*`
-(`$` is not in revl's identifier alphabet — the same collision-proof convention
+(`$` is not in revl's identifier alphabet, the same collision-proof convention
 as the assert temporaries `$revl_l` / `$revl_match_N`). This file pins the two
 halves the issue asks for:
 
   * the measured names emit, with the author's own spelling untouched;
-  * the driver's local names are DERIVED from the emitted source and asserted
-    to stay in that namespace, so a fourth local added to a preamble tomorrow
-    fails here instead of in a consumer.
+  * the driver's bound names are DERIVED from the emitted source (locals,
+    imports and function definitions) and asserted to stay in that namespace,
+    so a name added to a preamble tomorrow fails here instead of a consumer.
 
 The real-runtime proof lives beside the other tier runners:
 ``test_lifecycle_exec.py`` (python) and ``test_lifecycle_cross_tier.py`` (ts).
@@ -44,8 +46,11 @@ from revl import compile_source  # noqa: E402
 EMIT_PY = backend_emitter("python")
 EMIT_TS = backend_emitter("typescript")
 
-# The names the issue measured, one binding per program.
+# The names the issue measured, one binding per program. `Context` is the
+# python driver's import; typescript already renames a user `Context`
+# (`EMITTER_RESERVED`), so only the python tier enumerates it.
 LOCAL_NAMES = ("root", "baseline", "events")
+PY_LOCAL_NAMES = LOCAL_NAMES + ("Context",)
 
 BASE = """service Box { fn label() -> Str }
 
@@ -88,14 +93,16 @@ def _emitted(backend: str, source: str) -> str:
 
 # ----------------------------------------------------- the measured programs
 
-@pytest.mark.parametrize("name", LOCAL_NAMES)
+@pytest.mark.parametrize("name", PY_LOCAL_NAMES)
 def test_python_keeps_the_user_binding_and_reserves_the_driver(name: str):
-    """Before the fix the driver's `root`/`baseline`/`events` shadowed these
-    bindings; now the author's spelling is emitted untouched and every driver
-    reference reads its own `_revl_` local."""
+    """Before the fix the driver's names shadowed these bindings; now the
+    author's spelling is emitted untouched and every driver reference reads
+    its own `_revl_` name."""
     source = _emitted("python", _program(name))
     assert f"{name} = await _revl_call(_revl_root," in source
     assert "again = await _revl_call(_revl_root," in source
+    assert "from cordis import Context as _revl_Context" in source
+    assert "_revl_root = _revl_Context()" in source
     assert (
         "_revl_no_residue(_revl_root, _revl_baseline, _revl_events,"
         in source
@@ -122,9 +129,29 @@ def _python_test_function(source: str) -> ast.FunctionDef:
     return fn
 
 
+#: Function definitions the driver emits for itself. `_run` is in
+#: `_EMITTER_TEMPS`, so `_ident` renames a user binding or function of that
+#: spelling; it is the one def this scan sees and the one allowed bare name.
+_DRIVER_DEFS = frozenset({"_run"})
+
+
 def _python_bound_names(fn: ast.FunctionDef) -> set[str]:
-    return {node.id for node in ast.walk(fn)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+    """Every name the emitted test function binds: locals, `import`/`from`
+    aliases and nested function definitions. Import bindings were the gap that
+    let the bare `Context` import through this scan."""
+    names: set[str] = set()
+    for node in ast.walk(fn):
+        if node is fn:
+            # the emitted test entry point is not a driver binding
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+    return names
 
 
 def _typescript_it_body(source: str) -> str:
@@ -162,7 +189,9 @@ def test_python_driver_binds_only_the_reserved_namespace(body: str):
     fn = _python_test_function(EMIT_PY.emit(compile_source(_body_program(body))))
     bound = _python_bound_names(fn)
     assert bound, "the lifecycle driver binds nothing? the scan is wrong"
-    bare = sorted(name for name in bound if not name.startswith("_revl"))
+    bare = sorted(
+        name for name in bound
+        if name not in _DRIVER_DEFS and not name.startswith("_revl"))
     assert not bare, (
         f"lifecycle driver binds user-spellable name(s) {bare}; prefix each "
         "with `_revl` so a revl `let` cannot reach it (issue #2975)")
@@ -194,7 +223,7 @@ def test_typescript_driver_binds_only_unspellable_names(body: str):
 def test_python_refuses_a_binding_that_enters_the_reserved_namespace():
     """A `_revl*` binding cannot be renamed into safety on this tier (the
     rung would still be inside the reserved namespace), so it is refused by
-    name — a clean diagnostic instead of a runtime AttributeError."""
+    name, a clean diagnostic instead of a runtime AttributeError."""
     with pytest.raises(EMIT_PY.EmitError) as excinfo:
         EMIT_PY.emit(compile_source(_program("_revl_root")))
     assert "_revl_root" in str(excinfo.value)

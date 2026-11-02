@@ -5152,18 +5152,21 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(1, "# cordis-py is imported here, not at module scope: a document may")
     out.add(1, "# mix pure `test` blocks with lifecycle ones, and only the latter")
     out.add(1, "# need a runtime.")
-    out.add(1, "from cordis import Context")
+    out.add(1, "from cordis import Context as _revl_Context")
     out.add(0)
     uses_abort = _lifecycle_uses_abort(test)
     out.add(1, "async def _run():")
-    # issue #2975: every local the driver binds for ITSELF lives in the
-    # `_revl*` namespace, which `_ident` refuses a user identifier from
-    # entering (`root`, `events` and `baseline` were the bare exceptions: a
+    # issue #2975: every name the driver binds for ITSELF lives in the `_revl*`
+    # namespace, which `_ident` refuses a user identifier from entering. The
+    # bare locals (`root`, `events`, `baseline`) were the first half: a
     # `let root = call ...` rebound the driver's own context and the next step
-    # died inside the runtime). A future local added here must keep the
-    # prefix; tests/test_2975_lifecycle_driver_locals.py derives this set from
-    # the emitted source and fails on a bare one.
-    out.add(2, "_revl_root = Context()")
+    # died inside the runtime. The `Context` import is the second half: a
+    # `let Context = call ...` was assigned inside `_run`, so `Context` became
+    # local there, shadowed the enclosing import, and the first line raised
+    # UnboundLocalError. A future name added here must keep the prefix;
+    # tests/test_2975_lifecycle_driver_locals.py derives this set from the
+    # emitted source (locals, imports and defs) and fails on a bare one.
+    out.add(2, "_revl_root = _revl_Context()")
     if _lifecycle_uses_clock(test):
         # item 102: the clock coeffect is a module-global; reset it so this
         # test's `advance` steps start from t=0 and see only its own timers,

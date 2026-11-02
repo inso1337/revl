@@ -4664,10 +4664,10 @@ fn emit_lifecycle_test(t: Any, fname: Str) -> List[Str] {
     line(1, "# cordis-py is imported here, not at module scope: a document may"),
     line(1, "# mix pure `test` blocks with lifecycle ones, and only the latter"),
     line(1, "# need a runtime."),
-    line(1, "from cordis import Context"),
+    line(1, "from cordis import Context as _revl_Context"),
     "",
     line(1, "async def _run():"),
-    line(2, "_revl_root = Context()")]
+    line(2, "_revl_root = _revl_Context()")]
   if (test_uses_step(t, "advance")) { out = out.push(line(2, "_revl_Clock.reset()")) }
   out = out.concat([line(2, "_revl_events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = _revl_live()")])
   if (uses_abort) {

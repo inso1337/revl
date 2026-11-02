@@ -128,14 +128,16 @@ lifecycle test "bind {name}" {{
 def test_a_binding_named_like_a_driver_local_still_runs(tmp_path):
     """issue #2975: before the fix `bind root` failed with an AttributeError
     from the NEXT step and `bind baseline` with a TypeError from the residue
-    check; only a rename of the binding (or `events`, which passed by luck)
-    decided whether the same program ran."""
+    check; a rename of the binding decided whether the same program ran.
+    `Context` is the driver's import: it was assigned inside `_run` and the
+    first line raised UnboundLocalError."""
     path = tmp_path / "driver_locals.rvl"
     path.write_text(_DRIVER_LOCAL_SOURCE + "".join(
-        _binding_case(n) for n in ("root", "baseline", "events")), encoding="utf-8")
+        _binding_case(n) for n in ("root", "baseline", "events", "Context")),
+        encoding="utf-8")
 
     result = _revl_test(str(path))
     assert result.returncode == 0, result.stdout + result.stderr
-    for name in ("root", "baseline", "events"):
+    for name in ("root", "baseline", "events", "Context"):
         assert f"PASS bind {name}" in result.stdout
-    assert "[py] pass: 3 test(s) passed" in result.stdout
+    assert "[py] pass: 4 test(s) passed" in result.stdout
