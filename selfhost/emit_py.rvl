@@ -4610,7 +4610,7 @@ fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
     let cfg = value_field(st, "config")
     var parts = []
     for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${expr(value_field(cfg, k))}`) }
-    return [line(indent, `_revl_fibers[${py_repr(comp)}] = _revl_plug(root, ${comp}, {${parts.join(", ")}})`),
+    return [line(indent, `_revl_fibers[${py_repr(comp)}] = _revl_plug(_revl_root, ${comp}, {${parts.join(", ")}})`),
             line(indent, "await _revl_settle()"),
             line(indent, `_revl_load_failed(_revl_fibers[${py_repr(comp)}], ${py_repr(comp)}, ${py_repr(where)})`)]
   }
@@ -4624,7 +4624,7 @@ fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
   if (kind == "call") {
     var args = []
     for (a of value_list(value_field(st, "args"))) { args = args.push(expr(a)) }
-    let call = `await _revl_call(root, ${py_repr(host_key(value_str(value_field(st, "key"))))}, ${py_repr(value_field(st, "method"))}, [${args.join(", ")}], ${py_repr(where)})`
+    let call = `await _revl_call(_revl_root, ${py_repr(host_key(value_str(value_field(st, "key"))))}, ${py_repr(value_field(st, "method"))}, [${args.join(", ")}], ${py_repr(where)})`
     let bind = value_field(st, "bind")
     let first = value_is_null(bind) ? call : `${mangle(value_str(bind))} = ${call}`
     return [line(indent, first), line(indent, "await _revl_settle()")]
@@ -4635,9 +4635,9 @@ fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
   }
   if (kind == "abort") {
     return [line(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue"),
-            line(indent, "for _fiber in reversed(list(_revl_fibers.values())):"),
+            line(indent, "for _revl_fiber in reversed(list(_revl_fibers.values())):"),
             line(indent + 1, "try:"),
-            line(indent + 2, "await _fiber.dispose()   # replay inverses"),
+            line(indent + 2, "await _revl_fiber.dispose()   # replay inverses"),
             line(indent + 1, "except Exception:"),
             line(indent + 2, "pass"),
             line(indent, "_revl_fibers.clear()"),
@@ -4647,7 +4647,7 @@ fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
             line(indent, "await _revl_settle()")]
   }
   if (kind == "assert_no_residue") {
-    return [line(indent, `_revl_no_residue(root, baseline, events, ${py_repr(where)})`)]
+    return [line(indent, `_revl_no_residue(_revl_root, _revl_baseline, _revl_events, ${py_repr(where)})`)]
   }
   if (kind == "assert") {
     return [line(indent, `assert ${expr(value_field(st, "expr"))}, ${py_repr(where.concat(": assertion failed"))}`)]
@@ -4667,22 +4667,22 @@ fn emit_lifecycle_test(t: Any, fname: Str) -> List[Str] {
     line(1, "from cordis import Context"),
     "",
     line(1, "async def _run():"),
-    line(2, "root = Context()")]
+    line(2, "_revl_root = Context()")]
   if (test_uses_step(t, "advance")) { out = out.push(line(2, "_revl_Clock.reset()")) }
-  out = out.concat([line(2, "events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = _revl_live()")])
+  out = out.concat([line(2, "_revl_events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = _revl_live()")])
   if (uses_abort) {
     out = out.concat([line(2, "_revl_owner = _revl_SessionOwner()"), line(2, "_revl_set_session_owner(_revl_owner)")])
   }
-  out = out.concat([line(2, "_revl_set_trace(events.append)"), line(2, "try:"), line(3, "baseline = _revl_residue(root)")])
+  out = out.concat([line(2, "_revl_set_trace(_revl_events.append)"), line(2, "try:"), line(3, "_revl_baseline = _revl_residue(_revl_root)")])
   var body = []
   for (st of value_list(value_field(t, "body"))) { body = body.concat(lifecycle_step(st, 3, where)) }
   out = out.concat(close_block(body, 3))
   out = out.concat([line(2, "finally:"), line(3, "_revl_set_trace(None)")])
   if (uses_abort) { out = out.push(line(3, "_revl_clear_session_owner()")) }
-  out = out.concat([line(3, "for fiber in reversed(list(_revl_fibers.values())):"),
-    line(4, "try:"), line(5, "await fiber.dispose()"),
+  out = out.concat([line(3, "for _revl_fiber in reversed(list(_revl_fibers.values())):"),
+    line(4, "try:"), line(5, "await _revl_fiber.dispose()"),
     line(4, "except Exception:"), line(5, "pass"),
-    line(4, "finally:"), line(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(fiber))"),
+    line(4, "finally:"), line(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(_revl_fiber))"),
     "", line(1, "_revl_asyncio.run(_run())"), ""])
   return out
 }

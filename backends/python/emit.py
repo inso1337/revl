@@ -5156,13 +5156,20 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(0)
     uses_abort = _lifecycle_uses_abort(test)
     out.add(1, "async def _run():")
-    out.add(2, "root = Context()")
+    # issue #2975: every local the driver binds for ITSELF lives in the
+    # `_revl*` namespace, which `_ident` refuses a user identifier from
+    # entering (`root`, `events` and `baseline` were the bare exceptions: a
+    # `let root = call ...` rebound the driver's own context and the next step
+    # died inside the runtime). A future local added here must keep the
+    # prefix; tests/test_2975_lifecycle_driver_locals.py derives this set from
+    # the emitted source and fails on a bare one.
+    out.add(2, "_revl_root = Context()")
     if _lifecycle_uses_clock(test):
         # item 102: the clock coeffect is a module-global; reset it so this
         # test's `advance` steps start from t=0 and see only its own timers,
         # independent of any earlier lifecycle test in the file.
         out.add(2, "_revl_Clock.reset()")
-    out.add(2, "events = []")
+    out.add(2, "_revl_events = []")
     out.add(2, "_REVL_INVERSE_RESIDUE.clear()")
     out.add(2, "_revl_fibers = _revl_live()")
     if uses_abort:
@@ -5173,22 +5180,22 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         # later lifecycle test in the same file gets the pre-245 world back.
         out.add(2, "_revl_owner = _revl_SessionOwner()")
         out.add(2, "_revl_set_session_owner(_revl_owner)")
-    out.add(2, "_revl_set_trace(events.append)")
+    out.add(2, "_revl_set_trace(_revl_events.append)")
     out.add(2, "try:")
-    out.add(3, "baseline = _revl_residue(root)")
+    out.add(3, "_revl_baseline = _revl_residue(_revl_root)")
     _emit_block(out, 3, test.get("body"),
                 lambda step: _lifecycle_step(out, 3, step, where))
     out.add(2, "finally:")
     out.add(3, "_revl_set_trace(None)")
     if uses_abort:
         out.add(3, "_revl_clear_session_owner()")
-    out.add(3, "for fiber in reversed(list(_revl_fibers.values())):")
+    out.add(3, "for _revl_fiber in reversed(list(_revl_fibers.values())):")
     out.add(4, "try:")
-    out.add(5, "await fiber.dispose()")
+    out.add(5, "await _revl_fiber.dispose()")
     out.add(4, "except Exception:")
     out.add(5, "pass")
     out.add(4, "finally:")
-    out.add(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(fiber))")
+    out.add(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(_revl_fiber))")
     out.add(0)
     out.add(1, "_revl_asyncio.run(_run())")
     out.add(0)
@@ -5201,7 +5208,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         component = _ident(step["component"], "component name")
         config = ", ".join(f"{name!r}: {_expr(value)}"
                            for name, value in (step.get("config") or {}).items())
-        out.add(indent, f"_revl_fibers[{component!r}] = _revl_plug(root, {component}, {{{config}}})")
+        out.add(indent, f"_revl_fibers[{component!r}] = _revl_plug(_revl_root, {component}, {{{config}}})")
         out.add(indent, "await _revl_settle()")
         out.add(indent, f"_revl_load_failed(_revl_fibers[{component!r}], {component!r}, {where!r})")
     elif kind == "unload":
@@ -5212,7 +5219,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, "await _revl_settle()")
     elif kind == "call":
         args = ", ".join(_expr(arg) for arg in step.get("args") or [])
-        call = (f"await _revl_call(root, {_host_key(step['key'])!r}, {step['method']!r}, "
+        call = (f"await _revl_call(_revl_root, {_host_key(step['key'])!r}, {step['method']!r}, "
                 f"[{args}], {where!r})")
         bind = step.get("bind")
         out.add(indent, f"{_ident(bind, 'lifecycle binding')} = {call}" if bind else call)
@@ -5232,9 +5239,9 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         # mutations revert and the deferral queue is dropped, so the workspace is
         # left byte-identical to before (docs/design/245-session-commit.md).
         out.add(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue")
-        out.add(indent, "for _fiber in reversed(list(_revl_fibers.values())):")
+        out.add(indent, "for _revl_fiber in reversed(list(_revl_fibers.values())):")
         out.add(indent + 1, "try:")
-        out.add(indent + 2, "await _fiber.dispose()   # replay inverses")
+        out.add(indent + 2, "await _revl_fiber.dispose()   # replay inverses")
         out.add(indent + 1, "except Exception:")
         out.add(indent + 2, "pass")
         out.add(indent, "_revl_fibers.clear()")
@@ -5246,7 +5253,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, "_revl_set_session_owner(_revl_owner)")
         out.add(indent, "await _revl_settle()")
     elif kind == "assert_no_residue":
-        out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
+        out.add(indent, f"_revl_no_residue(_revl_root, _revl_baseline, _revl_events, {where!r})")
     elif kind == "assert":
         rendered = _expr(step["expr"])
         out.add(indent, f"assert {rendered}, {where + ': assertion failed'!r}")

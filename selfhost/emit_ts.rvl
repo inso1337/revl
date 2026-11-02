@@ -4496,9 +4496,9 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     }
     return { lines: [
       "  {",
-      `    const _f = plug(root, ${comp_name}, {${items.join(", ")}})`,
+      `    const _f = plug($revl_root, ${comp_name}, {${items.join(", ")}})`,
       "    await _f",
-      `    _revl_fibers.set(${json_dumps(comp_name)}, await _f)`,
+      `    $revl_fibers.set(${json_dumps(comp_name)}, await _f)`,
       "    await _revl_settle()",
       "  }"
     ], counter: c }
@@ -4506,8 +4506,8 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
   if (kind == "unload") {
     let comp_key = json_dumps(value_str(value_field(step, "component")))
     return { lines: [
-      `  await (await _revl_fibers.get(${comp_key})).dispose()`,
-      `  _revl_fibers.delete(${comp_key})`,
+      `  await (await $revl_fibers.get(${comp_key})).dispose()`,
+      `  $revl_fibers.delete(${comp_key})`,
       "  await _revl_settle()"
     ], counter: counter }
   }
@@ -4525,7 +4525,7 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     }
     var await_kw = ""
     if (value_bool(value_field(method, "async"))) { await_kw = "await " }
-    let call = `root.${ident(host_key(key))}.${mname}(${args.join(", ")})`
+    let call = `$revl_root.${ident(host_key(key))}.${mname}(${args.join(", ")})`
     let bind = value_field(step, "bind")
     var line = `  ${await_kw}${call}`
     if (!value_is_null(bind)) { line = `  const ${ident(value_str(bind))} = ${await_kw}${call}` }
@@ -4541,7 +4541,7 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     return { lines: [
       "  // R4 + R1: same introspection the py reference",
       "  // tier's `assert no_residue` performs.",
-      "  assertNoResidue(root, _revl_baseline)"
+      "  assertNoResidue($revl_root, $revl_baseline)"
     ], counter: counter }
   }
   if (kind == "abort") {
@@ -4554,10 +4554,10 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     return { lines: [
       "  // mark every live activation aborting, so its teardown",
       "  // reverts rather than commits (item 245).",
-      "  for (const _fiber of Array.from(_revl_fibers.values())) {",
+      "  for (const _fiber of Array.from($revl_fibers.values())) {",
       "    frameForCtx(_fiber.ctx)?.abort()",
       "  }",
-      "  for (const _fiber of Array.from(_revl_fibers.values()).reverse()) {",
+      "  for (const _fiber of Array.from($revl_fibers.values()).reverse()) {",
       "    try {",
       "      await _fiber.dispose()   // replay the witnessed inverses",
       "    } catch {",
@@ -4565,7 +4565,7 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
       "      // LIFO unwind; py's `abort` step swallows the same",
       "    }",
       "  }",
-      "  _revl_fibers.clear()",
+      "  $revl_fibers.clear()",
       "  await _revl_settle()"
     ], counter: counter }
   }
@@ -4585,7 +4585,7 @@ fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any]) 
   for (t of tests) {
     if (value_bool(value_field(t, "lifecycle"))) {
       let steps = value_list(value_field(t, "body"))
-      var body = ["  const root = new Context()"]
+      var body = ["  const $revl_root = new Context()"]
       var advances = false
       for (st of steps) {
         if (value_str(value_field(st, "step")) == "advance") { advances = true }
@@ -4593,8 +4593,8 @@ fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any]) 
       // item 102: the clock coeffect is module-global; reset it so this test's
       // `advance` steps start from t=0 and see only its own timers.
       if (advances) { body = body.push("  host.clockReset()") }
-      body = body.push("  const _revl_baseline = snapshotRuntime(root)")
-      body = body.push("  const _revl_fibers = new Map<string, any>()")
+      body = body.push("  const $revl_baseline = snapshotRuntime($revl_root)")
+      body = body.push("  const $revl_fibers = new Map<string, any>()")
       for (st of steps) {
         let r = lifecycle_step(st, services, provided, c, acx)
         body = body.concat(r.lines)
