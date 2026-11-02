@@ -47,6 +47,9 @@ on:
     paths:
       - "pyproject.toml"
       - "tools/check_wheel_manifest.py"
+      - "tools/release_manifest.py"
+      - "src/revl/update/**"
+      - "docs/updates.md"
       - ".github/workflows/publish.yml"
       - ".github/workflows/release-dryrun.yml"
 
@@ -176,6 +179,17 @@ jobs:
           print("gate api:", revl.gate.gate_version()["api"])
           print("installed wheel smoke: ok")
           PY
+
+      # The release manifest is what the updater reads. Writing it here, from
+      # the same built artifacts, proves the writer and the reader agree before
+      # a tag exists; the publish job runs the same two commands on the tag.
+      - name: Generate the release manifest
+        run: |
+          python3 tools/release_manifest.py --out release.json --version "$REVL_VERSION" \
+            --tag "v$REVL_VERSION" dist/*
+
+      - name: Validate the manifest the updater will read
+        run: python3 tools/release_manifest.py --validate release.json
 
       - name: This job does not publish
         run: |

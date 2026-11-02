@@ -39,6 +39,10 @@ from dataclasses import dataclass, field
 GENERATION_VERBS = frozenset({
     "revl_load", "revl_swap", "revl_edit", "revl_undo", "revl_rollback",
     "revl_restore", "revl_unload", "revl_ship", "revl_repair", "revl_change",
+    # a release apply is a swap of the running generation (its plan-only form
+    # leaves the generation unchanged and answers "nothing to undo"), and a
+    # release rollback is the generation undo it performs (docs/updates.md)
+    "revl_update_apply", "revl_update_rollback",
 })
 
 #: Mutating verbs with no exact inverse, and why. A response from one of these

@@ -33,6 +33,21 @@ driving the session may **do**.
 | **operator capabilities (item 55)** | what may the operator driving the session do? | **management authority** |
 | lineage (item 66) | where did a component's authority come from? | provenance |
 
+## The update surface
+
+The operator update verbs (docs/updates.md) are bound to this gate through the
+operation each performs: `revl_update_apply` is gated as `swap` and
+`revl_update_rollback` as `undo`. An apply replaces every component of the
+running composition and carries only a server-side plan hash, so the target
+cannot be derived from the call; under a profile, only a literal
+`may swap on *` grant authorizes it, which is the honest scope for replacing
+everything. `revl_update_check` and `revl_update_status` are read-only and
+ungated. The mutating update verbs are always advertised and refuse by name
+with `UPDATE_DISABLED` unless the server was started with `--update`; that
+flag is the grant that no caller over the transport can supply.
+`revl_update_status` also answers when updates are disabled, so an operator
+can see why.
+
 ## The operator profile
 
 A profile declares one or more **operators**. Each operator has a token and a
