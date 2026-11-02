@@ -347,8 +347,8 @@ refuses a call whose capability the analysis cannot bound.
 **When a yes may not stand at all (issue #1982).** A ceiling bounds a standing
 grant; only the policy file can forbid one. The line
 `capability <glob> may never be granted standing` refuses both widening shapes
-for the marked capabilities — the item-344 standing grant and the item-251
-distilled auto-approve rule — while leaving the capability usable: the
+for the marked capabilities (the item-344 standing grant and the item-251
+distilled auto-approve rule) while leaving the capability usable: the
 class-(c) crossing still prompts, and the single-use exact-hash approval still
 answers it per call. Consent that one operator yes cannot extend past itself is
 a shape the policy could not previously express, so a grant minted under such a
@@ -377,8 +377,8 @@ sensitive, as a clause in the extern/method modifier position:
 > above, and the `emission[production.payment]` scope, presume the
 > realm-style scoped-emission capability that is the pending FEATURE half of
 > roadmap item 343. In the shipped compiler an `emission` extern takes no
-> `[caps]` scope — the parser refuses one (only `witnessed[caps]` is
-> capability-scoped) — and an emission's capability token IS its extern name:
+> `[caps]` scope: the parser refuses one (only `witnessed[caps]` is
+> capability-scoped) and an emission's capability token IS its extern name:
 > the class map does `caps.add(name)`
 > (`revl.mcp.approval.ClassMap._classify_direct`). So today a policy rule
 > targets an emission by name and the declaration-side clause carries no

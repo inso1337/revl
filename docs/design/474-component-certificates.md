@@ -160,9 +160,9 @@ where they do not account for the catalogue exactly once:
   cross-tier items) is covered by the document's digest rather than by a
   per-code row. These rows get a `REQ_NAMED` requirement each, and a caveat
   apiece when they are not `proved`, which today is all of them but `A8`;
-- `unrecorded`, the catalogued codes with no row at all — derived from the
+- `unrecorded`, the catalogued codes with no row at all, derived from the
   catalogue and the map rather than listed here, so a code catalogued without a
-  ledger row appears in the certificate instead of falling out of it — carried
+  ledger row appears in the certificate instead of falling out of it, carried
   as a `REQ_UNRECORDED` requirement and a caveat. Stated silence is a weaker
   claim than an unproved status and a stronger one than an absence.
 
@@ -197,7 +197,7 @@ plus one step, and the user-facing statement of it lives in
   cell it was read out of, that cell's name, the gap, the theorem count, the
   oracle cell, the registered theorem names, the contentless findings); every
   caveat; every requirement with both the `detail` and the `check` recorded
-  behind it; all three members of the proof model — the toolchain pin, the
+  behind it; all three members of the proof model: the toolchain pin, the
   manifest digest and the dependency pins the manifest names; the checker
   identity; the
   subject's source digest; the commit, as a revision of this history; and

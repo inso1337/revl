@@ -339,7 +339,7 @@ chooses from these kinds and cannot mint a new one.
   parameters), `table="orders" <= table="users"` does not. A richer host
   order (subdomain containment) is a registry row for later, not designed
   here.
-- **The registry is CLOSED — against UNDECLARED names.** A parameter
+- **The registry is CLOSED to UNDECLARED names.** A parameter
   name is legal only if it is a core registry name (the table above) or
   a name the capability itself DECLARES (the next subsection). Every
   other name is refused, never defaulted to the discrete order. A
@@ -387,10 +387,10 @@ lift through the product; the set-level check below preserves them.
 ### Declared resource dimensions (the registry is closed against undeclared names)
 
 The core registry above is a closed table of *kinds*. It is not a closed
-table of *names*: a product capability that has a resource dimension the
-core vocabulary does not name — the sending mailbox of `emission[mail.send]`
-is the reported case (issue #1938) — DECLARES it, and the declared name
-becomes legal for that capability alone.
+table of *names*. A product capability may DECLARE a resource dimension the
+core vocabulary does not name. The sending mailbox of `emission[mail.send]` is
+the reported case (issue #1938); the declared name becomes legal for that
+capability alone.
 
 ```
 capability <token>(<name>: <kind>, ...)          # a top-level declaration
@@ -412,7 +412,7 @@ capability <token>(<name>: <kind>, ...)          # a top-level declaration
   still resolved against the parameter list of the extern that declares
   the capability. A declaration naming a parameter the extern does not
   have is refused. This relocates the typo hazard from one global list
-  to each declaration site, which is a strictly smaller surface — it is
+  to each declaration site, which is a strictly smaller surface; it is
   not a removal of it.
 - **The kind is NOT part of the token's bytes.** A declared name's
   canonical spelling is shape-identical to a core name's
@@ -423,15 +423,15 @@ capability <token>(<name>: <kind>, ...)          # a top-level declaration
   declaration, so a declared spelling round-trips byte-identically.
 - **Two reads, and only two.** A capability spelling is read in exactly
   two ways, and conflating them is the one real hazard here:
-  - `cap_order.parse_cap(text, declared=None)` — the **input-validation**
+  - `cap_order.parse_cap(text, declared=None)`: the **input-validation**
     read, for a spelling a HUMAN wrote: a policy document, an operator
     profile, a peer charter or advertisement, a parser-internal raw
     declaration. A policy file is loaded on its own with no
     composition's declarations in scope, so it **cannot name a declared
     dimension at all**: the name is refused at parse. That is deliberate
-    and fail-closed — refusing a malformed spelling is the load-bearing
+    and fail-closed, refusing a malformed spelling is the load-bearing
     property (`_canon_cap_spelling`, and the four peer/policy pins).
-  - `cap_order.parse_stored_cap(text)` — the **stored/artifact** read,
+  - `cap_order.parse_stored_cap(text)`: the **stored/artifact** read,
     for a spelling the COMPILER canonicalized: an IR `capabilities`
     entry, a WAL record, a ticket `classCCapabilities`/`resourceScopes`
     value, a grant spelling, a recorded-history entry. It passes the
@@ -443,7 +443,7 @@ capability <token>(<name>: <kind>, ...)          # a top-level declaration
   type-based order and becomes a `discrete` string of the same
   characters, rendering to the **same bytes**. So `path` containment
   degrades to **equality**. Equality is strictly narrower than
-  containment, so a stored read can never widen a cone — it can only
+  containment, so a stored read can never widen a cone; it can only
   fail to find one, which fails closed.
 - **Why the stored read has to exist.** It is not a convenience. The
   withheld-value redaction recovers a token from a spelling
@@ -464,13 +464,13 @@ capability <token>(<name>: <kind>, ...)          # a top-level declaration
   promises. A composition that ADOPTS a declared dimension changes that
   token's bytes on every surface where a parameterised spelling is
   recorded (audit line, boundary JSON, ticket resource fields, WAL,
-  distilled rule spellings) — additive to the interchange SCHEMA,
+  distilled rule spellings), additive to the interchange SCHEMA,
   non-additive to spellings. The ticket `hash` is unaffected: bound
   spellings are composed strictly after the hash body. Adoption is
   opt-in per capability, so no existing spelling moves on its own.
 
 `domain` is deliberately NOT part of this. A mail domain reads like a
-set, and `Cap` valuations are single-valued by construction — a
+set, and `Cap` valuations are single-valued by construction: a
 set-valued parameter is not expressible as a `Cap` parameter and would
 need a different algebra, not a new row. Its home is the declared-scope
 surface (item 470, `intent._canonical_scopes`).
@@ -790,8 +790,8 @@ argument is short enough to state completely:
    reaches a comparison at all (the registry is closed against
    undeclared names; refusal before the comparison). A declared name
    reaches a comparison only under the kind its declaration chose, one
-   of the same three orders, so the count of orders — the attack
-   surface — does not grow. Symbolic values against literals and
+   of the same three orders, so the count of orders (the attack
+   surface) does not grow. Symbolic values against literals and
    malformed paths refuse at the comparison with the pair named, never
    an admit. No default-allow row exists anywhere in the design.
 5. **The order itself is the attack surface, so it stays tiny.** The
@@ -963,7 +963,7 @@ Honesty surface:
   the cost-ceilings item.
 - **Richer host orders** (subdomain containment, table wildcard): a
   core registry row each, added when a consumer exists. Note this is
-  *adding an order*, which a capability declaration cannot do — a
+  *adding an order*, which a capability declaration cannot do: a
   declaration picks one of the three orders that exist. The extension
   point for a product's own DIMENSION is the `capability` declaration
   (issue #1938); the extension point for a new ORDER remains a core

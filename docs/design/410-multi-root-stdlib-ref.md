@@ -281,7 +281,7 @@ check runs before the module is imported, per kind, unchanged in shape.
 
 **Reachability (item 225).** For a long while none of that ran. The spec's
 `refs` list is built from the externs the process's slice reaches, and
-`placement.ts_safe_ir` classified an extern by its `bodies` alone — so a
+`placement.ts_safe_ir` classified an extern by its `bodies` alone, so a
 `= @ts ref` extern (empty `bodies`, populated `refs`) counted as un-emittable
 by the ts tier, and `tier_capability_gate` refused the node tier to every
 component reaching one. The only compositions that could boot a node process

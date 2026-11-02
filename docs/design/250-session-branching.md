@@ -237,7 +237,7 @@ declaration is also what REACHES the rewind, instead of stalling at the
 declaration: the emitter stamps the declared set onto the witnessed step's
 `transactional(...)` / `transactional_method(...)` registration, the runtime
 carries it on the registered entry (`Frame.transactional(scope=...)`), and
-`Timeline.record_yield` copies it onto the step's recorded `scope` — the same
+`Timeline.record_yield` copies it onto the step's recorded `scope`, the same
 field the py WAL writer already had a `"scope"` key for, so the fork's live
 verdict and an offline reader of the same WAL are reading one stamp. Before item
 872 no production path wrote that field at all, and an ABSENT scope read as
@@ -692,18 +692,18 @@ survive the process, then builds the two read surfaces on top.
    declared `undoIdempotent` register entry. All three are ABSENT BY DEFAULT, so
    every record a pre-250 composition writes stays byte-identical and no WAL
    golden moves. Without them an offline reader classifying a tail would be
-   GUESSING at the very axis Decision 2 keys on — the axis whose whole point is
+   GUESSING at the very axis Decision 2 keys on: the axis whose whole point is
    that it decides which inverses may run.
 2. **`fork-branch`, the branch side of the lineage.** Slice 1 wrote the edge only
-   on the parent (`fork-complete {branch}`), so a branch WAL read on its own — the
-   artifact a post-mortem tool is handed first — was anonymous. The branch WAL's
+   on the parent (`fork-complete {branch}`), so a branch WAL read on its own, the
+   artifact a post-mortem tool is handed first, was anonymous. The branch WAL's
    first record now names the branch, its parent, the step it diverged at, the
    parent's WAL, the residue it inherits, the provenance it PRESERVED
    (composition, generation, IR digest, source digest, capability surface, WAL
    position) and, listed explicitly, the provenance it did NOT (provider versions,
    seeds and clock, model decisions). The item asks the branch to preserve that
    whole set; the axes that are recorded are stated as facts, and the rest are
-   enumerated in `notPreserved` rather than quietly omitted — the honest partition
+   enumerated in `notPreserved` rather than quietly omitted, the honest partition
    applied to lineage.
 3. **`revl.wal` gains the step-kind vocabulary and the scope gate**, mirrored from
    the py backend exactly as item 322 mirrored the reader, and pinned by
@@ -714,7 +714,7 @@ survive the process, then builds the two read surfaces on top.
    `lineage` (what one WAL is), `topology` (the tree over a set of WALs, with the
    edges it cannot close named as orphans and dangling children rather than
    guessed at), `partition` (the fork partition of a recorded tail, with the three
-   Slice-1 refusals reported as findings — all of them, since offline nothing is
+   Slice-1 refusals reported as findings, all of them, since offline nothing is
    about to be touched and stopping at the first reason helps nobody), and
    `compare` (two histories after the point they diverged).
 5. **`revl branch` / `revl compare`** CLI, and `recover` annotates a branch WAL's
@@ -728,7 +728,7 @@ live component, no workspace handle and no fiber, so the only verbs it offers ar
 two WALs whose durable records do not relate them. It also states one blind spot
 on every partition document: an absent `scope` is UNPROVEN, so it cannot be
 distinguished from a scope that was never written down, and the reader resolves
-that the SAFE way — enumerate the step, never offer it as rewindable. On a WAL
+that the SAFE way: enumerate the step, never offer it as rewindable. On a WAL
 written before these inputs became durable (which is every WAL written before
 item 872) that means every effect the WAL records is enumerated, so such a tail
 can never be reported as clean. The direction is the same one the LIVE classifier
@@ -838,7 +838,7 @@ recover; reader agreement and `compare` listing it.
   layer on top of the branch primitive; it depends on Slice 1's honest fork
   existing and on an LLM-aware WAL that is its own item. Deferred and
   cross-referenced, not designed here. (The read half of the CLI surface this
-  bullet named — `revl branch`, `revl compare` — landed in Slice 2 over the
+  bullet named (`revl branch`, `revl compare`) landed in Slice 2 over the
   durable lineage; the re-executing half, `revl replay branch`, is the bullet
   above.)
 - **Non-idempotent rewound spans.** Open (self-review attack 4); Slice 1 refuses

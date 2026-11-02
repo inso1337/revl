@@ -374,7 +374,7 @@ rather than an assertion:
   route the register does not hold as promoted the hook returns `None` for
   every crossing and `validate_retry` returns the object `validate_response`
   produced. Measured with a successor answering a different model name on
-  every crossing. A route that IS promoted is not a shadow — it is the
+  every crossing. A route that IS promoted is not a shadow; it is the
   cutover, and section 17.6 item 1 records what that leaves open.
 * **The successor's own completion does not re-enter the seam.** It crosses
   the same `validate_retry`, so the tier holds a re-entrancy register for the
@@ -518,9 +518,9 @@ completion.
 
 Slice 2 derives the SERVED SIDE from the route: `live` means the candidate is
 answering, so an entry on a live route records `candidate`. An offline caller
-has nothing better. A seam does: this hook KNOWS who answered — it returns the
+has nothing better. A seam does: this hook KNOWS who answered and returns the
 candidate's answer exactly when the schedule served the candidate and `None`
-when it served the incumbent — so `TierShadow` passes that to
+when it served the incumbent, so `TierShadow` passes that to
 `Scheduler.offer` as a fact. `Scheduler.offer` grew a `served=` parameter for
 it and keeps slice 2's derivation as the default, so `serve` is unchanged.
 
@@ -698,13 +698,13 @@ serialized form, so `revl promote` could not be given them from outside the
 process. This section adds exactly two:
 
 - **`revl.shadow-window` 1.0** (`src/revl/shadow_routing.py`,
-  `ShadowLedger.as_window()` and `window_from_dict()`): the *recorded* half —
+  `ShadowLedger.as_window()` and `window_from_dict()`): the *recorded* half,
   the schedule (component, action, realm, both roles, the share as a rational,
   the salt, whether the route was live), the accumulated crossings with both
   sides' sealed model-decision records, which crossings were served to the
   successor, the candidate call count, and any refusal the drive ended on.
 - **`revl.shadow-plan` 1.0** (`src/revl/shadow_promotion.py`,
-  `ShadowPlan.as_dict()` and `plan_from_dict()`): the *declared* half — the
+  `ShadowPlan.as_dict()` and `plan_from_dict()`): the *declared* half, the
   route table by value, the roles, the authority diff, the layer classes, the
   stated threshold and the minimum observations, and whether the route is
   live.
@@ -712,7 +712,7 @@ process. This section adds exactly two:
 Both readers are strict and total: a missing member is `window-truncated`
 (or `plan-malformed`), a wrong-shaped one is `window-malformed`, and nothing
 is defaulted. `live` is validated as a boolean rather than coerced, because its
-default is the fail-open direction — a truthy string must not read as a live
+default is the fail-open direction: a truthy string must not read as a live
 route.
 
 The links the window reader can reach are a *separate* tuple,
@@ -738,9 +738,9 @@ one step per crossing. Recording those worlds and comparing them would compare
 a timeline against a walk that never had that shape.
 
 So `as_window()` carries the *records* and no worlds, and `revl promote`
-derives both worlds from the two compositions the window names — the running
-`FILES` and the `--candidate` generation — and runs the same
-`compare_timelines` the gate runs. What the window is for is the evidence: the
+derives both worlds from the two compositions named in the window, the running
+`FILES` and the `--candidate` generation, then runs the same
+`compare_timelines` as the gate. What the window is for is the evidence: the
 crossings, both sides' sealed answers, the share actually served, and the
 schedule the pairs are claimed to have come from.
 
@@ -758,7 +758,7 @@ The verb refuses in the composition stage before any world exists, which
 matters because a generation that cannot be resolved has no world to compare
 and a comparison that could not run must be named rather than skipped:
 
-1. both documents read (`_read_document`) — a missing or non-object file is
+1. both documents read (`_read_document`): a missing or non-object file is
    refused;
 2. the plan and the window are read (`plan_from_dict`, `window_from_dict`);
 3. the running composition compiles, and the candidate generation compiles;
@@ -775,7 +775,7 @@ and a comparison that could not run must be named rather than skipped:
    (issue #1222). A plan that declares a widening the compositions do not show
    is still refused by the gate's own authority stage;
 6. the window's crossings and share are checked against the running
-   composition's crossings for that (component, action) — a window stamped
+   composition's crossings for that (component, action): a window stamped
    `summarize` whose indices are `classify`'s anchor is `stamp-underived`,
    because the indices are derived from the composition rather than trusted;
 7. the two worlds are derived and the gate runs (`shadow_routing.decide` over
@@ -804,20 +804,20 @@ is empty on every axis. (Splicing an EXTRA completion in front of the body is
 not this generation: it raises the emission ceiling of `model.complete` and
 `model.cancel`, which is a budget widening, and step 5 refuses it before any
 world is compared.)
-All twenty of the window's pairs name the same completion on both sides — the
-new test file asserts the agreement pairwise rather than assuming it — and the
+All twenty of the window's pairs name the same completion on both sides; the
+new test file asserts the agreement pairwise rather than assuming it, and the
 two derived worlds differ at replay step 2, attributed to `(Classifier,
 tenant_a)`, with the divergence named as
 `emission model.complete('p0') -> emission model.complete('extra')`. On a live
 route the verb `REVERT`s and exits 1.
 
 Mutation: make `_world_divergence` return `None`. Twenty agreeing pairs,
-`PROMOTE`, exit 0 — the row fails.
+`PROMOTE`, exit 0: the row fails.
 
 The moved generation (`CANDIDATE_MOVED_SRC`) is the second falsifier and it
 lands in the same place from the other side: it relocates `summarize`'s
 crossings into `classify` without changing a kind or a label, so its world
-diverges too, but it also leaves `summarize` crossing no boundary — the route
+diverges too, but it also leaves `summarize` crossing no boundary: the route
 does not resolve and the verb refuses it as a composition precondition naming
 `action-uncrossed`, before any world exists. The row asserts both the refusal
 *and* that its world really does differ, so the refusal is not hiding a
@@ -845,10 +845,10 @@ comparison that would have passed.
 The new test file drives the verb to all three outcomes and asserts the exit
 status of each: `PROMOTE` exit 0, `REFUSE` exit 1, `REVERT` exit 1. It also
 pins that a keyless run refuses (`evidence-unverifiable`) while a *tampered*
-window refuses (`evidence-unverified`) — a verifier that ran and said no is a
-different link from no verifier at all — that the metric is not read on either
-the refusing or the promoting side, that the window carries no world while the
-two derived worlds are the two compositions, and that a shadowed drive's WAL
-writes 21 `model-decision` records for 20 pairs with no member that
+window refuses (`evidence-unverified`), distinguishing a verifier that ran and
+said no from no verifier at all. It also pins that the metric is not read on
+either the refusing or the promoting side, that the window carries no world
+while the two derived worlds are the two compositions, and that a shadowed
+drive's WAL writes 21 `model-decision` records for 20 pairs with no member that
 distinguishes the two sides. That last one is why the substrate is the window
 document and not the WAL.

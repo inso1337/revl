@@ -312,14 +312,14 @@ That is the DEFAULT, and it is strict: a declared secret with no resolvable valu
 refuses the plug, naming the secret and never a value. Issue #1936's second
 defect is the operator who configures a mailbox *after* start, or rotates a
 password: under a strict plug their composition cannot start at all, and the
-workaround the issue calls out — binding a keyring *locator* as the "secret" and
-reading the real credential inside the body — makes the audit token name a
+workaround the issue calls out (binding a keyring *locator* as the "secret" and
+reading the real credential inside the body) makes the audit token name a
 binding that is not the credential. So the plug has an explicit per-document
 opt-in, `secrets_may_be_absent`, which leaves an unresolvable name UNSET instead
 of refusing, and `_Driver.set_secret(name, value)` is the sanctioned seam that
 installs or ROTATES it afterwards. It writes the same name-keyed map plug-time
-resolution writes, so the audit token still names the real binding — never a
-locator, never a value (§5a) — and the emitted body's `_revl_secret` reads that
+resolution writes. The audit token therefore still names the real binding,
+never a locator or value (§5a). The emitted body's `_revl_secret` reads that
 map on every call, which is what makes an install-after-start and a later
 rotation visible to the NEXT call with no re-plug. What the opt-in changes is
 only WHEN a missing value is reported, never WHETHER: the miss is still
@@ -732,13 +732,13 @@ emitted backend source: `revl compile -o`, a bundle's `ir/ir.json` and
 `emitted/<backend>/`, and a component published through `truc` (whose registry
 copy is the `.rvl` source itself). The lock file and the attestation carry only
 digests, and the site wheel vendors the compiler rather than any user program,
-so it stops there — but "in every build artifact" is already further than a
+so it stops there, but "in every build artifact" is already further than a
 reader who trusted the qualifier would guess.
 
 This is deliberate and stays legal: the repo's own leak canaries put a real
 value in place precisely so a test can detect it downstream
 (`tests/test_secret_externalization.py`). So the frontend WARNS rather than
-refusing — `taint.LiteralSecretDefaultWarning`, raised once per field where
+refusing: `taint.LiteralSecretDefaultWarning`, raised once per field where
 `mentions_secret(field.type)` holds and the default is not `null`. The warning
 names the form that has no value to leak, which is 1a's bound secret:
 

@@ -178,7 +178,7 @@ refused, because a dropped parameter widens.
 
 The admitted case is where the roadmap's "attenuates to the intersection"
 clause lives. An admitted pair's record carries `holds`, `reaches` and
-`attenuated` — what the component holds that the role does NOT reach — which is
+`attenuated` (what the component holds that the role does NOT reach), which is
 the model-role sibling of the `dropped` column in the item-66 audit chain.
 
 ### 3.1 When the product is asked

@@ -13,8 +13,8 @@ What remains is NOT a language primitive: wiring these kernels to a LIVE dispatc
 (constructing the chain and candidate offers from real placement + the network
 transport) needs #421 (F8 network seam) and #107 (seam transport), and the
 hostile-wire TCK #475 is the adversarial consumer that keeps the still-hostile
-wire honest. The primitives are proven in isolation here — the signing/matching
-math and the dispatch decision table — so the transport work that consumes them
+wire honest. The primitives are proven in isolation here: the signing/matching
+math and the dispatch decision table, so the transport work that consumes them
 rides on a verified kernel. All three are Python-only: they touch no lexer,
 typecheck, selfhost, or rust emit, so no gate-crate regen.
 
@@ -213,8 +213,8 @@ to) and #107 (seam transport).
 ## Primitive 2: lawful-retry dispatcher (landed)
 
 Landed as `src/revl/lawful_retry.py`. `EffectClass` is the classification it
-consults (with `classify_extern` mapping the real extern facet names —
-`secret`/`deferred`/`witnessed`/`idempotent` — to a class, tightest-first);
+consults (with `classify_extern` mapping the real extern facet names,
+`secret`/`deferred`/`witnessed`/`idempotent`, to a class, tightest-first);
 `dispatch_on_loss` returns a `Decision` per the table below, bracketed by
 `peer_authority.check_delegation_chain` on the replay side and
 `peer_offer.offer_eligible` on the peer-selection side. Transport (actually

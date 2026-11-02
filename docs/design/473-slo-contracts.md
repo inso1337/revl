@@ -333,7 +333,7 @@ the last one is the honest choice for a verdict taken at a generation boundary,
 which is where a seal happens.
 
 A population whose records carry no timestamp cannot be windowed at all, and the
-answer is `insufficient` naming the record that would have to be stamped — never
+answer is `insufficient` naming the record that would have to be stamped, never
 a whole-population verdict wearing the window's name. The run's own
 `model-decision` records are exactly that population: `{component, stepIndex,
 outcome, llm}` and no time. So a composition that declares `over` on
@@ -343,7 +343,7 @@ decision the left-out below already names, and windowing the per-call population
 now depends on it too.
 
 The sketch wrote `of crossings`, and the landed registry admits the word and
-refuses the measurement. `crossings` IS counted — every recorded `emit` — and
+refuses the measurement. `crossings` IS counted (every recorded `emit`) and
 the runtime records no OUTCOME for one, so a rate over crossings has a
 population and nothing to divide by it. `of activations` is the member that
 measures: the population is the lifecycles the trace closed and the outcome is
@@ -520,8 +520,8 @@ bump: the measurement reads the three event kinds that exist, which is why
 `p95_latency` is measured from the item-121 model-hop bracket and not from a
 per-call event. There is no producer inside `Session`: nothing calls `Monitor`
 from a live generation, so the measurement runs over a RECORDED trace through
-`revl slo` rather than in flight. And the divert is the narrow one — a provider
-source named in the clause, re-admitted through the ordinary gate — not the
+`revl slo` rather than in flight. And the divert is the narrow one: a provider
+source named in the clause, re-admitted through the ordinary gate, not the
 standby-row vocabulary of slice 7.
 
 **Slice 3, landed: the window, the sample floor and the denominator.** `over`,
@@ -547,7 +547,7 @@ same kind of work: a record has to carry something it does not carry today.
 
 **Slice 5, landed: the live producer and the pause as a state the session is
 in.** `Session` binds the contract off the composition document at load
-(`_slo_bind`, `_slo_discover` — the two documents are different documents: an
+(`_slo_bind`, `_slo_discover`: the two documents are different documents: an
 `slo` block lives on the composition row table's IR and a session runs the
 PROGRAM ir `compile_files` produced, which carries no `slo` key), records the
 causal trace because a contract was declared (`_slo_arm_trace`), and runs
@@ -564,7 +564,7 @@ line in a document. `tests/test_slo_473_live_producer.py` pins it.
 
 **What the pause is and is not.** It is a state the SESSION is in: reported,
 refusing, and lifted by removing the latch. It is NOT a member of
-`cordis.fiber.FiberState`, and this slice deliberately adds no member there —
+`cordis.fiber.FiberState`, and this slice deliberately adds no member there,
 the fiber-state set is the cordis runtime's, item 460's fiber-state conformance
 tests are unchanged, and a fiber under a paused session still reads `ACTIVE`
 because it IS active: it holds its resources and owes its entries, and only
@@ -575,7 +575,7 @@ own argument and remains open.
 fourth `why_runtime` event kind and a `SCHEMA_VERSION` bump before `p95_latency`
 could be a per-call percentile. It does not need one. Item 250 Slice 3a already
 writes one `model-decision` record per model completion, AT THE CROSSING, to the
-WAL, carrying the same `runtime.revl_model_hop` payload the trace hop carries —
+WAL, carrying the same `runtime.revl_model_hop` payload the trace hop carries,
 the revl-measured bracket included. `slo.decisions_from_wal` reads those records
 and `slo.observations` prefers them over the trace's `emit` hops, which are the
 crossings a step-back walk visited rather than the calls the run made. The two
@@ -599,7 +599,7 @@ verbs is the work.
 its G2 argument, and the divert as a response. A language change of its own size.
 
 **Left out, with the prerequisite named.** `recovery_time` and `approval_wait`
-need timestamps on WAL records — and since slice 3 so does any `over` applied to
+need timestamps on WAL records, and since slice 3 so does any `over` applied to
 the per-call latency population, which is the same `model-decision` record. One
 durable-format change under `WAL_VERSION`
 (reader-compatible, since `wal.read_wal` keeps unknown record kinds and keys, but
@@ -623,7 +623,7 @@ with a reason rather than `holding`.
 Both halves are met. Slice 1 refuses the contradicting composition at compile
 time. Slice 2 measures a RECORDED generation through `revl slo`. Slice 5 is the
 LIVE half: a running `Session` measures its own generation, takes the declared
-response on a live breach — a pause genuinely stops it — and files a verifiable
+response on a live breach (a pause genuinely stops it) and files a verifiable
 `revl.slo-receipt` on its own generation-history entry, with one closed verdict
 per declared datum and `unmeasurable` plus a reason for every datum this tree
 cannot reach.
@@ -633,7 +633,7 @@ itself states them:
 
 * A receipt is issued only when a signing key is configured
   (`REVL_SLO_KEY` / `REVL_SLO_KEY_FILE`). Without one the generation is measured
-  and reported `unsigned`, and nothing is filed — an unsigned measurement is not
+  and reported `unsigned`, and nothing is filed: an unsigned measurement is not
   a receipt.
 * `recovery_time` and `approval_wait` are still `unmeasurable` in every receipt,
   each with the reason naming what would have to exist: timestamps on WAL

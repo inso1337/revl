@@ -1,4 +1,4 @@
-# 526 — aligning revl frontend assets with Cordis WebUI
+# 526: aligning revl frontend assets with Cordis WebUI
 
 **Roadmap:** item 459 (issue #722), part of the 462 web-platform arc · **Source:** cordiverse/webui study, 2026-09-08 · **Status:** DESIGN DRAFT
 
