@@ -388,10 +388,7 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
 
 
 @needs_cordis
-def test_restore_approval_ticket_uses_the_snapshot_compile_report(monkeypatch):
-    from revl.mcp.approval import ApprovalRequired
-    from revl.mcp.persist import _recompile, admitted_name
-
+def test_restore_approval_ticket_uses_the_snapshot_compile_report():
     modules = _candidate_modules()
     loaded = server._run_handler("revl_load", {
         "source": _CANDIDATE_WITH_BOOT, "modules": modules, "record": True,
@@ -408,20 +405,6 @@ def test_restore_approval_ticket_uses_the_snapshot_compile_report(monkeypatch):
     unloaded = server._run_handler("revl_unload", {})
     assert unloaded["ok"] is True, unloaded
     session.approval_policy = "auto"
-
-    def refuse_after_compile(snap, *, profile=None, report=None):
-        sources = snap["sources"]
-        candidate = _recompile(sources, admitted_name(snap),
-                               profile=profile, report=report)
-        refusal = ApprovalRequired({"hash": "sha256:restore",
-                                   "capabilities": []})
-        refusal.candidate = candidate
-        raise refusal
-
-    # The portable snapshot does not merge live --provider configuration. Its
-    # captured module buffer still lets us exercise ticket shaping after the
-    # same snapshot recompile succeeds and the boot gate refuses it.
-    monkeypatch.setattr(session, "restore", refuse_after_compile)
 
     result = server._run_handler("revl_restore", {"snapshot": snapshot})
     assert result.get("approvalRequired") is True, result
