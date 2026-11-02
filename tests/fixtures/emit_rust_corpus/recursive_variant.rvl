@@ -1,0 +1,7 @@
+// issue #2328: a recursive variant payload is Box-indirected so the Rust enum
+// is finite-sized (E0072).
+pub type Tree = Leaf | Node(Tree)
+
+pub fn is_leaf(t: Tree) -> Bool {
+  return match t { Leaf => true, _ => false }
+}

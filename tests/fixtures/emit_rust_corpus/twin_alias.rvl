@@ -1,0 +1,10 @@
+// issue #2328: two records with the identical field -> type shape are one Rust
+// type (they are interchangeable in revl, which is structural). The reference
+// emits ONE canonical struct and lowers the unbuilt twin to a `type` alias, so
+// a `Vec<Param>` is admitted where a `Vec<Bind>` is declared (E0308).
+pub type Param = { name: Str, ty: Str }
+pub type Bind = { name: Str, ty: Str }
+
+pub fn names(p: Param, b: Bind) -> Str {
+  return p.name
+}

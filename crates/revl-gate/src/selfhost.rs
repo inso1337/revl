@@ -53,6 +53,20 @@ pub struct MovSt {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BoxEdge {
+    owner: String,
+    kind: String,
+    member: String,
+    target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BoxedEdges {
+    cases: std::collections::HashMap<String, std::collections::HashMap<String, bool>>,
+    fields: std::collections::HashMap<String, std::collections::HashMap<String, bool>>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IcSt {
     defs: Vec<String>,
     names: std::collections::HashMap<String, String>,
@@ -4655,13 +4669,214 @@ fn emit_v3_functions(functions: Vec<Value>, fr: std::collections::HashMap<String
     return out;
 }
 
+fn inline_cycle_target(ftype: String, types: Value) -> String {
+    let mut t = ftype;
+    let mut seen = 0i64;
+    while true {
+        let lb = t.revl_index_of("[");
+        if ((!t.revl_ends_with("]")) || (lb <= 0i64)) {
+            if value_has(types.clone(), t.clone()) {
+                return t;
+            }
+            return String::from("");
+        }
+        let head = t.revl_slice(0i64, lb);
+        let inner = t.revl_slice((lb).checked_add(1i64).expect("revl: Int overflow"), (t.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+        if (head == "Opt") {
+            t = strip_spaces(&inner);
+        } else {
+            if (head == "Result") {
+                for part in split_generic(&inner) {
+                    let target = inline_cycle_target(part.clone(), types.clone());
+                    if (target != "") {
+                        return target;
+                    }
+                }
+                return String::from("");
+            } else {
+                return String::from("");
+            }
+        }
+        seen = (seen).checked_add(1i64).expect("revl: Int overflow");
+        if (seen > 64i64) {
+            return String::from("");
+        }
+    }
+    return String::from("");
+}
+
+fn edge_is_boxed(m: std::collections::HashMap<String, std::collections::HashMap<String, bool>>, owner: String, member: String) -> bool {
+    if (!m.contains_key(&owner)) {
+        return false;
+    }
+    return match m.get(&owner).cloned() {
+    Some(v) => v.contains_key(&member),
+    None => false,
+    _ => unreachable!(),
+};
+}
+
+fn edge_box(m: std::collections::HashMap<String, std::collections::HashMap<String, bool>>, owner: String, member: String) -> std::collections::HashMap<String, std::collections::HashMap<String, bool>> {
+    let mut members = std::collections::HashMap::new();
+    if m.contains_key(&owner) {
+        members = match m.get(&owner).cloned() {
+    Some(v) => v,
+    None => std::collections::HashMap::new(),
+    _ => unreachable!(),
+};
+    }
+    return { let mut c = m.clone(); c.insert(owner.clone(), { let mut c = members.clone(); c.insert(member, true); c }); c };
+}
+
+fn edges_of(adj: std::collections::HashMap<String, Vec<BoxEdge>>, node: String) -> Vec<BoxEdge> {
+    return match adj.get(&node).cloned() {
+    Some(v) => v,
+    None => vec![],
+    _ => unreachable!(),
+};
+}
+
+fn boxed_reaches(start: String, goal: &str, adj: std::collections::HashMap<String, Vec<BoxEdge>>, cases: std::collections::HashMap<String, std::collections::HashMap<String, bool>>, fields: std::collections::HashMap<String, std::collections::HashMap<String, bool>>) -> bool {
+    let mut seen = std::collections::HashMap::new();
+    let mut queue = vec![start];
+    let mut cursor = 0i64;
+    while (cursor < queue.revl_length()) {
+        let node = (queue)[(cursor) as usize].clone();
+        cursor = (cursor).checked_add(1i64).expect("revl: Int overflow");
+        for e in edges_of(adj.clone(), node.clone()) {
+            if (e.kind == "case") {
+                if edge_is_boxed(cases.clone(), node.clone(), e.member.clone()) {
+                    continue;
+                }
+            } else {
+                if edge_is_boxed(fields.clone(), node.clone(), e.member.clone()) {
+                    continue;
+                }
+            }
+            if (e.target == goal) {
+                return true;
+            }
+            if (!seen.contains_key(&e.target)) {
+                seen.insert(e.target.clone(), true);
+                queue.push(e.target.clone());
+            }
+        }
+    }
+    return false;
+}
+
+fn recursive_boxed_edges(types: Value) -> BoxedEdges {
+    let mut adj = std::collections::HashMap::new();
+    let mut enum_edges: Vec<BoxEdge> = vec![];
+    let mut field_edges: Vec<BoxEdge> = vec![];
+    for name in value_keys(types.clone()) {
+        let spec = value_field(types.clone(), name.clone());
+        let kind = value_str(value_field(spec.clone(), String::from("kind")));
+        let mut edges: Vec<BoxEdge> = vec![];
+        if (kind == "record") {
+            let fields = value_field(spec.clone(), String::from("fields"));
+            for field in value_keys(fields.clone()) {
+                let target = inline_cycle_target(value_str(value_field(fields.clone(), field.clone())), types.clone());
+                if (target != "") {
+                    let e = BoxEdge { owner: name.clone(), kind: String::from("field"), member: field.clone(), target: target.clone() };
+                    edges.push(e.clone());
+                    field_edges.push(e.clone());
+                }
+            }
+        } else {
+            if (kind == "variant") {
+                for case in value_list(value_field(spec.clone(), String::from("cases"))) {
+                    let target = inline_cycle_target(value_str(value_field(case.clone(), String::from("payload"))), types.clone());
+                    if (target != "") {
+                        let e = BoxEdge { owner: name.clone(), kind: String::from("case"), member: value_str(value_field(case.clone(), String::from("name"))), target: target.clone() };
+                        edges.push(e.clone());
+                        enum_edges.push(e.clone());
+                    }
+                }
+            }
+        }
+        adj.insert(name.clone(), edges.clone());
+    }
+    let mut cases = std::collections::HashMap::new();
+    let mut fields = std::collections::HashMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for e in enum_edges.clone() {
+            if edge_is_boxed(cases.clone(), e.owner.clone(), e.member.clone()) {
+                continue;
+            }
+            if boxed_reaches(e.target.clone(), &e.owner, adj.clone(), cases.clone(), fields.clone()) {
+                cases = edge_box(cases.clone(), e.owner.clone(), e.member.clone());
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            continue;
+        }
+        for e in field_edges.clone() {
+            if edge_is_boxed(fields.clone(), e.owner.clone(), e.member.clone()) {
+                continue;
+            }
+            if boxed_reaches(e.target.clone(), &e.owner, adj.clone(), cases.clone(), fields.clone()) {
+                fields = edge_box(fields.clone(), e.owner.clone(), e.member.clone());
+                changed = true;
+                break;
+            }
+        }
+    }
+    let result = BoxedEdges { cases: cases.clone(), fields: fields.clone() };
+    return result;
+}
+
+fn record_shape(spec: Value) -> String {
+    let fields = value_field(spec.clone(), String::from("fields"));
+    let mut parts: Vec<String> = vec![];
+    for field in list_sort(value_keys(fields.clone())) {
+        let ftype = value_str(value_field(fields.clone(), field.clone()));
+        parts.push(format!("{}:{}{}:{}", field.revl_length(), field, ftype.revl_length(), ftype));
+    }
+    return parts.revl_join("");
+}
+
+fn record_canonicals(types: Value) -> std::collections::HashMap<String, String> {
+    let mut canonical = std::collections::HashMap::new();
+    let mut by_shape = std::collections::HashMap::new();
+    for name in value_keys(types.clone()) {
+        let spec = value_field(types.clone(), name.clone());
+        if (value_str(value_field(spec.clone(), String::from("kind"))) == "record") {
+            let shape = record_shape(spec.clone());
+            if by_shape.contains_key(&shape) {
+                canonical.insert(name.clone(), map_get(by_shape.clone(), shape.clone()));
+            } else {
+                by_shape.insert(shape.clone(), name.clone());
+                canonical.insert(name.clone(), name.clone());
+            }
+        }
+    }
+    return canonical;
+}
+
 fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>) -> Vec<String> {
     let mut out: Vec<String> = vec![];
+    let boxed = recursive_boxed_edges(types.clone());
+    let canonicals = record_canonicals(types.clone());
     for name in value_keys(types.clone()) {
         let spec = value_field(types.clone(), name.clone());
         let kind = value_str(value_field(spec.clone(), String::from("kind")));
         let nm = type_ident(name.clone());
         if (kind == "record") {
+            let twin = match canonicals.get(&name).cloned() {
+    Some(v) => v,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+            if ((twin != "") && (twin != name)) {
+                out.push(format!("pub type {} = {};", nm, type_ident(twin.clone())));
+                out.push(String::from(""));
+                continue;
+            }
             out.push(String::from("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"));
             out.push(format!("pub struct {} {{", nm));
             let fields = value_field(spec.clone(), String::from("fields"));
@@ -4670,7 +4885,11 @@ fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>
                 if (fname != field) {
                     out.push(format!("    #[serde(rename = \"{}\")]", field));
                 }
-                out.push(format!("    {}: {},", fname, rust_type_t(value_field(fields.clone(), field.clone()), tnames.clone())));
+                let mut rendered = rust_type_t(value_field(fields.clone(), field.clone()), tnames.clone());
+                if edge_is_boxed(boxed.fields.clone(), name.clone(), field.clone()) {
+                    rendered = format!("Box<{}>", rendered);
+                }
+                out.push(format!("    {}: {},", fname, rendered));
             }
             out.push(String::from("}"));
         } else {
@@ -4684,7 +4903,11 @@ fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>
                     if value_is_null(payload.clone()) {
                         out.push(format!("    {},", cname));
                     } else {
-                        out.push(format!("    {}({}),", cname, rust_type_t(payload.clone(), tnames.clone())));
+                        let mut rendered = rust_type_t(payload.clone(), tnames.clone());
+                        if edge_is_boxed(boxed.cases.clone(), name.clone(), value_str(value_field(case.clone(), String::from("name")))) {
+                            rendered = format!("Box<{}>", rendered);
+                        }
+                        out.push(format!("    {}({}),", cname, rendered));
                     }
                 }
                 out.push(String::from("}"));

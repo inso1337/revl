@@ -19,10 +19,12 @@ Covered subset (what emits byte-identical):
     the ``use std::sync::Arc;`` / ``use cordis::Value;`` lines);
   * the v3 typed-core (slice 2) — ``_emit_v3_types`` (a record as a
     ``PartialEq``-deriving ``pub struct``, a variant as a serde-tagged
-    ``pub enum``); record literals (``Struct { .. }`` with the by-value field
-    clone) and field access; ADT construction (``Enum::Case`` /
-    ``Enum::Case(arg)`` and the built-in Result/Option constructors); ``match``
-    over user variants (bind + nullary patterns, the ``_`` wildcard vs the
+    ``pub enum``; a recursive case payload or record field at a containment
+    cycle is ``Box``-indirected, and an unbuilt same-shape record twin lowers
+    to ``pub type Twin = Canonical;``); record literals (``Struct { .. }`` with
+    the by-value field clone) and field access; ADT construction
+    (``Enum::Case`` / ``Enum::Case(arg)`` and the built-in Result/Option
+    constructors); ``match`` over user variants (bind + nullary patterns, the ``_`` wildcard vs the
     appended ``unreachable!()``); user record/variant names in ``_rust_type``
     (``List[Point]`` -> ``Vec<Point>``); and the ``_V3Ctx`` type inference
     (``case_adt`` / ``case_payload`` / ``record_by_fields``);
@@ -337,6 +339,15 @@ CORPUS = [
     "reserved_type_names.rvl",  # issue #2328: a user record `Box` and variant
                              #   `Vec` take the type-name reservation (`Box_`,
                              #   `Vec_`) at every position they are spelled
+    "recursive_variant.rvl",  # issue #2328: a recursive variant payload is
+                             #   Box-indirected (`Node(Box<Tree>)`), E0072
+    "recursive_record_field.rvl",  # issue #2328: `Option<T>` stores its payload
+                             #   INLINE in Rust, so a field that recurses through
+                             #   `Opt[Node]` is declared `Box<Option<Node>>`
+    "twin_alias.rvl",        # issue #2328: an unbuilt same-shape record is a
+                             #   `pub type Bind = Param;`, not a second struct
+    "record_diamond.rvl",    # issue #2328: the diamond A -> {B, C} -> D
+                             #   resolves through the same-shape twin alias
     "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
                              #   keyword (`box`) takes the mangled spelling as
                              #   an identifier, the surface key as a string
