@@ -135,9 +135,8 @@ sanctioned door to a host module in the install tree.
 
 One thing is done *to* a body rather than assumed by it: its result is coerced
 to the extern's **declared return type** on the way out. `Int` is a `bigint` on
-this tier, while a verbatim JS body naturally yields a `number`. The
-`Math.floor(...)` example above shows this. For a body declared `-> Int`, the
-emitter wraps it as `return revlToBigInt((() => { ... })())`. The body keeps its
+this tier, while a verbatim JS body naturally yields a `number`. most often from
+`Math.floor(...)`. For a body declared `-> Int`, the emitter wraps it as `return revlToBigInt((() => { ... })())`. The body keeps its
 shape and its own `return` statements, and the value that leaves the function
 is a `bigint`. The coercion follows the three cases that `bridge.ts`'s
 `toBigInt` uses at the wire seam (issue #1566), in the same order, so the two
