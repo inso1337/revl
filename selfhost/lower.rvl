@@ -33556,8 +33556,9 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
 // `nmOut` overrides the emitted name (a `_revl_sync` clone re-renders its
 // origin's span under the monomorph's name) and `strip` drops both the `async`
 // stamp and the async half of every parameter's type, which is the whole of
-// `_synthesize_sync_monomorphs`. `fnty` carries the module callables' declared
-// signatures; it is empty unless this document has a sync monomorph.
+// `_synthesize_sync_monomorphs`. `fnty` carries the module callables'
+// declared signatures: a document with a sync monomorph gets that table, and
+// every document gets each top-level `extern`'s row (issue #2945).
 fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
                       colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str],
                       nmOut: Str, strip: Bool, fnty: List[Bind]) -> LirFn {
