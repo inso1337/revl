@@ -245,7 +245,7 @@ def test_export_without_sdk_is_a_structured_no_op(monkeypatch):
     monkeypatch.setattr(otel, "otel_available", lambda: False)
     result = otel.export_to_otel(_cascade_trace())
     assert result["exported"] is False
-    assert "revl[otel]" in result["reason"]
+    assert ".[otel]" in result["reason"]
     # it still reports how many spans it *would* have emitted (root + 4)
     assert result["spans"] == 5
 
@@ -263,7 +263,7 @@ def test_cli_without_sdk_prints_the_span_mapping(tmp_path, monkeypatch):
 HAVE_OTEL = otel.otel_available()
 needs_otel = pytest.mark.skipif(
     not HAVE_OTEL,
-    reason="needs the OpenTelemetry SDK (pip install revl[otel])")
+    reason="needs the OpenTelemetry SDK (pip install '.[otel]' from a checkout)")
 
 
 @needs_otel

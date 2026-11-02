@@ -9,10 +9,11 @@ holds neither. So nothing in this module lifts `apply.py`'s theorem across a
 boundary. What crosses is a *protocol*, and the honest verdict vocabulary that
 comes with it.
 
-Slice 1 is the cut that is landable on today's tree: every seam is a LOCAL
-process seam (a UDS bridge, item 56's transport reused unchanged), so the
-control plane a cross-machine deploy would need — a replicated WAL, a quorum
-coordinator, a remote runner — is deliberately absent (Slice 2b+).
+Slice 1 is the cut that was landable on its own: every seam is a LOCAL process
+seam (a UDS bridge, item 56's transport reused unchanged), so it needed none of
+the control plane a cross-machine deploy requires. The remote runner and the
+bundle staging have since landed for `via = ssh` under a pinned host key; a
+replicated WAL and a quorum coordinator remain deliberately absent (Slice 2b+).
 What Slice 1 does build, in the four pieces the design names:
 
 1. **the attestation chain, verified at admission** (§2). `chain_bindings`
@@ -1385,9 +1386,9 @@ def compare_commit_receipt(admission_receipt: Mapping,
 # it exercises the exact serialization a real transport would and a field that
 # does not survive the round trip fails a test here, not in production. The live
 # cross-machine leg (staging over scp/rsync, spawning the runner over ssh, the
-# pinned host key of §1.3) rides on top of this protocol unchanged and is a
-# following slice; it would be verified end-to-end on the two self-hosted
-# runners (azure-amd-1 + oracle-arm64).
+# pinned host key of §1.3) rides on top of this protocol unchanged: it is
+# :meth:`StdioRunnerTransport.ssh` plus :func:`stage_bundle_over_ssh`, and the
+# ssh transport and command suites cover it end to end with fake ssh/scp shims.
 #
 # The protocol is deliberately thin — dict in, dict out — because a real runner
 # reads one JSON line off the orchestration channel and writes one back. The
@@ -1619,10 +1620,11 @@ def serve_deploy_request(request_wire: Mapping, *,
 
 class InProcessTransport:
     """The orchestration channel of §1.2, stubbed to run the runner IN THIS
-    PROCESS — no second machine, no ssh, no subprocess. It stands in for the
+    PROCESS: no second machine, no ssh, no subprocess. It stands in for the
     real SSH/scp transport so the whole PREPARE→COMMIT handshake is buildable
-    and testable on one host; the live cross-machine transport is a following
-    slice that implements the same `send` contract.
+    and testable on one host. :class:`StdioRunnerTransport` is the live
+    transport, over a child process (`.local`) and over ssh (`.ssh`), and
+    implements the same `send` contract.
 
     `send` carries the request through its canonical wire form and carries the
     reply back the same way (`to_wire` -> json text -> `from_wire`), so the stub
@@ -1686,8 +1688,9 @@ class ProcessRunnerTransport:
     :mod:`revl._deploy_participant` already uses.
 
     This is the piece between :class:`InProcessTransport` (which runs the runner
-    inside the conductor for a one-host test) and the deferred cross-machine leg
-    (design R4/R5: scp/rsync staging, a pinned SSH host key). It spawns `argv`
+    inside the conductor for a one-host test) and the live cross-machine leg
+    (design R4/R5: scp/rsync staging, a pinned SSH host key), which has landed as
+    the `.ssh` shape of :class:`StdioRunnerTransport`. It spawns `argv`
     and speaks the identical protocol regardless of what `argv` is: locally
     :meth:`local` builds ``[python, -m, revl, deploy-admit, ...]`` so the far
     "host" is a child on this machine, and the machine boundary rides on top
@@ -4414,10 +4417,11 @@ def deploy_admit_command(args) -> int:
 
     This is the process a live transport spawns: locally as
     ``python -m revl deploy-admit ...`` (see :meth:`StdioRunnerTransport.local`),
-    and across a machine boundary as the same command behind ``ssh <host>`` once
-    the deferred staging + pinned-host-key leg (design R4/R5) lands. It stages and
-    verifies; it never drives the local `apply` — that is the conductor's
-    coordinated protocol (:func:`run_deploy`), unchanged.
+    and across a machine boundary as the same command behind ``ssh <host>``
+    (see :meth:`StdioRunnerTransport.ssh`). The conductor stages the bundle
+    under the pinned host key (design R4/R5, :func:`stage_bundle_over_ssh`) and
+    this runner verifies what lands; it never drives the local `apply`, which is
+    the conductor's coordinated protocol (:func:`run_deploy`), unchanged.
 
     A line that is not a JSON object is answered with a fail-closed
     :data:`LINK_TRANSPORT` refusal rather than skipped: a runner that could not
