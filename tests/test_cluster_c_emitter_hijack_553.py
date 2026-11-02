@@ -992,7 +992,7 @@ lifecycle test "u" { load C let z = call echo.echo("z") assert z == "z" }
 """
 _A3_PLAIN_DIGEST = {
     # issue #2975 moved the typescript lifecycle driver's own locals to the
-    # `$revl_` sigil (the fn body below carries a `lifecycle test`, so its
+    # `$revl_` sigil (the fixture below carries a `lifecycle test`, so its
     # emitted bytes move with every such document). A program with no
     # lifecycle test, or a binding outside that driver, is unchanged.
     "typescript": "07b0bf8ace729df3cfde2b5974209e58c22aeab182ef8a3993819e9e4bceed29",
