@@ -29683,6 +29683,11 @@ fn infer_index(t: Str) -> Str {
   let h = parse_head(t)
   if (h == "List") { return type_arg1(t) }
   if (h == "Str") { return "Str" }
+  // issue #2949: a `Map[K, V]` subscript yields `V`, so the equality site sees
+  // the operand's width and stamps the same `widen` marker a `List` element
+  // read gets. Without it `m["a"] == 3` reached the tiers unmarked and
+  // TypeScript compared a number with a bigint.
+  if (h == "Map") { let a = type_args(t)  return a.length() > 1 ? a[1] : "" }
   return ""
 }
 
