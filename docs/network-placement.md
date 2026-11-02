@@ -91,7 +91,7 @@ mints one throwaway CA and one short-lived leaf per sandbox-seam participant
 **per boot**, with the same trust as the per-boot correlation secret, and lays
 each process's own leaf, key, and the CA certificate into a per-process directory
 that is the *only* placement material the sandbox driver mounts. It never
-includes the CA key or a sibling's key, so the whole-directory mount that would
+includes the CA key or a sibling's key. The whole-directory mount that would
 have leaked them is gone. Identity defaults to the process name. Under an
 `operator_profile`, item 55's attribution rule holds, so each participant must
 declare a `[tls]` identity that names a declared operator; otherwise placement
