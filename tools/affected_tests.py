@@ -18,7 +18,8 @@ the FULL gate, never fails open. Concretely:
     computed here from the real tree, one MODULE at a time (see
     `compile_reachable`), so a newly added core module cannot silently fall
     through to a narrow selection. A `src/revl` module off that graph selects the
-    tests that name it or any module that imports it.
+    tests that import it or a module that imports it directly, plus the tests
+    that name it (issue #2962).
   * A changed file matching NO mapping rule -> FULL.
   * Structural changes (Makefile, tools/pre_merge.sh, CI config, tests/conftest.py,
     shared test helpers/fixtures, the reference IR, or a test file DELETED) -> FULL.
@@ -1372,23 +1373,52 @@ def module_of(path: str) -> str:
     return ".".join(Path(path[len("src/revl/"):]).with_suffix("").parts)
 
 
-def importers_of(root: Path, module: str) -> set[str]:
-    """Every `src/revl` module that executes `module` through some chain of
-    imports, itself included."""
+def direct_importers_of(root: Path, module: str) -> set[str]:
+    """Every `src/revl` module with a direct import edge to `module`.
+
+    Issue #2962. The leaf arm used every TRANSITIVE importer (`revl.run`,
+    `revl.test`, `revl.gate`, ... for `revl.metrics`) and word-matched their
+    names, so `run` and `test` matched nearly every test. The transitive
+    closure is 585 tests for `revl.metrics` on this tree and cannot meet the
+    under-200 bound the issue requires, so the import arm narrows to one hop:
+    the tests that import the module or a module that imports it directly.
+    A test that reaches the module through a deeper importer is selected only
+    when it names the module, which the word arm below does.
+    """
     graph = import_graph(root) or {}
-    reverse: dict[str, set[str]] = {}
-    for src, targets in graph.items():
-        for target in targets:
-            reverse.setdefault(target, set()).add(src)
-    seen: set[str] = set()
-    stack = [module]
-    while stack:
-        current = stack.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        stack.extend(reverse.get(current, set()) - seen)
-    return seen
+    return {src for src, targets in graph.items() if module in targets}
+
+
+_TEST_IMPORT_CACHE: dict[Path, object] = {}
+
+
+def test_module_imports(root: Path) -> dict[str, set[str]] | None:
+    """`{test file: the src/revl modules its imports execute}`, or None when a
+    test cannot be read or parsed (the caller escalates).
+
+    Issue #2962. The leaf arm must select a test that imports the changed
+    module or a module that imports it directly. Matching importer names as
+    words could not tell an import from prose, so the imports are read the same
+    way the `src/revl` graph reads them (`_import_nodes` + `_module_edges`): a
+    lazy import inside a function body counts because the test may call it.
+    Every module the import executes is recorded, so an import of
+    `revl.mcp.session` also answers yes for `mcp` and `mcp.__init__`.
+    """
+    key = Path(root).resolve()
+    if key not in _TEST_IMPORT_CACHE:
+        pkg = root / "src" / "revl"
+        graph: dict[str, set[str]] | None = None
+        if pkg.is_dir():
+            mods = _module_index(pkg)
+            graph = {}
+            try:
+                for p in _test_files(root):
+                    graph[_node(p)] = _module_edges(
+                        mods, "", _import_nodes(p.read_text(encoding="utf-8")))
+            except (OSError, SyntaxError, ValueError):
+                graph = None
+        _TEST_IMPORT_CACHE[key] = graph
+    return _TEST_IMPORT_CACHE[key]
 
 
 # --------------------------------------------------------------------------- #
@@ -1644,18 +1674,29 @@ def select(changed, root) -> dict:
             if top in DOCUMENTED_CORE or module in reach:
                 where = "core" if top in DOCUMENTED_CORE else "compile-reachable"
                 return _full(f"src/revl/{module.replace('.', '/')} is {where} -> full")
-            # Not on the compile path, so only a test that executes this module
-            # can see the change, and a test executes it only by importing it or
-            # a module that imports it. Select every test naming any of them:
-            # each importer's own name and, for a subpackage module, its
-            # package's (issue #1780).
-            names = set()
-            for importer in importers_of(root, module):
-                parts = importer.split(".")
-                if parts[-1] == "__init__":
-                    parts = parts[:-1]
-                names.update(parts[:1] + parts[-1:])
-            hits = set().union(*(_word_tests(root, n) for n in sorted(names)))
+            # Not on the compile path. A test executes this module at import
+            # time by importing it or something on its import chain; the
+            # import arm takes the module itself and its DIRECT importers, and
+            # a test that reaches it through a deeper importer is selected
+            # when it names the module. The transitive closure was word-matched
+            # here instead and a change to a leaf selected 1072 of 1086 tests,
+            # because `revl.run` and `revl.test` are in that closure and
+            # `run`/`test` are words in nearly every test (issue #2962).
+            # Naming the module also covers a CLI subcommand named after it:
+            # `revl metrics` dispatches to `revl.metrics` without an import.
+            executors = {module} | direct_importers_of(root, module)
+            imports = test_module_imports(root)
+            if imports is None:
+                return _full("cannot analyze the tests' revl imports -> full")
+            hits = {node for node, mods in imports.items() if mods & executors}
+            parts = module.split(".")
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            # The module's own name, and its package when it is in a
+            # subpackage: a test naming `revl.mcp` may reach any `mcp` module
+            # (issue #1780).
+            names = set(parts[:1] + parts[-1:])
+            hits |= set().union(*(_word_tests(root, n) for n in sorted(names)))
             if not hits:
                 return _full(f"src/revl/{module} (leaf) has no referencing test -> full")
             pytest_nodes |= hits
