@@ -649,7 +649,7 @@
         "GOPROXY",
         "build",
         "go",
-        "stc-go is not in the local module cache and proxy.golang.org is unreachable \u2014 run `go build` once with network to populate the module cache"
+        "stc-go is not in the local module cache and proxy.golang.org is unreachable — run `go build` once with network to populate the module cache"
       ],
       "note": "Two copies of the go offline-resolve probe, one in the runner and one in the validator, including the operator-facing message. Near-clones."
     },
