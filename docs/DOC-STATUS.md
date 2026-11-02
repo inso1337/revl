@@ -107,7 +107,7 @@ regenerated rather than edited.
 | guarantees.md | needs-work | 2 |  |
 | guide-ai-agents.md | stale-fixed | 4 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
-| harness-gate-guide.md | needs-work | 5 |  |
+| harness-gate-guide.md | needs-work | 0 |  |
 | holes.md | needs-work | 29 |  |
 | import-a2a.md | current | 16 |  |
 | import-cordis.md | needs-work | 58 |  |

@@ -17,8 +17,10 @@ program, because **the two tiers do not give the same guarantee.**
 at all. Everything that is not a refusal is escalated to the reference
 toolchain. The gate never confines its host.**
 
-The py gate (`pip install revl`, `revl.gate.admit`) is the full reference
-compiler, so it can both refuse and admit. This crate cannot. It compiles
+The py gate (installed from source or a git tag, for example
+`pip install "git+https://github.com/inso1337/revl@<tag>"`, then
+`revl.gate.admit`) is the full reference compiler, so it can both refuse and
+admit. This crate cannot. It compiles
 `selfhost/lower.rvl`'s `admit_src` to rust: the composition and guarantee
 layer (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`) and **not**
 the reference type layer. So it has three arms, and none of them is an
