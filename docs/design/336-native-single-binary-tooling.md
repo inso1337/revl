@@ -679,10 +679,10 @@ the two differ only in where the identical archive bytes come from.
 Recorded after the fact. The runtime-management slice above surfaced an
 `embedding` (`private-runtime` / `system-python`) over `revl/gateVersion` so a
 client could tell a self-contained artifact from one leaning on an installed
-`revl`. That is WHETHER the runtime is private, not HOW it ships, and the one
-distinction the one-file item is ABOUT (a genuinely single distributed FILE
-(the runtime baked into the binary's own bytes) versus a self-contained PAIR (a
-runtime archive beside the executable)) was invisible at that surface: both
+`revl`. That is WHETHER the runtime is private, not HOW it ships. The one
+distinction the one-file item is ABOUT was invisible at that surface. A
+genuinely single distributed FILE has the runtime baked into the binary's own
+bytes. A self-contained PAIR has a runtime archive beside the executable. Both
 report `private-runtime`. So a fleet or install audit could not verify from the
 binary that a shipped artifact really is one file, and the runtime's own pin
 (the A3 skew comparand for the interpreter pairing, distinct from the native

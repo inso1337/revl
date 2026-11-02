@@ -339,7 +339,7 @@ chooses from these kinds and cannot mint a new one.
   parameters), `table="orders" <= table="users"` does not. A richer host
   order (subdomain containment) is a registry row for later, not designed
   here.
-- **The registry is CLOSED (against UNDECLARED names).** A parameter
+- **The registry is CLOSED to UNDECLARED names.** A parameter
   name is legal only if it is a core registry name (the table above) or
   a name the capability itself DECLARES (the next subsection). Every
   other name is refused, never defaulted to the discrete order. A
@@ -387,10 +387,10 @@ lift through the product; the set-level check below preserves them.
 ### Declared resource dimensions (the registry is closed against undeclared names)
 
 The core registry above is a closed table of *kinds*. It is not a closed
-table of *names*: a product capability that has a resource dimension the
-core vocabulary does not name (the sending mailbox of `emission[mail.send]`
-is the reported case (issue #1938)) DECLARES it, and the declared name
-becomes legal for that capability alone.
+table of *names*. A product capability may DECLARE a resource dimension the
+core vocabulary does not name. The sending mailbox of `emission[mail.send]` is
+the reported case (issue #1938); the declared name becomes legal for that
+capability alone.
 
 ```
 capability <token>(<name>: <kind>, ...)          # a top-level declaration

@@ -382,8 +382,8 @@ The issue quotes 345 across 242 for the tree-wide number and 10 for the declined
 shipped surface, both at its own head. Neither is reproducible as a named
 subset today: the tree-wide difference is baseline drift between that head and
 this one (main has since landed #2149 and the two `str-*` idioms), and the
-declined surface re-measures to 11, not 10, on the four files #1292 declined
-plus `stdlib/server.rvl`, `examples/user_cache.rvl` alone carries two of them.
+declined surface re-measures to 11, not 10, on the four files #1292 declined,
+plus `stdlib/server.rvl`; `examples/user_cache.rvl` alone carries two of them.
 The surface that decides the item is the declined one, and it is zero above.
 
 What the item deliberately did **not** take:

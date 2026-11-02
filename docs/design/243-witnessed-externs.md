@@ -193,11 +193,11 @@ tiers (Slice 2b) follow this contract.
    activation-body inverse, and consistent with G7.** `_deferred_transactional`
    is appended newest-last as each provide method fires, so `drain` must dispose
    it newest-FIRST (`reversed`). On a commit the order is immaterial (every
-   entry no-op discharges); on an ABORT it is load-bearing: two inverses whose
-   paths OVERLAP must undo newest-first or (because every stdlib/fs.rvl
-   inverse is idempotent-and-total ("a second replay is a no-op")) the oldest
-   inverse runs first, finds nothing, silently no-ops, and the newer inverse
-   then undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
+   entry no-op discharges). On an ABORT it is load-bearing: two inverses whose
+   paths OVERLAP must undo newest-first. Every stdlib/fs.rvl inverse is
+   idempotent-and-total, so a second replay is a no-op. If the oldest inverse
+   runs first, it finds nothing and silently no-ops; the newer inverse then
+   undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
    pre-session data while abort still reports `noResidue: true`, silently
    voiding the item 246 auto-approve of a class-(a) crossing. Three-line
    reproducers (`mv a b ; mv b c`; `rm a ; touch a`; `write "V2" ; write "V3"`,

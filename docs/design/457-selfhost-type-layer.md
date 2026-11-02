@@ -1135,8 +1135,8 @@ The third, and it is the one that changed a WIRE: a body's return cannot be
 typed against a running declaration the wire does not carry. `revl.manifest.
 manifest_wire` now renders a PLAIN operation as `get(key:Str):Str`, where plain
 means an IR method entry whose key set is exactly `{params, returns, emission}`
-with `emission` false (`revl.manifest._PLAIN_METHOD_KEYS`). Every marking (
-`async`, `capabilities`, `commutative`, `idempotent`, `termination`, `cache`,
+with `emission` false (`revl.manifest._PLAIN_METHOD_KEYS`). Every marking
+(`async`, `capabilities`, `commutative`, `idempotent`, `termination`, `cache`,
 `validated`, `route`) withholds the return, and so does a marking added to
 `lower.py` later, without an edit to the renderer. `put` is the case in the
 bench composition: it is an `emission`, its token stops at the parameter list,

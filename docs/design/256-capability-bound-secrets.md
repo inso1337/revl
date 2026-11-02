@@ -318,8 +318,8 @@ binding that is not the credential. So the plug has an explicit per-document
 opt-in, `secrets_may_be_absent`, which leaves an unresolvable name UNSET instead
 of refusing, and `_Driver.set_secret(name, value)` is the sanctioned seam that
 installs or ROTATES it afterwards. It writes the same name-keyed map plug-time
-resolution writes, so the audit token still names the real binding (never a
-locator, never a value (§5a)), and the emitted body's `_revl_secret` reads that
+resolution writes. The audit token therefore still names the real binding,
+never a locator or value (§5a). The emitted body's `_revl_secret` reads that
 map on every call, which is what makes an install-after-start and a later
 rotation visible to the NEXT call with no re-plug. What the opt-in changes is
 only WHEN a missing value is reported, never WHETHER: the miss is still

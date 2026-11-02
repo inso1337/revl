@@ -324,8 +324,8 @@ Landed in `backends/wasm/emit.py` (the compiled accumulator) and
    deadline in guest code.
 6. **The WAL descriptor is a static compile-time index, not a runtime log.**
    `_teardown_section` emits a `revl:teardown` custom section (seq, kind,
-   `deactivate_step` dispatch position per transactional/compensation entry)
-  : the honest ceiling on a tier whose teardown loop is compiled state with
+   `deactivate_step` dispatch position per transactional/compensation entry):
+   the honest ceiling on a tier whose teardown loop is compiled state with
    zero host bookkeeping (backends/wasm/README.md): runtime witness/argument
    VALUES live in the component's own linear memory, and nothing here claims
    to persist them durably. A host wanting genuine crash recovery on this

@@ -20,8 +20,8 @@ The prior investigation's conclusions all verified:
   *its* callers: a whole-program property that belongs in the frontend
   checker (lower.py's checking passes), not in an emitter.
 - There is no async signal in the IR. The extern IR node is built in
-  src/revl/lower.py:1265 (`_lower_externs`), entry dict at lower.py:1296-1303
- , `name/class/params/returns/bodies` (+ optional `undo`/`compensate`),
+  src/revl/lower.py:1265 (`_lower_externs`), entry dict at lower.py:1296-1303,
+  `name/class/params/returns/bodies` (+ optional `undo`/`compensate`),
   nothing about asynchrony.
 - revl already has `async fn` service operations (docs/syntax-2.0.md:344-355,
   services 2.0 §5; amendment A1 allows `await` of host async values in async
@@ -206,7 +206,7 @@ witness edges.
 The async version, inserted in the same block:
 
 > `Db.complete` is declared sync, but this implementation reaches async
-> extern `http_post`: a sync method has no in-flight window (A1).
+> operation `http_post` — a sync method has no in-flight window (A1)
 > hint: declare the operation `async fn complete(...)` in service `Db`, or
 > move the suspending call out of this method.
 > code=A1, category=async-propagation
@@ -277,8 +277,8 @@ recorded as a rejected extension.
 - **Across services (the G8 boundary):** propagation stops at the service
   declaration. A consumer sees `async fn` in the service it binds to; the
   admission gate already treats an async flip as a breaking change to a
-  service ("`m` becomes `async`: a consumer's call site …",
-  src/revl/admission.py:246-249). So async-ness crosses component
+  service ("`m` becomes `async` — a consumer's call site awaits it differently",
+  src/revl/admission.py:311-312). So async-ness crosses component
   boundaries only by declaration, which is what keeps the fixpoint
   module-local and fast.
 - **Component bodies:** activation bodies have their own `await` *step*
