@@ -196,6 +196,12 @@ ACCEPTED = [
 ]
 
 REJECTED = [
+    # issue #2949: a Map read answers its declared V. On main both checkers
+    # answered unknown for `mf["a"]`, so `unknown & Int32` (accepted, like
+    # `q & m`) and `unknown && Bool` (accepted, like `flag && q`) stayed
+    # admissible. Now V is Float and both operands are known, so both
+    # checkers must refuse.
+    'mf["a"] & m', 'mf["a"] && flag',
     # Bool in arithmetic (refusal-parity: `/` on Bool is the headline case)
     "flag / flag", "flag + 1", "true * false", "x + flag", "1 % flag",
     "flag / x", "x - true",

@@ -493,6 +493,7 @@ test "and `has` still agrees with it" { assert table().has("a") && !table().has(
 fn float_value_is_three(m: Map[Str, Float]) -> Bool { return m["a"] == 3 }
 fn int_is_a_float_value(m: Map[Str, Float]) -> Bool { return 3 == m["a"] }
 fn int32_value_is_three(m: Map[Str, Int32]) -> Bool { return m["a"] == 3 }
+fn int_is_an_int32_value(m: Map[Str, Int32]) -> Bool { return 3 == m["a"] }
 fn int_value_is_three(m: Map[Str, Int]) -> Bool { return m["a"] == 3 }
 fn int_value_is_a_float(m: Map[Str, Int]) -> Bool { return m["a"] == 3.0 }
 
@@ -520,6 +521,7 @@ test "a whole Float map value is not equal" {
   assert !float_value_is_three(m)
 }
 test "an Int32 map value equals an Int literal" { assert int32_value_is_three(i32s()) }
+test "the reverse Int32 order widens too" { assert int_is_an_int32_value(i32s()) }
 test "an Int map value equals an Int literal" { assert int_value_is_three(ints()) }
 test "an Int map value widens against a Float literal" { assert int_value_is_a_float(ints()) }
 """,

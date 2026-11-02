@@ -13,7 +13,7 @@ An Int literal needs the IR to state the other operand's Int type (a literal,
 annotated arithmetic or negation, a Map index with `value_type` Int): a bare
 name's type is not stated and keeps `revlEq`. A Map value of `Float` or `Int32`
 now carries the widen marker issue #2715 defined (#2949), so it too keeps
-`revlEq` — the map read is converted (`Number`/`BigInt`) rather than compared
+`revlEq`: the map read is converted (`Number`/`BigInt`) rather than compared
 as a raw `number` with a bigint. Structural operands, Float and None literals
 and widened operands keep `revlEq` as before.
 """

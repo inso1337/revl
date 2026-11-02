@@ -4053,7 +4053,7 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             return node.get("value_type") or (targs[1] if len(targs) > 1 else None)
         if thead == "Str":
             return "Str"
-        return node.get("value_type")
+        return None
     if kind == "if":
         return join(infer_ir(node.get("then"), tenv, types, services, filename, line),
                     infer_ir(node.get("else"), tenv, types, services, filename, line),

@@ -16,13 +16,15 @@ were marked correctly:
 A map read now answers `V`, so `_mark_equality_widen` sees the operand's
 width exactly as it does for `List`: the `Int` literal widens to `Float`
 against a `Float` value, and the `Int32` read widens to `Int`. A
-`Map[Str, Int]` read still carries no marker, and its IR is unchanged byte
-for byte.
+`Map[Str, Int]` read carries no widen marker and the equality node is
+unchanged; elsewhere the new type knowledge does reach `_operand_annotation`,
+so arithmetic over an Int map read gains `"operands": "Int"`.
 
 The executing five-tier probe lives in `tests/test_cross_tier_execution.py`
 (so the conformance job runs it), and the self-hosted lowering is held to the
-same IR by the `maps.rvl` corpus document. This file pins the IR and the wasm
-tier's unchanged refusal.
+same IR by the `maps.rvl` corpus document. This file pins the IR on BOTH
+strata the marker reads: the plain `fn` path (`infer_ast`) and a `provide`
+method body (`infer_ir`), plus the wasm tier's unchanged refusal.
 """
 
 import importlib.util
@@ -46,11 +48,43 @@ fn int_value_against_an_int(m: Map[Str, Int]) -> Bool { return m["a"] == 3 }
 fn int_value_against_a_float(m: Map[Str, Int]) -> Bool { return m["a"] == 3.0 }
 """
 
+# A component body goes through the OTHER inference (`infer_ir` over lowered
+# nodes), not the `fn` path above. Its index node carries neither `key_type`
+# nor `value_type`; the map value type has to come from the target's declared
+# type, so a revert of the `infer_ir` arm leaves this IR unmarked.
+COMPONENT_SOURCE = """
+service Reads {
+  fn float_is_three(m: Map[Str, Float]) -> Bool
+  fn int32_is_three(m: Map[Str, Int32]) -> Bool
+}
+component Reader provides reads: Reads {
+  provide reads {
+    fn float_is_three(m) = m["a"] == 3
+    fn int32_is_three(m) = m["a"] == 3
+  }
+}
+"""
+
 
 def _expr(name: str) -> dict:
     ir = compile_source(SOURCE, "map_index_2949.rvl")
     fn = next(f for f in ir["functions"] if f["name"] == name)
     return fn["body"][-1]["expr"]
+
+
+def _component_expr(name: str) -> dict:
+    ir = compile_source(COMPONENT_SOURCE, "map_index_2949_component.rvl")
+    body = ir["components"][0]["body"]
+    provide = next(step for step in body if step["step"] == "provide")
+    method = next(m for m in provide["methods"] if m["name"] == name)
+    return method["body"][-1]["expr"]
+
+
+def _component_map_read() -> dict:
+    """A component-stratum map read: a `name` target and no map annotations."""
+    return {"kind": "index",
+            "target": {"kind": "name", "id": "m"},
+            "index": {"kind": "lit", "value": "a"}}
 
 
 def _map_read(value_type: str) -> dict:
@@ -86,6 +120,23 @@ def test_int32_value_marks_the_index_in_either_operand_order():
     assert expr == {"kind": "bin", "op": "==",
                     "left": {"kind": "lit", "value": 3},
                     "right": {**_map_read("Int32"), "widen": "Int"}}
+
+
+def test_component_stratum_marks_a_float_map_value():
+    """A `provide` method body lowers through `infer_ir`, not `infer_ast`; the
+    component index node has no `value_type`, so this only marks once the arm
+    reads the target's declared map type."""
+    expr = _component_expr("float_is_three")
+    assert expr == {"kind": "bin", "op": "==",
+                    "left": _component_map_read(),
+                    "right": {"kind": "lit", "value": 3, "widen": "Float"}}
+
+
+def test_component_stratum_marks_an_int32_map_value():
+    expr = _component_expr("int32_is_three")
+    assert expr == {"kind": "bin", "op": "==",
+                    "left": {**_component_map_read(), "widen": "Int"},
+                    "right": {"kind": "lit", "value": 3}}
 
 
 def test_an_int_value_marks_the_read_against_a_float_literal():
