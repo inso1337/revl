@@ -478,19 +478,28 @@ pub struct TopFn {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CfgField {
+    name: String,
+    ty: String,
+    line: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CfgCaseD {
     cname: String,
     payload: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CfgTy {
     name: String,
     kind: String,
-    fields: Vec<Bind>,
+    fields: Vec<CfgField>,
     cases: Vec<CfgCaseD>,
     params: Vec<String>,
     rhs: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -18947,7 +18956,7 @@ fn cfg_data_msg(fname: &str, owner: &str, root_: &str, offender: &str) -> String
 }
 
 fn cfg_ty_none() -> CfgTy {
-    return CfgTy { name: String::from(""), kind: String::from(""), fields: vec![], cases: vec![], params: vec![], rhs: String::from("") };
+    return CfgTy { name: String::from(""), kind: String::from(""), fields: vec![], cases: vec![], params: vec![], rhs: String::from(""), line: 0i64 };
 }
 
 fn cfg_lookup(ds: &[CfgTy], h: &str) -> CfgTy {
@@ -19101,14 +19110,14 @@ fn cfg_tparams(ts: &[Token], i: i64) -> Vec<String> {
     return out;
 }
 
-fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<Bind> {
+fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgField> {
     let mut k = lo;
-    let mut out: Vec<Bind> = vec![];
+    let mut out: Vec<CfgField> = vec![];
     while ((k < hi) && (!atk(&ts, k, "}"))) {
         if (atk(&ts, k, "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) {
             let nm = tkc(&ts, k).text;
             let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
-            out.push(Bind { name: nm.clone(), ty: taint_strip(tr.ty.clone()) });
+            out.push(CfgField { name: nm.clone(), ty: taint_strip(tr.ty.clone()), line: tkc(&ts, k).line });
             k = tr.i;
             if atk(&ts, k, ",") {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -19136,7 +19145,7 @@ fn cfg_var_cases(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgCaseD> {
                     nk = (nk).checked_add(1i64).expect("revl: Int overflow");
                 }
             }
-            out.push(CfgCaseD { cname: nm.clone(), payload: payload.clone() });
+            out.push(CfgCaseD { cname: nm.clone(), payload: payload.clone(), line: tkc(&ts, k).line });
             k = nk;
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -19200,6 +19209,7 @@ fn cfg_one_type(ts: Vec<Token>, i: i64) -> CfgTyR {
     }
     j = (j).checked_add(1i64).expect("revl: Int overflow");
     let rhsEnd = cfg_decl_end(&ts, j);
+    let dline = tkc(&ts, i).line;
     if atk(&ts, j, "{") {
         let bend = close_brace(&ts, j);
         if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
@@ -19207,15 +19217,15 @@ fn cfg_one_type(ts: Vec<Token>, i: i64) -> CfgTyR {
         }
         let flds = cfg_rec_fields(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"));
         if (flds.revl_length() == 0i64) {
-            return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: vec![], params: params, rhs: String::from("") }, i: bend };
+            return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: vec![], params: params, rhs: String::from(""), line: dline }, i: bend };
         }
-        return CfgTyR { t: CfgTy { name: nm, kind: String::from("record"), fields: flds, cases: vec![], params: params, rhs: String::from("") }, i: bend };
+        return CfgTyR { t: CfgTy { name: nm, kind: String::from("record"), fields: flds, cases: vec![], params: params, rhs: String::from(""), line: dline }, i: bend };
     }
     if cfg_is_variant_rhs(&ts, j, rhsEnd) {
-        return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: cfg_var_cases(ts, j, rhsEnd), params: params, rhs: String::from("") }, i: rhsEnd };
+        return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: cfg_var_cases(ts, j, rhsEnd), params: params, rhs: String::from(""), line: dline }, i: rhsEnd };
     }
     let tr = type_at(ts.clone(), j);
-    return CfgTyR { t: CfgTy { name: nm, kind: String::from("alias"), fields: vec![], cases: vec![], params: params, rhs: taint_strip(tr.ty) }, i: rhsEnd };
+    return CfgTyR { t: CfgTy { name: nm, kind: String::from("alias"), fields: vec![], cases: vec![], params: params, rhs: taint_strip(tr.ty), line: dline }, i: rhsEnd };
 }
 
 fn cfg_collect_types(ts: Vec<Token>) -> Vec<CfgTy> {
@@ -19588,11 +19598,11 @@ fn cfg_svc_names(svcs: &[SvcD]) -> Vec<String> {
     return out;
 }
 
-fn cfg_erase_binds(bs: &[Bind], al: std::collections::HashMap<String, String>) -> Vec<Bind> {
-    let mut out: Vec<Bind> = vec![];
+fn cfg_erase_binds(bs: &[CfgField], al: std::collections::HashMap<String, String>) -> Vec<CfgField> {
+    let mut out: Vec<CfgField> = vec![];
     let mut i = 0i64;
     while (i < bs.revl_length()) {
-        out.push(Bind { name: (bs)[(i) as usize].name.clone(), ty: alias_subst((bs)[(i) as usize].ty.clone(), al.clone()) });
+        out.push(CfgField { name: (bs)[(i) as usize].name.clone(), ty: alias_subst((bs)[(i) as usize].ty.clone(), al.clone()), line: (bs)[(i) as usize].line.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -19602,7 +19612,7 @@ fn cfg_erase_cases(cs: &[CfgCaseD], al: std::collections::HashMap<String, String
     let mut out: Vec<CfgCaseD> = vec![];
     let mut i = 0i64;
     while (i < cs.revl_length()) {
-        out.push(CfgCaseD { cname: (cs)[(i) as usize].cname.clone(), payload: alias_subst((cs)[(i) as usize].payload.clone(), al.clone()) });
+        out.push(CfgCaseD { cname: (cs)[(i) as usize].cname.clone(), payload: alias_subst((cs)[(i) as usize].payload.clone(), al.clone()), line: (cs)[(i) as usize].line.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -19615,9 +19625,9 @@ fn cfg_erase_decls(ds: &[CfgTy], al: std::collections::HashMap<String, String>) 
         let d = (ds)[(i) as usize].clone();
         if (!al.contains_key(&d.name)) {
             if (d.kind == "alias") {
-                out.push(CfgTy { name: d.name.clone(), kind: String::from("variant"), fields: vec![], cases: vec![CfgCaseD { cname: d.rhs.clone(), payload: String::from("") }], params: d.params.clone(), rhs: String::from("") });
+                out.push(CfgTy { name: d.name.clone(), kind: String::from("variant"), fields: vec![], cases: vec![CfgCaseD { cname: d.rhs.clone(), payload: String::from(""), line: d.line }], params: d.params.clone(), rhs: String::from(""), line: d.line });
             } else {
-                out.push(CfgTy { name: d.name.clone(), kind: d.kind.clone(), fields: cfg_erase_binds(&d.fields, al.clone()), cases: cfg_erase_cases(&d.cases, al.clone()), params: d.params.clone(), rhs: d.rhs.clone() });
+                out.push(CfgTy { name: d.name.clone(), kind: d.kind.clone(), fields: cfg_erase_binds(&d.fields, al.clone()), cases: cfg_erase_cases(&d.cases, al.clone()), params: d.params.clone(), rhs: d.rhs.clone(), line: d.line });
             }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -19625,14 +19635,14 @@ fn cfg_erase_decls(ds: &[CfgTy], al: std::collections::HashMap<String, String>) 
     return out;
 }
 
-fn cfg_owner_verdict(os: &[CfgOwner], al: std::collections::HashMap<String, String>, svcs: &[String], decls: &[CfgTy], ar: std::collections::HashMap<String, i64>) -> Verd {
+fn cfg_owner_verdict(os: &[CfgOwner], al: std::collections::HashMap<String, String>, svcs: &[String], decls: &[CfgTy]) -> Verd {
     let mut oi = 0i64;
     while (oi < os.revl_length()) {
         let o = (os)[(oi) as usize].clone();
         let mut fi = 0i64;
         while (fi < o.flds.revl_length()) {
             let f = (o.flds)[(fi) as usize].clone();
-            let wf = wf_site_verd(WfSite { ty: f.fty.clone(), line: f.line, asyncOk: false, shadow: vec![] }, ar.clone());
+            let wf = wf_site_verd(WfSite { ty: f.fty.clone(), line: f.line, asyncOk: false, shadow: vec![] });
             if (wf.v != "") {
                 return wf;
             }
@@ -19651,10 +19661,9 @@ fn cfg_owner_verdict(os: &[CfgOwner], al: std::collections::HashMap<String, Stri
 fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
     let svcs = cfg_svc_names(&pg.svcs);
     let al = alias_map(ts.clone());
-    let raw = cfg_collect_types(ts.clone());
-    let decls = cfg_erase_decls(&raw, al.clone());
+    let decls = cfg_erase_decls(&cfg_collect_types(ts.clone()), al.clone());
     let acc = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
-    return cfg_owner_verdict(&cfg_owner_concat(acc.comps.clone(), &acc.exts), al, &svcs, &decls, wf_declared_arities(&raw));
+    return cfg_owner_verdict(&cfg_owner_concat(acc.comps.clone(), &acc.exts), al, &svcs, &decls);
 }
 
 fn wf_has(msg: &str, sub: &str) -> bool {
@@ -19752,11 +19761,7 @@ fn wf_declared_verd(s: WfSite, ar: std::collections::HashMap<String, i64>) -> Ve
     return mk_verd(tagged("T1", &msg), s.line);
 }
 
-fn wf_site_verd(s: WfSite, ar: std::collections::HashMap<String, i64>) -> Verd {
-    let dv = wf_declared_verd(s.clone(), ar.clone());
-    if (dv.v != "") {
-        return dv;
-    }
+fn wf_site_verd(s: WfSite) -> Verd {
     let r = check_type_wellformed(s.ty.clone(), s.asyncOk);
     if r.ok {
         return no_verd();
@@ -19793,18 +19798,25 @@ fn wf_ret_from(ts: Vec<Token>, i: i64, line: i64, shadow: Vec<String>, acc: Vec<
     return acc.revl_push(WfSite { ty: tr.ty, line: line, asyncOk: false, shadow: shadow });
 }
 
-fn wf_fn_sites(ts: Vec<Token>, i: i64) -> Vec<WfSite> {
+fn wf_fn_sites(ts: Vec<Token>, i: i64, retFirst: bool) -> Vec<WfSite> {
     let p0 = fn_params_i(&ts, i);
     let tps = explicit_tparams(&ts, i);
-    let ps = wf_params_from(ts.clone(), p0, true, tps.clone(), vec![]);
     let pe = close_paren(&ts, (p0).checked_sub(1i64).expect("revl: Int overflow"));
+    if retFirst {
+        let mut ret: Vec<WfSite> = vec![];
+        if (pe != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            ret = wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, tps.clone(), ret.clone());
+        }
+        return wf_params_from(ts, p0, true, tps, ret);
+    }
+    let ps = wf_params_from(ts.clone(), p0, true, tps.clone(), vec![]);
     if (pe == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return ps;
     }
     return wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, tps, ps);
 }
 
-fn wf_extern_sites(ts: Vec<Token>, i: i64) -> Vec<WfSite> {
+fn wf_extern_sites(ts: Vec<Token>, i: i64, retFirst: bool) -> Vec<WfSite> {
     let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
     while ((((j < ts.revl_length()) && (!atw(&ts, j.clone(), "fn"))) && (!atk(&ts, j.clone(), "eof"))) && (!atk(&ts, j.clone(), "{"))) {
         if atk(&ts, j.clone(), "[") {
@@ -19826,8 +19838,15 @@ fn wf_extern_sites(ts: Vec<Token>, i: i64) -> Vec<WfSite> {
         return vec![];
     }
     let p0 = (j).checked_add(3i64).expect("revl: Int overflow");
-    let ps = wf_params_from(ts.clone(), p0.clone(), false, vec![], vec![]);
     let pe = close_paren(&ts, (p0).checked_sub(1i64).expect("revl: Int overflow"));
+    if retFirst {
+        let mut ret: Vec<WfSite> = vec![];
+        if (pe != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            ret = wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, vec![], ret.clone());
+        }
+        return wf_params_from(ts, p0.clone(), false, vec![], ret);
+    }
+    let ps = wf_params_from(ts.clone(), p0.clone(), false, vec![], vec![]);
     if (pe == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return ps;
     }
@@ -19846,16 +19865,11 @@ fn wf_sites_concat(xs: Vec<WfSite>, ys: &[WfSite]) -> Vec<WfSite> {
 
 fn alias_decl_refusal(ts: Vec<Token>) -> Verd {
     let sc = alias_scan(ts.clone());
-    let ar = wf_declared_arities(&cfg_collect_types(ts.clone()));
     let mut i = 0i64;
     while (i < sc.names.revl_length()) {
         if is_alias_target((sc.targets)[(i) as usize].clone(), &sc.declared) {
             if (sc.tps)[(i) as usize].clone() {
                 return no_verd();
-            }
-            let dv = wf_declared_verd(WfSite { ty: (sc.targets)[(i) as usize].clone(), line: (sc.lines)[(i) as usize].clone(), asyncOk: false, shadow: vec![] }, ar.clone());
-            if (dv.v != "") {
-                return dv;
             }
             let r = check_type_wellformed((sc.targets)[(i) as usize].clone(), false);
             if (!r.ok) {
@@ -19871,56 +19885,86 @@ fn alias_decl_refusal(ts: Vec<Token>) -> Verd {
     return no_verd();
 }
 
-fn wf_decls_walk(ts: Vec<Token>, i: i64, a: WfAcc) -> WfAcc {
+fn wf_decls_walk(ts: Vec<Token>, i: i64, a: WfAcc, retFirst: bool) -> WfAcc {
     if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
         return a;
     }
     let t = tkc(&ts, i);
     if at_boot(&ts, i) {
-        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a);
+        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a, retFirst);
     }
     if at_event(&ts, i) {
-        return wf_decls_walk(ts.clone(), event_decl_end(&ts, i), a);
+        return wf_decls_walk(ts.clone(), event_decl_end(&ts, i), a, retFirst);
     }
     if (t.kind != "kw") {
-        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
     }
     if at_pub_prefix(&ts, i) {
-        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a);
+        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a, retFirst);
     }
     if (t.text == "use") {
-        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
     }
     if (t.text == "test") {
         let e = test_block_end(&ts, i);
         if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return wf_decls_walk(ts, e, a);
+            return wf_decls_walk(ts, e, a, retFirst);
         }
-        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
     }
     if (t.text == "type") {
-        return wf_decls_walk(ts.clone(), cfg_one_type(ts.clone(), i).i, a);
+        return wf_decls_walk(ts.clone(), cfg_one_type(ts.clone(), i).i, a, retFirst);
     }
     if (t.text == "extern") {
         let step = p_extern(ts.clone(), i, empty_prog());
-        let a2 = WfAcc { fns: a.fns.clone(), exts: wf_sites_concat(a.exts.clone(), &wf_extern_sites(ts.clone(), i)) };
-        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2);
+        let a2 = WfAcc { fns: a.fns.clone(), exts: wf_sites_concat(a.exts.clone(), &wf_extern_sites(ts.clone(), i, retFirst)) };
+        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2, retFirst);
     }
     if (t.text == "fn") {
-        let a2 = WfAcc { fns: wf_sites_concat(a.fns.clone(), &wf_fn_sites(ts.clone(), i)), exts: a.exts.clone() };
+        let a2 = WfAcc { fns: wf_sites_concat(a.fns.clone(), &wf_fn_sites(ts.clone(), i, retFirst)), exts: a.exts.clone() };
         let step = p_fn(ts.clone(), i, empty_prog());
-        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2);
+        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2, retFirst);
     }
     if (t.text == "service") {
-        return wf_decls_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, a);
+        return wf_decls_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, a, retFirst);
     }
     if (t.text == "component") {
-        return wf_decls_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, a);
+        return wf_decls_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, a, retFirst);
     }
-    return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+    return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
 }
 
-fn wf_type_decl_arities(ds: &[CfgTy], ar: std::collections::HashMap<String, i64>) -> Verd {
+fn wf_declared_sites(sites: &[WfSite], ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut i = 0i64;
+    while (i < sites.revl_length()) {
+        let v = wf_declared_verd((sites)[(i) as usize].clone(), ar.clone());
+        if (v.v != "") {
+            return v;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn dfa_owner_fields(os: &[CfgOwner], ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut oi = 0i64;
+    while (oi < os.revl_length()) {
+        let o = (os)[(oi) as usize].clone();
+        let mut fi = 0i64;
+        while (fi < o.flds.revl_length()) {
+            let f = (o.flds)[(fi) as usize].clone();
+            let m = wf_declared_msg(&f.fty, ar.clone(), &(vec![]));
+            if (m != "") {
+                return mk_verd(tagged("T1", &m), f.line);
+            }
+            fi = (fi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        oi = (oi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn dfa_type_decls(ds: &[CfgTy], ar: std::collections::HashMap<String, i64>) -> Verd {
     let mut i = 0i64;
     while (i < ds.revl_length()) {
         let d = (ds)[(i) as usize].clone();
@@ -19928,7 +19972,7 @@ fn wf_type_decl_arities(ds: &[CfgTy], ar: std::collections::HashMap<String, i64>
         while (k < d.fields.revl_length()) {
             let m = wf_declared_msg(&(d.fields)[(k) as usize].ty, ar.clone(), &d.params);
             if (m != "") {
-                return mk_verd(tagged("T1", &m), 0i64);
+                return mk_verd(tagged("T1", &m), (d.fields)[(k) as usize].line.clone());
             }
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -19936,31 +19980,70 @@ fn wf_type_decl_arities(ds: &[CfgTy], ar: std::collections::HashMap<String, i64>
         while (k < d.cases.revl_length()) {
             let m = wf_declared_msg(&(d.cases)[(k) as usize].payload, ar.clone(), &d.params);
             if (m != "") {
-                return mk_verd(tagged("T1", &m), 0i64);
+                return mk_verd(tagged("T1", &m), (d.cases)[(k) as usize].line.clone());
             }
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
         let m = wf_declared_msg(&d.rhs, ar.clone(), &d.params);
         if (m != "") {
-            return mk_verd(tagged("T1", &m), 0i64);
+            return mk_verd(tagged("T1", &m), d.line);
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return no_verd();
 }
 
-fn declared_types_refusal(ts: Vec<Token>) -> Verd {
+fn dfa_prop_sites(ts: Vec<Token>, ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if (at_qual_test(&ts, i) && (tkc(&ts, i).text == "prop")) {
+            let v = wf_declared_sites(&wf_params_from(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), false, vec![], vec![]), ar.clone());
+            if (v.v != "") {
+                return v;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn declared_arity_refusal(ts: Vec<Token>) -> Verd {
     let ds = cfg_collect_types(ts.clone());
     let ar = wf_declared_arities(&ds);
-    let tv = wf_type_decl_arities(&ds, ar.clone());
+    if ((ar.len() as i64) == 0i64) {
+        return no_verd();
+    }
+    let owners = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
+    let cv = dfa_owner_fields(&owners.comps, ar.clone());
+    if (cv.v != "") {
+        return cv;
+    }
+    let tv = dfa_type_decls(&ds, ar.clone());
     if (tv.v != "") {
         return tv;
     }
-    let acc = wf_decls_walk(ts.clone(), 0i64, WfAcc { fns: vec![], exts: vec![] });
+    let acc = wf_decls_walk(ts.clone(), 0i64, WfAcc { fns: vec![], exts: vec![] }, true);
+    let fv = wf_declared_sites(&acc.fns, ar.clone());
+    if (fv.v != "") {
+        return fv;
+    }
+    let ev = wf_declared_sites(&acc.exts, ar.clone());
+    if (ev.v != "") {
+        return ev;
+    }
+    let xv = dfa_owner_fields(&owners.exts, ar.clone());
+    if (xv.v != "") {
+        return xv;
+    }
+    return dfa_prop_sites(ts, ar);
+}
+
+fn declared_types_refusal(ts: Vec<Token>) -> Verd {
+    let acc = wf_decls_walk(ts.clone(), 0i64, WfAcc { fns: vec![], exts: vec![] }, false);
     let sites = wf_sites_concat(acc.fns.clone(), &acc.exts);
     let mut i = 0i64;
     while (i < sites.revl_length()) {
-        let v = wf_site_verd((sites)[(i) as usize].clone(), ar.clone());
+        let v = wf_site_verd((sites)[(i) as usize].clone());
         if (v.v != "") {
             return v;
         }
@@ -24139,7 +24222,7 @@ fn tb_refusal_at(ts: Vec<Token>, i: i64, gtys: &[Bind], al: std::collections::Ha
                 return mk_verd(tb_dup_msg(&kind, &nm), tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).line);
             }
             if prop {
-                let pv = tb_prop_params(&wf_params_from(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), false, vec![], vec![]), 0i64, &nm, gtys, al.clone(), wf_declared_arities(&cfg_collect_types(ts.clone())));
+                let pv = tb_prop_params(&wf_params_from(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), false, vec![], vec![]), 0i64, &nm, gtys, al.clone());
                 if (pv.v != "") {
                     return pv;
                 }
@@ -24200,11 +24283,11 @@ fn tb_refusal_at(ts: Vec<Token>, i: i64, gtys: &[Bind], al: std::collections::Ha
     return tb_refusal_at(ts.clone(), skip_line(&ts, i), gtys, al, prop, seen);
 }
 
-fn tb_prop_params(ss: &[WfSite], k: i64, nm: &str, env: &[Bind], al: std::collections::HashMap<String, String>, ar: std::collections::HashMap<String, i64>) -> Verd {
+fn tb_prop_params(ss: &[WfSite], k: i64, nm: &str, env: &[Bind], al: std::collections::HashMap<String, String>) -> Verd {
     if (k >= ss.revl_length()) {
         return no_verd();
     }
-    let w = wf_site_verd((ss)[(k) as usize].clone(), ar.clone());
+    let w = wf_site_verd((ss)[(k) as usize].clone());
     if (w.v != "") {
         return w;
     }
@@ -24212,7 +24295,7 @@ fn tb_prop_params(ss: &[WfSite], k: i64, nm: &str, env: &[Bind], al: std::collec
     if (g != "") {
         return mk_verd(g, (ss)[(k) as usize].line.clone());
     }
-    return tb_prop_params(ss, (k).checked_add(1i64).expect("revl: Int overflow"), nm, env, al, ar);
+    return tb_prop_params(ss, (k).checked_add(1i64).expect("revl: Int overflow"), nm, env, al);
 }
 
 fn tb_gen_prims() -> Vec<String> {
@@ -25913,6 +25996,10 @@ fn model_council_refusal(ts: &[Token]) -> Verd {
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], ambSvcs: &[String], ambSvcsKnown: bool, ambOps: &[SvcOps]) -> NoLink {
     let base = ctx_evals(ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), &type_ctors(&ts)), amb_ops_map(ambOps, 0i64, std::collections::HashMap::new())), appr_info(&ts, pg.clone())), &ts, pg.clone());
+    let dav = declared_arity_refusal(ts.clone());
+    if (dav.v != "") {
+        return NoLink { done: true, refs: vec![dav.clone()] };
+    }
     let acv = alias_cycle_refusal(ts.clone());
     if (acv.v != "") {
         return NoLink { done: true, refs: vec![acv.clone()] };
