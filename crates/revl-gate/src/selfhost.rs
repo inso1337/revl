@@ -361,6 +361,12 @@ pub struct Verd {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct G6B {
+    names: Vec<String>,
+    partial: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReachAcc {
     names: Vec<String>,
     hasReq: bool,
@@ -15388,6 +15394,110 @@ fn mth_body_tys(body: &[Stmt], i: i64, env: Vec<Bind>, cx: Ctx__m2) -> Vec<Bind>
     return mth_body_tys(body, (i).checked_add(1i64).expect("revl: Int overflow"), hv_bind(if (bound == "") { env.clone() } else { tenv_put(&env, s.bind.clone(), bound.clone()) }, s.clone()), cx);
 }
 
+fn g6_expr_binds(e: Expr, acc: Vec<String>) -> Vec<String> {
+    return match e {
+    Expr::Bin(b) => { let b = *b; g6_expr_binds(b.r.clone(), g6_expr_binds(b.l.clone(), acc.clone())) },
+    Expr::Un(u) => { let u = *u; g6_expr_binds(u.e.clone(), acc.clone()) },
+    Expr::Emit(u) => { let u = *u; g6_expr_binds(u.e.clone(), acc.clone()) },
+    Expr::Call(c) => { let c = *c; g6_expr_binds_list(&c.args, 0i64, g6_expr_binds(c.target.clone(), acc.clone())) },
+    Expr::Field(f) => { let f = *f; g6_expr_binds(f.target.clone(), acc.clone()) },
+    Expr::OptField(f) => { let f = *f; g6_expr_binds(f.target.clone(), acc.clone()) },
+    Expr::OptCall(c) => { let c = *c; g6_expr_binds_list(&c.args, 0i64, g6_expr_binds(c.target.clone(), acc.clone())) },
+    Expr::Index(x) => { let x = *x; g6_expr_binds(x.idx.clone(), g6_expr_binds(x.target.clone(), acc.clone())) },
+    Expr::If(f) => { let f = *f; g6_expr_binds(f.els.clone(), g6_expr_binds(f.then_.clone(), g6_expr_binds(f.cond.clone(), acc.clone()))) },
+    Expr::Rec(r) => g6_expr_binds_inits(&r.fields, 0i64, acc.clone()),
+    Expr::RecUpd(r) => { let r = *r; g6_expr_binds_inits(&r.upds, 0i64, g6_expr_binds(r.base.clone(), acc.clone())) },
+    Expr::Lst(l) => g6_expr_binds_list(&l.items, 0i64, acc.clone()),
+    Expr::Arrow(a) => { let a = *a; g6_expr_binds(a.body.clone(), union_into(acc.clone(), &param_names(&a.params))) },
+    Expr::Match(m) => { let m = *m; g6_expr_binds_arms(&m.arms, 0i64, g6_expr_binds(m.scrut.clone(), acc.clone())) },
+    Expr::Templ(t) => g6_expr_binds_parts(&t.parts, 0i64, acc.clone()),
+    _ => acc,
+};
+}
+
+fn g6_expr_binds_list(xs: &[Expr], i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return g6_expr_binds_list(xs, (i).checked_add(1i64).expect("revl: Int overflow"), g6_expr_binds((xs)[(i) as usize].clone(), acc));
+}
+
+fn g6_expr_binds_inits(xs: &[InitN], i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return g6_expr_binds_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), g6_expr_binds((xs)[(i) as usize].value.clone(), acc));
+}
+
+fn g6_expr_binds_parts(ps: &[PartN], i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= ps.revl_length()) {
+        return acc;
+    }
+    let next = if ((ps)[(i) as usize].kind == "e") { g6_expr_binds((ps)[(i) as usize].e.clone(), acc.clone()) } else { acc.clone() };
+    return g6_expr_binds_parts(ps, (i).checked_add(1i64).expect("revl: Int overflow"), next);
+}
+
+fn g6_expr_binds_arms(xs: &[ArmN], i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    let a = (xs)[(i) as usize].clone();
+    let mut out = if (a.bind != "") { union_into(acc.clone(), &(vec![a.bind.clone()])) } else { acc.clone() };
+    if a.isBlk {
+        let mut k = 0i64;
+        while (k < a.blk.revl_length()) {
+            out = union_into(out.clone(), &(vec![(a.blk)[(k) as usize].name.clone()]));
+            out = g6_expr_binds((a.blk)[(k) as usize].value.clone(), out.clone());
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        out = g6_expr_binds(a.blkTail.clone(), out.clone());
+    } else {
+        out = g6_expr_binds(a.body.clone(), out.clone());
+    }
+    return g6_expr_binds_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), out);
+}
+
+fn g6_stmt_binds(ss: &[Stmt], i: i64, acc: G6B) -> G6B {
+    if (i >= ss.revl_length()) {
+        return acc;
+    }
+    let s = (ss)[(i) as usize].clone();
+    let mut out = acc.clone();
+    if (s.kind == "skip") {
+        out = G6B { names: acc.names.clone(), partial: true };
+    }
+    if (s.bind != "") {
+        out = G6B { names: union_into(out.names.clone(), &(vec![s.bind.clone()])), partial: out.partial };
+    }
+    return g6_stmt_binds(ss, (i).checked_add(1i64).expect("revl: Int overflow"), G6B { names: g6_expr_binds(s.e.clone(), out.names.clone()), partial: out.partial });
+}
+
+fn g6_component_binds(comp: CompD) -> G6B {
+    let mut out = g6_stmt_binds(&comp.setup, 0i64, G6B { names: vec![], partial: false });
+    let mut pi = 0i64;
+    while (pi < comp.provs.revl_length()) {
+        let ms = (comp.provs)[(pi) as usize].methods.clone();
+        let mut mi = 0i64;
+        while (mi < ms.revl_length()) {
+            out = g6_stmt_binds(&(ms)[(mi) as usize].body, 0i64, out.clone());
+            mi = (mi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        pi = (pi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn g6_bind_rows(comp: CompD) -> Vec<Bind> {
+    let b = g6_component_binds(comp.clone());
+    let mut out = if b.partial { vec![Bind { name: String::from("g6 partial"), ty: String::from("1") }] } else { vec![] };
+    let mut i = 0i64;
+    while (i < b.names.revl_length()) {
+        out.push(Bind { name: String::from("g6b ").revl_concat(&(b.names)[(i) as usize]), ty: String::from("1") });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn mth_param_tys(pm: ProvM, decl: MSig, i: i64, acc: Vec<Bind>) -> Vec<Bind> {
     if (i >= pm.params.revl_length()) {
         return acc;
@@ -16495,6 +16605,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
     }
     let pcx = cx.clone();
     let compLocals = stmt_binds(&comp.setup, 0i64, vec![]);
+    let g6Rows = g6_bind_rows(comp.clone());
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
         let pv = (comp.provs)[(pi) as usize].clone();
@@ -16520,7 +16631,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
                 }
                 return mk_verd(tagged(&a.tag, &a.msg), body_line(&pm.body, mcx, comp.line));
             }
-            let mtv = mth_type_verdict(&arrow_typed_body(pm.clone()), 0i64, hv_shadow(ct_req_ret_rows(mcx.clone(), mth_param_tys(pm.clone(), decl.clone(), 0i64, setupTys.clone())), &pm.params), mcx.clone(), tk_solid(taint_strip(decl.ret.clone()), gtys), &pm.name, comp.line);
+            let mtv = mth_type_verdict(&arrow_typed_body(pm.clone()), 0i64, concat_binds(hv_shadow(ct_req_ret_rows(mcx.clone(), mth_param_tys(pm.clone(), decl.clone(), 0i64, setupTys.clone())), &pm.params), &g6Rows), mcx.clone(), tk_solid(taint_strip(decl.ret.clone()), gtys), &pm.name, comp.line);
             if (mtv.v != "") {
                 return mtv;
             }
@@ -21273,6 +21384,12 @@ fn tk_ty_has_tparam(t: &str, env: &[Bind]) -> bool {
 fn tk_names_fallthrough(n: &str, env: &[Bind]) -> bool {
     if (tenv_get(env, &(String::from("case ").revl_concat(&n))) != "") {
         return true;
+    }
+    if (tenv_get(env, "g6 partial") == "1") {
+        return false;
+    }
+    if (tenv_get(env, &(String::from("g6b ").revl_concat(&n))) == "1") {
+        return false;
     }
     return ((tenv_get(env, &(String::from("mp ").revl_concat(&n))) == "1") && sig_declared(env, n));
 }

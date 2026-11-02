@@ -8046,6 +8046,21 @@ _2544_G6_OWNED_PROGRAMS = [
                    "    }\n"
                    "  }\n"
                    "}\n"),
+    # a method PARAMETER whose name is also bound by a sibling method's `let`:
+    # the reference's component-wide scan answers G6 at the `let`, so the guard
+    # must stand down even though the parameter is the missed binder
+    ("parameter_and_sibling_let",
+     "fn tag(s: Str) -> Str { return s }\n"
+     "service Cache { fn f(tag: Str) -> Str }\n"
+     "component C provides cache: Cache {\n"
+     "  provide cache {\n"
+     '    fn f(tag) = tag("x")\n'
+     "    fn g(key) {\n"
+     '      let tag = "y"\n'
+     "      return key\n"
+     "    }\n"
+     "  }\n"
+     "}\n"),
     # a test block's local
     ("test_local", "fn tag(s: Str) -> Str { return s }\n"
                    'test "t" {\n'
