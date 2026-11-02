@@ -1,0 +1,14 @@
+// issue #2328 remaining slice (reference pass #919): the boxing pass is greedy
+// and prefers an enum payload over a struct field. `Expr`'s `Neg` and `Bin`
+// cases are boxed, which breaks the `BinN -> Expr -> BinN` cycle, so BinN's
+// fields stay inline even though three of them reach `Expr`; the `Result`
+// wrapper is inline too and only its `Expr` payload makes an edge. `N` carries
+// two boxed `Opt[N]` fields, so the second box on one owner and the
+// already-boxed-edge skips run.
+pub type Expr = Lit(Int) | Neg(Expr) | Bin(BinN)
+pub type BinN = { l: Expr, r: Opt[Expr], rs: Result[Expr, Str], xs: List[Expr] }
+pub type N = { a: Opt[N], b: Opt[N] }
+
+pub fn k() -> Int {
+  return 1
+}

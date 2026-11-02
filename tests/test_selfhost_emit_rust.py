@@ -352,6 +352,10 @@ CORPUS = [
     "record_diamond.rvl",    # issue #2328 remaining slice: the diamond
                              #   A -> {B, C} -> D resolves through the
                              #   same-shape twin alias (item 268)
+    "recursive_boxing.rvl",  # issue #2328 remaining slice (reference pass
+                             #   #919): greedy selection, enum payload before
+                             #   record field (BinN stays unboxed), the inline
+                             #   Result wrapper, and two boxes on one owner (N)
     "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
                              #   keyword (`box`) takes the mangled spelling as
                              #   an identifier, the surface key as a string
