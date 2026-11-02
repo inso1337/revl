@@ -15368,8 +15368,11 @@ fn value_method_head(h: &str) -> bool {
 }
 
 fn hv_family(s: Stmt) -> String {
-    if (((s.kind != "effect") || (s.bind == "")) || (s.edge == "subscribe")) {
+    if ((s.kind != "effect") || (s.bind == "")) {
         return String::from("");
+    }
+    if (s.edge == "subscribe") {
+        return String::from("Subscription");
     }
     return match s.e.clone() {
     Expr::Call(c) => { let c = *c; match c.target {

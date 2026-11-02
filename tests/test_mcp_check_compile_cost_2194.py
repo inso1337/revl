@@ -13,8 +13,9 @@ main source without them) and no operator providers or realm bindings. The
 other shapes keep the plain path, and the report must be identical to it.
 
 The second half pins the lexer: inside one tool call the read-only readers of
-the sent text (path jail, authoring gate, completer, token gate) share one
-parse of it, so a check lexes 5 times instead of 8, with the same response.
+the sent text (path jail, authoring gate, completer, token gate, and the
+knowledge index's program and token reads) share one parse of it, so a check
+lexes 5 times instead of 8, with the same response.
 """
 
 import contextlib
@@ -169,6 +170,30 @@ GATE_REFUSED = ("extern pure fn rd(p: Str) -> Str\n"
                 "service S { fn f(x: Str) -> Str }\n"
                 "component C provides s: S { provide s { fn f(x) = rd(x) } }\n")
 
+# a comment above a member: the index lexes the sent text for its spans too,
+# which the shared parse now answers from the program it already parsed
+MEMBER = ("// The file as a whole.\n"
+          "service Counter {\n"
+          "    // bump 0\n"
+          "    fn bump0(by: Int) -> Int\n"
+          "    // bump 1\n"
+          "    fn bump1(by: Int) -> Int\n"
+          "}\n\n"
+          "// A counter that adds.\n"
+          "component Adder provides counter: Counter {\n"
+          "  provide counter {\n"
+          "    // add 0\n"
+          "    fn bump0(by) = by + 0\n\n"
+          "    // add 1\n"
+          "    fn bump1(by) = by + 1\n\n"
+          "  }\n}\n\n"
+          "type Wide = {\n"
+          "  // field 0\n"
+          "  f0: Int,\n"
+          "  // field 1\n"
+          "  f1: Int,\n"
+          "}\n")
+
 
 def _count_lexes(monkeypatch) -> list:
     """Every `lex` call, under whatever name a module bound it: the parser
@@ -211,6 +236,19 @@ def test_a_refused_check_lexes_the_sent_text_four_times_not_seven(monkeypatch):
     assert len(compiles) == 3, compiles
     assert lexes.count(REFUSED) == 4, len(lexes)   # was 7
     assert len(lexes) == 6, len(lexes)             # was 9
+
+
+def test_a_member_commented_check_lexes_the_sent_text_three_times_not_four(monkeypatch):
+    """The knowledge index reads the sent text as a program and then, for its
+    first member-anchored comment, as tokens. Both reads share the call's one
+    parse, so a text with a comment on a member costs the index one lex, not
+    two (issue #2194)."""
+    lexes = _count_lexes(monkeypatch)
+    result = _call("revl_check", {"source": MEMBER})
+    assert result["ok"] is True
+    # the shared read-only parse, the check's compile, the knowledge index
+    assert lexes.count(MEMBER) == 3, len(lexes)     # was 4
+    assert len(lexes) == 5, len(lexes)              # was 6
 
 
 def test_nothing_is_shared_across_calls(monkeypatch):
@@ -287,9 +325,10 @@ print(json.dumps(response, sort_keys=True))
 LEX_REFUSED = "service S { fn f() -> Str { `never closed } }\n"
 
 
-@pytest.mark.parametrize("source", [TERSE, REFUSED, GATE_REFUSED, LEX_REFUSED],
+@pytest.mark.parametrize("source",
+                         [TERSE, REFUSED, GATE_REFUSED, LEX_REFUSED, MEMBER],
                          ids=["passing", "refused", "gate-refused",
-                              "lex-refused"])
+                              "lex-refused", "member"])
 def test_the_full_response_is_byte_identical_without_the_share(source):
     """With the share switched off every reader parses for itself, which is the
     code path before it existed. Each side runs in a fresh process, so no
@@ -302,7 +341,7 @@ def test_the_full_response_is_byte_identical_without_the_share(source):
                               check=True)
         out[mode] = done.stdout
     content = json.loads(out["shared"])["result"]["structuredContent"]
-    assert content["ok"] is (source == TERSE)
+    assert content["ok"] is (source in (TERSE, MEMBER))
     if source == GATE_REFUSED:
         assert content["authoringTrust"] == "untrusted"
     assert out["shared"] == out["unshared"]
@@ -373,9 +412,10 @@ def test_corrupting_the_shared_parse_changes_the_outcome(monkeypatch, corrupt):
     assert damaged != clean, corrupt
 
 
-@pytest.mark.parametrize("source", [TERSE, REFUSED, GATE_REFUSED, LEX_REFUSED],
+@pytest.mark.parametrize("source",
+                         [TERSE, REFUSED, GATE_REFUSED, LEX_REFUSED, MEMBER],
                          ids=["passing", "refused", "gate-refused",
-                              "lex-refused"])
+                              "lex-refused", "member"])
 def test_the_readers_leave_the_shared_parse_untouched(monkeypatch, source):
     """"Read-only reader" is a convention of `shared_parse`; this enforces it.
     A deep snapshot of each shared program and token list is taken when it is
