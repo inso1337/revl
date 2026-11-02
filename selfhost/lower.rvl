@@ -17339,18 +17339,20 @@ fn ba_unknown_msg(n: Str) -> Str {
 
 // Whether the reference has a payload type for `pat` over a scrutinee declared
 // `ty`: `_variant_case_payload`, `model_answer.arm_payload`, then the builtin
-// `Opt`/`Result` heads. `_variant_case_payload` is keyed by the scrutinee's
-// whole spelling, so a declared type answers only when it is written with no
-// type arguments. A provided type answers yes, which is the silent direction.
+// `Opt`/`Result` heads. `_variant_case_payload` substitutes the selector's type
+// arguments for an applied USER variant, and reads the case from the type's own
+// case list; a provided type answers yes, which is the silent direction.
 fn ba_payload_known(ty: Str, pat: Str, env: List[Bind]) -> Bool {
   let head = parse_head(ty)
   if (head == "") { return true }
   let args = type_args(ty)
-  // issue #2325: `_variant_case_payload` substitutes the selector's type
-  // arguments for an applied USER variant, so the reference now types this
-  // binder and a block arm reading it is admitted. The case table names the
-  // owning type; the `gpar` row gives the arity a raw generic fails.
-  if (tenv_get(env, "case ".concat(pat)) == head) {
+  // issue #2325: the reference types this binder for an applied user variant,
+  // so its block-arm lift admits an arm reading it. The `cases <head>` row is
+  // the type's OWN case list, which resolves a case name another type shares
+  // (or one the global table dropped, like a user `Some`); `gpar` gives the
+  // arity a raw generic fails.
+  let cs = tenv_get(env, "cases ".concat(head))
+  if (cs != "" && contains(split_top_commas(cs), pat)) {
     let ps = tenv_get(env, "gpar ".concat(head))
     if (ps == "") { return true }
     return args.length() == split_top_commas(ps).length()

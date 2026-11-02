@@ -3316,6 +3316,15 @@ _ISSUE_2399_REFUSED.update({
     "arm_result_matched_with_some": (
         "fn f(o: Result[Int, Str]) -> Int {\n"
         "  return match o { Some(x) => { let k = x\n k }, _ => 0 }\n}\n"),
+    # issue #2325: a raw generic selector has no arguments to substitute, so the
+    # binder stays unknown and the block-arm lift refuses it on both sides
+    "raw_generic_selector_block_arm": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => 0 }\n}\n"),
+    # the arity-mismatch branch of the same rule
+    "wrong_arity_generic_selector_block_arm": (
+        "type Pair[A, B] = First(A) | Second(B)\nfn f(o: Pair[Int]) -> Int {\n"
+        "  return match o { First(x) => { let k = x\n k }, Second(y) => 0 }\n}\n"),
     # a test written right after an extern is still checked
     "test_body_host_method_after_extern": (
         _EXTERN + "test \"t\" {\n  let a = g()\n  let n = a.length()\n  assert true\n}\n"),
@@ -3494,11 +3503,20 @@ _ISSUE_2399_ADMITTED = {
         "type Sh = Circle(Int) | Pt\nfn f(s: Sh) -> Int {\n"
         "  return match s { Circle(r) => { let k = r\n k }, Pt => 0 }\n}\n"),
     # issue #2325: an applied user variant's binder is typed now, so this arm
-    # reads a value of known type and the reference admits it. The cases avoid
-    # `Some`/`None`, which the native case table reserves for Opt.
+    # reads a value of known type and both sides admit it. `Option`/`Some`/`None`
+    # is the issue's own spelling even though the native table reserves those
+    # names for Opt; the type's own `cases` row resolves the owner.
     "arm_binder_of_applied_declared_generic": (
+        "type Option[T] = Some(T) | None\nfn f(o: Option[Int]) -> Int {\n"
+        "  return match o { Some(x) => { let k = x\n k }, None => 0 }\n}\n"),
+    "arm_binder_of_applied_declared_generic_renamed": (
         "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder[Int]) -> Int {\n"
         "  return match o { Has(x) => { let k = x\n k }, Nothing => 0 }\n}\n"),
+    # a case name two user types share resolves by the type's own case list
+    "arm_binder_of_shared_case_name": (
+        "type A[T] = Same(T) | OnlyA\ntype B[T] = Same(T) | OnlyB\n"
+        "fn f(a: A[Int]) -> Int {\n"
+        "  return match a { Same(x) => { let k = x\n k }, OnlyA => 0 }\n}\n"),
     "arm_rebinds_untyped_name": (
         "fn f(o: Option[Int]) -> Int {\n"
         "  return match o { Some(x) => { let x2 = 1\n x2 }, None => 0 }\n}\n"),
