@@ -116,40 +116,45 @@ def test_live_call_and_act_tickets_use_only_the_running_authored_set():
         "source": _CALL_CANDIDATE, "modules": modules, "record": True,
     })
     assert loaded["ok"] is True, loaded
+    session = server.SESSION
+    try:
+        draft_anchor = "extern emission[notify] fn candidate_notify(msg: Str)"
+        draft_replacement = (
+            "extern emission[notify] fn draft_notify(msg: Str) "
+            "= @py { return }\n"
+            "extern emission[notify] fn candidate_notify(msg: Str)"
+        )
+        draft = server._run_handler("revl_change", {"edit": {"edits": [{
+            "anchor": draft_anchor,
+            "replacement": draft_replacement,
+        }]}})
+        assert draft["ok"] is True and draft["committed"] is False, draft
 
-    draft_anchor = "extern emission[notify] fn candidate_notify(msg: Str)"
-    draft_replacement = (
-        "extern emission[notify] fn draft_notify(msg: Str) "
-        "= @py { return }\n"
-        "extern emission[notify] fn candidate_notify(msg: Str)"
-    )
-    draft = server._run_handler("revl_change", {"edit": {"edits": [{
-        "anchor": draft_anchor,
-        "replacement": draft_replacement,
-    }]}})
-    assert draft["ok"] is True and draft["committed"] is False, draft
+        # A separate candidate check compiles the proposed body after the draft
+        # edit. That updates the last-compiled set while leaving the admitted
+        # generation (and therefore the live set) alone.
+        candidate_source = _CALL_CANDIDATE.replace(
+            draft_anchor, draft_replacement)
+        checked = server._run_handler("revl_check", {
+            "source": candidate_source, "modules": modules,
+        })
+        assert checked["ok"] is True, checked
+        assert "draft_notify" in _body_names(server._AUTHORED_HOST_BODIES)
+        assert "draft_notify" not in _body_names(server._LIVE_HOST_BODIES)
 
-    # A separate candidate check compiles the proposed body after the draft
-    # edit. That updates the last-compiled set while leaving the admitted
-    # generation (and therefore the live set) alone.
-    candidate_source = _CALL_CANDIDATE.replace(draft_anchor, draft_replacement)
-    checked = server._run_handler("revl_check", {
-        "source": candidate_source, "modules": modules,
-    })
-    assert checked["ok"] is True, checked
-    assert "draft_notify" in _body_names(server._AUTHORED_HOST_BODIES)
-    assert "draft_notify" not in _body_names(server._LIVE_HOST_BODIES)
+        call_result = server._run_handler(
+            "revl_call", {"key": "ops", "method": "f", "args": ["x"]})
+        assert call_result.get("approvalRequired") is True, call_result
+        expected = {"candidate_notify", "candidate_helper", "candidate_root"}
+        assert _body_names(call_result["ticket"]["unreviewedHostCode"]) == expected
 
-    call_result = server._run_handler(
-        "revl_call", {"key": "ops", "method": "f", "args": ["x"]})
-    assert call_result.get("approvalRequired") is True, call_result
-    expected = {"candidate_notify", "candidate_helper", "candidate_root"}
-    assert _body_names(call_result["ticket"]["unreviewedHostCode"]) == expected
-
-    act_result = server._run_handler(
-        "revl_act", {"key": "ops", "method": "f", "args": ["x"]})
-    assert act_result["outcome"] == "ticket", act_result
-    assert _body_names(act_result["ticket"]["unreviewedHostCode"]) == expected
+        act_result = server._run_handler(
+            "revl_act", {"key": "ops", "method": "f", "args": ["x"]})
+        assert act_result["outcome"] == "ticket", act_result
+        assert _body_names(act_result["ticket"]["unreviewedHostCode"]) == expected
+    finally:
+        if session.loaded:
+            session.unload()
 
 
 @needs_cordis
@@ -200,6 +205,38 @@ def test_server_side_swap_ticket_uses_the_compile_report(tmp_path):
             session.unload()
 
 
+def test_server_side_swap_ticket_uses_inline_source_modules(monkeypatch):
+    """The server-side swap path attributes inline source and module buffers."""
+    from revl.mcp.approval import ApprovalRequired
+
+    modules = _candidate_modules()
+    running = server.compile_under_authoring(_PLAIN_CANDIDATE, None)
+
+    class RefusedSwapSession:
+        loaded = True
+        origin = {"source": _CANDIDATE_WITH_BOOT, "modules": modules}
+        ir = running
+
+        def swap(self, candidate, *, origin, agent_authored):
+            refusal = ApprovalRequired({"hash": "sha256:inline-swap",
+                                        "capabilities": []})
+            refusal.candidate = candidate
+            raise refusal
+
+        def unload(self):
+            self.loaded = False
+
+    monkeypatch.setattr(server, "_realm_removal_refused", lambda *_args: None)
+    monkeypatch.setattr(server, "SESSION", RefusedSwapSession())
+
+    result = server._swap_server_side(())
+
+    assert result.get("approvalRequired") is True, result
+    assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
+        "candidate_boot", "candidate_helper", "candidate_root",
+    }
+
+
 _EDIT_A = (
     "service Ops { fn ping() -> Int }\n"
     "extern emission[notify] fn note_a(msg: Str) = @py { return }\n"
@@ -246,7 +283,10 @@ def test_edit_and_change_tickets_name_every_loaded_file_body_beside_the_edited_m
             })
         else:
             result = server._run_handler("revl_edit", {"edits": edits})
+        assert result.get("ok") is False, result
         assert result.get("approvalRequired") is True, result
+        if verb == "revl_change":
+            assert result.get("committed", False) is False, result
         assert _body_names(result["ticket"]["unreviewedHostCode"]) == {
             "note_a", "note_b",
         }
