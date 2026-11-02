@@ -101,7 +101,7 @@ choice is being asked of them.
 
 The decisions queue says that a policy refused. The rejected-candidates section
 says why, edge by edge. It is off by default, so the default model and `--json`
-output are unchanged. `revl dash --rejected` enables it (with `--policy`), and
+output are unchanged. `revl dash --rejected` enables it, reading `--policy`, and
 the Python API enables it with `rejected=True` on `dash.build_model` or
 `dash.Dashboard`, together with a `policy`.
 
@@ -130,8 +130,9 @@ policy. The full detail is for the operator view only.
 
 On the command line the profile follows the source: a file under `.revl/export/`
 is author-written (issue #2547) and compiles under the authoring profile, so
-`--rejected` shows the collapsed verdict for it. `--trust-exported` says the
-file is the operator's own and restores the full record.
+`--rejected` shows the collapsed verdict for it. The same holds for a composition
+document whose row source or `use` is under `.revl/export/`. `--trust-exported`
+says the file is the operator's own and restores the full record.
 
 Under that profile the policy exceptions in the decisions queue are collapsed to
 the same verdict, so nothing else in the output names the refused edge.
@@ -154,7 +155,7 @@ revl dash <sources.rvl...> [options]
   --accept CROSSING    mark one added crossing acknowledged (repeatable)
   --accept-all         mark every added crossing acknowledged
   --policy POLICY      a boundary policy; its violations are the exception queue
-  --rejected           add the rejected-candidates section (read-only; needs --policy)
+  --rejected           add the rejected-candidates section (read-only; reads --policy)
   --mcp-scope NAME     a component under the policy's mcp sandbox (repeatable; * = all)
   --watch              periodic-refresh loop (read-only; Ctrl-C to stop)
   --interval SECONDS   refresh interval for --watch (default 2.0)

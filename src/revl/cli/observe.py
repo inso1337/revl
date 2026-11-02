@@ -110,17 +110,17 @@ def _run_dash(args) -> int:
     # refused by that same policy under `revl audit --policy`. An empty
     # decision queue is read as an absence of decisions, so it failed OPEN, and
     # the dependency-graph pane above it was empty for the same reason.
-    resolved = _composition_document(args, label="dash")
+    # issue #2756: when the opt-in section is requested, collect the export
+    # rule's decision through issue #1779's report out-parameter. A source under
+    # `.revl/export/` is author-written (issue #2547) and puts the whole compile
+    # under the authoring profile, and the section has to follow it. The report
+    # never enters the IR, so its bytes are unchanged.
+    compile_report = ({} if getattr(args, "rejected", False)
+                      and not getattr(args, "trust_exported", False) else None)
+    resolved = _composition_document(args, label="dash",
+                                     read_report=compile_report)
     if isinstance(resolved, int):
         return resolved
-    # issue #2756: when the opt-in section is requested, record what the compile
-    # read (issue #1779): a `use` of an author-written module under `.revl/export/`
-    # puts the whole compile under the authoring profile (issue #2547), and the
-    # section has to follow it. The report is a caller-supplied out-parameter, so
-    # the IR bytes are unchanged.
-    compile_report = ({} if resolved is None
-                      and getattr(args, "rejected", False)
-                      and not getattr(args, "trust_exported", False) else None)
     try:
         ir = (compile_files(args.files, report=compile_report)
               if resolved is None else resolved)
@@ -158,11 +158,9 @@ def _run_dash(args) -> int:
     # is the operator's own, so the full record is shown. Only the opt-in
     # section reads this; the default model and `--json` output stay unchanged.
     profile = None
-    if compile_report is not None:
-        from ..export_area import CliRule, author_profile  # noqa: PLC0415
-        sources = [*args.files, *(compile_report.get("dependencies") or ())]
-        if any(CliRule.exported(path) for path in sources):
-            profile = author_profile()
+    if compile_report is not None and compile_report.get("export_authored"):
+        from ..export_area import author_profile  # noqa: PLC0415
+        profile = author_profile()
 
     board = dash.Dashboard(
         ir, live_state=live_state, trace=trace, timeline=timeline,

@@ -263,3 +263,74 @@ def test_cli_used_exported_module_is_the_collapsed_author_view(tmp_path, capsys)
     section = out.split("REJECTED CANDIDATES", 1)[1]
     assert nav.UNTRUSTED_REASON in section
     assert "Local -> bus" not in section
+
+
+COMPOSITION_USE_EXPORTED = """composition Demo {
+  use ".revl/export/app.rvl"
+}
+"""
+
+ROW_SERVICES = """service Job { fn run() -> Str }
+service Bus { emission[bus] fn publish(message: Str) }
+"""
+
+ROW_APP = """component TenantAJob requires bus: Bus provides job: Job {
+  provide job { fn run() = "ok" }
+  emit bus.publish("a-event")
+}
+"""
+
+COMPOSITION_ROW_EXPORTED = """composition Demo {
+  use "services.rvl"
+  row @job from ".revl/export/app.rvl" provides job
+}
+"""
+
+
+def _composition_cli(tmp_path, capsys, comp, files, *flags):
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    document = tmp_path / "comp.rvl"
+    document.write_text(comp, encoding="utf-8")
+    policy = _policy_file(tmp_path, "component TenantAJob may reach kv\n")
+    return _dash_cli(capsys, str(document), "--root", str(tmp_path),
+                     "--policy", policy, "--rejected", *flags)
+
+
+def test_cli_composition_using_an_exported_module_collapses(tmp_path, capsys):
+    """A composition document is a supported dash input; a composition-level
+    `use` of an author-written module must collapse the section too."""
+    rc, out, _ = _composition_cli(
+        tmp_path, capsys, COMPOSITION_USE_EXPORTED,
+        {".revl/export/app.rvl": AUTHORED})
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert nav.UNTRUSTED_REASON in section
+    assert "TenantAJob -> bus" not in section
+
+
+def test_cli_composition_row_under_export_collapses(tmp_path, capsys):
+    """A composition row whose source is under `.revl/export/` is a compile
+    root the CliRule profiles, so the section collapses for the whole compile."""
+    rc, out, _ = _composition_cli(
+        tmp_path, capsys, COMPOSITION_ROW_EXPORTED,
+        {"services.rvl": ROW_SERVICES, ".revl/export/app.rvl": ROW_APP})
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert nav.UNTRUSTED_REASON in section
+    assert "TenantAJob -> bus" not in section
+
+
+def test_cli_trust_exported_composition_shows_the_operator_record(tmp_path, capsys):
+    """`--trust-exported` says the exported row is the operator's own, so the
+    same composition gets the full operator record."""
+    rc, out, _ = _composition_cli(
+        tmp_path, capsys, COMPOSITION_ROW_EXPORTED,
+        {"services.rvl": ROW_SERVICES, ".revl/export/app.rvl": ROW_APP},
+        "--trust-exported")
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert "TenantAJob -> bus: may reach only [kv]" in section
+    assert nav.UNTRUSTED_REASON not in section
