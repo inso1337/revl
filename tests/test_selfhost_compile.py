@@ -4149,13 +4149,20 @@ def test_case_arity_refusal_is_a_recorded_native_difference(compile_to, name):
 # Issue #2483: the reference checks an effect call's arguments against the
 # effect's declared parameter types, a case payload nested in them included.
 # The documents are tests/test_423_component_body_call_checking.py's
-# `EFFECT_ARG_REFUSED`. The self-host already gives the reference's refusal for
-# a wrong-typed service argument; the rest it admits, so each is recorded as
-# the native verdict on py ("EMITS" is a silent admit). The day the self-host
-# gives the reference's refusal, the entry fails and is DELETED. A wrong
-# payload type is issue #2448; a wrong payload count and a wrong-typed built-in
-# case in an effect argument are issue #2489.
-EFFECT_ARG_NATIVE_AGREES = ("service_argument_type",)
+# `EFFECT_ARG_REFUSED`. The self-host now gives the reference's refusal for a
+# wrong-typed service argument and for a wrong-typed case payload nested in an
+# effect argument (issue #2448); the rest it admits, so each is recorded as the
+# native verdict on py ("EMITS" is a silent admit). The day the self-host gives
+# the reference's refusal, the entry fails and is DELETED. The remaining ones
+# are a wrong payload count, a payload on a nullary case, and the acquire
+# argument shapes (issue #2489).
+EFFECT_ARG_NATIVE_AGREES = (
+    "service_argument_type",
+    # issue #2448
+    "service_payload_in_provide_method",
+    "service_payload_type",
+    "service_some_payload_type",
+)
 EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
     # issue #2489
     "acquire_err_payload_type": "EMITS",
@@ -4164,10 +4171,6 @@ EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
     "service_argument_to_nullary": "EMITS",
     "service_payload_extra": "EMITS",
     "service_payload_missing": "EMITS",
-    # issue #2448
-    "service_payload_in_provide_method": "EMITS",
-    "service_payload_type": "EMITS",
-    "service_some_payload_type": "EMITS",
 }
 
 
