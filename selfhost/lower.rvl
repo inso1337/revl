@@ -30055,15 +30055,36 @@ fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
   // scrutinee's ADT. The built-in `Opt`/`Result` payloads come from the
   // scrutinee's type ARGUMENTS below, so the built-in table entries
   // (`Result[Any, Any]`) never match a concrete `Result[Int, Str]` here.
-  if (scrutTy != "" && tenv_get(env, "case ".concat(pat)) == scrutTy) {
-    return tenv_get(env, "payload ".concat(pat))
-  }
+  //
+  // issue #2325: an APPLIED generic variant (`Box[Int]`) substitutes the
+  // selector's type arguments into the case payload (`Held(T)` -> `Int`), the
+  // same rule as the reference's `_variant_case_payload`. A generic variant's
+  // parameters ride the case table as `gpar <Name>` (the row generic records
+  // already use), and the built-ins are answered first so their seeded
+  // `Result[Any, Any]` rows never shadow the concrete arguments.
   let head = parse_head(scrutTy)
   let args = type_args(scrutTy)
   if (head == "Opt" && pat == "Some" && args.length() >= 1) { return args[0] }
   if (head == "Result" && args.length() == 2) {
     if (pat == "Ok") { return args[0] }
     if (pat == "Err") { return args[1] }
+  }
+  if (scrutTy != "" && tenv_get(env, "case ".concat(pat)) == head) {
+    let payload = tenv_get(env, "payload ".concat(pat))
+    let params = tenv_get(env, "gpar ".concat(head))
+    if (params != "") {
+      let names = split_top_commas(params)
+      if (names.length() == args.length()) {
+        var sub: List[Bind] = []
+        var i = 0
+        while (i < names.length()) {
+          sub = sub.push({ name: names[i], ty: args[i] })
+          i += 1
+        }
+        return tk_subst(payload, sub)
+      }
+    }
+    return payload
   }
   return ""
 }
@@ -30656,6 +30677,16 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseSte
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
   var k = j
   var acc = a
+  // issue #2325: a generic variant's parameters, under the same `gpar <Name>`
+  // row generic records use, so `arm_payload` can substitute an applied
+  // selector's arguments into the case payload.
+  if (atk(ts, i + 2, "[")) {
+    let tps = cfg_tparams(ts, i + 2)
+    if (tps.length() > 0) {
+      acc = { binds: acc.binds.push({ name: "gpar ".concat(nm), ty: tps.join(",") }),
+              amb: acc.amb }
+    }
+  }
   while (k < lineHi) {
     if (atk(ts, k, "ident")) {
       let cn = tkc(ts, k).text

@@ -34477,9 +34477,6 @@ fn eq_widen_right(op: &str, lt: String, rt: String) -> String {
 }
 
 fn arm_payload(scrutTy: String, pat: &str, env: &[Bind]) -> String {
-    if ((scrutTy != "") && (tenv_get(env, &(String::from("case ").revl_concat(&pat))) == scrutTy)) {
-        return tenv_get(env, &(String::from("payload ").revl_concat(&pat)));
-    }
     let head = parse_head(scrutTy.clone());
     let args = type_args(&scrutTy);
     if (((head == "Opt") && (pat == "Some")) && (args.revl_length() >= 1i64)) {
@@ -34492,6 +34489,23 @@ fn arm_payload(scrutTy: String, pat: &str, env: &[Bind]) -> String {
         if (pat == "Err") {
             return (args)[(1i64) as usize].clone();
         }
+    }
+    if ((scrutTy != "") && (tenv_get(env, &(String::from("case ").revl_concat(&pat))) == head)) {
+        let payload = tenv_get(env, &(String::from("payload ").revl_concat(&pat)));
+        let params = tenv_get(env, &(String::from("gpar ").revl_concat(&head)));
+        if (params != "") {
+            let names = split_top_commas(&params);
+            if (names.revl_length() == args.revl_length()) {
+                let mut sub: Vec<Bind> = vec![];
+                let mut i = 0i64;
+                while (i < names.revl_length()) {
+                    sub.push(Bind { name: (names)[(i) as usize].clone(), ty: (args)[(i) as usize].clone() });
+                    i = (i).checked_add(1i64).expect("revl: Int overflow");
+                }
+                return tk_subst(payload, &sub);
+            }
+        }
+        return payload;
     }
     return String::from("");
 }
@@ -35002,6 +35016,12 @@ fn decl_cases(ts: Vec<Token>, i: i64, a: CaseAcc, al: std::collections::HashMap<
     }
     let mut k = j;
     let mut acc = a.clone();
+    if atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "[") {
+        let tps = cfg_tparams(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+        if (tps.revl_length() > 0i64) {
+            acc = CaseAcc { binds: acc.binds.revl_push(Bind { name: String::from("gpar ").revl_concat(&nm), ty: tps.revl_join(",") }), amb: acc.amb.clone() };
+        }
+    }
     while (k < lineHi) {
         if atk(&ts, k, "ident") {
             let cn = tkc(&ts, k).text;

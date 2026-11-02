@@ -2592,7 +2592,17 @@ def _expr(
         # `Bx` whose fields read as `Object` (`b.v + 1L` is rejected).
         diamond = "<>" if spec.get("params") and all(
             _infers_exactly(v, ctx) for _, v in fields) else ""
-        return f"new {_ident(type_name, 'type name')}{diamond}({', '.join(args)})"
+        ctor = f"{_ident(type_name, 'type name')}{diamond}"
+        if not diamond and spec.get("params"):
+            # When javac cannot infer the arguments from the fields alone
+            # (an empty list, `None`, a variant case, a generic call), the
+            # frontend pins the let-bound local's applied type on the node.
+            # Name the arguments from it rather than leaving the local raw,
+            # which is what made a field read an `Object` operation.
+            expected = node.get("expected")
+            if isinstance(expected, str) and expected.startswith(type_name + "["):
+                ctor = _java_v3_type(expected)
+        return f"new {ctor}({', '.join(args)})"
 
     if kind == "list":
         return "java.util.List.of(" + ", ".join(
@@ -3074,7 +3084,21 @@ def _v3_match_expr(
             case_var = f"__revl_case_{ctx._match_counter + 1}"
             ctx._match_counter += 1
             lines.append(f"            case {qualified} {case_var} -> {{")
-            lines.append(f"                final var {bind} = {case_var}.value;")
+            # issue #2325: a raw case pattern (`case Box.Full c` over a
+            # selector whose Java type is not parameterised, e.g. a `let`
+            # local bound to a variant constructor) binds `c.value` as an
+            # `Object`, and javac refuses `v + 1L` in the arm. The frontend
+            # now carries the arm's payload type (`_arm_payload_type`
+            # substitutes the selector's type arguments), so declare the
+            # binding at that type and cast the untyped `value` once.
+            payload_type = arm.get("payload_type")
+            if (not type_args and isinstance(payload_type, str)
+                    and not payload_type.startswith("{")):
+                ptype = _java_v3_type(payload_type, boxed=True)
+                lines.append(
+                    f"                final {ptype} {bind} = ({ptype}) {case_var}.value;")
+            else:
+                lines.append(f"                final var {bind} = {case_var}.value;")
             lines.append(f"                yield ({body});")
             lines.append("            }")
         else:

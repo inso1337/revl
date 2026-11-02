@@ -849,13 +849,23 @@ fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
     out_args = out_args.push(map_get(by, fname))
   }
   // issue #2325: a generic record is built with the diamond when javac infers
-  // its type arguments exactly from the values (`infers_exactly`).
+  // its type arguments exactly from the values (`infers_exactly`). When it
+  // cannot, the frontend pins the let-bound local's applied type on the node
+  // (`expected`); naming the arguments from it keeps the local parameterised,
+  // where a raw constructor made a field read an `Object` operation.
   var diamond = ""
   if (bool_get(ctx.gen, tn)) {
     diamond = "<>"
     for (f of fields) { if (!infers_exactly(value_at(f, 1), ctx)) { diamond = "" } }
   }
-  return { text: `new ${mangle(tn)}${diamond}(${out_args.join(", ")})`, counter: c }
+  var ctor = `${mangle(tn)}${diamond}`
+  if (diamond == "" && bool_get(ctx.gen, tn)) {
+    let expected = value_str(value_field(node, "expected"))
+    if (expected.startsWith(`${tn}[`) && expected.endsWith("]")) {
+      ctor = java_v3_type(expected, false)
+    }
+  }
+  return { text: `new ${ctor}(${out_args.join(", ")})`, counter: c }
 }
 
 // `_match_bind_names`: every name a `match` arm binds anywhere under *node* (a
@@ -1140,7 +1150,18 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
         c = c + 1
         let case_var = `__revl_case_${c}`
         lines = lines.push(`            case ${qualified} ${case_var} -> {`)
-        lines = lines.push(`                final var ${mangle(bind)} = ${case_var}.value;`)
+        // issue #2325: a raw case pattern binds `.value` as `Object`, so an
+        // arm reading the payload (`v + 1L`) did not compile. The frontend
+        // carries the arm's payload type (`_arm_payload_type` substitutes the
+        // selector's type arguments), so declare the binding at that type and
+        // cast the untyped `value` once.
+        let ptype = value_str(value_field(arm, "payload_type"))
+        if (type_args == "" && ptype != "" && !ptype.startsWith("{")) {
+          let jt = java_v3_type(ptype, true)
+          lines = lines.push(`                final ${jt} ${mangle(bind)} = (${jt}) ${case_var}.value;`)
+        } else {
+          lines = lines.push(`                final var ${mangle(bind)} = ${case_var}.value;`)
+        }
         lines = lines.push(`                yield (${br.text});`)
         lines = lines.push(`            }`)
       } else {
