@@ -551,6 +551,20 @@
     },
     {
       "sites": [
+        "src/revl/lower.py::_variant_case_payload",
+        "src/revl/model_answer.py::applied_spec"
+      ],
+      "tokens": [
+        "cases",
+        "kind",
+        "name",
+        "params",
+        "payload"
+      ],
+      "note": "FALSE POSITIVE. Two functions that read the same variant-spec fields, one from the document's declared user types and one from the provided model-answer types. Neither declares the vocabulary; lowering produces it and both consume it."
+    },
+    {
+      "sites": [
         "src/revl/lsp/protocol.py::error",
         "src/revl/mcp/composed.py::_error",
         "src/revl/mcp/server.py::_error"
@@ -635,7 +649,7 @@
         "GOPROXY",
         "build",
         "go",
-        "stc-go is not in the local module cache and proxy.golang.org is unreachable — run `go build` once with network to populate the module cache"
+        "stc-go is not in the local module cache and proxy.golang.org is unreachable \u2014 run `go build` once with network to populate the module cache"
       ],
       "note": "Two copies of the go offline-resolve probe, one in the runner and one in the validator, including the operator-facing message. Near-clones."
     },
