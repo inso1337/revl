@@ -4,10 +4,11 @@
 
 This is the sibling of `ci_gate.py`. `ci_gate.py` demonstrates the ADMIT
 (verdict-only) half of the promised `revl.gate` surface; this file demonstrates
-the COMPILE half: an external tool that does `pip install revl`, imports ONLY
-`revl.gate`, and programmatically compiles a batch of agent-authored candidates
-to real target source with `compile_to`, gating whether it writes/emits each
-one on the SAME verdict `ci_gate.py` gates its "register" decision on.
+the COMPILE half: an external tool that installs revl from source or a git
+tag, imports ONLY `revl.gate`, and programmatically compiles a batch of
+agent-authored candidates to real target source with `compile_to`, gating
+whether it writes/emits each one on the SAME verdict `ci_gate.py` gates its
+"register" decision on.
 
 READ THIS BEFORE YOU COPY IT: THE ASYMMETRIC SECURITY CONTRACT
 ================================================================
