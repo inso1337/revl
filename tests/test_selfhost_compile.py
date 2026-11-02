@@ -4368,6 +4368,54 @@ def test_native_gate_checks_a_verb_on_a_host_local_as_the_reference(
         assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
 
 
+# The requirement-call argument walk descends into an arrow body and a match
+# arm, which are new scopes. An arrow parameter is untyped in the reference's
+# component lowering (`env.type_env.pop(param, None)`), so it shadows a
+# same-named typed local; a match binder is the scrutinee's payload
+# (`Opt[Int]` -> `Int`). Reading the enclosing local's `Str` instead refused
+# `emit k.put(n)` with the reference's message against a call the reference
+# admits. These documents are otherwise clean, so the only verdict is the gate's.
+_SCOPED_ARG_HEAD = (
+    "type Shape = Dot | Box(Int)\n"
+    "service Sink { emission fn put(x: Int) }\n"
+    "service R { emission fn run(n: Str) -> Int }\n"
+    "fn apply(cb: (Int) -> Unit) -> Int { return 1 }\n"
+    "component C requires k: Sink provides r: R {\n"
+    "  provide r { fn run(n) {\n"
+)
+_SCOPED_ARG_TAIL = "  } }\n}\n"
+
+
+def _scoped_arg(body: str, setup: str = "") -> str:
+    return _SCOPED_ARG_HEAD + setup + "    return " + body + "\n" + _SCOPED_ARG_TAIL
+
+
+_SCOPED_ARG_BINDERS = {
+    # an arrow parameter, untyped, shadowing the method parameter `n: Str`
+    "arrow_bare": _scoped_arg("apply((n) => emit k.put(n))"),
+    "arrow_arithmetic": _scoped_arg("apply((n) => emit k.put(n + 1))"),
+    # an arm binder shadows the method parameter `n: Str`; its payload is `Int`
+    "match_arm": _scoped_arg(
+        "apply((x) => match o { Some(n) => emit k.put(n),"
+        " None => emit k.put(0) })",
+        "    let o: Opt[Int] = Some(1)\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SCOPED_ARG_BINDERS))
+def test_a_binder_shadows_a_typed_local_in_a_requirement_argument(
+        admit, compile_to, reference_emit, name):
+    source = _SCOPED_ARG_BINDERS[name]
+    reference_emit["py"](compile_source(source, "doc.rvl"))  # the reference admits it
+    assert admit(source) == ""
+    # the native producer drops this match expression beside an emit, so only
+    # the gate's verdict is pinned for the arm document
+    if name == "match_arm":
+        return
+    got = compile_to(source, "py")
+    assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
+
+
 # Issue #2569, continued. A timer body (`every 30s { … }`) records emissions
 # only: the reference's parser refuses any other statement there before a host
 # verb in it is lowered, where the self-host statement grammar left the timer

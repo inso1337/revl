@@ -15023,7 +15023,7 @@ fn ct_arms(xs: &[ArmN], i: i64, cx: Ctx__m2, env: Vec<Bind>) -> String {
     if (i >= xs.revl_length()) {
         return String::from("");
     }
-    let inner = if ((xs)[(i) as usize].bind == "") { env.clone() } else { hv_shadow(env.clone(), &(vec![(xs)[(i) as usize].bind.clone()])) };
+    let inner = if ((xs)[(i) as usize].bind == "") { env.clone() } else { svc_shadow(hv_shadow(env.clone(), &(vec![(xs)[(i) as usize].bind.clone()])), &(vec![(xs)[(i) as usize].bind.clone()])) };
     let v = ct_scan((xs)[(i) as usize].body.clone(), cx.clone(), inner);
     if (v != "") {
         return v;
@@ -15257,7 +15257,7 @@ fn ct_scan(e: Expr, cx: Ctx__m2, env: Vec<Bind>) -> String {
     Expr::If(x) => { let x = *x; ct_exprs(&(vec![x.cond.clone(), x.then_.clone(), x.els.clone()]), 0i64, cx.clone(), env.clone()) },
     Expr::Rec(r) => ct_inits(&r.fields, 0i64, cx.clone(), env.clone()),
     Expr::Lst(l) => ct_exprs(&l.items, 0i64, cx.clone(), env.clone()),
-    Expr::Arrow(a) => { let a = *a; ct_scan(a.body, cx.clone(), env.clone()) },
+    Expr::Arrow(a) => { let a = *a; ct_scan(a.body.clone(), cx.clone(), svc_shadow(env.clone(), &param_names(&a.params))) },
     Expr::Match(m) => { let m = *m; ct_first(ct_scan(m.scrut.clone(), cx.clone(), env.clone()), ct_arms(&m.arms, 0i64, cx.clone(), env.clone())) },
     Expr::Templ(t) => ct_parts(&t.parts, 0i64, cx.clone(), env.clone()),
     Expr::RecUpd(r) => { let r = *r; ct_first(ct_scan(r.base.clone(), cx.clone(), env.clone()), ct_inits(&r.upds, 0i64, cx.clone(), env.clone())) },

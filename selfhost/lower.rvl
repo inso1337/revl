@@ -8211,8 +8211,13 @@ fn ct_inits(xs: List[InitN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
 
 fn ct_arms(xs: List[ArmN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
   if (i >= xs.length()) { return "" }
-  // a binder shadows a same-named host local (issue #2569)
-  let inner = xs[i].bind == "" ? env : hv_shadow(env, [xs[i].bind])
+  // an arm's binder is a new local: the reference seeds it with the payload
+  // type when it has one, and this walk carries none, so the binder shadows a
+  // same-named typed local rather than inheriting that local's type. Same
+  // shape as `vm_arms`, which already shadows it (issue #2448).
+  let inner = xs[i].bind == ""
+    ? env
+    : svc_shadow(hv_shadow(env, [xs[i].bind]), [xs[i].bind])
   let v = ct_scan(xs[i].body, cx, inner)
   if (v != "") { return v }
   return ct_arms(xs, i + 1, cx, env)
@@ -8477,9 +8482,12 @@ fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
     If(x)       => ct_exprs([x.cond, x.then_, x.els], 0, cx, env),
     Rec(r)      => ct_inits(r.fields, 0, cx, env),
     Lst(l)      => ct_exprs(l.items, 0, cx, env),
-    // an arrow's body is walked under the same environment: its parameters are
-    // names this walk does not type, so they stay on the gradual frontier.
-    Arrow(a)    => ct_scan(a.body, cx, env),
+    // an arrow's body is a new scope: the reference pops an untyped parameter
+    // from its type env (`_lower_component_pure_expr`), so the parameter
+    // shadows a same-named typed local. Without this an argument inference
+    // inside the body read the enclosing local's type and refused a call the
+    // reference admits (issue #2448).
+    Arrow(a)    => ct_scan(a.body, cx, svc_shadow(env, param_names(a.params))),
     Match(m)    => ct_first(ct_scan(m.scrut, cx, env),
                             ct_arms(m.arms, 0, cx, env)),
     Templ(t)    => ct_parts(t.parts, 0, cx, env),
