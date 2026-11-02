@@ -1383,6 +1383,8 @@
    "tests/fixtures/emit_py_corpus/to_char.rvl",
    "tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl",
    "tests/fixtures/emit_py_corpus/user_names_like_temps.rvl",
+   "tests/fixtures/emit_py_refusals/ceiling_value_position_wrapper.rvl",
+   "tests/fixtures/emit_py_refusals/ceiling_wrapper_shapes.rvl",
    "tests/fixtures/emit_py_refusals/host_identifier_collision.rvl",
    "tests/fixtures/emit_py_refusals/pub_fn_temp_name.rvl",
    "tests/fixtures/emit_rust_corpus/comp_opt_restore_undo_local.rvl",
