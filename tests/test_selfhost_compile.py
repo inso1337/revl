@@ -3307,16 +3307,15 @@ _BOX = "type Box[T] = { v: T }\n"
 _EXTERN = "extern pure fn g() = @py { return [1] }\n"
 
 _ISSUE_2399_REFUSED.update({
-    # an arm binder is typed only where `_arm_payload_type` types it
+    # an arm binder is typed only where `_arm_payload_type` types it; an
+    # applied user variant now is (issue #2325), so the two builtin
+    # mismatches below are the remaining unknown-payload arms.
     "arm_opt_matched_with_ok": (
         "fn f(o: Opt[Int]) -> Int {\n"
         "  return match o { Ok(x) => { let k = x\n k }, _ => 0 }\n}\n"),
     "arm_result_matched_with_some": (
         "fn f(o: Result[Int, Str]) -> Int {\n"
         "  return match o { Some(x) => { let k = x\n k }, _ => 0 }\n}\n"),
-    "arm_binder_of_applied_declared_generic": (
-        "type Option[T] = Some(T) | None\nfn f(o: Option[Int]) -> Int {\n"
-        "  return match o { Some(x) => { let k = x\n k }, None => 0 }\n}\n"),
     # a test written right after an extern is still checked
     "test_body_host_method_after_extern": (
         _EXTERN + "test \"t\" {\n  let a = g()\n  let n = a.length()\n  assert true\n}\n"),
@@ -3494,6 +3493,12 @@ _ISSUE_2399_ADMITTED = {
     "arm_binder_of_declared_variant": (
         "type Sh = Circle(Int) | Pt\nfn f(s: Sh) -> Int {\n"
         "  return match s { Circle(r) => { let k = r\n k }, Pt => 0 }\n}\n"),
+    # issue #2325: an applied user variant's binder is typed now, so this arm
+    # reads a value of known type and the reference admits it. The cases avoid
+    # `Some`/`None`, which the native case table reserves for Opt.
+    "arm_binder_of_applied_declared_generic": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder[Int]) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => 0 }\n}\n"),
     "arm_rebinds_untyped_name": (
         "fn f(o: Option[Int]) -> Int {\n"
         "  return match o { Some(x) => { let x2 = 1\n x2 }, None => 0 }\n}\n"),

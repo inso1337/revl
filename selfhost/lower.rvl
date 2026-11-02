@@ -17346,6 +17346,15 @@ fn ba_payload_known(ty: Str, pat: Str, env: List[Bind]) -> Bool {
   let head = parse_head(ty)
   if (head == "") { return true }
   let args = type_args(ty)
+  // issue #2325: `_variant_case_payload` substitutes the selector's type
+  // arguments for an applied USER variant, so the reference now types this
+  // binder and a block arm reading it is admitted. The case table names the
+  // owning type; the `gpar` row gives the arity a raw generic fails.
+  if (tenv_get(env, "case ".concat(pat)) == head) {
+    let ps = tenv_get(env, "gpar ".concat(head))
+    if (ps == "") { return true }
+    return args.length() == split_top_commas(ps).length()
+  }
   if (tenv_get(env, "decl ".concat(head)) == "1" && args.length() == 0) { return true }
   if (head == "Answer" || head == "Aggregate" || head == "DissentEntry") { return true }
   if (head == "Opt") { return pat == "Some" && args.length() > 0 }

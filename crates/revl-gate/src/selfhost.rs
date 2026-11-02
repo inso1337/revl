@@ -22851,6 +22851,13 @@ fn ba_payload_known(ty: String, pat: &str, env: &[Bind]) -> bool {
         return true;
     }
     let args = type_args(&ty);
+    if (tenv_get(env, &(String::from("case ").revl_concat(&pat))) == head) {
+        let ps = tenv_get(env, &(String::from("gpar ").revl_concat(&head)));
+        if (ps == "") {
+            return true;
+        }
+        return (args.revl_length() == split_top_commas(&ps).revl_length());
+    }
     if ((tenv_get(env, &(String::from("decl ").revl_concat(&head))) == "1") && (args.revl_length() == 0i64)) {
         return true;
     }
