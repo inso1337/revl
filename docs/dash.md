@@ -178,6 +178,6 @@ revl dash gen2.rvl --live-state now.json \
 ```
 
 Machine first, human second (see `docs/queries.md` §1): `--json` emits the
-structured model — `{ok, readOnly, mode, generation, graph, trace, decisions}`,
-plus `rejected` when `--rejected` is given — and the text render is the courtesy
+structured model, `{ok, readOnly, mode, generation, graph, trace, decisions}`,
+plus `rejected` when `--rejected` is given, and the text render is the courtesy
 window onto it.
