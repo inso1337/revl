@@ -9,7 +9,9 @@ holding its OWN local trust store. This slice builds that process and a
 :class:`deploy.ProcessRunnerTransport` that speaks to it over stdin/stdout, so the
 whole PREPARE→COMMIT handshake runs across a real process boundary on one
 machine. The cross-machine leg (scp/rsync staging, a pinned SSH host key) is the
-same command behind `ssh <host>` and is a following slice.
+same command behind `ssh <host>`, now landed as
+:class:`deploy.StdioRunnerTransport.ssh` plus
+:func:`deploy.stage_bundle_over_ssh`.
 
 These tests re-pin the runner-protocol properties the in-process test pins, now
 over a real child process driven by real newline-JSON bytes:
