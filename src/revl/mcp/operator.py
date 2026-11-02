@@ -64,6 +64,14 @@ TOOL_VERB = {
     "revl_snapshot": "snapshot",
     "revl_rollback": "undo",
     "revl_undo": "undo",  # item 65: deep history revert — same authority as rollback
+    # docs/updates.md: applying a release replaces the whole composition, so
+    # it answers to the `swap` authority. The call carries only a server-side
+    # plan hash, so target derivation cannot see the components; a
+    # subject-scoped grant therefore cannot authorize it and only a literal
+    # `may swap on *` does, which is the honest scope for replacing everything.
+    "revl_update_apply": "swap",
+    # a release rollback IS the generation undo it performs.
+    "revl_update_rollback": "undo",
     # item 245: the session commit/abort verbs. `commit` gates who may cross the
     # session boundary (flush the deferral queue, discharge the witnessed
     # escrow); enumeration (`revl_commit`) and abort share that authority — an

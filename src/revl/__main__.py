@@ -84,6 +84,7 @@ _run_trace = _deferred(".cli.observe", "_run_trace")
 _run_why = _deferred(".cli.observe", "_run_why")
 _run_promote = _deferred(".cli.promote", "_run_promote")
 _run_slo = _deferred(".cli.slo", "_run_slo")
+_run_update = _deferred(".update.cli", "_run_update")
 
 
 # The G8 boundary walk lives in `revl.boundary` (a CLI-free module) so the
@@ -1546,6 +1547,8 @@ def _dispatch(args) -> int:
         return _run_replay(args)
     if args.command == "serve":
         return _run_serve(args)
+    if args.command == "update":
+        return _run_update(args)
     if args.command == "mcp":
         return _run_mcp(args)
     if args.command == "import":

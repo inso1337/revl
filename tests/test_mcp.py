@@ -288,7 +288,10 @@ def test_initialize_and_tools_list(all_mcp_tools):
                           # the structured suite-run answer (issue #2843)
                           "revl_test_run",
                           # the compact next-step answer (issue #2854)
-                          "revl_brief"}
+                          "revl_brief",
+                          # the operator update surface (docs/updates.md)
+                          "revl_update_check", "revl_update_apply",
+                          "revl_update_status", "revl_update_rollback"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True
