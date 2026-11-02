@@ -67,7 +67,7 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    in (`construct`), with the rules that make it correct: read it before
    writing the fill. It is an example, not a fill (issue #2115):
    `idiom.exampleExpression` stands inside the example and carries the
-   example's own names, so do not submit it — take the fill from `fillable`.
+   example's own names, so do not submit it; take the fill from `fillable`.
    `grammarCategory` names the syntactic slot the fill must be (today
    `expression` for every hole); pass it as `category` to `revl_grammar`
    with a `format` to hold a constrained decoder to that slot. Fill one hole against its spec, re-check,
@@ -135,9 +135,9 @@ in full at [`revl_scaffold`](mcp-reference.md#revl_scaffold),
 [`revl_explain`](mcp-reference.md#revl_explain).
 
 <!-- docgen:authoring-mcp-count begin -->
-`revl mcp serve` lists its core tier by default and `revl_verbs`
-finds the rest — and calls one, given `name` and `args`, so no verb
-is out of reach; every verb is listed in full in
+`revl mcp serve` lists its core tier by default. `revl_verbs` finds
+the rest and can call any verb when given `name` and `args`; every
+verb is listed in full in
 [mcp-reference.md](mcp-reference.md).
 <!-- docgen:authoring-mcp-count end -->
 

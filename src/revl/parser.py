@@ -2410,6 +2410,10 @@ class Program:
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
     fn_alias_scopes: dict[int, dict[str, set[str]]] = field(default_factory=dict)
+    # issue #3004: bare name -> declaring file of each non-`pub` fn/extern of an
+    # included module, so a body outside that module that names one is refused
+    # as module-private (G1) rather than as an undeclared name.
+    module_private: dict[str, str] = field(default_factory=dict)
     # Provenance for non-component declarations: id(decl) -> source file.
     # Components carry their own `source`; fns, externs and services do not,
     # and a why-trace needs a file for every hop it names (why.py). Keyed by

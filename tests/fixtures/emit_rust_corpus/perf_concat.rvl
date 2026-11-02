@@ -1,0 +1,66 @@
+// The `concat` spelling of the item-437(a) self-append (issue #2468).
+//
+// `t = t.concat(x)` rebinds the receiver over its own value, so the reference
+// appends in place: `push_str` for a `Str` receiver, `extend` for a `List`
+// one. The port emitted the persistent `t = t.revl_concat(&x)` for the same
+// IR, which compiles and runs but breaks byte agreement with no marker. Each
+// shape the reference's rule accepts or declines is pinned here.
+
+// A `Str` accumulator in a plain fn: a param operand, a literal operand (the
+// bare `&'static str`), a non-atomic operand and a template.
+fn join_strs_concat(parts: List[Str], sep: Str) -> Str {
+  var t = ""
+  for (x of parts) {
+    t = t.concat(x)
+    t = t.concat(sep)
+  }
+  t = t.concat("!")
+  t = t.concat(sep.concat("?"))
+  t = t.concat(`${parts.length()}`)
+  return t
+}
+
+// An index read operand borrows the element place.
+fn concat_index(xs: List[Str], i: Int) -> Str {
+  var t = "head"
+  t = t.concat(xs[i])
+  return t
+}
+
+// Declined shapes keep the persistent form: an operand that reads the
+// receiver, a target that is not the receiver, and a `let` (a new binding).
+fn concat_declined(a: Str, b: Str) -> Str {
+  var t = a
+  t = t.concat(t)
+  t = b.concat(a)
+  let u = t.concat(b)
+  return u
+}
+
+// A `List` receiver extends in place.
+fn concat_lists(a: List[Int], b: List[Int]) -> List[Int] {
+  var out = a
+  out = out.concat(b)
+  return out
+}
+
+// A receiver the emitter cannot type (seeded from a `match` or an `if`
+// expression) takes the `Str` arm only when the operand is certainly a `Str`;
+// with an operand it cannot type either, the rewrite declines.
+fn concat_untyped(r: Result[Str, Str], k: Bool) -> Int {
+  var b = match r { Ok(v) => v, Err(e) => e }
+  b = b.concat("2")
+  var e = if (k) { "y" } else { "z" }
+  e = e.concat(b)
+  return b.length() + e.length()
+}
+
+// A receiver that is not a bare `var` keeps the persistent form, and so does
+// a self-assign through a builtin other than `concat`.
+fn concat_not_var(a: Str, b: Str) -> Str {
+  var t = a
+  t = t.length().to_str()
+  t = "pre".concat(b)
+  t = a.concat(b).concat(t)
+  return t
+}

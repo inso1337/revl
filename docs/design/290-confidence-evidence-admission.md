@@ -230,7 +230,7 @@ vocabulary. The floor vocabulary is therefore `declared`, `keyed`, and
 "verified, either way" writes `strong`.
 
 **Item 207 removed `shape-proven` from this section.** It was written here as
-a PEER of `keyed` — a static proof over an inverse body — and nothing ever
+a PEER of `keyed` (a static proof over an inverse body), but nothing ever
 produced it. Its provenance is an inverse, and every consumer that graded the
 register set grades a forward emission, so no declaration could reach it; over
 the whole producible vocabulary the `shape-proven` floor was an exact synonym

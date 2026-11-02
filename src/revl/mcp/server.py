@@ -82,6 +82,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
 from . import unknownargs as _unknownargs
+from . import update_tools as _update_tools
 from . import artifacts as _artifacts
 from . import fillspec
 from . import draft as _draft
@@ -111,6 +112,7 @@ from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha
 from .. import query as Q
 from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
+from .. import shared_parse as _shared_parse
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
@@ -464,12 +466,12 @@ def _transport_use_escapes(arguments: dict) -> list[str]:
         return []
     supplied: set[str] = set()
     _collect_module_keys(arguments, supplied)
-    from ..parser import Parser  # noqa: PLC0415
 
     escapes: list[str] = []
     for text in sources:
         try:
-            program = Parser(text, "<candidate>.rvl").parse()
+            # issue #2194: read-only, so the parse is shared within the call
+            program = _shared_parse.program(text, "<candidate>.rvl")
         except Exception:  # noqa: BLE001 — not parseable: the handler reports it
             continue
         for use in program.uses:
@@ -692,13 +694,13 @@ def _authoring_refusal(arguments: dict) -> dict | None:
     if profile is None:
         return None
     from ..admit_profile import enforce_source  # noqa: PLC0415
-    from ..parser import Parser  # noqa: PLC0415
 
     sources: list = []
     _collect_sources(arguments, sources)
     for text in sources:
         try:
-            program = Parser(text, "<candidate>.rvl").parse()
+            # issue #2194: the jail's parse of the same text, which it only read
+            program = _shared_parse.program(text, "<candidate>.rvl")
         except Exception:  # noqa: BLE001 — not parseable: the handler reports it
             continue
         try:
@@ -4827,6 +4829,7 @@ def _tool_plan(arguments: dict) -> dict:
     # issue #1707: the class diff reads the resulting composition; the IR
     # itself is not part of a plan's answer.
     resulting = result.pop("resultingIR", None)
+    result.pop("candidateHostBodies", None)
     if resulting is not None:
         result.update(_effect_classes.report(resulting, running, against=True))
     # component leases (item 61): advise — never block — when this swap would
@@ -7703,6 +7706,13 @@ _BY_NAME["revl_change"]["inputSchema"]["properties"]["edit"]["properties"] = {
     "target": {"type": "string"},
     "edits": _BY_NAME["revl_edit"]["inputSchema"]["properties"]["edits"]}
 del _BY_NAME
+# the operator update surface (docs/updates.md): check a release feed and
+# apply a verified release through the same admission and swap gates the
+# authoring verbs use. Off unless the operator started the server with
+# `--update`; the verbs are appended additively, like the query surface, so the
+# core verb literal above stays owned by the authoring loop.
+TOOLS.extend(_update_tools.TOOLS)
+
 # issue #2532: every schema says what the dispatch enforces: a top-level key
 # the verb does not declare is refused by name, not ignored. Set here, once,
 # over the assembled list, so a verb added anywhere above cannot miss it.
@@ -7941,7 +7951,17 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
     `revl_step_back` with no arguments runs an undo through it, so the undo
     passes the same jail, authoring and operator gates any call does. With
     `record`, a successful mutating call's exact undo is attached to the
-    payload and pushed on the session's undo stack (issue #1703)."""
+    payload and pushed on the session's undo stack (issue #1703).
+
+    The call's read-only readers of one text share one parse of it (issue
+    #2194): the path jail, the authoring gate, the completer and the
+    formatter's token gate. The share ends with the call."""
+    with _shared_parse.scope():
+        return _call_tool_in_scope(name, arguments, record)
+
+
+def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
+    """`_call_tool`'s body, inside the call's parse-sharing scope."""
     # issue #2239: the declared booleans, before anything reads them. A
     # `"true"`/`"false"` string is read as its bool and the response says so;
     # any other non-bool is refused by key and type, so no handler ever reads

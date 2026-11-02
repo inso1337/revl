@@ -69,18 +69,27 @@ uv pip install --python "$VPY" pip
 #
 # `cryptography` is here for the same reason: tests/test_ecdsa_differential.py
 # checks src/revl/tee_quote.py's hand-written P-256/P-384 ECDSA against
-# OpenSSL's, and it imports the library HARD rather than through an
-# `importorskip`, so that the one independent check on the quote verifier's
-# crypto cannot report SKIPPED. Without it here, that file ERRORS in this job
-# instead of running. `revl` itself imports nothing from it; the differential
-# asserts that too.
+# OpenSSL's, tests/test_peer_identity_differential.py does the same for the
+# peer identity layer, and the backend signature tests verify Ed25519 and RSA
+# RS256 against known-answer vectors. They import the library HARD rather than
+# through an `importorskip`, so the independent checks on the verifiers cannot
+# report SKIPPED. It is installed from the hashed lock rather than in the
+# pytest line, so the exact artifact is pinned per platform; `revl` itself
+# imports nothing from it, and the differentials assert that too.
 #
+# `requirements.txt` pins `cryptography==50.0.2` with its cffi and pycparser
+# dependencies and the sha256 of every wheel the universal resolution covers.
+# `--require-hashes` makes an install of any other artifact fail. A version
+# bump is one line in that file plus the regeneration command at its top; the
+# install line here does not change.
+uv pip install --python "$VPY" --require-hashes -r requirements.txt
+
 # `llguidance` likewise: tests/test_source_grammar_1661.py runs the exported
 # source grammar over the whole corpus with it and imports it hard, so without
 # it here that file ERRORS in this job (issue #1661), and the grammar-engine
 # checks in tests/test_constrained_decoding_1462.py skip.
 uv pip install --python "$VPY" pytest pytest-asyncio pyyaml watchdog coverage \
-    cryptography llguidance --editable "$CORDIS_PY"
+    llguidance --editable "$CORDIS_PY"
 # Re-install revl through stock pip so `[project.scripts]` (the `revl` and
 # `truc` console-script entries) are written to $VBIN. `uv pip install -e`
 # resolves the editable to a `.pth` and skips the entry-point step; issue #336.

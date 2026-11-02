@@ -1583,6 +1583,29 @@ def test_native_driver_resolves_a_use_on_the_import_path(
     assert got == want
 
 
+def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3004, pinned self-host gap: the reference refuses a BARE call to
+    another module's non-`pub` fn as module-private (G1), as it refuses the
+    named import of it. The native driver does not yet: its module admission
+    (`ad_imports_refusal`, selfhost/compile.rvl) reads only the names a `use`
+    list spells, and selfhost/lower.rvl's name resolver switches off for a text
+    with a `use`. This test turns red when the rule is ported; flip it then."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    # `one` is imported so lib.rvl's pure declarations join the program; a
+    # module reached only for a service contributes no fn at all
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE + "pub fn one() -> Int { return 1 }\n"
+        "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store, one }\n\n'
+                   + _STORE_COMPONENT % "helper(one())", encoding="utf-8")
+    with pytest.raises(RevlError, match="`helper` is module-private in"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert "module-private" not in got, got[:300]
+
+
 def test_native_import_check_passes_every_stdlib_and_truc_module(compile_rvl):
     """Issue #2363, the positive control: every `use` of every stdlib module
     and truc component resolves and names only what its module exports, so the
@@ -3405,6 +3428,53 @@ def test_the_review_controls_of_issue_2399_compile_on_both_sides(compile_rvl, ad
     assert not got.startswith("REFUSED|"), got[:160]
 
 
+# Issue #2928: checking a generic record's fields must substitute its type
+# arguments before checking a generic function call used as a field value.
+_ISSUE_2928_GENERIC_RECORD_CALLS = {
+    "direct_return": (
+        "type Bx[T] = { v: T }\n"
+        "fn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "fn g(n: Int) -> Bx[Opt[Int]] { return { v: wrap(n) } }\n"),
+    "identity_return": (
+        "type Bx[T] = { v: T }\n"
+        "fn id[U](x: U) -> U { return x }\n"
+        "fn g(n: Int) -> Bx[Int] { return { v: id(n) } }\n"),
+    "annotated_let": (
+        "type Bx[T] = { v: T }\n"
+        "fn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "fn g(n: Int) -> Bx[Opt[Int]] {\n"
+        "  let b: Bx[Opt[Int]] = { v: wrap(n) }\n"
+        "  return b\n"
+        "}\n"),
+    "wrong_field": (
+        "type Bx[T] = { v: T }\n"
+        "fn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
+        "fn g(n: Int) -> Bx[Opt[Str]] { return { v: wrap(n) } }\n"),
+}
+
+
+@pytest.mark.parametrize(
+    "case", ["annotated_let", "direct_return", "identity_return"])
+@pytest.mark.parametrize("tier", [tier for tier in TIERS if tier != "wasm"])
+def test_generic_record_fields_substitute_generic_call_results(
+        compile_rvl, reference_emit, case, tier):
+    text = _ISSUE_2928_GENERIC_RECORD_CALLS[case]
+    assert compile_rvl["admit"](text) == ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    ir = compile_source(text, "x.rvl")
+    assert got == reference_emit[tier](ir), got[:200]
+
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_generic_record_fields_still_refuse_a_wrong_generic_call_result(
+        compile_rvl, tier):
+    text = _ISSUE_2928_GENERIC_RECORD_CALLS["wrong_field"]
+    want = _reference_refusal(text)
+    assert want != ""
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + want, got[:200]
+
+
 # Documents the reference compiles, each next to one of the rules above: the
 # gate must not refuse any of them.
 _ISSUE_2399_ADMITTED = {
@@ -4189,6 +4259,17 @@ _STORE = "let store = effect Map.new() undo store.drop()"
 _JOBS_PROVIDER = ("service Jobs { fn run(sql: Str) -> Int }\n"
                   "component C provides jobs: Jobs {\n  " + _POOL + "\n"
                   "  provide jobs {\n    fn run(sql) %s\n  }\n}\n")
+# A `subscribe` bracket is an acquisition too: the reference records its handle
+# as a `Subscription` host local (item 130), so every verb on it meets the
+# reserved family's surface (`close`, `next`) and its zero-argument arity.
+_SUBHANDLE_BODY = ("  let src = effect Stream.source() undo src.close()\n"
+                   "  let sub = subscribe src\n              undo sub.close()\n")
+_SUBHANDLE_COMP = ("service Sink { emission fn write(v: Str) }\n"
+                   "component C requires sink: Sink {\n" + _SUBHANDLE_BODY)
+_SUBHANDLE_EVERY = "  every o in sub {\n    emit sink.write(o)\n  }\n}\n"
+_JOBS_SUBHANDLE = ("service Jobs { fn run(sql: Str) -> Int }\n"
+                   "component C provides jobs: Jobs {\n" + _SUBHANDLE_BODY +
+                   "  provide jobs {\n    fn run(sql) %s\n  }\n}\n")
 _HOST_LOCAL_VERBS = {
     "activation_wrong_type": (
         "component C {\n  " + _POOL + "\n  effect pool.query(1)\n"
@@ -4262,6 +4343,26 @@ _HOST_LOCAL_VERBS = {
         _JOBS_PROVIDER % ("{\n      let o: Opt[Str] = Some(sql)\n"
                           "      let n = match o { Some(pool) => pool.length(), None => 0 }\n"
                           "      return n\n    }"), ""),
+    # issue #2569: a `subscribe` local is a `Subscription` host local
+    "subscription_off_surface": (
+        _SUBHANDLE_COMP + "  effect sub.frob()\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, "HOST-METHOD"),
+    "subscription_next_count": (
+        _SUBHANDLE_COMP + "  effect sub.next(1)\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, "HOST-ARITY"),
+    "subscription_close_count": (
+        _SUBHANDLE_COMP + "  effect sub.close(1)\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, "HOST-ARITY"),
+    "method_subscription_off_surface": (
+        _JOBS_SUBHANDLE % "= sub.frob()", "HOST-METHOD"),
+    "method_subscription_next_count": (
+        _JOBS_SUBHANDLE % "= sub.next(1)", "HOST-ARITY"),
+    "method_subscription_close_count": (
+        _JOBS_SUBHANDLE % "= sub.close(1)", "HOST-ARITY"),
+    # the surface's own verbs are still admitted on the tracked local
+    "subscription_next_admitted": (
+        _SUBHANDLE_COMP + "  effect sub.next()\n  undo sub.close()\n"
+        + _SUBHANDLE_EVERY, ""),
 }
 
 

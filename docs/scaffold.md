@@ -1,8 +1,8 @@
 # `revl scaffold`
 
-**Status:** implemented (2026-08-26). Companion to docs/holes.md — that
-document owns the `hole` construct and the scaffold-then-fill loop (§8); this
-one owns the command that writes the scaffold. If you are building an agent
+**Status:** implemented (2026-08-26). Companion to docs/holes.md, which owns
+the `hole` construct and the scaffold-then-fill loop (§8); this page owns the
+command that writes the scaffold. If you are building an agent
 that authors revl, [authoring-for-agents.md](authoring-for-agents.md) names
 this command alongside `fmt` and `explain` as one loop.
 
@@ -97,8 +97,8 @@ language: the generator never grants authority the spec did not ask for.
   is injected by `--requires`. The root of a dotted label like `filesystem.read`
   is `filesystem`; the `.read` refinement is below revl's capability
   granularity, so it survives in the obligation prose as documentation, not as a
-  distinct capability, and the bound stays exactly `filesystem` — the boundary
-  the spec injected, never wider.
+  distinct capability, and the bound stays exactly `filesystem`; this preserves
+  the spec's injected boundary without widening it.
 * **A missing boundary stays a hole, not a permission.** If the spec asks for a
   capability whose boundary it did not inject, the generator does not invent the
   wiring. The operation that would need it is left as a pure `hole`, and the gap

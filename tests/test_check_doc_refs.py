@@ -8,6 +8,7 @@ pre-PR step relies on; it is the only test that reads the whole tree.
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 from _load_by_path import load_by_path
@@ -44,6 +45,16 @@ def _findings(root):
     tool = _tool()
     _, references, findings = tool.examine(root)
     return references, findings
+
+
+def _git_commit(root):
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"],
+                   cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"],
+                   cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=root, check=True)
 
 
 def test_a_line_past_the_end_of_the_file_is_stale(tmp_path):
@@ -184,6 +195,81 @@ def test_a_ledger_entry_without_a_reason_is_a_red(tmp_path):
         {"path": "src/gone.py", "line": 3}]}), encoding="utf-8")
     assert tool.main(["--root", str(root), "--ledger", str(ledger),
                       "--check"]) == 2
+
+
+def test_write_repairs_a_unique_moved_anchor_from_git_history(tmp_path):
+    root = _tree(tmp_path)
+    _write(root, "src/thing.py", "preamble = 0\nother = 0\ntarget = 1\n")
+    docs = _write(root, "docs/page.md", f"see `{_ref('src/thing.py', 3)}`\n")
+    _git_commit(root)
+    tool = _tool()
+    (root / "src/thing.py").write_text(
+        "other = 0\ntarget = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/thing.py"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "move target"],
+                   cwd=root, check=True)
+    docs.write_text("updated prose; still see `src/thing.py:3`\n",
+                    encoding="utf-8")
+    subprocess.run(["git", "add", "docs/page.md"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "edit citation prose"],
+                   cwd=root, check=True)
+    assert tool.main(["--root", str(root), "--write"]) == 0
+    assert docs.read_text(encoding="utf-8") == (
+        "updated prose; still see `src/thing.py:2`\n")
+    subprocess.run(["git", "add", "docs/page.md"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "repair citation"],
+                   cwd=root, check=True)
+    assert subprocess.run(["git", "status", "--porcelain"],
+                          cwd=root, capture_output=True, text=True,
+                          check=True).stdout == ""
+
+
+def test_write_reports_changed_content_instead_of_renumbering(tmp_path, capsys):
+    root = _tree(tmp_path)
+    _write(root, "src/thing.py", "preamble = 0\nother = 0\ntarget = 1\n")
+    docs = _write(root, "docs/page.md", f"see `{_ref('src/thing.py', 3)}`\n")
+    _git_commit(root)
+    tool = _tool()
+    (root / "src/thing.py").write_text(
+        "other = 0\nchanged = 1\n", encoding="utf-8")
+    assert tool.main(["--root", str(root), "--write"]) == 1
+    assert docs.read_text(encoding="utf-8") == "see `src/thing.py:3`\n"
+    assert "no-match" in capsys.readouterr().out
+
+
+def test_write_is_green_on_a_clean_committed_tree(tmp_path, capsys):
+    root = _tree(tmp_path)
+    _write(root, "src/thing.py", "one = 1\ntwo = 2\ntarget = 1\n")
+    _write(root, "docs/page.md", f"see `{_ref('src/thing.py', 3)}`\n")
+    _git_commit(root)
+    (root / "src/thing.py").write_text(
+        "one = 1\nchanged = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/thing.py"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "move target"],
+                   cwd=root, check=True)
+    tool = _tool()
+    ledger = root / "tools" / "doc_refs_ledger.json"
+    ledger.parent.mkdir()
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--write-ledger"]) == 0
+    subprocess.run(["git", "add", "tools/doc_refs_ledger.json"],
+                   cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "record stale reference"],
+                   cwd=root, check=True)
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--write"]) == 0
+    assert "suppressed: 1 findings already recorded in the ledger" in capsys.readouterr().out
+
+
+def test_write_labels_a_repeated_citation_as_ambiguous(tmp_path, capsys):
+    root = _tree(tmp_path)
+    _write(root, "src/thing.py", "target = 1\n")
+    _write(root, "docs/page.md",
+           f"one `{_ref('src/thing.py', 3)}` two `{_ref('src/thing.py', 3)}`\n")
+    _git_commit(root)
+    tool = _tool()
+    assert tool.main(["--root", str(root), "--write"]) == 1
+    assert "ambiguous-citation" in capsys.readouterr().out
 
 
 def test_a_vendored_or_hidden_checkout_is_not_scanned(tmp_path):

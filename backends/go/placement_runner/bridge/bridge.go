@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -363,9 +364,21 @@ func serveConn(conn net.Conn, invoke Invoke) {
 				// crossing still executing when the latch trips is the AMBIGUOUS
 				// one the halt inventory names (item 440). Cleared in a deferred
 				// call so a panicking handler still leaves the registry clean.
-				value, ierr := func() (any, error) {
+				//
+				// issue #2481: a handler that panics answers THIS crossing with
+				// an error reply and the connection keeps serving, the way a
+				// py, ts or java provider that raises does. The panic value
+				// becomes the error (`panic: <v>`, one line, no stack, the same
+				// text a recovered activation carries), so it goes through
+				// `SeamFailure` below like any other provider failure.
+				value, ierr := func() (value any, ierr error) {
 					seq := estop.BeginCrossing(req.Key, req.Method, "accept")
 					defer estop.EndCrossing(seq)
+					defer func() {
+						if r := recover(); r != nil {
+							value, ierr = nil, fmt.Errorf("panic: %v", r)
+						}
+					}()
 					return invoke(req.Key, req.Method, req.Args)
 				}()
 				if ierr != nil {

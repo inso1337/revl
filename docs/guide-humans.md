@@ -275,6 +275,8 @@ below; the exhaustive per-command flag reference is
 | `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](revl-diff.md) |
 | `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](derived-versioning.md) |
 | `revl changelog --from OLD --to NEW` | the release note derived from the interface, structural and authority delta, with the semver headline | [derived-versioning.md](derived-versioning.md) |
+| `revl update check` | compare the running toolchain with the newest release on a GitHub release feed, its manifest and compatibility statement (exit 10 when an update is available, `--json`) | [updates.md](updates.md) |
+| `revl update fetch` | download a release, verify the artifact sha256 against its manifest, and stage it under the update home; nothing is compiled or executed | [updates.md](updates.md) |
 | `revl contract FILES` | federated contracts between sovereign compositions: export a consumer surface, or check a provider against a pinned one | [federation.md](federation.md) |
 | `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
 | `revl retention-receipt FILES --policy P --requester W` | sign an erasure receipt over a `retention` policy's replicas and derivatives, or `--verify` one | [commands-reference.md](commands-reference.md) |
@@ -375,7 +377,7 @@ revl mcp proxy -- node server.js        # gate an MCP server, no .rvl written
 python3 tools/conformance.py             # every construct x every backend
 ```
 
-The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+) — the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
+The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+): the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
 
 `run --backend py` needs the cordis-py runtime (`backends/python/setup.sh`);
 without it the command says so and exits nonzero, and the end-to-end tests in

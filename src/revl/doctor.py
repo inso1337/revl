@@ -582,9 +582,9 @@ def check_mtls(prober: Prober) -> Check:
 
 
 def check_otel(prober: Prober) -> Check:
-    """OpenTelemetry export — an optional extra (`pip install revl[otel]`). Its
-    absence is the normal base install, so MISSING here reads as 'not enabled',
-    a WARN-level fact rather than an error."""
+    """OpenTelemetry export is an optional extra (`pip install '.[otel]'` from a
+    checkout). Its absence is the normal base install, so MISSING here reads as
+    'not enabled', a WARN-level fact rather than an error."""
     if prober.module_available("opentelemetry"):
         version = None
         try:
@@ -594,7 +594,8 @@ def check_otel(prober: Prober) -> Check:
             pass
         return Check("OpenTelemetry (revl[otel])", OK, version, "SDK importable")
     return Check("OpenTelemetry (revl[otel])", WARN, None,
-                 "optional extra not installed (pip install revl[otel])")
+                 "optional extra not installed "
+                 "(pip install '.[otel]' from a checkout)")
 
 
 def check_stdlib_version(prober: Prober) -> Check:

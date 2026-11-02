@@ -18,9 +18,10 @@ because its error reaches the placement runner's log and FATAL lines, one
 redacted record per line (issue #814), and a stack's host paths and argument
 words cannot be redacted.
 
-A panic in a bridge crossing (`RevlInvoke`) stays fatal by design: the
-placement runner's guard turns it into one redacted FATAL line
-(tests/test_go_runner_fatal_funnel.py, issue #814).
+A panic in a bridge crossing (`RevlInvoke` reached over the wire) comes back
+to the caller as an error reply, `panic: <v>` scrubbed by `bridge.SeamFailure`,
+and the process keeps serving, as a py, ts or java provider that raises does
+(tests/test_go_runner_fatal_funnel.py).
 
 The run tests build and run the emitted package with the real toolchain.
 """

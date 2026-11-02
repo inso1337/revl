@@ -119,6 +119,7 @@ def _assert_states_the_boundary(payload: dict) -> None:
     assert "approvalRequired" not in payload, payload
     assert "unreviewedHostCode" not in payload, payload
     assert "unreviewedHostCodeWarning" not in payload, payload
+    assert "candidateHostBodies" not in payload, payload
     note = payload["note"]
     assert "raises no approval ticket" in note, note
     assert "does not report `unreviewedHostCode`" in note, note

@@ -9,16 +9,16 @@
 revl is designing *instance-parametric components*: runtime-created
 instances (a session, a connection, a tenant), each with its own lifecycle
 and teardown. Against cordis-py this is already known to work by giving
-each instance its own **local realm** — `Context.isolate(name)` with no
+each instance its own **local realm** through `Context.isolate(name)` with no
 `label`, which mints a fresh identity per call.
 
 For each of the other four tiers:
 
 - **A.** Can the runtime hold two or more simultaneous live instances of
   the same plugin/component?
-- **B.** Is there an identity-keyed / *local* realm equivalent — can two
-  instances be isolated from each other **without choosing a distinct
-  label string** — or is isolation label-keyed only?
+- **B.** Is there an identity-keyed / *local* realm equivalent that isolates
+  two instances from each other **without choosing a distinct label string**,
+  or is isolation label-keyed only?
 - **C.** Is per-instance disposal independent, and is teardown still LIFO
   within an instance?
 - **D.** If there is no local-realm equivalent: what would it take, and is
@@ -26,14 +26,14 @@ For each of the other four tiers:
 
 ## Method
 
-Every tier is probed by driving its **runtime library directly** — no revl
-compilation in the loop — with the same five-part shape:
+Every tier is probed by driving its **runtime library directly**, without revl
+compilation in the loop, using the same five-part shape:
 
 | sub-probe | what it loads | reference expectation |
 |---|---|---|
 | **A** | the same component twice into the *same* context | refused (G2 provision disjointness) |
-| **A2** | twice into *two plain child contexts*, no isolation | refused — a child context is not a realm |
-| **B1** | twice into two isolates sharing **one label** | refused — one label is one realm |
+| **A2** | twice into *two plain child contexts*, no isolation | refused because a child context is not a realm |
+| **B1** | twice into two isolates sharing **one label** | refused because one label is one realm |
 | **B** | twice into two **unlabelled** isolates | both live, each with its own provision |
 | **C** | dispose one instance | the other stays live; the disposed one reverts LIFO |
 
@@ -46,7 +46,7 @@ against a re-verified reference rather than against a remembered one.
 All five tiers ran on this machine, in one pass, via
 `probes/local-realms/run-all.sh`. Toolchains present: Node v25.6.1,
 cargo 1.85.1 (warm `~/.cargo` registry with `cordis-rs` 0.3.0),
-OpenJDK 26.0.2 (Homebrew keg — *not* on the default `PATH`; the run needs
+OpenJDK 26.0.2 (Homebrew keg, *not* on the default `PATH`; the run needs
 `PATH=/opt/homebrew/opt/openjdk/bin:$PATH`), Python 3.14 with `wasmtime`
 47.x, and a checkout of the `cordis-wasm` prototype at
 `~/Projects/cordis-wasm`. cordis-py and cordis4j were cloned from source
@@ -58,13 +58,13 @@ the mechanism can be checked, but each A/B/C answer is backed by a run.
 
 ## Per-tier answers
 
-| tier | A — two live instances? | B — local (identity-keyed) realm? | C — independent disposal + LIFO? | D — gap |
+| tier | A: two live instances? | B: local (identity-keyed) realm? | C: independent disposal + LIFO? | D: gap |
 |---|---|---|---|---|
-| **cordis-py** (control) | **YES** — VERIFIED | **YES** — VERIFIED: `isolate(name)` with no label mints `Symbol('kv')` per call; two calls compare distinct | **YES** — VERIFIED | n/a |
-| **cordis** (TypeScript) | **YES** — VERIFIED | **YES** — VERIFIED: `isolate(name)` → `label ?? Symbol(name)`, byte-for-byte the same mechanism | **YES** — VERIFIED | **revl's shim only.** `runtime.ts:27-37` interns string→symbol process-wide, so revl can only reach the *global* form. |
-| **cordis-rs** (Rust) | **YES** — VERIFIED | **YES** — VERIFIED: `Context::isolate(name)` calls `new_isolation()`, a monotonic `Isolation(u64)` counter; observed `Isolation(3)` vs `Isolation(4)` | **YES** — VERIFIED | **revl's emitter only.** `backends/rust/emit.py:1145-1149` emits `isolate_with(key, _revl_realm(label))`, a *hash of the label string* — never `isolate()`/`new_isolation()`. |
-| **cordis4j** (Java) | **YES** — VERIFIED | **YES, and more cheaply than the reference** — VERIFIED: `ctx.fork()` alone gives an instance its own provision slot, no label at all. There is exactly one `isolate` overload and it takes a `String` (reflection-checked in-probe), but you never need it. | **YES** — VERIFIED | **revl's emitter only** — but see the divergence below; the Java tier's isolation model is structurally different from the reference. |
-| **cordis-wasm** | **YES** — VERIFIED | **NO.** VERIFIED: the runtime has no realm/isolate concept at all (`Runtime`'s public surface contains no realm-, isolate-, scope-, or namespace-shaped member). Two instances are only possible with **different key strings baked into the module bytes** at compile time. | **YES** — VERIFIED | **the runtime library.** A local realm needs a new per-fiber key-prefix applied at link and publish time; the emitter alone cannot express it without emitting a distinct module per instance. |
+| **cordis-py** (control) | **YES (VERIFIED)** | **YES (VERIFIED):** `isolate(name)` with no label mints `Symbol('kv')` per call; two calls compare distinct | **YES (VERIFIED)** | n/a |
+| **cordis** (TypeScript) | **YES (VERIFIED)** | **YES (VERIFIED):** `isolate(name)` → `label ?? Symbol(name)`, byte-for-byte the same mechanism | **YES (VERIFIED)** | **revl's shim only:** `runtime.ts:27-37` interns string→symbol process-wide, so revl can only reach the *global* form. |
+| **cordis-rs** (Rust) | **YES (VERIFIED)** | **YES (VERIFIED):** `Context::isolate(name)` calls `new_isolation()`, a monotonic `Isolation(u64)` counter; observed `Isolation(3)` vs `Isolation(4)` | **YES (VERIFIED)** | **revl's emitter only:** `backends/rust/emit.py:1145-1149` emits a *hash of the label string*, rather than calling `isolate()` or `new_isolation()`. |
+| **cordis4j** (Java) | **YES (VERIFIED)** | **YES, and more cheaply than the reference (VERIFIED):** `ctx.fork()` alone gives an instance its own provision slot, no label at all. There is exactly one `isolate` overload and it takes a `String` (reflection-checked in-probe), but you never need it. | **YES (VERIFIED)** | **revl's emitter only; see the divergence below.** The Java tier's isolation model is structurally different from the reference. |
+| **cordis-wasm** | **YES (VERIFIED)** | **NO (VERIFIED):** the runtime has no realm/isolate concept at all (`Runtime`'s public surface contains no realm-, isolate-, scope-, or namespace-shaped member). Two instances are only possible with **different key strings baked into the module bytes** at compile time. | **YES (VERIFIED)** | **The runtime library.** A local realm needs a new per-fiber key-prefix applied at link and publish time; the emitter alone cannot express it without emitting a distinct module per instance. |
 
 ### Exact runtime API corresponding to cordis-py's local realm
 
@@ -111,11 +111,11 @@ B1/same1.kv -> s1  same2.kv -> s2
    instance-parametric components need, for free.
 2. **Realm *labels* do not intern globally at the core-Context level.**
    Two sibling `isolate(Kv.class, "shared")` children do **not** join one
-   realm — contrary to the paper's §5.2.1 global-realm convention and to
-   `docs/design-v2-realms.md`'s "equal strings = same realm". The
+   realm. This differs from the paper's §5.2.1 global-realm convention and
+   from `docs/design-v2-realms.md`'s "equal strings = same realm". The
    global-realm behaviour exists one layer up, in `Loader`, which interns
-   realms by isolate-chain path (`core/Loader.java:40-60`, `:341-352`) —
-   a layer revl's Java emitter does not use (it emits
+   realms by isolate-chain path (`core/Loader.java:40-60`, `:341-352`). The
+   Java emitter does not use that layer; it emits
    `ctx = ctx.isolate(<Svc>.class, "<label>")` directly,
    `backends/java/emit.py:2094-2096`).
 
@@ -125,7 +125,8 @@ realm semantics are the ones that come for free. That is the exact inverse
 of every other hosted tier.
 
 Also worth recording: cordis4j enforces G2 with `SupplyConflictException`
-only *within one context* — `Two active components supply
+only *within one context*:
+`Two active components supply
 ServiceKey[type=interface Probe$Kv, qualifier=]: fiber #1 and fiber #2`
 (`internal/ServiceRegistry.java:224-236`). revl's linker still rejects a
 composition that double-provides a key, so the guarantee holds; but the
@@ -153,8 +154,8 @@ a module per instance.
 `cordis-wasm/runtime.py`, not in revl:
 
 - give `Fiber` a `realm: str = ""` set by `plug(name, code, realm=...)`;
-- prefix on resolve — `self.table[fiber.realm + key]` at `:293`;
-- prefix on publish — `self.table[fiber.realm + key]` at `:332`;
+- prefix on resolve: `self.table[fiber.realm + key]` at `:293`;
+- prefix on publish: `self.table[fiber.realm + key]` at `:332`;
 - scope the provision-conflict check at `:131-137` to the same prefix.
 
 That is roughly ten lines and it makes the realm a runtime value, at which
@@ -168,7 +169,7 @@ five tiers today, and on the fifth only after a small runtime change.**
 
 - **cordis-py, cordis (TS), cordis-rs**: the local realm already exists in
   the runtime library, verified live. Nothing is missing but revl's own
-  plumbing — all three revl shims intern a *string* into a realm identity
+  plumbing: all three revl shims intern a *string* into a realm identity
   (`backends/python/runtime.py:44-78`,
   `backends/typescript/runtime.ts:27-37`,
   `backends/rust/emit.py:1145-1149`+`:1184-1195`) and so can only ever
@@ -177,7 +178,7 @@ five tiers today, and on the fifth only after a small runtime change.**
   `new_isolation()` per instance.
 - **cordis4j**: the capability exists and is *stronger* than the reference
   (a bare `fork()` isolates), but the tier's model is structurally
-  different — per-context stores, no global interning below `Loader`. Any
+  different: per-context stores, with no global interning below `Loader`. Any
   design text that says "equal realm strings are one realm" is false here.
   Emitter change only; no runtime change.
 - **cordis-wasm**: **no** local-realm equivalent, and the gap is in the

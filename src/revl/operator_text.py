@@ -32,6 +32,7 @@ from .parser import Parser, Program
 # same way; the remaining fields are bookkeeping the parser and merge fill in.
 _DECL_LISTS = tuple(f.name for f in fields(Program)
                     if f.name not in ("filename", "fn_scopes", "fn_alias_scopes",
+                                      "module_private",
                                       "decl_files", "has_realm_placeholder"))
 
 

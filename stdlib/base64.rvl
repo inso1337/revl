@@ -1,0 +1,413 @@
+// The revl stdlib BASE64URL module - RFC 4648 base64url in PURE revl.
+//
+// ---------------------------------------------------------------- what this is
+// base64url is the base64 variant every web-text protocol uses to carry BYTES
+// through a text channel: RFC 7515 JWT segments are base64url, so are OAuth
+// state values, password-reset tokens, opaque ids and the salt/verifier fields
+// of a password KDF. It differs from standard base64 in exactly two ways, and
+// both are load-bearing:
+//
+//   * the alphabet is URL- and filename-safe: values 62 and 63 are `-` and `_`
+//     instead of `+` and `/` (RFC 4648 section 5), so a value can sit in a path
+//     segment, a query value or a filename without percent-encoding;
+//   * the output is UNPADDED, so a token can be split on a delimiter such as
+//     `.` without the `=` padding hanging off a segment.
+//
+// This module is the primitive kit for that: encode and strict decode, in pure
+// revl, on every tier. It is deliberately NOT a token type, a signer or a
+// module that knows about JWT. A caller composes those over this.
+//
+// ------------------------------------------------------------- the type story
+// revl has ONE string type, `Str`, and no byte-string type. So the contract is
+// stated in the types rather than implied by a name:
+//
+//   b64url_encode(text: Str) -> Str
+//     Encodes the UTF-8 BYTES of `text` (docs/strings.md: `charCodeAt` answers
+//     the full Unicode scalar, so the UTF-8 encoding is unambiguous) and
+//     returns the unpadded base64url TEXT. Total: every `Str` encodes, including
+//     the empty one, which encodes to "".
+//
+//   b64url_decode(text: Str) -> Result[Str, Base64Error]
+//     The exact inverse of `b64url_encode`: decodes strict canonical base64url
+//     TEXT, reads the decoded bytes as UTF-8, and returns the `Str`. It refuses
+//     non-canonical text, and because its declared result is a `Str` it also
+//     refuses byte output that is not valid UTF-8 rather than inventing a
+//     replacement-character string. A caller holding arbitrary bytes (a
+//     signature, a digest, random salt) uses the byte door below instead.
+//
+//   b64url_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error]
+//   b64url_decode_bytes(text: Str) -> Result[List[Int], Base64Error]
+//     The byte-level doors, over `List[Int]` because that is how revl spells a
+//     byte sequence (stdlib/str.rvl's `str_utf8_bytes` has the same answer).
+//     Decode does not assume UTF-8; encode refuses an element outside 0..255
+//     rather than masking it, because a masked value would encode DIFFERENT
+//     bytes than the caller holds.
+//
+// Every fallible door returns `Result[..., Base64Error]`, never a sentinel: the
+// empty string is a legitimate value, so `""` cannot mean failure.
+//
+// ------------------------------------------------------- strict canonical decode
+// RFC 4648 permits a decoder to accept text that is not the canonical encoding
+// of its bytes; this one does NOT, because accepting two spellings of one byte
+// string is a token-malleability hazard. A signature verified over the TEXT
+// would validate two different strings for the same signed bytes, and a cache,
+// a revocation list or a dedupe key built on the text would treat them as two
+// values. The refusals, each a named `Base64Error.code`:
+//
+//   invalid-length         the text length is 1 mod 4 (a group cannot end after
+//                          one character; 0, 2 and 3 are the legal tails)
+//   unexpected-padding     the text carries `=`, which unpadded base64url never
+//                          does; a padded input is refused, not stripped
+//   invalid-character      a character outside `A-Z a-z 0-9 - _` (including the
+//                          standard-base64 `+` and `/`, and whitespace)
+//   non-canonical-tail     the unused low bits of a 2- or 3-character last group
+//                          are not zero, so another spelling of the same bytes
+//                          exists; only the zero-padded spelling is accepted
+//   invalid-utf8           (b64url_decode only) the decoded bytes are not valid
+//                          UTF-8, or are an overlong form, a surrogate or above
+//                          U+10FFFF
+//   not-a-byte             (b64url_encode_bytes only) a list element is outside
+//                          0..255
+//
+// ---------------------------------------------------------------- tier status
+// Every function here is PURE revl: no `@py`, no `@<backend>` body, no extern at
+// all. It is built on the base `Str`/`Int` surface (`length`/`slice`/
+// `charCodeAt`/`concat`, `to_char`, `div_floor`/`mod`), which lowers on every
+// tier (py / ts / rs / go / java / wasm), so the module is usable on every tier
+// the day it lands. The py tier is executed by tests/test_base64_stdlib.py; the
+// other tiers inherit for free, like stdlib/str.rvl and stdlib/escape.rvl.
+//
+// revl has NO bitwise operators (no `>>`/`&`/`|` on Int), so the 6-bit grouping
+// is spelled with integer division and modulo: `x >> 6` is `x.div_floor(64)`,
+// `x & 0x3F` is `x.mod(64)`, `x << 2` is `x * 4`. Both lower on every tier
+// (including wasm: `$int_div_floor`/`$int_mod`). Bytes and code points here are
+// non-negative, so `div_floor` equals truncation.
+//
+// It stays self-contained: the UTF-8 helpers it needs are private copies of the
+// ones in stdlib/str.rvl, the same choice stdlib/escape.rvl made, because a
+// stdlib primitive is reached from a consumer's own tree and one less import is
+// one less thing a vendored copy can miss.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/base64.rvl" {
+//       Base64Error, b64url_encode, b64url_decode,
+//       b64url_encode_bytes, b64url_decode_bytes,
+//     }
+
+// Why `text` could not be encoded or decoded. `code` is a stable machine tag a
+// caller can branch on (the closed set is documented above); `message` is the
+// human half and names the offending offset, so a malformed token is debuggable
+// without re-running the decoder by hand.
+pub type Base64Error = { code: Str, message: Str }
+
+// ------------------------------------------------------------- error building
+
+fn err(code: Str, message: Str) -> Base64Error {
+  return { code: code, message: message }
+}
+
+fn err_at(code: Str, why: Str, at: Int) -> Base64Error {
+  var message = why
+  message = message.concat(" at offset ")
+  message = message.concat(at.to_str())
+  return err(code, message)
+}
+
+// ---------------------------------------------------------------- the alphabet
+// RFC 4648 section 5's URL- and filename-safe alphabet, in VALUE order: index
+// 0..63 is `A`..`Z`, `a`..`z`, `0`..`9`, `-`, `_`. Written as ONE literal so the
+// alphabet is reviewed in one place, and read by index. The decoder maps a code
+// point BACK to its value by the alphabet's ASCII layout (below) rather than
+// with a second table that could drift from this one.
+fn alphabet() -> Str {
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+}
+
+// The alphabet character for a 6-bit value in 0..63.
+fn alphabet_char(v: Int) -> Str {
+  return alphabet().slice(v, v + 1)
+}
+
+// The value of one code point in the alphabet, or -1 when the code point is not
+// in it. `A-Z` is 65..90, `a-z` is 97..122, `0-9` is 48..57; `-` (45) is 62 and
+// `_` (95) is 63. The arithmetic is the ASCII layout, so it cannot disagree with
+// `alphabet()` above: the test suite pins both directions against RFC 4648's
+// vectors.
+fn alphabet_value(code: Int) -> Int {
+  if (code >= 65 && code <= 90) { return code - 65 }    // A-Z -> 0..25
+  if (code >= 97 && code <= 122) { return code - 71 }   // a-z -> 26..51
+  if (code >= 48 && code <= 57) { return code + 4 }     // 0-9 -> 52..61
+  if (code == 45) { return 62 }                         // '-' -> 62
+  if (code == 95) { return 63 }                         // '_' -> 63
+  return 0 - 1
+}
+
+// ------------------------------------------------------------------ utf-8 in
+// The UTF-8 bytes of `text`, each an Int in 0..255. Private copy of
+// stdlib/str.rvl's `str_utf8_bytes` (see the header: self-contained on purpose).
+// A revl `Str` is a sequence of Unicode scalars, so this never has to recombine
+// a surrogate pair; it encodes each scalar directly.
+fn utf8_bytes(text: Str) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  let n = text.length()
+  while (i < n) {
+    for (b of utf8_encode_scalar(text.charCodeAt(i))) {
+      out = out.push(b)
+    }
+    i += 1
+  }
+  return out
+}
+
+// The 1-4 UTF-8 bytes of a single Unicode scalar, standard encoding. Private
+// copy of stdlib/str.rvl's `utf8_encode_scalar`, for the same reason.
+fn utf8_encode_scalar(cp: Int) -> List[Int] {
+  if (cp < 128) {
+    return [cp]
+  }
+  if (cp < 2048) {
+    return [192 + cp.div_floor(64),
+            128 + cp.mod(64)]
+  }
+  if (cp < 65536) {
+    return [224 + cp.div_floor(4096),
+            128 + cp.div_floor(64).mod(64),
+            128 + cp.mod(64)]
+  }
+  return [240 + cp.div_floor(262144),
+          128 + cp.div_floor(4096).mod(64),
+          128 + cp.div_floor(64).mod(64),
+          128 + cp.mod(64)]
+}
+
+// ---------------------------------------------------------------- encode
+// Unpadded base64url of arbitrary bytes. The caller has already validated that
+// every element is a byte (`b64url_encode_bytes`), so this half stays a pure
+// three-bytes-in, four-chars-out transform with no error channel.
+fn encode_bytes(bytes: List[Int]) -> Str {
+  var out = ""
+  var acc = 0
+  var held = 0
+  for (b of bytes) {
+    acc = acc * 256 + b
+    held += 1
+    if (held == 3) {
+      out = out.concat(alphabet_char(acc.div_floor(262144)))
+      out = out.concat(alphabet_char(acc.div_floor(4096).mod(64)))
+      out = out.concat(alphabet_char(acc.div_floor(64).mod(64)))
+      out = out.concat(alphabet_char(acc.mod(64)))
+      acc = 0
+      held = 0
+    }
+  }
+  if (held == 1) {
+    // one byte, 8 bits: the top 6, then the low 2 padded with four zero bits
+    out = out.concat(alphabet_char(acc.div_floor(4)))
+    out = out.concat(alphabet_char(acc.mod(4) * 16))
+  } else if (held == 2) {
+    // two bytes, 16 bits: the top 6, the middle 6, then the low 4 padded with
+    // two zero bits
+    out = out.concat(alphabet_char(acc.div_floor(1024)))
+    out = out.concat(alphabet_char(acc.div_floor(16).mod(64)))
+    out = out.concat(alphabet_char(acc.mod(16) * 4))
+  }
+  return out
+}
+
+// Unpadded base64url TEXT for the UTF-8 bytes of `text`. Total: the empty `Str`
+// encodes to "". The inverse is `b64url_decode`.
+pub fn b64url_encode(text: Str) -> Str {
+  return encode_bytes(utf8_bytes(text))
+}
+
+// Unpadded base64url TEXT for an arbitrary byte sequence. Refuses a list
+// element outside 0..255 (`not-a-byte`) instead of masking it, because masking
+// would encode bytes the caller does not hold.
+pub fn b64url_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error] {
+  var i = 0
+  let n = bytes.length()
+  while (i < n) {
+    let b = bytes[i]
+    if (b < 0 || b > 255) {
+      var message = "element "
+      message = message.concat(b.to_str())
+      message = message.concat(" is outside the byte range 0..255")
+      return Err(err_at("not-a-byte", message, i))
+    }
+    i += 1
+  }
+  return Ok(encode_bytes(bytes))
+}
+
+// ---------------------------------------------------------------- decode
+// Strict canonical base64url bytes. The one decode implementation; the `Str`
+// door below wraps it with a UTF-8 read so the two doors cannot disagree about
+// what text is acceptable.
+pub fn b64url_decode_bytes(text: Str) -> Result[List[Int], Base64Error] {
+  let n = text.length()
+  // A group has 4 chars, so a legal unpadded text ends after 0, 2 or 3 chars of
+  // its last group. Ending after 1 cannot encode even a single byte.
+  if (n.mod(4) == 1) {
+    var message = "a base64url text ends after 0, 2 or 3 characters of its"
+    message = message.concat(" last group; this one ends after 1")
+    return Err(err("invalid-length", message))
+  }
+  var out: List[Int] = []
+  var acc = 0
+  var held = 0
+  var i = 0
+  while (i < n) {
+    let code = text.charCodeAt(i)
+    if (code == 61) {   // '='
+      return Err(err_at("unexpected-padding",
+                        "this decoder reads UNPADDED base64url; '=' is not part of the value",
+                        i))
+    }
+    let v = alphabet_value(code)
+    if (v < 0) {
+      var message = "character `"
+      message = message.concat(text.slice(i, i + 1))
+      message = message.concat("` is not in the RFC 4648 base64url alphabet (A-Z a-z 0-9 - _)")
+      return Err(err_at("invalid-character", message, i))
+    }
+    acc = acc * 64 + v
+    held += 1
+    if (held == 4) {
+      out = out.push(acc.div_floor(65536))
+      out = out.push(acc.div_floor(256).mod(256))
+      out = out.push(acc.mod(256))
+      acc = 0
+      held = 0
+    }
+    i += 1
+  }
+  if (held == 2) {
+    // 12 bits of the last 2 chars carry 1 byte; the low 4 bits are padding and
+    // MUST be zero, or a second spelling of the same byte exists.
+    if (acc.mod(16) != 0) {
+      return Err(err("non-canonical-tail",
+                     "the last group's 4 unused low bits are not zero, so this text is not the canonical spelling of its bytes"))
+    }
+    out = out.push(acc.div_floor(16))
+  } else if (held == 3) {
+    // 18 bits of the last 3 chars carry 2 bytes; the low 2 bits are padding and
+    // MUST be zero for the same reason. The bytes are the top 16 bits: the
+    // first takes bits 17..10 (`acc >> 10`), the second bits 9..2
+    // (`(acc >> 2) & 0xFF`), and the two dropped bits are the remainder.
+    if (acc.mod(4) != 0) {
+      return Err(err("non-canonical-tail",
+                     "the last group's 2 unused low bits are not zero, so this text is not the canonical spelling of its bytes"))
+    }
+    out = out.push(acc.div_floor(1024))
+    out = out.push(acc.div_floor(4).mod(256))
+  }
+  return Ok(out)
+}
+
+// The exact inverse of `b64url_encode`: strict canonical base64url TEXT, read
+// back as UTF-8. Refuses non-canonical text and byte output that is not UTF-8
+// (`invalid-utf8`); a caller holding arbitrary bytes uses
+// `b64url_decode_bytes`.
+pub fn b64url_decode(text: Str) -> Result[Str, Base64Error] {
+  return match b64url_decode_bytes(text) {
+    Ok(bytes) => utf8_decode(bytes),
+    Err(e) => Err(e),
+  }
+}
+
+// --------------------------------------------------------------- utf-8 out
+// Is `b` a UTF-8 continuation byte (0b10xxxxxx)?
+fn is_continuation(b: Int) -> Bool {
+  return b >= 128 && b <= 191
+}
+
+fn invalid_utf8(why: Str, at: Int) -> Base64Error {
+  var message = "the decoded bytes are not valid UTF-8: "
+  message = message.concat(why)
+  message = message.concat(" at offset ")
+  message = message.concat(at.to_str())
+  return err("invalid-utf8", message)
+}
+
+// STRICT UTF-8 decode: the exact inverse of `utf8_bytes`. Refuses every form a
+// lenient decoder would paper over, because the result is used as a `Str` for
+// comparisons and signatures, and a replacement character would silently change
+// the value: a truncated sequence, a lone continuation byte, an overlong form
+// (the same scalar in more bytes than needed), a UTF-16 surrogate (not a
+// Unicode scalar) and a scalar above U+10FFFF. `to_char` is total on every tier
+// for the scalars that pass, so no per-tier body is needed here either.
+fn utf8_decode(bytes: List[Int]) -> Result[Str, Base64Error] {
+  var out = ""
+  var i = 0
+  let n = bytes.length()
+  while (i < n) {
+    let b0 = bytes[i]
+    if (b0 < 128) {
+      out = out.concat(b0.to_char())
+      i += 1
+    } else if (b0 >= 194 && b0 <= 223) {
+      if (i + 1 >= n) {
+        return Err(invalid_utf8("a 2-byte sequence is truncated", i))
+      }
+      let b1 = bytes[i + 1]
+      if (!is_continuation(b1)) {
+        return Err(invalid_utf8("a continuation byte is missing", i + 1))
+      }
+      out = out.concat(((b0 - 192) * 64 + (b1 - 128)).to_char())
+      i += 2
+    } else if (b0 >= 224 && b0 <= 239) {
+      if (i + 2 >= n) {
+        return Err(invalid_utf8("a 3-byte sequence is truncated", i))
+      }
+      let b1 = bytes[i + 1]
+      let b2 = bytes[i + 2]
+      if (!is_continuation(b1)) {
+        return Err(invalid_utf8("a continuation byte is missing", i + 1))
+      }
+      if (!is_continuation(b2)) {
+        return Err(invalid_utf8("a continuation byte is missing", i + 2))
+      }
+      let cp = (b0 - 224) * 4096 + (b1 - 128) * 64 + (b2 - 128)
+      if (cp < 2048) {
+        return Err(invalid_utf8("a 3-byte sequence encodes an overlong form", i))
+      }
+      if (cp >= 55296 && cp <= 57343) {
+        return Err(invalid_utf8("a surrogate code point (U+D800..U+DFFF) is not a Unicode scalar", i))
+      }
+      out = out.concat(cp.to_char())
+      i += 3
+    } else if (b0 >= 240 && b0 <= 244) {
+      if (i + 3 >= n) {
+        return Err(invalid_utf8("a 4-byte sequence is truncated", i))
+      }
+      let b1 = bytes[i + 1]
+      let b2 = bytes[i + 2]
+      let b3 = bytes[i + 3]
+      if (!is_continuation(b1)) {
+        return Err(invalid_utf8("a continuation byte is missing", i + 1))
+      }
+      if (!is_continuation(b2)) {
+        return Err(invalid_utf8("a continuation byte is missing", i + 2))
+      }
+      if (!is_continuation(b3)) {
+        return Err(invalid_utf8("a continuation byte is missing", i + 3))
+      }
+      let cp = (b0 - 240) * 262144 + (b1 - 128) * 4096 + (b2 - 128) * 64 + (b3 - 128)
+      if (cp < 65536) {
+        return Err(invalid_utf8("a 4-byte sequence encodes an overlong form", i))
+      }
+      if (cp > 1114111) {
+        return Err(invalid_utf8("a 4-byte sequence encodes a scalar above U+10FFFF", i))
+      }
+      out = out.concat(cp.to_char())
+      i += 4
+    } else {
+      // 0x80..0xBF (a lone continuation byte), 0xC0/0xC1 (an overlong 2-byte
+      // lead) and 0xF5..0xFF (above the Unicode range) cannot start a sequence.
+      return Err(invalid_utf8("a byte that cannot start a UTF-8 sequence", i))
+    }
+  }
+  return Ok(out)
+}

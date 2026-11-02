@@ -51,9 +51,9 @@ def complete(text: str, filename: str = "<candidate>.rvl") -> tuple[str, list]:
 
 
 def _parses(text: str, filename: str) -> bool:
-    from ..parser import Parser  # noqa: PLC0415 - the parser imports the lexer
+    from .. import shared_parse  # noqa: PLC0415 - the parser imports the lexer
     try:
-        Parser(text, filename).parse()
+        shared_parse.program(text, filename)   # issue #2194: only its outcome
     except RevlError:
         return False
     except Exception:  # noqa: BLE001 - a parser crash is not a completion

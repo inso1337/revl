@@ -60,17 +60,46 @@ __all__ = ["plan", "render"]
 def _compile(source: str | None, files: list[str] | None,
              modules: dict[str, str] | None = None,
              manifest: dict | None = None,
-             replacing: tuple[str, ...] = ()) -> dict:
+             replacing: tuple[str, ...] = (),
+             report: dict | None = None) -> dict:
     """Dispatch to the same entry points the CLI and the MCP bridge use, so
-    a plan is computed against the literal admission gate."""
+    a plan is computed against the literal admission gate. `report` retains
+    the compile's source map for the apply artifact's disclosure provenance."""
     if source is not None:
         return compile_source(source, "<candidate>.rvl", manifest=manifest,
-                              replacing=replacing, modules=modules)
+                              replacing=replacing, modules=modules,
+                              report=report)
     if not files:
         raise ValueError("provide `source` or `files`")
     return compile_files(list(files), manifest=manifest, replacing=replacing,
                          sources={os.path.abspath(p): t
-                                  for p, t in (modules or {}).items()} or None)
+                                  for p, t in (modules or {}).items()} or None,
+                         report=report)
+
+
+def _candidate_host_bodies(ir: dict, report: dict, candidate_sources: set[str],
+                           operator_sources: set[str]) -> list[dict]:
+    """Host bodies declared by the caller's sources or the files they reached.
+
+    `candidate_sources` is the paths the caller named plus the user-origin
+    modules the compile read from disk, so a `use`-reached file in the caller's
+    tree is attributed while a shipped `stdlib` module is not. The explicit
+    operator-source opt-out wins over both.
+    """
+    from .mcp.session import host_body_entry  # noqa: PLC0415
+
+    excluded = {os.path.abspath(path) for path in operator_sources}
+    names = {
+        name
+        for path, externs in (report.get("host_extern_sources") or {}).items()
+        if os.path.abspath(path) in candidate_sources
+        and os.path.abspath(path) not in excluded
+        for name in externs
+    }
+    return sorted((host_body_entry(extern)
+                   for extern in (ir.get("externs") or [])
+                   if extern.get("name") in names and extern.get("bodies")),
+        key=lambda entry: str(entry.get("extern")))
 
 
 def _boundary_of(ir: dict) -> dict:
@@ -170,7 +199,8 @@ def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
 
 def plan(source: str | None = None, files: list[str] | None = None,
          manifest: dict | None = None, modules: dict[str, str] | None = None,
-         replacing: tuple[str, ...] = (), include_ir: bool = False) -> dict:
+         replacing: tuple[str, ...] = (), include_ir: bool = False,
+         operator_sources: set[str] | None = None) -> dict:
     """What admitting this candidate would do to the running composition.
 
     `manifest` is a compiled IR document of what is running (or its
@@ -181,6 +211,10 @@ def plan(source: str | None = None, files: list[str] | None = None,
     With `include_ir=True` (and only on the admitted path) the result also
     carries `resultingIR` — the full resulting composition, bodies included —
     which is what `revl apply` executes against a live session (docs/apply.md).
+
+    `operator_sources` names operator-supplied sources also passed through
+    `modules`; their host bodies are excluded from candidate provenance in an
+    apply artifact. Paths are compared after resolving them to absolute paths.
 
     Returns a structured dict; `render()` turns it into the CLI's prose.
     """
@@ -194,6 +228,7 @@ def plan(source: str | None = None, files: list[str] | None = None,
     # -- run the gate (read-only) ------------------------------------------
     diagnostics: list[dict] = []
     candidate_ir: dict | None = None
+    compile_report: dict = {}
     parsed_entries: list[dict] | None = None
     parsed_services: dict = {}
     notes: list[str] = []
@@ -226,7 +261,7 @@ def plan(source: str | None = None, files: list[str] | None = None,
 
     try:
         candidate_ir = _compile(source, files, modules, manifest=running_ir,
-                                replacing=replacing)
+                                replacing=replacing, report=compile_report)
         basis, admissible = "admitted", True
     except RevlError as error:
         admissible = False
@@ -491,6 +526,17 @@ def plan(source: str | None = None, files: list[str] | None = None,
     # plan; only the admitted path has them, and only when asked (the plan's
     # prose output never carries an IR).
     if include_ir and basis == "admitted" and candidate_ir is not None:
+        candidate_sources = {
+            *(os.path.abspath(path) for path in (files or [])),
+            *(os.path.abspath(path) for path in (modules or {})),
+            *(os.path.abspath(path)
+              for path in (compile_report.get("dependencies") or {})),
+        }
+        if source is not None:
+            candidate_sources.add(os.path.abspath("<candidate>.rvl"))
+        result["candidateHostBodies"] = _candidate_host_bodies(
+            candidate_ir, compile_report, candidate_sources,
+            {os.path.abspath(path) for path in (operator_sources or set())})
         result["resultingIR"] = _merge_resulting_ir(running_ir, candidate_ir, dropped)
     return result
 

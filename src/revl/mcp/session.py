@@ -39,7 +39,8 @@ from . import quorum as _quorum
 from . import identity as _identity
 from .approval import ApprovalRequired
 from .undo_record import undo_cold_start_note
-from .approval import _args_digest as _cache_args_digest
+from .approval import UnencodableTicketArgs
+from .approval import _args_digest
 
 
 
@@ -95,6 +96,23 @@ class SessionError(RuntimeError):
         super().__init__(*args)
         self.code = code
         self.repair = repair
+
+
+def _unencodable_args(key: str, method: str, purpose: str,
+                      exc: Exception) -> SessionError:
+    """issue #3005: an argument with no canonical encoding refuses the call by
+    name (a session error, a 4xx on a face), never a crash. `purpose` names what
+    the digest was for, so a no-policy `cache pure` call is not told about an
+    approval ticket."""
+    return SessionError(f"`{key}.{method}` is refused: its {purpose} is keyed "
+                        f"by an argument digest, and {exc}")
+
+
+def _session_args_digest(args, key: str, method: str, purpose: str) -> str:
+    try:
+        return _args_digest(args)
+    except UnencodableTicketArgs as exc:
+        raise _unencodable_args(key, method, purpose, exc) from None
 
 
 class NothingLoaded(SessionError):
@@ -454,27 +472,39 @@ def _applied_host_bodies(running_ir: dict | None,
 
 
 def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
-                               resulting_ir: dict | None) -> dict:
+                               resulting_ir: dict | None,
+                               authored_host_bodies: list | None = None) -> dict:
     """The origin of an applied generation, with post-apply provenance.
 
     The admission inputs stay on the origin so a snapshot or a later edit can
     still see what the session holds; only the disclosure member is replaced.
     It records the bodies the pre-apply generation already disclosed and the
     resulting composition still holds (refreshed from the resulting IR, so a
-    changed classification does not stay stale), plus the bodies the apply
-    installed or changed. A plain apply has no candidate compile report to
-    attribute from, so the resulting IR is the only provenance available.
+    changed classification does not stay stale), plus the candidate bodies
+    carried by the plan artifact. A prior disclosure is carried only when the
+    body itself is unchanged. Older artifacts have no source map, so their
+    changed bodies retain the conservative comparison fallback.
     """
     live = {entry.get("name"): entry
             for entry in (resulting_ir or {}).get("externs") or []}
+    running = {entry.get("name"): entry
+               for entry in (running_ir or {}).get("externs") or []}
     carried = []
     for entry in ((origin or {}).get(AUTHORED_HOST_BODIES_KEY) or []):
         current = live.get(entry.get("extern")) or {}
-        if not current.get("bodies"):
+        previous = running.get(entry.get("extern")) or {}
+        if (not current.get("bodies")
+                or (previous.get("bodies") or {}) != current["bodies"]):
             continue
         carried.append(host_body_entry(current))
     merged = {entry.get("extern"): entry for entry in carried}
-    for entry in _applied_host_bodies(running_ir, resulting_ir):
+    applied = (_applied_host_bodies(running_ir, resulting_ir)
+               if authored_host_bodies is None else authored_host_bodies)
+    for entry in applied:
+        current = live.get(entry.get("extern")) or {}
+        if not current.get("bodies"):
+            continue
+        entry = host_body_entry(current)
         merged[entry["extern"]] = entry
     return {**(origin or {}), AUTHORED_HOST_BODIES_KEY: sorted(
         merged.values(), key=lambda entry: str(entry.get("extern")))}
@@ -3675,7 +3705,8 @@ class Session:
         # to be visible there (#2676). The pre-apply origin describes sources
         # that no longer run, so it is replaced rather than carried whole.
         self.origin = _applied_generation_origin(
-            self.origin, running_ir, resulting_ir)
+            self.origin, running_ir, resulting_ir,
+            authored_host_bodies=artifact.get("authoredHostBodies"))
         # an apply is an admitted change, so it is a generation in the history
         # (item 65). It was executed from a plan *artifact* (an IR, not sources),
         # so it has no source origin to re-admit its result: the entry snapshots
@@ -5650,7 +5681,8 @@ class Session:
             # reach crosses nothing), so it hits in any session, policy or not, and
             # a hit is observationally equivalent to the call (G6: equal args, equal
             # result). Generation-scoped: a swap drops the memo.
-            pure_key = (key, method, _cache_args_digest(args))
+            pure_key = (key, method, _session_args_digest(
+                args, key, method, "`cache pure` memo"))
             if pure_key in self._cache_pure:
                 self._cache_hits += 1
                 return {"result": render(self._cache_pure[pure_key]),
@@ -5661,7 +5693,8 @@ class Session:
             and self._class_map is not None)
         entry_key = None
         if cache_active:
-            entry_key = (key, method, _cache_args_digest(args))
+            entry_key = (key, method, _session_args_digest(
+                args, key, method, "seam cache entry"))
             entry = self._cache_entries.get(entry_key)
             if entry is not None and self._cache_entry_live(entry):
                 # LIVE HIT: the seam checks liveness BEFORE it consumes, so a hit
@@ -5770,7 +5803,8 @@ class Session:
                 "revl_call to invoke an operation with no gate")
         reach = self._class_map.classify_call(key, method)
         receipt = {"seq": len(self._actions), "key": key, "method": method,
-                   "argsDigest": _cache_args_digest(args),
+                   "argsDigest": _session_args_digest(args, key, method,
+                                                     "action receipt"),
                    "class": reach["class"] if reach is not None else None}
         before = self._act_marks()
         call = {"key": key, "method": method, "args": copy.deepcopy(args or []),
@@ -6543,8 +6577,12 @@ class Session:
             return
         # class (c): a standing approval, or a fresh ticket.
         from .approval import ApprovalRequired  # noqa: PLC0415
-        ticket = self._class_map.build_ticket(
-            reach, args, record_values=self.approval_record_values)
+        try:
+            ticket = self._class_map.build_ticket(
+                reach, args, record_values=self.approval_record_values)
+        except UnencodableTicketArgs as exc:
+            raise _unencodable_args(key, method, "approval ticket",
+                                    exc) from None
         self._refuse_unbounded_approval(ticket)   # issue #1755, opt-in
         # issue #1553: an operator's NO to this question refuses the re-issue it
         # was holding, once, before anything could cover it

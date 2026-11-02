@@ -42,10 +42,11 @@ fail, except the shape tests, which pin a property rather than a redaction:
   non-vacuity (2)      test_without_the_recover_the_runtime_prints_the_value
                        the same run with the defer deleted leaks the value the
                        way the runtime prints a panic: unfunnelled
-  the OTHER            test_every_goroutine_that_can_hold_a_value_carries_its_own_guard
-  goroutines           the crossing goroutine and the E-Stop watcher are not
-                       main's goroutine, and `recover` covers only the goroutine
-                       that runs it — Go has no process-wide panic hook
+  the OTHER            test_every_goroutine_that_can_hold_a_value_carries_its_own_recover
+  goroutines           the E-Stop watcher is not main's goroutine, and `recover`
+                       covers only the goroutine that runs it: Go has no
+                       process-wide panic hook. The crossing goroutine recovers
+                       in `bridge.Serve` instead (issue #2481)
   the guard is the     test_the_guard_is_the_deferred_function_itself
   deferred function    a guard that is a plain helper calling `recover` recovers
                        nothing: `defer guard(name)` with no trailing `()` defers
@@ -53,12 +54,14 @@ fail, except the shape tests, which pin a property rather than a redaction:
                        runs and the panic escapes anyway. The label is read when
                        the failure happens, not when the defer is registered, so
                        a post-boot panic is labelled with the spec's name.
-  the crossing channel test_a_panic_in_the_crossing_goroutine_prints_one_redacted_line
+  the crossing channel test_a_panic_in_a_crossing_comes_back_as_one_redacted_error_reply
                        live binary: a provider method panicking on the value it
-                       holds, reached OVER THE WIRE, so the panic unwinds
-                       `bridge.Serve`'s per-connection goroutine
-  non-vacuity (3)      test_without_the_crossing_guard_the_runtime_prints_the_value
-                       the same crossing with that goroutine's guard deleted
+                       holds, reached OVER THE WIRE. Issue #2481: the caller
+                       gets an error reply through `bridge.SeamFailure` and the
+                       process keeps serving, as a py, ts or java provider that
+                       raises does
+  non-vacuity (3)      test_without_the_crossing_recover_the_runtime_prints_the_value
+                       the same crossing with `bridge.Serve`'s recover deleted
                        leaks the value the way the runtime prints a panic
 
 The live tests need a go toolchain and are skipped without one, exactly like the
@@ -93,6 +96,7 @@ pytestmark = pytest.mark.skipif(shutil.which("go") is None,
 
 MAIN = ROOT / "backends" / "go" / "placement_runner" / "main.go"
 _RUNNER = ROOT / "backends" / "go" / "placement_runner"
+BRIDGE = _RUNNER / "bridge" / "bridge.go"
 
 CANARY = "SEKRIT-CANARY-814-GO"
 REDACTED_SECRET = "<redacted:secret>"
@@ -128,21 +132,28 @@ _SPEC = {
 }
 
 # The edits the non-vacuity arms make, spelled exactly as main.go spells them.
-# `_RECOVER_DEFER` is main's own defer and `_GUARD_CROSSING` the guard on the
-# goroutine `bridge.Serve` answers each connection on (the E-Stop watcher's
-# guard is asserted in place by `test_every_goroutine_...`, which slices its
-# block rather than replacing the text).
+# `_RECOVER_DEFER` is main's own defer and `_RECOVER_CROSSING` the recover in
+# `bridge.serveConn` that turns a handler's panic into its error reply (the
+# E-Stop watcher's guard is asserted in place by `test_every_goroutine_...`,
+# which slices its block rather than replacing the text).
 _RECOVER_DEFER = '\tdefer guard(&name)()\n'
-_GUARD_CROSSING = '\t\t\t\tdefer guard(&name)()\n'
+_RECOVER_CROSSING = (
+    '\t\t\t\t\tdefer func() {\n'
+    '\t\t\t\t\t\tif r := recover(); r != nil {\n'
+    '\t\t\t\t\t\t\tvalue, ierr = nil, fmt.Errorf("panic: %v", r)\n'
+    '\t\t\t\t\t\t}\n'
+    '\t\t\t\t\t}()\n'
+)
 _FATAL_PRINT = (
     '\tfmt.Fprintln(os.Stderr, "["+name+"] FATAL "+bridge.ScrubText(fmt.Sprint(fatal)))\n'
 )
 
 
 def _build(work: Path, *, replace: tuple[str, str] | None = None,
-           doc: str = _PANIC_DOC) -> str:
+           doc: str = _PANIC_DOC, edit: str = "main.go") -> str:
     """Build the runner + the generated `emitted` package for `_PANIC_DOC` in a
-    COPY of the runner dir, so a test can edit the entry point before building.
+    COPY of the runner dir, so a test can edit a runner source (`edit`, relative
+    to the runner dir) before building.
 
     `placement._build_go` writes the generated package into the runner it builds
     against, so pointing it at a copy is also what keeps these tests from
@@ -153,9 +164,9 @@ def _build(work: Path, *, replace: tuple[str, str] | None = None,
                     ignore=shutil.ignore_patterns("emitted", "revl_placement_runner"))
     if replace is not None:
         old, new = replace
-        text = (runner / "main.go").read_text(encoding="utf-8")
+        text = (runner / edit).read_text(encoding="utf-8")
         assert old in text, old
-        (runner / "main.go").write_text(text.replace(old, new), encoding="utf-8")
+        (runner / edit).write_text(text.replace(old, new), encoding="utf-8")
     saved = placement._GO_RUNNER
     placement._GO_RUNNER = runner
     try:
@@ -187,13 +198,14 @@ _SPEC_SERVING = {
 }
 
 
-def _cross(binary: str) -> tuple[int, str, str]:
+def _cross(binary: str) -> tuple[int, str, str, str]:
     """Serve, wait for `UP`, then drive ONE crossing whose handler panics on the
-    value it holds as a declared secret. Returns (exit code, stdout, stderr).
+    value it holds as a declared secret. Returns (exit code, stdout, stderr,
+    the raw reply line, empty when none arrived).
 
     The panic is raised inside `bridge.Serve`'s per-connection goroutine, which
-    is the point: main's recover cannot see it, so without that goroutine's own
-    guard the runtime prints the panic value verbatim. Stdin is held OPEN for
+    is the point: main's recover cannot see it, so without the bridge's own
+    recover the runtime prints the panic value verbatim. Stdin is held OPEN for
     the same reason `once` is off — the runner treats stdin EOF as the stop
     signal and would tear down before the client got there.
 
@@ -213,6 +225,7 @@ def _cross(binary: str) -> tuple[int, str, str]:
                             stderr=subprocess.PIPE, text=True,
                             stdin=subprocess.PIPE)
     lines: dict[str, list[str]] = {"out": [], "err": []}
+    reply = b""
 
     def pump(key: str, stream) -> None:
         for line in stream:
@@ -233,15 +246,16 @@ def _cross(binary: str) -> tuple[int, str, str]:
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(sock)
+            client.settimeout(120)
             client.sendall(json.dumps(
                 {"key": "vault", "method": "show", "args": ["u1"]}).encode() + b"\n")
             # Wait for the crossing to LAND before letting go of stdin. The
             # runner treats stdin EOF as its stop signal, so closing it here
             # would race the crossing: the teardown's `DOWN` and a clean exit 0
             # can beat the connection goroutine to the panic, and the arm would
-            # then fail for a reason that has nothing to do with the guard. A
-            # reply arriving instead means the guard did NOT halt the process,
-            # and the exit-code assertion below reports that.
+            # then fail for a reason that has nothing to do with the recover.
+            # Either the reply arrives (the recover answered the crossing) or
+            # the process dies (it did not), and the assertions read which.
             #
             # `selectors`, not `select.select`: this file runs inside the whole
             # `tests/` root, where the process's open descriptors run past
@@ -256,9 +270,14 @@ def _cross(binary: str) -> tuple[int, str, str]:
                 while time.monotonic() < deadline and proc.poll() is None:
                     if sel.select(0.05):
                         break
+                while proc.poll() is None and not reply.endswith(b"\n"):
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    reply += chunk
         try:
-            proc.stdin.close()  # the stop signal, if the guard did not halt it
-        except OSError:  # pragma: no cover - the guard already halted it
+            proc.stdin.close()  # the stop signal, if the process is still serving
+        except OSError:  # pragma: no cover - the process already died
             pass
         proc.wait(timeout=120)
     finally:
@@ -267,7 +286,8 @@ def _cross(binary: str) -> tuple[int, str, str]:
         for reader in readers:
             reader.join(timeout=10)
         shutil.rmtree(sockdir, ignore_errors=True)
-    return proc.returncode, "".join(lines["out"]), "".join(lines["err"])
+    return (proc.returncode, "".join(lines["out"]), "".join(lines["err"]),
+            reply.decode("utf-8", "replace"))
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +348,7 @@ def test_the_fatal_path_exits_instead_of_unwinding_into_teardown():
     assert "if fatal := recover(); fatal != nil {" in guard
 
 
-def test_every_goroutine_that_can_hold_a_value_carries_its_own_guard():
+def test_every_goroutine_that_can_hold_a_value_carries_its_own_recover():
     """Go has no process-wide panic hook, and `recover` covers only the goroutine
     that runs it — main's defer is a fence around main's own frame. Two other
     goroutines reach into value-carrying code, and the runtime prints a panic it
@@ -336,16 +356,21 @@ def test_every_goroutine_that_can_hold_a_value_carries_its_own_guard():
 
     The crossing goroutine is the one that matters most: its frame holds
     `args []json.RawMessage`, the caller's arguments, which is exactly where a
-    declared `Secret[T]` travels when a provider takes one."""
+    declared `Secret[T]` travels when a provider takes one. Since issue #2481 it
+    is covered by `bridge.serveConn`'s recover, which answers the crossing with
+    an error reply, and NOT by a guard: a guard deferred in the handler would
+    run first and halt the process."""
     source = MAIN.read_text(encoding="utf-8")
 
     serve = source[source.index("go bridge.Serve(ln, func("):]
     serve = serve[:serve.index("})")]
-    assert _GUARD_CROSSING in serve
-    # registered before the crossing is invoked, or the panic is already past it
-    # (issue #1567: the crossing dispatches through `invokeIn`, which resolves
-    # the key's realm and then calls `emitted.RevlInvoke`)
-    assert serve.index("defer guard(&name)()") < serve.index("invokeIn(")
+    assert "guard(" not in serve
+    # the recover sits in the bracket that invokes the handler, registered
+    # before the call, or the panic is already past it
+    bridge = BRIDGE.read_text(encoding="utf-8")
+    assert bridge.count(_RECOVER_CROSSING) == 1
+    assert (bridge.index(_RECOVER_CROSSING)
+            < bridge.index("return invoke(req.Key, req.Method, req.Args)"))
 
     # the E-Stop watcher parses the latch file and composes the HALTED inventory
     # off the main goroutine, so its escapes reach no funnel either.
@@ -356,7 +381,7 @@ def test_every_goroutine_that_can_hold_a_value_carries_its_own_guard():
 
     # and every guard routes through the one composer, not a hand-rolled line.
     assert source.count("func guard(name *string) func() {") == 1
-    assert source.count("\tdefer guard(&name)()") == 3
+    assert source.count("\tdefer guard(&name)()") == 2
 
 
 def test_the_guard_is_the_deferred_function_itself():
@@ -445,38 +470,47 @@ def test_without_the_recover_the_runtime_prints_the_value(tmp_path):
     assert "FATAL" not in err, err
 
 
-def test_a_panic_in_the_crossing_goroutine_prints_one_redacted_line(tmp_path):
+def test_a_panic_in_a_crossing_comes_back_as_one_redacted_error_reply(tmp_path):
     """The channel main's recover cannot reach. `bridge.Serve` answers each
     connection on a goroutine of its own, and the frame that goroutine runs the
     crossing in holds `args []json.RawMessage` — the caller's arguments, which
-    is where a declared `Secret[T]` travels when a provider takes one."""
-    code, out, err = _cross(_build(tmp_path))
+    is where a declared `Secret[T]` travels when a provider takes one.
 
-    assert code == 1, (out, err)
-    assert err.count("FATAL") == 1, err
-    assert REDACTED_SECRET in err, err
-    assert err.strip() == f"[vault] FATAL boom {REDACTED_SECRET}"
+    Issue #2481: the caller gets the failure as an ordinary error reply, the
+    shape a py (`bridge._invoke`), ts (`serve`) or java provider that raises
+    sends, one line with no stack, scrubbed by `bridge.SeamFailure`. The process
+    keeps serving and still tears down cleanly."""
+    code, out, err, reply = _cross(_build(tmp_path))
 
-    assert CANARY not in out + err, (out, err)
-    assert "goroutine " not in err, err
+    assert json.loads(reply) == {"ok": False, "error": f"panic: boom {REDACTED_SECRET}"}
+    assert CANARY not in out + err + reply, (out, err, reply)
+    assert "goroutine " not in err + reply, (err, reply)
+    assert "FATAL" not in err, err
 
-    # the process really was serving when it died — `UP` is the control that the
-    # ordinary channel is untouched, and no `DOWN` was earned on the way out.
+    # the crossing failed, the process did not: it was serving (`UP`) and it
+    # earned its clean-teardown line when stdin closed.
+    assert code == 0, (out, err)
     assert "UP" in out, out
-    assert "DOWN" not in out, out
+    assert "DOWN" in out, out
 
 
-def test_without_the_crossing_guard_the_runtime_prints_the_value(tmp_path):
+def test_without_the_crossing_recover_the_runtime_prints_the_value(tmp_path):
     """The non-vacuity arm for the crossing goroutine: the same crossing with
-    that goroutine's guard deleted, so the panic is the runtime's and its
-    rendering is the unfunnelled stack trace this guard exists to replace."""
-    binary = _build(tmp_path, replace=(_GUARD_CROSSING, ""))
-    code, out, err = _cross(binary)
+    `bridge.Serve`'s recover deleted, so the panic is the runtime's and its
+    rendering is the unfunnelled stack trace that recover exists to replace."""
+    # `recover()` -> `any(nil)` rather than deleting the block, so `fmt` stays
+    # used and the edited bridge still compiles: the arm then fails for the
+    # recover's absence alone.
+    disarmed = _RECOVER_CROSSING.replace("recover()", "any(nil)")
+    binary = _build(tmp_path, replace=(_RECOVER_CROSSING, disarmed),
+                    edit="bridge/bridge.go")
+    code, out, err, reply = _cross(binary)
 
     assert code == 2, (out, err)
     assert CANARY in err, err
     assert "goroutine " in err, err
     assert "FATAL" not in err, err
+    assert reply == "", reply
 
 
 # ---------------------------------------------------------------------------

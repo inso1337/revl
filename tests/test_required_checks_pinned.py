@@ -66,7 +66,7 @@ observation of the server, not the intent, and no unit test can re-read it. So
 until that PATCH lands, `census-artifact` is intended-required and NOT enforced.
 
 NOTE on the partition counts: this partition marks 12 jobs intended-required
-(7 of them enforced) and 13 non-required, over the 25 jobs ci.yml defines. The
+(7 of them enforced) and 14 non-required, over the 26 jobs ci.yml defines. The
 two sides are reconciled at the branch-protection settings, which are out of
 tree; whichever is stale, this test at least makes the job-name side of the
 contract explicit and drift-proof. It reads ci.yml as text, so it needs no
@@ -150,6 +150,12 @@ NOT_REQUIRED_CHECKS = {
     # nothing needs it; the drain waits for every non-heavy check, which is
     # where it is enforced. Branch protection lists the seven contexts only.
     "pure-read-guards": "pure-read guard tests; not a branch-protection context, enforced by the drain",
+    # Issue #3008: installs the pinned hashed lock in a fresh venv and verifies
+    # one Ed25519 and one RSA RS256 known-answer vector with it. It is a fast,
+    # named failure for the lock, not a replacement for `backend-python`, which
+    # still runs setup.sh and the whole backend suite. Kept out of branch
+    # protection for that reason; promotion would be a separate change.
+    "backend-python-signatures": "issue #3008 hashed-lock install and signature vectors; backend-python still runs the full backend suite, so this is a fast named check rather than a separate gate",
     "held-out": "item 537 held-out scoring; a scorer-touching diff is REFUSED by design, so it is advisory here and enforced in the promotion reward",
     # Container/privilege smoke that needs a Docker-capable runner; flaky as a
     # hard merge gate, run for signal not enforcement.

@@ -84,7 +84,11 @@ is a non-event.
 | `operations`  | the ordered, executable steps, each with the effect it predicts |
 | `runningIR`   | the pre-state's bodies, so the CLI can boot it (and so a teardown's inverse can re-load a withdrawn component) |
 | `resultingIR` | the resulting composition's bodies, so an added or replaced component can be loaded |
+| `authoredHostBodies` | candidate host bodies attributed from the plan compile's source map; apply uses it to keep changed operator providers out of candidate disclosure |
 | `plan`        | the full `revl plan` payload, for re-rendering and the summary |
+
+Artifacts written before this field existed use the conservative fallback that
+attributes changed host bodies by comparing the running and resulting IRs.
 
 Only an **admitted** plan can be serialized: `apply` executes changes, so a
 candidate the gate rejects has nothing to apply, and `revl plan -o` refuses it

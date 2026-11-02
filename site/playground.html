@@ -99,7 +99,19 @@
   </section>
 </main>
 
-<script src="https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js" integrity="sha384-Dz8WbRJS+zEg3mTsQKFzS7uiJxTV6CVDI6lD5b49KMnhy6hlO1vl+ru6YCYNiaXz" crossorigin="anonymous"></script>
+<!-- Pyodide v0.27.6, not v0.27.2: js/playground.js installs the cordis wheel
+     with `deps: false` (issue #946), and the micropip 0.8.0 that v0.27.2
+     bundles starts that wheel's download without awaiting it when deps is
+     false, so the install raises "attempted to install wheel before
+     downloading it?" and the page never leaves its loading overlay. v0.27.6
+     is the first 0.27.x release that bundles the micropip 0.9.0 that awaits
+     it, and it is also the last one before v0.27.7 turns on
+     `enableRunUntilComplete` by default (a Breaking change to stack-switching
+     behaviour that a page built on JSPI should adopt deliberately), so the
+     pin stops at v0.27.6 on purpose. Still Python 3.12.7, and no Breaking
+     entry separates v0.27.2 from v0.27.6.
+     tests/test_playground_pyodide_pin.py keeps it there. -->
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.6/full/pyodide.js" integrity="sha384-D7p9XIGSPyIyKBz6PTuzHm2CnAKahz9n9ezzdJctZouMULIQgZI7UPR46u9fqSbO" crossorigin="anonymous"></script>
 <script type="module" src="js/playground.js"></script>
 </body>
 </html>

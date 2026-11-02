@@ -126,7 +126,7 @@ behaviour. A process with no `[attest]` table declares **no** requirement: it
 parses to nothing, not to an empty demand, and it is checked against the empty
 `PlacementSlot`, which demands nothing, consumes no challenge and pays one
 `is None`. "Declares no requirement" therefore cannot be confused with "declares
-a requirement that admits everything" — the second is refused at parse time.
+a requirement that admits everything": the second is refused at parse time.
 Every existing placement file is unchanged.
 
 ## Tests

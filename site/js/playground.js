@@ -387,7 +387,7 @@ async function boot() {
     // METADATA so a plain `pip install` produces a working `import cordis`
     // (issue #946). Neither is installable that way here. `pyyaml` is in the
     // Pyodide distribution and is loaded by name below; `watchdog` is not in
-    // the distribution at all (pyodide-lock.json v0.27.2), so micropip would
+    // the distribution at all (pyodide-lock.json v0.27.6), so micropip would
     // fall through to PyPI, find no pure-Python or wasm32 wheel it can use,
     // and fail the whole install. The browser needs neither: it has no
     // filesystem to watch, and LIVE_DRIVER installs an inert `watchdog` shim

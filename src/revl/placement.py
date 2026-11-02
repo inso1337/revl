@@ -174,14 +174,30 @@ def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhos
         if result.returncode:
             raise RuntimeError(f"openssl {args[0]} failed:\n{result.stderr.strip()}")
 
+    # Every extension is spelled out, never left to the openssl build's
+    # defaults: those differ between OpenSSL 3.0 and 3.6, and a verifier that
+    # sets VERIFY_X509_STRICT (Python 3.13's `ssl.create_default_context`)
+    # refuses a CA with no keyUsage and a leaf with no authority key id.
+    ca_cnf = out_dir / "seam_ca.cnf"
+    ca_cnf.write_text(
+        "[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=ca_ext\n"
+        "[dn]\nCN=revl-seam-ca\n"
+        "[ca_ext]\nbasicConstraints=critical,CA:TRUE\n"
+        "keyUsage=critical,keyCertSign,cRLSign\n"
+        "subjectKeyIdentifier=hash\n",
+        encoding="utf-8")
     _openssl(["req", "-x509", "-newkey", "ec",
               "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
               "-keyout", str(ca_key), "-out", str(ca_crt),
-              "-days", "1", "-subj", "/CN=revl-seam-ca"])
+              "-days", "1", "-config", str(ca_cnf)])
     ext = out_dir / "seam_leaf.ext"
     san = ",".join(_san_entry(h) for h in hosts)
-    ext.write_text(f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n",
-                   encoding="utf-8")
+    ext.write_text(
+        f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature\n"
+        "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n",
+        encoding="utf-8")
     material: dict[str, dict] = {}
     for identity in sorted(set(identities)):
         key = out_dir / f"seam_{identity}.key"

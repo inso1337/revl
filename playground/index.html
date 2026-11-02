@@ -59,7 +59,13 @@
     </section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js" integrity="sha384-Dz8WbRJS+zEg3mTsQKFzS7uiJxTV6CVDI6lD5b49KMnhy6hlO1vl+ru6YCYNiaXz" crossorigin="anonymous"></script>
+  <!-- The same runtime as site/playground.html, pinned to the same patch
+       release for the reason its comment gives: v0.27.6 is the first 0.27.x
+       Pyodide that bundles a micropip able to install a wheel with
+       `deps: false`, and the last one before v0.27.7 changes the
+       enableRunUntilComplete default. tests/test_playground_pyodide_pin.py
+       keeps the two pages on one pin and one integrity hash. -->
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.6/full/pyodide.js" integrity="sha384-D7p9XIGSPyIyKBz6PTuzHm2CnAKahz9n9ezzdJctZouMULIQgZI7UPR46u9fqSbO" crossorigin="anonymous"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
