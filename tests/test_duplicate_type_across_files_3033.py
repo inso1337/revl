@@ -55,3 +55,11 @@ def test_a_type_refusal_names_the_declaring_file(tmp_path, monkeypatch):
         "b.rvl": "pub type T = {\n  x: Int,\n  x: Int\n}\n",
     })
     assert message.startswith("b.rvl:3: duplicate field `x` in record `T`"), message
+
+
+def test_a_reserved_name_refusal_names_the_declaring_file(tmp_path, monkeypatch):
+    message = _refusal(tmp_path, monkeypatch, {
+        "a.rvl": "pub fn a() -> Int { 1 }\n",
+        "b.rvl": "\npub type Principal = { x: Int }\n",
+    })
+    assert message.startswith("b.rvl:2: `Principal` is the reserved"), message
