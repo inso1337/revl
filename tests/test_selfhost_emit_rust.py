@@ -339,15 +339,19 @@ CORPUS = [
     "reserved_type_names.rvl",  # issue #2328: a user record `Box` and variant
                              #   `Vec` take the type-name reservation (`Box_`,
                              #   `Vec_`) at every position they are spelled
-    "recursive_variant.rvl",  # issue #2328: a recursive variant payload is
+    "recursive_variant.rvl",  # issue #2328 remaining slice (reference pass
+                             #   #919): a recursive variant payload is
                              #   Box-indirected (`Node(Box<Tree>)`), E0072
-    "recursive_record_field.rvl",  # issue #2328: `Option<T>` stores its payload
+    "recursive_record_field.rvl",  # issue #2328 remaining slice (reference
+                             #   pass #919): `Option<T>` stores its payload
                              #   INLINE in Rust, so a field that recurses through
                              #   `Opt[Node]` is declared `Box<Option<Node>>`
-    "twin_alias.rvl",        # issue #2328: an unbuilt same-shape record is a
+    "twin_alias.rvl",        # issue #2328 remaining slice (reference alias:
+                             #   item 268): an unbuilt same-shape record is a
                              #   `pub type Bind = Param;`, not a second struct
-    "record_diamond.rvl",    # issue #2328: the diamond A -> {B, C} -> D
-                             #   resolves through the same-shape twin alias
+    "record_diamond.rvl",    # issue #2328 remaining slice: the diamond
+                             #   A -> {B, C} -> D resolves through the
+                             #   same-shape twin alias (item 268)
     "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
                              #   keyword (`box`) takes the mangled spelling as
                              #   an identifier, the surface key as a string

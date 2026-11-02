@@ -1,5 +1,6 @@
-// issue #2328: a diamond of record types -- A reaches D twice, through the
-// same-shape twins B and C -- is one canonical struct plus one alias.
+// issue #2328 remaining slice: a diamond of record types -- A reaches D twice,
+// through the same-shape twins B and C -- is one canonical struct plus one
+// alias (roadmap item 268).
 pub type D = { v: Int }
 pub type B = { d: D }
 pub type C = { d: D }
