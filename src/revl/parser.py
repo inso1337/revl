@@ -9957,6 +9957,11 @@ def parse_text(text: str, path: str) -> Program:
         layer.source = source
     for decl in (*program.fn_decls, *program.externs, *program.services):
         program.decl_files[id(decl)] = source
+    # issue #3033: a `type` declaration records its file too, so a duplicate
+    # across two files of one compile names the files that declare it rather
+    # than the first file of the compile.
+    for decl in program.type_decls:
+        program.decl_files[id(decl)] = source
     # issue #1904: a `test`/`prop test`/`fault test` block carries no `.source`
     # of its own, so it records its declaring file here as an extern does. A
     # test block reached through a `use` is lowered inside the IMPORTER's
