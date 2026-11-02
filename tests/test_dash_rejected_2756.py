@@ -149,3 +149,188 @@ def test_section_mutates_no_input_and_dashboard_passes_it_through(tenants):
     assert "REJECTED CANDIDATES" in board.render()
     assert board.snapshot()["rejected"]["view"] == "operator"
     assert tenants == before
+
+
+# ------------------------------------------------------------------- CLI
+#
+# `revl dash --rejected` enables the section and, because the profile follows
+# the source (issue #2547), an author-written file under `.revl/export/` gets
+# the collapsed author verdict rather than the operator's full record.
+
+AUTHORED = """service Bus { emission[bus] fn publish(message: Str) }
+
+component TenantAJob requires bus: Bus {
+  emit bus.publish("a-event")
+}
+"""
+
+
+def _policy_file(tmp_path, text):
+    path = tmp_path / "boundary.policy"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _dash_cli(capsys, *argv):
+    from revl.__main__ import main
+    rc = main(["dash", *argv])
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def test_cli_rejected_flag_shows_the_section(tmp_path, capsys):
+    policy = _policy_file(tmp_path, ALLOW_KV)
+    rc, out, _ = _dash_cli(capsys, TENANTS, "--policy", policy, "--rejected")
+    assert rc == 0
+    assert "REJECTED CANDIDATES" in out
+    assert "TenantAJob -> bus: may reach only [kv]" in out
+    assert "repair (author, clears-this-gate): drop the reach" in out
+
+
+def test_cli_rejected_section_is_off_by_default(tmp_path, capsys):
+    policy = _policy_file(tmp_path, ALLOW_KV)
+    rc, out, _ = _dash_cli(capsys, TENANTS, "--policy", policy)
+    assert rc == 0
+    assert "REJECTED CANDIDATES" not in out
+
+
+def test_cli_json_rejected_key_follows_the_flag(tmp_path, capsys):
+    policy = _policy_file(tmp_path, ALLOW_KV)
+    rc, out, _ = _dash_cli(capsys, TENANTS, "--policy", policy,
+                           "--rejected", "--json")
+    assert rc == 0
+    model = json.loads(out)
+    assert model["rejected"]["view"] == "operator"
+    assert model["rejected"]["candidates"]
+
+    rc, out, _ = _dash_cli(capsys, TENANTS, "--policy", policy, "--json")
+    assert rc == 0
+    assert "rejected" not in json.loads(out)
+
+
+def _exported(tmp_path, capsys, *flags):
+    exported = tmp_path / ".revl" / "export" / "app.rvl"
+    exported.parent.mkdir(parents=True)
+    exported.write_text(AUTHORED, encoding="utf-8")
+    policy = _policy_file(tmp_path, ALLOW_KV)
+    return _dash_cli(capsys, str(exported), "--policy", policy,
+                     "--rejected", *flags)
+
+
+def test_cli_exported_source_is_the_collapsed_author_view(tmp_path, capsys):
+    """A file under `.revl/export/` is author-written, so its compile uses the
+    authoring profile and the section it enables must be the collapsed verdict,
+    not the operator's full `navigate` record."""
+    rc, out, _ = _exported(tmp_path, capsys)
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert nav.UNTRUSTED_REASON in section
+    assert "TenantAJob -> bus" not in section
+    assert "may reach only" not in section
+
+
+def test_cli_trust_exported_shows_the_operator_record(tmp_path, capsys):
+    """`--trust-exported` says the file is the operator's own, so the same
+    source gets the full operator view rather than the collapsed one."""
+    rc, out, _ = _exported(tmp_path, capsys, "--trust-exported")
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert "TenantAJob -> bus: may reach only [kv]" in section
+    assert nav.UNTRUSTED_REASON not in section
+
+
+USES_EXPORTED_LIB = """use ".revl/export/lib.rvl" { shout }
+service Bus { emission[bus] fn publish(message: Str) }
+
+component Local requires bus: Bus {
+  emit bus.publish("a-event")
+}
+"""
+
+
+def test_cli_used_exported_module_is_the_collapsed_author_view(tmp_path, capsys):
+    """A root the operator owns but which `use`s an author-written module is
+    compiled under the authoring profile as a whole (issue #2547), so the
+    section collapses for it too."""
+    lib = tmp_path / ".revl" / "export" / "lib.rvl"
+    lib.parent.mkdir(parents=True)
+    lib.write_text('pub fn shout() -> Str { return "x" }\n', encoding="utf-8")
+    root = tmp_path / "app.rvl"
+    root.write_text(USES_EXPORTED_LIB, encoding="utf-8")
+    policy = _policy_file(tmp_path, "component Local may reach kv\n")
+    rc, out, _ = _dash_cli(capsys, str(root), "--policy", policy, "--rejected")
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert nav.UNTRUSTED_REASON in section
+    assert "Local -> bus" not in section
+
+
+COMPOSITION_USE_EXPORTED = """composition Demo {
+  use ".revl/export/app.rvl"
+}
+"""
+
+ROW_SERVICES = """service Job { fn run() -> Str }
+service Bus { emission[bus] fn publish(message: Str) }
+"""
+
+ROW_APP = """component TenantAJob requires bus: Bus provides job: Job {
+  provide job { fn run() = "ok" }
+  emit bus.publish("a-event")
+}
+"""
+
+COMPOSITION_ROW_EXPORTED = """composition Demo {
+  use "services.rvl"
+  row @job from ".revl/export/app.rvl" provides job
+}
+"""
+
+
+def _composition_cli(tmp_path, capsys, comp, files, *flags):
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    document = tmp_path / "comp.rvl"
+    document.write_text(comp, encoding="utf-8")
+    policy = _policy_file(tmp_path, "component TenantAJob may reach kv\n")
+    return _dash_cli(capsys, str(document), "--root", str(tmp_path),
+                     "--policy", policy, "--rejected", *flags)
+
+
+def test_cli_composition_using_an_exported_module_collapses(tmp_path, capsys):
+    """A composition document is a supported dash input; a composition-level
+    `use` of an author-written module must collapse the section too."""
+    rc, out, _ = _composition_cli(
+        tmp_path, capsys, COMPOSITION_USE_EXPORTED,
+        {".revl/export/app.rvl": AUTHORED})
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert nav.UNTRUSTED_REASON in section
+    assert "TenantAJob -> bus" not in section
+
+
+def test_cli_composition_row_under_export_collapses(tmp_path, capsys):
+    """A composition row whose source is under `.revl/export/` is a compile
+    root the CliRule profiles, so the section collapses for the whole compile."""
+    rc, out, _ = _composition_cli(
+        tmp_path, capsys, COMPOSITION_ROW_EXPORTED,
+        {"services.rvl": ROW_SERVICES, ".revl/export/app.rvl": ROW_APP})
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert nav.UNTRUSTED_REASON in section
+    assert "TenantAJob -> bus" not in section
+
+
+def test_cli_trust_exported_composition_shows_the_operator_record(tmp_path, capsys):
+    """`--trust-exported` says the exported row is the operator's own, so the
+    same composition gets the full operator record."""
+    rc, out, _ = _composition_cli(
+        tmp_path, capsys, COMPOSITION_ROW_EXPORTED,
+        {"services.rvl": ROW_SERVICES, ".revl/export/app.rvl": ROW_APP},
+        "--trust-exported")
+    assert rc == 0
+    section = out.split("REJECTED CANDIDATES", 1)[1]
+    assert "TenantAJob -> bus: may reach only [kv]" in section
+    assert nav.UNTRUSTED_REASON not in section

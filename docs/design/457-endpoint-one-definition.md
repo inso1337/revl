@@ -111,6 +111,12 @@ disagree about what one request presented.
 | `Response` (stdlib/http.rvl) | sent as-is; the handler owns status, headers and body |
 | anything else in `Err` | compile refusal: "an error a client can act on needs a status; return `Result[T, ApiError]` or a `Response`" |
 
+A `Response` body is written as the handler produced it, with one encoding
+repair: a code unit that has no UTF-8 spelling (a lone surrogate a peer's JSON
+decoder built from an unpaired `\uXXXX` escape) is written as its JSON escape in
+a `Json` body and as U+FFFD in a `Text` body, so the face always has a status
+line to send (issue #3032). A body that encodes is byte-for-byte unchanged.
+
 `stdlib/http.rvl` gains `pub type ApiError = { status: Int, code: Str, message:
 Str }` and the constructors `bad_request`, `unauthorized`, `forbidden`,
 `not_found_error`, `conflict`. Streaming and server-sent events are not routed

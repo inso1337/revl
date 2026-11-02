@@ -53,8 +53,8 @@ and `docs/model-providers.md` tabulates them. In short:
 
 THE LOCAL ENGINE (optional)
 ---------------------------
-With `llguidance` installed (`pip install revl[constrain]`), two things are
-checked that are otherwise not:
+With `llguidance` installed (`pip install '.[constrain]'` from a checkout), two
+things are checked that are otherwise not:
 
 * a derived GBNF grammar is compiled by a real grammar engine before an
   adapter sends it, and an adapter will not claim a grammar that engine
