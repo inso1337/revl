@@ -406,28 +406,25 @@ def test_plain_record_literal_has_no_diamond():
 
 def test_loosely_inferred_record_literal_stays_raw():
     java = _java_source(LOOSE_RECORD_PROGRAM)
-    # A placeholder in the inferred type stays raw: an empty list is
-    # `List[Never]`, `None` is `Opt[Never]`, an empty map and `Ok(n)` mention
-    # `Any`, and a local/field inherits one of those. Naming the Java type
-    # from it would reference a class that does not exist or narrow a value.
+    # An UNANNOTATED literal is not pinned: its type is what the checker
+    # inferred, and the native producer must answer the same type for the
+    # byte-identical IR. That leaves a placeholder (`List[Never]`, `Any`), a
+    # variant case and a local/field raw; the Java arguments cannot be named
+    # from them safely.
     for arg in ("java.util.List.of()", "java.util.Optional.empty()",
-                "java.util.Map.of()", "new RevlResult.Ok<>(n)", "x", "a.v", "a"):
+                "java.util.Map.of()", "new S.B(1L)", "new S.A()",
+                "new RevlResult.Ok<>(n)", "new Box.Full(n)", "x", "a.v", "a"):
         assert f"final var b = new Bx({arg});" in java
-    # A variant case infers exactly (`S`, `Box[Int]`), so the local's type is
-    # named and the result is not raw.
-    assert "final var b = new Bx<S>(new S.B(1L));" in java
-    assert "final var b = new Bx<S>(new S.A());" in java
-    assert "final var b = new Bx<Box<java.lang.Long>>(new Box.Full(n));" in java
     assert "new Bx<>" not in java
 
 
-def test_generic_fn_call_names_the_pinned_type():
+def test_annotated_generic_fn_call_names_the_local_type():
     # Text only: a generic top-level fn still does not compile on this tier
-    # (its method declares no `<U>`), but the literal is no longer raw, and
-    # once that gap closes the field is an `Opt<Long>`, not an `Object`.
+    # (its method declares no `<U>`), but the annotated local pins the literal,
+    # so once that gap closes the field is an `Opt<Long>`, not an `Object`.
     java = _java_source(
         "type Bx[T] = { v: T }\nfn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
-        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b = { v: wrap(n) }\n"
+        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b: Bx[Opt[Int]] = { v: wrap(n) }\n"
         "  return b\n}\n")
     assert "final var b = new Bx<java.util.Optional<java.lang.Long>>(wrap(n));" in java
 

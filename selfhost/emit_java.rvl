@@ -861,7 +861,8 @@ fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   var ctor = `${mangle(tn)}${diamond}`
   if (diamond == "" && bool_get(ctx.gen, tn)) {
     let expected = value_str(value_field(node, "expected"))
-    if (expected.startsWith(`${tn}[`) && expected.endsWith("]")) {
+    if (expected.startsWith(`${tn}[`) && expected.endsWith("]")
+        && nameable_v3_type(expected, ctx)) {
       ctor = java_v3_type(expected, false)
     }
   }
@@ -1156,7 +1157,8 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
         // selector's type arguments), so declare the binding at that type and
         // cast the untyped `value` once.
         let ptype = value_str(value_field(arm, "payload_type"))
-        if (type_args == "" && ptype != "" && !ptype.startsWith("{")) {
+        if (type_args == "" && ptype != "" && !ptype.startsWith("{")
+            && nameable_v3_type(ptype, ctx)) {
           let jt = java_v3_type(ptype, true)
           lines = lines.push(`                final ${jt} ${mangle(bind)} = (${jt}) ${case_var}.value;`)
         } else {
@@ -1334,6 +1336,32 @@ fn declarable_type(raw: Str, ctx: Ctx) -> Bool {
   for (a of args) {
     if (!declarable_type(a, ctx)) { return false }
   }
+  return true
+}
+
+// `_names_a_v3_class`: whether `java_v3_type` names a class in scope. A
+// raw-pattern arm binding is declared at its payload type, so a bare type
+// parameter (`?T`), an inferred bottom (`Never`) or a structural shape must
+// keep the untyped `final var` binding instead.
+fn nameable_v3_type(raw: Str, ctx: Ctx) -> Bool {
+  let name = trim(raw)
+  if (name == "") { return false }
+  if (name == "Any" || name == "Unit") { return true }
+  if (type_map(name) != "") { return true }
+  let lb = name.indexOf("[")
+  if (lb < 0) { return bool_get(ctx.tys, name) }
+  let base = name.slice(0, lb)
+  let args = split_top(name.slice(lb + 1, last_index_of(name, "]")), ",")
+  if (base == "List" || base == "Opt" || base == "Set") {
+    return args.length() == 1 && nameable_v3_type(args[0], ctx)
+  }
+  if (base == "Map" || base == "Result") {
+    return args.length() == 2 && nameable_v3_type(args[0], ctx)
+      && nameable_v3_type(args[1], ctx)
+  }
+  if (base == "Stream") { return true }
+  if (!bool_get(ctx.tys, base)) { return false }
+  for (a of args) { if (!nameable_v3_type(a, ctx)) { return false } }
   return true
 }
 

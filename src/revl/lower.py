@@ -6966,9 +6966,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
         _pin_return_only_call(declared, lowered_value, types)
-        _pin_record_expected(
-            declared if declared is not None else type_env.get(stmt.name),
-            lowered_value, types)
+        _pin_record_expected(declared, lowered_value, types)
         body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -7527,35 +7525,25 @@ def _return_only_tparams(sig: dict | None) -> list[str]:
     return found
 
 
-def _mentions_wildcard(type_name: str | None) -> bool:
-    """Whether a type spelling mentions a placeholder (`Any`, `Never`, POISON,
-    or an implicit `$` parameter) anywhere inside it."""
-    head, args = parse_type(type_name)
-    if not head or _is_wildcard(head):
-        return True
-    return any(_mentions_wildcard(arg) for arg in args)
-
-
 def _pin_record_expected(local_type: str | None, node: dict | None,
                          types: dict) -> None:
-    """A `let`-bound generic record literal carries the local's type (issue #2325).
+    """An annotated `let`-bound generic record literal carries the local's type
+    (issue #2325).
 
-    `let b: Bx[List[Int]] = { v: [] }` (or an unannotated literal whose fields
-    the checker infers exactly, e.g. `{ v: wrap(n) }`) is not diamond-inferable
-    by javac: `new Bx(List.of())` infers `Bx<List<Object>>` and `b` stays raw,
-    so a field read is an `Object` operation. The local's type is the pin, and
-    the frontend is the only stage that knows it, so it rides the literal as
+    `let b: Bx[List[Int]] = { v: [] }` is not diamond-inferable by javac:
+    `new Bx(List.of())` infers `Bx<List<Object>>` and `b` stays raw, so a field
+    read is an `Object` operation. The annotation is the pin, and the frontend
+    is the only stage that knows it, so it rides the literal as
     ``"expected": "Bx[List[Int]]"``, the same marker an empty collection gets.
     The emitter renders the arguments from it instead of a diamond or a raw
     constructor.
 
-    A type the checker inferred must not name a placeholder: `{ v: [] }` infers
-    `List[Never]`, `{ v: Ok(n) }` infers `Result[Int, Any]`, and writing those
-    as Java type arguments would name classes that do not exist or narrow a
-    value the declared position may still widen. Those stay raw (the control
-    set in `backends/java/test_signature_heads_java_2325.py`). The marker is
-    additive and appears only on such a literal, so every other document is
-    byte-identical.
+    Only a DECLARED type is pinned. An unannotated literal's type is what the
+    checker inferred, and the Java argument must be the same type the native
+    (self-host) producer infers for the byte-identical IR; where that inference
+    differs (a generic variant constructor or generic call field), the literal
+    stays raw. The marker is additive and appears only on such a literal, so
+    every other document is byte-identical.
     """
     if not local_type or not isinstance(node, dict) or node.get("kind") != "record":
         return
@@ -7565,50 +7553,6 @@ def _pin_record_expected(local_type: str | None, node: dict | None,
         params = list(spec.get("params") or ())
         if params and len(args) == len(params):
             node["expected"] = local_type
-        return
-    fields = structural_fields(local_type)
-    if fields is None:
-        return
-    names = {name for name, _ in node.get("fields") or []}
-    matches = [
-        name for name, candidate in types.items()
-        if isinstance(candidate, dict) and candidate.get("kind") == "record"
-        and set((candidate.get("fields") or {}).keys()) == names
-    ]
-    if len(matches) != 1:
-        return
-    name = matches[0]
-    spec = types[name]
-    params = list(spec.get("params") or ())
-    if not params:
-        return
-    subst: dict[str, str] = {}
-
-    def _bind(pattern: str | None, actual: str | None) -> bool:
-        # A structural or placeholder field type names nothing a Java type
-        # argument can be built from (`{v: {v: List[Never]}}` is inferred from
-        # an anonymous literal, not declared), so it leaves the literal raw.
-        if not actual or "{" in actual or _mentions_wildcard(actual):
-            return False
-        head, args = parse_type(pattern)
-        if head in params and not args:
-            subst.setdefault(head, actual)
-            return True
-        ahead, aargs = parse_type(actual)
-        if args and len(args) == len(aargs):
-            return all(_bind(p, a) for p, a in zip(args, aargs))
-        return True
-
-    for field_name, declared in (spec.get("fields") or {}).items():
-        actual = fields.get(field_name)
-        if not _bind(declared, actual):
-            return
-    if any(param not in subst for param in params):
-        return
-    bound = [subst[param] for param in params]
-    if any(_mentions_wildcard(arg) or "{" in arg for arg in bound):
-        return
-    node["expected"] = format_type(name, bound)
 
 
 def _pin_return_only_call(declared: str | None, node: dict | None,
@@ -10057,6 +10001,7 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
             if st.type is not None:
                 check_type_wellformed(filename, st.line, st.type)
                 env.type_env[safe] = st.type
+                _pin_record_expected(st.type, value, env.types)
             else:
                 inferred = infer_ir(value, env.type_env, env.types, env.services)
                 if inferred is not None:
@@ -15463,6 +15408,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 check_type_wellformed(filename, ms.line, ms.type)
                 env.type_env[safe] = ms.type
                 _pin_empty_literal(ms.type, value)
+                _pin_record_expected(ms.type, value, env.types)
             elif swept is not None:
                 env.type_env[safe] = swept
             out.append({"step": "let", "name": safe, "value": value,

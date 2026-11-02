@@ -20935,7 +20935,7 @@ fn tk_check_flat(e: Expr, expected: String, env: Vec<Bind>, where__: &str) -> TI
         return tk_no("TYPE", &nom);
     }
     let bh = parse_head(expected.clone());
-    if (((expected == bh) && tk_is_struct(&r.ty)) && (tenv_get(&env, &(String::from("gpar ").revl_concat(&bh))) != "")) {
+    if (((expected == bh) && tk_is_struct(&r.ty)) && (tenv_get(&env, &(String::from("grec ").revl_concat(&bh))) != "")) {
         return tk_no("TYPE", &((String::from("a record literal for the bare generic record `").revl_concat(&bh)).revl_concat("` is not typed by the native gate (issue #2405)")));
     }
     if (!tk_compat_env(expected.clone(), r.ty.clone(), &env)) {
@@ -34495,15 +34495,16 @@ fn arm_payload(scrutTy: String, pat: &str, env: &[Bind]) -> String {
         let params = tenv_get(env, &(String::from("gpar ").revl_concat(&head)));
         if (params != "") {
             let names = split_top_commas(&params);
-            if (names.revl_length() == args.revl_length()) {
-                let mut sub: Vec<Bind> = vec![];
-                let mut i = 0i64;
-                while (i < names.revl_length()) {
-                    sub.push(Bind { name: (names)[(i) as usize].clone(), ty: (args)[(i) as usize].clone() });
-                    i = (i).checked_add(1i64).expect("revl: Int overflow");
-                }
-                return tk_subst(payload, &sub);
+            if (names.revl_length() != args.revl_length()) {
+                return String::from("");
             }
+            let mut sub: Vec<Bind> = vec![];
+            let mut i = 0i64;
+            while (i < names.revl_length()) {
+                sub.push(Bind { name: (names)[(i) as usize].clone(), ty: (args)[(i) as usize].clone() });
+                i = (i).checked_add(1i64).expect("revl: Int overflow");
+            }
+            return tk_subst(payload, &sub);
         }
         return payload;
     }
@@ -35514,6 +35515,21 @@ fn pins_return_only_call(node: &str, env: &[Bind]) -> bool {
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return ((n != "") && (tenv_get(env, &(String::from("rog ").revl_concat(&n))) == "1"));
+}
+
+fn pins_record_expected(node: &str, declared: String, env: &[Bind]) -> String {
+    if ((declared == "") || (!node.revl_starts_with("{\"kind\":\"record\""))) {
+        return String::from("");
+    }
+    let h = parse_head(declared.clone());
+    if (tenv_get(env, &(String::from("grec ").revl_concat(&h))) == "") {
+        return String::from("");
+    }
+    let ps = tenv_get(env, &(String::from("gpar ").revl_concat(&h)));
+    if ((ps == "") || (type_args(&declared).revl_length() != (ps.revl_split(",")).revl_length())) {
+        return String::from("");
+    }
+    return declared;
 }
 
 fn marked_tparam_names(s: &str) -> Vec<String> {
@@ -36931,6 +36947,10 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         }
         if ((declared != "") && pins_return_only_call(&rjs, &env)) {
             value = (((value.revl_slice(0i64, (value.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}");
+        }
+        let rec_pin = pins_record_expected(&rjs, declared.clone(), &env);
+        if (rec_pin != "") {
+            value = (((value.revl_slice(0i64, (value.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&rec_pin))).revl_concat("}");
         }
         let js = ((((((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&predeclared_mangle(name.clone())))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat(&own_birth_marker(births.clone(), i))).revl_concat("}");
         return mk_one(js, env2, if mutable { muts.revl_push(name.clone()) } else { muts.clone() }, r.i);

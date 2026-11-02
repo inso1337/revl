@@ -2600,7 +2600,8 @@ def _expr(
             # Name the arguments from it rather than leaving the local raw,
             # which is what made a field read an `Object` operation.
             expected = node.get("expected")
-            if isinstance(expected, str) and expected.startswith(type_name + "["):
+            if (isinstance(expected, str) and expected.startswith(type_name + "[")
+                    and _names_a_v3_class(expected, ctx)):
                 ctor = _java_v3_type(expected)
         return f"new {ctor}({', '.join(args)})"
 
@@ -2935,6 +2936,40 @@ def _selector_type_args(scrutinee: object, owner: str, ctx: _V3Ctx,
     return java[len(head):]
 
 
+def _names_a_v3_class(type_name: object, ctx: _V3Ctx) -> bool:
+    """Whether ``_java_v3_type(type_name)`` names a class in scope.
+
+    A raw-pattern match arm is declared at its payload type (`_arm_payload_type`
+    substitutes the selector's arguments), so the spelling must name something
+    Java can declare. A bare type parameter (`T`, or the checker's `?T`), an
+    inferred bottom (`Never`) and a structural record shape name no class;
+    those arms keep the untyped `final var` binding, as before.
+    """
+    if not isinstance(type_name, str) or not type_name.strip():
+        return False
+    name = type_name.strip()
+    if name in ("Any", "Unit"):
+        return True
+    if name in TYPE_MAP:
+        return True
+    if "[" not in name:
+        return name in ctx.types
+    base = name[: name.index("[")]
+    inner = name[name.index("[") + 1 : name.rindex("]")]
+    args = _split_v3_types(inner)
+    if base in ("List", "Opt", "Set"):
+        return len(args) == 1 and _names_a_v3_class(args[0], ctx)
+    if base in ("Map", "Result"):
+        return len(args) == 2 and all(_names_a_v3_class(a, ctx) for a in args)
+    if base == "Stream":
+        return True
+    spec = ctx.types.get(base)
+    if spec is None:
+        return False
+    params = spec.get("params") or []
+    return len(args) == len(params) and all(_names_a_v3_class(a, ctx) for a in args)
+
+
 def _infers_exactly(node: object, ctx: _V3Ctx) -> bool:
     """True when javac, inferring from *node* alone, gets the revl type
     (issue #2325).
@@ -3093,7 +3128,8 @@ def _v3_match_expr(
             # binding at that type and cast the untyped `value` once.
             payload_type = arm.get("payload_type")
             if (not type_args and isinstance(payload_type, str)
-                    and not payload_type.startswith("{")):
+                    and not payload_type.startswith("{")
+                    and _names_a_v3_class(payload_type, ctx)):
                 ptype = _java_v3_type(payload_type, boxed=True)
                 lines.append(
                     f"                final {ptype} {bind} = ({ptype}) {case_var}.value;")

@@ -15204,7 +15204,7 @@ fn tk_check_flat(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
   // got `Int``). The native gate does not instantiate a bare one, so it names
   // the shape instead of admitting it silently.
   let bh = parse_head(expected)
-  if (expected == bh && tk_is_struct(r.ty) && tenv_get(env, "gpar ".concat(bh)) != "") {
+  if (expected == bh && tk_is_struct(r.ty) && tenv_get(env, "grec ".concat(bh)) != "") {
     return tk_no("TYPE", "a record literal for the bare generic record `"
       .concat(bh).concat("` is not typed by the native gate (issue #2405)"))
   }
@@ -30074,15 +30074,17 @@ fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
     let params = tenv_get(env, "gpar ".concat(head))
     if (params != "") {
       let names = split_top_commas(params)
-      if (names.length() == args.length()) {
-        var sub: List[Bind] = []
-        var i = 0
-        while (i < names.length()) {
-          sub = sub.push({ name: names[i], ty: args[i] })
-          i += 1
-        }
-        return tk_subst(payload, sub)
+      // A raw generic selector (`Box`, no arguments) has no arguments to
+      // substitute and answers nothing, as the reference does; returning the
+      // bare parameter would name a type that is not in scope.
+      if (names.length() != args.length()) { return "" }
+      var sub: List[Bind] = []
+      var i = 0
+      while (i < names.length()) {
+        sub = sub.push({ name: names[i], ty: args[i] })
+        i += 1
       }
+      return tk_subst(payload, sub)
     }
     return payload
   }
@@ -31319,6 +31321,21 @@ fn pins_return_only_call(node: Str, env: List[Bind]) -> Bool {
     i += 1
   }
   return n != "" && tenv_get(env, "rog ".concat(n)) == "1"
+}
+
+// `_pin_record_expected` (issue #2325): an ANNOTATED `let`-bound generic
+// record literal carries the local's applied type on the literal (`expected`),
+// so the Java emitters can name the constructor's type arguments when javac
+// cannot infer them. An unannotated literal is not pinned: its type is what the
+// checker inferred, and the native producer must answer the same type for the
+// byte-identical IR.
+fn pins_record_expected(node: Str, declared: Str, env: List[Bind]) -> Str {
+  if (declared == "" || !node.startsWith("{\"kind\":\"record\"")) { return "" }
+  let h = parse_head(declared)
+  if (tenv_get(env, "grec ".concat(h)) == "") { return "" }
+  let ps = tenv_get(env, "gpar ".concat(h))
+  if (ps == "" || type_args(declared).length() != ps.split(",").length()) { return "" }
+  return declared
 }
 
 // The `?`-marked type parameters a marked spelling mentions, in first-use order.
@@ -32716,6 +32733,13 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (declared != "" && pins_return_only_call(rjs, env)) {
       value = value.slice(0, value.length() - 1)
         .concat(",\"expected\":").concat(jstr(declared)).concat("}")
+    }
+    // issue #2325: `_pin_record_expected`, after both; a generic record
+    // literal carries the local's applied type when javac cannot infer it.
+    let rec_pin = pins_record_expected(rjs, declared, env)
+    if (rec_pin != "") {
+      value = value.slice(0, value.length() - 1)
+        .concat(",\"expected\":").concat(jstr(rec_pin)).concat("}")
     }
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false")
