@@ -52,8 +52,8 @@ and the configure restriction, the BLIND SPOTS block, and the
 Slice S6 (§11), distribution, is BUILT: the mandatory `truc.lock` pin and the
 vendored-dir jail at resolution, reproducibility across differing registry
 indexes (`tests/test_composition_distribution.py`), and truc's two distribution
-CLI verbs (`truc stack check` (header-only resolution, a collision reported at
-edit time) and `truc apply` (resolve + admit, all-or-nothing write)),
+CLI verbs: `truc stack check` (header-only resolution, a collision reported at
+edit time) and `truc apply` (resolve + admit, all-or-nothing write),
 as thin front doors onto the composition engine (decision 7). The verbs live
 in truc's
 bootstrapped `.rvl` toolchain (`src/revl/truc/components/`, host bodies in
