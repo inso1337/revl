@@ -1,7 +1,8 @@
 # The token economy — make revl the cheapest language for an agent to write
 
-**Status:** output metric + one compound verb implemented (roadmap item 50); the
-benchmark now records provider-reported input tokens beside model turns.
+**Status:** generation and response metrics + one compound verb implemented
+(roadmap item 50); the benchmark now records provider-reported input tokens
+beside model turns.
 - **Metric:** `bench/tokens.py`, committed snapshot `bench/results/tokens-to-green.md`,
   pinned by `tests/test_tokens_to_green.py`.
 - **Response metric:** `bench/mcp_response_size.py`, pinned by
