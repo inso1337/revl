@@ -479,7 +479,7 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
         # issue #2697: the reviewer facets are reported honestly like every other
         # facet - present or unavailable - and stay out of `rank_key`: the issue
         # adds them to the bundle so a consumer and the policy layer can read
-        # them, not a numeric trust score to be gamed (docs/registry.md §2.1).
+        # them, not a numeric trust score to be gamed (docs/registry.md §2).
         "ceilings": "present" if bundle.ceilings is not None else "unavailable",
         "secret-sinks": "present" if bundle.secret_sinks is not None
                         else "unavailable",
@@ -588,7 +588,7 @@ def binding_mismatch(att: dict | None, bundle: "EvidenceBundle") -> str | None:
 def _capabilities_of(boundary: dict) -> tuple[tuple[str, ...], int]:
     """The union of emission-capability labels a composition reaches, and the
     number of boundary crossings — the raw material for the least-authority
-    ranking (docs/registry.md §2.1). `*` (unscoped) is carried through so it can
+    ranking (docs/registry.md §2). `*` (unscoped) is carried through so it can
     rank a candidate last."""
     labels: set[str] = set()
     emissions = 0
@@ -966,11 +966,12 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
 
 
 def _unhoused_meta(registry_dir: Path, committed_index: dict) -> list[str]:
-    """Entries whose committed row carries `description`/`tags` that no
-    `meta.json` beside the component accounts for.
+    """Entries whose committed row carries a publisher-declared field
+    (`description`/`tags`/`mediator`) that no `meta.json` beside the component
+    accounts for.
 
     This is the shape of a registry published by the pre-`meta.json` write path,
-    which patched those two keys into the row after the regenerator had run. It
+    which patched those keys into the row after the regenerator had run. It
     needs naming SEPARATELY, because the obvious response to a stale index —
     regenerate and commit — would silently DELETE fields nothing else records.
     """
@@ -1565,7 +1566,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     else:
         # a publish that restates description/tags may be repairing a malformed
         # meta.json (issue #2563), so read it leniently instead of validating it:
-        # a usable mediator is preserved, anything else is overwritten as before.
+        # a usable mediator is preserved and re-verified below; an unusable one
+        # is a refusal, never silently dropped.
         try:
             existing_meta = (json.loads(_read(meta_path))
                              if meta_path.exists() else None)
@@ -2519,8 +2521,23 @@ def resolve(registry, need, manifest: dict | None = None,
     # HARD rank term ahead of authority, not a tiebreak: least-authority alone
     # would otherwise let a component with a narrower surface win over the
     # mediator on a claim it never substantiated.
-    mediator_names = sorted({m.entry.name for m, _ in graded
-                             if m.entry.mediator is not None})
+    #
+    # WHICH mediator is protected matters. Exempting every marked candidate
+    # would let a second marking (for any capability the publisher alone holds)
+    # bypass the bar for the component the bar is meant to protect. So the
+    # protected incumbent is the marked candidate with the WIDEST authority -
+    # the one holding the raw capability, which is exactly the component whose
+    # narrow replacement least-authority ranking would otherwise prefer. Every
+    # other candidate, marked or not, is a replacement and must clear the bar.
+    mediator_pairs = [(m, a) for m, a in graded if m.entry.mediator is not None]
+    mediator_names = sorted({m.entry.name for m, _ in mediator_pairs})
+    protected_name = ""
+    if mediator_pairs:
+        widest = max(m.authority_fit_key() for m, _ in mediator_pairs)
+        protected_name = min(
+            (m for m, _ in mediator_pairs
+             if m.authority_fit_key() == widest),
+            key=lambda m: (len(m.entry.source), m.entry.name)).entry.name
 
     def _replacement_bar(assessment: EvidenceAssessment) -> tuple[bool, str]:
         """Whether a candidate clears the mediator-replacement bar:
@@ -2546,7 +2563,7 @@ def resolve(registry, need, manifest: dict | None = None,
             # consumer sees. Discount that class - and only that class.
             evidence = _discount_error_semantics(evidence)
         displacement = 0
-        if (mediator_names and match.entry.mediator is None
+        if (protected_name and match.entry.name != protected_name
                 and not _replacement_bar(assessment)[0]):
             displacement = 1
         return (displacement, match.authority_fit_key(), evidence,
@@ -2574,15 +2591,23 @@ def resolve(registry, need, manifest: dict | None = None,
         "trust set; an unverified claim ranks level with no claim at all"
         + ("" if key_bytes is not None else
            " (no signing key was supplied, so no attestation could be verified)"))
-    if mediator_names:
+    if protected_name:
         assumptions.append(
             "a trusted mediator is among the compatible candidates "
-            f"({', '.join(mediator_names)}): a candidate that would replace it "
+            f"({protected_name}): a candidate that would replace it "
             "ranks BELOW it unless it carries a cryptographically valid "
             "attestation binding a passing fault sweep"
             + ("" if key_bytes is not None else
                " (no signing key was supplied, so no candidate could prove the "
                "bar and the mediator keeps its place)"))
+        others = [n for n in mediator_names if n != protected_name]
+        if others:
+            assumptions.append(
+                f"other marked mediators ({', '.join(others)}) are replacement "
+                "candidates too: the protected incumbent is the marked "
+                "candidate with the widest authority (the one holding the raw "
+                "capability), because exempting every marked candidate would "
+                "let a second marking bypass the bar")
     if refused:
         assumptions.append(
             f"{len(refused)} entr{'y was' if len(refused) == 1 else 'ies were'} "
@@ -2651,13 +2676,14 @@ def resolve(registry, need, manifest: dict | None = None,
         if entry.mediator is not None:
             # the marking that sets the bar is visible on the candidate itself.
             candidate["mediator"] = entry.mediator
-        elif mediator_names:
-            # a candidate for a need a trusted mediator already serves: say the
-            # bar it had to clear and what it was missing (issue #2697).
+        if protected_name and entry.name != protected_name:
+            # every candidate other than the protected incumbent is a
+            # replacement, including a second marked mediator: say the bar it
+            # had to clear and what it was missing (issue #2697).
             met, reason = _replacement_bar(assessment)
             if not met:
                 candidate["replacementBar"] = {
-                    "mediators": mediator_names,
+                    "mediators": [protected_name],
                     "met": False,
                     "required": ("a cryptographically valid attestation binding "
                                  "a passing fault sweep"),
@@ -2665,7 +2691,7 @@ def resolve(registry, need, manifest: dict | None = None,
                 }
                 candidate["why"] += (
                     f"; it would replace the trusted mediator "
-                    f"{', '.join(mediator_names)}, but it carries {reason}, so "
+                    f"{protected_name}, but it carries {reason}, so "
                     "it ranks below the mediator")
         if match.bridge is not None:
             candidate["adapter"] = _adapter_block(match)

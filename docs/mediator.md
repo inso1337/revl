@@ -14,7 +14,8 @@ around, it is confined to one provider.
 
 ## What the gate proves
 
-`revl audit examples/mediator.rvl` prints the asymmetry:
+`revl audit examples/mediator.rvl` prints the asymmetry (the cardinality clause
+is elided here):
 
 ```
 component FsMediator  (examples/mediator.rvl)
@@ -31,7 +32,7 @@ component NotesConsumer  (examples/mediator.rvl)
 The raw token `fs` is on the mediator and nowhere else. The consumer reaches
 `writer.append`, and because the wrapper is declared as a bare `emission`
 (destination unnamed, the spelling item 561 names by the service it sits on),
-the consumer's surface says `*` — "a boundary the wrapper owns", not a token
+the consumer's surface says `*` ("a boundary the wrapper owns"), not a token
 the consumer may cross itself.
 
 The consumer's direct attempt is refused by name. If it writes
@@ -72,8 +73,10 @@ full rules.
 Once marked, `resolve` keeps the mediator's place unless a replacement clears a
 stronger evidence bar: a cryptographically valid attestation that binds a
 passing fault sweep. A candidate that cannot show both is ranked below the
-mediator and its result carries `replacementBar` with the reason. This is a
-hard lexical rule, not a trust score — see
+mediator and its result carries `replacementBar` with the reason. When several
+marked mediators match one need, the one with the widest authority is the
+protected incumbent; every other candidate, marked or not, is a replacement.
+This is a hard lexical rule, not a trust score; see
 [registry.md](registry.md#2-revl_resolve--the-one-search-verb).
 
 ## Honest limits

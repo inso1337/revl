@@ -31,6 +31,7 @@ from .registry import (
     _normalize_ir_for_attest,
     _provenance_document,
     _read,
+    _reached_capability_tokens,
     _write_evidence_file,
     load_knowledge,
 )
@@ -100,14 +101,7 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         # G8 boundary the capabilities facet carries.
         reach: dict[str, list[str]] = {}
         for comp, stats in boundary.items():
-            reached = {cap for scope in ((stats or {}).get("capabilities")
-                                         or {}).values()
-                       for cap in (scope or [])}
-            # a directly emitted host extern carries its declared scope on the
-            # extern row (item 247), not in the `key.method` capability map.
-            for ext in (stats or {}).get("externs") or []:
-                reached.update(ext.get("capabilities") or ())
-            hit = sorted(reached & sinks)
+            hit = sorted(_reached_capability_tokens(stats) & sinks)
             if hit:
                 reach[comp] = hit
         dossiers["secret-sinks"] = (

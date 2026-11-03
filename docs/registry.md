@@ -278,11 +278,16 @@ would replace it below the mediator unless that candidate carries a
 cryptographically valid attestation binding a passing fault sweep. A candidate
 without both is ranked as unavailable for the displacement decision, and its
 result carries `replacementBar` with the exact reason and the mediator's names.
-A candidate that clears the bar competes on the ordinary ranking again. This is
-a hard lexical term ahead of least authority, not a score: a narrower component
-cannot buy the mediator's place on an unsubstantiated claim. Without a
-verification key no attestation can grade `valid`, so no replacement can clear
-the bar and the marked mediator keeps its place.
+A candidate that clears the bar competes on the ordinary ranking again. If
+several marked mediators match the need, the protected incumbent is the one
+with the widest authority (the one holding the most raw authority); every other
+candidate, marked or not, is a replacement and must clear the bar. Exempting
+every marked candidate would let a second marking bypass the bar that exists to
+protect the component holding the raw capability. This is a hard lexical term
+ahead of least authority, not a score: a narrower component cannot buy the
+mediator's place on an unsubstantiated claim. Without a verification key no
+attestation can grade `valid`, so no replacement can clear the bar and the
+marked mediator keeps its place.
 
 ## 2. `revl_resolve` — the one search verb
 

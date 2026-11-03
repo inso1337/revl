@@ -79,6 +79,46 @@ MEDIATOR_META = {
     "mediator": {"component": "FsMediator", "capability": "fs"},
 }
 
+#: A mediator that holds TWO raw capabilities. It is the protected incumbent in
+#: the second-marking test: the widest-authority marked candidate.
+WIDE_MEDIATOR = """
+service FileStore { emission[fs] fn write(path: Str, data: Str) -> Int }
+service ArchiveStore { emission[archive] fn store(path: Str, data: Str) -> Int }
+service AppendWriter { emission fn append(path: Str, data: Str) -> Int }
+
+component FsMediator requires fs: FileStore, archive: ArchiveStore provides writer: AppendWriter {
+  provide writer {
+    fn append(path, data) -> Int {
+      emit fs.write(path, data)
+      emit archive.store(path, data)
+      return 0
+    }
+  }
+}
+"""
+
+#: A second, narrower marked mediator. Its marking must not exempt it from the
+#: bar protecting the wider mediator.
+NARROW_MEDIATOR = """
+service NetStore { emission[net] fn send(data: Str) -> Int }
+service AppendWriter { emission fn append(path: Str, data: Str) -> Int }
+
+component NetMediator requires net: NetStore provides writer: AppendWriter {
+  provide writer {
+    fn append(path, data) -> Int {
+      emit net.send(data)
+      return 0
+    }
+  }
+}
+"""
+
+NARROW_META = {
+    "description": "the only holder of the raw net boundary",
+    "tags": ["net", "mediator"],
+    "mediator": {"component": "NetMediator", "capability": "net"},
+}
+
 #: A need whose service is declared under a different name, so a match is
 #: structural (`resolve` never matches text).
 NEED = """
@@ -258,3 +298,72 @@ def test_an_attestation_that_does_not_bind_the_sweep_does_not_clear_the_bar(tmp_
     loser = result["candidates"][1]
     assert _names(result) == ["fs_mediator", "fast_writer"]
     assert "no passing fault sweep bound" in loser["replacementBar"]["reason"]
+
+
+def test_a_second_marking_cannot_bypass_the_bar(tmp_path):
+    """Exempting every marked candidate would let a second, narrower mediator
+    rank above the protected one on authority alone. The protected incumbent is
+    the marked candidate with the widest authority; every other candidate,
+    marked or not, is a replacement that must clear the bar."""
+    reg = _build(tmp_path, {
+        "fs_mediator": (WIDE_MEDIATOR, MEDIATOR_META),
+        "net_mediator": (NARROW_MEDIATOR, NARROW_META),
+    })
+    result = registry.resolve(reg, NEED, key=KEY)
+    # least authority would put the narrower net mediator first; the bar keeps
+    # the wider, protected mediator in place.
+    assert _names(result) == ["fs_mediator", "net_mediator"]
+    net = next(c for c in result["candidates"] if c["name"] == "net_mediator")
+    assert net["mediator"] == NARROW_META["mediator"]
+    assert net["replacementBar"]["mediators"] == ["fs_mediator"]
+    assert any("other marked mediators" in line
+               for line in result["assumptions"])
+
+
+# --------------------------------------------------------------- publish flow
+
+def _publish_mediator(tmp_path, version: str, description: str) -> str:
+    reg = os.path.join(str(tmp_path), "registry")
+    os.makedirs(reg)
+    registry.publish_release(reg, "fs_mediator", MEDIATOR, version=version,
+                             description=description, tags=["fs"])
+    return reg
+
+
+def _mark_published_mediator(reg: str) -> str:
+    entry_dir = os.path.join(reg, "components", "fs_mediator")
+    meta_path = os.path.join(entry_dir, "meta.json")
+    meta = json.loads(open(meta_path, encoding="utf-8").read())
+    meta["mediator"] = MEDIATOR_META["mediator"]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    registry.build_index(reg)
+    return meta_path
+
+
+def test_publish_preserves_a_marking_across_a_description_restatement(tmp_path):
+    reg = _publish_mediator(tmp_path, "1.0.0", "first")
+    meta_path = _mark_published_mediator(reg)
+    registry.publish_release(reg, "fs_mediator", MEDIATOR, version="1.0.1",
+                             description="second", tags=["fs", "mediator"])
+    meta = json.loads(open(meta_path, encoding="utf-8").read())
+    assert meta["mediator"] == MEDIATOR_META["mediator"]
+    assert meta["description"] == "second"
+    assert registry.verify(reg) == []
+
+
+def test_publish_refuses_a_source_that_no_longer_backs_the_marking(tmp_path):
+    reg = _publish_mediator(tmp_path, "1.0.0", "first")
+    meta_path = _mark_published_mediator(reg)
+    entry_dir = os.path.join(reg, "components", "fs_mediator")
+    source_path = os.path.join(entry_dir, "component.rvl")
+    before = open(source_path, encoding="utf-8").read()
+    with pytest.raises(RevlError) as refused:
+        registry.publish_release(reg, "fs_mediator", FAST, version="1.0.1",
+                                 description="dropped the raw boundary",
+                                 tags=["fs"])
+    assert "mediator" in refused.value.message
+    # nothing was written: both the source and the declaration are unchanged.
+    assert open(source_path, encoding="utf-8").read() == before
+    assert json.loads(open(meta_path, encoding="utf-8").read())[
+        "mediator"] == MEDIATOR_META["mediator"]

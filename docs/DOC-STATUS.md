@@ -124,6 +124,7 @@ regenerated rather than edited.
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 0 |  |
+| mediator.md | needs-work | 0 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 7 |  |
 | namespacing.md | needs-work | 16 |  |

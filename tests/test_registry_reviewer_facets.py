@@ -9,6 +9,7 @@ a signed attestation like every other dossier.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -101,6 +102,24 @@ def test_a_bound_secret_reports_its_sink_and_the_component_that_reaches_it(tmp_p
     assert bundle.secret_sinks["secrets"] == [
         {"name": "api_key", "capability": "net.send"}]
     assert bundle.secret_sinks["reach"] == {"A": ["net.send"]}
+
+
+def test_a_tampered_reviewer_facet_breaks_the_attestation(tmp_path):
+    """The facets are bound dossiers, not commentary: changing one after the
+    signature makes the attestation `invalid`, so a ceiling or a sink cannot be
+    edited under an honest signature."""
+    _reg, entry_dir = _build(tmp_path, "fs_mediator",
+                             open(MEDIATOR, encoding="utf-8").read())
+    path = os.path.join(entry_dir, registry.EVIDENCE_DIRNAME,
+                        registry.EVIDENCE_CEILINGS)
+    doc = json.loads(open(path, encoding="utf-8").read())
+    doc["cardinality"]["FsMediator"]["per_capability"]["fs"]["bound"] = 99
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    bundle = registry.load_evidence_bundle(entry_dir)
+    assessment = registry.assess_evidence(bundle, key=KEY, ir=_ir(entry_dir))
+    assert assessment.facets["attestation"] == "invalid"
+    assert assessment.verified["ceilings"] is False
 
 
 def test_a_recorded_inverse_reports_its_compensation_class(tmp_path):
