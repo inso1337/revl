@@ -4253,6 +4253,112 @@ fn f(m: Mb[Int]) -> Int {{
         _agree(admit, src)
 
 
+def test_provided_variant_exhaustiveness_matches_reference(admit):
+    """Issue #2981: a provided variant resolves through its provided case row.
+
+    The reference seeds `model_answer.ANSWER_TYPES` into its type table when the
+    program names one of the provided types, so the general exhaustiveness check
+    reaches `Aggregate[Str]` through the applied head (PR #2934). The gate's
+    table carried rows only for `type` declarations, and a provided type is
+    never declared there, so it found nothing and stayed silent. Seeding the two
+    provided variant rows under the same condition closes it.
+    """
+    # the issue's reproducer: the applied head is a module `fn` parameter
+    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    # the other declared positions the reference seeds from, and a transparent
+    # alias, which `_resolve_type_aliases` erases into its target first
+    _agree(admit, """type Box = { a: Aggregate[Str] }
+
+fn settle(b: Box) -> Str {
+  return match b.a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    _agree(admit, """service Review { fn settle(answer: Aggregate[Str]) -> Str }
+
+component Reviewer provides out: Review {
+  provide out {
+    fn settle(answer) = match answer {
+      Split(d) => "no",
+      Inquorate(d) => "no",
+    }
+  }
+}
+""")
+    _agree(admit, """type Agg = Aggregate[Str]
+
+fn settle(a: Agg) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    _agree(admit, """fn settle(a: Answer[Str]) -> Str {
+  return match a {
+    Says(v) => v,
+    Abstains => "no",
+  }
+}
+""")
+    # the provided entries seed together, so a BARE head is checked only when
+    # the program names one of them applied somewhere, exactly as `seeded` does
+    _agree(admit, """fn other(a: Aggregate[Str]) -> Str {
+  return match a {
+    Agreed(v) => v,
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+
+fn settle(a: Aggregate) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    # a bare head alone names nothing applied, and a complete match stays
+    # admitted: both are programs the reference lets through
+    _agree(admit, """fn settle(a: Aggregate) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    # a BODY annotation is not one of the declared positions `seeded` reads, so
+    # the bare-head match above stays admitted beside one
+    _agree(admit, """fn settle(a: Aggregate) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+
+fn helper() -> Str {
+  let xs: List[Aggregate[Str]] = []
+  return "no"
+}
+""")
+    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+  return match a {
+    Agreed(v) => v,
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+
+
 def test_issue_2842_scope_and_non_emission_controls_stay_admitted(admit):
     shadowed = """extern emission fn send(x: Str) -> Int = @py { return 1 }
 service Ops { emission fn invoke(send: (Str) -> Int) -> Int }
