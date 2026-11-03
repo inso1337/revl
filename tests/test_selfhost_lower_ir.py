@@ -534,6 +534,20 @@ def test_native_ir_types_a_constructor_in_scrutinee_position(lower_to_ir):
     assert [a["payload_type"] for a in ok_arms] == ["Int", "Any"]
     assert native == reference
 
+    # issue #2472: an INLINE user generic variant scrutinee (`match Jj(1)`) now
+    # types `Mb[Int]` rather than the bare head, and the reference's
+    # spelling-keyed `_arm_payload_type` stamps NO `payload_type` on its arms.
+    # The bare head used to match the case table's ADT exactly and stamped the
+    # declared `T` — a latent IR divergence this pins closed.
+    generic = (
+        "type Mb[T] = Jj(T) | Nn\n"
+        "fn inline() -> Int { return match Jj(1) { Jj(v) => v, Nn => 0 } }\n"
+    )
+    gen_ref = compile_source(generic)["functions"]
+    gen_native = json.loads(lower_to_ir(generic))["functions"]
+    assert "payload_type" not in gen_ref[0]["body"][0]["expr"]["arms"][0]
+    assert gen_native == gen_ref
+
 
 def test_native_ir_types_a_map_lookup(lower_to_ir):
     """Item 391 — `lookup` was the one `_BUILTIN_SIG` row the self-host method

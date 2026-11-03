@@ -2441,44 +2441,23 @@ def test_native_gate_admits_the_whole_emit_surface(admit):
                 assert verdict == "", f"{key}: {verdict!r}"
 
 
-# Issue #2402: the reference checker now builds and matches values of a user
-# generic variant (`type Mb[T] = Jj(T) | Nn`); `selfhost/lower.rvl` does not
-# yet. The documents are the reference's own test table,
-# tests/test_generic_variant_construction.py, and each entry records what the
-# native chain gives for it on py, so the difference is NAMED rather than
-# passing for agreement. Same ratchet as NATIVE_GATE_GAPS: the day the
-# self-host follows the reference, these tests fail on the stale entry, and
-# the entry is DELETED rather than reworded.
+# Issue #2472: the self-host now follows the reference on user generic variant
+# construction and arm binding. `selfhost/lower.rvl` carries the declaration's
+# type parameters (`vpar <Name>`) and substitutes them at each use, the way
+# `selfhost/lower.rvl` already instantiated a generic RECORD, and the reference
+# does in `generic_case_type`, `applied_variant_spec` / `_scrutinee_spec` and
+# `_check_generic_case` (issue #2402). The documents are the reference's own
+# test table, tests/test_generic_variant_construction.py, so the pin table that
+# recorded the old difference is gone and the table itself is the test: every
+# ADMITTED document compiles BYTE-FOR-BYTE on py, every REFUSED document is
+# refused with the reference's own message.
 #
-# The reference ADMITS these and the native gate refuses them loudly, with the
-# message the reference gave before the fix (the bare head `Mb`).
-GENERIC_VARIANT_LOUD_REFUSALS: dict[str, str] = {
-    "argument": "REFUSED|T1|argument 1 of `un(...)` expects `Mb[Int]`, got `Mb`",
-    "generic_fn": "REFUSED|T1|this function's return expects `Mb[T]`, got `Mb`",
-    "inferred_let": "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
-    "issue_let": "REFUSED|T1|`let v: Mb[Int]` expects `Mb[Int]`, got `Mb`",
-    "issue_nullary": "REFUSED|T1|`let v: Mb[Int]` expects `Mb[Int]`, got `Mb`",
-    "issue_return": "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
-    "list_payload": "REFUSED|T1|this function's return expects `Bag[Int]`, got `Bag`",
-    "nested": "REFUSED|T1|this function's return expects `Mb[Mb[Int]]`, got `Mb`",
-    "nullary_without_expectation":
-        "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
-    "two_parameters":
-        "REFUSED|T1|this function's return expects `Ei[Int, Str]`, got `Ei`",
-}
-
-# The reference REFUSES these and the native chain still ADMITS and emits
-# them: silent verdict differences, recorded so they cannot read as agreement.
-# The `arm_binds_*` pair (issue #2402) is refused on payload typing (an arm
-# over `Mb[Int]` binds `Int`, so returning it as `Str` is a mismatch); both
-# were admitted by the reference too before the fix. `aggregate_missing_agreed`
-# is issue #2981: the reference refuses the program (a match over a provided
-# `Aggregate[Str]` that leaves out `Agreed`, PR #2934's
-# `test_aggregate_missing_agreed_is_refused`) while the self-host gate admits
-# it. Each entry fails in either direction, on the reference or on the gate.
-GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",
-                                 "arm_binds_second_parameter",
-                                 "arm_binds_substituted_payload")
+# The one remaining difference is #2981 and NOT a generic-variant construction:
+# a match over the PROVIDED `Aggregate[Str]` that leaves out `Agreed`. The
+# reference refuses it (PR #2934's `test_aggregate_missing_agreed_is_refused`)
+# while the self-host gate admits it, because the provided type has no declared
+# `cases` row to judge. Silent direction, tracked separately.
+GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",)
 
 # The reference's program for a difference the docs table does not carry:
 # tests/test_generic_variant_construction.py spells the exhaustiveness case
@@ -2511,24 +2490,48 @@ def _generic_variant_silent_admit_doc(name):
     return GENERIC_VARIANT_INLINE_REFUSED[name]
 
 
-@pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_LOUD_REFUSALS))
-def test_generic_variant_program_is_refused_loudly_by_the_native_chain(
-        compile_to, name):
-    """Issue #2402: the reference admits it, the native chain refuses it with
-    the recorded REFUSED verdict. A change in either answer fails here."""
+@pytest.mark.parametrize("name", sorted(_generic_variant_docs().ADMITTED))
+def test_generic_variant_program_compiles_byte_identically(
+        compile_to, reference_emit, name):
+    """Issue #2472: every document the reference ADMITS compiles to the
+    reference's own py bytes through the native chain: the construction is
+    typed with its type arguments substituted (`Jj(1)` is `Mb[Int]`), the bare
+    nullary case is the `Any` placeholder, and the match arm binds the
+    substituted payload."""
     source = _generic_variant_docs().ADMITTED[name]
-    compile_source(source)  # the reference admits it
     got = compile_to(source, "py")
-    assert got == GENERIC_VARIANT_LOUD_REFUSALS[name], (
-        f"{name}: recorded as {GENERIC_VARIANT_LOUD_REFUSALS[name]!r}, now "
-        f"{got[:160]!r}. If the self-host now matches the reference, DELETE "
-        f"the entry and compare bytes instead.")
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
+        f"{name}: the native chain refuses a document the reference admits: "
+        f"{got[:200]!r}")
+    want = reference_emit["py"](compile_source(source))
+    assert got == want, (
+        f"{name}: the native chain diverged from the reference\n"
+        f"--- lengths ref={len(want)} got={len(got)} ---")
+
+
+@pytest.mark.parametrize("name", sorted(_generic_variant_docs().REFUSED))
+def test_generic_variant_misuse_is_refused_with_the_reference_message(
+        compile_to, name):
+    """Issue #2472: every document the reference REFUSES is refused by the
+    native chain with the reference's message VERBATIM — the whole sentence and
+    the position prefix, not a fragment: a wrong payload names the SUBSTITUTED
+    payload type, and an arm over `Mb[Int]` binds `Int`. The expected text is
+    the reference's own `RevlError`, minus its `<string>:<line>: ` prefix, so
+    the test cannot drift from the table it reads."""
+    source, _ = _generic_variant_docs().REFUSED[name]
+    with pytest.raises(RevlError) as refused:
+        compile_source(source)
+    reference = str(refused.value).split(": ", 1)[1]
+    got = compile_to(source, "py")
+    assert got == "REFUSED|T1|" + reference, (
+        f"{name}: the native verdict is {got[:220]!r}, the reference's message "
+        f"{reference!r}")
 
 
 @pytest.mark.parametrize("name", GENERIC_VARIANT_SILENT_ADMITS)
 def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
-    """Issues #2402 and #2981: the reference refuses it, the native chain still
-    emits. Fails the day the native chain refuses too, so the entry is removed."""
+    """Issue #2981: the reference refuses it, the native chain still emits.
+    Fails the day the native chain refuses too, so the entry is removed."""
     source, message = _generic_variant_silent_admit_doc(name)
     with pytest.raises(RevlError) as refused:
         compile_source(source)
@@ -4089,22 +4092,24 @@ def test_a_component_section_marker_is_not_a_dropped_component(compile_to):
 # tests/test_case_call_arity.py; `selfhost/*.rvl` does not count the arguments
 # yet. Each entry records what the native chain gives on py, so a difference
 # is NAMED rather than passing for agreement: "EMITS" is a silent admit (the
-# native chain writes target code), anything else is its verdict string. The
-# three generic documents are loud refusals, but with another message (the
-# bare head `Mb`, issue #2402). The day the self-host gives the reference's
-# refusal, the entry fails and is DELETED.
+# native chain writes target code), anything else is its verdict string.
+# The three generic documents used to be LOUD refusals with another message
+# (the bare head `Mb`, issue #2402). Issue #2472 typed the construction with
+# its type arguments substituted, which removed that accidental refusal: they
+# are now a VERDICT DOWNGRADE for these three documents, a silent admit where
+# the reference counts the arguments, exactly the one the non-generic
+# documents already have. Under-refusal is the direction this gate is allowed
+# to err in, and the entry is still a ratchet: the day the self-host counts
+# the arguments (issue #2447), each entry fails and is DELETED.
 CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
     "argument_to_nullary": "EMITS",
     "argument_to_nullary_as_argument": "EMITS",
     "err_missing": "EMITS",
     "extra_payload": "EMITS",
     "extra_payload_in_let": "EMITS",
-    "generic_argument_to_nullary":
-        "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
-    "generic_extra_payload":
-        "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
-    "generic_missing_payload":
-        "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
+    "generic_argument_to_nullary": "EMITS",
+    "generic_extra_payload": "EMITS",
+    "generic_missing_payload": "EMITS",
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
     # issue #2594: the producer cannot lower this provide step, and the
