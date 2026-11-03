@@ -32228,7 +32228,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         let inv = if is_hole_expr(und.e.clone()) { String::from("") } else { String::from(", \"inverse\": ").revl_concat(&jstr(&method_inverse(acq.e.clone(), und.e.clone(), &hostSc, cx.clone()))) };
         let caps = if top { inverse_captures(&ue.js, &sc) } else { mk_irres(true, String::from("")) };
         if (!caps.ok) {
-            return cir_fail_why(&ts, lo, String::from("an inverse that captures an arrow"));
+            return cir_fail_why(&ts, lo, String::from("an `undo` inverse holding an arrow while a mutable local is in scope"));
         }
         let capjs = if (caps.js == "") { String::from("") } else { (String::from(", \"undo_captures\": [").revl_concat(&caps.js)).revl_concat("]") };
         let step = (((((String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(&inv)).revl_concat(&capjs)).revl_concat("}");
@@ -32406,7 +32406,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         }
         let caps = inverse_captures(&ue.js, &sc);
         if (!caps.ok) {
-            return cir_fail_why(&ts, lo, String::from("an inverse that captures an arrow"));
+            return cir_fail_why(&ts, lo, String::from("an `undo` inverse holding an arrow while a mutable local is in scope"));
         }
         let inv = if is_hole_expr(und.e.clone()) { String::from("") } else { String::from(", \"inverse\": ").revl_concat(&jstr(&method_inverse(acq.e.clone(), und.e.clone(), &hostSc, cx.clone()))) };
         let mut step = (((((String::from("{\"step\": \"let-effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(", \"bind\": ")).revl_concat(&jstr(&name))).revl_concat(&inv);
@@ -32429,7 +32429,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         }
         let r = expr_at(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
         if (is_bad(r.e.clone()) || (r.i <= (j).checked_add(1i64).expect("revl: Int overflow"))) {
-            return cir_fail_why(&ts, lo, String::from("a `let`/`var` binding with no readable value"));
+            return cir_fail_why(&ts, lo, String::from("a `let`/`var` binding whose value the producer cannot read"));
         }
         let ve = cir_expr(r.e.clone(), sc.clone(), &hostSc, cx_at(cx.clone(), tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).line));
         if (!ve.ok) {
