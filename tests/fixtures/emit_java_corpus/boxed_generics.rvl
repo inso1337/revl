@@ -41,8 +41,10 @@ fn reason(r: Result[Int, Str]) -> Str {
 // A `match` over a generic variant applies the selector's type arguments to
 // each case pattern, so a bound payload is `Long`, not `Object` (issue
 // #2325). A parameter and a call to a top-level fn carry them; a `let` local
-// keeps the raw pattern. No case is built here: the self-host checker refuses
-// `Full(n)` for `Box[Int]` (issue #2472).
+// keeps the raw pattern. No case is BUILT here: issue #2472 was the self-host
+// checker's refusal of `Full(n)` for `Box[Int]`, which it now admits (the
+// construction side lives in tests/test_generic_variant_construction.py); what
+// a case construction emits on this tier is #2471's and #2325's subject.
 fn bumped(b: Box[Int]) -> Int {
   return match b {
     Full(v) => v + 1,

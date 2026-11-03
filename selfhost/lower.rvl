@@ -15139,11 +15139,61 @@ fn tk_check(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
     If(f)     => grec_mentioned(expected, env) || tk_settled(expected)
                    ? tk_check_if(f.cond, f.then_, f.els, expected, env, where_)
                    : tk_check_flat(e, expected, env, where_),
-    Match(m)  => grec_mentioned(expected, env)
+    // issue #2472: a settled expectation checks each arm too, with the arm's
+    // payload binding in scope. Inferring the JOINED arm type and checking
+    // that once misses disagreeing arms: when arms conflict the join is
+    // unknown, so a single flat check silently passes (`Jj(x) => x` over
+    // `Mb[Int]` in a function returning `Str` was admitted).
+    Match(m)  => grec_mentioned(expected, env) || tk_settled(expected)
                    ? tk_check_match(m, expected, env, where_)
                    : tk_check_flat(e, expected, env, where_),
+    // issue #2472: `check_ast`'s generic-case arm, ahead of the flat
+    // comparison, so a wrong payload is named at the payload and not at the
+    // whole construction.
+    Call(c)   => tk_check_call(e, c, expected, env, where_),
     _         => tk_check_flat(e, expected, env, where_),
   }
+}
+
+// Issue #2472: the reference's `_check_generic_case` arm of `check_ast`. A
+// case call in CHECK position against an instantiation of the SAME generic
+// ADT checks its argument against the SUBSTITUTED declared payload, so
+// `Jj("x")` for `Mb[Int]` is refused as "`Jj(...)` payload expects `Int`, got
+// `Str`" and a nested `Jj(Jj("x"))` meets `Mb[Mb[Int]]` from the outside in.
+// The remaining arguments are inferred, exactly as the reference's loop does.
+// Anything else falls through to the flat comparison.
+fn tk_check_call(e: Expr, c: CallN, expected: Str, env: List[Bind],
+                 where_: Str) -> TInf {
+  let n = match c.target { Var(v) => v, _ => "", }
+  // A body-rebound callee is not the case. The bail is BROADER than
+  // `_check_generic_case`'s `is_function_type(tenv.get(name))`: the reference
+  // only skips the generic-case arm for a function-typed binding, and refuses
+  // a call on a NON-function one through `refuse_call_on_non_function` (issue
+  // #2544), a path this walk does not port. Narrowing it here would move that
+  // unported refusal's message onto this arm, so the broader bail keeps the
+  // silent direction the #2544 gap already has.
+  if (n == "" || tenv_get(env, n) != "") {
+    return tk_check_flat(e, expected, env, where_)
+  }
+  let adt = tagged_case_adt(env, n)
+  let params = vpar_of(adt, env)
+  let eargs = type_args(expected)
+  if (params.length() == 0 || adt != parse_head(expected)
+      || eargs.length() != params.length()) {
+    return tk_check_flat(e, expected, env, where_)
+  }
+  let bound = tk_subst(vcase_mark(adt, params, tenv_get(env, "payload ".concat(n))),
+                       vcase_subst(adt, params, eargs))
+  var start = 0
+  if (bound != "" && c.args.length() > 0) {
+    let r = tk_check(c.args[0], bound, env,
+                     "`".concat(n).concat("(...)` payload"))
+    if (r.v != "") { return r }
+    start = 1
+  }
+  let rest = tk_arg_walk(c.args, start, env, [])
+  if (rest.v != "") { return rest.r }
+  return tk_ok(expected)
 }
 
 // Issue #2405 (gap 5): the reference's `compatible` resolves a declared
@@ -15243,18 +15293,23 @@ fn tk_check_match(m: MatchN, expected: Str, env: List[Bind], where_: Str) -> TIn
   if (v != "") { return { ty: "", v: v } }
   let s = tk_infer(m.scrut, env)
   if (s.v != "") { return s }
-  return tk_check_arms(m.arms, 0, expected, env, where_)
+  return tk_check_arms(m.arms, 0, expected, s.ty, env, where_)
 }
 
-fn tk_check_arms(arms: List[ArmN], i: Int, expected: Str, env: List[Bind],
-                 where_: Str) -> TInf {
+// Issue #2472: each arm's payload binder takes the case's declared payload with
+// the SCRUTINEE's type arguments substituted (`match_arm_payload` over
+// `_scrutinee_spec`'s applied spec), so `Jj(x) => x` over `Mb[Int]` checks `x`
+// as `Int`. Before, every binder was left unknown and the arm could not refuse.
+fn tk_check_arms(arms: List[ArmN], i: Int, expected: Str, scrutTy: Str,
+                 env: List[Bind], where_: Str) -> TInf {
   if (i >= arms.length()) { return tk_ok(expected) }
   let a = arms[i]
-  let inner = a.bind == "" ? env : tenv_put(env, a.bind, "")
+  let pay = match_arm_payload_ty(scrutTy, a.pat, env)
+  let inner = a.bind == "" ? env : tenv_put(env, a.bind, pay)
   let r = a.isBlk ? tk_check(a.blkTail, expected, tk_arm_lets_unknown(a, inner), where_)
                   : tk_check(a.body, expected, inner, where_)
   if (r.v != "") { return r }
-  return tk_check_arms(arms, i + 1, expected, env, where_)
+  return tk_check_arms(arms, i + 1, expected, scrutTy, env, where_)
 }
 
 // A block arm's value is its tail; the names its lets bind are left unknown.
@@ -15534,15 +15589,25 @@ fn tk_case_payload(c: CallN, env: List[Bind], argTys: List[Str]) -> TInf {
   if (tenv_get(env, n) != "") { return tk_ok("") }
   let adt = tagged_case_adt(env, n)
   if (adt == "") { return tk_ok("") }
+  // issue #2472: a GENERIC variant's case BINDS the declaration's parameters
+  // from the argument, so the construction's type is the applied one
+  // (`Jj(1)` is `Mb[Int]`, not the bare head `Mb`) and a payload that does not
+  // fit is refused with the SUBSTITUTED payload type.
+  let vc = vcase_type(n, adt, argTys.length() > 0 ? argTys[0] : "", env)
+  if (vc.params.length() > 0) {
+    if (!vc.ok) {
+      return tk_mismatch("`".concat(n).concat("(...)` payload"), vc.bound,
+                         argTys[0])
+    }
+    return tk_ok(vc.ty)
+  }
   let pl = tenv_get(env, "payload ".concat(n))
   if (pl == "" || argTys.length() == 0 || argTys[0] == "") { return tk_ok("") }
-  // A GENERIC case (`type Mb[T] = Jj(T)`) unifies its payload against the
-  // argument, so `Jj(1)` and `Jj("s")` are both admitted. The case row holds
-  // the parameter's own spelling, which is not a concrete type to compare
+  // A case whose declared payload still mentions an UNSUBSTITUTED type
+  // parameter of something this walk cannot instantiate (an undeclared
+  // one-letter nominal, a fn's own `T`) is not a concrete type to compare
   // against; refusing there would be a false refusal with the wrong sentence,
-  // the one direction the gate may not err in (the wider `Mb[Int]` vs `Mb`
-  // readings are recorded elsewhere). An argument that still carries a type
-  // parameter is the same silence.
+  // the one direction the gate may not err in.
   if (tk_ty_has_tparam(pl, env) || tk_ty_has_tparam(argTys[0], env)) {
     return tk_ok("")
   }
@@ -15550,6 +15615,147 @@ fn tk_case_payload(c: CallN, env: List[Bind], argTys: List[Str]) -> TInf {
     return tk_mismatch("`".concat(n).concat("(...)` payload"), pl, argTys[0])
   }
   return tk_ok("")
+}
+
+// --------------------------- user generic variants (issue #2472)
+//
+// The self-host port of the reference's `generic_case_type`,
+// `applied_variant_spec`, `_scrutinee_spec` and `_check_generic_case`
+// (src/revl/typecheck.py, issue #2402). A declared variant's type parameters
+// ride beside its cases in the same type environment, under `vpar <Name>`
+// (comma-joined), the variant half of the generic record's `gpar` row; every
+// reader below substitutes them at the use. The LOWERING's `arm_payload` is
+// deliberately NOT one of them: the reference's `_arm_payload_type` is keyed by
+// the scrutinee's whole spelling and emits no `payload_type` for an applied
+// user generic, and the emitted IR has to keep agreeing with it.
+fn vpar_of(adt: Str, env: List[Bind]) -> List[Str] {
+  let r = tenv_get(env, "vpar ".concat(adt))
+  return r == "" ? [] : r.split(",")
+}
+
+// The case's declared payload with the variant's parameters replaced by
+// MARKERS (`?Mb.T`), so a type parameter of an enclosing generic fn that
+// happens to share the name cannot be captured by a substitution meant for the
+// variant (`generic_case_type`'s `markers`).
+fn vcase_mark(adt: Str, params: List[Str], payload: Str) -> Str {
+  var marks: List[Bind] = []
+  var i = 0
+  while (i < params.length()) {
+    marks = marks.push({ name: params[i],
+                         ty: "?".concat(adt).concat(".").concat(params[i]) })
+    i += 1
+  }
+  return tk_subst(payload, marks)
+}
+
+// The inverse of `vcase_mark`, for a diagnostic: a marker the unifier left
+// unbound is reported with the declaration's own name, as the reference's
+// `render_type` does.
+fn vcase_unmark(t: Str, adt: Str, params: List[Str]) -> Str {
+  var marks: List[Bind] = []
+  var i = 0
+  while (i < params.length()) {
+    marks = marks.push({ name: "?".concat(adt).concat(".").concat(params[i]),
+                         ty: params[i] })
+    i += 1
+  }
+  return tk_subst(t, marks)
+}
+
+// The parameter-to-argument substitution of an APPLIED variant, keyed by the
+// marker spelling. Empty when the arity disagrees, which is the silent answer:
+// the reference's `applied_variant_spec` resolves nothing then.
+fn vcase_subst(adt: Str, params: List[Str], args: List[Str]) -> List[Bind] {
+  if (params.length() == 0 || params.length() != args.length()) { return [] }
+  var sub: List[Bind] = []
+  var i = 0
+  while (i < params.length()) {
+    sub = sub.push({ name: "?".concat(adt).concat(".").concat(params[i]),
+                     ty: ty_trim(args[i]) })
+    i += 1
+  }
+  return sub
+}
+
+type VCase = { ty: Str, ok: Bool, bound: Str, params: List[Str] }
+
+// The type a GENERIC case construction has, and whether its payload fits.
+// `Jj(1)` for `type Mb[T] = Jj(T) | Nn` is `Mb[Int]`: the declared payload
+// unifies with the argument and binds `T`. A parameter the case does not
+// mention (every parameter of a bare `Nn`) is the `Any` placeholder the
+// built-in constructors already use (`None` is `Opt[Any]`), which a join fills
+// from a sibling and a declared boundary accepts. `ok == false` is the
+// reference's payload refusal, and `bound` the substituted declared payload it
+// names: the message carries the parameter's own spelling, never the marker.
+// An empty `params` means the ADT is not a declared generic variant.
+fn vcase_type(nm: Str, adt: Str, argT: Str, env: List[Bind]) -> VCase {
+  let params = vpar_of(adt, env)
+  if (params.length() == 0) {
+    return { ty: "", ok: true, bound: "", params: [] }
+  }
+  let marked = vcase_mark(adt, params, tenv_get(env, "payload ".concat(nm)))
+  var sub: List[Bind] = []
+  var ok = true
+  var bound = marked
+  if (marked != "" && argT != "") {
+    // `tk_unify` for a parameter that occurs MORE than once inside one payload
+    // widens the two bindings with `tk_join` (the compatible-directional join),
+    // where the reference's `unify` calls `join`, which fills an `Any`
+    // placeholder from the sibling. The self-host therefore keeps the less
+    // precise of the two (`Result[Int, Any]` where the reference says
+    // `Result[Int, Int]`). That is the SILENT direction: `Any` is more
+    // permissive, `ty` is only read here and by `infer_ctor`'s annotation, and
+    // no admission or emitted byte depends on it. Closing it is a change to
+    // `tk_unify`'s shared use by fn signatures, not to this port.
+    let u = tk_unify(marked, argT, sub, env)
+    sub = u.sub
+    bound = vcase_unmark(tk_subst(marked, u.sub), adt, params)
+    ok = tk_compat_env(bound, argT, env)
+  }
+  var out: List[Str] = []
+  var i = 0
+  while (i < params.length()) {
+    let b = tenv_get(sub, "?".concat(adt).concat(".").concat(params[i]))
+    out = out.push(b == "" ? "Any" : b)
+    i += 1
+  }
+  return { ty: ty_render(adt, out), ok: ok, bound: bound, params: params }
+}
+
+// Whether `t` is an APPLIED user generic variant (`Mb[Int]`), the shape whose
+// unresolved parameter is the `Any` placeholder a join may fill.
+fn vcase_mentioned(t: Str, env: List[Bind]) -> Bool {
+  if (t == "" || t.indexOf("[") < 0) { return false }
+  return vpar_of(parse_head(t), env).length() > 0
+}
+
+// The reference's `join` when the two sides are compatible: the kept side with
+// every type argument that is only the unresolved placeholder `Any` replaced by
+// the other side's argument in the same position (`_fill_unknown_args`). `Nn`
+// alone is `Mb[Any]`, so `if (c) { Nn } else { Jj(1) }` is `Mb[Int]`.
+fn vfill_any(keep: Str, other: Str) -> Str {
+  let kh = parse_head(keep)
+  let ka = type_args(keep)
+  let oa = type_args(other)
+  if (kh == "" || kh != parse_head(other) || ka.length() != oa.length()) {
+    return keep
+  }
+  var out: List[Str] = []
+  var changed = false
+  var i = 0
+  while (i < ka.length()) {
+    let f = ka[i] == "Any" && oa[i] != "Any" ? oa[i] : vfill_any(ka[i], oa[i])
+    if (f != ka[i]) { changed = true }
+    out = out.push(f)
+    i += 1
+  }
+  return changed ? ty_render(kh, out) : keep
+}
+
+fn vcase_join_fill(a: Str, b: Str, env: List[Bind]) -> Str {
+  if (tk_compat_env(a, b, env)) { return vfill_any(a, b) }
+  if (tk_compat_env(b, a, env)) { return vfill_any(b, a) }
+  return ""
 }
 
 // Whether a type spelling still mentions an UNSUBSTITUTED type parameter: a
@@ -15616,7 +15822,9 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // is unknown or a body-rebound name shadows the constructor, which is the
   // reference's own gradual silence.
   let cpl = tk_case_payload(c, env, a.tys)
-  if (cpl.v != "") { return cpl }
+  // A refusal, or (issue #2472) the APPLIED type of a generic case
+  // construction, which the annotation engine would answer as the bare head.
+  if (cpl.v != "" || cpl.ty != "") { return cpl }
   // docs/design/457 T2b: a bare-name callee against the signature table, and a
   // method callee against the host stub surface / `_BUILTIN_SIG`. Both MISS
   // rather than guess where the premise they need is not proven, and the
@@ -15779,6 +15987,16 @@ fn tk_if(cond: Expr, then_: Expr, els: Expr, env: List[Bind]) -> TInf {
   if (b.v != "") { return b }
   if (grec_mentioned(a.ty, env) || grec_mentioned(b.ty, env)) {
     return tk_if_join(a.ty, b.ty, env)
+  }
+  // issue #2472: an APPLIED user generic's unresolved parameter is the `Any`
+  // placeholder (`Nn` is `Mb[Any]`), which the sibling branch fills
+  // (`_fill_unknown_args`): `if (c) { Nn } else { Jj(1) }` is `Mb[Int]`. Only
+  // a pair whose `join` exists is decided here; a disagreement keeps the
+  // annotation engine's unknown, which is the silent direction.
+  if (a.ty != "" && b.ty != ""
+      && (vcase_mentioned(a.ty, env) || vcase_mentioned(b.ty, env))) {
+    let j = vcase_join_fill(a.ty, b.ty, env)
+    if (j != "") { return tk_ok(j) }
   }
   // issue #2405 (gap 2): two branches of known, unknown-free types that no
   // `join` meets draw the reference's refusal; the annotation engine's join
@@ -29762,17 +29980,23 @@ fn infer_ctor(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
     return ""
   }
   if (adt.startsWith("Opt")) { return "" }
-  return adt
+  // issue #2472: a GENERIC case construction's type is the APPLIED one
+  // (`Jj(1)` is `Mb[Int]`), as `infer_ast`'s `generic_case_type` answers.
+  let vc = vcase_type(nm, adt, arg0, env)
+  return vc.params.length() > 0 ? vc.ty : adt
 }
 
 // A NULLARY user case used as a bare value (`let s = C0_0`) types as its ADT.
 // The guard is the one `lir_expr`'s `Var` arm uses to decide the node is an
 // `adt` rather than a `var`, so the type and the node agree by construction.
+// A generic ADT's bare case names no parameter, so its type is the `Any`
+// placeholder (`Nn` is `Mb[Any]`, as `None` is `Opt[Any]`; issue #2472).
 fn infer_bare_case(n: Str, env: List[Bind]) -> Str {
   let adt = tagged_case_adt(env, n)
   if (adt == "" || tenv_get(env, "payload ".concat(n)) != "") { return "" }
   if (adt.startsWith("Result") || adt.startsWith("Opt")) { return "" }
-  return adt
+  let vc = vcase_type(n, adt, "", env)
+  return vc.params.length() > 0 ? vc.ty : adt
 }
 
 fn infer_call_ty(c: CallN, env: List[Bind]) -> Str {
@@ -30001,7 +30225,9 @@ fn infer_match_ty(m: MatchN, env: List[Bind]) -> Str {
   var i = 0
   while (i < m.arms.length()) {
     let a = m.arms[i]
-    let pay = arm_payload(scrutTy, a.pat, env)
+    // issue #2472: the checker's arm payload (`match_arm_payload` over the
+    // applied spec), so an arm over `Mb[Int]` binds `Int` rather than nothing.
+    let pay = match_arm_payload_ty(scrutTy, a.pat, env)
     var inner = a.bind == "" ? env : env_mut_put(env, a.bind, false)
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
     let bt = infer(a.body, inner)
@@ -30064,6 +30290,38 @@ fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
   // (`Result[Any, Any]`) never match a concrete `Result[Int, Str]` here.
   if (scrutTy != "" && tenv_get(env, "case ".concat(pat)) == scrutTy) {
     return tenv_get(env, "payload ".concat(pat))
+  }
+  let head = parse_head(scrutTy)
+  let args = type_args(scrutTy)
+  if (head == "Opt" && pat == "Some" && args.length() >= 1) { return args[0] }
+  if (head == "Result" && args.length() == 2) {
+    if (pat == "Ok") { return args[0] }
+    if (pat == "Err") { return args[1] }
+  }
+  return ""
+}
+
+// Issue #2472: the CHECKER's arm payload, `match_arm_payload` over
+// `_scrutinee_spec`. It differs from the lowering's `arm_payload` in exactly
+// one way: an APPLIED user generic resolves through its declared head with the
+// type arguments substituted (`Jj(x)` over `Mb[Int]` binds `x: Int`). The
+// reference keeps the two apart too: `_arm_payload_type` is keyed by the
+// scrutinee's whole spelling, so the emitted arm carries no `payload_type` for
+// an applied generic, while `infer_ast`/`check_ast` bind the substituted one.
+// `""` is the reference's unknown: an undeclared head, a wrong arity, or a
+// non-variant.
+fn match_arm_payload_ty(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
+  let adt = tenv_get(env, "case ".concat(pat))
+  if (adt != "") {
+    if (adt == scrutTy) { return tenv_get(env, "payload ".concat(pat)) }
+    let params = vpar_of(adt, env)
+    if (params.length() > 0 && parse_head(scrutTy) == adt) {
+      let sub = vcase_subst(adt, params, type_args(scrutTy))
+      if (sub.length() > 0) {
+        return tk_subst(vcase_mark(adt, params,
+                                   tenv_get(env, "payload ".concat(pat))), sub)
+      }
+    }
   }
   let head = parse_head(scrutTy)
   let args = type_args(scrutTy)
@@ -30632,6 +30890,27 @@ fn grec_rows(ts: List[Token], i: Int, j: Int, bend: Int, nm: Str,
   return out
 }
 
+// Issue #2472: a declared VARIANT's type parameters, from the `[T, U]` between
+// its name and its `=`. `lb` is the `[` and `rb` the `]`. Comma-joined, the
+// same shape as the generic record's `gpar` row, because every reader of it is
+// the same substitution. "" where the list cannot be taken whole, which leaves
+// the variant unresolved rather than guessed.
+fn variant_param_list(ts: List[Token], lb: Int, rb: Int) -> Str {
+  if (rb <= lb + 1) { return "" }
+  var ps: List[Str] = []
+  var k = lb + 1
+  while (k < rb) {
+    if (!atk(ts, k, "ident")) { return "" }
+    ps = ps.push(tkc(ts, k).text)
+    k += 1
+    if (k < rb) {
+      if (!atk(ts, k, ",")) { return "" }
+      k += 1
+    }
+  }
+  return ps.length() == 0 ? "" : ps.join(",")
+}
+
 fn decl_cases(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseStep {
   // the WHOLE declaration, not its first line. A variant is routinely written
   // over several lines (`pub type Method =` then one `| Case` per line), and a
@@ -30643,7 +30922,12 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseSte
   let lineHi = type_decl_end(ts, i + 1)
   let nm = tkc(ts, i + 1).text
   var j = i + 2
-  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  var pv = ""
+  if (atk(ts, j, "[")) {
+    let rb = skip_brackets(ts, j)
+    if (rb > j + 1) { pv = variant_param_list(ts, j, rb - 1) }
+    j = rb
+  }
   if (!atk(ts, j, "=")) { return { a: a, i: lineHi } }
   j += 1
   if (atk(ts, j, "{")) {
@@ -30661,8 +30945,13 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseSte
     return { a: { binds: fields, amb: a.amb }, i: bend }
   }
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
+  // issue #2472: a GENERIC variant's parameters (`vpar <Name>`, comma-joined)
+  // are what its case constructors and its applied match arms substitute. A
+  // list this reading cannot take whole records nothing, which leaves the
+  // variant unresolved, the silent direction.
   var k = j
-  var acc = a
+  var acc = pv == "" ? a
+    : { binds: tenv_put(a.binds, "vpar ".concat(nm), pv), amb: a.amb }
   while (k < lineHi) {
     if (atk(ts, k, "ident")) {
       let cn = tkc(ts, k).text
