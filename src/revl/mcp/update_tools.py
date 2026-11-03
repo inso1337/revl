@@ -291,11 +291,11 @@ def _plan_hash(binding: dict) -> str:
 def _widening_from_audits(before: dict, after: dict) -> dict:
     """Every authority axis that widened between two audits.
 
-    `audit_diff` carries seven differs: the crossing set and its reach,
-    per-emission capability scopes, host backends, recovery inverses,
-    capability registers and emission cardinality. A release can widen any of
-    them while adding no crossing, so all of them feed the acknowledgement
-    decision.
+    `audit_diff` carries eight differs: the crossing set and its reach,
+    per-emission capability scopes, host backends, inverse provenance, recovery
+    inverses, capability registers and emission cardinality. A release can widen
+    any of them while adding no crossing, so all of them feed the
+    acknowledgement decision.
     """
     from ..audit_diff import (diff_backends,  # noqa: PLC0415
                               diff_capability_scopes, diff_cardinality,
@@ -310,6 +310,7 @@ def _widening_from_audits(before: dict, after: dict) -> dict:
     buckets = {
         "added": list(drift["added"]),
         "reachWeakened": list(drift["reach_weakened"]),
+        "inverseWeakened": list(drift["inverse_weakened"]),
         "scopesWidened": list(scopes["scope_widened"]),
         "backendsAdded": list(backends["backends_added"]),
         "recoveryDropped": list(recovery["recovery_dropped"]),

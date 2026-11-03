@@ -79,7 +79,7 @@ what the human render prints on its `host code:` line, and it carries:
 | --- | --- |
 | `name` | the extern's name, or `"*"` for a first-class dispatch (a reach through a value whose target is not statically nameable). |
 | `class` | the G4 classification, one of the five boundary classes: `"pure"` (no observable effect), `"acquire"` (takes a resource that must be released), `"emission"` (an irreversible crossing out of the system), `"witnessed"` (a reversible host mutation that names its inverse), or `"local"` (a durable write to local state, which crosses no boundary and so asks no owner — item 2146). `"first-class dispatch"` is the pseudo-class for a `"*"` entry. May be `null` when the class is not known. |
-| `inverse` | the derived inverse-provenance class of this crossing, one value of the closed vocabulary in [the inverse class](#the-inverse-class) below. **Always present**; `unknown` is a value, never a missing field. |
+| `inverse` | the derived inverse-provenance class of this crossing, one value of the closed vocabulary in [the inverse class](#the-inverse-class) below. This version emits it on **every** entry; `unknown` is a value, never the way this version renders a missing field. A document captured before the field existed has no `inverse`, and that absence is not `unknown` (the two are not comparable). |
 | `capabilities` | the declared capability scope of a scoped `emission[...]` / `witnessed[...]` extern, as a sorted token list (e.g. `["fs"]`). **This token, not the name, is what a `capability <glob>` policy rule keys on.** Absent for an unscoped extern, whose token is its own name. A token carrying resource parameters (`fs.write(path="/data")`) appears with its parameters; a capability's own DECLARED dimensions (issue #1938, design 294) appear here too, which is additive to the schema and not to an existing token's bytes. |
 | `backends` | the backend tiers this extern has a body for (sorted), e.g. `["py"]`. |
 
@@ -115,7 +115,7 @@ every extern entry:
 | `declared` | an exact inverse the author declared | an `acquire`/`witnessed` extern's `undo` slot |
 | `generated` | an exact inverse derived from trusted metadata | reserved: no current declaration produces one |
 | `compensation` | a best-effort offset, not a restoration | a `compensate` slot on an `emission` |
-| `forward` | irreversible, but recoverable forward by a safe re-issue | a `deferred` emission carrying an idempotency register (`idempotent`, `idempotent(key: ...)`) |
+| `forward` | irreversible, but recoverable forward by re-issuing the crossing, where the declaration carries an idempotency register | a `deferred` emission with `idempotent` or `idempotent(key: ...)`. The register carried beside the class says how strong the claim is: `read`/`keyed` are free to re-issue, `declared` is fenced and operator-gated |
 | `irreversible` | an emission with no inverse, offset or forward claim | the emission rule (`docs/backend-ir-v3.md`) |
 | `unknown` | no provenance fact at all | anything else: a `pure` read or a `local` write (both are forbidden a slot), a class `null`, or the `"*"` first-class dispatch |
 
@@ -126,12 +126,14 @@ metadata, and anything else is `unknown`. Whether an `unknown` crossing may run
 is a separate policy decision made later, with this field in hand; this slice
 adds no refusal.
 
-`unknown` is a first-class value, not an omission: every entry carries the
-field. The vocabulary is closed, so a consumer may switch on it and must treat a
-value it does not recognise as `unknown`. A change of class between two
-generations is authority drift: `revl audit --diff` reports a weaker class as a
-weakening and fails the gate unless acknowledged
-([audit-diff.md](audit-diff.md#inverse-provenance-drift)).
+`unknown` is a first-class value, not an omission: every entry this version
+emits carries the field. The vocabulary is closed, so a consumer may switch on it
+and must treat a value it does not recognise as `unknown`. A change of class
+between two generations is authority drift: `revl audit --diff` reports a weaker
+class as a weakening and fails the gate unless acknowledged
+([audit-diff.md](audit-diff.md#inverse-provenance-drift)). Externs from a
+document captured before the field existed are not comparable and are skipped by
+that diff, never read as `unknown`.
 
 ## The human render is not a stability contract
 

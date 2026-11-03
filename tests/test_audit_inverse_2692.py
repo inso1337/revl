@@ -123,6 +123,16 @@ def test_an_unknown_value_ranks_below_every_known_class():
     assert inverse_rank("not-a-class") == 0
 
 
+def test_the_trust_order_is_the_documented_one():
+    # docs/audit-diff.md's weakening table and docs/interchange-format.md's
+    # vocabulary both present this order; the diff direction is derived from it.
+    ordered = ["declared", "generated", "compensation", "forward",
+               "irreversible", "unknown"]
+    ranks = [inverse_rank(cls) for cls in ordered]
+    assert ranks == sorted(ranks, reverse=True)
+    assert len(set(ranks)) == len(ordered)
+
+
 # ------------------------------------------------- qualified derivations
 
 def test_declared_exact_inverses_read_declared():
@@ -140,7 +150,12 @@ def test_an_extern_with_no_undo_and_no_register_reads_unknown():
         entry = _extern(audit, name)
         assert entry["inverse"] == "unknown", (name, entry)
     local = _extern(audit, "record")
-    assert local["class"] == "local" and "undo" not in local
+    assert local["class"] == "local"
+    # the fact comes from the lowered extern: a local write is forbidden an
+    # `undo` slot, so there is nothing for the class to read.
+    record_ir = next(ext for ext in compile_source(CORPUS, "corpus.rvl")["externs"]
+                     if ext["name"] == "record")
+    assert "undo" not in record_ir
 
 
 def test_an_emission_with_no_offset_and_no_forward_claim_is_irreversible():
@@ -294,6 +309,33 @@ def test_compensation_to_declared_is_a_strengthening_and_passes():
     assert result["inverse_weakened"] == []
     assert result["inverse_strengthened"] == ["inverse:deposit"]
     assert result["widened"] is False
+
+
+def test_a_baseline_captured_before_the_field_is_not_comparable():
+    # An audit captured before this slice carries no `inverse` on any extern.
+    # That absence is NOT `unknown`; the two sides are not comparable, so the
+    # diff must invent neither a weakening nor a strengthening.
+    current = _audit(_DECLARED)
+    legacy = {k: ([{kk: vv for kk, vv in ext.items() if kk != "inverse"}
+                   for ext in v] if k == "externs" else v)
+              for k, v in current.items()}
+    assert all("inverse" not in ext for ext in legacy["externs"])
+    result = evaluate(legacy, current)
+    assert result["inverse_weakened"] == []
+    assert result["inverse_strengthened"] == []
+    assert result["widened"] is False
+    assert "clean" in render(result, "legacy.json")
+
+
+def test_the_mcp_widening_report_names_inverse_drift():
+    # The MCP release report is a derived widening surface: every axis
+    # `evaluate` gates must be named there, or a release could be blocked with
+    # no bucket saying why.
+    from revl.mcp.update_tools import _widening_from_audits  # noqa: PLC0415
+
+    report = _widening_from_audits(_audit(_DECLARED), _audit(_COMPENSATION))
+    assert report["widened"] is True
+    assert report["inverseWeakened"] == ["inverse:deposit"]
 
 
 def test_the_human_diff_names_the_weakened_inverse():

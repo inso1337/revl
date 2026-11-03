@@ -25,8 +25,11 @@ is to be treated as `unknown`:
                   which is out of scope for this slice)
     compensation  a best-effort offset (`compensate ...`), not a restoration
     forward       irreversible, but recoverable forward by re-issuing the
-                  crossing, made safe by the declaration's idempotency register
-                  (a deferred emission with `idempotent`/`idempotent(key: ...)`)
+                  crossing, where the declaration carries an idempotency
+                  register (a deferred emission with `idempotent` or
+                  `idempotent(key: ...)`). The strength is the register's, not
+                  this class's: `read`/`keyed` are free to re-issue, while a
+                  `declared` claim is fenced and operator-gated.
     irreversible  an emission with no inverse, no offset and no forward claim
     unknown       no provenance fact at all
 
@@ -36,9 +39,11 @@ slot) or from trusted metadata, and anything else is `unknown`. Extending
 `inverse_class` to read synthesized inverses is a later slice; this one only
 makes the field exist, visible, and diffable.
 
-`unknown` is a VALUE, never a missing field: every audit extern entry carries
-`inverse`, so a consumer never has to tell "no provenance" from "the producer
-did not know about the field".
+`unknown` is a VALUE, never a missing field: every audit extern entry this
+version emits carries `inverse`, so a consumer never has to tell "no provenance"
+from "the producer did not know about the field". A document captured before the
+field existed has no `inverse` on its externs at all, and that absence is not
+`unknown`; `audit_diff.diff_inverses` treats it as not comparable.
 """
 
 from __future__ import annotations
@@ -91,9 +96,11 @@ def inverse_class(extern: dict | None) -> str:
             return "compensation"
         # A deferred emission is the one crossing with an owed record to
         # re-issue. It is forward-recoverable only when the declaration carries
-        # an idempotency register (`idempotent`, `idempotent(key: p)`, or a
-        # keyed/declared claim); without one the recovery is the absent tier of
-        # `docs/crash-recovery.md` §4b, which is not a forward claim at all.
+        # an idempotency register (`idempotent`, `idempotent(key: p)`); without
+        # one the recovery is the absent tier of `docs/crash-recovery.md` §4b,
+        # which is not a forward claim at all. The register itself, carried
+        # beside this class, says how strong the claim is: `read`/`keyed` are
+        # free to re-issue, `declared` is fenced and operator-gated.
         if extern.get("deferred") and extern.get("register"):
             return "forward"
         return "irreversible"

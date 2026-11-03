@@ -539,19 +539,25 @@ def diff_inverses(prev: dict, new: dict) -> dict:
     `forward`, `irreversible`, `unknown`). The class is a function of the
     declaration alone, so the diff keys on the extern name.
 
-    A class that moves to a WEAKER recovery story (toward `unknown` in
-    `inverse_rank`, e.g. `declared -> compensation`, or `compensation ->
-    irreversible`) is a weakened inverse: the crossing that could be put back
-    exactly can now only be offset, or not recovered at all. It is the same
-    dangerous direction as a reach weakening and feeds the gate the same way. A
-    move toward a stronger class is a strengthening (safe). Only externs in both
-    audits are compared: a brand-new extern is already flagged by its `host:`
-    crossing, and a removed one gave up its reach entirely.
+    A class that moves to a WEAKER recovery story (later in `inverse_rank`, e.g.
+    `declared -> compensation`, or `compensation -> irreversible`) is a weakened
+    inverse: the crossing that could be put back exactly can now only be offset,
+    or not recovered at all. It is the same dangerous direction as a reach
+    weakening and feeds the gate the same way. A move toward a stronger class is
+    a strengthening (safe). Only externs in both audits are compared: a brand-new
+    extern is already flagged by its `host:` crossing, and a removed one gave up
+    its reach entirely.
+
+    An extern whose entry on EITHER side has no `inverse` is skipped, not read
+    as `unknown`: a baseline captured before this field existed did not record a
+    class at all, and treating that absence as a class would report drift on a
+    crossing that did not change. Absence is not `unknown`; it is not
+    comparable.
     """
-    prev_inv = {ext["name"]: ext.get("inverse")
-                for ext in prev.get("externs") or []}
-    new_inv = {ext["name"]: ext.get("inverse")
-               for ext in new.get("externs") or []}
+    prev_inv = {ext["name"]: ext["inverse"]
+                for ext in prev.get("externs") or [] if "inverse" in ext}
+    new_inv = {ext["name"]: ext["inverse"]
+               for ext in new.get("externs") or [] if "inverse" in ext}
     weakened: list[str] = []
     strengthened: list[str] = []
     for name in prev_inv.keys() & new_inv.keys():
@@ -688,7 +694,8 @@ def diff_cardinality(prev: dict, new: dict) -> dict:
 
 def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
              accept_all: bool = False) -> dict:
-    """The gate decision. `unacknowledged` are the additions that fail.
+    """The gate decision. `unacknowledged` are the additions and the weakened
+    authority facts (a loosened reach, a weaker inverse class) that fail.
 
     exit-code contract: 0 iff `unacknowledged` is empty (a clean or fully
     acknowledged diff); nonzero otherwise.
