@@ -4503,9 +4503,12 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     }
     return { lines: [
       "  {",
-      `    const _f = $revl_plug($revl_root, ${comp_name}, {${items.join(", ")}})`,
-      "    await _f",
-      `    $revl_fibers.set(${json_dumps(comp_name)}, await _f)`,
+      // issue #3053: the load block's fiber handle is `$revl_f`, not `_f`, so
+      // it cannot shadow a lifecycle `let _f` a config expression reads in the
+      // initializer's temporal dead zone.
+      `    const $revl_f = $revl_plug($revl_root, ${comp_name}, {${items.join(", ")}})`,
+      "    await $revl_f",
+      `    $revl_fibers.set(${json_dumps(comp_name)}, await $revl_f)`,
       "    await _revl_settle()",
       "  }"
     ], counter: c }

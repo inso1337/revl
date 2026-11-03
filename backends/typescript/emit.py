@@ -5738,9 +5738,13 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
                     for field, value in cfg.items())
                 body.append("  {")
-                body.append(f"    const _f = $revl_plug($revl_root, {component}, {{{cfg_items}}})")
-                body.append("    await _f")
-                body.append(f"    $revl_fibers.set({_string(component)}, await _f)")
+                # issue #3053: the load block's own fiber handle carries the
+                # `$revl_` sigil too. A bare `_f` shadowed a lifecycle `let _f`
+                # for the whole block, so a config expression that read the
+                # binding (in the initializer's own TDZ) threw a ReferenceError.
+                body.append(f"    const $revl_f = $revl_plug($revl_root, {component}, {{{cfg_items}}})")
+                body.append("    await $revl_f")
+                body.append(f"    $revl_fibers.set({_string(component)}, await $revl_f)")
                 body.append("    await _revl_settle()")
                 body.append("  }")
             elif kind == "unload":

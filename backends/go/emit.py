@@ -474,15 +474,24 @@ _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
 #: shares. Go has no identifier sigil a revl name cannot spell (unlike ts's
 #: `$` or python's refused `_revl` namespace), so the collision is closed the
 #: way rust closes `root`: the USER name moves one rung of the same injective
-#: ladder and the emitter keeps the bare token. The lifecycle driver's
-#: function-scope bindings are its `revlT` receiver parameter, the `root`
-#: context, the `_fibers` registry, the `_revlLoadOrder` teardown order and the
-#: `_revlAt` step breadcrumb; a user `let` of any of those spellings emitted a
-#: second declaration in the same block ("root redeclared in this block", issue
-#: #3053). Only names that are actually bound BARE at that scope belong here: a
-#: driver local inside a `{ ... }` or `for` scope is shadowed, not redeclared,
-#: and needs no reservation.
-_EMITTER_RESERVED = {"revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt"}
+#: ladder and the emitter keeps the bare token.
+#:
+#: The function-scope half is the lifecycle driver's `revlT` receiver
+#: parameter, the `root` context, the `_fibers` registry, the `_revlLoadOrder`
+#: teardown order and the `_revlAt` step breadcrumb. A user `let` of any of
+#: those spellings emitted a second declaration in the same block ("root
+#: redeclared in this block", issue #3053).
+#:
+#: The call-step half (`_svc`, `_err`, `_r`, `_ok`) is block-scoped, but the
+#: driver writes the call result to the USER's binding by name (`<bind> =
+#: (_svc).Label()`), and a short declaration in the step's own block shadows
+#: that name first, so a user binding of one of these spellings made the
+#: assignment target the wrong variable (a go build type error). `_f`, `i`,
+#: `_i` and `_j` stay unreserved: their shadows are never read as a user value.
+_EMITTER_RESERVED = {
+    "revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
+    "_svc", "_err", "_r", "_ok",
+}
 
 
 def _safe_local(name: str) -> str:

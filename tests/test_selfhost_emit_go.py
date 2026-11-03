@@ -1149,11 +1149,13 @@ def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_pa
 
 #: issue #3053: go has no identifier sigil a revl name cannot spell, so the
 #: reference renames a user binding that would redeclare one of the lifecycle
-#: driver's own function-scope names (`root` -> `root_`, rust's posture). A
+#: driver's own names (`root` -> `root_`, rust's posture), including the call
+#: step's block locals the driver writes the user's binding through. A
 #: provide-method parameter is the widest user-binding position both the
-#: reference and this port render; it proves the two `safe_local` ladders
-#: carry the same reserved set, byte for byte.
-_RESERVED_DRIVER_NAMES = ("revlT", "root", "_fibers", "_revlAt", "_revlLoadOrder")
+#: reference and this port render; it proves the two `safe_local` ladders carry
+#: the same reserved set, byte for byte.
+_RESERVED_DRIVER_NAMES = ("revlT", "root", "_fibers", "_revlAt", "_revlLoadOrder",
+                          "_svc", "_err", "_r", "_ok")
 
 
 @pytest.mark.parametrize("name", _RESERVED_DRIVER_NAMES)
@@ -1176,5 +1178,3 @@ fn identity(x: Int) -> Int {{ return x }}
     assert f"{name}_ " in got, (
         f"a provide-method parameter named {name!r} was not moved clear of the "
         f"lifecycle driver's own name (issue #3053)")
-
-
