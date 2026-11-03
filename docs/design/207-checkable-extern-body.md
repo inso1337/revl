@@ -493,7 +493,7 @@ end to end. Driving it there turned up one more fact worth recording next to
 this one: a `capability <token> requires register` rule selects a token only when
 that token is in the component's REACH, and a directly emitted extern
 contributes its own NAME to the reach set as host code, not its capability
-token — `__main__._boundary` fills the per-component `capabilities` map from
+token: `__main__._boundary` fills the per-component `capabilities` map from
 SERVICE-method emissions only. So the map-level reproducer above shows the wrong
 fold, but the rule never selected `db` in that composition at all; the
 end-to-end test declares `db` on one keyed extern and one bare-`idempotent`
@@ -519,9 +519,9 @@ produces.
 Landed as described, with one addition: `docs/crash-recovery.md` gained §4d for
 S2's recipe rather than a footnote next to the old caveat, because the recipe is
 the answer an operator arrives at §4b looking for. The register set is now
-exactly `{declared, keyed, read}`, and item 309's tripwire — which existed to
+exactly `{declared, keyed, read}`, and item 309's tripwire (which existed to
 flag the gap between what the lattice accepted and what a declaration could
-produce — became an assertion that the two are the same set, passing by
+produce) became an assertion that the two are the same set, passing by
 construction.
 
 Keep `strong` as the "either verified form" floor. After the deletion it means
@@ -569,7 +569,7 @@ declared xfail.
    is exactly `{read, keyed}` and `_reissue_permitted` falls through to the
    fail-closed arm for a name no descriptor can carry.
 4. **C4.** `_replay_tier` returns `free` for a declared-idempotent inverse
-   regardless of the register it carries, and `fenced` without the declaration —
+   regardless of the register it carries, and `fenced` without the declaration,
    which is why a body-shape register would have changed no recovery verdict.
 5. **C5.** A witnessed mutating inverse registers `declared` and satisfies
    neither `keyed` nor `strong`; `undo pure` is the only strong route and lower

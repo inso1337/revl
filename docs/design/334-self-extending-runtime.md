@@ -658,7 +658,7 @@ changes something a proposal has no business changing.
 1. **A proposal may not choose its own authority ADDRESS.** The item-246/251
    approval policy scopes a standing approval and an auto-approve rule by
    `(component glob, realm)`, and matches the realm half against
-   `ticket["realm"]` — which is `ClassMap.component_realm`
+   `ticket["realm"]`, which is `ClassMap.component_realm`
    (`approval.py:723`), which is `policy.component_realms` over the component
    IR's `isolate` map. An untrusted author writes its own component NAMES, so
    the glob half discriminates nothing against it; the realm was the only half
@@ -678,7 +678,7 @@ changes something a proposal has no business changing.
    co-composed `providers` module still places whatever the OPERATOR wrote. The
    agent's realms are refused; the operator's are untouched.
 
-   **AMENDED — the refusal belongs to the AUTHOR, not to this door.** Slice 2
+   **AMENDED: the refusal belongs to the AUTHOR, not to this door.** Slice 2
    shipped `no_realm_placement` as an opt-in that `self_extension` alone set,
    leaving it OFF in `untrusted_author` so item 330's per-turn `Session.admit`
    stayed byte-identical, and naming the per-turn case as the same question with
@@ -689,12 +689,12 @@ changes something a proposal has no business changing.
    `mcp.server.AuthoringTrust.profile()` backs `compile_under_authoring`, the
    one compiler door for agent-supplied source, and therefore the `revl_load`
    and `revl_swap` MCP verbs with inline `source`. A `revl_swap` replaces the
-   composition and the successor keeps serving — exactly what this section says
+   composition and the successor keeps serving, exactly what this section says
    about `propose`, and it ran at DEFAULT authoring trust with no operator flags.
 
    Second, "additive, torn down with the turn" bounds the DURATION, not the
    authority. `Session._wire_turn` rebuilds the class map over the MERGED
-   composition — it has to; skipping it was a total class-(c) approval bypass —
+   composition: it has to; skipping it was a total class-(c) approval bypass,
    so the turn's components sit in the live ir and `ClassMap.component_realm`
    reads their `isolate` map like any other. The realm the turn wrote for itself
    is the `ticket["realm"]` half of every match its own crossings are judged by,
@@ -720,15 +720,15 @@ changes something a proposal has no business changing.
    still serving (the instance is dead). The mislabel is not cosmetic:
    `SWAP_REVERTED` is the RETRY-shaped verdict, the one a self-extension loop
    answers by generating a better candidate, so a halted gate would be proposed
-   at forever instead of reconciled. `propose` now reads the halt latch FIRST —
-   ahead of the forbidden-grant rule and any compile — and returns
+   at forever instead of reconciled. `propose` now reads the halt latch FIRST (
+   ahead of the forbidden-grant rule and any compile) and returns
    `admitted=False, code="HALTED"` pointing at `revl recover`. It re-reads the
    latch in the swap's `except` arm too, because the race is real and needs no
    second thread: the swap runs the item-246 activation gate, which calls the
    embedder's `approver` callback, which is host code that may hit the E-Stop
    from inside the very call `propose` is awaiting. `Session.halted` is the
    public read that makes the domination expressible, and `Gate.estop` /
-   `Gate.estop_report` put the button and the inventory on the facade — a
+   `Gate.estop_report` put the button and the inventory on the facade, a
    guarantee about a button no embedder can reach is not a guarantee.
 
 **What a proposal can and cannot change (the whole answer, after slice 2).**
@@ -736,18 +736,18 @@ changes something a proposal has no business changing.
 | | |
 | --- | --- |
 | CAN change | which component implements a key; the revl-level composition over the granted providers; the set of keys served (subject to the health gate, which holds the successor to the keys gen N actually served) |
-| CANNOT change | the host code (no new `extern`, no transitive host-extern reach — G8); the reach (`granted` only — R2); the decider (the forbidden-grant rule); its own authority address (no realm — G9); whether a halt applies to it (`HALTED` dominates) |
+| CANNOT change | the host code (no new `extern`, no transitive host-extern reach; G8); the reach (`granted` only; R2); the decider (the forbidden-grant rule); its own authority address (no realm; G9); whether a halt applies to it (`HALTED` dominates) |
 | MUST pass | the standalone decision compile under `self_extension(granted)` (= `untrusted_author(granted)`), then the item-246 activation gate and the post-activation health gate on the swap, with `_abort_swap` back to gen N on any failure |
 
-Everything in the CANNOT row needs a FRESH admission — the operator-gated
-trusted `swap`/`load`, where a human reviewed it — and none of it is reachable
+Everything in the CANNOT row needs a FRESH admission (the operator-gated
+trusted `swap`/`load`, where a human reviewed it), and none of it is reachable
 from the autonomous loop.
 
 That premise is about WHO AUTHORED the source, and it does not hold for a
 `swap`/`load` whose source arrived over the MCP transport: the server itself
 classifies inline `source` and `modules` as agent-authored and applies the
 untrusted-author profile to them. A "fresh admission" is the operator's own
-reviewed bytes — a `.rvl` file inside a sanctioned root (no MCP verb writes to
+reviewed bytes, a `.rvl` file inside a sanctioned root (no MCP verb writes to
 disk), an explicit `--author-trust trusted`, or a CLI caller passing
 `over_the_transport=False`. The whole CANNOT row is enforced at all three doors
 that admit an untrusted author's source, not at `propose` alone.
@@ -803,7 +803,7 @@ reverts to gen N with the instance state intact; a provider hand-off carries its
 genuinely-new-host-code path (operator gate or item 411); and the per-turn
 `Session.admit` realm question named in slice 2's (1).
 
-**Slice 4 (LANDED): what a proposal INHERITS — the per-turn handle.** Slices 1-3
+**Slice 4 (LANDED): what a proposal INHERITS (the per-turn handle).** Slices 1-3
 bound what a candidate may REACH (`untrusted_author`), what authority ADDRESS it
 may write for itself (`no_realm_placement`), what happens when it fails to
 activate (the health gate) and what live state may cross onto it (the
@@ -814,21 +814,21 @@ handle dispatched by KEY NAME against the live session (`AdmitHandle.call`, and
 separately the facade `Handle.call`, which reimplemented the same key check and
 went straight to `Session.call`). A key name is not a binding. `Session.swap`
 disposes the WHOLE composition, so after a `propose` the turn the handle names
-is gone — while the key it names can be re-declared by the successor, and under
+is gone, while the key it names can be re-declared by the successor, and under
 `propose` the successor is agent-authored code that writes its own component and
 key names. An embedder that kept calling the handle it was given for its trusted
 turn landed in the agent's implementation instead, silently: no new `extern`, no
 ungranted service, no realm of its own, so nothing the admission profile checks
 was violated. The profile judges what a candidate REACHES; it cannot see what a
 stale caller hands it. This is the same shape as the record-mode frame
-attribution slice 3 fixed — state keyed to a name outliving the thing the name
-was meant to bound — and it failed OPEN.
+attribution slice 3 fixed (state keyed to a name outliving the thing the name
+was meant to bound), and it failed OPEN.
 
 The binding is the generation's item-245 owner, which is exactly the frame
 `AdmitHandle`'s own docstring promises the turn's crossings register into.
 `_install_session_owner` builds a FRESH owner for every generation that loads
 (`load`, `swap`'s successor, `_abort_swap`'s reloaded predecessor) and `_reset`
-drops it, while `_wire_turn` — additive, no generation change — leaves it alone.
+drops it, while `_wire_turn` (additive, no generation change) leaves it alone.
 So the rule is one line: a handle is live while the owner it was minted under is
 the live owner. A handle whose owner moved refuses `STALE_HANDLE`, naming the
 generation it was minted against, and the generation check runs BEFORE the key
@@ -843,14 +843,14 @@ and cannot alias.
 
 Three consequences, all deliberate. A REFUSED proposal swaps nothing, so the
 generation never moves and the handle stays live (the non-vacuity control). A
-sibling turn admitted alongside rebuilds the class map — the surface epoch moves
-— but not the generation, so earlier turns keep their handles. And a REVERTED
+sibling turn admitted alongside rebuilds the class map (the surface epoch moves
+), but not the generation, so earlier turns keep their handles. And a REVERTED
 proposal does invalidate: `_abort_swap` disposes and re-loads the predecessor,
 so the turn's fibers were torn down and re-activated and the handle no longer
 addresses the instance it was minted onto. `Gate.call` keeps serving gen N
 throughout, which is EDGE 1's guarantee and is untouched. Seven tests.
 
-**Slice 5 (LANDED): what a proposal INHERITS by NAME — the reviewed blast set.**
+**Slice 5 (LANDED): what a proposal INHERITS by NAME, the reviewed blast set.**
 Slice 2 looked at the `(component glob, realm)` pair the item-246/251 approval
 policy scopes a standing approval and an auto-approve rule by, closed the realm
 half (`no_realm_placement`, G9), and dismissed the other half in one clause: "an
@@ -893,7 +893,7 @@ re-deriving the budget would renew it), and `_auto_rule_suspended` checks growth
 first and then signature drift. The digest covers the component's `body`,
 `provides`, `requires` and `config` and excludes `source`, which is the spelling
 of a path rather than of the component and moves for reasons that are not
-changes of code — a composition compiled from another directory, `propose`'s own
+changes of code, a composition compiled from another directory, `propose`'s own
 `candidate.rvl` staging name.
 
 Deliberately AUTHOR-BLIND, and that is the design decision, not an accident of
@@ -912,8 +912,8 @@ proposal swaps nothing, so the reviewed component is still live and still covere
 (the non-vacuity control); a proposal carrying the reviewed component's OWN code
 digests identically and stays covered, through `propose`, which is what
 distinguishes a bind on the code from a bind on the verb; and a generation that
-re-materializes the identical composition — the common case, and every `uses` /
-`ttl` budget test in `tests/test_distill_enforcement.py` — is unchanged. Five
+re-materializes the identical composition (the common case, and every `uses` /
+`ttl` budget test in `tests/test_distill_enforcement.py`) is unchanged. Five
 tests in `tests/test_334_reviewed_name_substitution.py`; three of them fail on
 the predecessor and both controls pass on it.
 
@@ -929,7 +929,7 @@ EMPTY RESERVATION, there is no rust `Session` and no witnessed-effect runtime,
 so items 243/245 are unavailable on that tier. That is no longer true.
 `session.rs` now carries a real `Session` state machine: the generation state,
 the untrusted-author admission ENTRY (`propose`'s decision half, wired in this
-design's order — halt-dominance, then the forbidden-grant rule, then the
+design's order: halt-dominance, then the forbidden-grant rule, then the
 standalone decision), an `Externs` registry that enforces the item-243 pair
 rules at declaration time (`UNKNOWN_INVERSE`, `INVERSE_NOT_LOCAL`,
 `INVERSE_NOT_CALLABLE`), and `call`/`commit`/`abort` that RUN the host bodies
@@ -938,7 +938,7 @@ measurement rather than a report. `Admission::Admitted` also has a reachable
 arm now.
 
 What is still missing is the ACCEPT half, and it is one thing: `compile_to`
-refuses on every tier (`crates/revl-gate/src/lib.rs`, Stage 4 — the self-host
+refuses on every tier (`crates/revl-gate/src/lib.rs`, Stage 4: the self-host
 emitters still depend on `@py`-only helper externs, so there is no native
 emitter to run). A rust host can therefore DECIDE on an agent-proposed
 candidate and fail closed (`NO_ADMISSION`), but it cannot turn one into a
