@@ -285,7 +285,9 @@ SIGN_DOMAINS = {
     "2.0": b"revl.model-decision/v2\x00",
 }
 
-#: The domain :func:`seal` writes and the fallback for an unknown version.
+#: The domain :func:`seal` writes and the fallback for an unknown version. It
+#: is the CURRENT version's tag, not a stable 1.0 tag: out-of-tree code that
+#: MACs a 1.0 record must use :data:`SIGN_DOMAINS` rather than this constant.
 SIGN_DOMAIN = SIGN_DOMAINS[EVIDENCE_VERSION]
 
 #: The one member of a sealed record that the MAC does not cover: itself.
@@ -743,7 +745,8 @@ def _check_template(template_digest: Any,
                        "template_absence_reason, so which template produced "
                        "the prompt is silent; an absent identity must be "
                        "explicit and named")
-    if not _HEX64.match(str(template_digest)):
+    if not isinstance(template_digest, str) \
+            or not _HEX64.match(template_digest):
         return Verdict(False, EVIDENCE_VOCABULARY,
                        f"template_digest is not a {HASH_ALG} digest of the "
                        f"unfilled template text ({template_digest!r})")

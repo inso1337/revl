@@ -402,6 +402,29 @@ def test_each_version_has_its_own_mac_domain():
     body = {k: v for k, v in v1.items() if k != me.SIGNATURE_FIELD}
     relabelled = dict(body, version="2.0")
     assert me._sign(body, KEY) != me._sign(relabelled, KEY)
+    # the 1.0 MAC presented on a 2.0 label is refused by the domain, not read
+    cross = dict(relabelled, **{me.SIGNATURE_FIELD: v1[me.SIGNATURE_FIELD]})
+    assert me.verify(cross, KEY).link == me.EVIDENCE_SIGNATURE
+
+
+def test_the_1_0_body_is_frozen():
+    """The compatibility promise rests on this exact member set. Pinning it
+    here means a member added to 1.0 by accident fails a test instead of
+    silently changing what an old record is checked against."""
+    assert set(me.BODY_MEMBERS_V1) == {
+        "kind", "version", "sign_alg", "hash_alg", "key_id", "recorded_at",
+        "component", "step_index", "role", "residence", "model_digest",
+        "placement_digest", "prompt_binding", "origins", "candidates",
+        "chosen", "outcome", "sampling", "policy_digest", "fallback_depth",
+        "retained",
+    }
+
+
+def test_every_accepted_version_has_one_body_and_one_domain():
+    versioned = set(me.EVIDENCE_VERSIONS)
+    assert versioned == set(me.BODY_MEMBERS_BY_VERSION)
+    assert versioned == set(me.SIGN_DOMAINS)
+    assert me.EVIDENCE_VERSION in versioned
 
 
 @pytest.mark.parametrize("member", sorted(me.BODY_MEMBERS_V1))
@@ -587,6 +610,7 @@ def test_an_explicit_template_absence_is_recordable(reason):
 @pytest.mark.parametrize("digest,absence", [
     (None, None),                      # silent about the template
     ("not-a-digest", None),            # not a digest of anything
+    (10 ** 63, None),                  # 64 digits, but not a string
     (None, "because"),                 # outside the reason vocabulary
     (D("classify {ticket}"), "unpublished"),  # both arms at once
 ])

@@ -161,12 +161,14 @@ provider's declaration. §4.5 is what that does and does not prove.
 
 **Why a version bump, and not additive members.** A `1.0` record verifies under
 its own body, its own closed member set and its own MAC domain
-(`SIGN_DOMAINS`). Adding the members to `1.0` would have made them optional to
-an old verifier; bumping the version instead means each record is checked
-against the body it was sealed with, and neither version can be relabelled. A
-`2.0` record rewritten as `1.0` fails its MAC, and even a key holder who re-MACs
-it is refused for carrying members `1.0` does not define. A `1.0` record
-rewritten as `2.0` is missing the claims `2.0` requires.
+(`SIGN_DOMAINS`). Adding the members to `1.0` would have made every 1.0 record
+that did not carry them fail, and it would have left a verifier unable to tell
+an old record from a new one whose member was forgotten. Bumping the version
+instead means each record is checked against the body it was sealed with, and
+neither version can be relabelled. A `2.0` record rewritten as `1.0` fails its
+MAC, and even a key holder who re-MACs it is refused for carrying members `1.0`
+does not define. A `1.0` record rewritten as `2.0` is missing the claims `2.0`
+requires.
 
 The limit, stated rather than implied: `seal()` only ever writes `2.0`, so a
 record this tree produces carries the three claims. A provider that holds the
@@ -466,7 +468,7 @@ and a verifier laxer than its sealer is the other half of the same split.
 
 ## 7. Non-vacuity
 
-259 tests pass in `tests/test_model_evidence_517.py`, none skip. A passing test
+262 tests pass in `tests/test_model_evidence_517.py`, none skip. A passing test
 is not evidence until it has been seen to fail, so three defects were injected
 into a clean tree and the suite re-run. The numbers below were measured when
 this note landed; the generated per-member sets have grown with the body since,
