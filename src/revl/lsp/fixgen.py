@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, fields, is_dataclass
 
-from ..parser import ExprCall, ExprField, ExprVar, Parser, Program
+from ..parser import ExprCall, ExprField, ExprVar, LetEffect, Parser, Program
 from ..errors import RevlError
 from .analysis import compute_diagnostics
 from .document import find_symbol_column, line_text, lines_of
@@ -246,6 +246,135 @@ def _fix_zero_arg_sized_receiver(text: str, diagnostic: dict,
     )
 
 
+def _dotted_target(expr) -> str | None:
+    """The dotted name an acquisition expression calls, or None."""
+    if isinstance(expr, ExprCall):
+        expr = expr.callee
+    if isinstance(expr, ExprVar):
+        return expr.name
+    if isinstance(expr, ExprField):
+        head = _dotted_target(expr.target)
+        return f"{head}.{expr.name}" if head else None
+    return None
+
+
+def _g4_site_undo(text: str, diagnostic: dict, filename: str) -> Fix | None:
+    """G4 — a mutation with no inverse; spell the inverse at the site.
+
+    The one mechanical repair on a missing-undo refusal is the `site-undo`
+    one: on the bound acquisition (`let h = effect open_h()`), append
+    `undo close_h(h)` (or the host family's release, `undo h.close()`). The
+    inverse is the DECLARED one, so the repair cannot invent a teardown the
+    compiler does not already know: a host acquisition's release comes from
+    the host-stub family table, and an extern's from its own declared `undo`
+    slot. When the source spells no binding, or the inverse is not the
+    single `result`/release shape, no candidate is offered; the prose repair
+    stands. `generate_fix` still verifies the candidate by recompiling.
+
+    The parser refuses a dotted acquisition (`Pool.open(...)`) while it parses,
+    so the AST is unavailable for that shape; the lexical path reads the one
+    line plus the extern declarations instead. The bare-name shape parses (the
+    gate is deferred to lowering), so its AST path is the authoritative one;
+    the line guard below still declines a multi-line acquisition rather than
+    guessing where the call ends."""
+    line0 = diagnostic["range"]["start"]["line"]
+    row = line_text(text, line0)
+    start = row.find("effect")
+    if start < 0:
+        return None
+    # the whole acquisition must close on its own line: appending after a
+    # continuation would cut the call in half
+    tail = row[start:]
+    if tail.count("(") != tail.count(")") or "//" in tail:
+        return None
+    program = _parse(text, filename)
+    inverse = None
+    if program is not None:
+        node = None
+        for candidate in _walk_nodes(program):
+            if (isinstance(candidate, LetEffect) and candidate.line == line0 + 1
+                    and candidate.undo is None):
+                if node is not None:
+                    return None        # ambiguous: more than one at this line
+                node = candidate
+        if node is not None:
+            inverse = _site_inverse(node.bind, _dotted_target(node.acquire),
+                                    program.externs)
+    if inverse is None:
+        inverse = _lexical_site_inverse(row, text)
+    if inverse is None:
+        return None
+    end = len(row.rstrip())
+    edit = _replace_edit(line0, end, end, f" undo {inverse}")
+    return Fix("G4", f"Add the acquisition's inverse: `undo {inverse}`", [edit])
+
+
+_SITE = re.compile(
+    r"\beffect\s+(?:await\s+)?(?P<target>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
+_BOUND = re.compile(r"\blet\s+(?P<bind>[A-Za-z_]\w*)\s*=\s*$")
+
+
+def _lexical_site_inverse(row: str, text: str) -> str | None:
+    """The inverse for a refused line whose program does not parse.
+
+    Used for the parser's own domain (a dotted acquisition): the line is read
+    for the binding and the call, and a bare extern's declared inverse for a
+    dotted name comes from the extern declarations text, not the AST."""
+    site = _SITE.search(row)
+    if site is None:
+        return None
+    bound = _BOUND.search(row[:site.start()])
+    if bound is None:
+        return None
+    bind, target = bound.group("bind"), site.group("target")
+    from ..typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415 — heavy module
+    release = _HOST_ACQUIRE_VERBS.get(target)
+    if release is not None:
+        return f"{bind}.{release}()"
+    if "." in target:
+        return None                 # a dotted call is not a bare extern
+    for decl in _EXTERN_UNDO.finditer(text):
+        if decl.group("name") == target:
+            return f"{decl.group('inverse')}({bind})"
+    return None
+
+
+#: an extern declaration that names its inverse in the one site-spellable
+#: shape, `undo close_h(result)`, over the acquired value only
+_EXTERN_UNDO = re.compile(
+    r"extern\s+\w+\s+fn\s+(?P<name>[A-Za-z_]\w*)\s*\([^)]*\)[^\n]*?"
+    r"\bundo\s+(?P<inverse>[A-Za-z_]\w*)\s*\(\s*result\s*\)")
+
+
+def _site_inverse(bind: str | None, target: str | None,
+                  externs) -> str | None:
+    """The inverse expression a missing-undo site should spell, or None.
+
+    Host stub families carry one release (`Pool.open` -> `close`, item 1859);
+    a declared extern carries its own `undo` slot, written `undo close(result)`
+    and therefore spelled at the site on the bound handle, `close(bind)`."""
+    if target is None or bind is None:
+        return None
+    from ..typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415 — heavy module
+    release = _HOST_ACQUIRE_VERBS.get(target)
+    if release is not None:
+        return f"{bind}.{release}()"
+    if "." in target:
+        return None                     # a dotted call is not a bare extern
+    for decl in externs:
+        if decl.name != target or decl.undo is None:
+            continue
+        undo = decl.undo
+        if not isinstance(undo, ExprCall) or not isinstance(undo.callee, ExprVar):
+            return None
+        args = undo.args or []
+        if (len(args) == 1 and isinstance(args[0], ExprVar)
+                and args[0].name == "result"):
+            return f"{undo.callee.name}({bind})"
+        return None
+    return None
+
+
 def _walk_nodes(value, seen: set[int] | None = None):
     """Yield dataclass nodes in the parser tree without following cycles."""
     if value is None or isinstance(value, (str, bytes, int, float, bool)):
@@ -294,6 +423,7 @@ def _parse(text: str, filename: str) -> Program | None:
 _GENERATORS = {
     "T2": _fix_t2_null,
     "A9": _fix_a9_provide_key,
+    "G4": _g4_site_undo,
     "REVL": _fix_zero_arg_sized_receiver,
 }
 

@@ -4679,6 +4679,32 @@ _HELD_DOC = (" `source`/`files` are optional when the session holds a "
              "answers `queried: \"session\"`.")
 
 
+def _compiled_sources(source: str | None, modules: dict | None,
+                      held: dict | None) -> dict[str, str]:
+    """The text a check compiled, by the filename its errors name (issue #2684).
+
+    An inline candidate compiles as `<candidate>.rvl`; `modules` are overlaid
+    on the disk at their paths, so an edited buffer is the text that compiled
+    even when the path also exists on disk. `held` carries the same buffers for
+    a held-session check, plus `files_content`: the files no edit touched, as
+    they read when the session loaded them. The map is the only text the fixgen
+    engine may verify a repair against; a `files` entry with none of these is
+    left out rather than read from disk, because the disk copy may be pre-edit
+    text the compile never saw."""
+    texts: dict[str, str] = {}
+    if source is not None:
+        texts["<candidate>.rvl"] = source
+    for path, text in (modules or {}).items():
+        if isinstance(path, str) and isinstance(text, str):
+            texts[path] = text
+            texts[os.path.abspath(path)] = text
+    for path, text in ((held or {}).get("files_content") or {}).items():
+        if isinstance(path, str) and isinstance(text, str):
+            texts.setdefault(path, text)
+            texts.setdefault(os.path.abspath(path), text)
+    return texts
+
+
 def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     """Compile a candidate as sent, and return `(payload, ir)`.
 
@@ -4692,10 +4718,16 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     the compile reads, while `held` carries the edited buffers the argument
     shape cannot (a `files` set's edited text rides as `modules`, but its
     `files_content` is what the comment index wants)."""
+    source, _files, modules = _candidate_of(arguments)
     try:
-        ir = _compile(*_candidate_of(arguments))
+        ir = _compile(source, _files, modules)
     except RevlError as error:
-        refused = report(error)
+        # issue #2684: hand the fixgen repair engine the text this compile read,
+        # so a G4 record's mechanical repair carries a verified `fix_code`
+        # rather than only the prose. It is never read from `error.filename`:
+        # an edited buffer rides as a `modules` overlay over a real path, and
+        # the disk copy there is pre-edit text that did not compile.
+        refused = report(error, sources=_compiled_sources(source, modules, held))
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
@@ -4707,7 +4739,6 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     # `fillSpec` — the expected type, the emission upper bound, the in-scope
     # bindings and the reachable service signatures the checker already knew at
     # that position — so the hole can be filled directly (docs/holes.md §8).
-    source, _files, modules = _candidate_of(arguments)
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
