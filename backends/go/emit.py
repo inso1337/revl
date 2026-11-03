@@ -508,8 +508,10 @@ def _safe_local(name: str) -> str:
     returned unchanged and can never equal a shifted name, because a shifted
     name's root is reserved and an unchanged name's root is not. The output is
     never itself reserved: no member of `_GO_KEYWORDS` or `_EMITTER_RESERVED`
-    ends in `_`. Only a name whose root is reserved can change, so no existing
-    program's output moves."""
+    ends in `_`. Only a name whose root is reserved can change, so a program
+    that binds no reserved name emits byte-identically to before; binding one
+    of the driver's own spellings now moves the USER name one rung clear
+    (issue #3053)."""
     n = str(name)
     root = n
     while root:
