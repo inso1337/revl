@@ -1,0 +1,16 @@
+// A provide-method `var out = []` read in a way the only-sized fallback
+// cannot excuse (`out.join`). The frontend admits it and the go reference
+// REFUSES the document by name: nothing types the literal and Go would reject
+// the module (issue #2898).
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS.
+service Count { fn count() -> Int }
+component C provides count: Count {
+  provide count {
+    fn count() {
+      var out = []
+      let s = out.join(",")
+      return s.length()
+    }
+  }
+}

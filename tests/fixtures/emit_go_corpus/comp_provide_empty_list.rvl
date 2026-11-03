@@ -1,0 +1,17 @@
+// A provide method that binds an untyped `[]` and returns it: the binding
+// takes the method's declared return type (issue #2898), which is
+// `_emit_method_body`'s let arm on the live path this tier carries. An
+// annotated `let pinned: List[Str] = []` takes its pin with no inference, and
+// the `.length()` read is a `builtin` node, which is what makes the frontend
+// stamp the document ir_version 3 (a document of components alone is v1).
+service Dup { fn dup(xs: List[Str]) -> List[Str] }
+component D provides dup: Dup {
+  provide dup {
+    fn dup(xs) {
+      var out = []
+      let pinned: List[Str] = []
+      let n = out.length()
+      return out
+    }
+  }
+}

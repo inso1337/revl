@@ -1,0 +1,10 @@
+// An untyped `[]` read only as an element of another list literal. The
+// frontend admits it, and the go reference REFUSES it by name: there is no
+// declared List type anywhere the binding flows, and Go fixes a composite
+// literal's element type at the literal (issue #2898).
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS.
+fn w() -> List[List[Int]] {
+  var row = []
+  return [row]
+}

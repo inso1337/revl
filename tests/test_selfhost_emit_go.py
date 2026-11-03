@@ -85,6 +85,12 @@ CORPUS = [
     "calls.rvl",     # free-function calls + the call-return type pin on a `let`
     "strings.rvl",   # string `+` as Go `+`, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow, Map-typed passthru
+    # issue #2898: an untyped `[]` typed from where its binding flows, from what
+    # is pushed or concatenated into it, else the slice main gave it when only
+    # sized; two bindings of one name in disjoint blocks take their own types,
+    # and a third binding of one name takes the third key. The shapes the
+    # reference refuses live in tests/fixtures/emit_go_refusals/.
+    "empty_list_inference.rvl",
     "records.rvl",   # user record `type`s -> structs, record literals, field access
     "variants.rvl",  # user variant `type`s -> sealed ifaces, ADT construction, match
     # item 383 / 391 (self-host port) — the `.reduce` transform desugars to the
@@ -216,6 +222,12 @@ CORPUS = [
     "comp_provide_arith.rvl",
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
     "comp_to_char.rvl",  # Int.to_char in a provide body (issue #2285)
+    # ... and a method-body `let` binding an untyped `[]` (issue #2898):
+    # `_emit_method_body`'s let arm types it from the method's declared return
+    "comp_provide_empty_list.rvl",
+    # ... and a method-body `let` binding a user variant, which holds the
+    # variant's interface type rather than the concrete case struct
+    "comp_provide_variant_binding.rvl",
 ]
 
 # The combined-path and live-path documents, which import stc-go and are built
@@ -310,6 +322,9 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     "inference.rvl", "accumulators.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     # issue #106: every preamble and import the ported surface pulls in
     "stdlib_surface.rvl", "loop_shapes.rvl", "extern_config.rvl", "in_file_tests.rvl",
+    # issue #2898: every shape of an untyped `[]` the inference types, with the
+    # document's own test block run by `go test`
+    "empty_list_inference.rvl",
 ])
 def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
     """Agreement alone cannot catch a type error shared by both emitters."""
@@ -469,6 +484,28 @@ def test_the_closed_families_now_agree(emitted, reference, tmp_path, source):
     path.write_text(source)
     ir = compile_files([str(path)])
     assert emitted["emit_go_src"](ir) == reference.emit(ir)
+
+
+def test_an_untyped_empty_list_the_reference_refuses_is_named(emitted, reference):
+    """issue #2898: the shapes `_empty_list_type` refuses are refused here too.
+
+    A rejected document has no bytes to agree with, so these live in
+    `tests/fixtures/emit_go_refusals/` rather than in CORPUS: the reference
+    raises by name, and the port has no refusal channel, so it answers with the
+    marker instead of printing a literal Go would later reject.
+    """
+    cases = {
+        "unpinned_empty_list.rvl": "needs an expected List type",
+        "conflicting_empty_list.rvl": "conflicting expected List types",
+        "sliced_empty_list.rvl": "needs an expected List type",
+        "method_untyped_empty_list.rvl": "needs an expected List type",
+    }
+    for name, message in cases.items():
+        ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_go_refusals"
+                                / name)])
+        with pytest.raises(reference.EmitError, match=message):
+            reference.emit(ir)
+        assert "<<UNSUPPORTED-EMPTY-LIST-TYPE>>" in emitted["emit_go_src"](ir)
 
 
 def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_path):
