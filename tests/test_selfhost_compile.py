@@ -3919,6 +3919,143 @@ def test_the_well_typed_generic_record_forms_are_admitted(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2942, the self-host half: a declared type applied to the wrong number
+# of type arguments. PR #2947 gave the reference checker the refusal where the
+# annotation is written; the native gate now runs the reference's declared-arity
+# pass, in its own site order, ahead of every other admission phase.
+_TYPE_ARITY_2942_REFUSED = {
+    "zero_parameter_applied": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb[Int]) -> Int {\n"
+        "  return match m { Jj(x) => x, Nn => 0 }\n"
+        "}\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "generic_wrong_count": (
+        "type Box[T] = { v: T }\n"
+        "fn f(b: Box[Int, Int]) -> Int { return 1 }\n",
+        "`Box` takes 1 type argument(s), got 2 (`Box[Int, Int]`)",
+    ),
+    "record_field": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type R = { a: Int, m: Mb[Int] }\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "case_payload": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type W = Wr(Mb[Int]) | Em\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "alias_right_hand_side": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type Al = Mb[Int]\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+}
+
+_TYPE_ARITY_2942_ADMITTED = {
+    "zero_parameter_bare": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb) -> Int {\n"
+        "  return match m { Jj(x) => x, Nn => 0 }\n"
+        "}\n"),
+    "generic_right_count": (
+        "type Box[T] = { v: T }\n"
+        "fn f(b: Box[Int]) -> Int { return b.v }\n"),
+    # a declaration's own type parameter names the parameter, not the declared
+    # head of the same name
+    "declaration_type_parameter_shadows": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type W[Mb] = { v: Mb[Int] }\n"
+        "fn f() -> Int { return 1 }\n"),
+    # a declared head that reuses a builtin name keeps the builtin reading
+    "declared_name_that_is_a_builtin": (
+        "type Opt = A | B\n"
+        "fn f(o: Opt[Int]) -> Int { return 1 }\n"),
+}
+
+# Two-fault programs: `type_arity.check_declared_type_arity` runs before
+# `check_and_lower`, so its message wins over a builtin wellformed refusal, an
+# alias cycle, a later-line declaration and a fn parameter check. The native
+# gate must pick the same one.
+_TYPE_ARITY_2942_ORDERING = {
+    "before_a_builtin_wellformed_refusal": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(x: List[Int, Int], y: Mb[Int]) -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "before_a_later_record_field": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type A = List[Int, Int]\n"
+        "type R = { m: Mb[Int] }\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "before_an_alias_cycle": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type A = B\n"
+        "type B = A\n"
+        "fn f(m: Mb[Int]) -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    # a FnDecl's return is checked before its parameters
+    "return_before_parameter": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb[Int]) -> Mb[Str] { return Nn }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Str]`)",
+    ),
+    # Program visits components before type_decls
+    "config_before_a_type_declaration": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type R = { m: Mb[Int] }\n"
+        "component C {\n"
+        "  config {\n"
+        "    k: Mb[Str]\n"
+        "  }\n"
+        "}\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Str]`)",
+    ),
+}
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_REFUSED))
+def test_a_declared_type_with_the_wrong_argument_count_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text, message = _TYPE_ARITY_2942_REFUSED[name]
+    assert _reference_refusal(text) == message
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + message, got[:160]
+
+
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_ADMITTED))
+def test_the_right_declared_type_argument_count_is_admitted(admit, name):
+    text = _TYPE_ARITY_2942_ADMITTED[name]
+    assert _reference_refusal(text) == ""
+    assert admit(text) == ""
+
+
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_ORDERING))
+def test_the_declared_arity_pass_keeps_the_reference_order(admit, name):
+    text, message = _TYPE_ARITY_2942_ORDERING[name]
+    assert _reference_refusal(text) == message
+    assert admit(text) == "T1|" + message
+
+
+def test_a_fn_type_parameter_is_scoped_out_of_the_arity_check(admit):
+    text = ("type Mb = Jj(Int) | Nn\n"
+            "fn g[Mb](x: Mb[Int]) -> Int { return 1 }\n")
+    # The reference scopes an explicit type parameter out of the arity table, so
+    # this spelling is not an arity refusal: it is refused later for
+    # `type parameter `Mb` shadows a declared type`, a rule the native gate does
+    # not port yet. The arity pass must not claim it first.
+    assert _reference_refusal(text) == "type parameter `Mb` shadows a declared type"
+    assert "type argument(s), got" not in admit(text)
+
+
 # Issue #2460: an `if` whose branches join `Int` and `Float` is a `Float` in the
 # reference (`join`) and the native annotation engine answered unknown, so a
 # NESTED one fell back to `Int` on the outer join and the return-position widen
