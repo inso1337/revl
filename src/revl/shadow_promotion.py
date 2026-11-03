@@ -539,11 +539,13 @@ def plan_from_dict(document: Any) -> tuple:
     roles — is :func:`_check_plan` and the precondition walk's question, and
     this function deliberately does not answer it twice.
 
-    ``live`` is the one member checked here rather than there, because it is
-    the member whose default is the fail-open direction: ``live=False``
-    reports a shadow, in which the first attributed divergence only lowers
-    agreement instead of reverting, so a document that failed to say which of
-    the two rules applies must not be read as the one that reverts less."""
+    ``live`` is checked here rather than there because it is the member whose
+    default is the fail-open direction: ``live=False`` reports a shadow, in
+    which the first attributed divergence only lowers agreement instead of
+    reverting, so a document that failed to say which of the two rules applies
+    must not be read as the one that reverts less. ``window_fresh`` is checked
+    here for its shape, a boolean when stated, and read as false when absent,
+    which can only narrow what the verdict claims."""
     if not isinstance(document, Mapping):
         return (None, Refusal(PLAN_MALFORMED,
                               f"the plan document is {document!r}, which is "
