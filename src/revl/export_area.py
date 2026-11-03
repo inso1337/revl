@@ -244,6 +244,15 @@ class CliRule:
             authored.update(pending)
         if report is not None:
             report.update(seen)
+            # What this compile actually decided was author-written, recorded
+            # where the decision is made. A caller that has to show the same
+            # profile (issue #2756) reads this rather than re-asking the path
+            # rule after the compile. Includes a root under `.revl/export/`, a
+            # `use` of one, and a composition-level `use` or row source: all of
+            # them land in `authored` above. The key is NOT `authored`: the MCP
+            # server already reports that one as a boolean about transport
+            # authorship (issue #1704), a different question.
+            report["export_authored"] = dict(authored)
             roots = {os.path.abspath(p) for p in paths}
             riding = {p: t for p, t in authored.items()
                       if p not in roots and p not in sources}

@@ -134,4 +134,4 @@ PYTHONPATH=/path/to/revl/src python examples/ecosystem-consumer/ci_gate.py \
 `tests/test_gate_consumer_example.py` runs this same script against a
 freshly assembled, isolated copy of the installed `revl` package (not the
 checkout on `sys.path`), which is what proves this example exercises the
-PACKAGED surface `pip install revl` ships, not an in-tree import.
+PACKAGED surface an installed wheel ships, not an in-tree import.

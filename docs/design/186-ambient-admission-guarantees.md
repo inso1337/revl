@@ -193,7 +193,7 @@ Two oracles, one per regime:
 
 Slice 3 is small, needs no type layer, and closes the one guarantee hole that
 is a soundness gap today (a cycle hidden by the manifest). The wave was deferred
-until the type layer lands, and this note is the spec it landed against — the
+until the type layer lands, and this note is the spec it landed against: the
 part-2 note below records where that precondition turned out to be wrong.
 
 ### Landed since this note was written
@@ -270,7 +270,7 @@ C=k:T        handoff: the state shape the running component C exports at key k
 ```
 
 `manifest_wire` renders it off the WHOLE IR document's `components`, whose
-`handoff` field survives lowering — the same place `compiler._running_handoffs`
+`handoff` field survives lowering, the same place `compiler._running_handoffs`
 reads, so the gate sees exactly the ambient table the reference's own check
 sees. It is a per-component COMPOSITION row: it rides with its component, after
 that component's requirement and route rows and ahead of the service block, so
@@ -280,8 +280,8 @@ byte-identically to before.
 
 `admit_ambient` now runs the reference's own check. For each incoming component
 declaring `handoff k: A`, if some running provider exports state at `k` with
-shape `E`, then `A` must accept everything an `E` produces — the covariant
-`compatible(expected=A, actual=E)` of §5, pointed at state — and a successor
+shape `E`, then `A` must accept everything an `E` produces (the covariant
+`compatible(expected=A, actual=E)` of §5, pointed at state), and a successor
 that cannot hold the predecessor's state is refused in the reference's exact
 words, classified `(G2, admission)`. A key nothing running exported starts COLD
 and a successor that declares no `handoff` opts out: neither is a conflict, on
@@ -292,8 +292,8 @@ replacement must accept.
 **The precondition this note named did not hold.** Part 2 was deferred behind
 "the self-host type layer (457): `compatible` cannot be ported to `lower.rvl`
 before the types it compares exist there". That was the wrong reading of the
-dependency. Both shapes reach the gate as declared SPELLINGS — the running one
-on the wire, the incoming one off the component's own annotation — and
+dependency. Both shapes reach the gate as declared SPELLINGS: the running one
+on the wire, the incoming one off the component's own annotation, and
 `admission._handoff_compatible` calls `compatible(accepted, exported)` with NO
 declared-type table. So the only algebra to port is the type-STRING one, which
 `ty_parse`/`ty_render` already were; `ho_compatible` is the `types=None` reading
@@ -314,7 +314,7 @@ that land on ONE line are broken the same way by `seq` on both sides. Measured
 over the ordering corpus in three line layouts (hand-off against the withdrawal,
 a G4 spawn-emission bound, the BOOT count, and a component's own G4, in both
 orders plus two triples): 30 admissions, all agreeing, and the splice is
-load-bearing — reversing the two producers reds seven of them.
+load-bearing; reversing the two producers reds seven of them.
 
 Which components it runs over (issue #1127): `_admit_handoff_replacement` is
 handed `live_components`, which `check_and_lower` builds by dropping every
@@ -326,7 +326,7 @@ hand-off verdict on the reference: the body refusal is the whole answer.
 
 `collect_nonlink` carries the same set. It records every component its loop
 refused over and `handoff_refusals` skips those, which is the only place the
-gate needs it — the withdrawal runs over the FULL list on both sides, for the
+gate needs it: the withdrawal runs over the FULL list on both sides, for the
 reason stated above it. Without the set the gate ranked a `G2` hand-off drift,
 anchored at the COMPONENT line, ahead of an inline body refusal that `body_line`
 anchors at the offending STATEMENT, so `pick_min` named the hand-off where
@@ -348,14 +348,14 @@ happen; the running composition keeps running with its state where it is. The
 non-vacuity controls pin that it does not refuse everything: an identical shape,
 a WIDENED accepted shape (`Opt[Str]` accepting an exported `Str`), a numeric
 widening, an elementwise container widening, a cold key and a successor
-declaring no hand-off all still admit — and stripping the `C=k:T` rows from a
+declaring no hand-off all still admit, and stripping the `C=k:T` rows from a
 rendered wire reproduces the admission the gate used to give, which is what pins
 which row closed it.
 
 On the ADMISSION surface (`crates/revl-gate/src/admission.rs`) the row is READ
 and counted as nothing, exactly as a route row is: its key is already on the
 wire as its component's own provision row, and the fold is what compares the
-shapes. Reading it is the point — a row that surface cannot parse declines the
+shapes. Reading it is the point: a row that surface cannot parse declines the
 WHOLE wire, so leaving handoff rows out would have silently withheld the
 admission arm from every STATEFUL running composition. It is read AHEAD of the
 route row on both surfaces, because the type field is the one place on the wire
@@ -393,8 +393,8 @@ contributed no edge at all.
 
 Failure direction: fail-CLOSED. Every refusal here is an admission that does not
 happen; the running composition keeps running, its routed consumer still bound
-to the providers it has. The scope is exactly the reference's — a realm named by
-a route row with no provider in the resulting per-(key, realm) table — and the
+to the providers it has. The scope is exactly the reference's: a realm named by
+a route row with no provider in the resulting per-(key, realm) table, and the
 non-vacuity controls in oracle B pin that a legitimate routed replacement (same
 name, same key, same realm) and a routed key nothing withdraws both still admit.
 A garbled route row refuses by name, as a garbled withdrawal row does, rather
@@ -407,7 +407,7 @@ The row costs wire budget like any other: `MANIFEST_ROW_LIMIT` counts
 On the admission surface a route row is READ and counted as nothing:
 `manifest_shape` validates its component, key and realm labels, and leaves the
 counts to the `C<*k` requirement row, which already carries the by-key
-obligation. Reading it is the point — a row that surface cannot parse declines
+obligation. Reading it is the point, a row that surface cannot parse declines
 the WHOLE wire, so leaving route rows out would have silently withheld the
 admission arm from every routed composition, which is the shape of the bug the
 `C<*k` and `C<k/r` spellings had there until #1044 read them.

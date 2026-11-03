@@ -53,6 +53,20 @@ pub struct MovSt {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BoxEdge {
+    owner: String,
+    kind: String,
+    member: String,
+    target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BoxedEdges {
+    cases: std::collections::HashMap<String, std::collections::HashMap<String, bool>>,
+    fields: std::collections::HashMap<String, std::collections::HashMap<String, bool>>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IcSt {
     defs: Vec<String>,
     names: std::collections::HashMap<String, String>,
@@ -478,19 +492,28 @@ pub struct TopFn {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CfgField {
+    name: String,
+    ty: String,
+    line: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CfgCaseD {
     cname: String,
     payload: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CfgTy {
     name: String,
     kind: String,
-    fields: Vec<Bind>,
+    fields: Vec<CfgField>,
     cases: Vec<CfgCaseD>,
     params: Vec<String>,
     rhs: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -547,6 +570,7 @@ pub struct WfSite {
     ty: String,
     line: i64,
     asyncOk: bool,
+    shadow: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -4660,13 +4684,214 @@ fn emit_v3_functions(functions: Vec<Value>, fr: std::collections::HashMap<String
     return out;
 }
 
+fn inline_cycle_target(ftype: String, types: Value) -> String {
+    let mut t = ftype;
+    let mut seen = 0i64;
+    while true {
+        let lb = t.revl_index_of("[");
+        if ((!t.revl_ends_with("]")) || (lb <= 0i64)) {
+            if value_has(types.clone(), t.clone()) {
+                return t;
+            }
+            return String::from("");
+        }
+        let head = t.revl_slice(0i64, lb);
+        let inner = t.revl_slice((lb).checked_add(1i64).expect("revl: Int overflow"), (t.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+        if (head == "Opt") {
+            t = strip_spaces(&inner);
+        } else {
+            if (head == "Result") {
+                for part in split_generic(&inner) {
+                    let target = inline_cycle_target(part.clone(), types.clone());
+                    if (target != "") {
+                        return target;
+                    }
+                }
+                return String::from("");
+            } else {
+                return String::from("");
+            }
+        }
+        seen = (seen).checked_add(1i64).expect("revl: Int overflow");
+        if (seen > 64i64) {
+            return String::from("");
+        }
+    }
+    return String::from("");
+}
+
+fn edge_is_boxed(m: std::collections::HashMap<String, std::collections::HashMap<String, bool>>, owner: String, member: String) -> bool {
+    if (!m.contains_key(&owner)) {
+        return false;
+    }
+    return match m.get(&owner).cloned() {
+    Some(v) => v.contains_key(&member),
+    None => false,
+    _ => unreachable!(),
+};
+}
+
+fn edge_box(m: std::collections::HashMap<String, std::collections::HashMap<String, bool>>, owner: String, member: String) -> std::collections::HashMap<String, std::collections::HashMap<String, bool>> {
+    let mut members = std::collections::HashMap::new();
+    if m.contains_key(&owner) {
+        members = match m.get(&owner).cloned() {
+    Some(v) => v,
+    None => std::collections::HashMap::new(),
+    _ => unreachable!(),
+};
+    }
+    return { let mut c = m.clone(); c.insert(owner.clone(), { let mut c = members.clone(); c.insert(member, true); c }); c };
+}
+
+fn edges_of(adj: std::collections::HashMap<String, Vec<BoxEdge>>, node: String) -> Vec<BoxEdge> {
+    return match adj.get(&node).cloned() {
+    Some(v) => v,
+    None => vec![],
+    _ => unreachable!(),
+};
+}
+
+fn boxed_reaches(start: String, goal: &str, adj: std::collections::HashMap<String, Vec<BoxEdge>>, cases: std::collections::HashMap<String, std::collections::HashMap<String, bool>>, fields: std::collections::HashMap<String, std::collections::HashMap<String, bool>>) -> bool {
+    let mut seen = std::collections::HashMap::new();
+    let mut queue = vec![start];
+    let mut cursor = 0i64;
+    while (cursor < queue.revl_length()) {
+        let node = (queue)[(cursor) as usize].clone();
+        cursor = (cursor).checked_add(1i64).expect("revl: Int overflow");
+        for e in edges_of(adj.clone(), node.clone()) {
+            if (e.kind == "case") {
+                if edge_is_boxed(cases.clone(), node.clone(), e.member.clone()) {
+                    continue;
+                }
+            } else {
+                if edge_is_boxed(fields.clone(), node.clone(), e.member.clone()) {
+                    continue;
+                }
+            }
+            if (e.target == goal) {
+                return true;
+            }
+            if (!seen.contains_key(&e.target)) {
+                seen.insert(e.target.clone(), true);
+                queue.push(e.target.clone());
+            }
+        }
+    }
+    return false;
+}
+
+fn recursive_boxed_edges(types: Value) -> BoxedEdges {
+    let mut adj = std::collections::HashMap::new();
+    let mut enum_edges: Vec<BoxEdge> = vec![];
+    let mut field_edges: Vec<BoxEdge> = vec![];
+    for name in value_keys(types.clone()) {
+        let spec = value_field(types.clone(), name.clone());
+        let kind = value_str(value_field(spec.clone(), String::from("kind")));
+        let mut edges: Vec<BoxEdge> = vec![];
+        if (kind == "record") {
+            let fields = value_field(spec.clone(), String::from("fields"));
+            for field in value_keys(fields.clone()) {
+                let target = inline_cycle_target(value_str(value_field(fields.clone(), field.clone())), types.clone());
+                if (target != "") {
+                    let e = BoxEdge { owner: name.clone(), kind: String::from("field"), member: field.clone(), target: target.clone() };
+                    edges.push(e.clone());
+                    field_edges.push(e.clone());
+                }
+            }
+        } else {
+            if (kind == "variant") {
+                for case in value_list(value_field(spec.clone(), String::from("cases"))) {
+                    let target = inline_cycle_target(value_str(value_field(case.clone(), String::from("payload"))), types.clone());
+                    if (target != "") {
+                        let e = BoxEdge { owner: name.clone(), kind: String::from("case"), member: value_str(value_field(case.clone(), String::from("name"))), target: target.clone() };
+                        edges.push(e.clone());
+                        enum_edges.push(e.clone());
+                    }
+                }
+            }
+        }
+        adj.insert(name.clone(), edges.clone());
+    }
+    let mut cases = std::collections::HashMap::new();
+    let mut fields = std::collections::HashMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for e in enum_edges.clone() {
+            if edge_is_boxed(cases.clone(), e.owner.clone(), e.member.clone()) {
+                continue;
+            }
+            if boxed_reaches(e.target.clone(), &e.owner, adj.clone(), cases.clone(), fields.clone()) {
+                cases = edge_box(cases.clone(), e.owner.clone(), e.member.clone());
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            continue;
+        }
+        for e in field_edges.clone() {
+            if edge_is_boxed(fields.clone(), e.owner.clone(), e.member.clone()) {
+                continue;
+            }
+            if boxed_reaches(e.target.clone(), &e.owner, adj.clone(), cases.clone(), fields.clone()) {
+                fields = edge_box(fields.clone(), e.owner.clone(), e.member.clone());
+                changed = true;
+                break;
+            }
+        }
+    }
+    let result = BoxedEdges { cases: cases.clone(), fields: fields.clone() };
+    return result;
+}
+
+fn record_shape(spec: Value) -> String {
+    let fields = value_field(spec.clone(), String::from("fields"));
+    let mut parts: Vec<String> = vec![];
+    for field in list_sort(value_keys(fields.clone())) {
+        let ftype = value_str(value_field(fields.clone(), field.clone()));
+        parts.push(format!("{}:{}{}:{}", field.revl_length(), field, ftype.revl_length(), ftype));
+    }
+    return parts.revl_join("");
+}
+
+fn record_canonicals(types: Value) -> std::collections::HashMap<String, String> {
+    let mut canonical = std::collections::HashMap::new();
+    let mut by_shape = std::collections::HashMap::new();
+    for name in value_keys(types.clone()) {
+        let spec = value_field(types.clone(), name.clone());
+        if (value_str(value_field(spec.clone(), String::from("kind"))) == "record") {
+            let shape = record_shape(spec.clone());
+            if by_shape.contains_key(&shape) {
+                canonical.insert(name.clone(), map_get(by_shape.clone(), shape.clone()));
+            } else {
+                by_shape.insert(shape.clone(), name.clone());
+                canonical.insert(name.clone(), name.clone());
+            }
+        }
+    }
+    return canonical;
+}
+
 fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>) -> Vec<String> {
     let mut out: Vec<String> = vec![];
+    let boxed = recursive_boxed_edges(types.clone());
+    let canonicals = record_canonicals(types.clone());
     for name in value_keys(types.clone()) {
         let spec = value_field(types.clone(), name.clone());
         let kind = value_str(value_field(spec.clone(), String::from("kind")));
         let nm = type_ident(name.clone());
         if (kind == "record") {
+            let twin = match canonicals.get(&name).cloned() {
+    Some(v) => v,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+            if ((twin != "") && (twin != name)) {
+                out.push(format!("pub type {} = {};", nm, type_ident(twin.clone())));
+                out.push(String::from(""));
+                continue;
+            }
             out.push(String::from("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"));
             out.push(format!("pub struct {} {{", nm));
             let fields = value_field(spec.clone(), String::from("fields"));
@@ -4675,7 +4900,11 @@ fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>
                 if (fname != field) {
                     out.push(format!("    #[serde(rename = \"{}\")]", field));
                 }
-                out.push(format!("    {}: {},", fname, rust_type_t(value_field(fields.clone(), field.clone()), tnames.clone())));
+                let mut rendered = rust_type_t(value_field(fields.clone(), field.clone()), tnames.clone());
+                if edge_is_boxed(boxed.fields.clone(), name.clone(), field.clone()) {
+                    rendered = format!("Box<{}>", rendered);
+                }
+                out.push(format!("    {}: {},", fname, rendered));
             }
             out.push(String::from("}"));
         } else {
@@ -4689,7 +4918,11 @@ fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>
                     if value_is_null(payload.clone()) {
                         out.push(format!("    {},", cname));
                     } else {
-                        out.push(format!("    {}({}),", cname, rust_type_t(payload.clone(), tnames.clone())));
+                        let mut rendered = rust_type_t(payload.clone(), tnames.clone());
+                        if edge_is_boxed(boxed.cases.clone(), name.clone(), value_str(value_field(case.clone(), String::from("name")))) {
+                            rendered = format!("Box<{}>", rendered);
+                        }
+                        out.push(format!("    {}({}),", cname, rendered));
                     }
                 }
                 out.push(String::from("}"));
@@ -15150,8 +15383,11 @@ fn value_method_head(h: &str) -> bool {
 }
 
 fn hv_family(s: Stmt) -> String {
-    if (((s.kind != "effect") || (s.bind == "")) || (s.edge == "subscribe")) {
+    if ((s.kind != "effect") || (s.bind == "")) {
         return String::from("");
+    }
+    if (s.edge == "subscribe") {
+        return String::from("Subscription");
     }
     return match s.e.clone() {
     Expr::Call(c) => { let c = *c; match c.target {
@@ -18951,7 +19187,7 @@ fn cfg_data_msg(fname: &str, owner: &str, root_: &str, offender: &str) -> String
 }
 
 fn cfg_ty_none() -> CfgTy {
-    return CfgTy { name: String::from(""), kind: String::from(""), fields: vec![], cases: vec![], params: vec![], rhs: String::from("") };
+    return CfgTy { name: String::from(""), kind: String::from(""), fields: vec![], cases: vec![], params: vec![], rhs: String::from(""), line: 0i64 };
 }
 
 fn cfg_lookup(ds: &[CfgTy], h: &str) -> CfgTy {
@@ -19105,14 +19341,14 @@ fn cfg_tparams(ts: &[Token], i: i64) -> Vec<String> {
     return out;
 }
 
-fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<Bind> {
+fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgField> {
     let mut k = lo;
-    let mut out: Vec<Bind> = vec![];
+    let mut out: Vec<CfgField> = vec![];
     while ((k < hi) && (!atk(&ts, k, "}"))) {
         if (atk(&ts, k, "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) {
             let nm = tkc(&ts, k).text;
             let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
-            out.push(Bind { name: nm.clone(), ty: taint_strip(tr.ty.clone()) });
+            out.push(CfgField { name: nm.clone(), ty: taint_strip(tr.ty.clone()), line: tkc(&ts, k).line });
             k = tr.i;
             if atk(&ts, k, ",") {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -19140,7 +19376,7 @@ fn cfg_var_cases(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgCaseD> {
                     nk = (nk).checked_add(1i64).expect("revl: Int overflow");
                 }
             }
-            out.push(CfgCaseD { cname: nm.clone(), payload: payload.clone() });
+            out.push(CfgCaseD { cname: nm.clone(), payload: payload.clone(), line: tkc(&ts, k).line });
             k = nk;
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -19204,6 +19440,7 @@ fn cfg_one_type(ts: Vec<Token>, i: i64) -> CfgTyR {
     }
     j = (j).checked_add(1i64).expect("revl: Int overflow");
     let rhsEnd = cfg_decl_end(&ts, j);
+    let dline = tkc(&ts, i).line;
     if atk(&ts, j, "{") {
         let bend = close_brace(&ts, j);
         if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
@@ -19211,15 +19448,15 @@ fn cfg_one_type(ts: Vec<Token>, i: i64) -> CfgTyR {
         }
         let flds = cfg_rec_fields(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"));
         if (flds.revl_length() == 0i64) {
-            return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: vec![], params: params, rhs: String::from("") }, i: bend };
+            return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: vec![], params: params, rhs: String::from(""), line: dline }, i: bend };
         }
-        return CfgTyR { t: CfgTy { name: nm, kind: String::from("record"), fields: flds, cases: vec![], params: params, rhs: String::from("") }, i: bend };
+        return CfgTyR { t: CfgTy { name: nm, kind: String::from("record"), fields: flds, cases: vec![], params: params, rhs: String::from(""), line: dline }, i: bend };
     }
     if cfg_is_variant_rhs(&ts, j, rhsEnd) {
-        return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: cfg_var_cases(ts, j, rhsEnd), params: params, rhs: String::from("") }, i: rhsEnd };
+        return CfgTyR { t: CfgTy { name: nm, kind: String::from("variant"), fields: vec![], cases: cfg_var_cases(ts, j, rhsEnd), params: params, rhs: String::from(""), line: dline }, i: rhsEnd };
     }
     let tr = type_at(ts.clone(), j);
-    return CfgTyR { t: CfgTy { name: nm, kind: String::from("alias"), fields: vec![], cases: vec![], params: params, rhs: taint_strip(tr.ty) }, i: rhsEnd };
+    return CfgTyR { t: CfgTy { name: nm, kind: String::from("alias"), fields: vec![], cases: vec![], params: params, rhs: taint_strip(tr.ty), line: dline }, i: rhsEnd };
 }
 
 fn cfg_collect_types(ts: Vec<Token>) -> Vec<CfgTy> {
@@ -19592,11 +19829,11 @@ fn cfg_svc_names(svcs: &[SvcD]) -> Vec<String> {
     return out;
 }
 
-fn cfg_erase_binds(bs: &[Bind], al: std::collections::HashMap<String, String>) -> Vec<Bind> {
-    let mut out: Vec<Bind> = vec![];
+fn cfg_erase_binds(bs: &[CfgField], al: std::collections::HashMap<String, String>) -> Vec<CfgField> {
+    let mut out: Vec<CfgField> = vec![];
     let mut i = 0i64;
     while (i < bs.revl_length()) {
-        out.push(Bind { name: (bs)[(i) as usize].name.clone(), ty: alias_subst((bs)[(i) as usize].ty.clone(), al.clone()) });
+        out.push(CfgField { name: (bs)[(i) as usize].name.clone(), ty: alias_subst((bs)[(i) as usize].ty.clone(), al.clone()), line: (bs)[(i) as usize].line.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -19606,7 +19843,7 @@ fn cfg_erase_cases(cs: &[CfgCaseD], al: std::collections::HashMap<String, String
     let mut out: Vec<CfgCaseD> = vec![];
     let mut i = 0i64;
     while (i < cs.revl_length()) {
-        out.push(CfgCaseD { cname: (cs)[(i) as usize].cname.clone(), payload: alias_subst((cs)[(i) as usize].payload.clone(), al.clone()) });
+        out.push(CfgCaseD { cname: (cs)[(i) as usize].cname.clone(), payload: alias_subst((cs)[(i) as usize].payload.clone(), al.clone()), line: (cs)[(i) as usize].line.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -19619,9 +19856,9 @@ fn cfg_erase_decls(ds: &[CfgTy], al: std::collections::HashMap<String, String>) 
         let d = (ds)[(i) as usize].clone();
         if (!al.contains_key(&d.name)) {
             if (d.kind == "alias") {
-                out.push(CfgTy { name: d.name.clone(), kind: String::from("variant"), fields: vec![], cases: vec![CfgCaseD { cname: d.rhs.clone(), payload: String::from("") }], params: d.params.clone(), rhs: String::from("") });
+                out.push(CfgTy { name: d.name.clone(), kind: String::from("variant"), fields: vec![], cases: vec![CfgCaseD { cname: d.rhs.clone(), payload: String::from(""), line: d.line }], params: d.params.clone(), rhs: String::from(""), line: d.line });
             } else {
-                out.push(CfgTy { name: d.name.clone(), kind: d.kind.clone(), fields: cfg_erase_binds(&d.fields, al.clone()), cases: cfg_erase_cases(&d.cases, al.clone()), params: d.params.clone(), rhs: d.rhs.clone() });
+                out.push(CfgTy { name: d.name.clone(), kind: d.kind.clone(), fields: cfg_erase_binds(&d.fields, al.clone()), cases: cfg_erase_cases(&d.cases, al.clone()), params: d.params.clone(), rhs: d.rhs.clone(), line: d.line });
             }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -19636,7 +19873,7 @@ fn cfg_owner_verdict(os: &[CfgOwner], al: std::collections::HashMap<String, Stri
         let mut fi = 0i64;
         while (fi < o.flds.revl_length()) {
             let f = (o.flds)[(fi) as usize].clone();
-            let wf = wf_site_verd(WfSite { ty: f.fty.clone(), line: f.line, asyncOk: false });
+            let wf = wf_site_verd(WfSite { ty: f.fty.clone(), line: f.line, asyncOk: false, shadow: vec![] });
             if (wf.v != "") {
                 return wf;
             }
@@ -19680,6 +19917,81 @@ fn wf_tag(msg: &str) -> String {
     return String::from("");
 }
 
+fn wf_declared_head(h: &str) -> bool {
+    return (((((((((((is_builtin_type_name(h) || (h == "Value")) || (h == "Retained")) || (h == "Secret")) || (h == "Trusted")) || (h == "Untrusted")) || (h == "Async")) || (h == "Delegate")) || (h == "Approval")) || (h == "Criterion")) || (h == "Guard")) || (h == "Fn"));
+}
+
+fn wf_declared_arities(ds: &[CfgTy]) -> std::collections::HashMap<String, i64> {
+    let mut declared: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        declared.push((ds)[(i) as usize].name.clone());
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut ar = std::collections::HashMap::new();
+    i = 0i64;
+    while (i < ds.revl_length()) {
+        let d = (ds)[(i) as usize].clone();
+        let mut counted = (!wf_declared_head(&d.name));
+        if (((counted && (d.params.revl_length() > 0i64)) && (d.kind == "alias")) && is_alias_target(d.rhs.clone(), &declared)) {
+            counted = false;
+        }
+        if (counted && (!ar.contains_key(&d.name))) {
+            ar.insert(d.name.clone(), d.params.revl_length());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return ar;
+}
+
+fn wf_declared_msg(ty: &str, ar: std::collections::HashMap<String, i64>, shadow: &[String]) -> String {
+    let s = ty_trim(ty);
+    if (s == "") {
+        return String::from("");
+    }
+    if ({ s.chars().nth((0i64) as usize).unwrap().to_string() } == "{") {
+        let fs = cfg_struct_fields(&s);
+        let mut i = 0i64;
+        while (i < fs.revl_length()) {
+            let m = wf_declared_msg(&(fs)[(i) as usize].ty, ar.clone(), shadow);
+            if (m != "") {
+                return m;
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return String::from("");
+    }
+    let p = ty_parse(s.clone());
+    let want = match ar.get(&p.head).cloned() {
+    Some(v) => v,
+    None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
+    _ => unreachable!(),
+};
+    if ((((want != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && (!contains__m2(shadow, &p.head))) && (p.args.revl_length() > 0i64)) && (p.args.revl_length() != want)) {
+        return (((((((String::from("`").revl_concat(&p.head)).revl_concat("` takes ")).revl_concat(&int_str(want.clone()))).revl_concat(" type argument(s), got ")).revl_concat(&int_str(p.args.revl_length()))).revl_concat(" (`")).revl_concat(&s)).revl_concat("`)");
+    }
+    let mut i = 0i64;
+    while (i < p.args.revl_length()) {
+        let m = wf_declared_msg(&(p.args)[(i) as usize], ar.clone(), shadow);
+        if (m != "") {
+            return m;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return String::from("");
+}
+
+fn wf_declared_verd(s: WfSite, ar: std::collections::HashMap<String, i64>) -> Verd {
+    if ((ar.len() as i64) == 0i64) {
+        return no_verd();
+    }
+    let msg = wf_declared_msg(&s.ty, ar.clone(), &s.shadow);
+    if (msg == "") {
+        return no_verd();
+    }
+    return mk_verd(tagged("T1", &msg), s.line);
+}
+
 fn wf_site_verd(s: WfSite) -> Verd {
     let r = check_type_wellformed(s.ty.clone(), s.asyncOk);
     if r.ok {
@@ -19692,7 +20004,7 @@ fn wf_site_verd(s: WfSite) -> Verd {
     return mk_verd(tagged(&tg, &r.msg), s.line);
 }
 
-fn wf_params_from(ts: Vec<Token>, p0: i64, asyncOk: bool, acc: Vec<WfSite>) -> Vec<WfSite> {
+fn wf_params_from(ts: Vec<Token>, p0: i64, asyncOk: bool, shadow: Vec<String>, acc: Vec<WfSite>) -> Vec<WfSite> {
     let e = close_paren(&ts, (p0).checked_sub(1i64).expect("revl: Int overflow"));
     let hi = if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { p0 } else { (e).checked_sub(1i64).expect("revl: Int overflow") };
     let mut k = p0;
@@ -19700,7 +20012,7 @@ fn wf_params_from(ts: Vec<Token>, p0: i64, asyncOk: bool, acc: Vec<WfSite>) -> V
     while (k < hi) {
         if (atk(&ts, k, "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) {
             let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
-            out.push(WfSite { ty: tr.ty.clone(), line: tkc(&ts, k).line, asyncOk: asyncOk });
+            out.push(WfSite { ty: tr.ty.clone(), line: tkc(&ts, k).line, asyncOk: asyncOk, shadow: shadow.clone() });
             k = if (tr.i > k) { tr.i } else { (k).checked_add(1i64).expect("revl: Int overflow") };
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -19709,25 +20021,33 @@ fn wf_params_from(ts: Vec<Token>, p0: i64, asyncOk: bool, acc: Vec<WfSite>) -> V
     return out;
 }
 
-fn wf_ret_from(ts: Vec<Token>, i: i64, line: i64, acc: Vec<WfSite>) -> Vec<WfSite> {
+fn wf_ret_from(ts: Vec<Token>, i: i64, line: i64, shadow: Vec<String>, acc: Vec<WfSite>) -> Vec<WfSite> {
     if (!atk(&ts, i, "arrow")) {
         return acc;
     }
     let tr = type_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
-    return acc.revl_push(WfSite { ty: tr.ty, line: line, asyncOk: false });
+    return acc.revl_push(WfSite { ty: tr.ty, line: line, asyncOk: false, shadow: shadow });
 }
 
-fn wf_fn_sites(ts: Vec<Token>, i: i64) -> Vec<WfSite> {
+fn wf_fn_sites(ts: Vec<Token>, i: i64, retFirst: bool) -> Vec<WfSite> {
     let p0 = fn_params_i(&ts, i);
-    let ps = wf_params_from(ts.clone(), p0, true, vec![]);
+    let tps = explicit_tparams(&ts, i);
     let pe = close_paren(&ts, (p0).checked_sub(1i64).expect("revl: Int overflow"));
+    if retFirst {
+        let mut ret: Vec<WfSite> = vec![];
+        if (pe != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            ret = wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, tps.clone(), ret.clone());
+        }
+        return wf_params_from(ts, p0, true, tps, ret);
+    }
+    let ps = wf_params_from(ts.clone(), p0, true, tps.clone(), vec![]);
     if (pe == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return ps;
     }
-    return wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, ps);
+    return wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, tps, ps);
 }
 
-fn wf_extern_sites(ts: Vec<Token>, i: i64) -> Vec<WfSite> {
+fn wf_extern_sites(ts: Vec<Token>, i: i64, retFirst: bool) -> Vec<WfSite> {
     let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
     while ((((j < ts.revl_length()) && (!atw(&ts, j.clone(), "fn"))) && (!atk(&ts, j.clone(), "eof"))) && (!atk(&ts, j.clone(), "{"))) {
         if atk(&ts, j.clone(), "[") {
@@ -19749,12 +20069,19 @@ fn wf_extern_sites(ts: Vec<Token>, i: i64) -> Vec<WfSite> {
         return vec![];
     }
     let p0 = (j).checked_add(3i64).expect("revl: Int overflow");
-    let ps = wf_params_from(ts.clone(), p0.clone(), false, vec![]);
     let pe = close_paren(&ts, (p0).checked_sub(1i64).expect("revl: Int overflow"));
+    if retFirst {
+        let mut ret: Vec<WfSite> = vec![];
+        if (pe != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            ret = wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, vec![], ret.clone());
+        }
+        return wf_params_from(ts, p0.clone(), false, vec![], ret);
+    }
+    let ps = wf_params_from(ts.clone(), p0.clone(), false, vec![], vec![]);
     if (pe == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return ps;
     }
-    return wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, ps);
+    return wf_ret_from(ts.clone(), pe, tkc(&ts, i).line, vec![], ps);
 }
 
 fn wf_sites_concat(xs: Vec<WfSite>, ys: &[WfSite]) -> Vec<WfSite> {
@@ -19789,57 +20116,161 @@ fn alias_decl_refusal(ts: Vec<Token>) -> Verd {
     return no_verd();
 }
 
-fn wf_decls_walk(ts: Vec<Token>, i: i64, a: WfAcc) -> WfAcc {
+fn wf_decls_walk(ts: Vec<Token>, i: i64, a: WfAcc, retFirst: bool) -> WfAcc {
     if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
         return a;
     }
     let t = tkc(&ts, i);
     if at_boot(&ts, i) {
-        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a);
+        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a, retFirst);
     }
     if at_event(&ts, i) {
-        return wf_decls_walk(ts.clone(), event_decl_end(&ts, i), a);
+        return wf_decls_walk(ts.clone(), event_decl_end(&ts, i), a, retFirst);
     }
     if (t.kind != "kw") {
-        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
     }
     if at_pub_prefix(&ts, i) {
-        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a);
+        return wf_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), a, retFirst);
     }
     if (t.text == "use") {
-        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
     }
     if (t.text == "test") {
         let e = test_block_end(&ts, i);
         if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return wf_decls_walk(ts, e, a);
+            return wf_decls_walk(ts, e, a, retFirst);
         }
-        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+        return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
     }
     if (t.text == "type") {
-        return wf_decls_walk(ts.clone(), cfg_one_type(ts.clone(), i).i, a);
+        return wf_decls_walk(ts.clone(), cfg_one_type(ts.clone(), i).i, a, retFirst);
     }
     if (t.text == "extern") {
         let step = p_extern(ts.clone(), i, empty_prog());
-        let a2 = WfAcc { fns: a.fns.clone(), exts: wf_sites_concat(a.exts.clone(), &wf_extern_sites(ts.clone(), i)) };
-        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2);
+        let a2 = WfAcc { fns: a.fns.clone(), exts: wf_sites_concat(a.exts.clone(), &wf_extern_sites(ts.clone(), i, retFirst)) };
+        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2, retFirst);
     }
     if (t.text == "fn") {
-        let a2 = WfAcc { fns: wf_sites_concat(a.fns.clone(), &wf_fn_sites(ts.clone(), i)), exts: a.exts.clone() };
+        let a2 = WfAcc { fns: wf_sites_concat(a.fns.clone(), &wf_fn_sites(ts.clone(), i, retFirst)), exts: a.exts.clone() };
         let step = p_fn(ts.clone(), i, empty_prog());
-        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2);
+        return wf_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, a2, retFirst);
     }
     if (t.text == "service") {
-        return wf_decls_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, a);
+        return wf_decls_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, a, retFirst);
     }
     if (t.text == "component") {
-        return wf_decls_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, a);
+        return wf_decls_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, a, retFirst);
     }
-    return wf_decls_walk(ts.clone(), skip_line(&ts, i), a);
+    return wf_decls_walk(ts.clone(), skip_line(&ts, i), a, retFirst);
+}
+
+fn wf_declared_sites(sites: &[WfSite], ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut i = 0i64;
+    while (i < sites.revl_length()) {
+        let v = wf_declared_verd((sites)[(i) as usize].clone(), ar.clone());
+        if (v.v != "") {
+            return v;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn dfa_owner_fields(os: &[CfgOwner], ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut oi = 0i64;
+    while (oi < os.revl_length()) {
+        let o = (os)[(oi) as usize].clone();
+        let mut fi = 0i64;
+        while (fi < o.flds.revl_length()) {
+            let f = (o.flds)[(fi) as usize].clone();
+            let m = wf_declared_msg(&f.fty, ar.clone(), &(vec![]));
+            if (m != "") {
+                return mk_verd(tagged("T1", &m), f.line);
+            }
+            fi = (fi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        oi = (oi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn dfa_type_decls(ds: &[CfgTy], ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        let d = (ds)[(i) as usize].clone();
+        let mut k = 0i64;
+        while (k < d.fields.revl_length()) {
+            let m = wf_declared_msg(&(d.fields)[(k) as usize].ty, ar.clone(), &d.params);
+            if (m != "") {
+                return mk_verd(tagged("T1", &m), (d.fields)[(k) as usize].line.clone());
+            }
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        k = 0i64;
+        while (k < d.cases.revl_length()) {
+            let m = wf_declared_msg(&(d.cases)[(k) as usize].payload, ar.clone(), &d.params);
+            if (m != "") {
+                return mk_verd(tagged("T1", &m), (d.cases)[(k) as usize].line.clone());
+            }
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let m = wf_declared_msg(&d.rhs, ar.clone(), &d.params);
+        if (m != "") {
+            return mk_verd(tagged("T1", &m), d.line);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn dfa_prop_sites(ts: Vec<Token>, ar: std::collections::HashMap<String, i64>) -> Verd {
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if (at_qual_test(&ts, i) && (tkc(&ts, i).text == "prop")) {
+            let v = wf_declared_sites(&wf_params_from(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), false, vec![], vec![]), ar.clone());
+            if (v.v != "") {
+                return v;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn declared_arity_refusal(ts: Vec<Token>) -> Verd {
+    let ds = cfg_collect_types(ts.clone());
+    let ar = wf_declared_arities(&ds);
+    if ((ar.len() as i64) == 0i64) {
+        return no_verd();
+    }
+    let owners = cfg_owners_walk(ts.clone(), 0i64, CfgAcc { comps: vec![], exts: vec![] });
+    let cv = dfa_owner_fields(&owners.comps, ar.clone());
+    if (cv.v != "") {
+        return cv;
+    }
+    let tv = dfa_type_decls(&ds, ar.clone());
+    if (tv.v != "") {
+        return tv;
+    }
+    let acc = wf_decls_walk(ts.clone(), 0i64, WfAcc { fns: vec![], exts: vec![] }, true);
+    let fv = wf_declared_sites(&acc.fns, ar.clone());
+    if (fv.v != "") {
+        return fv;
+    }
+    let ev = wf_declared_sites(&acc.exts, ar.clone());
+    if (ev.v != "") {
+        return ev;
+    }
+    let xv = dfa_owner_fields(&owners.exts, ar.clone());
+    if (xv.v != "") {
+        return xv;
+    }
+    return dfa_prop_sites(ts, ar);
 }
 
 fn declared_types_refusal(ts: Vec<Token>) -> Verd {
-    let acc = wf_decls_walk(ts.clone(), 0i64, WfAcc { fns: vec![], exts: vec![] });
+    let acc = wf_decls_walk(ts.clone(), 0i64, WfAcc { fns: vec![], exts: vec![] }, false);
     let sites = wf_sites_concat(acc.fns.clone(), &acc.exts);
     let mut i = 0i64;
     while (i < sites.revl_length()) {
@@ -24022,7 +24453,7 @@ fn tb_refusal_at(ts: Vec<Token>, i: i64, gtys: &[Bind], al: std::collections::Ha
                 return mk_verd(tb_dup_msg(&kind, &nm), tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).line);
             }
             if prop {
-                let pv = tb_prop_params(&wf_params_from(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), false, vec![]), 0i64, &nm, gtys, al.clone());
+                let pv = tb_prop_params(&wf_params_from(ts.clone(), (i).checked_add(4i64).expect("revl: Int overflow"), false, vec![], vec![]), 0i64, &nm, gtys, al.clone());
                 if (pv.v != "") {
                     return pv;
                 }
@@ -25796,6 +26227,10 @@ fn model_council_refusal(ts: &[Token]) -> Verd {
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], ambSvcs: &[String], ambSvcsKnown: bool, ambOps: &[SvcOps]) -> NoLink {
     let base = ctx_evals(ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), &type_ctors(&ts)), amb_ops_map(ambOps, 0i64, std::collections::HashMap::new())), appr_info(&ts, pg.clone())), &ts, pg.clone());
+    let dav = declared_arity_refusal(ts.clone());
+    if (dav.v != "") {
+        return NoLink { done: true, refs: vec![dav.clone()] };
+    }
     let acv = alias_cycle_refusal(ts.clone());
     if (acv.v != "") {
         return NoLink { done: true, refs: vec![acv.clone()] };
@@ -41920,7 +42355,7 @@ fn wf_walk(name: String, root_: &str, allow_async: bool, in_fn_return: bool) -> 
     return WfR { ok: true, msg: String::from("") };
 }
 
-fn int_str(n: i64) -> String {
+pub fn int_str(n: i64) -> String {
     if (n == 0i64) {
         return String::from("0");
     }

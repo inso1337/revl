@@ -54,17 +54,17 @@ collapses a caught cleanup error into a verified success:
 
 | field | meaning |
 |---|---|
-| `requestedVerdict` | `commit` or `abort` — the intent, before any effect |
-| `disposal` | `{invoked, returned, failed, cancelled}` — the owned disposers' fate: invoked, ran to return, raised, or a disposer itself cancelled |
+| `requestedVerdict` | `commit` or `abort`: the intent, before any effect |
+| `disposal` | `{invoked, returned, failed, cancelled}`: the owned disposers' fate: invoked, ran to return, raised, or a disposer itself cancelled |
 | `nativeCleanupComplete` | the native `_dispose_all` returned |
 | `settled` | PHYSICAL settlement: cleanup returned AND the R4 checks pass |
-| `releaseOwnership` | the host may drop pool/root reservations — false on any unresolved residue, so ambiguity retains |
+| `releaseOwnership` | the host may drop pool/root reservations: false on any unresolved residue, so ambiguity retains |
 | `unresolved` | what is still owed (compensation residue, failed checks, or the failure reason + live components) |
 
 On a returned cleanup the result is a superset of `unload`'s report
 (`unloaded`, `noResidue`, `checks`, `detail`, `trace`, `compensationResidue`).
 On a failed/cancelled cleanup the verdict is NOT finalised, the Session is NOT
-reset, and `releaseOwnership` is false — the composition stays loaded for the
+reset, and `releaseOwnership` is false; the composition stays loaded for the
 host to inspect, strand, or reconcile deliberately.
 
 ## One owned teardown, never duplicated
@@ -83,7 +83,7 @@ when a fresh composition boots.
 `aclose` refuses BEFORE any terminal effect when the ownership contract is
 unmet, stating the missing contract so the host keeps its resources:
 
-- nothing loaded / frozen (`_require`), or E-STOPPED (`_refuse_if_halted` —
+- nothing loaded / frozen (`_require`), or E-STOPPED (`_refuse_if_halted`,
   the estop stranding path stays with the synchronous `unload`);
 - the session's runtime loop IS the caller's own running loop. That shared-loop
   shape cannot be offloaded (it would double-drive one loop) nor disposed inline
@@ -91,7 +91,7 @@ unmet, stating the missing contract so the host keeps its resources:
   teardown begins.
 
 Scope is this Session's own driver and loop only. Closing one Session neither
-stops nor freezes an unrelated one — there is no global clock freeze and no
+stops nor freezes an unrelated one; there is no global clock freeze and no
 global-idle requirement; an independent root keeps serving.
 
 ## Acceptance scenarios
@@ -100,7 +100,7 @@ Covered by this slice (tests in `tests/test_session_awaitable_teardown.py`):
 
 1. Close from a running host loop with no nested `run_until_complete` failure.
 2. Owned child cleanup awaits real async work (the `undo` inverse) before the
-   settlement is reported — the offloaded `run_until_complete` blocks the worker
+   settlement is reported; the offloaded `run_until_complete` blocks the worker
    until `_dispose_all` returns.
 3. Disposal that fails/cancels/logs a fault exposes unresolved/failure state, not
    verified success; the Session is retained.
@@ -109,7 +109,7 @@ Covered by this slice (tests in `tests/test_session_awaitable_teardown.py`):
 5. Two independent Sessions: closing A neither stops B nor touches B's loop.
 6. Unsupported (shared-loop) ownership is rejected before inverse/terminal
    effects, with enough status for the host to preserve ownership.
-7. Existing synchronous lifecycle verdict behaviour is unchanged — the async
+7. Existing synchronous lifecycle verdict behaviour is unchanged; the async
    settlement envelope is `aclose`-only; `unload` stays byte-compatible.
 
 ## Deferred slices (explicitly out of this PR)

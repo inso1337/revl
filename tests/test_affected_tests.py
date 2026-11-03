@@ -1484,6 +1484,198 @@ def test_an_mcp_module_off_the_compile_path_selects_a_narrow_set():
     assert "tests/test_mcp_http_transport.py" in r["pytest"]   # an importer's tests
 
 
+# --- a leaf module selects its importers, not their words (issue #2962) ---- #
+def test_a_leaf_module_change_does_not_word_match_the_importer_closure():
+    """Issue #2962 and its review. The import arm follows the whole closure: a
+    test that imports `revl.run` executes `revl.metrics` when run's imports
+    reach it, and a one-hop cut fails open. What made a leaf change select
+    1072 of the 1086 test files on this tree was word-matching the closure's
+    NAMES (`revl.run` and `revl.test` put `run` and `test` into the word set),
+    so the word arm keeps only the module's own name and a direct importer's
+    last name. These words must now select strictly less than the closure."""
+    r = sel("src/revl/metrics.py")
+    assert r["full"] is False, r["reason"]
+    selected = set(r["pytest"])
+    assert "tests/test_metrics.py" in selected
+    for word in ("run", "test"):
+        assert at._word_tests(ROOT, word) - selected, (
+            f"a test that names `{word}` but imports nothing whose imports "
+            f"reach metrics is selected: the importer closure is being "
+            f"word-matched again"
+        )
+
+
+def test_a_test_that_reaches_a_leaf_module_through_its_cli_command_is_selected(
+        tmp_path):
+    """`revl metrics` dispatches to `revl.metrics` without the test importing
+    it, which is why the module's own name still goes through the word match.
+    The test runs the CLI only and names no importer."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "",
+        "src/revl/metrics.py": "",
+        "tests/test_cli_metrics.py":
+            "subprocess.run([sys.executable, '-m', 'revl', 'metrics', 't.jsonl'])\n",
+        "tests/test_unrelated.py": "x = 1\n",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    at._TEST_IMPORT_CACHE.clear()
+    r = at.select(["src/revl/metrics.py"], root)
+    assert r["full"] is False, r["reason"]
+    assert "tests/test_cli_metrics.py" in r["pytest"], (
+        "a test that only runs `revl metrics` was dropped; the module's own "
+        "name must stay in the word match"
+    )
+    assert "tests/test_unrelated.py" not in r["pytest"]
+
+
+def test_a_test_that_only_names_a_direct_importers_command_is_selected(
+        tmp_path):
+    """Issue #2962's word arm also keeps a DIRECT importer's command name: a
+    test that only runs `revl slo` or `revl observe` never spells `metrics`,
+    and both importers execute it. The importer's last segment is the name to
+    match; its package segment (`cli`) is not, because a package is not a
+    command."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "",
+        "src/revl/metrics.py": "",
+        "src/revl/cli/__init__.py": "",
+        "src/revl/cli/observe.py": "from .. import metrics\n",
+        "tests/test_cli_observe.py":
+            "subprocess.run([sys.executable, '-m', 'revl', 'observe', 'x'])\n",
+        "tests/test_cli_package.py": "PACKAGE = 'cli'\n",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    at._TEST_IMPORT_CACHE.clear()
+    r = at.select(["src/revl/metrics.py"], root)
+    assert r["full"] is False, r["reason"]
+    assert "tests/test_cli_observe.py" in r["pytest"], (
+        "a test that only runs the command served by a direct importer of "
+        "`metrics` was dropped"
+    )
+    assert "tests/test_cli_package.py" not in r["pytest"], (
+        "the importer's package segment `cli` must not go through the word "
+        "match; it names a package, not a command"
+    )
+
+
+def test_a_test_that_imports_a_direct_importer_of_a_leaf_module_is_selected(
+        tmp_path):
+    """The import graph selects a test that executes the changed module through
+    a module that imports it directly, even though the test never names the
+    changed module. A deeper importer is covered by the same closure and is
+    pinned in the real-tree acceptance test below."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "",
+        "src/revl/leaf.py": "",
+        "src/revl/mid.py": "from .leaf import value\n",
+        "tests/test_imports_mid.py": "from revl.mid import value\n",
+        "tests/test_names_leaf.py": "NAME = 'leaf'\n",
+        "tests/test_unrelated.py": "x = 1\n",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    at._TEST_IMPORT_CACHE.clear()
+    r = at.select(["src/revl/leaf.py"], root)
+    assert r["full"] is False, r["reason"]
+    assert "tests/test_imports_mid.py" in r["pytest"], (
+        "a test importing a direct importer of the leaf module was dropped"
+    )
+    assert "tests/test_names_leaf.py" in r["pytest"]
+    assert "tests/test_unrelated.py" not in r["pytest"]
+
+
+def test_a_test_that_imports_a_deeper_importer_of_a_leaf_module_is_selected(
+        tmp_path):
+    """The fail-open case the review caught: `top` imports `mid`, `mid` imports
+    `leaf`, and a test that imports only `top` still executes `leaf` at import
+    time, so it must be selected even though it never names the leaf module."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "",
+        "src/revl/leaf.py": "",
+        "src/revl/mid.py": "from .leaf import value\n",
+        "src/revl/top.py": "from .mid import value\n",
+        "tests/test_imports_top.py": "from revl.top import value\n",
+        "tests/test_unrelated.py": "x = 1\n",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    at._TEST_IMPORT_CACHE.clear()
+    r = at.select(["src/revl/leaf.py"], root)
+    assert r["full"] is False, r["reason"]
+    assert "tests/test_imports_top.py" in r["pytest"], (
+        "a test importing a two-hop importer of the leaf module was dropped; "
+        "the selector is failing open"
+    )
+    assert "tests/test_unrelated.py" not in r["pytest"]
+
+
+def test_the_test_import_graph_reads_the_import_forms_tests_use(tmp_path):
+    """The leaf arm's graph is only as good as its import scan: a test imports
+    a module as `import revl.x`, `from revl.x import y`, `from revl import x`,
+    through a package (`from revl.mcp import session`), or lazily inside a
+    function body. All of them execute the module when the test runs."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "",
+        "src/revl/metrics.py": "",
+        "src/revl/slo.py": "",
+        "src/revl/mcp/__init__.py": "",
+        "src/revl/mcp/session.py": "",
+        "tests/test_import_form.py": "import revl.metrics\n",
+        "tests/test_from_form.py": "from revl.slo import thing\n",
+        "tests/test_package_form.py": "from revl.mcp import session\n",
+        "tests/test_lazy_form.py": "def f():\n    import revl.metrics\n",
+    })
+    at._TEST_IMPORT_CACHE.clear()
+    graph = at.test_module_imports(root)
+    assert graph is not None
+    assert "metrics" in graph["tests/test_import_form.py"]
+    assert "slo" in graph["tests/test_from_form.py"]
+    assert "mcp.session" in graph["tests/test_package_form.py"]
+    assert "metrics" in graph["tests/test_lazy_form.py"]
+
+
+# The forms a test uses to import `revl.metrics` or `revl.slo`, a direct
+# importer of metrics. Read at the text level on purpose: this half of the
+# acceptance check must not ask the selector's own graph, or a gap in the
+# graph's scan would hide itself.
+_METRICS_IMPORTS = re.compile(
+    r"^[ \t]*(?:"
+    r"from[ \t]+revl[ \t]+import[ \t][^\n]*\b(?:metrics|slo)\b"
+    r"|from[ \t]+revl\.(?:metrics|slo)[ \t]+import\b"
+    r"|import[ \t]+revl\.(?:metrics|slo)\b"
+    r")",
+    re.MULTILINE,
+)
+
+
+def test_no_test_that_imports_a_leaf_module_or_an_importer_is_dropped():
+    """Acceptance for issue #2962: a test that imports `revl.metrics` or ANY
+    module whose imports reach it, directly or through a chain, is selected,
+    whether or not the test's prose happens to name the module. A one-hop cut
+    fails this (importing `revl.run` executes `metrics`, so its tests are in
+    the closure); the review of #3040 caught exactly that fail-open."""
+    r = sel("src/revl/metrics.py")
+    assert r["full"] is False, r["reason"]
+    selected = set(r["pytest"])
+    imports = at.test_module_imports(ROOT)
+    assert imports is not None, "the tests' revl imports did not parse"
+    closure = at.importers_of(ROOT, "metrics")
+    execute = {t for t, mods in imports.items() if mods & closure}
+    assert execute, "no test imports a module whose imports reach metrics"
+    dropped = execute - selected
+    assert not dropped, (
+        "these tests import a module whose imports reach metrics and were "
+        f"dropped: {sorted(dropped)}"
+    )
+    importing = {
+        at._node(p) for p in at._test_files(ROOT)
+        if _METRICS_IMPORTS.search(p.read_text(encoding="utf-8"))
+    }
+    assert importing, "the independent scan found no importer of metrics or slo"
+    assert not importing - selected, (
+        "the independent text scan found an importer of metrics or slo that "
+        f"was dropped: {sorted(importing - selected)}"
+    )
+
+
 def test_an_mcp_module_on_the_compile_path_still_selects_full(tmp_path):
     """The other direction. On the real tree no `revl.mcp` module is
     compile-reachable any more (tests/test_compile_never_imports_mcp_1780.py),

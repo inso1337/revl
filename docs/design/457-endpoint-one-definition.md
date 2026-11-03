@@ -96,7 +96,7 @@ openapi` and `revl export openapi` are inverses on the subset both express.
 
 The `Bearer` row's "at most one" is the arity of the *parameter*, not a claim
 about the wire: a request may present more than one `Authorization` field.
-When it does, `http_face` makes no claim at all rather than picking one — the
+When it does, `http_face` makes no claim at all rather than picking one; the
 same answer a missing credential gets, so the handler's `validate` denies and
 the router still grants nothing. Picking the first field instead would let
 `auth.token` and the `Request` escape hatch, which carries every header,
@@ -110,6 +110,12 @@ disagree about what one request presented.
 | `Result[T, ApiError]` | `Ok(t)` as above; `Err(e)` is `e.status` with body `{"code": e.code, "message": e.message}` |
 | `Response` (stdlib/http.rvl) | sent as-is; the handler owns status, headers and body |
 | anything else in `Err` | compile refusal: "an error a client can act on needs a status; return `Result[T, ApiError]` or a `Response`" |
+
+A `Response` body is written as the handler produced it, with one encoding
+repair: a code unit that has no UTF-8 spelling (a lone surrogate a peer's JSON
+decoder built from an unpaired `\uXXXX` escape) is written as its JSON escape in
+a `Json` body and as U+FFFD in a `Text` body, so the face always has a status
+line to send (issue #3032). A body that encodes is byte-for-byte unchanged.
 
 `stdlib/http.rvl` gains `pub type ApiError = { status: Int, code: Str, message:
 Str }` and the constructors `bad_request`, `unauthorized`, `forbidden`,
@@ -140,7 +146,7 @@ operations; they are 456's remaining scope (2) and get their own contract.
    trust: every routed input is an `Untrusted` source, the inbound twin of
    D-424c.9, so a request value reaching a G9 sink (a command, an authority
    selection, an instruction channel) is refused without an `endorse`. The
-   static lattice's origin class is `input` — the class `_origin_of` gives an
+   static lattice's origin class is `input`, the class `_origin_of` gives an
    inbound crossing that declares no capability scope, which is what a routed
    request is; the compiler is declaring `Untrusted[...]` on the author's
    behalf, keyed by the operation name so the provide method implementing it
