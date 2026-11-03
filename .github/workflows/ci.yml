@@ -1664,12 +1664,23 @@ jobs:
                && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
             base="${BEFORE_SHA}"
           fi
-          # One seed, this run only, never written down. `set +x` is not needed
-          # because nothing traces here, and the value is printed only on the
-          # failure path below where a reproducer is worth more than the draw.
+          # One seed, this run only, held in an owner-only file OUTSIDE the
+          # checkout. `tools/heldout_scoring.py` accepts a seed only as a file
+          # path: a literal on a command line leaves nothing to check, and a
+          # file in the workspace is readable by everything that reads the
+          # workspace. The rotation ledger is created beside it and is
+          # discarded with the runner, so no digest survives the run. The value
+          # is printed only on the failure path below, where a reproducer is
+          # worth more than the draw.
           seed="$(openssl rand -hex 32)"
+          seed_dir="${RUNNER_TEMP:-/tmp}/heldout-seed-$$"
+          mkdir -p "$seed_dir"
+          chmod 700 "$seed_dir"
+          seed_file="$seed_dir/seed"
+          (umask 077; printf '%s' "$seed" > "$seed_file")
+          chmod 600 "$seed_file"
           status=0
-          REVL_HELDOUT_SEED="$seed" python3 tools/heldout_scoring.py \
+          REVL_HELDOUT_SEED_FILE="$seed_file" python3 tools/heldout_scoring.py \
             --diff-base "$base" --count 200 --json /tmp/heldout.json || status=$?
           refusal="$(python3 -c "import json;print(json.load(open('/tmp/heldout.json')).get('refusal') or '')" 2>/dev/null || echo "")"
           if [ "$status" = "0" ]; then
@@ -1692,7 +1703,9 @@ jobs:
           fi
           echo "::error title=held-out scoring found a divergence::seed $seed"
           echo "Reproduce with:"
-          echo "  REVL_HELDOUT_SEED=$seed python3 tools/heldout_scoring.py \\"
+          repro="${RUNNER_TEMP:-/tmp}/heldout-repro-seed"
+          echo "  printf %s '$seed' > \"$repro\" && chmod 600 \"$repro\""
+          echo "  REVL_HELDOUT_SEED_FILE=\"$repro\" python3 tools/heldout_scoring.py \\"
           echo "    --diff-base $base --count 200"
           exit 1
 
