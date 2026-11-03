@@ -21,14 +21,16 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKEND = ROOT / "backends" / "python"
-for path in (str(ROOT / "src"), str(BACKEND)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
+from revl._paths import python_backend_emitter, python_backend_first  # noqa: E402
 
-import emit  # noqa: E402
+# The py tier's own directory first, so `runtime` is the reference runtime and
+# never a bare-name collision. The emitter itself is loaded through the same
+# helper: a bare `import emit` would answer with whichever backend is first.
+python_backend_first()
 import runtime as rt  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
@@ -46,7 +48,7 @@ def _cordis():
 
 def _module(source: str, name: str) -> types.ModuleType:
     """Compile a revl composition and exec its py-tier emission."""
-    code = emit.emit(compile_source(source, f"{name}.rvl"))
+    code = python_backend_emitter().emit(compile_source(source, f"{name}.rvl"))
     module = types.ModuleType(name)
     sys.modules[name] = module
     try:
