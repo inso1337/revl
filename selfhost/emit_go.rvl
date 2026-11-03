@@ -1837,6 +1837,35 @@ fn scan_expr_pos(node: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx, pos: S
   }
   if (k == "call") { a = scan_call_offers(node, scope, a, ctx) }
   if (k == "record") { a = scan_record_offers(node, scope, a, ctx) }
+  // a match arm's binder and an arrow's parameters bind over their own body
+  // (`_v3_binding_keys` gives each a fresh key), so a bind that shadows an
+  // empty-list binding is not a use of the outer one
+  if (k == "match") {
+    a = scan_expr_pos(value_field(node, "scrutinee"), scope, a, ctx, "other", "")
+    for (arm of value_list(value_field(node, "arms"))) {
+      var inner = scope
+      let bind = value_str(value_field(arm, "bind"))
+      if (has_bind(bind)) {
+        let key = fresh_binding(bind, a.seen)
+        a = { a | seen = a.seen.set(key, "1") }
+        inner = scope.set(bind, key)
+      }
+      a = scan_expr_pos(value_field(arm, "body"), inner, a, ctx, "other", "")
+    }
+    return a
+  }
+  if (k == "arrow") {
+    var fscope = scope
+    for (pn of value_list(value_field(node, "params"))) {
+      let pname = value_str(pn)
+      if (has_bind(pname)) {
+        let key = fresh_binding(pname, a.seen)
+        a = { a | seen = a.seen.set(key, "1") }
+        fscope = fscope.set(pname, key)
+      }
+    }
+    return scan_expr_pos(value_field(node, "body"), fscope, a, ctx, "other", "")
+  }
   for (child of value_children(node)) {
     a = scan_expr_pos(child, scope, a, ctx, "other", "")
   }
@@ -1967,6 +1996,10 @@ fn scan_stmt(st: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk 
         a = { a | writes = a.writes.push([target, "other", ""]) }
         for (arg of args) { a = scan_expr(arg, scope, a, ctx) }
         a = scan_expr(value_field(val, "target"), scope, a, ctx)
+        // `_push_evidence`'s general arm: a push on ANOTHER receiver still
+        // types the assigned binding from the value's List type
+        let t = scoped_infer(val, scope, a.scratch, ctx)
+        if (is_list_surface(t)) { a = { a | assign_offers = a.assign_offers.push([target, t]) } }
       }
       return { scope: scope, acc: a }
     }
@@ -1974,7 +2007,7 @@ fn scan_stmt(st: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk 
       let src = local_ref_of(concat[0])
       let srckey = src != "" ? (scope.has(src) ? map_get(scope, src) : src) : ""
       a = { a | writes = a.writes.push([target, "concat", srckey]) }
-      a = { a | concat_aliases = a.concat_aliases.push([target, srckey]) }
+      if (srckey != "") { a = { a | concat_aliases = a.concat_aliases.push([target, srckey]) } }
       a = add_read(a, target, "concat", srckey)
       if (srckey != "") { a = add_read(a, srckey, "concatarg", target) }
       else { a = scan_expr(concat[0], scope, a, ctx) }
@@ -2682,9 +2715,9 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     // the binding's key: the analysis renamed the body's bindings, this port
     // keeps the source names and takes the matching key off `keys`
     var key = raw
-    if (ctx.key_i < ctx.keys.length()) { key = ctx.keys[ctx.key_i] }
+    if (has_bind(raw) && ctx.key_i < ctx.keys.length()) { key = ctx.keys[ctx.key_i] }
     var inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, key))
-    var nctx = { ctx | key_i = ctx.key_i + 1 }
+    var nctx = { ctx | key_i = ctx.key_i + (has_bind(raw) ? 1 : 0) }
     if (inferred == "" && is_empty_list_lit(valnode)) {
       // `_empty_list_type`: where the binding flows decides, else what is
       // pushed into it, else the slice main gave it when it is only sized or

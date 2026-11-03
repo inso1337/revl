@@ -11,7 +11,7 @@ component P provides pick: Pick {
   provide pick {
     fn pick(n) {
       let o = Missing
-      return n
+      return match o { Missing => 1, Found(v) => v }
     }
   }
 }
