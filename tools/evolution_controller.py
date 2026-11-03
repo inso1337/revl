@@ -61,10 +61,11 @@ read.
 
 An `evolution` proposal ENDS at `proposal-recorded`. It does not reach `admit`,
 `authority`, `shadow`, `canary` or `observe`: the controller returns as soon as
-`propose` verifies and records every later stage `NOT_REACHED`. A record that
-supplies evidence for one of those stages is refused with
-`MODE_REFUSES_ACTIVATION`, so the evolution path has no door to activation
-rather than a label the controller trusts.
+`propose` verifies and records every later stage `NOT_REACHED`. Once `trigger`
+verifies, a record that supplies evidence for one of those stages is refused
+with `MODE_REFUSES_ACTIVATION`; a missing or failing trigger refuses first, at
+`trigger`, because the preconditions stay in order. Either way the evolution
+path has no door to activation rather than a label the controller trusts.
 
 The `||` is the barrier and it is the point of the whole module. Issue #1222
 (item 543): a canary on one percent of traffic measures latency, refusal rate
@@ -95,6 +96,7 @@ failure with a NAMED code:
     a trigger that is a schedule           -> SCHEDULED_TRIGGER
     no retry budget declared               -> UNBOUNDED_RETRY
     the retry budget is spent              -> BUDGET_EXHAUSTED
+    a proposal with no scope               -> UNSCOPED
     no declared mode                       -> MODE_MISSING
     a mode outside the three               -> MODE_UNKNOWN
     a repair with no fault citation        -> FAULT_NOT_CITED
@@ -108,6 +110,8 @@ failure with a NAMED code:
     the diff reaches the admission kernel  -> KERNEL_INTERSECTION
     a non-empty capability/taint/budget or
     retention diff                         -> AUTHORITY_WIDENED
+    a judge raised, or answered for the
+    wrong stage                            -> JUDGE_RAISED
 
 `AUTHORITY_WIDENED` and `KERNEL_INTERSECTION` are separate codes on purpose.
 Issue #1222's exit test asks for a refusal BY NAME on a non-empty diff, and a
@@ -321,7 +325,7 @@ class Verdict(ComponentVerdict):
 
     `code` IS THIS MODULE'S FIFTH FIELD and it is deliberate, not drift. Issue
     #1222's exit test asks for a refusal BY NAME, and the FAILURE DIRECTION
-    table in this module's docstring enumerates fourteen codes a stage can
+    table in this module's docstring enumerates twenty codes a stage can
     fail with. Item 536's reward has no such enumeration: a reward component
     fails with prose, because the reward answers "did this candidate earn a
     training example" and the lifecycle answers "which authority refused, and

@@ -118,17 +118,18 @@ A feature's gap is the `trigger` stage's `gap`, required for every mode and
 already refused as `NO_TRIGGER` when absent; the mode's own citation is the
 tests that gap names. The citation is checked at `propose`, before any measured
 record is read, and a missing one is a named refusal (`FAULT_NOT_CITED`,
-`TESTS_NOT_CITED`). The mode itself is checked first: an absent mode is
-`MODE_MISSING` and a value outside the three is `MODE_UNKNOWN`. The controller
-cannot verify that a caller meant what it declared, and the design does not
-pretend otherwise: what the mode
-enforces is the **shape of the path**. An `evolution` record stops the walk
-after a verified `propose`, and every later stage is recorded `NOT_REACHED`. A
-record that supplies evidence for any stage past `propose` is refused with
-`MODE_REFUSES_ACTIVATION`, so the evolution path has no door to admission,
-activation or deployment rather than a label the controller trusts. This field
-is what turns "evolution proposes only" from a convention in this document into
-a property of the controller's control flow.
+`TESTS_NOT_CITED`). The mode itself is checked first at that stage: an absent
+mode is `MODE_MISSING` and a value outside the three is `MODE_UNKNOWN`. The
+controller cannot verify that a caller meant what it declared, and the design
+does not pretend otherwise: what the mode enforces is the **shape of the
+path**. An `evolution` record stops the walk after a verified `propose`, and
+every later stage is recorded `NOT_REACHED`. Once `trigger` verifies, a record
+that supplies evidence for any stage past `propose` is refused with
+`MODE_REFUSES_ACTIVATION`; a failing trigger refuses first, at `trigger`,
+because the preconditions stay in order. Either way the evolution path has no
+door to admission, activation or deployment rather than a label the controller
+trusts. This field is what turns "evolution proposes only" from a convention in
+this document into a property of the controller's control flow.
 
 ### 2.2 Where this maps onto the two shorter spellings
 
@@ -393,7 +394,7 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-Four demonstrations, all in `tests/test_evolution_controller.py`: 91 tests,
+Four demonstrations, all in `tests/test_evolution_controller.py`: 92 tests,
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four

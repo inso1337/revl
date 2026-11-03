@@ -258,18 +258,35 @@ def test_an_evolution_proposal_that_asks_for_activation_is_refused(clean_tree):
     assert "evolution" in verdict.by_name()["propose"].reason
 
 
-@pytest.mark.parametrize("stage", ("admit", "authority") + ec.MEASURED)
+@pytest.mark.parametrize(
+    "stage", ec.STAGES[ec.STAGES.index("propose") + 1:])
 def test_every_stage_past_the_proposal_is_refused_in_evolution_mode(
         clean_tree, stage):
     """The evolution path has no door to ANY later stage, not only the measured
-    ones. Pinning each one means a future stage cannot be added without a
-    decision about which side of the mode stop it is on."""
+    ones. Reading the tail of `STAGES` rather than restating it means a future
+    stage cannot be added without a decision about which side of the mode stop
+    it is on."""
     record = evolution_record(clean_tree)
     record["stages"][stage] = {"verified": True, "reason": "supplied",
                                "evidence": ["supplied"]}
     verdict = run(record)
     assert verdict.decision == "REFUSE"
     assert verdict.code == "MODE_REFUSES_ACTIVATION"
+
+
+def test_a_failing_trigger_refuses_before_the_evolution_mode_stop(clean_tree):
+    """The precondition order is not bypassed by the mode check. This record
+    supplies a stage past the proposal, but its trigger does not verify, so the
+    refusal is the trigger's code and not the mode's. Nothing past the trigger
+    is read either way."""
+    record = proposal_record(clean_tree, mode="evolution")
+    del record["fault"]
+    del record["stages"]["trigger"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.refusing_stage == "trigger"
+    assert verdict.code == "STAGE_SKIPPED"
+    assert verdict.measurements_read is False
 
 
 # -------------------------------------------- missing evidence is a refusal
