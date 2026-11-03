@@ -24418,14 +24418,19 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
 // so its structural walk never drifts from the admission parser's.
 
 // A built IR fragment plus whether it stayed inside the covered surface.
-type IrRes    = { ok: Bool, js: Str }
+// On success `js` is the lowered fragment. A statement failure instead puts
+// its source line in `js` and the reason in `why` (issue #2594), which
+// `ir_component` carries into the component's `unlowered` refusal. An
+// expression-only failure sets neither.
+type IrRes    = { ok: Bool, js: Str, why: Str }
 type IrSvcR   = { js: Str, v3: Bool }
 type IrCompR  = { js: Str, v3: Bool, v2: Bool }
 type IrMethR  = { js: Str, i: Int, v3: Bool }
 type IrAcc    = { svcs: Str, comps: Str, v3: Bool, v2: Bool, col: List[Str],
                   sl: Map[Str, List[Int]] }
 
-fn mk_irres(ok: Bool, js: Str) -> IrRes { return { ok: ok, js: js } }
+fn mk_irres(ok: Bool, js: Str) -> IrRes { return { ok: ok, js: js, why: "" } }
+fn mk_irfail(js: Str, why: Str) -> IrRes { return { ok: false, js: js, why: why } }
 fn mk_irsvcr(js: Str, v3: Bool) -> IrSvcR { return { js: js, v3: v3 } }
 fn mk_ircompr(js: Str, v3: Bool, v2: Bool) -> IrCompR {
   return { js: js, v3: v3, v2: v2 }
@@ -27957,21 +27962,21 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
   if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, acc, top) }
   if (atw(ts, lo, "effect")) {
-    if (atw(ts, lo + 1, "spawn")) { return cir_fail(ts, lo) }
+    if (atw(ts, lo + 1, "spawn")) { return cir_fail_why(ts, lo, "a `spawn` that is not bound to a handle") }
     let acq = expr_at(ts, lo + 1)
-    if (is_bad(acq.e)) { return cir_fail(ts, lo) }
+    if (is_bad(acq.e)) { return cir_fail_why(ts, lo, "an `effect` acquisition") }
     let ae = cir_expr(acq.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
-    if (!ae.ok) { return cir_fail(ts, lo) }
+    if (!ae.ok) { return cir_fail_why(ts, lo, "an `effect` acquisition outside the producer's expression surface") }
     if (!atw(ts, acq.i, "undo")) {
-      if (!is_witnessed_acq(acq.e, cx)) { return cir_fail(ts, lo) }
+      if (!is_witnessed_acq(acq.e, cx)) { return cir_fail_why(ts, lo, "an acquisition without `undo` that is not a witnessed extern") }
       let wstep = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js).concat("}")
       let wacc = acc == "" ? wstep : acc.concat(", ").concat(wstep)
       return cir_method_stmts(ts, acq.i, hi, cx, sc, hostSc, wacc, top)
     }
     let und = expr_at(ts, acq.i + 1)
-    if (is_bad(und.e)) { return cir_fail(ts, lo) }
+    if (is_bad(und.e)) { return cir_fail_why(ts, lo, "an `effect` undo expression") }
     let ue = cir_expr(und.e, sc, hostSc, cx_at(cx, tkc(ts, acq.i + 1).line))
-    if (!ue.ok) { return cir_fail(ts, lo) }
+    if (!ue.ok) { return cir_fail_why(ts, lo, "an `effect` undo expression outside the producer's expression surface") }
     // issue #1945: the inverse provenance the reference stamps on every
     // provide-method effect whose `undo` is written (a hole is judged when
     // it is filled, so it carries none)
@@ -27982,7 +27987,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // which walks the body's TOP-LEVEL steps only — so a nested `if`/`while`/
     // `for` interior carries none, and neither does a nested one here.
     let caps = top ? inverse_captures(ue.js, sc) : mk_irres(true, "")
-    if (!caps.ok) { return cir_fail(ts, lo) }
+    if (!caps.ok) { return cir_fail_why(ts, lo, "an `undo` inverse holding an arrow while a mutable local is in scope") }
     let capjs = caps.js == "" ? "" : ", \"undo_captures\": [".concat(caps.js).concat("]")
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat(inv).concat(capjs).concat("}")
@@ -27991,7 +27996,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   }
   if (atw(ts, lo, "emit")) {
     let em = cir_emit_step(ts, lo, cx, sc, hostSc)
-    if (!em.ok) { return cir_fail(ts, lo) }
+    if (!em.ok) { return cir_fail_why(ts, lo, "an `emit` step outside the producer's step surface") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
     return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc, top)
   }
@@ -28011,20 +28016,20 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   // provide method lost its entire activation.
   if (atw(ts, lo, "await")) {
     let r = expr_at(ts, lo + 1)
-    if (is_bad(r.e) || r.i <= lo + 1) { return cir_fail(ts, lo) }
+    if (is_bad(r.e) || r.i <= lo + 1) { return cir_fail_why(ts, lo, "an `await` expression") }
     let ae = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
-    if (!ae.ok) { return cir_fail(ts, lo) }
+    if (!ae.ok) { return cir_fail_why(ts, lo, "an `await` expression outside the producer's expression surface") }
     let astep = "{\"step\": \"await\", \"expr\": ".concat(ae.js).concat("}")
     let aacc = acc == "" ? astep : acc.concat(", ").concat(astep)
     return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, aacc, top)
   }
   if (atw(ts, lo, "if")) {
     let c = expr_at(ts, lo + 1)
-    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return cir_fail(ts, lo) }
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return cir_fail_why(ts, lo, "an `if` condition") }
     let tend = close_brace(ts, c.i)
-    if (tend == 0 - 1) { return cir_fail(ts, lo) }
+    if (tend == 0 - 1) { return cir_fail_why(ts, lo, "an `if` block") }
     let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
-    if (!ce.ok) { return cir_fail(ts, lo) }
+    if (!ce.ok) { return cir_fail_why(ts, lo, "an `if` condition outside the producer's expression surface") }
     let tb = cir_method_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, "", false)
     if (!tb.ok) { return cir_fail_in(ts, lo, tb) }
     var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js)
@@ -28032,7 +28037,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     var nexti = tend
     if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
       let eend = close_brace(ts, tend + 1)
-      if (eend == 0 - 1) { return cir_fail(ts, lo) }
+      if (eend == 0 - 1) { return cir_fail_why(ts, lo, "an `else` block") }
       let eb = cir_method_stmts(ts, tend + 2, eend - 1, cx, sc, hostSc, "", false)
       if (!eb.ok) { return cir_fail_in(ts, lo, eb) }
       js = js.concat(", \"else\": [").concat(eb.js).concat("]")
@@ -28040,7 +28045,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     } else {
       if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
         let eend = cir_if_end(ts, tend + 1)
-        if (eend == 0 - 1) { return cir_fail(ts, lo) }
+        if (eend == 0 - 1) { return cir_fail_why(ts, lo, "an `else if` block") }
         let eb = cir_method_stmts(ts, tend + 1, eend, cx, sc, hostSc, "", false)
         if (!eb.ok) { return cir_fail_in(ts, lo, eb) }
         js = js.concat(", \"else\": [").concat(eb.js).concat("]")
@@ -28055,11 +28060,11 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   }
   if (atw(ts, lo, "while")) {
     let c = expr_at(ts, lo + 1)
-    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return cir_fail(ts, lo) }
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return cir_fail_why(ts, lo, "a `while` condition") }
     let wend = close_brace(ts, c.i)
-    if (wend == 0 - 1) { return cir_fail(ts, lo) }
+    if (wend == 0 - 1) { return cir_fail_why(ts, lo, "a `while` block") }
     let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
-    if (!ce.ok) { return cir_fail(ts, lo) }
+    if (!ce.ok) { return cir_fail_why(ts, lo, "a `while` condition outside the producer's expression surface") }
     let wb = cir_method_stmts(ts, c.i + 1, wend - 1, cx, sc, hostSc, "", false)
     if (!wb.ok) { return cir_fail_in(ts, lo, wb) }
     let step = "{\"step\": \"while\", \"cond\": ".concat(ce.js)
@@ -28068,14 +28073,14 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     return cir_method_stmts(ts, wend, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "for")) {
-    if (!atk(ts, lo + 1, "(")) { return cir_fail(ts, lo) }
+    if (!atk(ts, lo + 1, "(")) { return cir_fail_why(ts, lo, "a `for` header") }
     let bind = tkc(ts, lo + 2).text
     let it = expr_at(ts, lo + 4)
-    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) { return cir_fail(ts, lo) }
+    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) { return cir_fail_why(ts, lo, "a `for` header") }
     let bend = close_brace(ts, it.i + 1)
-    if (bend == 0 - 1) { return cir_fail(ts, lo) }
+    if (bend == 0 - 1) { return cir_fail_why(ts, lo, "a `for` block") }
     let ie = cir_expr(it.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 4).line))
-    if (!ie.ok) { return cir_fail(ts, lo) }
+    if (!ie.ok) { return cir_fail_why(ts, lo, "a `for` iterable outside the producer's expression surface") }
     // the bind is typed by the iterable's `List` element, read through the
     // service-aware env, as the reference's `_sweep` + `_type_arg` type it, so
     // `t = t + x` over a `List[Int]` carries its `operands` (issue #2198)
@@ -28103,7 +28108,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
       return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc0, top)
     }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
-    if (!ve.ok) { return cir_fail(ts, lo) }
+    if (!ve.ok) { return cir_fail_why(ts, lo, "a `return` expression outside the producer's expression surface") }
     let wj = cir_widen(ve.js, tenv_get(sc, "returns "), infer(r.e, cenv_ir(cx, sc)))
     let step = "{\"step\": \"return\", \"expr\": ".concat(wj).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
@@ -28117,24 +28122,24 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
       && atw(ts, lo + 3, "effect")) {
     // a `var` bracket would make the HANDLE itself reassignable, which no
     // teardown accumulator can follow; the reference has no such form.
-    if (atw(ts, lo, "var")) { return cir_fail(ts, lo) }
+    if (atw(ts, lo, "var")) { return cir_fail_why(ts, lo, "a `var` binding of an effect bracket") }
     let name = tkc(ts, lo + 1).text
     // a spawn inside a provide method is a per-INVOCATION child, which is not
     // the activation-scoped acquisition `cir_spawn` builds; it keeps refusing.
-    if (atw(ts, lo + 4, "spawn")) { return cir_fail(ts, lo) }
+    if (atw(ts, lo + 4, "spawn")) { return cir_fail_why(ts, lo, "a per-invocation `spawn` handle") }
     let acq = expr_at(ts, lo + 4)
-    if (is_bad(acq.e)) { return cir_fail(ts, lo) }
+    if (is_bad(acq.e)) { return cir_fail_why(ts, lo, "an `effect` bracket's acquisition") }
     let ae = cir_expr(acq.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 4).line))
-    if (!ae.ok) { return cir_fail(ts, lo) }
-    if (!atw(ts, acq.i, "undo")) { return cir_fail(ts, lo) }
+    if (!ae.ok) { return cir_fail_why(ts, lo, "an `effect` bracket's acquisition outside the producer's expression surface") }
+    if (!atw(ts, acq.i, "undo")) { return cir_fail_why(ts, lo, "an `effect` bracket without `undo`") }
     let sc2 = sc.push({ name: name, ty: value_ty(acq.e, cenv_ir(cx, sc)) })
     let hostSc2 = starts_with(ae.js, "{\"kind\": \"host\"") ? hostSc.push(name) : hostSc
     let und = expr_at(ts, acq.i + 1)
-    if (is_bad(und.e)) { return cir_fail(ts, lo) }
+    if (is_bad(und.e)) { return cir_fail_why(ts, lo, "an `effect` bracket's undo expression") }
     let ue = cir_expr(und.e, sc2, hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line))
-    if (!ue.ok) { return cir_fail(ts, lo) }
+    if (!ue.ok) { return cir_fail_why(ts, lo, "an `effect` bracket's undo expression outside the producer's expression surface") }
     let caps = inverse_captures(ue.js, sc)
-    if (!caps.ok) { return cir_fail(ts, lo) }
+    if (!caps.ok) { return cir_fail_why(ts, lo, "an `undo` inverse holding an arrow while a mutable local is in scope") }
     // issue #2092: the reference's key order and provenance, both of which the
     // activation-body emitter already keeps. `_lower_effect_step` builds the
     // step as `{"step": …, "acquire": …, "undo": …}` and appends `bind` LAST
@@ -28158,11 +28163,11 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     let name = tkc(ts, lo + 1).text
     var j = lo + 2
     if (atk(ts, j, ":")) { j = type_at(ts, j + 1).i }
-    if (!atk(ts, j, "=")) { return cir_fail(ts, lo) }
+    if (!atk(ts, j, "=")) { return cir_fail_why(ts, lo, "a `let`/`var` binding without `=`") }
     let r = expr_at(ts, j + 1)
-    if (is_bad(r.e) || r.i <= j + 1) { return cir_fail(ts, lo) }
+    if (is_bad(r.e) || r.i <= j + 1) { return cir_fail_why(ts, lo, "a `let`/`var` binding whose value the producer cannot read") }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, j + 1).line))
-    if (!ve.ok) { return cir_fail(ts, lo) }
+    if (!ve.ok) { return cir_fail_why(ts, lo, "a `let`/`var` binding whose value is outside the producer's expression surface") }
     // the binder's escape (`_lower_provide`'s `_alloc_safe`, against the
     // parameters, the earlier locals and the component scope), carried to
     // the reads as a `rename` row: `let Some = step` binds `Some_` and the
@@ -28184,17 +28189,17 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   // `<name> = <expr>` — a reassignment of a local the method declared.
   if (atk(ts, lo, "ident") && atk(ts, lo + 1, "=")) {
     let name = tkc(ts, lo).text
-    if (!scope_has(sc, name)) { return cir_fail(ts, lo) }
+    if (!scope_has(sc, name)) { return cir_fail_why(ts, lo, "a reassignment of a name the method did not declare") }
     let r = expr_at(ts, lo + 2)
-    if (is_bad(r.e) || r.i <= lo + 2) { return cir_fail(ts, lo) }
+    if (is_bad(r.e) || r.i <= lo + 2) { return cir_fail_why(ts, lo, "an assignment value") }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 2).line))
-    if (!ve.ok) { return cir_fail(ts, lo) }
+    if (!ve.ok) { return cir_fail_why(ts, lo, "an assignment value outside the producer's expression surface") }
     let step = "{\"step\": \"assign\", \"name\": ".concat(jstr(cir_safe_of(sc, name)))
       .concat(", \"value\": ").concat(ve.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc, top)
   }
-  return cir_fail(ts, lo)
+  return cir_fail_why(ts, lo, "a statement the producer does not read")
 }
 
 // ---- the UI transaction unit (issue #1369) --------------------------------
@@ -28340,7 +28345,7 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   // contributes no key; the method table stays byte-identical to the
   // reference's.
   let head = atw(ts, i, "async") ? i + 1 : i
-  if (!atw(ts, head, "fn")) { return cir_fail(ts, i) }
+  if (!atw(ts, head, "fn")) { return cir_fail_why(ts, i, "a provide method that is not a `fn`") }
   let nm = tkc(ts, head + 1).text
   let ps = params_at(ts, head + 3)
   let pnames = param_names(ps.ps)
@@ -28354,14 +28359,14 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   if (atk(ts, h, "arrow")) { h = type_at(ts, h + 1).i }
   if (atk(ts, h, "=")) {
     let r = expr_at(ts, h + 1)
-    if (is_bad(r.e)) { return cir_fail(ts, h + 1) }
+    if (is_bad(r.e)) { return cir_fail_why(ts, h + 1, "an expression-bodied provide method's body") }
     // the shorthand body reads the COMPONENT's scope as well as its own
     // parameters — that is where an activation `let` binds a host acquisition
     // or a spawn handle — which is the scope the block-bodied form below
     // already builds.
     let bsc = concat_binds(sc, pbinds)
     let be = cir_expr(r.e, bsc, hostSc, cx_at(cx, tkc(ts, h + 1).line))
-    if (!be.ok) { return cir_fail(ts, h + 1) }
+    if (!be.ok) { return cir_fail_why(ts, h + 1, "an expression-bodied provide method's body outside the producer's expression surface") }
     let bj = cir_widen(be.js, mret, infer(r.e, cenv_ir(cx, bsc)))
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(bj).concat("}]")
@@ -28371,11 +28376,11 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   }
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
-    if (bend == 0 - 1) { return cir_fail(ts, head) }
+    if (bend == 0 - 1) { return cir_fail_why(ts, head, "a provide method body") }
     if (cir_has_control(ts, h + 1, bend - 1)
         && cir_method_rebinds(ts, h + 1, bend - 1, concat_binds(sc, pbinds))) {
       // a method-wide refusal, no one statement stops it: name the `fn` line
-      return cir_fail(ts, head)
+      return cir_fail_why(ts, head, "a method body that binds one name twice")
     }
     let br = cir_method_stmts(ts, h + 1, bend - 1, cx,
                               tenv_put(concat_binds(sc, pbinds), "returns ", mret),
@@ -28387,7 +28392,7 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
     return cir_prov_methods(ts, bend, end, cx, sc, hostSc, svc, cu, nacc)
   }
-  return cir_fail(ts, head)
+  return cir_fail_why(ts, head, "a provide method body")
 }
 
 // ------------------------------------------------ the effect BLOCK's setup
@@ -28939,14 +28944,30 @@ fn cir_fail(ts: List[Token], i: Int) -> IrRes {
   return mk_irres(false, tkc(ts, i).line.to_str())
 }
 
+// The same failure, with the statement's own reason (issue #2594): the
+// `cir_method_stmts` and `cir_prov_methods` failure points say which part of
+// the step they could not lower, and `ir_component` carries that reason into
+// the component's refusal next to the line.
+fn cir_fail_why(ts: List[Token], i: Int, why: Str) -> IrRes {
+  return mk_irfail(tkc(ts, i).line.to_str(), why)
+}
+
 // A step that failed because a statement nested in it failed keeps the INNER
 // line, as the reference reports the statement it refuses rather than the step
 // around it: a provide step names the method statement that stopped it, an
 // `if` the statement in its block. A nested result without a line falls back
 // to the step's own first token.
 fn cir_fail_in(ts: List[Token], i: Int, inner: IrRes) -> IrRes {
-  if (inner.js != "") { return mk_irres(false, inner.js) }
+  if (inner.js != "") { return inner }
   return cir_fail(ts, i)
+}
+
+// The `unlowered` reason a bodyless component carries (issue #2594): the line
+// the producer stopped on, and the failing statement's reason when its failure
+// point recorded one.
+fn unlowered_body(res: IrRes) -> Str {
+  let at = "the body statement at line ".concat(res.js)
+  return res.why == "" ? at : at.concat(" (").concat(res.why).concat(")")
 }
 
 // A component activation body -> its `body` step list. `config` is a header
@@ -29587,10 +29608,10 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
   // producer, and the driver refuses the component with it before any emitter
   // can run (`compile.rvl::unlowered_refusal`). The line is the innermost
   // statement that failed (`cir_fail_in`), the line the reference reports
-  // when it refuses the same statement.
+  // when it refuses the same statement, and the reason is the one its failure
+  // point recorded (`cir_fail_why`).
   if (!bodyRes.ok) {
-    js = js.concat(", \"unlowered\": ")
-      .concat(jstr("the body statement at line ".concat(bodyRes.js)))
+    js = js.concat(", \"unlowered\": ").concat(jstr(unlowered_body(bodyRes)))
   } else {
     if (!iceptRes.ok) { js = js.concat(", \"unlowered\": ").concat(jstr("its `intercept` metadata")) }
   }
