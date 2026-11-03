@@ -222,12 +222,10 @@ CORPUS = [
     "comp_provide_arith.rvl",
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
     "comp_to_char.rvl",  # Int.to_char in a provide body (issue #2285)
-    # ... and a method-body `let` binding an untyped `[]` (issue #2898):
-    # `_emit_method_body`'s let arm types it from the method's declared return
+    # ... and method-body `let` bindings on the combined path (issue #2898):
+    # an untyped `[]` typed from the method's declared return and its pin, and
+    # a user variant held at its interface type by a later match
     "comp_provide_empty_list.rvl",
-    # ... and a method-body `let` binding a user variant, which holds the
-    # variant's interface type rather than the concrete case struct
-    "comp_provide_variant_binding.rvl",
 ]
 
 # The combined-path and live-path documents, which import stc-go and are built
