@@ -150,7 +150,7 @@ CORPUS = [
     # (`Mb[int64]`, `MbJj[int64]{..}`, `case MbJj[int64]:`), with the
     # substituted payload type, two parameters, a phantom parameter and
     # unpinned list literals. The document the old port-gap pin was replaced by.
-    "generic_variant.rvl",
+    "../emit_rust_corpus/generic_variant.rvl",
     # issue #106: the v3 COMBINED path's first slice (`_emit_v3_combined`). A
     # top-level declaration beside components whose provide methods are single
     # `return`s or empty bodies, with or without `requires`: the pure tier, the
@@ -162,7 +162,7 @@ CORPUS = [
     # issue #2494: a user generic variant on the component tier, in a service
     # signature and in provide methods (instantiated case structs, the
     # substituted payload, an unpinned list literal)
-    "comp_provide_generic_variant.rvl",
+    "../emit_rust_corpus/comp_provide_generic_variant.rvl",
     "../emit_rust_corpus/service.rvl",
     "../emit_rust_corpus/requires.rvl",
     "../emit_rust_corpus/services_multi.rvl",

@@ -2166,9 +2166,18 @@ fn build_type_tables(types: Value) -> TypeTables {
     let mut tn = std::collections::HashMap::new();
     let mut ft = std::collections::HashMap::new();
     for name in value_keys(types.clone()) {
-        tn.insert(name.clone(), String::from("1"));
         let spec = value_field(types.clone(), name.clone());
         let kind = value_str(value_field(spec.clone(), String::from("kind")));
+        let mut entry = String::from("1");
+        let params = value_list(value_field(spec.clone(), String::from("params")));
+        if ((kind == "variant") && (params.revl_length() > 0i64)) {
+            let mut pnames: Vec<String> = vec![];
+            for p in params.clone() {
+                pnames.push(value_str(p.clone()));
+            }
+            entry = String::from("g:").revl_concat(&pnames.revl_join(","));
+        }
+        tn.insert(name.clone(), entry);
         if (kind == "record") {
             let fields = value_field(spec.clone(), String::from("fields"));
             for f in value_keys(fields.clone()) {
@@ -2269,6 +2278,35 @@ fn list_element_type(t: &str) -> String {
     return String::from("");
 }
 
+fn phantom_params(spec: Value) -> Vec<String> {
+    let mut used: Vec<String> = vec![];
+    for case in value_list(value_field(spec.clone(), String::from("cases"))) {
+        let payload = value_field(case.clone(), String::from("payload"));
+        if (!value_is_null(payload.clone())) {
+            for w in type_words(&value_str(payload.clone())) {
+                if (!list_contains(used.clone(), w.clone())) {
+                    used.push(w.clone());
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = vec![];
+    for p in value_list(value_field(spec.clone(), String::from("params"))) {
+        if (!list_contains(used.clone(), value_str(p.clone()))) {
+            out.push(value_str(p.clone()));
+        }
+    }
+    return out;
+}
+
+fn generic_variant_params(tnames: std::collections::HashMap<String, String>, head: String) -> Vec<String> {
+    let entry = map_get(tnames.clone(), head.clone());
+    if (!entry.revl_starts_with("g:")) {
+        return vec![];
+    }
+    return split_generic(&(entry.revl_slice(2i64, entry.revl_length())));
+}
+
 fn is_list_type(t: &str) -> bool {
     return (t.revl_starts_with("List[") && t.revl_ends_with("]"));
 }
@@ -2306,6 +2344,17 @@ fn rust_type_t(tv: Value, tnames: std::collections::HashMap<String, String>) -> 
             if (head == "Result") {
                 let ps = split_generic(&inner);
                 return format!("Result<{}, {}>", rust_type_t(Value::new(serde_json::Value::from((ps)[(0i64) as usize].clone())), tnames.clone()), rust_type_t(Value::new(serde_json::Value::from((ps)[(1i64) as usize].clone())), tnames.clone()));
+            }
+            let gparams = generic_variant_params(tnames.clone(), head.clone());
+            if (gparams.revl_length() > 0i64) {
+                let args = split_generic(&inner);
+                if (args.revl_length() == gparams.revl_length()) {
+                    let mut rendered: Vec<String> = vec![];
+                    for a in args {
+                        rendered.push(rust_type_t(Value::new(serde_json::Value::from(a.clone())), tnames.clone()));
+                    }
+                    return format!("{}<{}>", type_ident(head), rendered.revl_join(", "));
+                }
             }
         }
     }
@@ -4196,17 +4245,21 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
             if value_bool(value_field(node.clone(), String::from("mutable"))) {
                 kw = String::from("let mut");
             }
-            if ((!ctx_.dz.contains_key(&raw)) && (value == "vec![]")) {
-                out.push(format!("<<UNSUPPORTED-EMPTY-LIST-TYPE:{}>>", raw));
+            if (((ctx_.dz.contains_key(&raw) && (node_kind(valnode.clone()) == "adt")) && (generic_variant_params(ctx_.tn.clone(), map_get(ctx_.ca.clone(), value_str(value_field(valnode.clone(), String::from("case"))))).revl_length() > 0i64)) && (map_get(ctx_.cp.clone(), value_str(value_field(valnode.clone(), String::from("case")))) == "n")) {
+                out.push(format!("<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:{}>>", value_str(value_field(valnode.clone(), String::from("case")))));
             } else {
-                if is_nested_empty_list_lit(valnode.clone()) {
+                if ((!ctx_.dz.contains_key(&raw)) && (value == "vec![]")) {
                     out.push(format!("<<UNSUPPORTED-EMPTY-LIST-TYPE:{}>>", raw));
                 } else {
-                    let mut annot = if (ctx_.dz.contains_key(&raw) && (value == "vec![]")) { String::from(": Vec<()>") } else { String::from("") };
-                    if ((ctx_.dz.contains_key(&raw) && (node_kind(valnode.clone()) == "var")) && (ref_name(valnode.clone()) == "None")) {
-                        annot = String::from(": Option<Value>");
+                    if is_nested_empty_list_lit(valnode.clone()) {
+                        out.push(format!("<<UNSUPPORTED-EMPTY-LIST-TYPE:{}>>", raw));
+                    } else {
+                        let mut annot = if (ctx_.dz.contains_key(&raw) && (value == "vec![]")) { String::from(": Vec<()>") } else { String::from("") };
+                        if ((ctx_.dz.contains_key(&raw) && (node_kind(valnode.clone()) == "var")) && (ref_name(valnode.clone()) == "None")) {
+                            annot = String::from(": Option<Value>");
+                        }
+                        out.push(line(indent, &(format!("{} {}{} = {};", kw, nm, annot, value))));
                     }
-                    out.push(line(indent, &(format!("{} {}{} = {};", kw, nm, annot, value))));
                 }
             }
         } else {
@@ -4896,19 +4949,41 @@ fn emit_v3_types(types: Value, tnames: std::collections::HashMap<String, String>
             if (kind == "variant") {
                 out.push(String::from("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"));
                 out.push(format!("#[serde(tag = \"$kind\", content = \"$value\")]"));
-                out.push(format!("pub enum {} {{", nm));
+                let params = value_list(value_field(spec.clone(), String::from("params")));
+                let mut raw_params: Vec<String> = vec![];
+                let mut pnames: Vec<String> = vec![];
+                for p in params {
+                    raw_params.push(value_str(p.clone()));
+                    pnames.push(type_ident(value_str(p.clone())));
+                }
+                let mut generics = String::from("");
+                if (pnames.revl_length() > 0i64) {
+                    generics = format!("<{}>", pnames.revl_join(", "));
+                }
+                out.push(format!("pub enum {}{} {{", nm, generics));
+                let scope = with_tparams(tnames.clone(), raw_params.clone());
                 for case in value_list(value_field(spec.clone(), String::from("cases"))) {
                     let cname = mangle(value_str(value_field(case.clone(), String::from("name"))));
                     let payload = value_field(case.clone(), String::from("payload"));
                     if value_is_null(payload.clone()) {
                         out.push(format!("    {},", cname));
                     } else {
-                        let mut rendered = rust_type_t(payload.clone(), tnames.clone());
+                        let mut rendered = rust_type_t(payload.clone(), scope.clone());
                         if edge_is_boxed(boxed.cases.clone(), name.clone(), value_str(value_field(case.clone(), String::from("name")))) {
                             rendered = format!("Box<{}>", rendered);
                         }
                         out.push(format!("    {}({}),", cname, rendered));
                     }
+                }
+                let phantom = phantom_params(spec.clone());
+                if (phantom.revl_length() > 0i64) {
+                    let mut markers: Vec<String> = vec![];
+                    for p in phantom.clone() {
+                        markers.push(type_ident(p.clone()));
+                    }
+                    out.push(String::from("    #[doc(hidden)]"));
+                    out.push(String::from("    #[serde(skip)]"));
+                    out.push(format!("    __RevlPhantom(std::marker::PhantomData<fn() -> ({},)>),", markers.revl_join(", ")));
                 }
                 out.push(String::from("}"));
             } else {

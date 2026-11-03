@@ -390,10 +390,10 @@ CORPUS = [
     # every use site and the substituted payload, with two parameters, a
     # phantom parameter (the hidden `PhantomData` case) and unpinned list
     # literals. The document the old port-gap pin was replaced by.
-    "../emit_go_corpus/generic_variant.rvl",
+    "generic_variant.rvl",
     # issue #2494: the same variant on the component tier, in a service
     # signature and in provide methods
-    "../emit_go_corpus/comp_provide_generic_variant.rvl",
+    "comp_provide_generic_variant.rvl",
 ]
 
 
