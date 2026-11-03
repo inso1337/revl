@@ -1228,6 +1228,14 @@ _V3_BOXED = {
     "void": "java.lang.Void",
 }
 
+# The erased-dynamic builtins have no declaration to point at, so every
+# rendered position spells them as `Object`; a bare `Any`/`Value` would name a
+# class that does not exist. `Any` is the type algebra's wildcard (roadmap 79);
+# `Value` (stdlib/value.rvl, docs/stdlib-value.md) is its named counterpart and
+# used to fall through to `_ident`, emitting `java.util.List<Value>` and
+# `Value v` that javac rejects with `cannot find symbol` (issue #3019).
+_V3_ERASED = {"Any": "Object", "Value": "Object"}
+
 
 def _java_v3_type(name: object, *, boxed: bool = False) -> str:
     """IR v3 surface type -> Java type for emitted v3 classes."""
@@ -1242,10 +1250,9 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
         if not boxed:
             return java_type
         return _V3_BOXED.get(java_type, java_type)
-    if name == "Any":
-        # No TYPE_MAP entry: `Any` is the open type, so it is `Object` in every
-        # position (a bare `Any` would name a class that does not exist).
-        return "Object"
+    erased = _V3_ERASED.get(name)
+    if erased is not None:
+        return erased
     if "[" in name:
         base = name[: name.index("[")]
         inner = name[name.index("[") + 1 : name.rindex("]")]

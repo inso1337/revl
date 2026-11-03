@@ -9245,6 +9245,65 @@ def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
     return boxed_cases, boxed_fields
 
 
+# The derive set of a v3 record/variant. `PartialEq` is load-bearing (revl's
+# equality is structural) and the serde pair is what lets a value cross the
+# generated RPC bridge; an item that CONTAINS the opaque erased `Value` can
+# derive neither (issue #3019).
+_V3_DERIVES = "Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize"
+_V3_ERASED_DERIVES = "Clone, Debug"
+_VALUE_WORD = re.compile(r"\bValue\b")
+
+
+def _declaration_surfaces(spec: dict) -> list:
+    """Every surface type a record field or variant payload names."""
+    fields = spec.get("fields") or {}
+    cases = spec.get("cases") or []
+    surfaces = list(fields.values()) if isinstance(fields, dict) else []
+    surfaces += [case["payload"] for case in cases
+                 if isinstance(case, dict) and case.get("payload") is not None]
+    return surfaces
+
+
+def _value_carrying_types(types: dict) -> set:
+    """The declared types whose emitted Rust item CONTAINS the opaque `Value`.
+
+    `Value` (stdlib/value.rvl, docs/stdlib-value.md) and every surface type that
+    erases to it (`Any`, an unknown name, `Row`, `Stream[..]`) is the tier's
+    dynamic value: a `cordis::Value`, which implements `Clone` and `Debug` and
+    nothing else. A record or variant containing one therefore cannot derive
+    `PartialEq` or the serde traits, so `_emit_v3_types` reduces its derive set
+    (#3019).
+
+    Containment is transitive: a record holding a record holding a `Value` needs
+    the same reduction, because the inner item no longer implements what the
+    outer derive would require of it. The surfaces are rendered exactly as
+    `_emit_v3_types` renders them, so a record field is rendered without its
+    declaration's parameters in scope and a variant payload with them: a type
+    parameter (`T`) is not the erased value.
+    """
+    rendered: dict[str, list[str]] = {}
+    for name, spec in types.items():
+        params = spec.get("params") or []
+        scope = (dict(types, **{p: {"kind": "param"} for p in params})
+                 if params and spec.get("kind") == "variant" else types)
+        rendered[name] = [
+            _rust_type(surface, scope) for surface in _declaration_surfaces(spec)]
+    carrying = {name for name, spellings in rendered.items()
+                if any(_VALUE_WORD.search(spelling) for spelling in spellings)}
+    changed = True
+    while changed:
+        changed = False
+        carried = {_ident(name, "type name") for name in carrying}
+        extra = {name for name, spellings in rendered.items()
+                 if name not in carrying
+                 and any(word in carried
+                         for spelling in spellings
+                         for word in _RUST_TYPE_WORD.findall(spelling))}
+        carrying |= extra
+        changed = bool(extra)
+    return carrying
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     # PartialEq is not decoration: revl has one equality and it is
     # structural (syntax-2.0 §3.4), so `{a: 1} == {a: 1}` must compile and
@@ -9252,6 +9311,11 @@ def _emit_v3_types(types: dict) -> list[str]:
     # the comparison outright (E0369) and legal revl fails on this tier.
     out: list[str] = []
     boxed_cases, boxed_fields = _recursive_boxed_edges(types)
+    # The erased dynamic value is the one exception (see
+    # `_value_carrying_types`): `cordis::Value` has no PartialEq and no serde
+    # impls, so an item containing one derives only what it supports rather than
+    # emitting a crate rustc rejects (#3019).
+    carrying = _value_carrying_types(types)
     # Two records with the IDENTICAL field->type shape are interchangeable in
     # revl (structural equality, item 268), so a value of one is admitted where
     # the other is declared -- `let one = [Bind {..}]` then `ArrowN { params:
@@ -9270,6 +9334,7 @@ def _emit_v3_types(types: dict) -> list[str]:
             canonical[rn] = _by_shape.setdefault(shape, rn)
     for raw_name, spec in types.items():
         name = _ident(raw_name, "type name")
+        derives = _V3_ERASED_DERIVES if raw_name in carrying else _V3_DERIVES
         if spec.get("kind") == "record":
             twin = canonical.get(raw_name)
             if twin is not None and twin != raw_name:
@@ -9277,7 +9342,7 @@ def _emit_v3_types(types: dict) -> list[str]:
                     f"pub type {name} = {_ident(twin, 'type name')};")
                 out.append("")
                 continue
-            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
+            out.append(f"#[derive({derives})]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
                 rendered = _rust_type(ftype, types)
@@ -9292,12 +9357,17 @@ def _emit_v3_types(types: dict) -> list[str]:
                     # told the real key — without this a record round-trips under
                     # a name no other tier writes, and any `from_value` decode of
                     # the wire object faults on a field the schema just accepted.
-                    out.append(f'    #[serde(rename = "{field}")]')
+                    out.append(
+                        f'    #[serde(rename = "{field}")]'
+                        if raw_name not in carrying
+                        else "    // no serde derive: the item carries the erased `Value`")
                 out.append(f"    {fname}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
-            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
-            out.append('#[serde(tag = "$kind", content = "$value")]')
+            out.append(f"#[derive({derives})]")
+            out.append('#[serde(tag = "$kind", content = "$value")]'
+                       if raw_name not in carrying
+                       else "// no serde derive: the variant carries the erased `Value`")
             # issue #2471: a generic variant declares its type parameters, and
             # a payload naming one keeps it (`Jj(T)`), not the `Value` an
             # unknown name falls back to
@@ -9324,7 +9394,9 @@ def _emit_v3_types(types: dict) -> list[str]:
                 # match already ends in `_ => unreachable!()`
                 marker = ", ".join(_ident(p, "type name") for p in phantom)
                 out.append("    #[doc(hidden)]")
-                out.append("    #[serde(skip)]")
+                out.append("    #[serde(skip)]"
+                           if raw_name not in carrying
+                           else "    // no serde derive: the variant carries the erased `Value`")
                 out.append(f"    __RevlPhantom(std::marker::PhantomData<fn() -> ({marker},)>),")
             out.append("}")
         else:
