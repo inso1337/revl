@@ -8,20 +8,16 @@ skipped instead of measured.
 """
 
 import importlib.util
-import sys
 from pathlib import Path
+
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 HERE = ROOT / "bench" / "cross_tier_kernels"
 
 
 def _harness():
-    path = HERE / "harness.py"
-    spec = importlib.util.spec_from_file_location("cross_tier_kernels_harness", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_by_path("cross_tier_kernels_harness", HERE / "harness.py")
 
 
 # The native reference's checksums at n=5. They are the agreement oracle: an
