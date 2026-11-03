@@ -314,7 +314,12 @@ def _run_attest(args) -> int:
     from ..composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
 
     if not getattr(args, "anchor", False) and not args.target:
-        print("error: attest needs a composition TARGET", file=sys.stderr)
+        if args.verify or getattr(args, "verify_certificate", False):
+            print("error: this mode needs a record to check as TARGET",
+                  file=sys.stderr)
+        else:
+            print("error: attest needs a composition TARGET (or --anchor with "
+                  "at least one --digest)", file=sys.stderr)
         return 2
 
     try:
@@ -325,16 +330,6 @@ def _run_attest(args) -> int:
 
     if getattr(args, "anchor", False):
         return _run_anchor(args, key, load_composition)
-
-    if (args.verify or getattr(args, "verify_certificate", False)) \
-            and not args.target:
-        print("error: this mode needs a record to check as TARGET",
-              file=sys.stderr)
-        return 1
-    if not args.target:
-        print("error: attest needs a composition TARGET (or --anchor with "
-              "at least one --digest)", file=sys.stderr)
-        return 1
 
     if getattr(args, "certificate", False) or getattr(args, "verify_certificate", False):
         if args.verify:

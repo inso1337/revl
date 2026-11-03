@@ -16,6 +16,7 @@ log or timestamping service. These tests pin the definition of done:
 """
 
 import hashlib
+import hmac
 import json
 import sys
 from pathlib import Path
@@ -245,6 +246,53 @@ def test_anchor_and_attestation_do_not_verify_as_each_other():
     assert reason.startswith("signature mismatch")
 
 
+def _sign_in_domain(document: dict, key: bytes, domain: bytes) -> str:
+    signed = {member: value for member, value in document.items()
+              if member != "signature"}
+    return hmac.new(key, domain + A._canonical_bytes(signed),
+                    hashlib.sha256).hexdigest()
+
+
+@pytest.mark.parametrize("domain_name", [
+    "attestation", "certificate", "deploy-receipt", "pool-receipt",
+    "pool-receipt-attestation",
+])
+def test_a_mac_from_another_protocol_domain_does_not_verify_as_an_anchor(
+        domain_name):
+    """One key signs several protocols. Each records its own domain tag in the
+    MAC, so a valid MAC for another protocol is not a valid anchor MAC."""
+    from revl import cert, deploy  # noqa: PLC0415
+
+    domains = {
+        "attestation": A.SIGN_DOMAIN,
+        "certificate": cert.CERT_SIGN_DOMAIN,
+        "deploy-receipt": deploy.RECEIPT_DOMAIN,
+        "pool-receipt": pool_receipt.RECEIPT_DOMAIN,
+        "pool-receipt-attestation": pool_receipt.ATTESTATION_DOMAIN,
+    }
+    document = _anchor()
+    document["signature"] = _sign_in_domain(document, KEY,
+                                            domains[domain_name])
+
+    ok, reason = N.verify_anchor(document, KEY)
+
+    assert not ok
+    assert reason.startswith("signature mismatch")
+
+
+def test_a_record_that_names_another_key_fingerprint_is_refused():
+    """key_id is what a reader uses to choose which key to fetch. A MAC that
+    verifies under a key the record does not name has no answer to that."""
+    document = _anchor()
+    document["key_id"] = A.key_id(OTHER_KEY)
+    _sign_again(document)
+
+    ok, reason = N.verify_anchor(document, KEY)
+
+    assert not ok
+    assert reason.startswith("identity mismatch")
+
+
 # ------------------------------------------------------------- shape refusals
 
 @pytest.mark.parametrize("digests", [
@@ -417,7 +465,33 @@ def test_cli_attest_without_a_target_is_a_usage_error(capsys):
     assert "needs a composition TARGET" in capsys.readouterr().err
 
 
-def test_cli_verify_refuses_anchor_options_without_an_anchor(tmp_path, capsys):
-    rc = main(["verify", str(tmp_path / "bundle"), "--key", "k"])
+@pytest.mark.parametrize("extra", [
+    ["--key", "k"],
+    ["--digest", "composition=" + "a" * 64],
+])
+def test_cli_verify_refuses_anchor_options_without_an_anchor(tmp_path, capsys,
+                                                             extra):
+    rc = main(["verify", str(tmp_path / "bundle"), *extra])
     assert rc == 2
     assert "apply only with --anchor" in capsys.readouterr().err
+
+
+def test_cli_verify_without_anchor_still_routes_to_the_bundle_verifier(
+        tmp_path, capsys):
+    rc = main(["verify", str(tmp_path / "missing.revlbundle")])
+    assert rc == 2
+    assert "cannot verify" in capsys.readouterr().err
+
+
+def test_cli_attest_verify_without_a_target_is_a_usage_error(capsys):
+    rc = main(["attest", "--verify"])
+    assert rc == 2
+    assert "needs a record to check" in capsys.readouterr().err
+
+
+def test_cli_attest_anchor_refuses_verify_mode(tmp_path, capsys):
+    keyf = _key_file(tmp_path)
+    rc = main(["attest", "--anchor", "--verify",
+               "--digest", "receipt:one=" + "a" * 64, "--key", str(keyf)])
+    assert rc == 1
+    assert "cannot be combined" in capsys.readouterr().err

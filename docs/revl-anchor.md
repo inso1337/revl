@@ -82,7 +82,7 @@ anchor: VALID: valid: anchor is authentic and commits to the digests presented
 | `timestamp`   | ISO-8601 UTC instant the anchor was signed                       |
 | `sign_alg`    | `hmac-sha256`, checked at verify time, not only recorded         |
 | `signer`      | an optional label; identity is the key, not this string         |
-| `key_id`      | a non-secret fingerprint of the signing key                     |
+| `key_id`      | a non-secret fingerprint of the signing key; a verifier refuses a record naming any other key |
 | `signature`   | HMAC-SHA256 over every member above                              |
 
 A digest name is 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:`, `/`
@@ -108,7 +108,10 @@ share the same key material.
 
 **Versioning.** The version is an envelope property. A verifier refuses a
 version it does not implement instead of reading an unknown shape as version
-1.0, so a future record cannot be silently misread by an old verifier.
+1.0. A future record that also changes the MAC domain fails at the signature
+check first; one that keeps the version 1.0 domain and changes only the version
+member is refused by the envelope check. Either way it is refused, never
+silently read as version 1.0.
 
 ## 5. Emitting
 
@@ -133,10 +136,11 @@ revl verify --anchor FILE [--key KEY] [--digest NAME=DIGEST ...] [--json]
 
 `revl verify --anchor` is a check: exit `0` when the anchor is valid, `1` when
 it is read and invalid, and `2` when the record or key cannot be read. It
-reports four distinct failure modes: a signature mismatch, an envelope this
-build does not implement (including an unknown version), an `anchor_hash` that
-does not match the digests it carries, and a mismatch against a digest supplied
-with `--digest`. No network access is performed.
+reports five distinct failure modes: a signature mismatch, a `key_id` that
+names a different key, an envelope this build does not implement (including an
+unknown version), an `anchor_hash` that does not match the digests it carries,
+and a mismatch against a digest supplied with `--digest`. No network access is
+performed.
 
 `revl verify FILE` without `--anchor` remains the bundle verifier
 (`docs/bundle.md`).

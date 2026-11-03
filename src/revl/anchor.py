@@ -257,6 +257,10 @@ def verify_anchor(anchor: dict, key: bytes, *,
         protocol domain (an attestation, a certificate, a receipt). Checked
         first, because it proves the record is authentic before its contents
         are read.
+      * **identity mismatch**: the MAC verifies, but `key_id` names a
+        different key. The fingerprint is a function of the key alone, so a
+        record that names another one is about another signer even when the
+        MAC is right.
       * **envelope refused**: authentic, but not an anchor this build
         implements. An unknown version is refused here rather than read as
         version 1.0, and the same goes for a mislabelled algorithm, a missing
@@ -290,6 +294,19 @@ def verify_anchor(anchor: dict, key: bytes, *,
     if not hmac.compare_digest(expected_sig, given_sig):
         return False, ("signature mismatch: wrong key, or the anchor was "
                        "tampered with after signing")
+
+    # The fingerprint is part of the signed body and a function of the key
+    # alone, so a record naming a different one is a record about another
+    # signer even when its MAC is right: `key_id` is what a reader uses to
+    # decide WHICH key to fetch, and a MAC that verifies under a key the
+    # record does not name is the one arrangement in which that decision
+    # cannot be made.
+    named = anchor.get("key_id")
+    expected_kid = attest.key_id(bytes(key))
+    if named != expected_kid:
+        return False, ("identity mismatch: the anchor names key "
+                       f"{str(named)[:64]!r}, which is not the key it is "
+                       f"being checked with (this key is {expected_kid})")
 
     envelope = _validate_envelope(anchor)
     if envelope:
