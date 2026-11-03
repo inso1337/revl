@@ -439,7 +439,7 @@ diff would be exercising the path that cannot promote.
 
 **Slice 1 (this change).** The reduction, the stage table, the barrier, the
 fence, the kernel enumeration, the named refusals, the single verdict, the CLI
-and its three exit statuses, and the reward-scorecard adapter for `observe`.
+and its four exit statuses, and the reward-scorecard adapter for `observe`.
 Oracle: `tests/test_evolution_controller.py`. Fixture: a git tree per case,
 built in `tmp_path`, one edited path per case so the difference between a
 promotion and a refusal is always a single edit.

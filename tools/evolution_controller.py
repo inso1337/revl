@@ -197,9 +197,9 @@ from evolution_reward import Verdict as ComponentVerdict  # noqa: E402
 MODES = ("repair", "feature", "evolution")
 
 # The terminal shape for an evolution-mode proposal. Spelled as the roadmap
-# writes it, because it is not one of the controller's three decisions: the
-# lifecycle did not promote, roll back or refuse anything; it recorded a
-# proposal and stopped.
+# writes it, because it is not one of the three decisions proper (`PROMOTE`,
+# `ROLL_BACK`, `REFUSE`): the lifecycle did not promote, roll back or refuse
+# anything; it recorded a proposal and stopped.
 PROPOSAL_RECORDED = "proposal-recorded"
 
 # Exit statuses. REFUSE is distinct from ROLL_BACK for the same reason
