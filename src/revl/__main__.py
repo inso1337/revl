@@ -1469,6 +1469,18 @@ def _dispatch(args) -> int:
         from .bundle import run_bundle  # noqa: PLC0415 — lazy, pulls the compiler
         return run_bundle(args)
     if args.command == "verify":
+        anchor = getattr(args, "anchor", None)
+        if anchor:
+            if args.bundle:
+                print("error: give a bundle or --anchor FILE, not both",
+                      file=sys.stderr)
+                return 2
+            from .cli.observe import run_anchor_verify  # noqa: PLC0415 (lazy)
+            return run_anchor_verify(args)
+        if not args.bundle:
+            print("error: revl verify needs a bundle, or --anchor FILE",
+                  file=sys.stderr)
+            return 2
         from .bundle import run_verify  # noqa: PLC0415 — lazy
         return run_verify(args)
     if args.command == "deploy":

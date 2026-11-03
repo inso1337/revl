@@ -149,6 +149,7 @@ regenerated rather than edited.
 | rejections.md | needs-work | 81 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
+| revl-anchor.md | current | 0 | written with issue #2723 |
 | revl-attest.md | current | 9 |  |
 | revl-diff.md | current | 19 |  |
 | revl-metrics.md | current | 16 |  |

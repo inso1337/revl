@@ -2574,17 +2574,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="cryptographic attestation of a verified composition (item 127): "
              "sign a portable record that this exact composition was admitted "
              "(canonical IR hash + verdict + guarantees + timestamp), or "
-             "--verify one (docs/revl-attest.md)")
+             "--verify one. With --anchor, sign a chain-neutral record over a "
+             "set of named digests instead (docs/revl-attest.md, "
+             "docs/revl-anchor.md)")
     attest_cmd.add_argument(
-        "target", metavar="TARGET",
+        "target", metavar="TARGET", nargs="?",
         help="what to attest: a composition (a `.rvl` source, a compiled IR, "
              "or an `audit --json` document). With --verify, the attestation "
-             "JSON to check instead")
+             "JSON to check instead. With --anchor, optional: when given, its "
+             "canonical composition hash is added under the name 'composition'")
     attest_cmd.add_argument(
         "--verify", action="store_true",
         help="verify mode: TARGET is an attestation JSON — check its signature "
              "(and, with --against, that the composition still matches). Exits "
              "nonzero if the attestation is invalid")
+    attest_cmd.add_argument(
+        "--anchor", action="store_true",
+        help="anchor mode: sign a chain-neutral record over named sha256 "
+             "digests (a composition hash, attestation digests, receipt "
+             "digests) to publish to an external log or timestamping service "
+             "(docs/revl-anchor.md). Emitted as JSON with --json")
+    attest_cmd.add_argument(
+        "--digest", action="append", metavar="NAME=DIGEST", default=None,
+        help="with --anchor: a named sha256 digest to commit to, repeatable. "
+             "The value is 64 lowercase hex characters")
     attest_cmd.add_argument(
         "--against", metavar="COMPOSITION", default=None,
         help="with --verify: the composition to re-hash and check the "
@@ -2785,13 +2798,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="recompile a .revlbundle and prove it rebuilds bit-for-bit: source "
              "and IR hashes match, deps are locked, emitted artifacts correspond "
              "to each backend, capabilities match policy, evidence is present "
-             "(item 305, docs/bundle.md)")
-    verify_cmd.add_argument("bundle", metavar="BUNDLE",
-                            help="a bundle written by `revl bundle`: either the "
-                                 ".revlbundle directory or a one-file bundle "
-                                 "(--one-file); both verify identically")
+             "(item 305, docs/bundle.md). With --anchor FILE, verify a "
+             "chain-neutral anchor record instead (docs/revl-anchor.md)")
+    verify_cmd.add_argument(
+        "bundle", metavar="BUNDLE", nargs="?",
+        help="a bundle written by `revl bundle`: either the .revlbundle "
+             "directory or a one-file bundle (--one-file); both verify "
+             "identically. Omit when using --anchor")
+    verify_cmd.add_argument(
+        "--anchor", metavar="FILE", default=None,
+        help="verify an anchor record written by `revl attest --anchor`: "
+             "recheck its signature, recompute its anchor hash from the "
+             "digests it carries, and optionally compare the digests the "
+             "verifier holds with --digest. Exits nonzero if it is invalid")
+    verify_cmd.add_argument(
+        "--key", metavar="PATH", default=None,
+        help="with --anchor: the verifying key file. Falls back to "
+             "REVL_ATTEST_KEY_FILE (a path) or REVL_ATTEST_KEY (the secret)")
+    verify_cmd.add_argument(
+        "--digest", action="append", metavar="NAME=DIGEST", default=None,
+        help="with --anchor: a named digest the verifier holds; the anchor may "
+             "not commit to a different value for that name, or omit it. "
+             "Repeatable")
     verify_cmd.add_argument("--json", action="store_true",
-                            help="machine-readable tier-by-tier report")
+                            help="machine-readable tier-by-tier report, or the "
+                                 "anchor verdict with --anchor")
 
     # `revl deploy MAP [--dry-run]` — admit a deploy map (roadmap item 118,
     # docs/design/118-revl-deploy.md §1.1). With --dry-run it is the deploy
