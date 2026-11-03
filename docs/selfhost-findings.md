@@ -1786,6 +1786,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 `go`:
 
 - `generic_fn.rvl`
+- `comp_provide_empty_list.rvl`
 
 `java`:
 
