@@ -196,7 +196,7 @@ nowhere else:
     hash or component is not the entry's, and a ticket the session no longer has
     outstanding all fail it;
   * `decision` is not a parameter of the public `mint_standing_grant`, so no
-    operator request can take this route — `revl_approve(hash=<lease ticket>,
+    operator request can take this route, `revl_approve(hash=<lease ticket>,
     uses=N)` and `revl_approve(capability=<leased capability>, uses=N)` both
     refuse, exactly as they do for a crossing;
   * the grant the gate mints is lease-tagged, and `_find_standing_grant` still
@@ -208,7 +208,7 @@ One thing the invariant does not say, and the code does not do: it does not make
 the lease gate independent of the rule. Before the votes arrive, and for a
 decision that is absent, lapsed, denied, spent or bound to another ticket, the
 lease load is REFUSED with the question open, exactly as it was before this
-slice — the acquisition has a route, it does not have a bypass.
+slice: the acquisition has a route; it does not have a bypass.
 
 ## Decision 2: the vote protocol
 
@@ -342,7 +342,7 @@ operator it named. One bound operator could therefore satisfy a
 WAS refused, and correctly, is every way of counting the same one name twice: a
 second cast asserted under a name that already voted is refused as
 `duplicate-voter`, and a differently-cased spelling is not one of the rule's
-names at all, so it is refused as `unknown-approver` — neither can carry the
+names at all, so it is refused as `unknown-approver`: neither can carry the
 count, because the eligible set is compared literally. The self-quorum was a
 self-asserted identity, not a miscount.
 

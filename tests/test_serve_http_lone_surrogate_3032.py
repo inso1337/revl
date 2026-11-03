@@ -3,7 +3,7 @@
 Issue #3032. `_encode_response_value` wrote a handler-owned `Response` body with
 `str(payload).encode("utf-8")`. A `Str` is a sequence of Unicode scalar values
 (`docs/strings.md`), but a value that reached the handler from an upstream it
-does not control can carry an unpaired UTF-16 code unit -- the raw `"\ud83d"` a
+does not control can carry an unpaired UTF-16 code unit -- the raw `"\\ud83d"` a
 JSON decoder produces for an escape with no partner -- and that has no UTF-8
 spelling. The encode raised `UnicodeEncodeError` inside `_respond`, nothing
 caught it, and the connection closed with no status line at all. A program that

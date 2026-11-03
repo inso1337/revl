@@ -1,4 +1,4 @@
-# 456 — first-class HTTP contracts
+# 456: first-class HTTP contracts
 
 **Roadmap:** item 456 (driven by 462, docs/design/525-exemplary-web-app.md) · **Issue:** #719 · **Status:** SLICE 1 LANDED · **Vocabulary:** aligned to Cordis (`@cordisjs/server`, `@cordisjs/http`)
 
@@ -8,7 +8,7 @@ revl runs inside the Cordis ecosystem, so the HTTP contract deliberately mirrors
 Cordis's HTTP shapes where they overlap rather than deriving a parallel one from
 first principles. Two Cordis packages are the anchors:
 
-- **`@cordisjs/server`** — "HTTP/WebSocket server for Cordis", and the closer
+- **`@cordisjs/server`**: "HTTP/WebSocket server for Cordis", and the closer
   reference for item 456 (a server routing requests to handlers). A handler sees
   a `Request` and a `Response` (`packages/core/src/body.ts`):
   - `Request`: `url: string`, `method: string`, `path: string`,
@@ -23,7 +23,7 @@ first principles. Two Cordis packages are the anchors:
     'put', 'patch']` plus a separate `ctx.server.ws(...)` route
     (`packages/core/src/index.ts:125`, `:314`). A route is a middleware
     `(req, res, next) => Promise<Response | void>` (index.ts:98).
-- **`@cordisjs/http`** — the client fetch SERVICE, orthogonal to the server but
+- **`@cordisjs/http`**: the client fetch SERVICE, orthogonal to the server but
   the same vocabulary (`packages/core/src/index.ts`):
   - `Http.Response<T>` = `{ url: string, data: T, status: number,
     statusText: string, headers: Headers }` (index.ts:135-141).
@@ -34,28 +34,28 @@ first principles. Two Cordis packages are the anchors:
 
 ### What revl aligned to
 
-- **`Response.status_text: Str`** — added, mirroring Cordis's `statusText`
+- **`Response.status_text: Str`**: added, mirroring Cordis's `statusText`
   (server `res.statusText` / node `statusMessage`, client `Response.statusText`).
   The numeric `status` stays `Int`, exactly as Cordis carries both.
-- **`Method` variant** (`Get | Post | Put | Patch | Delete | Head`) — models
+- **`Method` variant** (`Get | Post | Put | Patch | Delete | Head`): models
   Cordis's `Server.methods` set (minus the `all` wildcard) as a type instead of a
   free `Str`, so a route table matches it exhaustively. `Request.method` is now
   `Method`. `method_str`/`parse_method` map to and from the wire spelling.
-- **Headers as `List[Header]`** — kept, as the closest revl match to Cordis's
+- **Headers as `List[Header]`**: kept, as the closest revl match to Cordis's
   WHATWG `Headers` multimap: ordered and repeatable (`Set-Cookie`, `Accept`),
   which a `Map[Str, Str]` cannot represent. Names are normalised to lower-case
   before storing, as WHATWG `Headers` does.
 
 ### Where revl deliberately DIVERGES (named, not oversight)
 
-- **`Outcome = Handled(Response) | NotHandled`** — Cordis has no typed "did a
+- **`Outcome = Handled(Response) | NotHandled`**: Cordis has no typed "did a
   route handle this". A handler mutates `res` (setting `res.status`/`res.body`
   flips an internal `res.claimed` flag) and the server FALLS BACK to
   `res.status = 404`/`405` by convention when nothing claimed it
-  (`packages/core/src/index.ts:202-223`). That convention — status recovered from
-  a mutation side effect — is the untyped, refactor-fragile pattern item 456
+  (`packages/core/src/index.ts:202-223`). That convention, status recovered from
+  a mutation side effect, is the untyped, refactor-fragile pattern item 456
   exists to replace, so revl keeps `Outcome` as its core contribution.
-- **Typed `Body = Empty | Text(Str) | Json(Str)`** — Cordis's body slot is
+- **Typed `Body = Empty | Text(Str) | Json(Str)`**: Cordis's body slot is
   untyped (`res.body: BodyInit`, `Http.Response.data: T`). revl keeps the body's
   KIND in the type, so emptiness is the `Empty` variant rather than a
   `""`/`"::empty::"` sentinel. This is revl's value-add over an untyped `data`;
@@ -81,31 +81,31 @@ silently break it.
 
 `Request`/`Response`/`Header` are ordinary records and `Body`/`Outcome` are
 ordinary variant types. The revl language already has records, variant types
-(`type T = A(X) | B`), `match`, and `Opt` — the exact surface an HTTP contract
-needs — so **first-class HTTP contracts are a standard-library module, not new
+(`type T = A(X) | B`), `match`, and `Opt`, the exact surface an HTTP contract
+needs, so **first-class HTTP contracts are a standard-library module, not new
 language syntax.** This matches 525's non-goal ("where a capability belongs in a
 standard web library rather than the language, say so") and means the item ships
 without inventing an unreviewed language surface.
 
 The contract lives in `stdlib/http.rvl` and is pure revl (no `@py` externs), so
 it compiles and runs identically on every backend the moment that backend emits
-variants and the base builtins — no per-tier work, exactly like
+variants and the base builtins, no per-tier work, exactly like
 `stdlib/render.rvl`.
 
 ## Shipped (slice 1)
 
 `stdlib/http.rvl`:
 
-- `pub type Method = Get | Post | Put | Patch | Delete | Head` — the Cordis
+- `pub type Method = Get | Post | Put | Patch | Delete | Head`: the Cordis
   method set as a type, not a free `Str`.
-- `pub type Header = { name: Str, value: Str }` — a `List[Header]` mirrors
+- `pub type Header = { name: Str, value: Str }`: a `List[Header]` mirrors
   Cordis's WHATWG `Headers` multimap.
-- `pub type Body = Empty | Text(Str) | Json(Str)` — emptiness is the `Empty`
+- `pub type Body = Empty | Text(Str) | Json(Str)`: emptiness is the `Empty`
   variant, the typed replacement for `""` / `"::empty::"`.
 - `pub type Request = { method: Method, path, headers: List[Header], body: Body }`
 - `pub type Response = { status: Int, status_text: Str, headers: List[Header],
-  body: Body }` — `status_text` mirrors Cordis's `statusText`.
-- `pub type Outcome = Handled(Response) | NotHandled` — a mishandled route is a
+  body: Body }`: `status_text` mirrors Cordis's `statusText`.
+- `pub type Outcome = Handled(Response) | NotHandled`: a mishandled route is a
   typed `NotHandled`, never an empty string.
 - constructors: `header`, `request`, `response`, `ok_text`, `ok_json`,
   `not_found`, `handled`, `not_handled` (the `ok_*`/`not_found` helpers carry the
@@ -137,14 +137,14 @@ handled text route.
 3. **Binary bodies.** `Body` has no `Bytes` case yet (revl `Bytes` exists);
    add when the exemplary app (462) needs a non-text payload.
 4. **Adoption in 462.** The exemplary app must actually route through this
-   contract to retire the harness's real sentinels — the forcing function that
+   contract to retire the harness's real sentinels, the forcing function that
    proves the surface is right. Any friction found there is a gap filed back
    against this item, per 525's sequencing.
 
 ## Why this is the right first cut
 
 It is the smallest change that makes the two things the string convention
-encoded — *did a route handle this* and *what is its status/body* — readable from
+encoded (*did a route handle this* and *what is its status/body*) readable from
 the type, on existing language surface, with no emitter or tier work. The wire
 binding and the exemplary-app adoption build on it rather than being blocked by a
 language decision.
