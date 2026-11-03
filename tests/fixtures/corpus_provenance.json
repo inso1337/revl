@@ -126,6 +126,7 @@
    "examples/lifecycle_timer.rvl",
    "examples/lifecycle_wasm.rvl",
    "examples/live_counter.rvl",
+   "examples/mediator.rvl",
    "examples/migrator.rvl",
    "examples/model_council.rvl",
    "examples/model_council_binding.rvl",

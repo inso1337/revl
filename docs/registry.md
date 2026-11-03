@@ -45,7 +45,7 @@ registry/
     <name>/                    # single namespace, first-come for a FREE name
       component.rvl            # source, canonical formatting (the current release)
       version                  # the release this entry is, one line (§1.1)
-      meta.json                # description + tags, publisher-declared (§1.3)
+      meta.json                # description + tags + mediator (§1.3, §1.5)
       manifest.json            # the compiled manifest (item 28 format)
       dossier.json             # evidence: audit --json today; the item 31
                                # gauntlet dossier when it exists
@@ -56,6 +56,10 @@ registry/
         fault-sweep.json       #   fault.sweep_dossier (item 30/125)
         inverse-roundtrip.json #   fault.roundtrip_dossier (item 26)
         capabilities.json      #   the G8 boundary surface
+        ceilings.json          #   cardinality(ir): what each crossing may repeat
+        secret-sinks.json      #   the bound secrets and the components that
+                               #   can reach their sinks
+        compensation.json      #   every reversible crossing and its class
         provenance.json        #   assembled source/build provenance
       releases/                # GENERATED at publish; append-only (§1.2)
         <version>/
@@ -72,6 +76,9 @@ path, run after `build_index`) from the **existing producers' verbatim output**
 - it re-implements no evidence. A missing facet is `unavailable`, never faked;
 the runtime-tested facets (`fault-sweep`, `inverse-roundtrip`) are written when
 the cordis-py runtime is present and honestly skipped when it is absent.
+`ceilings`, `secret-sinks` and `compensation` are always reproducible with no
+runtime and are always written; an empty document means "none", never "this
+publisher did not produce the facet" (§2.3, item 293, issue #2697).
 
 `index.json` maps each component to what a resolver needs without opening
 sources: provided service shapes (canonicalized), required keys,
@@ -155,19 +162,23 @@ verified. Registry-side identity is still phase 2's remaining half.
 
 `index.json` carries the chain: an entry's row gains `releases`, the sorted list
 of frozen releases, so a consumer can see which releases exist and derive a
-changelog across them without opening the tree (`indexVersion` is `"2"`).
+changelog across them without opening the tree (`indexVersion` is `"3"`; `"3"`
+added the per-entry `mediator` row in issue #2697).
 
 The derived changelog (item 261) is stored as `releases/<version>/changelog.json`
 and its headline is item 64's computed bump. A *first* release has nothing to
 diff against and carries no changelog rather than an invented one.
 
-### 1.3 `meta.json` — the two fields the compiler cannot derive
+### 1.3 `meta.json` — the fields the compiler cannot derive
 
-What a component *is* (`description`) and how to find it (`tags`) cannot be read
-off its source, and `truc ship` refuses an under-described component for that
-reason. They are declared in `meta.json` — a JSON object with those two keys and
-no others — and `build_index` copies them verbatim into the row, exactly as it
-copies `version` from the `version` file.
+What a component *is* (`description`), how to find it (`tags`) and whether it is
+a trusted mediator for one capability (`mediator`, §1.5) cannot all be read off
+its source, and `truc ship` refuses an under-described component for that
+reason. They are declared in `meta.json` — a JSON object with those keys and no
+others — and `build_index` copies them verbatim into the row, exactly as it
+copies `version` from the `version` file. The `mediator` value is the one that
+is *checked* rather than merely copied: `build_index` verifies it against the
+compiled audit (§1.5), and the field is an authority field at read time.
 
 The point of the file is the check. `index.json` is generated and **a stale
 index fails CI**, which only means something while every key in a row is
@@ -237,6 +248,41 @@ code. The records stay the vendor's: `revl_export {with_knowledge: true}` never
 copies them into the project's sidecar and renders no note into a vendored
 `component.rvl`, whose bytes the lock pins. A consumer's own note about a
 vendored declaration goes to the project's sidecar only.
+
+### 1.5 Marking a trusted mediator
+
+A mediator is the one component that holds a raw capability and gives everyone
+else a narrow wrapper ([mediator.md](mediator.md), `examples/mediator.rvl`). Mark
+it in the entry's `meta.json`:
+
+```json
+"mediator": {"component": "FsMediator", "capability": "fs"}
+```
+
+The declaration is **verified against the compiled audit**, not believed: the
+named component must be the only component in the entry's composition whose G8
+reach carries `capability`. A second holder, a capability nobody reaches, an
+unknown component, an unrecognised key or a non-string value is a refusal. The
+verified value is copied into the index row and is an authority field: the
+read-time check recompiles the source and compares the row against `meta.json`,
+so an index that drops or changes the marking is refused rather than ranked.
+
+`truc ship` has no flag for the marking yet; declare it in `meta.json` on the
+phase-0 commit path (or after a first publish) and regenerate the index. A later
+publish that restates only description/tags preserves the declared mediator, and
+re-verifies it against the new source before anything is written.
+
+**What it changes in a resolve.** When a marked mediator is among the
+§5-compatible candidates for a need, `resolve` puts every other candidate that
+would replace it below the mediator unless that candidate carries a
+cryptographically valid attestation binding a passing fault sweep. A candidate
+without both is ranked as unavailable for the displacement decision, and its
+result carries `replacementBar` with the exact reason and the mediator's names.
+A candidate that clears the bar competes on the ordinary ranking again. This is
+a hard lexical term ahead of least authority, not a score: a narrower component
+cannot buy the mediator's place on an unsubstantiated claim. Without a
+verification key no attestation can grade `valid`, so no replacement can clear
+the bar and the marked mediator keeps its place.
 
 ## 2. `revl_resolve` — the one search verb
 
@@ -312,7 +358,10 @@ lookup) is a regression against this document.
 4. **evidence quality** (item 293): among candidates tied on the above, the
    one with the stronger evidence bundle wins - a fuller fault sweep (12/12
    over unavailable), a valid attestation, a trusted publisher, an
-   inverse-roundtrip pass;
+   inverse-roundtrip pass. The `ceilings`, `secret-sinks` and `compensation`
+   facets are carried and reported in `evidence.facets`, but they do not enter
+   the rank key: they are facts for a consumer or a policy to read, not a score
+   (issue #2697);
 5. smaller source (less for the agent to hold in context).
 
 Interface compatibility (§5) is a **hard filter**, never a ranking term: an
@@ -323,6 +372,15 @@ read as valid; a tampered attestation grades `invalid` (bottom), and a
 `verifyRequired` resolve filters any candidate lacking a cryptographically valid
 attestation. The chosen candidate's `why` names the evidence it won on
 (`fault sweep 12/12, attestation valid, gauntlet admissible`).
+
+**The mediator bar (issue #2697, §1.5).** A marked mediator is a hard term ahead
+of least authority, not a tiebreak. When one is among the compatible candidates,
+any other candidate that would replace it ranks below it unless it carries a
+cryptographically valid attestation binding a passing fault sweep. The demoted
+candidate keeps its honest evidence status but carries `replacementBar` naming
+the mediator and the missing condition, and its `why` says why it lost. The
+mediator itself rides with its `mediator` marking in the result. Without a key
+no candidate can prove the bar.
 
 **`wouldBeRefused` (item 290 §5).** Pass a boundary policy (`policy` on
 `revl_resolve`, `policy=` on `registry.resolve`) and every ranked candidate the
