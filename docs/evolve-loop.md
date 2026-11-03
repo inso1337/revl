@@ -4,8 +4,11 @@
 made revl's admission gate reachable as a bridge service — one-shot: a candidate
 is admitted, or refused with a why-trace. **evolve** is the loop that turns a
 refusal into a next attempt: admit, on refusal hand the structured why-trace to
-a `propose` step, retry to a budget. `src/revl/evolve_loop.py` is the
-orchestration; `examples/evolve_loop.rvl` declares the seam in revl.
+a `propose` step, retry to a budget. The proposer is handed one bounded
+`ProposerPacket`, every proposal call records its digest, and **rounds** restart
+the loop from the last admitted component with the earlier proposals dropped.
+`src/revl/evolve_loop.py` is the orchestration; `examples/evolve_loop.rvl`
+declares the seam in revl.
 
 ## The problem
 
@@ -33,10 +36,11 @@ loop is proven end to end in tests.
 
 ## Control flow
 
-`evolve(candidate, proposer, budget)` (`src/revl/evolve_loop.py`):
+`evolve(candidate, proposer, budget, brief="")` (`src/revl/evolve_loop.py`):
 
 ```text
 current = candidate
+notes = []
 for n in 1 .. budget:
     verdict = Gate.admit_structured(current.sources, current.manifest)
     record attempt n (candidate, verdict)
@@ -44,7 +48,11 @@ for n in 1 .. budget:
         return EvolveResult(admitted=True, attempts, final_rejection=None)
     why_trace = rejection_payload(verdict.rejection)
     if n < budget:                      # regenerate only if an attempt remains
-        current = proposer(current, why_trace)
+        packet = ProposerPacket(brief, current, why_trace,
+                                notes[-MAX_PACKET_NOTES:])
+        attempt.packet_digest = packet.digest()
+        current = proposer(packet)
+        notes.append(refusal_note(n, why_trace))
 return EvolveResult(admitted=False, attempts, final_rejection=why_trace)
 ```
 
@@ -60,17 +68,52 @@ return EvolveResult(admitted=False, attempts, final_rejection=why_trace)
   inherits item 144's guarantees exactly — evolve *orchestrates* the gate, it
   does not re-implement admission.
 
+## The proposer packet
+
+Every proposal call receives one `ProposerPacket`, never a bare candidate or an
+unbounded transcript:
+
+```text
+ProposerPacket(
+  brief: str,                  # the original task text, unchanged
+  candidate: Candidate,        # the parent candidate to start from
+  last_refusal: dict | None,   # the refusal that ended the last attempt
+  notes: tuple[str, ...],      # capped summaries of earlier refusals
+)
+```
+
+| field | meaning | bound |
+| --- | --- | --- |
+| `brief` | the task text the caller supplied to `evolve`/`rounds` | carried unchanged, never accumulated |
+| `candidate` | the parent candidate: the current attempt for a repair, or the retained component for a round seed | one candidate |
+| `last_refusal` | the `rejection_payload` of the refusal that triggered the proposal, or `None` for a round seed | one payload |
+| `notes` | one-line `refusal_note` summaries of earlier refusals in the same round | at most `MAX_PACKET_NOTES` (8), each at most `MAX_NOTE_CHARS` (160) |
+
+The packet **never** holds the discarded attempt history (the full `Attempt`
+list stays on `EvolveResult` for audit), earlier candidates or their sources,
+the proposer's own conversation, or any authority. It is deliberately smaller
+than the record so a fresh proposer cannot re-anchor on its own earlier edits.
+
+`ProposerPacket.canonical_json()` is the canonical form (sorted keys, compact
+separators, UTF-8) and `digest()` is its SHA-256. Every refused attempt that
+hands a packet to `propose` records that digest as `Attempt.packet_digest`, so a
+later reader can check exactly what the proposer was shown. An admitted attempt,
+and a final refusal with no attempt left to spend, record `None`: nothing was
+handed over. `packet.candidate_digest` is the content hash of the parent
+candidate, so a round packet can be checked against the component the previous
+round retained.
+
 ## The propose seam
 
 ```text
-propose(candidate: Candidate, why_trace: dict) -> Candidate
+propose(packet: ProposerPacket) -> Candidate
 ```
 
-- `candidate` — `Candidate(sources={path: source}, manifest=<running IR JSON>)`.
-- `why_trace` — the rejection payload below.
+- `packet`: the bounded input above: brief, parent candidate, last refusal,
+  capped notes.
 - returns the revised candidate to admit next. A proposer that cannot improve
-  the candidate returns it unchanged; the budget still bounds the loop, so a
-  stuck proposer ends in exhaustion, never an infinite loop.
+  the candidate returns `packet.candidate` unchanged; the budget still bounds
+  the loop, so a stuck proposer ends in exhaustion, never an infinite loop.
 
 The harness installs its real generator once, at startup:
 
@@ -82,12 +125,15 @@ evolve_loop.register_proposer(my_generator)   # then evolve() needs no proposer=
 the tests inject `scripted_proposer`). Across the service seam the same seam is
 `host_propose` in `examples/evolve_loop.rvl`, whose `@py` body is
 `evolve_loop.propose_bridge` (JSON-string in, JSON-string out — value-typed, so
-`service Evolve` is transport-safe for the same reason `Gate.admit` is).
+`service Evolve` is transport-safe for the same reason `Gate.admit` is). That
+transport is `(candidate, why-trace)` strings, so the bridge reconstructs a
+packet with an empty brief and no notes; a caller that needs the brief or the
+notes uses `evolve`/`rounds` in-process.
 
 ## The structured-rejection payload contract
 
-This is what `propose` receives and what a generator branches on. It is
-`diagnostics.classify`'s agent-facing record (already the projection of a
+This is the `last_refusal` the packet carries and what a generator branches on.
+It is `diagnostics.classify`'s agent-facing record (already the projection of a
 `RevlError`), augmented by the gate with the mapped `fix`, then normalized by
 `rejection_payload` into stable generator-facing keys:
 
@@ -137,15 +183,58 @@ on an admit). Item 144's `admit` is left byte-for-byte unchanged.
 ```text
 EvolveResult(
   admitted: bool,
-  attempts: [ Attempt(n, candidate, admitted, diagnostic, rejection), … ],
+  attempts: [ Attempt(n, candidate, admitted, diagnostic, rejection,
+                      packet_digest), … ],
   final_rejection: <payload> | None,   # set only on give-up
 )
 ```
 
 `result.to_json()` is the log a harness records — every candidate offered, in
-order, each with its verdict and (on refusal) the payload that drove the next
-propose. `final_candidate` is the last candidate offered (the admitted one on
-success).
+order, each with its verdict, (on refusal) the payload that drove the next
+propose, and (when a packet was handed over) `packet_digest`, the hash of what
+the proposer saw. `final_candidate` is the last candidate offered (the admitted
+one on success).
+
+## Rounds: a fresh start from the retained component
+
+`rounds(candidate, brief, proposer, budget, max_rounds)`
+(`src/revl/evolve_loop.py`) wraps `evolve` in bounded fresh-context rounds:
+
+```text
+current = candidate
+for r in 1 .. max_rounds:
+    packet = ProposerPacket(brief, current, last_refusal=None, notes=())
+    first = proposer(packet)             # fresh context for this round
+    result = evolve(first, proposer, budget, brief=brief)
+    record Round(n=r, packet, packet.digest(), result)
+    if not result.admitted:
+        return RoundsResult(admitted=False, rounds, result.final_rejection)
+    current = result.final_candidate     # keep only the last admitted candidate
+return RoundsResult(admitted=True, rounds)
+```
+
+Each round ends at a retained, admitted component; the next round starts from a
+seed packet built from that component and the original brief, with no refusal
+text and no notes from the previous round. The previous round's attempts are
+not lost: they stay in `Round.result.attempts` for audit. Two rounds therefore
+have different seed-packet digests whenever a round changed the component, and
+the round-two packet contains no refusal from round one.
+
+**Forgetting frees context, never authority.** A restart drops the proposer's
+memory of earlier attempts; it never changes what the retained component may
+do. Authority lives in the admitted component's declared capabilities and
+effects, which travel with the component and are re-checked by the Gate on
+every admission, so a restart can neither lose nor gain any. If the restarted
+proposer repeats a dead end from an earlier round, that dead end is still in
+`Round.result.attempts`: the record makes it visible even though the packet
+does not carry it.
+
+`budget` (per round) and `max_rounds` are fixed before the run starts. A round
+that exhausts its budget ends the whole run with `admitted=False` and that
+round's `final_rejection`; `RoundsResult.final_candidate` then names the last
+component a round retained, or `None` when no round admitted.
+`RoundsResult.to_json()` records each round's seed packet and digest beside its
+attempt history.
 
 ## Worked proof (the tests)
 
@@ -159,30 +248,43 @@ success).
   with `budget=3` the loop spends all three attempts and gives up with
   `admitted=False`, the full three-attempt history, and a `final_rejection`
   still carrying `g_rule == "G2"` and the `["Base", "Dup"]` call path.
+- **the packet digest**: a recording proposer sees, on its only call, exactly
+  the round-one candidate and its refusal payload; `Attempt.packet_digest`
+  equals the digest of that packet. The admitted attempt records `None`.
+- **capped notes**: across a longer run the packet's `notes` grow one summary
+  per earlier refusal and stop at `MAX_PACKET_NOTES`.
+- **rounds**: two rounds produce different seed-packet digests; the round-two
+  packet has no refusal text from round one, and carries the kept component's
+  `candidate_digest` and the original brief.
+- **bounded rounds**: a failed round ends the run and keeps the last retained
+  component; `budget` and `max_rounds` are validated and fixed before the run.
 
 ## Harness coordination
 
 This is the mechanism the automorph harness's `evolve` wires to:
 
 1. the harness calls `evolve_loop.register_proposer(generator)` once, where
-   `generator(candidate, why_trace) -> candidate` is its LLM-backed regenerator;
-2. it drives `evolve_loop.evolve(candidate, budget=…)` per candidate (or
-   `evolve_bridge`/the `Evolve` service across a seam), reading `EvolveResult`;
-3. on refusal the harness's generator receives the payload above — it branches
-   on `g_rule`, reads `subject`/`call_path` to locate the offending code, and
-   uses `fix` as the rewrite hint.
+   `generator(packet) -> candidate` is its LLM-backed regenerator;
+2. it drives `evolve_loop.evolve(candidate, budget=…)` per candidate, or
+   `evolve_loop.rounds(candidate, brief, budget=…, max_rounds=…)` for a
+   multi-round run (or `evolve_bridge`/the `Evolve` service across a seam),
+   reading `EvolveResult`/`RoundsResult`;
+3. on refusal the harness's generator receives the packet; it branches on
+   `packet.last_refusal.g_rule`, reads `subject`/`call_path` to locate the
+   offending code, and uses `fix` as the rewrite hint.
 
-The seam is deliberately narrow (one callable, value-typed at the service
-boundary) so the generator and the loop evolve independently: the harness owns
-*what* a revision is, this module owns *when* one is asked for and *what
-refusal-shape* it is handed.
+The seam is deliberately narrow (one callable taking one bounded packet,
+value-typed at the service boundary) so the generator and the loop evolve
+independently: the harness owns *what* a revision is, this module owns *when*
+one is asked for and *what* bounded input it is handed.
 
 ## Trade-offs and what a fuller loop still needs
 
 1. **The manifest is fixed.** evolve admits successive candidates against one
-   running world. A loop that also evolves the running composition (admit a
-   candidate, then admit the *next* against the world the previous one joined)
-   is a further slice — it needs the admitted manifest threaded forward as the
+   running world. `rounds` threads the retained *candidate* forward, not the
+   admitted *manifest*. A loop that also evolves the running composition (admit
+   a candidate, then admit the *next* against the world the previous one joined)
+   is a further slice: it needs the admitted manifest threaded forward as the
    next attempt's `manifest`, which `EvolveResult.final_candidate` already
    carries the material for.
 2. **The proposer is trusted.** The loop re-admits whatever `propose` returns,
@@ -190,7 +292,11 @@ refusal-shape* it is handed.
    re-admitted), but it *can* burn the budget. The budget is the only bound on a
    bad generator today; a fuller loop might also detect non-progress (the same
    `g_rule`+`subject` recurring) and give up early.
-3. **`admit_structured` is py-tier.** Like item 144's gate it runs on the py
+3. **The notes are summaries.** A packet carries capped one-line summaries of
+   earlier refusals, not their full payloads. The full history stays in the
+   attempt record; a proposer that needs the detail of an old dead end has to be
+   given it by the harness, deliberately, not implicitly by the loop.
+4. **`admit_structured` is py-tier.** Like item 144's gate it runs on the py
    process; a cross-tier `Evolve` service reaches it as a bridge proxy exactly
    as `docs/gate-as-a-service.md` describes, and inherits the same
    deadline/withdrawal bound.
