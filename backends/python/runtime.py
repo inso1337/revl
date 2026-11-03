@@ -1538,7 +1538,7 @@ class CeilingCapsMissing(RuntimeError):
     one) with `_revl_declared_caps`, so the runtime can tell "this callee
     declares a ceiling" from "this callee declares none". If the declaration
     exists but the emitted call carries no `caps=`, the crossing would meter
-    nothing and silently run unmetered — the exact bypass #2688 is fixing. The
+    nothing and silently run unmetered: the exact bypass #2688 is fixing. The
     runtime refuses by name instead: a missing spelling is a wiring defect,
     never a license to fire (issue #2688)."""
 
