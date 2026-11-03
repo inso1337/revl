@@ -220,6 +220,24 @@ exact `(component, step_index)` and an exact member of the record. That is
 what item 496's rationale is about and what a threshold on a counter cannot
 produce: the output when a shadow disagrees is a name, not a number.
 
+### 4.1. What a clean sample licenses
+
+A clean window is not a proof. With n paired observations and no divergence,
+the rule of three puts the failure rate below 3/n at 95 percent, but only if
+the draws are independent observations of the same action class and realm, the
+candidate was fixed before the window opened, the window was not used to
+choose among candidates, and the bound is claimed over the compared behaviour
+and not over what the sample did not exercise: the shadow sees the paths
+traffic happened to take, so it bounds those paths and says nothing about
+reach or taint behaviour elsewhere. The verdict therefore tags its evidence
+`sampled`, quotes `failure_rate_upper_95` as 3/n only when the plan declares
+`window_fresh`, and carries "not quotable" when the plan does not; with any
+divergence the bound is omitted and the counts stand alone. A refusal that
+stopped before the barrier read no evidence and carries no strength tag: the
+refusal is its answer. No path in this note tags anything `exact`:
+whole-history replay (issue #2749) is the first honest producer of that tag,
+and it is not built.
+
 ---
 
 ## 5. Restore is not compensate
@@ -256,7 +274,9 @@ is exactly what issue #1225 asks to stop.
 
 ## 6. Failure direction
 
-Fail-closed, with no third value and no default anywhere:
+Fail-closed, with no third value and no default that widens what the gate may
+do. The one member read as false when absent is `window_fresh`, and it can
+only narrow what the verdict may claim: silence means no bound is quoted.
 
 | shape | refusal |
 |---|---|
