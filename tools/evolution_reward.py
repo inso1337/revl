@@ -164,7 +164,10 @@ two check different things:
 by name when no allow set was supplied at all. That is default deny: a run with
 no grant names nothing as editable, so it can retain nothing. A declared scope
 that names a fenced evaluator path, or that is `**` over the whole tree, is a
-declaration that bounds nothing and is refused too.
+declaration that bounds nothing and is refused too. The measured diff is fenced
+as well: a change to an evaluator file is refused even when a directory glob in
+the grant covers it, because the grant names the subject and the fence is the
+judge.
 
 Exit status is 0 only when the trajectory is retained.
 """
@@ -687,7 +690,7 @@ def probe_scope(candidate: Candidate) -> Verdict:
     The declared scope is the candidate's claim about its own work; the operator
     allow set (`--allow` / `ALLOW_ENV`) is the grant that claim is checked
     against. A probe that read only the claim would let a candidate declare
-    `**` and bound nothing, which is issue #2803. Fail-closed in five
+    `**` and bound nothing, which is issue #2803. Fail-closed in six
     directions:
 
       * no operator allow set: nothing is named as editable, and default deny
@@ -698,7 +701,10 @@ def probe_scope(candidate: Candidate) -> Verdict:
         declares it may edit its own judge is refused before the diff is read;
       * no change at all: there is no work to retain;
       * a measured path outside the operator grant or the declared scope:
-        refused and listed, so the verdict is readable without re-running git.
+        refused and listed, so the verdict is readable without re-running git;
+      * a measured path that CHANGES a fenced evaluator: refused even when the
+        declaration and the grant both admit the directory, because the grant
+        names the subject and the fence is the judge.
 
     A declared whole-tree scope is refused by name too. It is checked after the
     measured grant so that when a `**` candidate's diff ALSO leaves the grant,
@@ -744,6 +750,17 @@ def probe_scope(candidate: Candidate) -> Verdict:
             + ", ".join(outside_allow[:6]),
             [f"git diff --name-only {candidate.base}",
              "allow=" + ";".join(candidate.allow)])
+    measured_fence = [p for p in paths if p in set(EVALUATOR_FENCE)]
+    if measured_fence:
+        return failed(
+            name,
+            f"{len(measured_fence)} measured change(s) reach fenced evaluator "
+            "path(s): " + ", ".join(measured_fence[:6])
+            + ". The operator grant names the subject; the fence is the judge, "
+            "and a change to it is refused even when a directory glob in the "
+            "grant covers it",
+            [f"git diff --name-only {candidate.base}",
+             "fence=" + ";".join(EVALUATOR_FENCE)])
     if _whole_tree(candidate.scope):
         return failed(
             name,

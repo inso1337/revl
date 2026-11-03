@@ -698,7 +698,7 @@ def judge_admit(proposal: Proposal) -> Verdict:
 def judge_authority(proposal: Proposal) -> Verdict:
     """The authority diff. A PRECONDITION, and the reason this module exists.
 
-    Four checks, every one of them computed by the controller rather than read
+    Five checks, every one of them computed by the controller rather than read
     off the record, because a proposal that can hand in a green authority
     record and be believed has not had its authority checked.
 

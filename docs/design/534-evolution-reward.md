@@ -205,7 +205,10 @@ default deny: a run that names nothing as editable retains nothing. A declared
 scope that NAMES a fenced evaluator path is refused before the diff is read. A
 declared `**` over the whole tree is refused by name as well; it is checked
 after the grant so that, when the diff also leaves the grant, the verdict names
-the path rather than only the pattern. The fence is
+the path rather than only the pattern. The MEASURED diff is checked against the
+same fence after the grant, so a directory glob that covers a judge file does
+not let a candidate edit it; the grant names the subject, the fence is the
+judge. The fence is
 `EVALUATOR_FENCE`: the reward's own two files, `tools/heldout_scoring.py`'s
 fence, and `tools/evolution_controller.py`'s. `tests/test_evolution_controller.py`
 holds it to those two lists so a fence added there cannot silently stop being
@@ -490,9 +493,10 @@ candidate-written claim and `**` bounded nothing, so `probe_scope` now also chec
 the measured diff against an operator grant (`--allow` / `REVL_EDIT_ALLOW`, never
 a record key). No grant fails the component by name, a path outside the grant is
 refused and listed, and a declared scope that names an `EVALUATOR_FENCE` path or
-is `**` over the whole tree is refused. The controller applies the same grant at
-its `authority` precondition (`NO_ALLOW_SET`, `OUTSIDE_ALLOW`), before any
-measured stage is read.
+is `**` over the whole tree is refused. A measured change that reaches a fenced
+evaluator is refused even when the grant's directory glob covers it. The
+controller applies the same grant at its `authority` precondition
+(`NO_ALLOW_SET`, `OUTSIDE_ALLOW`), before any measured stage is read.
 Oracle: the `scope` block of `tests/test_evolution_reward.py`, the `allow` block
 of `tests/test_evolution_controller.py`, and `tools/evolution_reward.py`'s
 `ALLOW_ENV`, `parse_allow`, `allow_from_env` and `EVALUATOR_FENCE`.

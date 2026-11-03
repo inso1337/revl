@@ -587,6 +587,20 @@ def test_a_new_unlisted_tools_file_is_refused_when_tools_is_not_allowed(
     assert "operator allow set" in verdict.reason
 
 
+def test_a_change_to_a_fenced_evaluator_is_refused_even_inside_the_grant(
+        reward, tiny_repo):
+    """A directory glob in the grant covers the judge file too, so the
+    declaration cannot be the only fence. The measured diff is checked against
+    `EVALUATOR_FENCE` after the grant: without that, declaring and granting
+    `tools/**` would let a candidate edit the scorer."""
+    (tiny_repo / "tools" / "evolution_reward.py").write_text("changed\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("tools/**",)))
+    assert verdict.verified is False
+    assert "fenced" in verdict.reason
+    assert "tools/evolution_reward.py" in verdict.reason
+
+
 def test_a_declared_scope_naming_a_fenced_path_is_refused_before_measurement(
         reward, tiny_repo):
     """A scope that names the scorer is refused by name before the diff is read.
