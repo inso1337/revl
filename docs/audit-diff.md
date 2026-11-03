@@ -71,10 +71,39 @@ author-written bound; a VALUE is never in the audit at all (values arrive at
 | `added`     | crossing in NEW but not PREV — a widening  | fails (exit 1) unless acknowledged |
 | `removed`   | crossing in PREV but not NEW — narrowing   | always passes |
 | `unchanged` | crossing in both                           | always passes |
+| `inverse_weakened` | the derived `inverse` class of a crossing moved to a weaker one (defaulted to `unknown`) | fails (exit 1) unless acknowledged |
+| `inverse_strengthened` | the class moved to a stronger one | always passes |
 
 Adding authority is the only dangerous direction, so **only unacknowledged
-additions fail**. Giving up authority (a removal) never needs a gate. Exit code
-is `0` iff there are no unacknowledged additions.
+additions and weakenings fail**. Giving up authority (a removal, a tightened
+reach, a strengthened inverse) never needs a gate. Exit code is `0` iff there
+are no unacknowledged additions or weakenings.
+
+## Inverse provenance drift
+
+Issue #2692 adds one derived field to the audit: every crossing carries
+`inverse`, a class from the closed vocabulary `declared`, `generated`,
+`compensation`, `forward`, `irreversible`, `unknown` (the meanings and the rule
+that nothing is inferred from a name are in
+[interchange-format.md](interchange-format.md#the-inverse-class)).
+
+A class change is drift on the authority axis even when the crossing token is
+unchanged: the component still reaches the same extern, but the way that
+crossing can be undone may have weakened. The gate orders the vocabulary by
+recovery strength and reports a move toward `unknown` as a weakening:
+
+| change (examples) | bucket |
+| --- | --- |
+| `declared` → `compensation` (an exact inverse became a best-effort offset) | `inverse_weakened` |
+| `compensation` → `irreversible` (the offset was dropped) | `inverse_weakened` |
+| `forward` → `compensation` (a safe re-issue became a best-effort offset) | `inverse_weakened` |
+| `unknown` → anything known; `irreversible` → `forward`/`compensation`; `compensation` → `declared` | `inverse_strengthened` (safe) |
+
+Each weakening is reported as the token `inverse:<extern-name>` and is
+acknowledged through the same `--accept`/`--accept-all` path as an added
+crossing. Only externs present in BOTH audits are compared: a brand-new extern
+is already an added `host:` crossing, and a removed one gave up its reach
+entirely.
 
 ## Acknowledging an intended widening
 
