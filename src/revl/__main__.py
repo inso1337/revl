@@ -1481,6 +1481,10 @@ def _dispatch(args) -> int:
             print("error: revl verify needs a bundle, or --anchor FILE",
                   file=sys.stderr)
             return 2
+        if getattr(args, "key", None) or getattr(args, "digest", None):
+            print("error: --key and --digest apply only with --anchor FILE",
+                  file=sys.stderr)
+            return 2
         from .bundle import run_verify  # noqa: PLC0415 — lazy
         return run_verify(args)
     if args.command == "deploy":

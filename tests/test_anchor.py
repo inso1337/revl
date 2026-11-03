@@ -407,3 +407,15 @@ def test_cli_verify_refuses_a_bundle_and_an_anchor_together(tmp_path, capsys):
                str(anchor_path), "--key", str(keyf)])
     assert rc == 2
     assert "not both" in capsys.readouterr().err
+
+
+def test_cli_attest_without_a_target_is_a_usage_error(capsys):
+    rc = main(["attest"])
+    assert rc == 2
+    assert "needs a composition TARGET" in capsys.readouterr().err
+
+
+def test_cli_verify_refuses_anchor_options_without_an_anchor(tmp_path, capsys):
+    rc = main(["verify", str(tmp_path / "bundle"), "--key", "k"])
+    assert rc == 2
+    assert "apply only with --anchor" in capsys.readouterr().err

@@ -313,6 +313,10 @@ def _run_attest(args) -> int:
     from .. import attest as _attest  # noqa: PLC0415
     from ..composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
 
+    if not getattr(args, "anchor", False) and not args.target:
+        print("error: attest needs a composition TARGET", file=sys.stderr)
+        return 2
+
     try:
         key = _attest.resolve_key(args.key)
     except RevlError as error:
