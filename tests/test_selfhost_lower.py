@@ -4952,6 +4952,42 @@ def _parse_admit_all(blob: str) -> list[tuple[int, str]]:
     return out
 
 
+# Issue #2942: the reference's declared-arity pass anchors a record field at
+# `RecordField.line`, a case payload at `VariantCase.line` and an alias
+# right-hand side at `TypeDecl.line`. The native gate must carry the same line,
+# because `admit_all`'s rows are `line|tag|msg` and the multi-refusal oracle
+# compares them.
+_DECLARED_ARITY_LINE_CASES = [
+    ("record_field", (
+        "type Mb = Jj(Int) | Nn\n"
+        "type R = {\n"
+        "  a: Int,\n"
+        "  m: Mb[Int]\n"
+        "}\n"
+        "fn f() -> Int { return 1 }\n")),
+    ("case_payload", (
+        "type Mb = Jj(Int) | Nn\n"
+        "type W =\n"
+        "  Wr(Mb[Int])\n"
+        "  | Em\n"
+        "fn f() -> Int { return 1 }\n")),
+    ("alias_right_hand_side", (
+        "type Mb = Jj(Int) | Nn\n"
+        "\n"
+        "type Al = Mb[Int]\n"
+        "fn f() -> Int { return 1 }\n")),
+]
+
+
+@pytest.mark.parametrize("name,src", _DECLARED_ARITY_LINE_CASES,
+                         ids=[n for n, _ in _DECLARED_ARITY_LINE_CASES])
+def test_a_declared_type_arity_refusal_carries_the_reference_line(
+        admit_all, name, src):
+    ref = _ref_all(src)
+    assert len(ref) == 1 and ref[0][1] == "T1", ref
+    assert _parse_admit_all(admit_all(src)) == ref
+
+
 @pytest.mark.parametrize("oneline", [False, True], ids=["multiline", "oneline"])
 @pytest.mark.parametrize("name,src", _MULTI_REFUSAL_PROGRAMS,
                          ids=[n for n, _ in _MULTI_REFUSAL_PROGRAMS])
