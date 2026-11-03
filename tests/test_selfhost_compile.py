@@ -975,8 +975,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     refusal = (
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 6 "
-        "is not supported by the self-host compiler, which would emit the "
-        "component without its body.")
+        "(a `let`/`var` binding whose value the producer cannot read) is not "
+        "supported by the self-host compiler, which would emit the component "
+        "without its body.")
     got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
     assert got == refusal, got[:200]
     # the manifest-aware driver runs its own emit, so it carries its own guard
@@ -985,7 +986,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert "body" not in native
-    assert native["unlowered"] == "the body statement at line 6"
+    assert native["unlowered"] == (
+        "the body statement at line 6 "
+        "(a `let`/`var` binding whose value the producer cannot read)")
 
 
 def test_a_bodyless_component_refusal_names_the_inner_statement(
@@ -1007,6 +1010,26 @@ def test_a_bodyless_component_refusal_names_the_inner_statement(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert _refused_line(native["unlowered"]) == 6
+
+
+def test_a_bodyless_component_refusal_carries_the_failing_statements_reason(
+        compile_to, lower_to_ir):
+    """Every `cir_method_stmts`/`cir_prov_methods` failure point records why it
+    stopped the producer (issue #2594), and `ir_component` carries that reason
+    into the component's refusal next to the line. Two documents that stop on
+    different statements carry different reasons, not one generic sentence."""
+    arity = load_by_path("test_case_call_arity",
+                         ROOT / "tests" / "test_case_call_arity.py")
+    source, _ = arity.REFUSED["provide_block_body"]
+    reasons = {}
+    for name, doc in (("block arm", _BODYLESS_COMPONENT_SRC),
+                      ("case arity", source)):
+        comp = json.loads(lower_to_ir(doc))["components"][0]
+        match = re.search(r"\((.+)\)$", comp["unlowered"])
+        assert match is not None, comp["unlowered"]
+        reasons[name] = match.group(1)
+        assert reasons[name] in compile_to(doc, "py")
+    assert reasons["block arm"] != reasons["case arity"], reasons
 
 
 def _refused_line(text: str) -> int:
@@ -4245,11 +4268,13 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
     # issue #2594: the producer cannot lower this provide step, and the
-    # bodyless component it used to emit is now refused by name.
+    # bodyless component it used to emit is now refused by name, with the
+    # failing statement's reason.
     "provide_block_body":
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 7 "
-        "is not supported by the self-host compiler, which would emit the "
-        "component without its body.",
+        "(a `let`/`var` binding whose value is outside the producer's "
+        "expression surface) is not supported by the self-host compiler, which "
+        "would emit the component without its body.",
     "provide_expression_body": "EMITS",
     "ok_extra": "EMITS",
     "some_extra": "EMITS",
