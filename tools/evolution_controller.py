@@ -29,14 +29,20 @@ rather than a rule a later generation can propose a change to. That is correct
 and it is item 544's work, not this module's. What a controller can contribute,
 and what is implemented here, is the other half of the same argument:
 
-  * the kernel set is ENUMERATED in one place, `KERNEL_PATHS` in
-    `src/revl/kernel_boundary.py`, which this module IMPORTS rather than
-    restates, which is the precondition issue #1223 lists first;
+  * the whole evaluator is ENUMERATED in one place, `EVALUATOR_PATHS` in
+    `src/revl/kernel_boundary.py`, whose `KERNEL_PATHS` is one view and whose
+    `authority` view is `AUTHORITY_FENCE` below. This module IMPORTS the views
+    rather than restating them, which is the precondition issue #1223 lists
+    first and issue #2802 extended to the scorecard assembler;
   * the enumeration and the stage table are themselves FENCED
     (`AUTHORITY_FENCE`), so a proposal whose diff reaches the rules that judge
     it is refused BY NAME rather than judged by the rules it just edited. That
     is the word "unilaterally" turned into a check: a fenced proposal is routed
-    to a human, not forbidden forever.
+    to a human, not forbidden forever;
+  * the verdict and every scorecard carry `protocol_digest`, the evaluator's
+    identity from the scorer's own checkout (issue #2802). A stage record from
+    a different checkout is refused rather than read, so the two rounds cannot
+    silently claim they were scored by the same protocol.
 
 THE LIFECYCLE, AND WHICH STAGES ARE PRECONDITIONS
 -------------------------------------------------
@@ -69,6 +75,7 @@ failure with a NAMED code:
 
     no record for a stage                  -> STAGE_SKIPPED
     a record with no evidence              -> EVIDENCE_MISSING
+    a record from another evaluator        -> PROTOCOL_MISMATCH
     a record that reports failure          -> STAGE_FAILED
     a trigger with no named artifact       -> NO_TRIGGER
     a trigger that is a schedule           -> SCHEDULED_TRIGGER
@@ -145,7 +152,8 @@ sys.path.insert(0, str(ROOT / "src"))
 if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
-from revl.kernel_boundary import KERNEL_PATHS  # noqa: E402
+from revl.kernel_boundary import (  # noqa: E402
+    KERNEL_PATHS, evaluator_fence, protocol_digest)
 from revl.promotion_barrier import AUTHORITY_AXES  # noqa: E402
 
 # Item 536's verdict, IMPORTED (issue #1336). The stage verdict below EXTENDS
@@ -202,15 +210,25 @@ SUPPLIED_BY = {
 # of these is refused rather than judged, because a proposal that edited the
 # judge has not been judged.
 #
+# This is the `authority` VIEW of `EVALUATOR_PATHS` (issue #2802), not a list of
+# its own: the one enumeration lives next to `KERNEL_PATHS` in
+# `src/revl/kernel_boundary.py`, and it carries the controller, the reward, the
+# progress counters, the held-out scorer and their tests. A path that used to be
+# on no list (the scorecard assembler) is on this one because a proposal that
+# edits it is judged by the rule it just wrote.
+#
 # What is NOT here matters as much as what is, and the reasoning is the one
 # `tools/heldout_scoring.py` states for `HELD_OUT_FENCE`: `src/`, `selfhost/`,
 # `backends/` and `crates/` are the SUBJECT of the loop. Fencing them would
 # forbid the work the loop exists to produce. The fence is the judge, never the
 # subject.
-AUTHORITY_FENCE = (
-    "tools/evolution_controller.py",
-    "tests/test_evolution_controller.py",
-)
+AUTHORITY_FENCE = evaluator_fence("authority")
+
+#: This checkout's evaluator identity (issue #2802), written into every verdict.
+#: A stage record from another checkout carries a different digest, and
+#: `_record_for` refuses it: two rounds cannot claim they were scored by the
+#: same protocol when one of them ran a different one.
+PROTOCOL_DIGEST = protocol_digest(ROOT)
 
 # THE ADMISSION KERNEL, enumerated in one place because issue #1223 lists that
 # as the first precondition of making the boundary a capability rather than a
@@ -270,7 +288,7 @@ class Verdict(ComponentVerdict):
 
     `code` IS THIS MODULE'S FIFTH FIELD and it is deliberate, not drift. Issue
     #1222's exit test asks for a refusal BY NAME, and the FAILURE DIRECTION
-    table in this module's docstring enumerates fourteen codes a stage can
+    table in this module's docstring enumerates fifteen codes a stage can
     fail with. Item 536's reward has no such enumeration: a reward component
     fails with prose, because the reward answers "did this candidate earn a
     training example" and the lifecycle answers "which authority refused, and
@@ -490,12 +508,17 @@ def authority_moved(record: dict):
 def _record_for(proposal: Proposal, stage: str):
     """`(ok, record_or_verdict)`: the stage's evidence record, or the refusal.
 
-    Two named refusals and no third shape. A stage with no record at all was
-    SKIPPED; a stage whose record carries no evidence is UNSUPPORTED. The
-    second is the one the item warns about: a controller that promotes when a
-    stage's evidence is MISSING (rather than failing) is the fail-open shape,
-    and this repository has measured ten separate checks that ran on every PR
-    and could not fail.
+    Three named refusals and no third shape. A stage with no record at all was
+    SKIPPED; a stage whose record carries no evidence is UNSUPPORTED; a stage
+    whose record carries a `protocol_digest` that differs from this checkout's
+    was produced by a DIFFERENT evaluator. The second is the one the item warns
+    about: a controller that promotes when a stage's evidence is MISSING (rather
+    than failing) is the fail-open shape, and this repository has measured ten
+    separate checks that ran on every PR and could not fail. The third is issue
+    #2802's: a record that names ANOTHER protocol is not evidence about this
+    one. An absent digest is read rather than invented as a mismatch, because
+    the lifecycle also judges hand-written records; the verdict they feed
+    carries the protocol this checkout actually ran.
     """
     record = proposal.stages.get(stage)
     if record is None:
@@ -509,6 +532,17 @@ def _record_for(proposal: Proposal, stage: str):
             stage, "STAGE_SKIPPED",
             f"the `{stage}` record is {type(record).__name__}, not an object")
     record = _normalise(stage, record)
+    supplied = record.get("protocol_digest")
+    if supplied and supplied != PROTOCOL_DIGEST:
+        return False, failed(
+            stage, "PROTOCOL_MISMATCH",
+            f"the `{stage}` record was produced by a different evaluator: it "
+            f"carries protocol digest {supplied}, and this checkout's is "
+            f"{PROTOCOL_DIGEST}. Two rounds scored by different protocols "
+            f"cannot show they were scored by the same one, so the record is "
+            f"refused rather than read",
+            (f"record-protocol={supplied}",
+             f"checkout-protocol={PROTOCOL_DIGEST}"))
     if not record.get("evidence"):
         return False, failed(
             stage, "EVIDENCE_MISSING",
@@ -527,6 +561,8 @@ def _normalise(stage: str, record: dict) -> dict:
     --json` is wired in without a translation step that could soften the
     conjunction. `retained` maps to `verified` because it is the same
     all-or-nothing question, and the component names become the evidence.
+    `protocol_digest` is carried through, because the adapter must not drop the
+    field the mismatch check reads.
     """
     if "retained" not in record:
         return record
@@ -539,6 +575,7 @@ def _normalise(stage: str, record: dict) -> dict:
                    else "reward components did not verify: " + ", ".join(blockers)),
         "evidence": [f"tools/evolution_reward.py: {n}" for n in names if n],
         "diff": record.get("diff"),
+        "protocol_digest": record.get("protocol_digest"),
     }
 
 
@@ -817,6 +854,7 @@ class LifecycleVerdict:
             "measurements_read": self.measurements_read,
             "refusing_stage": self.refusing_stage,
             "findings": list(self.findings),
+            "protocol_digest": PROTOCOL_DIGEST,
             "stages": [v.as_dict() for v in self.verdicts],
             "preconditions": list(PRECONDITIONS),
             "measured": list(MEASURED),
@@ -830,7 +868,8 @@ class LifecycleVerdict:
 
     def render(self) -> str:
         lines = [f"evolution controller over {self.proposal.tree}",
-                 f"base {self.proposal.base}", ""]
+                 f"base {self.proposal.base}",
+                 f"protocol {PROTOCOL_DIGEST}", ""]
         for v in self.verdicts:
             kind = "precondition" if v.component in PRECONDITIONS else "measured"
             mark = "ok  " if v.verified else "FAIL"

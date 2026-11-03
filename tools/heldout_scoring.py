@@ -35,12 +35,23 @@ THE THREE ENFORCEMENTS
    readable, so the seed is required to be outside it and that requirement is
    tested rather than asserted.
 
-3. THE CANDIDATE'S DIFF MUST NOT REACH THE SCORER. `HELD_OUT_FENCE` lists the
-   paths that decide what is drawn and what counts as a divergence. The
+3. THE CANDIDATE'S DIFF MUST NOT REACH THE SCORER. `HELD_OUT_FENCE` is the
+   `held_out` view of the one evaluator enumeration (issue #2802), and it lists
+   the paths that decide what is drawn and what counts as a divergence. The
    candidate's changed-file set is required, and a diff that touches a fenced
    path is REFUSED rather than scored, because a candidate that edited the
    scorer has not been scored by it. Refused is not failed: it is the verdict
    that routes a semantic change to a human, which is what item 537 asks for.
+
+WHICH PROTOCOL PRODUCED A VERDICT
+---------------------------------
+Every record carries `protocol_digest`: `sha256:<hex>` over the evaluator's
+tracked bytes in the scorer's own checkout (issue #2802). A scorecard and a
+controller verdict from the same protocol carry the same digest, so two rounds
+can show they were scored by the same protocol, and a record from a different
+checkout is refused by the controller instead of read. The digest proves
+identity, not correctness: custody and rotation of the expected value are issue
+#2762's question.
 
 THE FAILURE DIRECTION IS CLOSED
 -------------------------------
@@ -105,6 +116,39 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def _evaluator_protocol():
+    """`tools/evaluator_protocol.py` from THIS checkout, loaded by path.
+
+    The scorer runs from its own checkout; it must not import the candidate's
+    compiler, and `src/revl/kernel_boundary.py` is loaded by the helper rather
+    than through `revl/__init__.py` for that reason. Loading the helper by path
+    keeps this module's import closure to files it names, which the scorer's
+    own closure test classifies: `tools/evaluator_protocol.py` is on the fence
+    and the one file it loads is under `src/`. Registered in `sys.modules`
+    before `exec_module` because `kernel_boundary.py` declares a dataclass.
+    """
+    name = ("_revl_heldout_evaluator_protocol_"
+            + hashlib.sha1(str(ROOT).encode("utf-8")).hexdigest()[:12])
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    path = ROOT / "tools" / "evaluator_protocol.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load the evaluator protocol from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+_PROTOCOL = _evaluator_protocol()
+
 # Exit statuses. `REFUSED` is distinct from `DIVERGENT` on purpose: a promotion
 # treats both as not-a-pass, but a reader has to be able to tell "the gate ran
 # and found something" from "the gate declined to run", and a single non-zero
@@ -118,25 +162,20 @@ REFUSED = 2
 # The paths that decide WHAT IS DRAWN and WHAT COUNTS AS A DIVERGENCE. A
 # candidate diff that touches one of these is refused rather than scored.
 #
+# This is the `held_out` VIEW of `EVALUATOR_PATHS` (issue #2802). The one
+# enumeration lives next to `KERNEL_PATHS` in `src/revl/kernel_boundary.py`, and
+# `evaluator_protocol` loads it without importing the compiler. It is not a copy
+# and it is not a second list: a path added to the enumeration and tagged
+# `held_out` arrives here.
+#
 # What is NOT here is as load-bearing as what is: `selfhost/`, `src/revl/`,
 # `backends/` and `crates/` are the SUBJECT. A candidate improving the gate has
 # to be able to change them, and fencing them would forbid the work this loop
 # exists to produce. The fence is the scorer, never the subject.
-HELD_OUT_FENCE = (
-    "tools/heldout_scoring.py",
-    "tests/test_heldout_scoring.py",
-    "tools/gate_reference_census.py",
-    "tools/build_gate_crate.py",
-    "tests/test_selfhost_lower.py",
-    # Slice 2 reads this: it is the ALLOWANCE the `false-admit` direction is
-    # compared against, so it decides what counts as a divergence and belongs
-    # on the fence by the same rule as the tools above. Before slice 2 it was
-    # in `SCORING_UNREACHED` -- a scoring run never opened it -- and moving it
-    # here is the visible consequence of starting to read it. A candidate that
-    # widens its own allowance by re-recording the baseline is REFUSED, which
-    # is the routing item 537 asks for rather than a silent pass.
-    "tools/gate_reference_census_baseline.json",
-)
+HELD_OUT_FENCE = _PROTOCOL.HELD_OUT_FENCE
+
+#: `sha256:<hex>` over this scorer's evaluator, recorded in every verdict.
+protocol_digest = _PROTOCOL.protocol_digest
 
 # The subject: the top-level directories a candidate is allowed to change and
 # that the gate measures. `tests` is one of them on purpose -- a candidate that
@@ -849,8 +888,21 @@ def score(cases, census, engine=None, reference=None):
     return buckets, liveness
 
 
+def _protocol_or_none():
+    """This checkout's protocol digest, or None when even that cannot be read.
+
+    A refusal record is the tool's report that it did not answer the question.
+    It must still be writable when git is missing or the evaluator enumeration
+    names a file that is not there, so the identity is reported as None rather
+    than turning the refusal into a traceback."""
+    try:
+        return protocol_digest(ROOT)
+    except (OSError, RuntimeError):
+        return None
+
+
 def verdict_record(buckets, liveness, *, seed, source, count, fence,
-                   changed_count, allowance, tells):
+                   changed_count, allowance, tells, protocol):
     findings = {name: buckets.get(name, []) for name in ZERO_TOLERANCE}
     families = bypass_families(buckets)
     new_families = {tag: ids for tag, ids in families.items()
@@ -862,6 +914,7 @@ def verdict_record(buckets, liveness, *, seed, source, count, fence,
         "grammar": GRAMMAR,
         "size": count,
         "rotation": ROTATION,
+        "protocol_digest": protocol,
         "seed_digest": seed,
         "seed_source": source,
         "fence": list(fence),
@@ -896,6 +949,7 @@ def refusal_record(reason: str):
         "grammar": GRAMMAR,
         "size": 0,
         "rotation": ROTATION,
+        "protocol_digest": _protocol_or_none(),
         "seed_digest": None,
         "seed_source": None,
         "fence": list(HELD_OUT_FENCE),
@@ -916,6 +970,13 @@ def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
     Every branch that cannot answer the question returns a refusal record. No
     branch returns a score computed from anything other than the draw.
     """
+    try:
+        protocol = protocol_digest(ROOT)
+    except (OSError, RuntimeError) as exc:
+        # The scorer cannot name the protocol it is about to score under, so it
+        # must not produce a score under it. This is a refusal, not a crash.
+        return (refusal_record("protocol-digest-unavailable:"
+                              + type(exc).__name__), REFUSED)
     try:
         seed, source = checked_seed(argv_seed, env, root)
         if changed is None:
@@ -963,6 +1024,7 @@ def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
         changed_count=len(changed),
         allowance=allowance,
         tells=tells,
+        protocol=protocol,
     )
     record["draw_digest"] = draw_digest(cases)
     return record, OK if record["verdict"] == "clean" else DIVERGENT
@@ -979,6 +1041,7 @@ def render(record) -> str:
                  + " (" + record["grammar"] + ")")
     lines.append("  seed " + str(record["seed_digest"])
                  + " from " + str(record["seed_source"]))
+    lines.append("  protocol " + str(record.get("protocol_digest")))
     lines.append("  draw " + str(record.get("draw_digest")))
     live = record.get("liveness", {})
     lines.append("  liveness: " + str(live.get("issued_admissions"))

@@ -337,8 +337,8 @@ PROGRESS_COUNTER_SOURCES |= {
 # files name is classified fence, subject or unreached. That test is what turns
 # a new dependency into a red, so it has to be SELECTED when one of them moves.
 #
-# DERIVED from the tool, by AST rather than by import: a copy here is exactly
-# the drift the selection exists to catch. Issue #1307 landed because
+# DERIVED from the tools' own source, not copied: a copy here is exactly the
+# drift the selection exists to catch. Issue #1307 landed because
 # `tools/gate_reference_census.py` began naming `tools/corpus_provenance.py`
 # and the tests selected for that file did not include the one that holds the
 # classification, so main went red on a path nobody ran.
@@ -346,10 +346,10 @@ _FENCE_CACHE: dict[Path, frozenset] = {}
 
 
 def held_out_fence(root: Path) -> frozenset[str]:
-    """`HELD_OUT_FENCE` as written in `tools/heldout_scoring.py`.
+    """`HELD_OUT_FENCE` as the tools derive it (issue #2802).
 
     An empty result is returned rather than raised: the caller treats it as "no
-    fence file changed", and the tool's own suite holds the parse. A scorer
+    fence file changed", and the tool's own suite holds the derivation. A scorer
     file that is renamed away is a rename the generic rules still cover.
 
     Cached per root, same shape and same reason as `_READ_CACHE` below: this
@@ -362,24 +362,35 @@ def held_out_fence(root: Path) -> frozenset[str]:
     return _FENCE_CACHE[root]
 
 
+_MODULE = "_affected_evaluator_protocol"
+
+
 def _held_out_fence(root: Path) -> frozenset[str]:
-    source = root / "tools" / "heldout_scoring.py"
+    """`HELD_OUT_FENCE` as the tools derive it, from `tools/evaluator_protocol.py`.
+
+    Since issue #2802 the fence is the `held_out` view of `EVALUATOR_PATHS` in
+    `src/revl/kernel_boundary.py`; there is no tuple literal in
+    `tools/heldout_scoring.py` to parse any more. The helper is loaded by path,
+    and only from `root`, so it answers for the tree it is in and no other, the
+    same rule `census_module` follows. A helper that will not load is an EMPTY
+    result, which the caller has always read as "no fence file changed": a
+    scorer file that is renamed away is a rename the generic rules still cover.
+
+    The name is fixed rather than derived from `root` so a second root does not
+    leave a second module registered; `_FENCE_CACHE` still caches per root.
+    """
+    path = root / "tools" / "evaluator_protocol.py"
     try:
-        tree = ast.parse(source.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return frozenset()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        if "HELD_OUT_FENCE" not in names:
-            continue
-        if not isinstance(node.value, (ast.Tuple, ast.List)):
+        spec = importlib.util.spec_from_file_location(_MODULE, path)
+        if spec is None or spec.loader is None:
             return frozenset()
-        return frozenset(
-            e.value for e in node.value.elts
-            if isinstance(e, ast.Constant) and isinstance(e.value, str))
-    return frozenset()
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[_MODULE] = module
+        spec.loader.exec_module(module)
+        return frozenset(module.HELD_OUT_FENCE)
+    except Exception:  # noqa: BLE001 - fail safe: no fence file changed
+        sys.modules.pop(_MODULE, None)
+        return frozenset()
 
 
 # The directories `tools/gate_reference_census.py` walks for `.rvl` documents

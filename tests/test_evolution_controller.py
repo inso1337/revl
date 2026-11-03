@@ -290,6 +290,74 @@ def test_every_fenced_path_exists_in_this_tree(path):
     assert (ROOT / path).exists(), path
 
 
+def test_a_diff_that_changes_only_the_reward_is_refused(tmp_path):
+    """Issue #2802's acceptance: the scorecard assembler was on no list.
+
+    `tools/evolution_reward.py` holds `COMPONENTS` and the retention rule, so a
+    proposal that edits it and is then judged by it has not been judged. Before
+    issue #2802 this diff promoted.
+    """
+    tree = make_tree(tmp_path / "rewardfence",
+                     {"tools/evolution_reward.py": "changed\n"})
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "FENCE_TOUCHED"
+    assert "tools/evolution_reward.py" in verdict.by_name()["authority"].reason
+
+
+def test_the_controller_fence_is_a_view_of_the_evaluator_set():
+    """The fence is derived, not restated: a path added to `EVALUATOR_PATHS` and
+    tagged `authority` arrives here without a second list being edited."""
+    from revl.kernel_boundary import EVALUATOR_PATHS  # noqa: PLC0415
+
+    assert set(ec.AUTHORITY_FENCE) <= set(EVALUATOR_PATHS)
+    assert set(ec.KERNEL_PATHS) <= set(EVALUATOR_PATHS)
+    for path in ("tools/evolution_reward.py", "tools/evolution_progress.py",
+                 "tests/test_evolution_reward.py",
+                 "tests/test_evolution_progress.py"):
+        assert path in ec.AUTHORITY_FENCE, path
+
+
+def test_the_verdict_carries_the_protocol_digest(clean_tree):
+    """Item 520's one verdict now binds the protocol that produced it."""
+    blob = run(proposal_record(clean_tree)).as_dict()
+    assert blob["protocol_digest"] == ec.PROTOCOL_DIGEST
+    assert blob["protocol_digest"].startswith("sha256:")
+
+
+def test_a_stage_record_from_another_protocol_is_refused(clean_tree):
+    """A record from a different evaluator is not evidence about this one."""
+    record = proposal_record(clean_tree)
+    record["stages"]["authority"]["protocol_digest"] = "sha256:" + "0" * 64
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "authority"
+    assert ec.PROTOCOL_DIGEST in verdict.by_name()["authority"].reason
+
+
+def test_a_stage_record_from_this_protocol_is_read(clean_tree):
+    """The control for the case above: the same digest this checkout computes
+    is not refused, so the check discriminates rather than refusing every
+    record that names a protocol."""
+    record = proposal_record(clean_tree)
+    record["stages"]["shadow"]["protocol_digest"] = ec.PROTOCOL_DIGEST
+    assert run(record).decision == "PROMOTE"
+
+
+def test_the_scorecard_adapter_carries_the_protocol_digest_through(clean_tree):
+    """`_normalise` rebuilds the observe record; it must not drop the field the
+    mismatch check reads, or a scorecard from another protocol would pass."""
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [], "components": [],
+        "protocol_digest": "sha256:" + "0" * 64,
+    }
+    verdict = run(record)
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "observe"
+
+
 # ----------------------------------------- the kernel (item 544, #1223)
 
 @pytest.mark.parametrize("path", [

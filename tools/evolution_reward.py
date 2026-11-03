@@ -108,6 +108,18 @@ No component is a placeholder any more. See
 `docs/design/535-held-out-scoring.md` for `held-out`'s, and
 `docs/design/546-evolution-progress-term.md` for `progress`'s.
 
+THE SCORECARD NAMES THE PROTOCOL THAT PRODUCED IT
+-------------------------------------------------
+Issue #2802. The scorecard already recorded short digests of the census
+baseline, the formal axioms and the held-out draw, and none of them named the
+scorer itself. `protocol_digest` is `sha256:<hex>` over the evaluator's tracked
+bytes (`EVALUATOR_PATHS` in `src/revl/kernel_boundary.py`), read from THIS
+checkout, the one the scorer runs from. A later round carries the same digest
+when it was scored by the same protocol, and `tools/evolution_controller.py`
+refuses a stage record whose digest differs from its own. The digest proves
+identity, not correctness: who holds the expected value, and how it rotates, is
+issue #2762's custody question and not something a hash decides.
+
 THE EMPTY DIFF IS NOT RETAINED
 ------------------------------
 Every component above `progress` is a preservation check, and a reward made of
@@ -1707,6 +1719,27 @@ PROBES = {
 
 # ----------------------------------------------------------------- the score
 
+def _evaluator_protocol():
+    """`tools/evaluator_protocol.py` from THIS checkout, sys.path restored.
+
+    Same shape and same reason as `_progress_module`: this file can be imported
+    by the controller and by a test loader with `tools/` not on `sys.path`, and
+    importing `revl.kernel_boundary` through `revl/__init__.py` would pull the
+    compiler into the scorer. The evaluator enumeration is loaded from the one
+    file that owns it by the helper, which restores `sys.path` itself.
+    """
+    tools = str(ROOT / "tools")
+    added = tools not in sys.path
+    if added:
+        sys.path.insert(0, tools)
+    try:
+        import evaluator_protocol  # noqa: PLC0415
+    finally:
+        if added and tools in sys.path:
+            sys.path.remove(tools)
+    return evaluator_protocol
+
+
 @dataclass
 class Scorecard:
     candidate: Candidate
@@ -1738,6 +1771,11 @@ class Scorecard:
             "prose_ignored": list(self.candidate.prose_ignored),
             "base": self.candidate.base,
             "scope": list(self.candidate.scope),
+            # Issue #2802. The scorer's own protocol identity, taken from THIS
+            # checkout and not the candidate's: a scorecard from two rounds that
+            # carry the same digest names the same scorer, component list and
+            # retention rule. It proves identity, not correctness.
+            "protocol_digest": _evaluator_protocol().protocol_digest(ROOT),
         }
         # The counter ledger the `progress` verdict was decided on, in the
         # shape `evolution_progress.promote` reads, so a generation is judged
@@ -1752,7 +1790,8 @@ class Scorecard:
 
     def render(self) -> str:
         lines = [f"evolution reward over {self.candidate.tree}",
-                 f"base {self.candidate.base}", ""]
+                 f"base {self.candidate.base}",
+                 f"protocol {_evaluator_protocol().protocol_digest(ROOT)}", ""]
         for v in self.verdicts:
             mark = "ok  " if v.verified else "FAIL"
             lines.append(f"  {mark} {v.component:<22} {v.reason}")
