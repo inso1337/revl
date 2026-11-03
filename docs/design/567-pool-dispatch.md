@@ -63,9 +63,21 @@ it will execute, never trusts the attestation's self-declared hash"), and it is
 tested with a perfectly signed task whose declared digest is one the charter
 admits and whose bytes are different.
 
-Eight checks on the peer side, each naming one lowercase link, each failing
+Since issue #2720 the envelope also carries the AUTHORITY the task hands the
+peer: a `grant` (`caps` and `budgets`, read off the member's tier grant rather
+than accepted from the caller) and a `policy_digest` (the charter digest, the
+policy in force). The peer checks the policy digest against the charter it
+holds and echoes the grant and policy into its receipt, so a reader of the
+receipt alone can tell what the run was authorised to do. A task built without
+them keeps the 1.0 shape, and the receipt it produces is the 1.0 shape, which
+verifies and cannot count as evidence for a promotion that requires the
+binding. See
+[566-pool-execution-receipts.md](566-pool-execution-receipts.md#the-grant-the-policy-the-outcome-and-the-budget-claim-issue-2720).
+
+Nine checks on the peer side, each naming one lowercase link, each failing
 closed: `task-shape`, `task-signature`, `pool-identity`, `charter-identity`,
-`peer-identity`, `artifact-digest`, `unknown-runner`, `replayed-task`. A
+`policy-identity`, `peer-identity`, `artifact-digest`, `unknown-runner`,
+`replayed-task`. A
 multi-file task adds four, each naming the file it is about: `bundle-path`,
 `bundle-missing-file`, `bundle-extra-file` and `bundle-file-digest` (see
 "Multi-file artifacts" below). Four more on the way back: `peer-unreachable`, `result-digest`, `receipt-refused`,
