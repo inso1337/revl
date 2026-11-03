@@ -252,8 +252,8 @@ column is refused by the controller with `KERNEL_INTERSECTION`; a path in the
 column is refused by this tool with `diff-reaches-fence:<path>`. The census and
 its baseline are in two columns because they decide two questions, which is why
 they are one row and not two. `tools/evolution_reward.py` and
-`tools/evolution_progress.py` were on none of the old lists, so before issue
-#2802 a diff could edit the retention rule and be rewarded by it.
+`tools/evolution_progress.py` were on none of the old lists, so a diff could
+edit the retention rule and no check named it.
 
 The enumeration's identity is `protocol_digest`: `sha256:<hex>` over the
 evaluator's tracked bytes, read from the scorer's own checkout. It is written
@@ -359,6 +359,7 @@ fail-open shape, and most serious findings in this repository have it.
 | `seed-too-short` | fewer than 16 characters |
 | `seed-in-tree` | `git grep` finds it in the tracked tree |
 | `seed-check-unavailable:...` | git missing, or an exit status that is neither found nor not-found |
+| `protocol-digest-unavailable:...` | the evaluator's tracked bytes cannot be read, so the scorer cannot name the protocol it would score under |
 | `no-diff` | neither `--diff-base` nor `--diff-paths` |
 | `diff-unavailable:...` | `git diff` failed |
 | `diff-reaches-fence:<paths>` | the candidate changed a scorer file |

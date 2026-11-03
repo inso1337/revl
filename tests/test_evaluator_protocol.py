@@ -20,6 +20,7 @@ three things the one enumeration has to be worth:
 
 from __future__ import annotations
 
+import ast
 import shutil
 import subprocess
 import sys
@@ -96,6 +97,9 @@ def test_every_evaluator_path_exists_in_the_tree():
     assert not missing, (
         f"EVALUATOR_PATHS names {missing}, which is not in the tree. An "
         f"enumeration that protects a path nothing writes to protects nothing.")
+    assert len(kb.EVALUATOR_PATHS) == len(set(kb.EVALUATOR_PATHS)), (
+        "EVALUATOR_PATHS names a path twice; a member is a decision and not a "
+        "duplicate row")
 
 
 def test_the_named_views_partition_the_evaluator_set():
@@ -131,6 +135,40 @@ def test_the_fences_are_derived_from_the_enumeration_not_restated():
     assert set(kb.KERNEL_PATHS) == set(kb.evaluator_fence("kernel"))
     assert set(protocol.AUTHORITY_FENCE) <= set(kb.EVALUATOR_PATHS)
     assert set(protocol.HELD_OUT_FENCE) <= set(kb.EVALUATOR_PATHS)
+
+
+def _assigned(path: str, name: str):
+    """The value of the `name = ...` assignment in a tool, by AST."""
+    tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return node.value
+    return None
+
+
+def test_the_tool_fences_are_derived_rather_than_copied():
+    """The acceptance is DERIVED, not equal to today's members.
+
+    An equality check passes for a literal copy that matches the current
+    enumeration and fails only after the enumeration moves, which is the drift
+    issue #2802 exists to prevent. These read the assignment in each tool and
+    hold it to the derivation call, so a tuple literal is refused here even
+    while its members are correct.
+    """
+    controller = _assigned("tools/evolution_controller.py", "AUTHORITY_FENCE")
+    assert isinstance(controller, ast.Call), ast.dump(controller) if controller else None
+    assert isinstance(controller.func, ast.Name)
+    assert controller.func.id == "evaluator_fence"
+    assert [a.value for a in controller.args
+            if isinstance(a, ast.Constant)] == ["authority"]
+
+    held_out = _assigned("tools/heldout_scoring.py", "HELD_OUT_FENCE")
+    assert isinstance(held_out, ast.Attribute), ast.dump(held_out) if held_out else None
+    assert held_out.attr == "HELD_OUT_FENCE"
+    assert isinstance(held_out.value, ast.Name)
+    assert held_out.value.id == "_PROTOCOL"
 
 
 def test_the_scorecard_assemblers_are_fenced_by_name():
@@ -191,6 +229,14 @@ def test_a_member_that_is_not_tracked_is_a_refusal(tmp_path):
     root = staged_checkout(tmp_path / "checkout")
     with pytest.raises(FileNotFoundError):
         kb.protocol_digest(root, ("tools/not_an_evaluator.py",))
+
+
+def test_an_empty_path_list_is_refused(tmp_path):
+    """`git ls-files` with no pathspec hashes the whole tree; an empty view is
+    a typo, not a protocol."""
+    root = staged_checkout(tmp_path / "checkout")
+    with pytest.raises(ValueError):
+        kb.protocol_digest(root, ())
 
 
 def test_the_scorecard_digest_follows_the_protocol_it_was_scored_under(

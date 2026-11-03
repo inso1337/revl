@@ -88,6 +88,8 @@ failure with a NAMED code:
     the diff reaches the admission kernel  -> KERNEL_INTERSECTION
     a non-empty capability/taint/budget or
     retention diff                         -> AUTHORITY_WIDENED
+    the controller cannot name its own
+    evaluator                              -> PROTOCOL_UNAVAILABLE
 
 `AUTHORITY_WIDENED` and `KERNEL_INTERSECTION` are separate codes on purpose.
 Issue #1222's exit test asks for a refusal BY NAME on a non-empty diff, and a
@@ -224,11 +226,20 @@ SUPPLIED_BY = {
 # subject.
 AUTHORITY_FENCE = evaluator_fence("authority")
 
-#: This checkout's evaluator identity (issue #2802), written into every verdict.
-#: A stage record from another checkout carries a different digest, and
-#: `_record_for` refuses it: two rounds cannot claim they were scored by the
-#: same protocol when one of them ran a different one.
-PROTOCOL_DIGEST = protocol_digest(ROOT)
+#: This checkout's evaluator identity (issue #2802), for the verdict in
+#: progress. Computed in `decide()` rather than at import for two reasons: a
+#: checkout whose protocol cannot be read is a named refusal rather than an
+#: import traceback, and a controller asked twice compares against the protocol
+#: it will actually run, not the one it saw at start-up.
+_OWN_PROTOCOL = None
+
+
+def own_protocol_digest() -> str:
+    """`protocol_digest(ROOT)`, computed once per `decide()`."""
+    global _OWN_PROTOCOL
+    if _OWN_PROTOCOL is None:
+        _OWN_PROTOCOL = protocol_digest(ROOT)
+    return _OWN_PROTOCOL
 
 # THE ADMISSION KERNEL, enumerated in one place because issue #1223 lists that
 # as the first precondition of making the boundary a capability rather than a
@@ -288,7 +299,7 @@ class Verdict(ComponentVerdict):
 
     `code` IS THIS MODULE'S FIFTH FIELD and it is deliberate, not drift. Issue
     #1222's exit test asks for a refusal BY NAME, and the FAILURE DIRECTION
-    table in this module's docstring enumerates fifteen codes a stage can
+    table in this module's docstring enumerates the codes a stage can
     fail with. Item 536's reward has no such enumeration: a reward component
     fails with prose, because the reward answers "did this candidate earn a
     training example" and the lifecycle answers "which authority refused, and
@@ -532,17 +543,18 @@ def _record_for(proposal: Proposal, stage: str):
             stage, "STAGE_SKIPPED",
             f"the `{stage}` record is {type(record).__name__}, not an object")
     record = _normalise(stage, record)
+    own = own_protocol_digest()
     supplied = record.get("protocol_digest")
-    if supplied and supplied != PROTOCOL_DIGEST:
+    if supplied and supplied != own:
         return False, failed(
             stage, "PROTOCOL_MISMATCH",
             f"the `{stage}` record was produced by a different evaluator: it "
             f"carries protocol digest {supplied}, and this checkout's is "
-            f"{PROTOCOL_DIGEST}. Two rounds scored by different protocols "
+            f"{own}. Two rounds scored by different protocols "
             f"cannot show they were scored by the same one, so the record is "
             f"refused rather than read",
             (f"record-protocol={supplied}",
-             f"checkout-protocol={PROTOCOL_DIGEST}"))
+             f"checkout-protocol={own}"))
     if not record.get("evidence"):
         return False, failed(
             stage, "EVIDENCE_MISSING",
@@ -836,6 +848,10 @@ class LifecycleVerdict:
     code: str = ""
     measurements_read: bool = False
     findings: list = field(default_factory=list)
+    #: This checkout's evaluator identity, or None when even that could not be
+    #: read. It is a field rather than a module read so the artifact keeps the
+    #: protocol the verdict was actually produced under (issue #2802).
+    protocol: str | None = None
 
     def by_name(self) -> dict:
         return {v.component: v for v in self.verdicts}
@@ -854,7 +870,7 @@ class LifecycleVerdict:
             "measurements_read": self.measurements_read,
             "refusing_stage": self.refusing_stage,
             "findings": list(self.findings),
-            "protocol_digest": PROTOCOL_DIGEST,
+            "protocol_digest": self.protocol,
             "stages": [v.as_dict() for v in self.verdicts],
             "preconditions": list(PRECONDITIONS),
             "measured": list(MEASURED),
@@ -869,7 +885,7 @@ class LifecycleVerdict:
     def render(self) -> str:
         lines = [f"evolution controller over {self.proposal.tree}",
                  f"base {self.proposal.base}",
-                 f"protocol {PROTOCOL_DIGEST}", ""]
+                 f"protocol {self.protocol or 'unavailable'}", ""]
         for v in self.verdicts:
             kind = "precondition" if v.component in PRECONDITIONS else "measured"
             mark = "ok  " if v.verified else "FAIL"
@@ -926,7 +942,23 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
     That is item 543's barrier expressed as control flow rather than as a
     weighting: there is no path on which a canary number can reach a comparison
     with a precondition's verdict, because the comparison does not exist.
+
+    The checkout's protocol identity is read HERE, once, so a controller that
+    cannot name its own evaluator refuses with a code instead of failing to
+    import, and two verdicts from one process each compare against the protocol
+    they are about to run.
     """
+    global _OWN_PROTOCOL
+    _OWN_PROTOCOL = None
+    try:
+        own = own_protocol_digest()
+    except (OSError, RuntimeError) as exc:
+        return LifecycleVerdict(
+            proposal, [], "REFUSE", "PROTOCOL_UNAVAILABLE",
+            measurements_read=False,
+            findings=[f"the controller cannot identify its own evaluator, so it "
+                      f"cannot compare a stage record against it: {exc}"])
+
     verdicts = []
     for stage in PRECONDITIONS:
         verdict = _judge(proposal, stage)
@@ -951,7 +983,7 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
                 verdicts.append(not_reached(measured, stage))
             return LifecycleVerdict(
                 proposal, verdicts, "REFUSE", verdict.code,
-                measurements_read=False, findings=findings)
+                measurements_read=False, findings=findings, protocol=own)
 
     # Only now. Every precondition is satisfied, so the candidate was entitled
     # to enter shadow, and the measurements decide keep versus undo.
@@ -973,7 +1005,7 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
             first_failure = verdict
     if first_failure is None:
         return LifecycleVerdict(proposal, verdicts, "PROMOTE", "",
-                                measurements_read=True)
+                                measurements_read=True, protocol=own)
     supplied_anyway = [s for s in unread if s in proposal.stages]
     if supplied_anyway:
         findings.append(
@@ -992,7 +1024,7 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
     return LifecycleVerdict(
         proposal, verdicts,
         "ROLL_BACK" if activated else "REFUSE", first_failure.code,
-        measurements_read=True, findings=findings)
+        measurements_read=True, findings=findings, protocol=own)
 
 
 def main(argv=None) -> int:

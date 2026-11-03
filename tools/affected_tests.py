@@ -346,7 +346,7 @@ _FENCE_CACHE: dict[Path, frozenset] = {}
 
 
 def held_out_fence(root: Path) -> frozenset[str]:
-    """`HELD_OUT_FENCE` as the tools derive it (issue #2802).
+    """The `held_out` view of the evaluator enumeration (issue #2802).
 
     An empty result is returned rather than raised: the caller treats it as "no
     fence file changed", and the tool's own suite holds the derivation. A scorer
@@ -362,35 +362,61 @@ def held_out_fence(root: Path) -> frozenset[str]:
     return _FENCE_CACHE[root]
 
 
-_MODULE = "_affected_evaluator_protocol"
-
-
 def _held_out_fence(root: Path) -> frozenset[str]:
-    """`HELD_OUT_FENCE` as the tools derive it, from `tools/evaluator_protocol.py`.
+    """The `held_out` view of `_EVALUATOR` in `src/revl/kernel_boundary.py`.
 
-    Since issue #2802 the fence is the `held_out` view of `EVALUATOR_PATHS` in
-    `src/revl/kernel_boundary.py`; there is no tuple literal in
-    `tools/heldout_scoring.py` to parse any more. The helper is loaded by path,
-    and only from `root`, so it answers for the tree it is in and no other, the
-    same rule `census_module` follows. A helper that will not load is an EMPTY
-    result, which the caller has always read as "no fence file changed": a
-    scorer file that is renamed away is a rename the generic rules still cover.
+    Since issue #2802 the fence is a view of one enumeration. The selector
+    cannot call the derivation without executing the tree it is selecting
+    against, so it reads the table by AST: each row is a `(path, tags)` tuple,
+    and a row tagged `held_out` is a fenced path. That keeps the answer
+    derived from the one list rather than copied, and keeps this tool free of
+    the modules it is measuring.
 
-    The name is fixed rather than derived from `root` so a second root does not
-    leave a second module registered; `_FENCE_CACHE` still caches per root.
+    An empty result is the fail-safe for a table that cannot be read, the same
+    answer the selector gave when the fence was a tuple literal it could not
+    parse: a scorer file that is renamed away is a rename the generic rules
+    still cover, and a synthetic root in this module's own tests has no
+    enumeration at all.
     """
-    path = root / "tools" / "evaluator_protocol.py"
+    source = root / "src" / "revl" / "kernel_boundary.py"
     try:
-        spec = importlib.util.spec_from_file_location(_MODULE, path)
-        if spec is None or spec.loader is None:
-            return frozenset()
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[_MODULE] = module
-        spec.loader.exec_module(module)
-        return frozenset(module.HELD_OUT_FENCE)
-    except Exception:  # noqa: BLE001 - fail safe: no fence file changed
-        sys.modules.pop(_MODULE, None)
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
         return frozenset()
+    for node in ast.walk(tree):
+        # An ANNOTATED assignment (`_EVALUATOR: tuple[...] = (...)`) is an
+        # `AnnAssign`, not an `Assign`; reading only the latter is how a parser
+        # like this one goes quiet.
+        if isinstance(node, ast.AnnAssign):
+            if not (isinstance(node.target, ast.Name)
+                    and node.target.id == "_EVALUATOR"):
+                continue
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            if not any(isinstance(t, ast.Name) and t.id == "_EVALUATOR"
+                       for t in node.targets):
+                continue
+            value = node.value
+        else:
+            continue
+        if not isinstance(value, (ast.Tuple, ast.List)):
+            return frozenset()
+        out = set()
+        for row in value.elts:
+            if not isinstance(row, ast.Tuple) or len(row.elts) != 2:
+                continue
+            path, tags = row.elts
+            if not (isinstance(path, ast.Constant)
+                    and isinstance(path.value, str)):
+                continue
+            if not isinstance(tags, ast.Tuple):
+                continue
+            named = {t.value for t in tags.elts
+                     if isinstance(t, ast.Constant) and isinstance(t.value, str)}
+            if "held_out" in named:
+                out.add(path.value)
+        return frozenset(out)
+    return frozenset()
 
 
 # The directories `tools/gate_reference_census.py` walks for `.rvl` documents

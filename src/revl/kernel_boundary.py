@@ -208,12 +208,19 @@ def protocol_digest(root, paths=EVALUATOR_PATHS) -> str:
 
     A `path` that names no tracked file is a refusal, not a silent omission: an
     enumeration missing a member is the hole this function exists to make
-    visible. `paths` is a parameter so a test can hash a staged checkout;
-    production callers take `EVALUATOR_PATHS`.
+    visible. An EMPTY `paths` is refused for the same reason: `git ls-files`
+    with no pathspec answers with the whole tree, which would make a typo in a
+    fence name look like a protocol instead of an empty one. `paths` is a
+    parameter so a test can hash a staged checkout; production callers take
+    `EVALUATOR_PATHS`.
     """
     import hashlib  # noqa: PLC0415 - the compiler must not pay for this module
     from pathlib import Path  # noqa: PLC0415
 
+    if not paths:
+        raise ValueError(
+            "protocol_digest: an empty path list names no protocol, and "
+            "`git ls-files` with no pathspec would hash the whole tree")
     root = Path(root)
     files = _evaluator_files(root, paths)
     hasher = hashlib.sha256()
