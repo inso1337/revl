@@ -2234,6 +2234,20 @@ fn ba_has(ts: List[Token], lo: Int, hi: Int) -> Bool {
   return false
 }
 
+// The end of the arm-block statement at lo. The reference's recursive descent
+// separates two statements written side by side on one line, and the reader's
+// own statement end (`p_run`) is where that boundary is; `ba_end` (a line
+// change, a `;`, the closing bracket) only stands in for a statement form the
+// reader has no case for. Reading `{ let z = 1  z }` as one statement made the
+// arm's tail `(let z = 1 z)`, which `p_run` cannot parse, so the whole
+// statement holding the arm was skipped and every sibling arm's calls with it
+// (issue #2968).
+fn ba_stmt_end(ts: List[Token], lo: Int, hi: Int) -> Int {
+  let se = ba_end(ts, lo, hi, true)
+  let r = p_run(ts, lo, se)
+  return r.i > lo && r.i <= se ? r.i : se
+}
+
 // The first token of an arm block's last statement (its tail).
 fn ba_tail_start(ts: List[Token], lo: Int, hi: Int) -> Int {
   var i = lo
@@ -2242,7 +2256,7 @@ fn ba_tail_start(ts: List[Token], lo: Int, hi: Int) -> Int {
     if (atk(ts, i, ";")) { i += 1 }
     else {
       last = i
-      let se = ba_end(ts, i, hi, true)
+      let se = ba_stmt_end(ts, i, hi)
       i = se > i ? se : i + 1
     }
   }

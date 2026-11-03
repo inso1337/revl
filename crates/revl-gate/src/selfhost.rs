@@ -10590,15 +10590,21 @@ fn ba_has(ts: &[Token], lo: i64, hi: i64) -> bool {
     return false;
 }
 
-fn ba_tail_start(ts: &[Token], lo: i64, hi: i64) -> i64 {
+fn ba_stmt_end(ts: Vec<Token>, lo: i64, hi: i64) -> i64 {
+    let se = ba_end(&ts, lo, hi, true);
+    let r = p_run(ts.clone(), lo, se);
+    return if ((r.i > lo) && (r.i <= se)) { r.i } else { se };
+}
+
+fn ba_tail_start(ts: Vec<Token>, lo: i64, hi: i64) -> i64 {
     let mut i = lo;
     let mut last = lo;
     while (i < hi) {
-        if atk(ts, i, ";") {
+        if atk(&ts, i, ";") {
             i = (i).checked_add(1i64).expect("revl: Int overflow");
         } else {
             last = i;
-            let se = ba_end(ts, i, hi, true);
+            let se = ba_stmt_end(ts.clone(), i, hi);
             i = if (se > i) { se } else { (i).checked_add(1i64).expect("revl: Int overflow") };
         }
     }
@@ -10630,7 +10636,7 @@ fn ba_one_line(xs: &[Token], line: i64) -> Vec<Token> {
 }
 
 fn ba_arm(ts: Vec<Token>, i: i64, e: i64) -> BaRw {
-    let t0 = ba_tail_start(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
+    let t0 = ba_tail_start(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
     let mut tend = (e).checked_sub(1i64).expect("revl: Int overflow");
     while ((tend > t0) && atk(&ts, (tend).checked_sub(1i64).expect("revl: Int overflow"), ";")) {
         tend = (tend).checked_sub(1i64).expect("revl: Int overflow");
@@ -37570,7 +37576,7 @@ fn lift_arm(ts: Vec<Token>, p: i64, e: i64, m: i64, env: Vec<Bind>, marks: std::
         henv = env_mut_put(&henv, &(caps)[(i) as usize], false);
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    let t0 = ba_tail_start(&ts, (p).checked_add(2i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
+    let t0 = ba_tail_start(ts.clone(), (p).checked_add(2i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
     let mut tend = (e).checked_sub(1i64).expect("revl: Int overflow");
     while ((tend > t0) && atk(&ts, (tend).checked_sub(1i64).expect("revl: Int overflow"), ";")) {
         tend = (tend).checked_sub(1i64).expect("revl: Int overflow");
