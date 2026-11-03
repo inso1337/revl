@@ -121,6 +121,9 @@ BENCH_DEPENDENT_TESTS = (
     # Issue #1462: runs `bench/structured_output_bench.py` against a fake
     # server.
     "tests/test_constrained_decoding_1462.py",
+    # Issue #2709, second slice: loads `bench/cross_tier_kernels/harness.py`,
+    # emits its kernels and pins the checksums the cross-tier table gates on.
+    "tests/test_cross_tier_kernels_2709.py",
     "tests/test_demand_ranking.py",
     # Issue #2709: measures a host extern call on the Python tier by running
     # `bench/extern_call_cost.py`'s arms, so a bench change must re-run it.
