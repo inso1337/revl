@@ -7483,17 +7483,24 @@ class _V3Ctx:
 
         Callers pass either the RAW surface name (a declared type read from
         `var_types`/`_v3_infer_type`) or the EMITTED ident (a record literal),
-        so the raw key is tried first and the emitted ident falls back to it
-        (`Box` -> `Box_`), the way `field_is_boxed` resolves it.
+        so one lookup matches both: the raw name, or the ident it mangles to
+        (`Box` -> `Box_`).
         """
-        spec = self.types.get(type_name)
-        if spec is None:
-            raw = next((name for name in self.types
-                        if _ident(name, "type name") == type_name), None)
-            spec = self.types.get(raw) if raw is not None else None
-        if spec is None or spec.get("kind") != "record":
-            return {}
-        return dict(spec.get("fields") or {})
+        raw = next((name for name in self.types
+                    if name == type_name
+                    or _ident(name, "type name") == type_name), None)
+        spec = self.types.get(raw) if raw is not None else None
+        record = isinstance(spec, dict) and spec.get("kind") == "record"
+        return dict(spec.get("fields") or {}) if record else {}
+
+    def declaration_params(self, type_name: str) -> frozenset:
+        """The type parameters of the record/variant whose EMITTED ident is
+        `type_name` (empty for a non-generic or unknown declaration). A field
+        typed as one of these is a parameter, not the erased `Value`."""
+        raw = next((name for name in self.types
+                    if _ident(name, "type name") == type_name), None)
+        spec = self.types.get(raw) if raw is not None else None
+        return frozenset(spec.get("params") or []) if spec else frozenset()
 
     def record_type_for_names(self, names: list[str],
                               expected: str | None = None) -> str:
@@ -8038,8 +8045,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # A concrete value flowing INTO an erased `Any`/`Value` FIELD is the
             # same coercion a call argument gets: the field holds `cordis::Value`
             # and an `i64`/`String` does not implement `Into<Value>`, so
-            # `{ v: 1 }` against a `v: Value` field was E0308 (issue #3019).
-            rendered = _coerce_any_arg(v, rendered, field_types.get(k), ctx)
+            # `{ v: 1 }` against a `v: Value` field was E0308 (issue #3019). A
+            # generic record's field typed as its own parameter (`Cell[T].v`) is
+            # a parameter, not the erased value, and must not be boxed.
+            declared = field_types.get(k)
+            if declared not in ctx.declaration_params(type_name):
+                rendered = _coerce_any_arg(v, rendered, declared, ctx)
             if ctx.field_is_boxed(type_name, _ident(k, "record field")):
                 # recursive struct field -> the struct holds `Box<T>` (E0072);
                 # move the field value onto the heap to match.
@@ -9294,20 +9305,14 @@ def _surface_reaches_carrying(surface: object, carrying: set,
     field renders must not be mistaken for it. `shadowed` is the declaration's
     own type parameters, which name a parameter, not a declaration.
     """
-    if not isinstance(surface, str):
-        return False
-    text = surface.strip()
+    text = surface.strip() if isinstance(surface, str) else ""
     head = _SURFACE_HEAD.match(text)
-    if head is None:
-        return False
-    name = head.group(1)
-    if name not in shadowed and name in carrying:
-        return True
+    name = head.group(1) if head else ""
     args = _SURFACE_ARGS.match(text)
-    if args is None:
-        return False
-    return any(_surface_reaches_carrying(arg, carrying, shadowed)
-               for arg in _split_generic(args.group(1)))
+    inner = _split_generic(args.group(1)) if args else []
+    return ((name not in shadowed and name in carrying)
+            or any(_surface_reaches_carrying(arg, carrying, shadowed)
+                   for arg in inner))
 
 
 def _value_carrying_types(types: dict) -> set:
@@ -9322,22 +9327,20 @@ def _value_carrying_types(types: dict) -> set:
 
     Containment is transitive: a record holding a record holding a `Value` needs
     the same reduction, because the inner item no longer implements what the
-    outer derive would require of it. The surfaces are rendered exactly as
-    `_emit_v3_types` renders them, so a record field is rendered without its
-    declaration's parameters in scope and a variant payload with them: a type
-    parameter (`T`) is not the erased value, even when a DECLARED type shares
-    its name.
+    outer derive would require of it. The surfaces are rendered with the
+    declaration's own type parameters in scope, so a field typed as a parameter
+    (`Cell[T].v`) is not the erased value, even when a DECLARED type shares the
+    parameter's name.
     """
     rendered: dict[str, list[str]] = {}
     shadowed: dict[str, frozenset] = {}
     for name, spec in types.items():
         params = spec.get("params") or []
-        variant = spec.get("kind") == "variant"
         scope = (dict(types, **{p: {"kind": "param"} for p in params})
-                 if params and variant else types)
+                 if params else types)
         rendered[name] = [
             _rust_type(surface, scope) for surface in _declaration_surfaces(spec)]
-        shadowed[name] = frozenset(params) if variant else frozenset()
+        shadowed[name] = frozenset(params)
     carrying = {name for name, spellings in rendered.items()
                 if any(_VALUE_WORD.search(spelling) for spelling in spellings)}
     changed = True
