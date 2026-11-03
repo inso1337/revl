@@ -1057,7 +1057,10 @@ def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list
         return []
     committed_index = json.loads(_read(index_path))
     comps = _components_dir(registry_dir)
-    migrated: list[str] = []
+    # Validate everything BEFORE writing anything: a mediator lifted out of the
+    # committed index is an authority field, and a build_index that refuses it
+    # must not leave an unverified meta.json behind.
+    pending: list[tuple[str, Path, dict]] = []
     for name, row in sorted((committed_index.get("components") or {}).items()):
         if not isinstance(row, dict):
             continue
@@ -1067,11 +1070,30 @@ def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list
         meta = {f: row[f] for f in ENTRY_META_FIELDS if f in row}
         if not meta:
             continue
-        migrated.append(name)
-        if write:
+        if "mediator" in meta:
+            source_path = entry_dir / "component.rvl"
+            try:
+                ir = compile_files([str(source_path)])
+            except RevlError as error:
+                raise RevlError(
+                    str(entry_dir / ENTRY_META_FILENAME), 0,
+                    f"{name}: cannot migrate {ENTRY_META_FILENAME}: component.rvl "
+                    f"does not compile ({error.message})") from None
+            problem = _mediator_problem(
+                meta["mediator"],
+                _audit_document(ir).get("boundary"), ir)
+            if problem:
+                raise RevlError(
+                    str(entry_dir / ENTRY_META_FILENAME), 0,
+                    f"{name}: refusing to migrate an unverified mediator: "
+                    f"{problem}")
+        pending.append((name, entry_dir, meta))
+    migrated = [name for name, _, _ in pending]
+    if write:
+        for _name, entry_dir, meta in pending:
             _write_meta(entry_dir, meta)
-    if migrated and write:
-        build_index(registry_dir)
+        if migrated:
+            build_index(registry_dir)
     return migrated
 
 

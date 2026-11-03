@@ -457,6 +457,24 @@ def test_a_wider_decoy_marking_does_not_become_the_incumbent(tmp_path):
     assert decoy["replacementBar"]["mediators"] == ["decoy", "fs_mediator"]
 
 
+def test_migrate_meta_refuses_an_unverified_mediator_before_writing(tmp_path):
+    """A mediator lifted out of a committed index is an authority field. The
+    migration verifies it before writing anything, so a refusing rebuild cannot
+    leave an unverified meta.json behind."""
+    reg = _build(tmp_path, {"fast_writer": (FAST, None)})
+    index_path = os.path.join(reg, "index.json")
+    index = json.loads(open(index_path, encoding="utf-8").read())
+    index["components"]["fast_writer"]["mediator"] = {
+        "component": "FastWriter", "capability": "fs"}
+    with open(index_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(index, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(RevlError) as refused:
+        registry.migrate_meta(reg)
+    assert "unverified mediator" in refused.value.message
+    assert not os.path.exists(os.path.join(
+        reg, "components", "fast_writer", "meta.json"))
+
+
 # --------------------------------------------------------------- publish flow
 
 def _publish_mediator(tmp_path, version: str, description: str) -> str:
