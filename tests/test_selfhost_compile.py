@@ -975,8 +975,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     refusal = (
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 6 "
-        "(a `let`/`var` binding with no readable value) is not supported by the "
-        "self-host compiler, which would emit the component without its body.")
+        "(a `let`/`var` binding whose value the producer cannot read) is not "
+        "supported by the self-host compiler, which would emit the component "
+        "without its body.")
     got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
     assert got == refusal, got[:200]
     # the manifest-aware driver runs its own emit, so it carries its own guard
@@ -987,7 +988,7 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
     assert "body" not in native
     assert native["unlowered"] == (
         "the body statement at line 6 "
-        "(a `let`/`var` binding with no readable value)")
+        "(a `let`/`var` binding whose value the producer cannot read)")
 
 
 def test_a_bodyless_component_refusal_names_the_inner_statement(

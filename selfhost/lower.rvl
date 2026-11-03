@@ -27742,7 +27742,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // which walks the body's TOP-LEVEL steps only — so a nested `if`/`while`/
     // `for` interior carries none, and neither does a nested one here.
     let caps = top ? inverse_captures(ue.js, sc) : mk_irres(true, "")
-    if (!caps.ok) { return cir_fail_why(ts, lo, "an inverse that captures an arrow") }
+    if (!caps.ok) { return cir_fail_why(ts, lo, "an `undo` inverse holding an arrow while a mutable local is in scope") }
     let capjs = caps.js == "" ? "" : ", \"undo_captures\": [".concat(caps.js).concat("]")
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat(inv).concat(capjs).concat("}")
@@ -27894,7 +27894,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     let ue = cir_expr(und.e, sc2, hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line))
     if (!ue.ok) { return cir_fail_why(ts, lo, "an `effect` bracket's undo expression outside the producer's expression surface") }
     let caps = inverse_captures(ue.js, sc)
-    if (!caps.ok) { return cir_fail_why(ts, lo, "an inverse that captures an arrow") }
+    if (!caps.ok) { return cir_fail_why(ts, lo, "an `undo` inverse holding an arrow while a mutable local is in scope") }
     // issue #2092: the reference's key order and provenance, both of which the
     // activation-body emitter already keeps. `_lower_effect_step` builds the
     // step as `{"step": …, "acquire": …, "undo": …}` and appends `bind` LAST
@@ -27920,7 +27920,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (atk(ts, j, ":")) { j = type_at(ts, j + 1).i }
     if (!atk(ts, j, "=")) { return cir_fail_why(ts, lo, "a `let`/`var` binding without `=`") }
     let r = expr_at(ts, j + 1)
-    if (is_bad(r.e) || r.i <= j + 1) { return cir_fail_why(ts, lo, "a `let`/`var` binding with no readable value") }
+    if (is_bad(r.e) || r.i <= j + 1) { return cir_fail_why(ts, lo, "a `let`/`var` binding whose value the producer cannot read") }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, j + 1).line))
     if (!ve.ok) { return cir_fail_why(ts, lo, "a `let`/`var` binding whose value is outside the producer's expression surface") }
     // the binder's escape (`_lower_provide`'s `_alloc_safe`, against the
