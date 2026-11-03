@@ -7479,8 +7479,15 @@ class _V3Ctx:
     def record_field_types(self, type_name: str) -> dict[str, str | None]:
         """The declared field -> type map of an emitted record type, so a field
         VALUE can be lowered with its target type as context. Empty for a
-        synthesized/unknown name."""
-        spec = self.types.get(type_name)
+        synthesized/unknown name.
+
+        `type_name` is the EMITTED ident; `self.types` is keyed by the raw name,
+        and a record named after a prelude item (`Box` -> `Box_`) is mangled, so
+        the raw name is resolved back the way `field_is_boxed` resolves it.
+        """
+        raw = next((name for name in self.types
+                    if _ident(name, "type name") == type_name), None)
+        spec = self.types.get(raw) if raw is not None else None
         if spec is None or spec.get("kind") != "record":
             return {}
         return dict(spec.get("fields") or {})
@@ -8025,6 +8032,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         def _field_value(k, v):
             rendered = _by_value_arg(
                 v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)
+            # A concrete value flowing INTO an erased `Any`/`Value` FIELD is the
+            # same coercion a call argument gets: the field holds `cordis::Value`
+            # and an `i64`/`String` does not implement `Into<Value>`, so
+            # `{ v: 1 }` against a `v: Value` field was E0308 (issue #3019).
+            rendered = _coerce_any_arg(v, rendered, field_types.get(k), ctx)
             if ctx.field_is_boxed(type_name, _ident(k, "record field")):
                 # recursive struct field -> the struct holds `Box<T>` (E0072);
                 # move the field value onto the heap to match.

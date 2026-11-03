@@ -16,6 +16,10 @@ of an erased field are not available on this tier, exactly as they are not for
 an opaque ``Value`` itself; a declaration that does not contain one keeps the
 full derive set.
 
+A concrete value entering an erased field takes the same coercion a ``Value``
+parameter takes, so ``{ v: n }`` against ``v: Value`` boxes the ``i64`` instead
+of failing with E0308.
+
 The end-to-end test builds the emitted crate with cargo, so the claim is that
 the generated Rust compiles, not that the source looks right.
 """
@@ -48,7 +52,9 @@ type Outer = { inner: Inner, items: List[Inner] }
 type Maybe = Has(Value) | Missing
 type Holder = { tag: Str, inner: Inner, outer: Outer, maybe: Maybe }
 pub type Plain = { n: Int }
+pub type Box = { tags: List[Value], v: Value, m: Map[Str, Value] }
 pub fn keep(h: Holder) -> Holder { return h }
+pub fn make(n: Int) -> Box { return { tags: [], v: n, m: Map.empty() } }
 """
 
 FULL_DERIVE = ("#[derive(Clone, Debug, PartialEq, "
@@ -90,6 +96,17 @@ def test_nested_and_variant_value_fields_reduce_too():
     assert _derive_of(out, "pub enum Maybe") == ERASED_DERIVE
     assert _derive_of(out, "pub struct Holder") == ERASED_DERIVE
     assert _derive_of(out, "pub struct Plain") == FULL_DERIVE
+
+
+def test_concrete_value_flowing_into_a_value_field_is_boxed():
+    """A value entering an erased `Value` field takes the same coercion a
+    `Value` parameter gets: the field holds `cordis::Value` and a concrete
+    `i64` does not implement `Into<Value>`, so `{ v: n }` must box it or the
+    struct literal is E0308. `Box` also covers the mangled-name lookup: the
+    record emits as `Box_`, and its declared field types must still be found."""
+    m = _load_rust_emit()
+    out = m.emit(compile_source(NESTED_VALUE, "nested_value.rvl"))
+    assert "v: Value::new(serde_json::Value::from(n))" in out
 
 
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
