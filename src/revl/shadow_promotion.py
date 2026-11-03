@@ -250,6 +250,10 @@ BOUND_CONDITIONS_NOT_QUOTABLE = (
     "result of choosing the candidate that agreed, and a window used for "
     "selection does not support the rule-of-three bound; the counts stand "
     "alone")
+BOUND_CONDITIONS_TOO_SMALL = (
+    "no bound is quoted: the rule of three gives 3/n, and with fewer than "
+    "three clean draws 3/n is above one, which is not a bound on a failure "
+    "rate; the counts stand alone")
 
 #: The members two records must match on to be said to AGREE. The digest of
 #: the completion that was taken, and the outcome. See the module header for
@@ -435,13 +439,13 @@ class ShadowPlan:
     ``live`` is whether the candidate is already answering. It selects which of
     the two rules in the module header applies.
 
-    ``window_fresh`` is the plan's declaration that its observation window was
-    fixed BEFORE candidates were compared, so it was not used to choose between
-    them. It does not change the decision; it decides whether the verdict may
-    quote a failure-rate bound at all. It is the one member whose ABSENCE is
-    read as false rather than refused, because false is the direction that
-    narrows what the verdict may claim and never widens authority. A document
-    that states it must state it as a boolean.
+    ``window_fresh`` is the plan's declaration that the observation window was
+    opened only after the candidate was fixed, so it was not used to choose
+    between them. It does not change the decision; it decides whether the
+    verdict may quote a failure-rate bound at all. It is the one member whose
+    ABSENCE is read as false rather than refused, because false is the
+    direction that narrows what the verdict may claim and never widens
+    authority. A document that states it must state it as a boolean.
     """
 
     component: str
@@ -971,6 +975,13 @@ def _check_plan(plan: ShadowPlan) -> Optional[Refusal]:
             f"plan.min_observations {plan.min_observations!r} is not a "
             f"positive count; a promotion on zero observations is a promotion "
             f"on no evidence")
+    if not isinstance(plan.window_fresh, bool):
+        return Refusal(
+            PLAN_MALFORMED,
+            f"plan.window_fresh {plan.window_fresh!r} is not a boolean; the "
+            f"member decides whether a clean tally may be quoted as a "
+            f"failure-rate bound, and a truthy non-boolean is not a "
+            f"declaration")
     if not isinstance(plan.route_table, Mapping):
         return Refusal(PLAN_MALFORMED,
                        "plan.route_table is not model_route.check()'s mapping")
@@ -1442,12 +1453,13 @@ class Promotion:
     evidence at all. A verdict here is never `exact`.
 
     ``failure_rate_upper_95`` and ``bound_conditions`` state what a clean
-    sample licenses. With zero divergences the bound is 3/n (the rule of
-    three) and ``bound_conditions`` names the conditions that make it valid;
-    when the plan has not declared its window fresh the same field carries
-    :data:`NOT_QUOTABLE` instead, because a window used to choose among
-    candidates is a selection and not a random sample. With any divergence
-    both fields are ``None``: the counts stand alone."""
+    sample licenses. A PROMOTE over at least three clean draws quotes 3/n
+    (the rule of three) and ``bound_conditions`` names the conditions that
+    make it valid. A clean promotion the plan has not declared fresh, or one
+    with fewer than three draws, carries :data:`NOT_QUOTABLE` instead, because
+    a selected window is not a random sample and 3/n is not a failure-rate
+    bound below three draws. Any refusal, and any divergence, leaves both
+    fields ``None``: the counts stand alone."""
 
     kind: str
     version: str
@@ -1528,29 +1540,32 @@ def _restoration(plan: ShadowPlan) -> dict:
             "fully_restored": not compensated and not neither}
 
 
-def _evidence_bound(plan: ShadowPlan,
-                    tally: Optional[Tally]) -> tuple:
+def _evidence_bound(plan: ShadowPlan, tally: Optional[Tally],
+                    decision: str) -> tuple:
     """``(evidence_strength, failure_rate_upper_95, bound_conditions)``.
 
     The bound is the rule of three: n independent draws with no failure put
-    the failure rate below 3/n at 95 percent. It is quoted only when the
-    sample is clean AND the plan declares the window was not used to choose
-    among candidates. With a divergence there is no bound to quote and both
-    fields are ``None``; with a clean tally and no such declaration the field
-    carries :data:`NOT_QUOTABLE`, because a clean result over a window that
-    selected the candidate is not a sample of that candidate's failure rate.
+    the failure rate below 3/n at 95 percent. It is quoted only on a clean
+    PASS that the plan declares was not selected (``window_fresh``), and only
+    when 3/n is at most one (n at least three). A refusal quotes nothing: a
+    clean window the plan refused as too small is not a pass, and 3/n over
+    fewer than three draws is not a probability bound. A clean promotion the
+    plan did not declare fresh carries :data:`NOT_QUOTABLE`, because a window
+    that selected the candidate is not a sample of that candidate's failure
+    rate. With any divergence the bound is absent and the counts stand alone.
 
     No path here can return :data:`EVIDENCE_EXACT`: this module compares a
     sample by construction, and the tag exists so a consumer can require a
     strength this path does not supply."""
     if tally is None:
         return (None, None, None)
-    if tally.diverged:
+    if tally.diverged or decision != PROMOTE:
         return (EVIDENCE_SAMPLED, None, None)
-    if getattr(plan, "window_fresh", False) and tally.paired > 0:
-        return (EVIDENCE_SAMPLED, 3.0 / tally.paired,
-                BOUND_CONDITIONS_QUOTABLE)
-    return (EVIDENCE_SAMPLED, NOT_QUOTABLE, BOUND_CONDITIONS_NOT_QUOTABLE)
+    if not getattr(plan, "window_fresh", False):
+        return (EVIDENCE_SAMPLED, NOT_QUOTABLE, BOUND_CONDITIONS_NOT_QUOTABLE)
+    if tally.paired < 3:
+        return (EVIDENCE_SAMPLED, NOT_QUOTABLE, BOUND_CONDITIONS_TOO_SMALL)
+    return (EVIDENCE_SAMPLED, 3.0 / tally.paired, BOUND_CONDITIONS_QUOTABLE)
 
 
 def _verdict(plan: ShadowPlan, decision: str, refusal: Optional[Refusal],
@@ -1563,7 +1578,7 @@ def _verdict(plan: ShadowPlan, decision: str, refusal: Optional[Refusal],
     full = list(trail) + [
         {"stage": name, "status": "not reached"}
         for name in STAGES if name not in seen]
-    strength, bound, conditions = _evidence_bound(plan, tally)
+    strength, bound, conditions = _evidence_bound(plan, tally, decision)
     return Promotion(
         kind=PROMOTION_KIND, version=PROMOTION_VERSION, decision=decision,
         action_class=plan.action_class if isinstance(plan, ShadowPlan)
@@ -1735,7 +1750,9 @@ def render(promotion: Promotion) -> str:
         for divergence in tally.divergences:
             out.append(f"  diverged at {divergence.describe()}")
         if promotion.failure_rate_upper_95 is None:
-            out.append("failure rate upper 95: omitted (the window diverged)")
+            why = "the window diverged" if tally.diverged \
+                else "the verdict did not promote"
+            out.append(f"failure rate upper 95: omitted ({why})")
         else:
             out.append("failure rate upper 95: "
                        + _render_upper_bound(promotion.failure_rate_upper_95))

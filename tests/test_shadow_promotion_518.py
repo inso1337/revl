@@ -345,6 +345,42 @@ def test_a_plan_that_says_nothing_about_its_window_is_not_quotable():
     assert verdict.bound_conditions == sp.BOUND_CONDITIONS_NOT_QUOTABLE
 
 
+def test_a_clean_window_too_small_to_promote_quotes_no_bound():
+    """A refusal is not a pass. 3/2 would be an "upper bound" of 1.5, so the
+    clean tally stands alone instead of quoting an impossible number."""
+    verdict = decide(p=plan(window_fresh=True), obs=window(2))
+    assert verdict.decision == sp.REFUSE
+    assert verdict.refusal.link == sp.SAMPLE_TOO_SMALL
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.tally.paired == 2
+    assert verdict.tally.diverged == 0
+    assert verdict.failure_rate_upper_95 is None
+    assert verdict.bound_conditions is None
+    text = sp.render(verdict)
+    assert "failure rate upper 95: omitted (the verdict did not promote)" \
+        in text
+
+
+def test_a_promotion_with_too_few_draws_quotes_no_impossible_bound():
+    """A plan may declare a one-draw sample. The gate then promotes on it,
+    but 3/1 and 3/2 are above one and cannot be quoted as failure rates."""
+    verdict = decide(p=plan(window_fresh=True, min_observations=2),
+                     obs=window(2))
+    assert verdict.decision == sp.PROMOTE
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.failure_rate_upper_95 == sp.NOT_QUOTABLE
+    assert verdict.bound_conditions == sp.BOUND_CONDITIONS_TOO_SMALL
+
+
+def test_a_non_boolean_window_fresh_is_refused():
+    """The member is a declaration, so a truthy string is not one. The plan
+    document reader checks it; direct construction is checked too."""
+    verdict = decide(p=plan(window_fresh="yes"))
+    assert verdict.decision == sp.REFUSE
+    assert verdict.refusal.link == sp.PLAN_MALFORMED
+    assert "window_fresh" in verdict.refusal.reason
+
+
 def test_a_divergence_omits_the_bound_and_leaves_the_counts():
     """One divergence in thirty still clears the 0.95 threshold, so this
     verdict PROMOTES. It quotes no bound anyway: the counts are a tally, not
