@@ -7477,17 +7477,20 @@ class _V3Ctx:
                       "type name")
 
     def record_field_types(self, type_name: str) -> dict[str, str | None]:
-        """The declared field -> type map of an emitted record type, so a field
-        VALUE can be lowered with its target type as context. Empty for a
+        """The declared field -> type map of a record type, so a field VALUE can
+        be lowered with its target type as context. Empty for a
         synthesized/unknown name.
 
-        `type_name` is the EMITTED ident; `self.types` is keyed by the raw name,
-        and a record named after a prelude item (`Box` -> `Box_`) is mangled, so
-        the raw name is resolved back the way `field_is_boxed` resolves it.
+        Callers pass either the RAW surface name (a declared type read from
+        `var_types`/`_v3_infer_type`) or the EMITTED ident (a record literal),
+        so the raw key is tried first and the emitted ident falls back to it
+        (`Box` -> `Box_`), the way `field_is_boxed` resolves it.
         """
-        raw = next((name for name in self.types
-                    if _ident(name, "type name") == type_name), None)
-        spec = self.types.get(raw) if raw is not None else None
+        spec = self.types.get(type_name)
+        if spec is None:
+            raw = next((name for name in self.types
+                        if _ident(name, "type name") == type_name), None)
+            spec = self.types.get(raw) if raw is not None else None
         if spec is None or spec.get("kind") != "record":
             return {}
         return dict(spec.get("fields") or {})
@@ -9259,11 +9262,16 @@ def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
 
 # The derive set of a v3 record/variant. `PartialEq` is load-bearing (revl's
 # equality is structural) and the serde pair is what lets a value cross the
-# generated RPC bridge; an item that CONTAINS the opaque erased `Value` can
-# derive neither (issue #3019).
+# generated RPC bridge; an item that CONTAINS the opaque erased `Value` cannot
+# derive any of the three (issue #3019).
 _V3_DERIVES = "Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize"
 _V3_ERASED_DERIVES = "Clone, Debug"
 _VALUE_WORD = re.compile(r"\bValue\b")
+# The head of a surface type (`Map[Str, Int]`, `Inner`, `Mb[Int]`) and the
+# bracketed argument list after it. Used to resolve a surface type STRUCTURALLY
+# to the declarations it names.
+_SURFACE_HEAD = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)")
+_SURFACE_ARGS = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\[(.*)\]\s*$", re.S)
 
 
 def _declaration_surfaces(spec: dict) -> list:
@@ -9274,6 +9282,32 @@ def _declaration_surfaces(spec: dict) -> list:
     surfaces += [case["payload"] for case in cases
                  if isinstance(case, dict) and case.get("payload") is not None]
     return surfaces
+
+
+def _surface_reaches_carrying(surface: object, carrying: set,
+                              shadowed: frozenset) -> bool:
+    """Whether a surface type NAMES a declaration that carries the erased value.
+
+    Resolved structurally (a declared name, or the arguments of `Head[..]`)
+    rather than by matching a rendered spelling: a user type named `HashMap`
+    emits `HashMap`, and the `std::collections::HashMap<..>` an unrelated `Map`
+    field renders must not be mistaken for it. `shadowed` is the declaration's
+    own type parameters, which name a parameter, not a declaration.
+    """
+    if not isinstance(surface, str):
+        return False
+    text = surface.strip()
+    head = _SURFACE_HEAD.match(text)
+    if head is None:
+        return False
+    name = head.group(1)
+    if name not in shadowed and name in carrying:
+        return True
+    args = _SURFACE_ARGS.match(text)
+    if args is None:
+        return False
+    return any(_surface_reaches_carrying(arg, carrying, shadowed)
+               for arg in _split_generic(args.group(1)))
 
 
 def _value_carrying_types(types: dict) -> set:
@@ -9291,26 +9325,28 @@ def _value_carrying_types(types: dict) -> set:
     outer derive would require of it. The surfaces are rendered exactly as
     `_emit_v3_types` renders them, so a record field is rendered without its
     declaration's parameters in scope and a variant payload with them: a type
-    parameter (`T`) is not the erased value.
+    parameter (`T`) is not the erased value, even when a DECLARED type shares
+    its name.
     """
     rendered: dict[str, list[str]] = {}
+    shadowed: dict[str, frozenset] = {}
     for name, spec in types.items():
         params = spec.get("params") or []
+        variant = spec.get("kind") == "variant"
         scope = (dict(types, **{p: {"kind": "param"} for p in params})
-                 if params and spec.get("kind") == "variant" else types)
+                 if params and variant else types)
         rendered[name] = [
             _rust_type(surface, scope) for surface in _declaration_surfaces(spec)]
+        shadowed[name] = frozenset(params) if variant else frozenset()
     carrying = {name for name, spellings in rendered.items()
                 if any(_VALUE_WORD.search(spelling) for spelling in spellings)}
     changed = True
     while changed:
         changed = False
-        carried = {_ident(name, "type name") for name in carrying}
-        extra = {name for name, spellings in rendered.items()
+        extra = {name for name, spec in types.items()
                  if name not in carrying
-                 and any(word in carried
-                         for spelling in spellings
-                         for word in _RUST_TYPE_WORD.findall(spelling))}
+                 and any(_surface_reaches_carrying(surface, carrying, shadowed[name])
+                         for surface in _declaration_surfaces(spec))}
         carrying |= extra
         changed = bool(extra)
     return carrying
@@ -11364,13 +11400,24 @@ def _revl_ftoa_helper() -> list[str]:
 # the first cut, so the golden holds). Anything else that is not the opaque
 # cordis `Value` is marshalled generically through serde (records, ADTs, Map,
 # Result, and their Vec/Option nestings, once the emitted types derive
-# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque.
+# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque, and
+# so is a declared record/variant that CONTAINS one, because `_emit_v3_types`
+# gives it only `Clone, Debug` (#3019).
 _SCALAR_OPTION = ("Option<String>", "Option<i64>", "Option<bool>", "Option<f64>")
+
+# The EMITTED idents of the declarations that carry the erased value, set by
+# `_emit_bridge` for the marshalling predicates below. Empty for a document
+# without one, so every existing bridge emits byte-identically.
+_BRIDGE_OPAQUE_TYPES: frozenset = frozenset()
 
 
 def _bridge_serde_ok(rtype: str) -> bool:
-    """True when `rtype` can cross via serde: not the opaque cordis `Value`."""
-    return not re.search(r"\bValue\b", rtype)
+    """True when `rtype` can cross via serde: not the opaque cordis `Value`, nor
+    a declared type that carries one and so does not derive the serde traits."""
+    if re.search(r"\bValue\b", rtype):
+        return False
+    return not any(word in _BRIDGE_OPAQUE_TYPES
+                   for word in _RUST_TYPE_WORD.findall(rtype))
 
 
 def _split_result(rtype: str):
@@ -11500,6 +11547,9 @@ def _emit_bridge(ir: dict) -> list[str]:
     types = ir.get("types") or {}
     if not services:
         return []
+    global _BRIDGE_OPAQUE_TYPES
+    _BRIDGE_OPAQUE_TYPES = frozenset(
+        _ident(name, "type name") for name in _value_carrying_types(types))
     provided: dict[str, str] = {}
     for component in components:
         for key, service in (component.get("provides") or {}).items():
