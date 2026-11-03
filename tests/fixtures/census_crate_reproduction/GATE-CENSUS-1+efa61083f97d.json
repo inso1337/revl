@@ -903,7 +903,6 @@
   "tests/fixtures/emit_go_refusals/opt_none_argument.rvl",
   "tests/fixtures/emit_go_refusals/opt_record_field_default.rvl",
   "tests/fixtures/emit_go_refusals/record_update.rvl",
-  "tests/fixtures/emit_go_refusals/unpinned_generic_variant.rvl",
   "tests/fixtures/emit_go_refusals/validated_emission_operation.rvl",
   "tests/fixtures/emit_go_silent_differences/import_directive_alias.rvl",
   "tests/fixtures/emit_java_corpus/adts.rvl",
@@ -1055,7 +1054,6 @@
   "tests/fixtures/emit_rust_corpus/comp_provide_generic.rvl",
   "tests/fixtures/emit_rust_corpus/comp_provide_generic_add.rvl",
   "tests/fixtures/emit_rust_corpus/comp_provide_generic_let.rvl",
-  "tests/fixtures/emit_rust_corpus/comp_provide_generic_variant.rvl",
   "tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl",
   "tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl",
   "tests/fixtures/emit_rust_corpus/comp_stream.rvl",
@@ -1069,7 +1067,6 @@
   "tests/fixtures/emit_rust_corpus/externs.rvl",
   "tests/fixtures/emit_rust_corpus/float_pub.rvl",
   "tests/fixtures/emit_rust_corpus/generic_fn.rvl",
-  "tests/fixtures/emit_rust_corpus/generic_variant.rvl",
   "tests/fixtures/emit_rust_corpus/held_acquire_binds.rvl",
   "tests/fixtures/emit_rust_corpus/in_file_tests.rvl",
   "tests/fixtures/emit_rust_corpus/intercept_metadata.rvl",
@@ -1087,11 +1084,7 @@
   "tests/fixtures/emit_rust_corpus/perf_iter.rvl",
   "tests/fixtures/emit_rust_corpus/perf_shapes.rvl",
   "tests/fixtures/emit_rust_corpus/prelude_names.rvl",
-  "tests/fixtures/emit_rust_corpus/record_diamond.rvl",
   "tests/fixtures/emit_rust_corpus/records.rvl",
-  "tests/fixtures/emit_rust_corpus/recursive_boxing.rvl",
-  "tests/fixtures/emit_rust_corpus/recursive_record_field.rvl",
-  "tests/fixtures/emit_rust_corpus/recursive_variant.rvl",
   "tests/fixtures/emit_rust_corpus/requires.rvl",
   "tests/fixtures/emit_rust_corpus/reserved_names.rvl",
   "tests/fixtures/emit_rust_corpus/reserved_type_names.rvl",
@@ -1104,7 +1097,6 @@
   "tests/fixtures/emit_rust_corpus/teardown_compensate.rvl",
   "tests/fixtures/emit_rust_corpus/to_char.rvl",
   "tests/fixtures/emit_rust_corpus/transforms.rvl",
-  "tests/fixtures/emit_rust_corpus/twin_alias.rvl",
   "tests/fixtures/emit_rust_corpus/unread_empty_list.rvl",
   "tests/fixtures/emit_rust_corpus/v1_components.rvl",
   "tests/fixtures/emit_rust_corpus/variants.rvl",
@@ -1112,7 +1104,6 @@
   "tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl",
   "tests/fixtures/emit_rust_refusals/nested_empty_list.rvl",
   "tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl",
-  "tests/fixtures/emit_rust_refusals/unpinned_generic_variant.rvl",
   "tests/fixtures/emit_rust_refusals/untyped_empty_list.rvl",
   "tests/fixtures/emit_rust_refusals/validated_emission_operation.rvl",
   "tests/fixtures/emit_ts_corpus/arith.rvl",
@@ -1424,10 +1415,5 @@
   "tests/fixtures/verified_method_effect/t1_let_bound.rvl",
   "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
  ],
- "tracked_buckets": {
-  "false-reject/T1": [
-   "tests/fixtures/emit_rust_corpus/comp_provide_generic_variant.rvl",
-   "tests/fixtures/emit_rust_corpus/generic_variant.rvl"
-  ]
- }
+ "tracked_buckets": {}
 }
