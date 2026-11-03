@@ -1,4 +1,4 @@
-# `revl anchor`: a chain-neutral record over existing digests
+# `revl attest --anchor`: a chain-neutral record over existing digests
 
 *Commit to a set of digests that revl already signs, and publish one value to
 any external log, timestamping service or ledger you choose. revl does not
@@ -95,6 +95,10 @@ hex characters. Mixed-case hex is refused so that one digest has one spelling.
 sha256(json.dumps(digests, sort_keys=True, separators=(",", ":"),
                   ensure_ascii=False).encode("utf-8"))
 ```
+
+`anchor_hash` commits to the digest set only. The timestamp and signer are
+covered by the signature, not by the hash, so signing the same set again at
+another time gives the same published value with a different signature.
 
 **The signature.** HMAC-SHA256 over the canonical spelling of the whole record
 minus `signature`, byte strings formed the same way, prefixed with

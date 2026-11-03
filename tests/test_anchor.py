@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import anchor as N  # noqa: E402
 from revl import attest as A  # noqa: E402
 from revl import compile_source  # noqa: E402
+from revl.compiler import compile_files  # noqa: E402
 from revl import pool_receipt  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
@@ -293,7 +294,8 @@ def test_cli_emit_and_verify_roundtrip(tmp_path, capsys):
     assert rc == 0
     document = json.loads(capsys.readouterr().out)
     assert document["kind"] == "revl.anchor"
-    assert "composition" in document["digests"]
+    assert document["digests"]["composition"] == A.canonical_hash(
+        compile_files([str(comp)]))
 
     anchor_path = _write(tmp_path / "anchor.json", json.dumps(document))
     rc = main(["verify", "--anchor", str(anchor_path), "--key", str(keyf)])
