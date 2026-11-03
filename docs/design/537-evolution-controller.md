@@ -366,7 +366,7 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-Three demonstrations, all in `tests/test_evolution_controller.py`: 77 tests,
+Three demonstrations, all in `tests/test_evolution_controller.py`: 98 tests,
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four

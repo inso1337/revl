@@ -460,16 +460,16 @@ def test_a_domain_proposal_that_escapes_its_domain_is_refused(tmp_path):
 
 
 def test_the_domain_escape_is_measured_not_declared(tmp_path):
-    """The `changed` field is the candidate's account of itself. An honest
-    declaration cannot hide an escape, because the measured set is what is
-    checked against the tag."""
-    tree = make_tree(tmp_path / "escapereal",
-                     {"src/svc.rvl": "candidate\n",
-                      "src/shared/core.rvl": "changed\n"})
+    """The tag is checked against the measured set, never against the
+    candidate's account of itself. A declared set that claims an escape the
+    tree does not contain must not create one; a check reading `changed` would
+    refuse here."""
+    tree = make_tree(tmp_path / "escapereal", {"src/svc.rvl": "candidate\n"})
     record = proposal_record(tree)
     record["applies_to"] = {"domain": ["src/svc.rvl"]}
     record["changed"] = ["src/svc.rvl", "src/shared/core.rvl"]
-    assert run(record).code == "DOMAIN_ESCAPE"
+    verdict = run(record)
+    assert verdict.decision == "PROMOTE", verdict.render()
 
 
 def test_a_domain_proposal_inside_its_domain_promotes(clean_tree):
@@ -480,14 +480,15 @@ def test_a_domain_proposal_inside_its_domain_promotes(clean_tree):
     assert verdict.decision == "PROMOTE", verdict.render()
 
 
-def test_a_domain_is_matched_segment_wise(clean_tree):
+def test_a_domain_is_matched_segment_wise(tmp_path):
     """`src/svc` does not cover `src/svc2`, the same rule as the fence and the
-    kernel: an over-matching domain is a hole dressed as a refusal."""
-    record = proposal_record(clean_tree)
-    record["applies_to"] = {"domain": ["src/svc2"]}
+    kernel: a string-prefix check is a hole dressed as a refusal."""
+    tree = make_tree(tmp_path / "seg", {"src/svc2/x.rvl": "candidate\n"})
+    record = proposal_record(tree)
+    record["applies_to"] = {"domain": ["src/svc"]}
     verdict = run(record)
     assert verdict.code == "DOMAIN_ESCAPE"
-    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+    assert "src/svc2/x.rvl" in verdict.by_name()["authority"].reason
 
 
 @pytest.mark.parametrize("target", ["shared", "default"])
