@@ -352,6 +352,12 @@ CORPUS = [
     "record_diamond.rvl",    # issue #2328 remaining slice: the diamond
                              #   A -> {B, C} -> D resolves through the
                              #   same-shape twin alias (item 268)
+    "../emit_java_corpus/branch_shapes.rvl",  # issue #2797 item 1: the document
+                             #   the differential survey flagged. An UNBUILT
+                             #   same-shape record (`UnusedCell`) lowers to
+                             #   `pub type UnusedCell = Cell;`, never a second
+                             #   struct; every other branch shape in the
+                             #   document stays byte-identical too.
     "recursive_boxing.rvl",  # issue #2328 remaining slice (reference pass
                              #   #919): greedy selection, enum payload before
                              #   record field (BinN stays unboxed), the inline
@@ -777,6 +783,19 @@ def test_selfhosted_emitter_reserved_names_at_declarations_and_uses(emitted):
     for declaration in ("let ctx_ = root_;", "let ctx__ = root__;",
                         "let config__ = ctx__;"):
         assert declaration in src
+
+
+def test_selfhosted_emitter_unbuilt_same_shape_record_is_a_twin_alias(emitted):
+    """issue #2797 item 1: the document the differential survey flagged. The
+    reference emits ONE canonical struct per field->type shape and lowers an
+    unbuilt same-shape twin (`UnusedCell`, same shape as `Cell`) to
+    `pub type UnusedCell = Cell;`; materializing it as a second struct was the
+    silent divergence."""
+    src = emitted["emit_rust_src"](compile_files(
+        [str(ROOT / "tests" / "fixtures" / "emit_java_corpus" / "branch_shapes.rvl")]))
+    assert "pub struct Cell {" in src
+    assert "pub type UnusedCell = Cell;" in src
+    assert "pub struct UnusedCell" not in src
 
 
 def test_selfhosted_emitter_output_scaffold(emitted):

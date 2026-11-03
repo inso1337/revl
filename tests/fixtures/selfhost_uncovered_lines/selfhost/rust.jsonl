@@ -150,7 +150,7 @@
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_inner", 2, 2]
 
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_interp", 2, 2]
+["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_interp", 1, 1]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_un", 2, 2]
 
@@ -226,4 +226,4 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "split_fn_ret", 2, 2]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 3, 3]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 2, 2]
