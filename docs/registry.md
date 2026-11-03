@@ -360,8 +360,8 @@ lookup) is a regression against this document.
    over unavailable), a valid attestation, a trusted publisher, an
    inverse-roundtrip pass. The `ceilings`, `secret-sinks` and `compensation`
    facets are carried and reported in `evidence.facets`, but they do not enter
-   the rank key: they are facts for a consumer or a policy to read, not a score
-   (issue #2697);
+   the rank key: they are facts for a consumer, or for a later ranking or
+   policy slice, not a score (issue #2697);
 5. smaller source (less for the agent to hold in context).
 
 Interface compatibility (§5) is a **hard filter**, never a ranking term: an
