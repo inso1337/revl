@@ -110,7 +110,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 
@@ -815,4 +815,47 @@ def test_ts_type_matches_reference_on_structural_types_2297(emitted, reference, 
     of a union, exactly as the reference `_ts_v3_type` does. The corpus document
     `block_arm_records.rvl` covers the lifted-arm signatures end to end."""
     assert emitted["ts_type"](surface) == reference._ts_v3_type(surface)
+
+
+#: issue #3053: the lifecycle driver calls `plug`, `snapshotRuntime`,
+#: `assertNoResidue` and `frameForCtx` on its own behalf, so the reference
+#: imports them under the `$revl_` sigil the driver's locals already carry.
+#: `$` is not in revl's identifier alphabet, so a lifecycle `let
+#: snapshotRuntime = call ...` can no longer shadow the driver's earlier call;
+#: before the fix that binding emitted `const snapshotRuntime` in the driver's
+#: own scope and the call read its temporal dead zone. The port must carry the
+#: same import aliases byte for byte.
+_TS_LIFECYCLE_HELPERS = ("plug", "snapshotRuntime", "assertNoResidue", "frameForCtx")
+
+
+def _a_lifecycle_binding(name: str) -> str:
+    tail = "  abort\n" if name == "frameForCtx" else "  unload BoxC\n"
+    return f"""service Box {{ fn label() -> Str }}
+
+component BoxC provides box: Box {{
+  provide box {{
+    fn label() = "b"
+  }}
+}}
+
+lifecycle test "bind {name}" {{
+  load BoxC
+  let {name} = call box.label()
+  assert {name} == "b"
+{tail}  assert no_residue
+}}
+"""
+
+
+@pytest.mark.parametrize("name", _TS_LIFECYCLE_HELPERS)
+def test_a_lifecycle_binding_named_like_a_runtime_helper_cannot_shadow_the_driver(
+        emitted, reference, name):
+    """issue #3053: the author's spelling stays untouched, the driver reads its
+    `$revl_` alias, and the port emits the reference's bytes."""
+    ir = compile_source(_a_lifecycle_binding(name))
+    want = reference.emit(ir)
+    got = emitted["emit_ts_src"](ir)
+    assert got == want
+    assert f"{name} as $revl_{name}" in want
+    assert f"const {name} = $revl_root.box.label()" in got
 

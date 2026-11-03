@@ -470,10 +470,25 @@ class _Env:
 _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
                 "defer", "return", "var", "const", "package", "import"}
 
+#: Names the emitted go code binds for the emitter at a scope a user binding
+#: shares. Go has no identifier sigil a revl name cannot spell (unlike ts's
+#: `$` or python's refused `_revl` namespace), so the collision is closed the
+#: way rust closes `root`: the USER name moves one rung of the same injective
+#: ladder and the emitter keeps the bare token. The lifecycle driver's
+#: function-scope bindings are its `revlT` receiver parameter, the `root`
+#: context, the `_fibers` registry, the `_revlLoadOrder` teardown order and the
+#: `_revlAt` step breadcrumb; a user `let` of any of those spellings emitted a
+#: second declaration in the same block ("root redeclared in this block", issue
+#: #3053). Only names that are actually bound BARE at that scope belong here: a
+#: driver local inside a `{ ... }` or `for` scope is shadowed, not redeclared,
+#: and needs no reservation.
+_EMITTER_RESERVED = {"revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt"}
+
 
 def _safe_local(name: str) -> str:
-    """Rename a revl identifier that collides with a *Go* keyword so it emits
-    as a usable Go local (roadmap item 165).
+    """Rename a revl identifier that collides with a *Go* keyword (or a name
+    the emitted lifecycle driver binds at the user's scope) so it emits as a
+    usable Go local (roadmap item 165, issue #3053).
 
     The rename must be a pure function of the name (declaration site and use
     sites agree without a table) AND INJECTIVE: two distinct revl identifiers
@@ -486,18 +501,19 @@ def _safe_local(name: str) -> str:
     compiler CI does not run.
 
     The injective rule: escape a name iff the name OR any name reachable from
-    it by dropping trailing `_` is a Go keyword, and escape it by exactly ONE
-    `_`. Names whose underscore-stripped root is a keyword shift up one rung of
-    the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
-    which is injective; every other name is returned unchanged and can never
-    equal a shifted name, because a shifted name's root is a keyword and an
-    unchanged name's root is not. The output is never itself a keyword: no
-    member of `_GO_KEYWORDS` ends in `_`. Only a name whose root is a keyword
-    can change, so no existing program's output moves."""
+    it by dropping trailing `_` is a Go keyword or an `_EMITTER_RESERVED` name,
+    and escape it by exactly ONE `_`. Names whose underscore-stripped root is
+    reserved shift up one rung of the `kw`/`kw_`/`kw__` ladder (`func` ->
+    `func_`, `func_` -> `func__`), which is injective; every other name is
+    returned unchanged and can never equal a shifted name, because a shifted
+    name's root is reserved and an unchanged name's root is not. The output is
+    never itself reserved: no member of `_GO_KEYWORDS` or `_EMITTER_RESERVED`
+    ends in `_`. Only a name whose root is reserved can change, so no existing
+    program's output moves."""
     n = str(name)
     root = n
     while root:
-        if root in _GO_KEYWORDS:
+        if root in _GO_KEYWORDS or root in _EMITTER_RESERVED:
             return n + "_"
         if not root.endswith("_"):
             break

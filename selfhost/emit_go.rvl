@@ -3997,11 +3997,22 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
+// issue #3053: the names the emitted lifecycle driver binds BARE at the test
+// function's scope (its `revlT` receiver, the `root` context, the `_fibers`
+// registry, the `_revlLoadOrder` teardown order and the `_revlAt` breadcrumb).
+// go has no identifier sigil a revl name cannot spell, so like rust's `root`
+// the USER name shifts one ladder rung and the driver keeps the bare token.
+// Mirrors `_EMITTER_RESERVED` in backends/go/emit.py. A driver local inside a
+// `{ ... }` or `for` scope is shadowed, not redeclared, and is not listed.
+fn is_emitter_reserved(name: Str) -> Bool {
+  return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt"], name)
+}
+
 fn safe_local(name: Str) -> Str {
   var root = name
   var go = true
   while (go && root != "") {
-    if (is_go_keyword(root)) { return name.concat("_") }
+    if (is_go_keyword(root) || is_emitter_reserved(root)) { return name.concat("_") }
     if (!root.endsWith("_")) { go = false } else { root = root.slice(0, root.length() - 1) }
   }
   return name

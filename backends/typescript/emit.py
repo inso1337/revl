@@ -5716,13 +5716,18 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         # whole file failed to parse and the run reported `Tests no tests`
         # instead of naming the binding. tests/test_2975_lifecycle_driver_locals.py
         # derives this set from the emitted source and fails on a bare local.
+        #
+        # issue #3053: the runtime helpers the driver calls (`plug`,
+        # `snapshotRuntime`, `assertNoResidue`, `frameForCtx`) come in under the
+        # same sigil from `_runtime_imports`, so they are driver references too
+        # and a user binding of one of those spellings cannot shadow them.
         body.append("  const $revl_root = new Context()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
             # item 102: the clock coeffect is a module-global; reset it so this
             # test's `advance` steps start from t=0 and see only its own timers,
             # independent of any earlier lifecycle test in the file.
             body.append("  host.clockReset()")
-        body.append("  const $revl_baseline = snapshotRuntime($revl_root)")
+        body.append("  const $revl_baseline = $revl_snapshotRuntime($revl_root)")
         body.append("  const $revl_fibers = new Map<string, any>()")
         for step in test.get("body") or []:
             kind = step.get("step")
@@ -5733,7 +5738,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
                     for field, value in cfg.items())
                 body.append("  {")
-                body.append(f"    const _f = plug($revl_root, {component}, {{{cfg_items}}})")
+                body.append(f"    const _f = $revl_plug($revl_root, {component}, {{{cfg_items}}})")
                 body.append("    await _f")
                 body.append(f"    $revl_fibers.set({_string(component)}, await _f)")
                 body.append("    await _revl_settle()")
@@ -5776,7 +5781,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
             elif kind == "assert_no_residue":
                 body.append("  // R4 + R1: same introspection the py reference")
                 body.append("  // tier's `assert no_residue` performs.")
-                body.append("  assertNoResidue($revl_root, $revl_baseline)")
+                body.append("  $revl_assertNoResidue($revl_root, $revl_baseline)")
             elif kind == "abort":
                 # issue #1911 (the py reference tier's item 377): drive the
                 # enclosing session's 245 abort. `Frame.abort()` is this tier's
@@ -5791,7 +5796,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 body.append("  // mark every live activation aborting, so its teardown")
                 body.append("  // reverts rather than commits (item 245).")
                 body.append("  for (const _fiber of Array.from($revl_fibers.values())) {")
-                body.append("    frameForCtx(_fiber.ctx)?.abort()")
+                body.append("    $revl_frameForCtx(_fiber.ctx)?.abort()")
                 body.append("  }")
                 body.append("  for (const _fiber of Array.from($revl_fibers.values()).reverse()) {")
                 body.append("    try {")
@@ -5963,12 +5968,23 @@ def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
     if _uses_spawn(ir):
         names.append("spawn")
     if _uses_lifecycle_tests(ir):
-        names += ["plug", "snapshotRuntime", "assertNoResidue"]
+        # issue #3053: the lifecycle driver is the only code that calls these
+        # runtime helpers, and it calls them on ITS OWN behalf, so each is
+        # imported under the `$revl_` sigil the driver's locals already carry
+        # (issue #2975). `$` is not in revl's identifier alphabet, so a
+        # lifecycle `let plug = call ...` / `let snapshotRuntime = ...` emits a
+        # bare user binding beside a driver that never spells that bare name.
+        # The plain imports made the user's `const snapshotRuntime` the only
+        # `snapshotRuntime` in the driver's scope, so the driver's earlier call
+        # hit the temporal dead zone.
+        names += ["plug as $revl_plug",
+                  "snapshotRuntime as $revl_snapshotRuntime",
+                  "assertNoResidue as $revl_assertNoResidue"]
         if _uses_lifecycle_abort(ir):
             # issue #1911: only a test that drives an `abort` step reaches the
             # runtime's session-level reject seam (`frameForCtx` -> `Frame.abort`),
             # so an abort-free document imports exactly what it did before.
-            names.append("frameForCtx")
+            names.append("frameForCtx as $revl_frameForCtx")
     return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
 
 
