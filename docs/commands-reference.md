@@ -588,9 +588,10 @@ whole composition's worst even when `--component` narrows the report:
 The exit status remains the gate's: a soft-only failure is a graded `review`,
 `canary` or `observe`, not a refusal, so it exits 0. The outcome grades the
 evidence and register clauses only; `refused` remains the whole gate's answer,
-so a reach, approval or tenant rule can still refuse a component whose evidence
-outcome is `admit`. A policy with no evidence or register rules has no `outcome`
-section and evaluates exactly as before.
+so the `requires idempotent-teardown` floor and the reach, approval or tenant
+rules can still refuse a component whose evidence outcome is `admit`. A policy
+with no evidence or register rules has no `outcome` section and evaluates
+exactly as before.
 
 ### `revl simulate`
 

@@ -691,11 +691,13 @@ rule family: `<subject> <outcome> on evidence [...]`, where the outcome is
 `observe`, `canary` or `review`. A soft clause never appends a violation and
 never changes the gate, so section 2's hard predicate, fail-closed direction
 and no-partial-credit rule stay untouched: `requires evidence` still refuses
-on every failing clause. `admit` is computed when every hard clause holds
-and no soft clause fails; a hard failure maps to `quarantine` when the
-policy declares `quarantine required` and to the gate's own `refuse`
-otherwise. The strictest failing soft outcome decides, and the report names
-the clause that decided it. The facet vocabulary stays the same; the
+on every failing clause. `admit` is computed when every selected hard
+evidence or register clause holds and no soft clause fails; a hard failure
+maps to `quarantine` when the policy declares `quarantine required` and to
+the gate's own `refuse` otherwise. The strictest failing soft outcome
+decides, and the report names the clause that decided it. The
+`requires idempotent-teardown` floor and the reach, approval and tenant rule
+families stay outside this outcome. The facet vocabulary stays the same; the
 diff-size, shadow-agreement, proposer-agreement and proposer-history facets
 named in the issue are a later slice, not silently invented here.
 

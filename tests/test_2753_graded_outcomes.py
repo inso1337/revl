@@ -314,15 +314,14 @@ def test_mixed_case_soft_rule_parses():
 
 def test_documented_soft_example_parses():
     """The commands-reference snippet must be copy-pasteable; a self-attesting
-    facet on a soft rule still needs its unrooted acknowledgment."""
-    policy = parse_policy(
-        "component vendored-* requires evidence [attestation valid]\n"
-        "component vendored-* review  on evidence "
-        "[fault-sweep full] self-attested\n"
-        "component vendored-* canary  on evidence "
-        "[inverse-roundtrip pass] self-attested\n"
-        "component vendored-* observe on evidence "
-        "[gauntlet admissible] self-attested\n")
+    facet on a soft rule still needs its unrooted acknowledgment. Read the
+    actual fenced block, not a copy, so the doc cannot regress silently."""
+    doc = (ROOT / "docs/commands-reference.md").read_text(encoding="utf-8")
+    marker = "component vendored-* requires evidence [attestation valid]"
+    at = doc.index(marker)
+    fence_start = doc.rfind("```", 0, at)
+    fence_end = doc.index("```", at)
+    policy = parse_policy(doc[fence_start + 3:fence_end].strip("\n"))
     assert [r.outcome for r in policy.evidence_rules] == [
         None, "review", "canary", "observe"]
 
