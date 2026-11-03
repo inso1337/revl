@@ -3316,6 +3316,12 @@ _ISSUE_2399_REFUSED.update({
     "arm_result_matched_with_some": (
         "fn f(o: Result[Int, Str]) -> Int {\n"
         "  return match o { Some(x) => { let k = x\n k }, _ => 0 }\n}\n"),
+    # issue #2325: a raw generic selector has no arguments to substitute, so the
+    # binder stays unknown. The arm returns a literal so the reference reaches
+    # the arm check and refuses there, matching the native message.
+    "raw_generic_selector_block_arm": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n 1 }, Nothing => 0 }\n}\n"),
     # a test written right after an extern is still checked
     "test_body_host_method_after_extern": (
         _EXTERN + "test \"t\" {\n  let a = g()\n  let n = a.length()\n  assert true\n}\n"),
@@ -3508,6 +3514,12 @@ _ISSUE_2399_ADMITTED = {
         "type A[T] = Same(T) | OnlyA\ntype B[T] = Same(T) | OnlyB\n"
         "fn f(a: A[Int]) -> Int {\n"
         "  return match a { Same(x) => { let k = x\n k }, OnlyA => 0 }\n}\n"),
+    # issue #2325: a generic fn's applied selector now types the binder too, so
+    # a block arm reading it is admitted
+    "arm_binder_of_applied_declared_generic_fn": (
+        "type Holder[T] = Has(T) | Nothing\n"
+        "fn f[T](o: Holder[T], d: T) -> T {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => d }\n}\n"),
     "arm_rebinds_untyped_name": (
         "fn f(o: Option[Int]) -> Int {\n"
         "  return match o { Some(x) => { let x2 = 1\n x2 }, None => 0 }\n}\n"),
