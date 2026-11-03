@@ -101,7 +101,11 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         # G8 boundary the capabilities facet carries.
         reach: dict[str, list[str]] = {}
         for comp, stats in boundary.items():
-            hit = sorted(_reached_capability_tokens(stats) & sinks)
+            reached = _reached_capability_tokens(stats)
+            # an unnameable (`*`) reach could be any declared sink, so it is
+            # listed against every one of them: the facet answers "can reach",
+            # and over-approximating a possible sink is the safe direction.
+            hit = sorted(sinks) if "*" in reached else sorted(reached & sinks)
             if hit:
                 reach[comp] = hit
         dossiers["secret-sinks"] = (

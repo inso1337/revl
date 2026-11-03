@@ -3,10 +3,14 @@ a candidate that would replace it must clear a stronger evidence bar (issue
 #2697, slice 2).
 
 The marking is a `meta.json` facet, and it is CHECKED against the compiled
-audit: the named component must be the only component in the entry's
-composition whose G8 reach carries the capability. `resolve` then ranks a
-candidate that would displace that mediator below it unless the candidate
-carries a cryptographically valid attestation binding a passing fault sweep.
+audit: the capability must be a named token (never `*`), the named component
+must hold it through a declared `requires` service whose method declares it,
+none of its provided services may re-declare it, and it must be the only
+component in the entry's composition whose G8 reach carries it. `resolve` then
+ranks a candidate that would displace a single marked mediator below it unless
+the candidate carries a cryptographically valid attestation binding a passing
+fault sweep. Several compatible markings are an ambiguity the answer reports;
+no marked candidate is crowned by an authority heuristic.
 """
 
 from __future__ import annotations
@@ -79,8 +83,8 @@ MEDIATOR_META = {
     "mediator": {"component": "FsMediator", "capability": "fs"},
 }
 
-#: A mediator that holds TWO raw capabilities. It is the protected incumbent in
-#: the second-marking test: the widest-authority marked candidate.
+#: A mediator that holds TWO raw capabilities. It is one of two valid marked
+#: candidates in the ambiguity test.
 WIDE_MEDIATOR = """
 service FileStore { emission[fs] fn write(path: Str, data: Str) -> Int }
 service ArchiveStore { emission[archive] fn store(path: Str, data: Str) -> Int }
@@ -97,8 +101,7 @@ component FsMediator requires fs: FileStore, archive: ArchiveStore provides writ
 }
 """
 
-#: A second, narrower marked mediator. Its marking must not exempt it from the
-#: bar protecting the wider mediator.
+#: A second valid marked mediator, for a different capability.
 NARROW_MEDIATOR = """
 service NetStore { emission[net] fn send(data: Str) -> Int }
 service AppendWriter { emission fn append(path: Str, data: Str) -> Int }
@@ -118,6 +121,95 @@ NARROW_META = {
     "tags": ["net", "mediator"],
     "mediator": {"component": "NetMediator", "capability": "net"},
 }
+
+#: A valid marking with WIDER authority than MEDIATOR. It must not become the
+#: protected incumbent by out-authority-ing the genuine mediator.
+DECOY_MEDIATOR = """
+service NetStore { emission[net] fn send(data: Str) -> Int }
+service DbStore { emission[db] fn query(sql: Str) -> Int }
+service AppendWriter { emission fn append(path: Str, data: Str) -> Int }
+
+component Decoy requires net: NetStore, db: DbStore provides writer: AppendWriter {
+  provide writer {
+    fn append(path, data) -> Int {
+      emit net.send(data)
+      emit db.query("select 1")
+      return 0
+    }
+  }
+}
+"""
+
+DECOY_META = {
+    "description": "a decoy marked mediator with a wider surface",
+    "tags": ["net", "mediator"],
+    "mediator": {"component": "Decoy", "capability": "net"},
+}
+
+#: A component whose only capability is the unnameable `*` a bare emission
+#: carries. `*` cannot be marked as a capability.
+BARE_BOUNDARY = """
+service Ops { emission fn go() -> Int }
+extern emission fn ping() -> Int = @py { return 0 }
+
+component Bare provides ops: Ops {
+  provide ops {
+    fn go() -> Int {
+      emit ping()
+      return 0
+    }
+  }
+}
+"""
+
+#: A component that reaches `fs` through a host extern, but holds no declared
+#: `requires` service for it: it is not a mediator.
+NOT_REQUIRED = """
+service Ops { emission fn go() -> Int }
+extern emission[fs] fn write_raw(path: Str, data: Str) -> Int = @py { return 0 }
+
+component Direct provides ops: Ops {
+  provide ops {
+    fn go() -> Int {
+      emit write_raw("x", "y")
+      return 0
+    }
+  }
+}
+"""
+
+#: A wrapper that re-declares the raw token on its provided service, handing it
+#: to every consumer: it is not a mediator.
+RE_EXPOSING = """
+service FileStore { emission[fs] fn write(path: Str, data: Str) -> Int }
+service AppendWriter { emission[fs] fn append(path: Str, data: Str) -> Int }
+
+component ReExposing requires fs: FileStore provides writer: AppendWriter {
+  provide writer {
+    fn append(path, data) -> Int {
+      emit fs.write(path, data)
+      return 0
+    }
+  }
+}
+"""
+
+#: A declared `db` requirement the component never reaches: the token is a
+#: valid requirement, but the composition does not carry it.
+UNREACHED = """
+service FileStore { emission[fs] fn write(path: Str, data: Str) -> Int }
+service DbStore { emission[db] fn query(sql: Str) -> Int }
+service AppendWriter { emission fn append(path: Str, data: Str) -> Int }
+
+component FsMediator requires fs: FileStore, db: DbStore provides writer: AppendWriter {
+  provide writer {
+    fn append(path, data) -> Int {
+      emit fs.write(path, data)
+      return 0
+    }
+  }
+}
+"""
 
 #: A need whose service is declared under a different name, so a match is
 #: structural (`resolve` never matches text).
@@ -204,11 +296,41 @@ def test_a_marking_whose_capability_nobody_reaches_is_refused(tmp_path):
     meta = dict(MEDIATOR_META,
                 mediator={"component": "FsMediator", "capability": "db"})
     reg = _write_entries(os.path.join(str(tmp_path), "registry"),
-                         {"fs_mediator": (MEDIATOR, meta)})
+                         {"fs_mediator": (UNREACHED, meta)})
     with pytest.raises(RevlError) as refused:
         registry.build_index(reg)
     assert "no component" in refused.value.message
     assert "db" in refused.value.message
+
+
+def test_a_marking_for_the_unnameable_boundary_is_refused(tmp_path):
+    meta = {"description": "bare wrapper", "tags": [],
+            "mediator": {"component": "Bare", "capability": "*"}}
+    reg = _write_entries(os.path.join(str(tmp_path), "registry"),
+                         {"bare": (BARE_BOUNDARY, meta)})
+    with pytest.raises(RevlError) as refused:
+        registry.build_index(reg)
+    assert "cannot be marked" in refused.value.message
+
+
+def test_a_marking_for_a_capability_not_declared_as_a_requirement_is_refused(tmp_path):
+    meta = {"description": "raw host call", "tags": [],
+            "mediator": {"component": "Direct", "capability": "fs"}}
+    reg = _write_entries(os.path.join(str(tmp_path), "registry"),
+                         {"direct": (NOT_REQUIRED, meta)})
+    with pytest.raises(RevlError) as refused:
+        registry.build_index(reg)
+    assert "declared requirement" in refused.value.message
+
+
+def test_a_wrapper_that_redeclares_the_token_is_refused(tmp_path):
+    meta = {"description": "re-exposing wrapper", "tags": [],
+            "mediator": {"component": "ReExposing", "capability": "fs"}}
+    reg = _write_entries(os.path.join(str(tmp_path), "registry"),
+                         {"re_exposing": (RE_EXPOSING, meta)})
+    with pytest.raises(RevlError) as refused:
+        registry.build_index(reg)
+    assert "must not hand the raw capability" in refused.value.message
 
 
 def test_a_marking_naming_the_wrong_component_is_refused(tmp_path):
@@ -300,24 +422,39 @@ def test_an_attestation_that_does_not_bind_the_sweep_does_not_clear_the_bar(tmp_
     assert "no passing fault sweep bound" in loser["replacementBar"]["reason"]
 
 
-def test_a_second_marking_cannot_bypass_the_bar(tmp_path):
-    """Exempting every marked candidate would let a second, narrower mediator
-    rank above the protected one on authority alone. The protected incumbent is
-    the marked candidate with the widest authority; every other candidate,
-    marked or not, is a replacement that must clear the bar."""
+def test_two_marked_mediators_are_reported_as_ambiguous(tmp_path):
+    """Several compatible marked mediators cannot be resolved to one incumbent
+    without guessing, so no candidate is exempt: every one that lacks the bar
+    carries replacementBar and the answer reports the ambiguity."""
     reg = _build(tmp_path, {
         "fs_mediator": (WIDE_MEDIATOR, MEDIATOR_META),
         "net_mediator": (NARROW_MEDIATOR, NARROW_META),
     })
     result = registry.resolve(reg, NEED, key=KEY)
-    # least authority would put the narrower net mediator first; the bar keeps
-    # the wider, protected mediator in place.
-    assert _names(result) == ["fs_mediator", "net_mediator"]
-    net = next(c for c in result["candidates"] if c["name"] == "net_mediator")
-    assert net["mediator"] == NARROW_META["mediator"]
-    assert net["replacementBar"]["mediators"] == ["fs_mediator"]
-    assert any("other marked mediators" in line
+    assert result["mediatorAmbiguity"] == ["fs_mediator", "net_mediator"]
+    # least authority decides among candidates that all lack the bar.
+    assert _names(result) == ["net_mediator", "fs_mediator"]
+    for candidate in result["candidates"]:
+        assert candidate["replacementBar"]["ambiguous"] is True
+    assert any("several marked mediators" in line
                for line in result["assumptions"])
+
+
+def test_a_wider_decoy_marking_does_not_become_the_incumbent(tmp_path):
+    """A decoy marked mediator with more authority must not be crowned the
+    protected incumbent: several markings are an ambiguity, not a ranking
+    choice, so the genuine mediator is not the one barred."""
+    reg = _build(tmp_path, {
+        "fs_mediator": (MEDIATOR, MEDIATOR_META),
+        "decoy": (DECOY_MEDIATOR, DECOY_META),
+    })
+    result = registry.resolve(reg, NEED, key=KEY)
+    assert result["mediatorAmbiguity"] == ["decoy", "fs_mediator"]
+    # the genuine, narrower mediator ranks first; both carry the bar.
+    assert _names(result)[0] == "fs_mediator"
+    decoy = next(c for c in result["candidates"] if c["name"] == "decoy")
+    assert decoy["replacementBar"]["ambiguous"] is True
+    assert decoy["replacementBar"]["mediators"] == ["decoy", "fs_mediator"]
 
 
 # --------------------------------------------------------------- publish flow

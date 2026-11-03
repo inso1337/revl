@@ -26,7 +26,8 @@ MEDIATOR = os.path.join(ROOT, "examples", "mediator.rvl")
 DURABLE = os.path.join(ROOT, "examples", "durable_log.rvl")
 
 #: A composition that binds a secret to the one sink it may reach (the honest
-#: host-body shape of `tests/test_secret_bound.py`).
+#: host-body shape of `tests/test_secret_bound.py`), plus a component whose
+#: boundary is unnameable (`*`): it could reach any declared sink.
 SECRET_SOURCE = """
 secret api_key for net.send
 
@@ -34,11 +35,22 @@ extern emission[net.send] fn send(m: Str) -> Int
 = @py { return len(m) + len(api_key) }
 
 service Ops { emission fn go(u: Str) -> Int }
+service Relay { emission fn relay() -> Int }
+service Ops2 { emission fn run() -> Int }
 
 component A provides ops: Ops {
   provide ops {
     fn go(u) {
       let n = emit send(u)
+      return 0
+    }
+  }
+}
+
+component Wrapper requires relay: Relay provides ops2: Ops2 {
+  provide ops2 {
+    fn run() -> Int {
+      emit relay.relay()
       return 0
     }
   }
@@ -101,7 +113,10 @@ def test_a_bound_secret_reports_its_sink_and_the_component_that_reaches_it(tmp_p
     bundle = registry.load_evidence_bundle(entry_dir)
     assert bundle.secret_sinks["secrets"] == [
         {"name": "api_key", "capability": "net.send"}]
-    assert bundle.secret_sinks["reach"] == {"A": ["net.send"]}
+    # A names the sink directly; Wrapper's `*` reach could be any declared sink,
+    # so it is listed against this one too.
+    assert bundle.secret_sinks["reach"] == {"A": ["net.send"],
+                                           "Wrapper": ["net.send"]}
 
 
 def test_a_tampered_reviewer_facet_breaks_the_attestation(tmp_path):

@@ -702,16 +702,27 @@ def _reached_capability_tokens(stats: dict) -> set:
     return reached
 
 
-def _mediator_problem(value, boundary: dict | None) -> str | None:
+def _mediator_problem(value, boundary: dict | None, ir: dict | None = None
+                      ) -> str | None:
     """Why a `mediator` declaration is unusable, or None when it is verified.
 
     The declaration names the component and the raw capability token it alone
-    holds. With a compiled `boundary` (the G8 audit surface) the claim is
-    CHECKED, never believed: the named component must reach that token and no
-    other component in the entry's composition may. Without a boundary only the
-    shape is checked - the caller that has the IR must pass it (`build_index`
-    does), because a marking nothing verifies is the same defect `meta.json`
-    exists to close.
+    holds. With the compiled IR and its `boundary` (the G8 audit surface) the
+    claim is CHECKED, never believed:
+
+    * the capability must be a NAMED token, never `*` (the unnameable boundary a
+      bare emission has; marking it would be trivially true for every wrapper);
+    * the named component must hold it through a declared `requires` service
+      whose method declares it (the raw capability is a service scope the
+      mediator was wired to, not a reach it happens to have);
+    * none of the component's PROVIDED services may re-declare the token: a
+      wrapper that hands the raw token to its consumers is not a mediator;
+    * the named component must be the only component in the composition whose
+      G8 reach carries the token.
+
+    Without an IR only the shape is checked - the caller that has the IR must
+    pass it (`build_index` does), because a marking nothing verifies is the
+    same defect `meta.json` exists to close.
     """
     if not isinstance(value, dict):
         return "mediator must be an object with `component` and `capability`"
@@ -725,8 +736,40 @@ def _mediator_problem(value, boundary: dict | None) -> str | None:
         return "mediator.component must be a non-empty component name"
     if not isinstance(capability, str) or not capability:
         return "mediator.capability must be a non-empty capability token"
-    if boundary is None:
+    if capability == "*":
+        return ("mediator.capability must name a capability; `*` is the "
+                "unnameable boundary a bare emission has and cannot be marked")
+    if boundary is None or ir is None:
         return None
+    components = [c for c in (ir.get("components") or [])
+                  if c.get("name") == component]
+    if not components:
+        return (f"mediator names component `{component}`, which is not in this "
+                "composition")
+    declared = next(iter(components))
+    services = ir.get("services") or {}
+
+    def _services_declaring(names) -> list[str]:
+        out = []
+        for service in names:
+            methods = ((services.get(service) or {}).get("methods") or {})
+            for method in methods.values():
+                if capability in (method.get("capabilities") or []):
+                    out.append(service)
+                    break
+        return out
+
+    required = _services_declaring((declared.get("requires") or {}).values())
+    if not required:
+        return (f"mediator names component `{component}` and capability "
+                f"`{capability}`, but no service it requires declares "
+                f"`{capability}`; a mediator holds the raw capability through "
+                "a declared requirement")
+    exposed = _services_declaring((declared.get("provides") or {}).values())
+    if exposed:
+        return (f"mediator's component `{component}` re-declares `{capability}` "
+                f"on its provided service(s) {', '.join(f'`{s}`' for s in exposed)}; "
+                "a mediator must not hand the raw capability to its consumers")
     holders: list[str] = []
     for name, stats in sorted((boundary or {}).items()):
         if capability in _reached_capability_tokens(stats):
@@ -743,7 +786,7 @@ def _mediator_problem(value, boundary: dict | None) -> str | None:
     return None
 
 
-def _entry_meta(entry_dir: Path, *, boundary: dict | None = None) -> dict | None:
+def _entry_meta(entry_dir: Path, *, ir: dict | None = None) -> dict | None:
     """The publisher-declared metadata of one entry, from `<entry>/meta.json`,
     or None when the entry declares none.
 
@@ -756,9 +799,9 @@ def _entry_meta(entry_dir: Path, *, boundary: dict | None = None) -> dict | None
     regenerator cannot copy must hear about it now rather than ship an entry
     whose row nothing can reproduce.
 
-    `boundary` is the compiled G8 surface from `_audit_document(ir)`. Pass it
-    whenever the IR is available: only then is the `mediator` claim CHECKED
-    against the composition rather than merely parsed (issue #2697).
+    `ir` is the compiled entry. Pass it whenever it is available: only then is
+    the `mediator` claim CHECKED against the composition rather than merely
+    parsed (issue #2697).
     """
     path = entry_dir / ENTRY_META_FILENAME
     if not path.exists():
@@ -789,7 +832,9 @@ def _entry_meta(entry_dir: Path, *, boundary: dict | None = None) -> dict | None
                            or not all(isinstance(t, str) for t in tags)):
         raise refuse("tags must be a list of strings")
     if "mediator" in meta:
-        problem = _mediator_problem(meta["mediator"], boundary)
+        boundary = (_audit_document(ir).get("boundary")
+                    if ir is not None else None)
+        problem = _mediator_problem(meta["mediator"], boundary, ir)
         if problem:
             raise refuse(problem)
     return meta
@@ -956,8 +1001,7 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
         rows[name] = _entry_index_row(name, ir, source, manifest, manifest_text,
                                       _entry_version(entry_dir),
                                       released_versions(entry_dir),
-                                      _entry_meta(entry_dir,
-                                                  boundary=manifest.get("boundary")))
+                                      _entry_meta(entry_dir, ir=ir))
     index = {"indexVersion": INDEX_VERSION, "components": rows}
     if write:
         index_text = json.dumps(index, indent=2, sort_keys=True) + "\n"
@@ -1576,9 +1620,10 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
         if isinstance(existing_meta, dict):
             surviving_mediator = existing_meta.get("mediator")
     if surviving_mediator is not None:
-        surviving_boundary = _audit_document(
-            _compile_stored(entry_dir, source)).get("boundary")
-        problem = _mediator_problem(surviving_mediator, surviving_boundary)
+        surviving_ir = _compile_stored(entry_dir, source)
+        surviving_boundary = _audit_document(surviving_ir).get("boundary")
+        problem = _mediator_problem(surviving_mediator, surviving_boundary,
+                                    surviving_ir)
         if problem:
             raise RevlError(
                 str(meta_path), 0,
@@ -1763,7 +1808,7 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
     manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     problems: list[str] = []
     try:
-        meta = _entry_meta(entry_dir, boundary=manifest.get("boundary"))
+        meta = _entry_meta(entry_dir, ir=ir)
     except RevlError as error:
         # a bad meta.json is a problem on this entry, not a crash for the whole
         # registry: `build_index` refuses it, and a read path names it.
@@ -2528,16 +2573,19 @@ def resolve(registry, need, manifest: dict | None = None,
     # protected incumbent is the marked candidate with the WIDEST authority -
     # the one holding the raw capability, which is exactly the component whose
     # narrow replacement least-authority ranking would otherwise prefer. Every
-    # other candidate, marked or not, is a replacement and must clear the bar.
+    # other candidate is a replacement and must clear the bar.
+    #
+    # WHICH mediator is protected matters. Inferring an incumbent from the
+    # authority ranking is attacker-selectable: a decoy marked mediator with a
+    # wider surface would become the protected one and the genuine mediator
+    # would be the candidate barred. Exactly one marked candidate is
+    # unambiguous and is protected. Several is an AMBIGUITY: no candidate is
+    # exempt, every candidate that lacks the bar is demoted, and the result
+    # reports the ambiguity instead of crowning one by authority.
     mediator_pairs = [(m, a) for m, a in graded if m.entry.mediator is not None]
     mediator_names = sorted({m.entry.name for m, _ in mediator_pairs})
-    protected_name = ""
-    if mediator_pairs:
-        widest = max(m.authority_fit_key() for m, _ in mediator_pairs)
-        protected_name = min(
-            (m for m, _ in mediator_pairs
-             if m.authority_fit_key() == widest),
-            key=lambda m: (len(m.entry.source), m.entry.name)).entry.name
+    mediator_ambiguous = len(mediator_names) > 1
+    protected_name = mediator_names[0] if len(mediator_names) == 1 else ""
 
     def _replacement_bar(assessment: EvidenceAssessment) -> tuple[bool, str]:
         """Whether a candidate clears the mediator-replacement bar:
@@ -2591,7 +2639,15 @@ def resolve(registry, need, manifest: dict | None = None,
         "trust set; an unverified claim ranks level with no claim at all"
         + ("" if key_bytes is not None else
            " (no signing key was supplied, so no attestation could be verified)"))
-    if protected_name:
+    if mediator_ambiguous:
+        assumptions.append(
+            "several marked mediators are among the compatible candidates "
+            f"({', '.join(mediator_names)}): the bar cannot name one incumbent, "
+            "so NO candidate is exempt; every candidate without a "
+            "cryptographically valid attestation binding a passing fault sweep "
+            "is ranked below the ones that have it, and the ambiguity is "
+            "reported in `mediatorAmbiguity`")
+    elif protected_name:
         assumptions.append(
             "a trusted mediator is among the compatible candidates "
             f"({protected_name}): a candidate that would replace it "
@@ -2600,14 +2656,6 @@ def resolve(registry, need, manifest: dict | None = None,
             + ("" if key_bytes is not None else
                " (no signing key was supplied, so no candidate could prove the "
                "bar and the mediator keeps its place)"))
-        others = [n for n in mediator_names if n != protected_name]
-        if others:
-            assumptions.append(
-                f"other marked mediators ({', '.join(others)}) are replacement "
-                "candidates too: the protected incumbent is the marked "
-                "candidate with the widest authority (the one holding the raw "
-                "capability), because exempting every marked candidate would "
-                "let a second marking bypass the bar")
     if refused:
         assumptions.append(
             f"{len(refused)} entr{'y was' if len(refused) == 1 else 'ies were'} "
@@ -2676,23 +2724,30 @@ def resolve(registry, need, manifest: dict | None = None,
         if entry.mediator is not None:
             # the marking that sets the bar is visible on the candidate itself.
             candidate["mediator"] = entry.mediator
-        if protected_name and entry.name != protected_name:
+        if mediator_names and entry.name != protected_name:
             # every candidate other than the protected incumbent is a
-            # replacement, including a second marked mediator: say the bar it
-            # had to clear and what it was missing (issue #2697).
+            # replacement: say the bar it had to clear and what it was missing
+            # (issue #2697). With several marked mediators, no candidate is
+            # exempt and every one carries the bar; the ambiguity is reported.
             met, reason = _replacement_bar(assessment)
             if not met:
-                candidate["replacementBar"] = {
-                    "mediators": [protected_name],
+                bar = {
+                    "mediators": (mediator_names if mediator_ambiguous
+                                  else [protected_name]),
                     "met": False,
                     "required": ("a cryptographically valid attestation binding "
                                  "a passing fault sweep"),
                     "reason": reason,
                 }
+                if mediator_ambiguous:
+                    bar["ambiguous"] = True
+                candidate["replacementBar"] = bar
+                target = ("one of the marked mediators "
+                          f"{', '.join(mediator_names)}" if mediator_ambiguous
+                          else f"the trusted mediator {protected_name}")
                 candidate["why"] += (
-                    f"; it would replace the trusted mediator "
-                    f"{protected_name}, but it carries {reason}, so "
-                    "it ranks below the mediator")
+                    f"; it would replace {target}, but it carries {reason}, so "
+                    "it ranks below the candidates that clear the bar")
         if match.bridge is not None:
             candidate["adapter"] = _adapter_block(match)
             if match.bridge.merges:
@@ -2728,6 +2783,10 @@ def resolve(registry, need, manifest: dict | None = None,
         "candidates": candidates,
         "refused": refused,
     }
+    if mediator_ambiguous:
+        # No incumbent can be named without guessing; the answer reports the
+        # ambiguity rather than crowning one marked candidate (issue #2697).
+        result["mediatorAmbiguity"] = mediator_names
     if policy is not None:
         # item 290 §5: the prediction's OWN honesty block. `unpredicted` is the
         # reason an absent `wouldBeRefused` is not a clearance, so it rides in the

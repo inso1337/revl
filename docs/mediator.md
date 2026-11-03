@@ -63,21 +63,26 @@ entry's `meta.json`:
 ```
 
 `build_index` verifies it against the compiled audit: the named component must
-be the **only** component in the entry's composition whose G8 reach carries that
-capability. A marking another component also reaches, or a capability nobody
-reaches, is a refusal, not a shrug. `verify` and the read-time index check treat
-the marking like every other authority field, so an index that quietly drops it
-is not believed. [registry.md](registry.md#15-marking-a-trusted-mediator) has the
-full rules.
+hold the capability through a declared `requires` service whose method declares
+it, must not re-declare it on any provided service, and must be the **only**
+component in the entry's composition whose G8 reach carries that capability.
+`*`, the unnameable boundary a bare emission has, cannot be marked. A marking
+another component also reaches, a wrapper that hands the token to its consumers,
+a capability nobody reaches or a capability not declared as a requirement is a
+refusal, not a shrug. `verify` and the read-time index check treat the marking
+like every other authority field, so an index that quietly drops it is not
+believed. [registry.md](registry.md#15-marking-a-trusted-mediator) has the full
+rules.
 
 Once marked, `resolve` keeps the mediator's place unless a replacement clears a
 stronger evidence bar: a cryptographically valid attestation that binds a
 passing fault sweep. A candidate that cannot show both is ranked below the
 mediator and its result carries `replacementBar` with the reason. When several
-marked mediators match one need, the one with the widest authority is the
-protected incumbent; every other candidate, marked or not, is a replacement.
-This is a hard lexical rule, not a trust score; see
-[registry.md](registry.md#2-revl_resolve--the-one-search-verb).
+marked mediators match one need, the answer does not pick one by authority (a
+decoy marking could win that choice); it reports the ambiguity in
+`mediatorAmbiguity`, no candidate is exempt, and every candidate that lacks the
+bar is ranked below those that have it. This is a hard lexical rule, not a trust
+score; see [registry.md](registry.md#2-revl_resolve--the-one-search-verb).
 
 ## Honest limits
 

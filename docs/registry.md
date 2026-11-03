@@ -57,9 +57,10 @@ registry/
         inverse-roundtrip.json #   fault.roundtrip_dossier (item 26)
         capabilities.json      #   the G8 boundary surface
         ceilings.json          #   cardinality(ir): what each crossing may repeat
-        secret-sinks.json      #   the bound secrets and the components that
-                               #   can reach their sinks
-        compensation.json      #   every reversible crossing and its class
+        secret-sinks.json      #   the bound secrets, the components that name
+                               #   their sinks, and every unnameable (*) reach
+        compensation.json      #   the recovery surface: each reversible
+                               #   crossing with its class and register
         provenance.json        #   assembled source/build provenance
       releases/                # GENERATED at publish; append-only (§1.2)
         <version>/
@@ -78,7 +79,13 @@ the runtime-tested facets (`fault-sweep`, `inverse-roundtrip`) are written when
 the cordis-py runtime is present and honestly skipped when it is absent.
 `ceilings`, `secret-sinks` and `compensation` are always reproducible with no
 runtime and are always written; an empty document means "none", never "this
-publisher did not produce the facet" (§2.3, item 293, issue #2697).
+publisher did not produce the facet" (§2.3, item 293, issue #2697). A
+`secret-sinks` reach lists the components that directly name a declared sink,
+and lists every component whose boundary is unnameable (`*`) against every
+declared sink, since that reach could be any of them. `compensation` is the
+audit recovery surface: one row per reversible crossing, with its class and
+declaration register. A crossing absent from it has no declared inverse,
+compensation or deferred class.
 
 `index.json` maps each component to what a resolver needs without opening
 sources: provided service shapes (canonicalized), required keys,
@@ -259,35 +266,37 @@ it in the entry's `meta.json`:
 "mediator": {"component": "FsMediator", "capability": "fs"}
 ```
 
-The declaration is **verified against the compiled audit**, not believed: the
-named component must be the only component in the entry's composition whose G8
-reach carries `capability`. A second holder, a capability nobody reaches, an
-unknown component, an unrecognised key or a non-string value is a refusal. The
-verified value is copied into the index row and is an authority field: the
-read-time check recompiles the source and compares the row against `meta.json`,
-so an index that drops or changes the marking is refused rather than ranked.
+The declaration is **verified against the compiled audit**, not believed. The
+capability must be a named token (`*`, the unnameable boundary a bare emission
+has, cannot be marked); the named component must hold it through a declared
+`requires` service whose method declares it; none of that component's provided
+services may re-declare it; and the component must be the only component in the
+entry's composition whose G8 reach carries it. A second holder, a capability
+nobody reaches, an unknown component, an unrecognised key or a non-string value
+is a refusal. The verified value is copied into the index row and is an
+authority field: the read-time check recompiles the source and compares the row
+against `meta.json`, so an index that drops or changes the marking is refused
+rather than ranked.
 
 `truc ship` has no flag for the marking yet; declare it in `meta.json` on the
 phase-0 commit path (or after a first publish) and regenerate the index. A later
 publish that restates only description/tags preserves the declared mediator, and
 re-verifies it against the new source before anything is written.
 
-**What it changes in a resolve.** When a marked mediator is among the
+**What it changes in a resolve.** When exactly one marked mediator is among the
 §5-compatible candidates for a need, `resolve` puts every other candidate that
-would replace it below the mediator unless that candidate carries a
-cryptographically valid attestation binding a passing fault sweep. A candidate
-without both is ranked as unavailable for the displacement decision, and its
-result carries `replacementBar` with the exact reason and the mediator's names.
-A candidate that clears the bar competes on the ordinary ranking again. If
-several marked mediators match the need, the protected incumbent is the one
-with the widest authority (the one holding the most raw authority); every other
-candidate, marked or not, is a replacement and must clear the bar. Exempting
-every marked candidate would let a second marking bypass the bar that exists to
-protect the component holding the raw capability. This is a hard lexical term
-ahead of least authority, not a score: a narrower component cannot buy the
-mediator's place on an unsubstantiated claim. Without a verification key no
-attestation can grade `valid`, so no replacement can clear the bar and the
-marked mediator keeps its place.
+would replace it below it unless that candidate carries a cryptographically
+valid attestation binding a passing fault sweep. A candidate without both is
+ranked as unavailable for the displacement decision, and its result carries
+`replacementBar` with the exact reason. A candidate that clears the bar competes
+on the ordinary ranking again. When SEVERAL marked mediators match, the answer
+does not guess an incumbent from the ranking (which a decoy marking could
+select): it reports the ambiguity in `mediatorAmbiguity`, no candidate is
+exempt, and every candidate that lacks the bar is ranked below those that have
+it. This is a hard lexical term ahead of least authority, not a score: a
+narrower component cannot buy the mediator's place on an unsubstantiated claim.
+Without a verification key no attestation can grade `valid`, so no replacement
+can clear the bar and a single marked mediator keeps its place.
 
 ## 2. `revl_resolve` — the one search verb
 
