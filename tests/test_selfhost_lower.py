@@ -5019,6 +5019,7 @@ def test_a_deep_call_nest_is_decided_without_a_quadratic_scan(admit):
     assert elapsed < 30, f"{elapsed:.1f}s for 20000 nested calls: the scan is quadratic again"
 
 
+@pytest.mark.slow
 def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
     """The fuzz the size bound was standing in for.
 
