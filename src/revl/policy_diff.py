@@ -357,9 +357,16 @@ def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
     An evidence rule is fail-closed over a conjunction of facets, so its surface
     is the facets and their thresholds, not the rule text: raising a threshold
     under an unchanged rule is exactly the kind of widening a diff of the rule
-    text would miss."""
+    text would miss.
+
+    A SOFT rule (`outcome` set, issue #2753) never refuses and never changes the
+    gate, so it is not part of this leg's surface. Including it would mark a
+    recorded pair undecided and report widening when the operator only added an
+    advisory grade, while changing the grade would move nothing."""
     rows = []
     for rule in policy.evidence_rules:
+        if rule.outcome is not None:
+            continue
         if rule.scope == "capability":
             selected = _policy._matches_any(token, (rule.selector,))
         elif rule.scope == "component":
