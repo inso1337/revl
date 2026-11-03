@@ -6,37 +6,37 @@ recovery model, how to recover past a refusal without emitting cascading false
 errors, the per-file vs per-compile scope decision, the output shape, and a
 staged plan an implementation agent can pick up.
 
-## Stage 1 as built (Fable review corrections — authoritative for Stage 1)
+## Stage 1 as built (Fable review corrections: authoritative for Stage 1)
 
 Stage 1 was reviewed before implementation and four corrections were applied.
 Where this section differs from the sink/Poison prose below, THIS section
 governs Stage 1; the sink and `Poison` machinery are **deferred to Stage 2**.
 
-- **Change 1 — header-stub, don't drop (soundness).** When a component's BODY
+- **Change 1: header-stub, don't drop (soundness).** When a component's BODY
   lowering aborts, appending "no lowered component and continue" corrupts
   `_link`: the multi-realm route check (`lower.py`) fabricates "no component
   provides key in realm" for consumers routing to the refused component's
   realm, and G2 (`provider_of`) / G3 (cycle DFS) silently MISS a real
   conflict/cycle on a key it declares. Instead append a HEADER-ONLY stub
-  (`provides`/`requires` from the `component` declaration — available before
-  body lowering — marked `poisoned: true`) so `_link`'s topology is complete,
+  (`provides`/`requires` from the `component` declaration, available before
+  body lowering, marked `poisoned: true`) so `_link`'s topology is complete,
   and EXCLUDE poisoned stubs from the body-walking post-passes (`check_taint`,
   spawn bounds/attenuation, holes). `isolate`/`routes` are body statements, so a
   stub carries none: its provisions sit in the shared realm, which is exactly
   enough to stop the route-check fabrication and keep G2/G3 sound over its keys.
   See `_component_header_stub` in `lower.py`.
-- **Change 2 — Stage 1 needs NO sink threading.** Do not thread a sink through
+- **Change 2: Stage 1 needs NO sink threading.** Do not thread a sink through
   every `_lower_*` helper or convert every `raise`. Instead: (1a) wrap each
   iteration of the component loop (including the A1 reach raise) in
   `try/except RevlError: errors.append(e); <append header stub>; continue`;
   (1b) wrap each post-pass (`check_taint`, handoff, spawn bounds, attenuation,
   fault tests, `_link`, tests) in a `_collect` helper so each runs even when
   `errors` is non-empty; (1c) convert `_link` INTERNALLY to collect-all via an
-  optional `errors` sink (G2 loop, route loop, cycle DFS — but CAP at ONE
+  optional `errors` sink (G2 loop, route loop, cycle DFS, but CAP at ONE
   reported cycle per SCC to avoid overlapping-path noise). Phase-2 table
   failures (types/signatures, BEFORE the loop) keep RAISING = the truncation
   behavior; there is no `fatal()`/`Poison` machinery in Stage 1.
-- **Change 3 — one carrier, ~70 catch sites unchanged.** `check_and_lower`
+- **Change 3: one carrier, ~70 catch sites unchanged.** `check_and_lower`
   raises a `RevlErrors(RevlError)` carrier when `errors` is non-empty, whose
   primary fields (filename/line/message/code/…) MIRROR THE FIRST error so
   `classify()` and every legacy single-error `except RevlError` consumer behave
@@ -48,9 +48,9 @@ governs Stage 1; the sink and `Poison` machinery are **deferred to Stage 2**.
   one-element list. Note `plan._add`'s dedup key EXCLUDES filename by design
   (the gate abspaths, the standalone compile does not); the carrier's own dedup
   key INCLUDES filename.
-- **Change 4 — stable order, guarded crashes.** Diagnostics are deduped on
-  `(code, filename, line, message)` and sorted by COMPILE ORDER — `(file
-  position in the compile-args order, line)`, not alphabetical — so
+- **Change 4: stable order, guarded crashes.** Diagnostics are deduped on
+  `(code, filename, line, message)` and sorted by COMPILE ORDER: `(file
+  position in the compile-args order, line)`, not alphabetical, so
   `diagnostics[0]` equals what today's single-error compile reports for the same
   input (Python's stable sort keeps append/pipeline order on ties). And a
   post-pass that throws an UNEXPECTED (non-`RevlError`) exception on poisoned
@@ -345,7 +345,7 @@ first implementation.
 
 Extend the existing surfaces; do not invent a new one.
 
-`report` grows from a one-element list to the carrier's full list (Change 3 —
+`report` grows from a one-element list to the carrier's full list (Change 3:
 no `truncated` flag; truncation is simply the phase-2 raise aborting early):
 
 ```
@@ -358,8 +358,8 @@ Each diagnostic is the existing `classify(error)` record: location
 (`filename`, `line`), `message`, `code`, `category`, and the fix redirect from
 the `FIXES` table. That fix line is the exclusion-diagnostic redirect the author
 acts on. Nothing about the per-diagnostic shape changes; there are just N of
-them, sorted by COMPILE ORDER — `(file position in the compile-args order,
-line)` — so `diagnostics[0]` is stable (Change 4).
+them, sorted by COMPILE ORDER: `(file position in the compile-args order,
+line)`, so `diagnostics[0]` is stable (Change 4).
 
 Consumers:
 
@@ -387,13 +387,13 @@ alone captures most of the H38 win.
 
 ### Stage 1: component-boundary recovery, as built (the 80%)
 
-Implemented per the Fable corrections above — NO sink threading, NO `Poison`
+Implemented per the Fable corrections above: NO sink threading, NO `Poison`
 (both deferred to Stage 2):
 
 - A local `errors: list[RevlError]` in `check_and_lower`, plus a `_collect`
   helper that runs a post-pass and appends any `RevlError` instead of aborting
   (dropping a non-`RevlError` crash only while already failing, Change 4).
-- Wrap each component-loop iteration in `try/except RevlError` — including the
+- Wrap each component-loop iteration in `try/except RevlError`, including the
   async A1 reach raise: on refusal, append the error AND a `_component_header_stub`
   (Change 1), then continue. A duplicate-component refusal is collected but adds
   NO stub (its name is already in the topology).
@@ -404,7 +404,7 @@ Implemented per the Fable corrections above — NO sink threading, NO `Poison`
   conflicts, multi-realm route gaps, and G3 cycles (one per SCC).
 - At the end of `check_and_lower`, if `errors` is non-empty, `_raise_collected`
   dedups on `(code, filename, line, message)`, sorts by compile order, and
-  raises a `RevlErrors` carrier — BEFORE the IR result is assembled, since the
+  raises a `RevlErrors` carrier, BEFORE the IR result is assembled, since the
   result reads possibly-partial `manifest`/`components`.
 - Phase-2 table failures (types/signatures, before the loop, before `errors`
   even exists) keep RAISING: the compile aborts there = the truncation behavior.
@@ -428,7 +428,7 @@ Exit tests for stage 1 (all in `tests/test_multi_error_reporting.py`):
 Fable exit tests (the soundness + robustness set):
 
 - Header-stub: a body-refused component whose HEADER provides a key another
-  provides — the body refusal is reported, a real G2 on that key is STILL
+  provides: the body refusal is reported, a real G2 on that key is STILL
   reported, and no route "no provider" is fabricated.
 - A partial spawner that registers a spawn site then refuses leaves `spawn_reg`
   entries but causes no crash and no fabricated spawn/attenuation diagnostic.

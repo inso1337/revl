@@ -1676,9 +1676,19 @@ def _check_principal_producers(program: Program, filename: str) -> None:
 
 def _lower_type_decls(program: Program, filename: str) -> dict:
     types: dict[str, dict] = {}
+    declared_at: dict[str, tuple[str, int]] = {}
     for decl in program.type_decls:
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in types:
-            raise RevlError(filename, decl.line, f"duplicate type `{decl.name}`")
+            first_file, first_line = declared_at[decl.name]
+            if first_file == decl_file:
+                raise RevlError(decl_file, decl.line, f"duplicate type `{decl.name}`")
+            # issue #3033: across files, name both declarations, as a
+            # duplicate service across files does
+            raise RevlError(
+                decl_file, decl.line,
+                f"duplicate type `{decl.name}` (also declared in {first_file}:{first_line})")
+        declared_at[decl.name] = (decl_file, decl.line)
         if decl.name == PRINCIPAL:
             # item 457 S2 (docs/design/457-endpoint-one-definition.md,
             # "Authorization: explicit, and not derivable"): `Principal` is the
@@ -1688,7 +1698,7 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
             # user-scoped guard without authorizing. Reserve the name so the
             # opacity is enforced, not merely conventional.
             raise RevlError(
-                filename, decl.line,
+                decl_file, decl.line,
                 "`Principal` is the reserved opaque authorization principal and "
                 "cannot be declared as a revl type",
                 hint=PRINCIPAL_PRODUCER_HINT, code="G4", category="route")
@@ -1699,7 +1709,7 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
             # constructor that carries the members' disagreement, and the
             # exhaustiveness rule over that constructor would then be checking
             # a type the program had already opted out of.
-            raise model_answer.reserved_name_error(filename, decl.line,
+            raise model_answer.reserved_name_error(decl_file, decl.line,
                                                    decl.name)
         if decl.fields:
             fields: dict[str, str] = {}
@@ -1708,9 +1718,9 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
                 # reach a backend (protocol hijacking). Complementary to the
                 # reserved-word renaming `_safe_name` applies at binding sites.
                 _reject_dunder_name(field.name, "field", f"record `{decl.name}`",
-                                    filename, field.line)
+                                    decl_file, field.line)
                 if field.name in fields:
-                    raise RevlError(filename, field.line,
+                    raise RevlError(decl_file, field.line,
                                     f"duplicate field `{field.name}` in record `{decl.name}`")
                 fields[field.name] = field.type
             types[decl.name] = {"params": decl.params, "kind": "record", "fields": fields}
@@ -1719,7 +1729,7 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
             seen: set[str] = set()
             for case in decl.cases:
                 if case.name in seen:
-                    raise RevlError(filename, case.line,
+                    raise RevlError(decl_file, case.line,
                                     f"duplicate case `{case.name}` in type `{decl.name}`")
                 seen.add(case.name)
                 cases.append({"name": case.name, "payload": case.payload})

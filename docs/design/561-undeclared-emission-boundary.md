@@ -190,12 +190,12 @@ fourth corner of that fixture family: one key, two services, no declaration.
   entry, `_host_source` spells `emission[<cap>]` on each synthesized verb, and
   `check_hostable` refuses a `host` declaration whose shim reaches a boundary
   the row does not name. The token is read from the shim, not from the row
-  label, so the two rows are no longer conflated — they were already distinct
+  label, so the two rows are no longer conflated; they were already distinct
   boundaries, and now they are named as such.
 * **The kernel-boundary arm is still open.** Issue #1265's exit asks for one
   more step after this one, and it is still not taken. The cost this note
   quoted for it was wrong in both directions, which is the subject of the
-  section below. **Taken** by the follow-up item — see §"The kernel arm,
+  section below. **Taken** by the follow-up item, see §"The kernel arm,
   taken" below for what landed and what deliberately did not.
 * **The G4 upper bound on a bare method is still absent.** A provider of a
   service whose method declares no token may emit through anything, and nothing
@@ -319,7 +319,7 @@ written:
   additively, in key order after `emission`. The claim that the reference IR
   blocked this turned out to be false: the backends ignore the key, and the
   byte-for-byte pin is satisfied by inserting it rather than by regenerating.
-  The reference IR has three copies — `examples/user_cache.ir.json`,
+  The reference IR has three copies, `examples/user_cache.ir.json`,
   `backends/python/tests/user_cache.ir.json` and the vendored
   `backends/typescript/tests/fixtures/user_cache.ir.json`, which
   `backends/typescript/tests/emitter.test.ts` pins byte-identical to the first
@@ -331,7 +331,7 @@ written:
   head: `registry/components/{pg,mysql,audited}_database/component.rvl` and the
   `tests/test_search_as_admission.py` corpus still spelled `emission` bare, so
   hot-swapping them against the example **widened** `[db]` to `any` and the §5
-  gate refused them — the arm working, on candidates that had been admitted by
+  gate refused them: the arm working, on candidates that had been admitted by
   accident. They now declare `emission[db]`, `registry/index.json` is
   regenerated from them, and `tests/test_manifest.py::test_boundary_report`'s
   pin moved from `{'db.execute': ['*']}` to `{'db.execute': ['db']}`. A fourth
@@ -343,8 +343,8 @@ written:
   at least one `emission` method and no `capabilities`, computed where the
   service table is, and passed to `kernel_boundary._undeclared` /
   `offending` as a second argument. A `svc:` element alone still cannot decide
-  it — the two occasions `_held_capabilities_pairs` builds one are still one
-  token — which is what `test_the_namespace_alone_cannot_decide_the_residual`
+  it: the two occasions `_held_capabilities_pairs` builds one are still one
+  token, which is what `test_the_namespace_alone_cannot_decide_the_residual`
   pins, and it stays.
 * **Its own operator-facing announcement.** `CHANGELOG.md`, under 3.0.0.
 * **A measurement with `cordis` installed.** Taken: the arm's blast radius on
@@ -365,7 +365,7 @@ after side this branch's head.
 | surface | before | after |
 |---|---|---|
 | `docs/census-artifact/cases/stdlib/server.rvl.json` bucket | `agree-admit` | `agree-admit` |
-| bare `emission` on the declined surface — `examples/{user_cache,migrator,async_timer,heartbeat}.rvl`, `stdlib/server.rvl` | 11 | 0 |
+| bare `emission` on the declined surface: `examples/{user_cache,migrator,async_timer,heartbeat}.rvl`, `stdlib/server.rvl` | 11 | 0 |
 | bare `emission` on that surface plus the three idiom snippets (`src/revl/idioms/{component-setup,emission-method,timer}.rvl`) | 14 | 0 |
 | bare `emission` on the whole shipped surface (`src/ examples/ demo/ stdlib/`, `examples/rejections/` excluded) | 15 | 1 |
 | bare `emission` tree-wide (every `.rvl` the parser accepts) | 350 across 246 of 853 | 336 across 238 of 853 |
@@ -382,8 +382,8 @@ The issue quotes 345 across 242 for the tree-wide number and 10 for the declined
 shipped surface, both at its own head. Neither is reproducible as a named
 subset today: the tree-wide difference is baseline drift between that head and
 this one (main has since landed #2149 and the two `str-*` idioms), and the
-declined surface re-measures to 11, not 10, on the four files #1292 declined
-plus `stdlib/server.rvl` — `examples/user_cache.rvl` alone carries two of them.
+declined surface re-measures to 11, not 10, on the four files #1292 declined,
+plus `stdlib/server.rvl`; `examples/user_cache.rvl` alone carries two of them.
 The surface that decides the item is the declined one, and it is zero above.
 
 What the item deliberately did **not** take:
@@ -393,7 +393,7 @@ What the item deliberately did **not** take:
 * **Two providers of one service reaching two boundaries.** Still one name for
   both, unchanged.
 * **The "scope the arm to a service the candidate does not provide" design.**
-  Still recorded unmeasured, still not adopted — `examples/user_cache.rvl`
+  Still recorded unmeasured, still not adopted: `examples/user_cache.rvl`
   provides its own `Database`, and the declarations-based predicate is what
   makes it admissible without a second rule.
 
@@ -408,7 +408,7 @@ folder: path)`), which rewrote both `src/revl/kernel_boundary.py` and
   `cap_order.parse_stored_cap` rather than `parse_cap`, so a declared dimension
   is not mistaken for a ceiling. The arm's own element is unaffected and needs
   no such call: `lower._undeclared_cap` builds a `Cap` **directly**
-  (`Cap("svc:" + service, ())`) because there is no stored spelling to read —
+  (`Cap("svc:" + service, ())`) because there is no stored spelling to read,
   that is what "the declaration names no token" means. The one bridge the arm
   does share, `_cap_keyed`, is #1938's and keeps its `parse_stored_cap`.
 * The two namespaces stay disjoint, which is what lets both hold at once. A

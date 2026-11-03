@@ -78,11 +78,11 @@ def test_abort_step_is_lowered_and_unwound_not_refused():
     # that reaches a still-live component already sees it rejecting
     mark = out.index("frameForCtx(_fiber.ctx)?.abort()")
     dispose = out.index("await _fiber.dispose()")
-    clear = out.index("_revl_fibers.clear()")
-    residue = out.index("assertNoResidue(root, _revl_baseline)")
+    clear = out.index("$revl_fibers.clear()")
+    residue = out.index("assertNoResidue($revl_root, $revl_baseline)")
     assert mark < dispose < clear < residue
     # ...and the unwind is LIFO and tolerates a throwing teardown, like py's step
-    assert "Array.from(_revl_fibers.values()).reverse()" in out
+    assert "Array.from($revl_fibers.values()).reverse()" in out
     assert "try {" in out and "} catch {" in out
     # the tier implements the step itself; there is no `SessionOwner` here
     assert "begin_abort" not in out
