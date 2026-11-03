@@ -6,7 +6,7 @@ beside model turns.
 - **Metric:** `bench/tokens.py`, committed snapshot `bench/results/tokens-to-green.md`,
   pinned by `tests/test_tokens_to_green.py`.
 - **Response metric:** `bench/mcp_response_size.py`, pinned by
-  `tests/test_mcp_response_size.py`: how much text each MCP verb's answer puts
+  `tests/test_mcp_response_size.py`: how much text an MCP verb's answer puts
   back into the agent's context.
 - **Compound verb:** `revl_ship` in `src/revl/mcp/ship.py`, registered in
   `src/revl/mcp/server.py`, pinned by `tests/test_mcp_ship.py`.

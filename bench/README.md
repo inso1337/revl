@@ -43,10 +43,10 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   companion analysis: `results/token-surface-audit.md`.
 - `mcp_response_size.py`: the **response side** of the token economy (item 50).
   Drives a fixed scripted session (a passing `revl_ship`, a refused one, a
-  `revl_plan`) through the real MCP dispatcher and reports the text each answer
-  puts into the agent's context, in the same proxy tokens as `tokens.py`, per
-  call and per verb. Pinned by `tests/test_mcp_response_size.py`. Free, no
-  model, no transport.
+  `revl_plan`) through the real MCP dispatcher and reports the text each
+  measured answer puts into the agent's context, in the same proxy tokens as
+  `tokens.py`, per call and per verb. Pinned by
+  `tests/test_mcp_response_size.py`. Free, no model, no transport.
 - `framework_unload_survey.py`: the third host's selection evidence. Named,
   falsifiable claims about each candidate framework's published API, checked
   against the artifact the package index serves at a pinned version.

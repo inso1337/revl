@@ -45,6 +45,25 @@ def rows():
     return responses.measure()
 
 
+def _over_ceiling(rows, ceilings):
+    """The scripted calls whose measured size is past their recorded ceiling.
+
+    This is the single comparison the real pin and the guard test share. A
+    missing ceiling is a failure, not a KeyError: when the scripted session
+    grows, the pin must say which call has no recorded ceiling, even when this
+    file is run with a subset of its tests.
+    """
+    out = []
+    for row in rows:
+        ceiling = ceilings.get(row["step"])
+        assert ceiling is not None, (
+            f"no recorded ceiling for scripted call `{row['step']}`; add one "
+            f"to CEILINGS when the scripted session gains a call")
+        if row["est_tokens"] > ceiling:
+            out.append(row)
+    return out
+
+
 def test_scripted_session_covers_the_three_measured_cases(rows):
     assert [row["step"] for row in rows] == SCRIPTED_STEPS
     assert set(CEILINGS) == {row["step"] for row in rows}, (
@@ -54,18 +73,20 @@ def test_scripted_session_covers_the_three_measured_cases(rows):
 
 
 def test_each_response_stays_under_its_recorded_ceiling(rows):
-    for row in rows:
-        ceiling = CEILINGS[row["step"]]
-        assert row["est_tokens"] <= ceiling, (
-            f"{row['step']} ({row['verb']}, {row['outcome']}) returned "
-            f"{row['est_tokens']} est. tokens, past its ceiling of {ceiling}. "
-            f"Every later turn of the session pays this text again; raise the "
-            f"ceiling in this file only when the growth is intended.")
+    over = _over_ceiling(rows, CEILINGS)
+    assert not over, "; ".join(
+        f"{row['step']} ({row['verb']}, {row['outcome']}) returned "
+        f"{row['est_tokens']} est. tokens, past its ceiling of "
+        f"{CEILINGS[row['step']]}. Every later turn of the session pays this "
+        f"text again; raise the ceiling in this file only when the growth is "
+        f"intended"
+        for row in over)
 
 
 def test_each_ceiling_is_no_looser_than_todays_measurement(rows):
     for row in rows:
-        ceiling = CEILINGS[row["step"]]
+        ceiling = CEILINGS.get(row["step"])
+        assert ceiling is not None, f"no recorded ceiling for `{row['step']}`"
         assert row["est_tokens"] == ceiling, (
             f"{row['step']} ({row['verb']}, {row['outcome']}) now returns "
             f"{row['est_tokens']} est. tokens against a ceiling of {ceiling}. "
@@ -75,12 +96,12 @@ def test_each_ceiling_is_no_looser_than_todays_measurement(rows):
 def test_a_response_that_grows_past_its_ceiling_is_rejected(rows):
     """Lowering one ceiling below the measured size reports exactly that call.
 
-    This is the guard the ceilings rely on, checked without editing the file:
-    a response one token past a ceiling cannot pass.
+    This exercises the same comparison as the real pin, without editing the
+    file: a response one token past a ceiling cannot pass.
     """
     row = rows[0]
     lowered = {**CEILINGS, row["step"]: row["est_tokens"] - 1}
-    over = [r for r in rows if r["est_tokens"] > lowered[r["step"]]]
+    over = _over_ceiling(rows, lowered)
     assert [(r["step"], r["est_tokens"]) for r in over] == [
         (row["step"], row["est_tokens"])]
 
@@ -95,6 +116,6 @@ def test_report_is_deterministic_and_aggregates_per_verb(rows):
     text = "\n".join(first)
     assert "| scripted call | verb | outcome | est. tokens | chars |" in text
     assert "### per verb" in text
-    # revl_ship is the one verb the session calls twice: median 1264, max 1488.
-    assert "| `revl_ship` | 2 | 1264 | 1488 | 2529 |" in text
+    # revl_ship is the one verb the session calls twice: median 1264.5, max 1488.
+    assert "| `revl_ship` | 2 | 1264.5 | 1488 | 2529 |" in text
     assert "| `revl_plan` | 1 | 1100 | 1100 | 1100 |" in text

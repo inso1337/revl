@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Response sizes: how much text each MCP verb returns into an agent's context.
+"""MCP response sizes: how much text a verb returns into an agent's context.
 
 The token economy already measures two protocol costs: the arguments an agent
 must serialize to drive the MCP surface (`bench/results/token-surface-audit.md`)
@@ -101,8 +101,9 @@ def measure() -> list[dict]:
 
     One row per call: the step, the verb, whether it succeeded or refused, and
     the size of the text the agent receives, in chars and in proxy tokens. The
-    session is swapped for a fresh one for the run and restored afterwards, so
-    calling this twice gives the same rows and no caller's session is touched.
+    session is swapped for a fresh one and the undo stack cleared for the run,
+    then both are restored, so calling this twice gives the same rows and no
+    caller's state is touched.
     """
     from revl.mcp import server  # noqa: PLC0415 - only the report needs revl
     from revl.mcp import repeat  # noqa: PLC0415
@@ -110,10 +111,13 @@ def measure() -> list[dict]:
 
     calls = _calls()
     previous = server.SESSION
-    # the repeat layer remembers the last refusal in a module global, so a
-    # scripted run must start (and end) with it clear or a later run could see
-    # a restated refusal instead of the verb's own answer.
+    previous_undo = list(server.UNDO_STACK.entries)
+    # the repeat layer remembers the last refusal in a module global and a
+    # generation verb stamps the undo stack's depth, so the scripted run must
+    # neither see nor leave either one: otherwise the same call could be
+    # restated, or the ship row's chars could count a caller's undo depth.
     repeat.forget()
+    server.UNDO_STACK.clear()
     server.SESSION = Session()
     try:
         rows = []
@@ -143,6 +147,7 @@ def measure() -> list[dict]:
         return rows
     finally:
         server.SESSION = previous
+        server.UNDO_STACK.entries[:] = previous_undo
         repeat.forget()
 
 
@@ -153,6 +158,14 @@ def _median(xs: list[int]) -> float | None:
     mid = len(ordered) // 2
     return float(ordered[mid]) if len(ordered) % 2 else (
         ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _number(value: float | None) -> str:
+    """A size for the report: integral values without a decimal, halves kept."""
+    if value is None:
+        return "n/a"
+    text = f"{value:.1f}"
+    return text[:-2] if text.endswith(".0") else text
 
 
 def per_verb(rows: list[dict]) -> list[dict]:
@@ -173,7 +186,7 @@ def per_verb(rows: list[dict]) -> list[dict]:
 def render(rows: list[dict], sha: str) -> list[str]:
     """The report as Markdown lines. Deterministic for a given run's rows."""
     lines = [
-        "## response size: text each MCP verb returns into the agent's context",
+        "## response size: text the measured MCP verbs return into the agent's context",
         f"compiler: `{sha}`  ·  reproduce: `python3 bench/mcp_response_size.py`",
         "",
         "A fixed scripted session drives the real MCP dispatcher in process "
@@ -201,7 +214,7 @@ def render(rows: list[dict], sha: str) -> list[str]:
     for summary in per_verb(rows):
         lines.append(
             f"| `{summary['verb']}` | {summary['count']} | "
-            f"{summary['median_est_tokens']:.0f} | "
+            f"{_number(summary['median_est_tokens'])} | "
             f"{summary['max_est_tokens']} | {summary['total_est_tokens']} |"
         )
 
@@ -217,7 +230,7 @@ def render(rows: list[dict], sha: str) -> list[str]:
 def to_json(rows: list[dict], sha: str) -> dict:
     return {
         "compiler": sha,
-        "unit": "est_output_tokens (deterministic BPE-proxy; see count_tokens)",
+        "unit": "est_tokens (deterministic BPE-proxy; see count_tokens)",
         "calls": rows,
         "perVerb": per_verb(rows),
     }
