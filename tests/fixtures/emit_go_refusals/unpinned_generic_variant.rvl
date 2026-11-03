@@ -1,0 +1,10 @@
+// issue #2494: a payload-less case of a generic variant that nothing pins.
+// Neither a flow target nor a payload supplies the type argument, and nothing
+// reads the binding later, so the reference refuses it by name. The self-host
+// port names the construction instead of emitting code that does not build.
+type Mb[T] = Jj(T) | Nn
+
+fn h() -> Int {
+  let x = Nn
+  return 1
+}

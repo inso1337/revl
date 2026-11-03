@@ -318,7 +318,7 @@ type Ctx = {
   vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
   signatures: List[Any],
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
-  variants: List[Str], tnames: List[Str],
+  variants: List[Str], tnames: List[Str], gv: Map[Str, Str],
   rt: Str, builders: Map[Str, Str], builder_seq: Int,
   reserved: Map[Str, Str], strings_alias: Str,
   sc: Map[Str, Str], scan_seq: Int, body: List[Any], tn: Str,
@@ -329,7 +329,7 @@ type Ctx = {
 // reusing the same type tables).
 type TypeTables = {
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
-  variants: List[Str], tnames: List[Str]
+  variants: List[Str], tnames: List[Str], gv: Map[Str, Str]
 }
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
@@ -345,7 +345,7 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
     vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
     signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
-    tnames: ctx.tnames, rt: ctx.rt,
+    tnames: ctx.tnames, gv: ctx.gv, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
@@ -360,7 +360,7 @@ fn set_fh(ctx: Ctx, fh: Map[Str, Str]) -> Ctx {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er,
     signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
-    tnames: ctx.tnames, rt: ctx.rt,
+    tnames: ctx.tnames, gv: ctx.gv, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
@@ -372,7 +372,7 @@ fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er,
     signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
-    tnames: ctx.tnames, rt: ctx.rt,
+    tnames: ctx.tnames, gv: ctx.gv, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: sc, scan_seq: seq, body: ctx.body, tn: ctx.tn,
@@ -423,6 +423,10 @@ fn build_type_tables(types: Any) -> TypeTables {
   var rbf: Map[Str, Str] = Map.empty()
   var rf: Map[Str, Str] = Map.empty()
   var variants: List[Str] = []
+  // issue #2471: a generic variant's type parameters, comma-joined, so the
+  // ctx-aware type renderer can spell an applied instantiation (`Mb[Int]` ->
+  // `Mb[int64]`). Every other declared type has no entry.
+  var gv: Map[Str, Str] = Map.empty()
   let tnames = value_keys(types)
   for (name of tnames) {
     let spec = value_field(types, name)
@@ -438,6 +442,12 @@ fn build_type_tables(types: Any) -> TypeTables {
     }
     if (kind == "variant") {
       variants = variants.push(name)
+      let params = value_list(value_field(spec, "params"))
+      if (params.length() > 0) {
+        var pnames: List[Str] = []
+        for (p of params) { pnames = pnames.push(value_str(p)) }
+        gv = gv.set(name, pnames.join(","))
+      }
       for (case of value_list(value_field(spec, "cases"))) {
         let cn = value_str(value_field(case, "name"))
         let payload = value_field(case, "payload")
@@ -446,7 +456,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
   }
-  return { ca: ca, cp: cp, rbf: rbf, rf: rf, variants: variants, tnames: tnames }
+  return { ca: ca, cp: cp, rbf: rbf, rf: rf, variants: variants, tnames: tnames, gv: gv }
 }
 
 // `_V3GoCtx.record_type_for_fields`: a record literal's nominal struct type, from
@@ -523,7 +533,7 @@ fn prim_go(t: Str) -> Str {
 }
 
 // `_go_v3_type`: a surface type -> its Go spelling. "" for None/""/Unit.
-fn go_type(tv: Any) -> Str {
+fn go_type(tv: Any, gv: Map[Str, Str]) -> Str {
   let raw = value_str(tv)
   if (raw == "" || raw == "Unit") { return "" }
   let t = trim_str(raw)
@@ -543,8 +553,8 @@ fn go_type(tv: Any) -> Str {
     let np = ft.length()
     var ps = []
     var i = 0
-    while (i < np - 1) { ps = ps.push(go_type(ft[i])); i = i + 1 }
-    let ret = go_type(erase_async(ft[np - 1]))
+    while (i < np - 1) { ps = ps.push(go_type(ft[i], gv)); i = i + 1 }
+    let ret = go_type(erase_async(ft[np - 1]), gv)
     let head = "func(".concat(ps.join(", ")).concat(") ").concat(ret)
     return rstrip(head)
   }
@@ -552,21 +562,183 @@ fn go_type(tv: Any) -> Str {
     let lb = t.indexOf("[")
     let head = t.slice(0, lb)
     let inner = t.slice(lb + 1, t.length() - 1)
-    if (head == "List") { return "[]".concat(go_type(inner)) }
-    if (head == "Opt") { return `RevlOpt[${go_type(inner)}]` }
+    if (head == "List") { return "[]".concat(go_type(inner, gv)) }
+    if (head == "Opt") { return `RevlOpt[${go_type(inner, gv)}]` }
     if (head == "Result") {
       let ps = split_top(inner, ",")
-      return `RevlResult[${go_type(ps[0])}, ${go_type(ps[1])}]`
+      return `RevlResult[${go_type(ps[0], gv)}, ${go_type(ps[1], gv)}]`
     }
     if (head == "Map") {
       let ps = split_top(inner, ",")
-      return `map[${go_type(ps[0])}]${go_type(ps[1])}`
+      return `map[${go_type(ps[0], gv)}]${go_type(ps[1], gv)}`
     }
+  }
+  let av = applied_variant(t, gv)
+  if (av.generic) {
+    // issue #2471: `Mb[Int]` is the Go instantiation `Mb[int64]`
+    var rendered: List[Str] = []
+    for (a of av.args) {
+      let got = go_type(a, gv)
+      rendered = rendered.push(got == "" ? "struct{}" : got)
+    }
+    return `${v3_ident(av.head)}[${rendered.join(", ")}]`
   }
   return v3_ident(t)
 }
 
 fn contains_ch(s: Str, ch: Str) -> Bool { return s.indexOf(ch) >= 0 }
+
+// ================================================ user generic variants (#2471)
+// A user generic variant (`type Mb[T] = Jj(T) | Nn`) lowers to Go generics:
+// `type Mb[T any] interface { isMb(T) }` with one `MbJj[T any]` struct per case.
+// Every use names the instantiation (`Mb[int64]`, `MbJj[int64]{Value: ..}`,
+// `case MbJj[int64]:`), because Go cannot infer a type argument from a composite
+// literal or from the position a value flows into.
+type AppliedVariant = { generic: Bool, head: Str, params: List[Str], args: List[Str] }
+
+// The generic variants a document declares: head -> comma-joined parameters.
+fn gv_of(types: Any) -> Map[Str, Str] {
+  var gv: Map[Str, Str] = Map.empty()
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    if (value_str(value_field(spec, "kind")) == "variant") {
+      let params = value_list(value_field(spec, "params"))
+      if (params.length() > 0) {
+        var pnames: List[Str] = []
+        for (p of params) { pnames = pnames.push(value_str(p)) }
+        gv = gv.set(name, pnames.join(","))
+      }
+    }
+  }
+  return gv
+}
+
+fn generic_params(gv: Map[Str, Str], head: Str) -> List[Str] {
+  let raw = map_get(gv, head)
+  if (raw == "") { return [] }
+  return split_generic_args(raw)
+}
+
+// `_v3_generic_variant`: `(head, params, args)` for an applied generic user
+// variant (`Mb[Int]`), else a non-generic answer. A bare head of a generic
+// variant answers its parameters as `any`.
+fn applied_variant(surface: Str, gv: Map[Str, Str]) -> AppliedVariant {
+  let s = trim_str(surface)
+  var head = s
+  var args: List[Str] = []
+  let lb = s.indexOf("[")
+  if (lb > 0 && s.endsWith("]")) {
+    head = trim_str(s.slice(0, lb))
+    args = split_generic_args(trim_str(s.slice(lb + 1, s.length() - 1)))
+  }
+  let params = generic_params(gv, head)
+  if (params.length() == 0) { return { generic: false, head: s, params: [], args: [] } }
+  var bound = args
+  if (bound.length() != params.length()) {
+    bound = []
+    for (p of params) { bound = bound.push("any") }
+  }
+  return { generic: true, head: head, params: params, args: bound }
+}
+
+fn pair_map(params: List[Str], args: List[Str]) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  var i = 0
+  while (i < params.length() && i < args.length()) { out = out.set(params[i], args[i]); i = i + 1 }
+  return out
+}
+
+// `_go_v3_applied_variant`: the instantiation (`Mb[Int]`) a construction of
+// `case` builds, when its variant is generic, else "". The type arguments come
+// from the flow target when it names the same variant, else from the payload
+// argument; a parameter neither pins stays `any`.
+fn construct_instance(ctx: Ctx, case: Str, expected: Str, arg_nodes: List[Any]) -> Str {
+  let adt = map_get(ctx.ca, case)
+  let av = applied_variant(adt, ctx.gv)
+  if (!av.generic) { return "" }
+  var bound: Map[Str, Str] = Map.empty()
+  let want = applied_variant(expected, ctx.gv)
+  if (want.generic && want.head == av.head) {
+    var i = 0
+    while (i < av.params.length() && i < want.args.length()) {
+      if (want.args[i] != "any") { bound = bound.set(av.params[i], want.args[i]) }
+      i = i + 1
+    }
+  }
+  let payload = map_get(ctx.cp, case)
+  if (arg_nodes.length() > 0 && payload != "") {
+    bound = v3_unify(payload, infer_type(arg_nodes[0], ctx), av.params, bound)
+  }
+  var args: List[Str] = []
+  for (p of av.params) { args = args.push(bound.lookup(p) ?? "any") }
+  return `${av.head}[${args.join(", ")}]`
+}
+
+// `_go_v3_variant_payload`: the case payload with a generic variant's
+// parameters substituted (`T` -> `Int` for `Mb[Int]`).
+fn variant_payload(ctx: Ctx, case: Str, expected: Str, arg_nodes: List[Any]) -> Str {
+  let payload = map_get(ctx.cp, case)
+  let inst = construct_instance(ctx, case, expected, arg_nodes)
+  if (inst == "") { return payload }
+  let av = applied_variant(inst, ctx.gv)
+  return v3_subst(payload, pair_map(av.params, av.args))
+}
+
+// `_go_v3_type_args`: `[int64]` for the instantiation `Mb[Int]`, "" for a
+// non-generic type: the suffix a case struct takes (`MbJj[int64]`).
+fn variant_type_args(instance: Str, gv: Map[Str, Str]) -> Str {
+  let av = applied_variant(instance, gv)
+  if (!av.generic) { return "" }
+  let rendered = go_type(instance, gv)
+  let head = v3_ident(av.head)
+  return rendered.slice(head.length(), rendered.length())
+}
+
+// `_v3_refuse_unbound`: a construction whose type argument nothing pins is
+// refused by name (the reference raises EmitError). Go infers no type argument
+// from where a value flows later, and `any` is a different instantiation
+// (`Mb[any]` is not `Mb[int64]`), so the package would not build.
+fn unbound_refusal(instance: Str, case: Str, gv: Map[Str, Str]) -> Str {
+  let av = applied_variant(instance, gv)
+  if (!av.generic) { return "" }
+  var free: List[Str] = []
+  var i = 0
+  while (i < av.params.length()) {
+    if (av.args[i] == "any") { free = free.push(av.params[i]) }
+    i = i + 1
+  }
+  if (free.length() == 0) { return "" }
+  return `<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:${case}:${free.join(",")}>>`
+}
+
+// `_v3_has_unbound_arg`: does the surface carry an unbound (`any`) type
+// argument of a generic variant at ANY depth? `Mb[Mb[any]]` does, `Mb[any]`
+// does, `List[Mb[Int]]` does not (issue #2497).
+fn has_unbound_arg(surface: Str, gv: Map[Str, Str]) -> Bool {
+  let s = trim_str(surface)
+  let av = applied_variant(s, gv)
+  if (av.generic && list_contains(av.args, "any")) { return true }
+  if (contains_ch(s, "[") && s.endsWith("]")) {
+    let inner = trim_str(s.slice(s.indexOf("[") + 1, s.length() - 1))
+    for (a of split_generic_args(inner)) {
+      if (has_unbound_arg(a, gv)) { return true }
+    }
+  }
+  return false
+}
+
+// `_v3_list_elem`: the element type of an unpinned list literal, the first item
+// type with no unbound generic variant argument at any depth (`[Nn, Jj(4)]` is
+// a `List[Mb[Int]]`; `[Jj(Nn), Jj(Jj(1)), Nn]` is a
+// `List[Mb[Mb[Int]]]`, issue #2497), else the first item type known at all.
+fn list_elem(item_types: List[Str], gv: Map[Str, Str]) -> Str {
+  var known: List[Str] = []
+  for (t of item_types) { if (t != "") { known = known.push(t) } }
+  for (t of known) {
+    if (!has_unbound_arg(t, gv)) { return t }
+  }
+  return known.length() > 0 ? known[0] : ""
+}
 
 // `_go_v3_lit`: a v3 literal.
 fn go_v3_lit(node: Any) -> Str {
@@ -608,10 +780,12 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
     let pin = value_str(value_field(node, "expected"))
     if (pin.startsWith("List[") && pin.endsWith("]")) { return pin }
     let items = value_list(value_field(node, "items"))
-    if (items.length() > 0) {
-      let elem = infer_type(items[0], ctx)
-      if (elem != "") { return `List[${elem}]` }
-    }
+    var item_types: List[Str] = []
+    for (it of items) { item_types = item_types.push(infer_type(it, ctx)) }
+    // issue #2471: the first item whose generic variant arguments are all
+    // bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`)
+    let elem = list_elem(item_types, ctx.gv)
+    if (elem != "") { return `List[${elem}]` }
     return ""
   }
   if (k == "index") {
@@ -693,6 +867,10 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
   if (k == "adt") {
     let adt_case = value_str(value_field(node, "case"))
     if (is_builtin_ctor(adt_case)) { return infer_ctor(adt_case, value_list(value_field(node, "args")), ctx) }
+    // issue #2471: a generic variant construction answers its instantiation,
+    // from its flow target or its payload
+    let inst = construct_instance(ctx, adt_case, "", value_list(value_field(node, "args")))
+    if (inst != "") { return inst }
     let a = map_get(ctx.ca, adt_case)
     if (resolved(a)) { return a }
     return ""
@@ -826,7 +1004,7 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
         // Neither side is fully concrete (`Ok(g(2)) == Ok(2)`): fill each
         // side's erased type arguments from the other, so both emit as ONE
         // instantiation (issue #1631).
-        let merged = fill_erased(lt, rt)
+        let merged = fill_erased(lt, rt, ctx.gv)
         if (merged != lt || merged != rt) { exp = merged }
       }
       let el = render_expr(value_field(node, "left"), ctx, exp)
@@ -903,7 +1081,11 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
   var declared = []
   var g = { generic: false, params: [], mapping: Map.empty(), tparams: [] }
   if (node_kind(callee) == "var") {
-    if (resolved(map_get(ctx.ca, cn))) { param_types = [map_get(ctx.cp, cn)] }
+    // issue #2471: a generic variant construction reached as a call renders
+    // its arguments against the substituted payload type
+    if (resolved(map_get(ctx.ca, cn))) {
+      param_types = [variant_payload(ctx, cn, expected, value_list(value_field(node, "args")))]
+    }
     else if (!is_builtin_ctor(cn)) {
       for (sig of ctx.signatures) {
         if (value_str(value_field(sig, "name")) == cn) {
@@ -976,7 +1158,7 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
   if (!value_is_null(value_field(node, "key_type"))) { return `revlMapIndex(${target}, ${index})` }
   // `v[k]` on a statically `Any` receiver: Go's index operator is
   // type-directed, so the read goes through reflection (issue #1356).
-  if (go_type(infer_type(tn, ctx)) == "any") { return `revlAnyIndex(${target}, ${index})` }
+  if (go_type(infer_type(tn, ctx), ctx.gv) == "any") { return `revlAnyIndex(${target}, ${index})` }
   return `${target}[${index}]`
 }
 
@@ -987,9 +1169,13 @@ fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
     elem = pin.slice(5, pin.length() - 1)
   }
   let items = value_list(value_field(node, "items"))
-  if (elem == "" && items.length() > 0) { elem = infer_type(items[0], ctx) }
+  if (elem == "" && items.length() > 0) {
+    var item_types: List[Str] = []
+    for (it of items) { item_types = item_types.push(infer_type(it, ctx)) }
+    elem = list_elem(item_types, ctx.gv)
+  }
   var goelem = "any"
-  if (elem != "") { goelem = go_type(elem) }
+  if (elem != "") { goelem = go_type(elem, ctx.gv) }
   var parts = []
   for (it of items) { parts = parts.push(render_expr(it, ctx, elem)) }
   return `[]${goelem}{${parts.join(", ")}}`
@@ -1017,13 +1203,13 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
   var ps = []
   i = 0
   while (i < names.length()) {
-    var gt = go_type(declared[i])
+    var gt = go_type(declared[i], ctx.gv)
     if (gt == "") { gt = "any" }
     ps = ps.push(`${v3_ident(value_str(names[i]))} ${gt}`)
     i = i + 1
   }
   let body = render_expr(value_field(node, "body"), bodyctx, "")
-  let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx))
+  let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx), ctx.gv)
   var ret = ""
   if (bodyt != "") { ret = " ".concat(bodyt) }
   let rendered = `func(${ps.join(", ")})${ret} { return ${body} }`
@@ -1041,7 +1227,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     var sigs = []
     i = 0
     while (i < names.length()) {
-      var st = go_type(declared[i])
+      var st = go_type(declared[i], ctx.gv)
       if (st == "") { st = "any" }
       sigs = sigs.push(st)
       i = i + 1
@@ -1131,7 +1317,14 @@ fn double_pct(s: Str) -> Str {
 fn render_construct(ctx: Ctx, case: Str, args: List[Str], expected: Str, arg_nodes: List[Any]) -> Str {
   let adt = map_get(ctx.ca, case)
   if (resolved(adt)) {
-    let struct = `${v3_ident(adt)}${case}`
+    // issue #2471: a generic variant construction names its instantiation
+    // (`MbJj[int64]{..}`); one whose type argument nothing pins is refused by
+    // name, since Go infers no type argument from a later use
+    let inst = construct_instance(ctx, case, expected, arg_nodes)
+    let refusal = unbound_refusal(inst, case, ctx.gv)
+    if (refusal != "") { return refusal }
+    var struct = `${v3_ident(adt)}${case}`
+    if (inst != "") { struct = struct + variant_type_args(inst, ctx.gv) }
     if (map_get(ctx.cp, case) == "") {
       if (args.length() > 0) { return `<<UNSUPPORTED-CTOR-ARITY:${case}>>` }
       return `${struct}{}`
@@ -1152,7 +1345,7 @@ fn render_construct(ctx: Ctx, case: Str, args: List[Str], expected: Str, arg_nod
         if (it != "") { inner = it }
       }
     }
-    var got = go_type(inner)
+    var got = go_type(inner, ctx.gv)
     if (got == "") { got = "any" }
     if (case == "None") {
       if (args.length() > 0) { return "<<UNSUPPORTED-CTOR-ARITY:None>>" }
@@ -1175,9 +1368,9 @@ fn render_construct(ctx: Ctx, case: Str, args: List[Str], expected: Str, arg_nod
         if (case == "Ok") { ok = side } else { err = side }
       }
     }
-    var got_ok = go_type(ok)
+    var got_ok = go_type(ok, ctx.gv)
     if (got_ok == "") { got_ok = "any" }
-    var got_err = go_type(err)
+    var got_err = go_type(err, ctx.gv)
     if (got_err == "") { got_err = "any" }
     var payload = ""
     if (args.length() > 0) { payload = args[0] }
@@ -1231,11 +1424,11 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
   let st = infer_type(scrut_node, ctx)
   let arms = value_list(value_field(node, "arms"))
   var exp_t = ""
-  if (expected != "") { exp_t = go_type(expected) }
+  if (expected != "") { exp_t = go_type(expected, ctx.gv) }
   if (exp_t == "") {
     var i = 0
     while (i < arms.length() && exp_t == "") {
-      exp_t = go_type(infer_type(value_field(arms[i], "body"), ctx))
+      exp_t = go_type(infer_type(value_field(arms[i], "body"), ctx), ctx.gv)
       i = i + 1
     }
   }
@@ -1276,7 +1469,7 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
   var lines = [`func() ${exp_t} {`]
   var switch_operand = scrutinee
   if (node_kind(scrut_node) != "var" && node_kind(scrut_node) != "name") {
-    let iface_t = st == "" ? "any" : go_type(st)
+    let iface_t = st == "" ? "any" : go_type(st, ctx.gv)
     lines = lines.push(line(1, `var _s ${iface_t} = ${scrutinee}`))
     switch_operand = "_s"
   }
@@ -1292,12 +1485,23 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
     } else {
       var adt = st
       if (!resolved(adt)) { adt = map_get(ctx.ca, pattern) }
-      lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
+      // issue #2471: the case struct of an applied generic variant is
+      // instantiated like the scrutinee (`MbJj[int64]` under `Mb[Int]`), and
+      // the bound payload takes the substituted type
+      let av = applied_variant(adt, ctx.gv)
+      var case_type = `${v3_ident(adt)}${pattern}`
+      var payload_type = map_get(ctx.cp, pattern)
+      if (av.generic) {
+        let inst = `${av.head}[${av.args.join(", ")}]`
+        case_type = `${v3_ident(av.head)}${pattern}${variant_type_args(inst, ctx.gv)}`
+        payload_type = v3_subst(payload_type, pair_map(av.params, av.args))
+      }
+      lines = lines.push(line(1, `case ${case_type}:`))
       let bindn = value_field(arm, "bind")
       var armctx = ctx
       if (!value_is_null(bindn) && value_str(bindn) != "" && value_str(bindn) != "_") {
         let bind = value_str(bindn)
-        armctx = set_vt(ctx, bind, map_get(ctx.cp, pattern))
+        armctx = set_vt(ctx, bind, payload_type)
         lines = lines.push(line(2, `${v3_ident(bind)} := _m.Value`))
         // a payload bound but never read in the arm body is a Go
         // `declared and not used` build error; pin it so an unused
@@ -1328,6 +1532,8 @@ fn is_interface(surface: Str, ctx: Ctx) -> Bool {
   if (s == "any") { return true }
   if (s.startsWith("Opt[") && s.endsWith("]")) { return true }
   if (s.startsWith("Result[") && s.endsWith("]")) { return true }
+  // issue #2471: an applied generic user variant (`Mb[Int]`) is an interface
+  if (applied_variant(s, ctx.gv).generic) { return true }
   return list_contains(ctx.variants, s)
 }
 
@@ -1421,8 +1627,21 @@ fn fn_value_ret(surface: Str) -> Str {
 // `_v3_fill_erased`: `surface` with each erased top-level `any` type argument
 // of a built-in Opt/Result filled from `declared`, a type of the same family
 // (else `surface` unchanged).
-fn fill_erased(surface: Str, declared: Str) -> Str {
+fn fill_erased(surface: Str, declared: Str, gv: Map[Str, Str]) -> Str {
   if (surface == "" || declared == "") { return surface }
+  // issue #2471: `Mb[any]` takes the type arguments of a same-head hint
+  // (`Mb[Int]`), exactly as Opt/Result fill an erased argument
+  let hv = applied_variant(surface, gv)
+  let wv = applied_variant(declared, gv)
+  if (hv.generic && wv.generic && hv.head == wv.head) {
+    var merged_gv: List[Str] = []
+    var gi = 0
+    while (gi < hv.args.length() && gi < wv.args.length()) {
+      merged_gv = merged_gv.push(hv.args[gi] == "any" ? wv.args[gi] : hv.args[gi])
+      gi = gi + 1
+    }
+    return `${hv.head}[${merged_gv.join(", ")}]`
+  }
   for (head of ["Opt[", "Result["]) {
     if (surface.startsWith(head) && surface.endsWith("]")
         && declared.startsWith(head) && declared.endsWith("]")) {
@@ -1444,14 +1663,14 @@ fn fill_erased(surface: Str, declared: Str) -> Str {
 // The `let` arm's flow refinement: a bare `None` infers nothing and is an `Opt`
 // of what it flows into; an Opt/Result value with an erased type argument
 // takes the missing part from the binding's flow hint.
-fn flow_typed(valnode: Any, inferred: Str, hint: Str) -> Str {
+fn flow_typed(valnode: Any, inferred: Str, hint: Str, gv: Map[Str, Str]) -> Str {
   var t = inferred
   let vk = node_kind(valnode)
   if (t == "" && (vk == "var" || vk == "name") && ref_name(valnode) == "None") {
-    let filled = fill_erased("Opt[any]", hint)
+    let filled = fill_erased("Opt[any]", hint, gv)
     if (filled != "Opt[any]") { t = filled }
   }
-  if (has_any_word(t)) { t = fill_erased(t, hint) }
+  if (has_any_word(t)) { t = fill_erased(t, hint, gv) }
   return t
 }
 
@@ -1628,7 +1847,7 @@ fn explicit_instantiation(name: Str, g: GenericCall, ctx: Ctx) -> Str {
   while (j <= last) {
     let b = g.mapping.lookup(g.tparams[j]) ?? "any"
     if (b == "any") { return "" }
-    items = items.push(go_type(b))
+    items = items.push(go_type(b, ctx.gv))
     j = j + 1
   }
   return `[${items.join(", ")}]`
@@ -1695,8 +1914,10 @@ fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   }
   if (kind == "adt") {
     let case = value_str(value_field(node, "case"))
-    let payload = map_get(ctx.cp, case)
     let arg_nodes = value_list(value_field(node, "args"))
+    // issue #2471: a generic variant's payload takes the construction's
+    // substituted type arguments as each argument's flow target
+    let payload = variant_payload(ctx, case, expected, arg_nodes)
     var aa = []
     for (a of arg_nodes) { aa = aa.push(render_expr(a, ctx, payload)) }
     return render_construct(ctx, case, aa, expected, arg_nodes)
@@ -1712,8 +1933,8 @@ fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (kind == "arrow") { return render_arrow(node, ctx) }
   if (kind == "if") {
     var expt = ""
-    if (expected != "") { expt = go_type(expected) }
-    else { expt = go_type(infer_type(value_field(node, "then"), ctx)) }
+    if (expected != "") { expt = go_type(expected, ctx.gv) }
+    else { expt = go_type(infer_type(value_field(node, "then"), ctx), ctx.gv) }
     if (expt == "") { expt = "any" }
     let cond = render_expr(value_field(node, "cond"), ctx, "")
     let then = render_expr(value_field(node, "then"), ctx, expected)
@@ -1729,7 +1950,7 @@ fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
     if (infer_type(tn, ctx) == "Str") { return marked(`revlStrLen(${target})`) }
     return marked(`revlListLen(${target})`)
   }
-  if (kind == "maplit") { return render_maplit(node, expected) }
+  if (kind == "maplit") { return render_maplit(node, ctx, expected) }
   if (kind == "builtin") { return render_builtin(node, ctx) }
   if (kind == "optfield" || kind == "optcall") { return render_optchain(node, ctx, kind) }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
@@ -1842,7 +2063,7 @@ fn render_optchain(node: Any, ctx: Ctx, kind: Str) -> Str {
   let tt = infer_type(tn, ctx)
   if (!(tt.startsWith("Opt[") && tt.endsWith("]"))) { return `<<UNSUPPORTED-EXPR:${kind}-receiver>>` }
   let payload = tt.slice(4, tt.length() - 1)
-  let go_payload = go_type(payload)
+  let go_payload = go_type(payload, ctx.gv)
   var ret_surface = ""
   var body = ""
   if (kind == "optfield") {
@@ -1857,7 +2078,7 @@ fn render_optchain(node: Any, ctx: Ctx, kind: Str) -> Str {
     body = builtin_call(method, payload, "_x", args, ctx.strings_alias)
   }
   var go_ret = "any"
-  if (ret_surface != "") { go_ret = go_type(ret_surface) }
+  if (ret_surface != "") { go_ret = go_type(ret_surface, ctx.gv) }
   return marked(`revlOptMap(${target}, func(_x ${go_payload}) ${go_ret} { return ${body} })`)
 }
 
@@ -1865,12 +2086,12 @@ fn render_optchain(node: Any, ctx: Ctx, kind: Str) -> Str {
 // positionally, so the literal needs its expected Map type (the flow target,
 // else the annotation the frontend threaded onto the node); the reference
 // refuses an unpinned one, and so does this port, by name.
-fn render_maplit(node: Any, expected: Str) -> Str {
+fn render_maplit(node: Any, ctx: Ctx, expected: Str) -> Str {
   var exp = expected
   if (exp == "") { exp = value_str(value_field(node, "expected")) }
   if (exp.startsWith("Map[") && exp.endsWith("]")) {
     let kv = split_top(exp.slice(4, exp.length() - 1), ",")
-    return `map[${go_type(kv[0])}]${go_type(kv[1])}{}`
+    return `map[${go_type(kv[0], ctx.gv)}]${go_type(kv[1], ctx.gv)}{}`
   }
   return "<<UNSUPPORTED-EXPR:maplit-unpinned>>"
 }
@@ -2099,7 +2320,7 @@ fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
   return {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
-    tnames: ctx.tnames, rt: ctx.rt,
+    tnames: ctx.tnames, gv: ctx.gv, rt: ctx.rt,
     builders: builders, builder_seq: seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
@@ -2114,7 +2335,7 @@ fn with_reserved(ctx: Ctx, reserved: Map[Str, Str]) -> Ctx {
   return {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
-    tnames: ctx.tnames, rt: ctx.rt,
+    tnames: ctx.tnames, gv: ctx.gv, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
@@ -2163,12 +2384,12 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     let raw = value_str(value_field(node, "name"))
     let nm = v3_ident(raw)
     let valnode = value_field(node, "value")
-    let inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, raw))
+    let inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, raw), ctx.gv)
     var nctx = ctx
     if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
     let value = render_expr(valnode, ctx, inferred)
     var got = ""
-    if (inferred != "") { got = go_type(inferred) }
+    if (inferred != "") { got = go_type(inferred, ctx.gv) }
     var out = []
     // A variant / Opt / Result binding holds its declared (interface or
     // two-value struct) type, not the concrete case `:=` would infer (item 280).
@@ -2290,8 +2511,34 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
 // variant is a sealed interface (`isX()` seal) plus one struct per case (nullary
 // `struct{}`, payload `struct { Value T }`) with the seal method. Each decl is
 // followed by a blank line, exactly as the reference does.
+// `_emit_v3_go_generic_variant`: a generic user variant as Go generics (issue
+// #2471): the interface and every case struct take the variant's type
+// parameters, and the marker method names them, so `MbJj[int64]` is an
+// `Mb[int64]` and not an `Mb[string]`.
+fn emit_generic_variant(gname: Str, spec: Any, gv: Map[Str, Str]) -> List[Str] {
+  var params: List[Str] = []
+  for (p of value_list(value_field(spec, "params"))) { params = params.push(v3_ident(value_str(p))) }
+  var decls: List[Str] = []
+  for (p of params) { decls = decls.push(`${p} any`) }
+  let decl = decls.join(", ")
+  let uses = params.join(", ")
+  let marker = `is${gname}`
+  var out = [`// ${gname} is a sealed generic sum type (revl ADT); ${marker}() seals it.`,
+             `type ${gname}[${decl}] interface { ${marker}(${uses}) }`]
+  for (case of value_list(value_field(spec, "cases"))) {
+    let cstruct = `${gname}${value_str(value_field(case, "name"))}`
+    let payload = value_field(case, "payload")
+    if (value_is_null(payload)) { out = out.push(`type ${cstruct}[${decl}] struct{}`) }
+    else { out = out.push(`type ${cstruct}[${decl}] struct { Value ${go_type(payload, gv)} }`) }
+    out = out.push(`func (${cstruct}[${uses}]) ${marker}(${uses}) {}`)
+  }
+  out = out.push("")
+  return out
+}
+
 fn emit_v3_types(types: Any) -> List[Str] {
   var out = []
+  let gv = gv_of(types)
   for (name of value_keys(types)) {
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
@@ -2300,24 +2547,29 @@ fn emit_v3_types(types: Any) -> List[Str] {
       out = out.push(`type ${gname} struct {`)
       let fields = value_field(spec, "fields")
       for (field of value_keys(fields)) {
-        out = out.push(line(1, `${v3_field_ident(field)} ${go_type(value_field(fields, field))} ${json_tag(field)}`))
+        out = out.push(line(1, `${v3_field_ident(field)} ${go_type(value_field(fields, field), gv)} ${json_tag(field)}`))
       }
       out = out.push("}")
       out = out.push("")
     } else {
       if (kind == "variant") {
-        let marker = `is${gname}`
-        out = out.push(`// ${gname} is a sealed sum type (revl ADT); ${marker}() seals it.`)
-        out = out.push(`type ${gname} interface { ${marker}() }`)
-        for (case of value_list(value_field(spec, "cases"))) {
-          let cname = value_str(value_field(case, "name"))
-          let cstruct = `${gname}${cname}`
-          let payload = value_field(case, "payload")
-          if (value_is_null(payload)) { out = out.push(`type ${cstruct} struct{}`) }
-          else { out = out.push(`type ${cstruct} struct { Value ${go_type(payload)} }`) }
-          out = out.push(`func (${cstruct}) ${marker}() {}`)
+        let params = value_list(value_field(spec, "params"))
+        if (params.length() > 0) {
+          out = out.concat(emit_generic_variant(gname, spec, gv))
+        } else {
+          let marker = `is${gname}`
+          out = out.push(`// ${gname} is a sealed sum type (revl ADT); ${marker}() seals it.`)
+          out = out.push(`type ${gname} interface { ${marker}() }`)
+          for (case of value_list(value_field(spec, "cases"))) {
+            let cname = value_str(value_field(case, "name"))
+            let cstruct = `${gname}${cname}`
+            let payload = value_field(case, "payload")
+            if (value_is_null(payload)) { out = out.push(`type ${cstruct} struct{}`) }
+            else { out = out.push(`type ${cstruct} struct { Value ${go_type(payload, gv)} }`) }
+            out = out.push(`func (${cstruct}) ${marker}() {}`)
+          }
+          out = out.push("")
         }
-        out = out.push("")
       } else {
         out = out.push(`<<UNSUPPORTED-TYPE:${kind}>>`)
       }
@@ -2531,7 +2783,7 @@ fn hoist_imports(body: Str) -> Hoisted {
 
 type Eout = { lines: List[Str], imports: List[Str] }
 
-fn emit_externs(externs: List[Any]) -> Eout {
+fn emit_externs(externs: List[Any], gv: Map[Str, Str]) -> Eout {
   var out = []
   var imports = []
   var any_config = false
@@ -2544,12 +2796,12 @@ fn emit_externs(externs: List[Any]) -> Eout {
     var args = []
     for (p of value_list(value_field(ext, "params"))) {
       let pname = v3_ident(value_str(value_field(p, "name")))
-      ps = ps.push(`${pname} ${go_type(value_field(p, "type"))}`)
+      ps = ps.push(`${pname} ${go_type(value_field(p, "type"), gv)}`)
       args = args.push(pname)
     }
     let params = ps.join(", ")
     let arg_list = args.join(", ")
-    let ret = go_type(value_field(ext, "returns"))
+    let ret = go_type(value_field(ext, "returns"), gv)
     var sigret = ""
     if (ret != "") { sigret = " ".concat(ret) }
     let bodies = value_field(ext, "bodies")
@@ -2674,7 +2926,7 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     let ctx0 = {
       vt: vt, fr: fr, er: er, signatures: signatures,
       ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
-      rt: rt, builders: Map.empty(), builder_seq: 0,
+      gv: t.gv, rt: rt, builders: Map.empty(), builder_seq: 0,
       reserved: reserved, strings_alias: strings_alias,
       sc: Map.empty(), scan_seq: 0, body: body, tn: "",
       fh: Map.empty()
@@ -2682,9 +2934,9 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     let ctx = set_fh(ctx0, flow_hints(body, rt, ctx0))
     var ps = []
     for (p of params) {
-      ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
+      ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"), t.gv)}`)
     }
-    let ret = go_type(value_field(fnode, "returns"))
+    let ret = go_type(value_field(fnode, "returns"), t.gv)
     var sigret = ""
     if (ret != "") { sigret = " ".concat(ret) }
     var type_params = ""
@@ -2759,7 +3011,7 @@ fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTab
     let ctx0 = {
       vt: Map.empty(), fr: fr, er: er, signatures: signatures,
       ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
-      rt: "", builders: Map.empty(), builder_seq: 0,
+      gv: t.gv, rt: "", builders: Map.empty(), builder_seq: 0,
       reserved: res, strings_alias: strings_alias,
       sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT",
       fh: Map.empty()
@@ -3825,7 +4077,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   var type_lines = []
   if (value_keys(types).length() > 0) { type_lines = emit_v3_types(types) }
   var ext: Eout = { lines: [], imports: [] }
-  if (externs.length() > 0) { ext = emit_externs(externs) }
+  if (externs.length() > 0) { ext = emit_externs(externs, tables.gv) }
   let emitted_functions = emit_functions(functions, fr, er, tables, functions.concat(externs), strings_alias)
   let emitted_tests = emit_tests(value_list(value_field(ir, "tests")), fr, er, tables,
                                  functions.concat(externs), strings_alias, emitted_functions.reserved)
@@ -4055,6 +4307,16 @@ fn comp_go_type(tv: Any, types: Any) -> Str {
     while (i < np - 1) { ps = ps.push(comp_go_type(ft[i], types)); i = i + 1 }
     return rstrip(`func(${ps.join(", ")}) ${comp_go_return(erase_async(ft[np - 1]), types)}`)
   }
+  // issue #2471: an applied generic variant is its Go instantiation
+  let av = applied_variant(t, gv_of(types))
+  if (av.generic) {
+    var rendered: List[Str] = []
+    for (a of av.args) {
+      let got = comp_go_type(a, types)
+      rendered = rendered.push(got == "" ? "struct{}" : got)
+    }
+    return `${v3_ident(av.head)}[${rendered.join(", ")}]`
+  }
   return value_is_null(value_field(types, t)) ? camel(t) : v3_ident(t)
 }
 
@@ -4154,6 +4416,43 @@ fn case_payload(types: Any, adt: Str, case_name: Str) -> Str {
   return e.length() > 0 ? e[1] : ""
 }
 
+// `_v3_comp_applied` (issue #2471): the instantiation (`Mb[Int]`) a
+// component-body construction of `case` builds when its variant is generic,
+// else "". The type arguments come from the flow target when it names the same
+// variant, else from the payload argument.
+fn comp_applied(env: CEnv, adt: Str, case: Str, expected: Str, arg_nodes: List[Any]) -> Str {
+  let gv = gv_of(env.types)
+  let av = applied_variant(adt, gv)
+  if (!av.generic) { return "" }
+  var bound: Map[Str, Str] = Map.empty()
+  let want = applied_variant(expected, gv)
+  if (want.generic && want.head == av.head) {
+    var i = 0
+    while (i < av.params.length() && i < want.args.length()) {
+      if (want.args[i] != "any") { bound = bound.set(av.params[i], want.args[i]) }
+      i = i + 1
+    }
+  }
+  let payload = case_payload(env.types, av.head, case)
+  if (arg_nodes.length() > 0 && payload != "") {
+    bound = v3_unify(payload, comp_infer(arg_nodes[0], env), av.params, bound)
+  }
+  var args: List[Str] = []
+  for (p of av.params) { args = args.push(bound.lookup(p) ?? "any") }
+  return `${av.head}[${args.join(", ")}]`
+}
+
+// `_v3_comp_case_type`: the Go case struct of `case` under `instance`:
+// `MbJj[int64]` for `Mb[Int]`, `StepFinal` for a monomorphic `Step`.
+fn comp_case_type(instance: Str, case: Str, types: Any) -> Str {
+  let gv = gv_of(types)
+  let av = applied_variant(instance, gv)
+  let head = av.generic ? av.head : instance
+  var struct = `${v3_ident(head)}${case}`
+  if (!av.generic) { return struct }
+  return struct.concat(variant_type_args(instance, gv))
+}
+
 // The variant an `adt` node constructs: the type the checker froze onto it,
 // else the layout's. "" when that is not a declared variant.
 fn adt_variant(n: Any, types: Any) -> Str {
@@ -4180,7 +4479,11 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
   if (k == "name" || k == "var") { return map_get(env.vt, ref_ident(n)) }
   if (k == "list") {
     let items = value_list(value_field(n, "items"))
-    let el = items.length() > 0 ? comp_infer(items[0], env) : ""
+    var item_types: List[Str] = []
+    for (it of items) { item_types = item_types.push(comp_infer(it, env)) }
+    // issue #2471: the first item whose generic variant arguments are all
+    // bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`)
+    let el = list_elem(item_types, gv_of(env.types))
     return el == "" ? "List[Int]" : `List[${el}]`
   }
   if (k == "bin") {
@@ -4196,8 +4499,13 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
   if (k == "un") { return node_op(n) == "!" ? "Bool" : comp_infer(value_field(n, "operand"), env) }
   if (k == "record") { return comp_record_for_fields(env.types, record_field_names(n)) }
   if (k == "adt") {
+    let case = value_str(value_field(n, "case"))
     let t = value_str(value_field(n, "type"))
-    return t != "" ? t : case_variant_of(env.types, "", value_str(value_field(n, "case")))
+    let declared = t != "" ? t : case_variant_of(env.types, "", case)
+    // issue #2471: a construction of a generic variant answers its
+    // instantiation (from the frozen node type or the payload argument)
+    let inst = comp_applied(env, declared, case, "", value_list(value_field(n, "args")))
+    return inst != "" ? inst : declared
   }
   if (k == "fn") { return map_get(env.fr, value_str(value_field(n, "name"))) }
   if (k == "builtin") { return builtin_ret_type(value_str(value_field(n, "method")), comp_infer(value_field(n, "target"), env)) }
@@ -4392,11 +4700,18 @@ fn comp_match_ok(n: Any, env: CEnv) -> Bool {
   let st = comp_infer(scrut, env)
   var ok = comp_expr_ok(scrut, env) && !st.startsWith("Opt[") && !st.startsWith("Result[")
   var e = env
+  let gav = applied_variant(st, gv_of(env.types))
   for (arm of value_list(value_field(n, "arms"))) {
     let pattern = value_str(value_field(arm, "pattern"))
     let bind = value_str(value_field(arm, "bind"))
-    let adt = case_variant_of(env.types, st, pattern)
-    let payload = case_payload(env.types, adt, pattern)
+    var adt = case_variant_of(env.types, st, pattern)
+    var payload = case_payload(env.types, adt, pattern)
+    // issue #2471: an arm over an applied generic variant binds the
+    // substituted payload type
+    if (gav.generic && pattern != "_") {
+      adt = gav.head
+      payload = v3_subst(payload, pair_map(gav.params, gav.args))
+    }
     let binds = bind != "" && bind != "_" && pattern != "_"
     ok = ok && (pattern == "_" || adt != "") && (!binds || payload != "")
     if (binds) { e = with_vt(e, bind, payload) }
@@ -4507,11 +4822,19 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
     var elem = ""
     let items = value_list(value_field(n, "items"))
     if (expected.startsWith("List[") && expected.endsWith("]")) { elem = expected.slice(5, expected.length() - 1) }
-    if (elem == "" && items.length() > 0) { elem = comp_infer(items[0], env) }
+    if (elem == "" && items.length() > 0) {
+      var item_types: List[Str] = []
+      for (it of items) { item_types = item_types.push(comp_infer(it, env)) }
+      // issue #2471: the first item whose generic variant arguments are all
+      // bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`)
+      elem = list_elem(item_types, gv_of(env.types))
+    }
     var go_elem = "any"
     if (elem != "") { go_elem = comp_go_type(elem, env.types) }
     var parts = []
-    for (it of items) { parts = parts.push(comp_expr(it, env, "")) }
+    // the element type is each item's flow target, so a nullary `Nn` in
+    // `[Jj(n), Nn]` builds an `MbNn[int64]` (issue #2471)
+    for (it of items) { parts = parts.push(comp_expr(it, env, elem)) }
     return `[]${go_elem}{${parts.join(", ")}}`
   }
   if (k == "record") {
@@ -4524,9 +4847,25 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
   }
   if (k == "adt") {
     let adt = adt_variant(n, env.types)
-    let struct_name = v3_ident(adt).concat(value_str(value_field(n, "case")))
-    if (case_payload(env.types, adt, value_str(value_field(n, "case"))) == "") { return `${struct_name}{}` }
-    return `${struct_name}{Value: ${comp_args(n, env)}}`
+    let case = value_str(value_field(n, "case"))
+    let arg_nodes = value_list(value_field(n, "args"))
+    // issue #2471: a generic variant construction names its instantiation
+    // (`MbJj[int64]{..}`), and one whose type argument nothing pins is refused
+    // by name rather than emitted as a package that does not build
+    let inst = comp_applied(env, adt, case, expected, arg_nodes)
+    let refusal = unbound_refusal(inst, case, gv_of(env.types))
+    if (refusal != "") { return refusal }
+    var struct_name = `${v3_ident(adt)}${case}`
+    if (inst != "") { struct_name = comp_case_type(inst, case, env.types) }
+    var payload = case_payload(env.types, adt, case)
+    if (inst != "") {
+      let av = applied_variant(inst, gv_of(env.types))
+      payload = v3_subst(payload, pair_map(av.params, av.args))
+    }
+    if (payload == "") { return `${struct_name}{}` }
+    var parts: List[Str] = []
+    for (a of arg_nodes) { parts = parts.push(comp_expr(a, env, payload)) }
+    return `${struct_name}{Value: ${parts.join(", ")}}`
   }
   if (k == "builtin") {
     let target_node = value_field(n, "target")
@@ -4566,8 +4905,15 @@ fn comp_infer_match(n: Any, env: CEnv) -> Str {
   for (arm of value_list(value_field(n, "arms"))) {
     let pattern = value_str(value_field(arm, "pattern"))
     let bind = value_str(value_field(arm, "bind"))
-    let adt = decl_kind(env.types, st) != "" ? st : case_variant_of(env.types, "", pattern)
-    let bound = pattern == "_" ? st : case_payload(env.types, adt, pattern)
+    var adt = decl_kind(env.types, st) != "" ? st : case_variant_of(env.types, "", pattern)
+    var bound = pattern == "_" ? st : case_payload(env.types, adt, pattern)
+    // issue #2471: an arm over an applied generic variant binds the
+    // substituted payload type
+    let gav = applied_variant(st, gv_of(env.types))
+    if (gav.generic && pattern != "_") {
+      adt = gav.head
+      bound = v3_subst(case_payload(env.types, adt, pattern), pair_map(gav.params, gav.args))
+    }
     let e = bind != "" && bind != "_" && bound != "" ? with_vt(env, bind, bound) : env
     found = found != "" ? found : comp_infer(value_field(arm, "body"), e)
   }
@@ -4592,7 +4938,10 @@ fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
     let pc = case_variant_of(env.types, "", value_str(value_field(arm, "pattern")))
     first_case = first_case != "" ? first_case : pc
   }
-  let iface = decl_kind(env.types, st) != "" ? st : first_case
+  let gav = applied_variant(st, gv_of(env.types))
+  // issue #2471: an applied generic variant is its own interface
+  // instantiation (`Mb[int64]`), not the bare declaration
+  let iface = gav.generic ? st : (decl_kind(env.types, st) != "" ? st : first_case)
   let iface_t = comp_go_type(iface, env.types)
   var lines = bare ? [`func() ${exp_t} {`] : [`func() ${exp_t} {`, line(1, `var _s ${iface_t == "" ? "any" : iface_t} = ${scrutinee}`)]
   lines = lines.push(line(1, `switch _m := ${bare ? scrutinee : "_s"}.(type) {`))
@@ -4606,10 +4955,20 @@ fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
       lines = lines.push(line(2, `return ${comp_expr(value_field(arm, "body"), e, expected)}`))
     } else {
       let adt = case_variant_of(env.types, st, pattern)
-      lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
+      // issue #2471: the case struct of an applied generic variant is
+      // instantiated like the scrutinee (`MbJj[int64]` under `Mb[Int]`), and
+      // the bound payload takes the substituted type
+      var case_type = `${v3_ident(adt)}${pattern}`
+      var payload = case_payload(env.types, adt, pattern)
+      if (gav.generic) {
+        let inst = `${gav.head}[${gav.args.join(", ")}]`
+        case_type = `${v3_ident(gav.head)}${pattern}${variant_type_args(inst, gv_of(env.types))}`
+        payload = v3_subst(payload, pair_map(gav.params, gav.args))
+      }
+      lines = lines.push(line(1, `case ${case_type}:`))
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "" && bind != "_") {
-        e = with_vt(e, bind, case_payload(env.types, adt, pattern))
+        e = with_vt(e, bind, payload)
         lines = lines.push(line(2, `${safe_local(bind)} := _m.Value`)).push(line(2, `_ = ${safe_local(bind)}`))
       } else {
         lines = lines.push(line(2, "_ = _m"))
@@ -5671,12 +6030,12 @@ fn teardown_preamble() -> List[Str] {
 
 // ---------------------------------------------------------------- in-file tests
 test "go_type covers the scalar and generic surface" {
-  assert go_type("Int") == "int64"
-  assert go_type("Str") == "string"
-  assert go_type("Bool") == "bool"
-  assert go_type("List[Int]") == "[]int64"
-  assert go_type("Map[Str, Int]") == "map[string]int64"
-  assert go_type("Opt[Str]") == "RevlOpt[string]"
+  assert go_type("Int", Map.empty()) == "int64"
+  assert go_type("Str", Map.empty()) == "string"
+  assert go_type("Bool", Map.empty()) == "bool"
+  assert go_type("List[Int]", Map.empty()) == "[]int64"
+  assert go_type("Map[Str, Int]", Map.empty()) == "map[string]int64"
+  assert go_type("Opt[Str]", Map.empty()) == "RevlOpt[string]"
 }
 
 test "the go bin-op table maps the longest revl ops" {
@@ -5720,7 +6079,7 @@ fn typed_ctx() -> Ctx {
   return {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
     ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), variants: ["Tree"], tnames: ["Tree", "Point"],
-    rt: "", signatures: [],
+    gv: Map.empty(), rt: "", signatures: [],
     builders: Map.empty(), builder_seq: 0,
     reserved: Map.empty(), strings_alias: "strings",
     sc: Map.empty(), scan_seq: 0, body: [], tn: "",
@@ -5751,10 +6110,10 @@ test "a declared Secret[T] extern return wraps its verbatim body" {
   // verbatim body; an unstamped one is the plain single function. The
   // end-to-end byte check lives in the corpus.
   let plain = emit_externs([{ name: "tag", params: [], returns: "Str",
-                              bodies: { go: `return "n"` } }]).lines
+                              bodies: { go: `return "n"` } }], Map.empty()).lines
   assert plain.join("|") == `func tag() string {|${str_tab()}return "n"|}|`
   let stamped = emit_externs([{ name: "mint", params: [], returns: "Str",
-                                secret_return: true, bodies: { go: `return "s"` } }]).lines
+                                secret_return: true, bodies: { go: `return "s"` } }], Map.empty()).lines
   assert stamped[0] == "func mint() string {"
   assert stamped[1] == str_tab().concat("return revlSecretResult(revlSecret_mint())")
   assert stamped[4] == "func revlSecret_mint() string {"
@@ -5803,9 +6162,9 @@ test "a body Python splitlines would break differently takes a marker" {
 }
 
 test "go_type passes user record/variant names through" {
-  assert go_type("Point") == "Point"
-  assert go_type("List[Point]") == "[]Point"
-  assert go_type("Opt[Point]") == "RevlOpt[Point]"
+  assert go_type("Point", Map.empty()) == "Point"
+  assert go_type("List[Point]", Map.empty()) == "[]Point"
+  assert go_type("Opt[Point]", Map.empty()) == "RevlOpt[Point]"
 }
 
 // --------------------------------------------------------------- component wrap
