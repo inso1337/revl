@@ -318,7 +318,7 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
-fail-open default hides. Fifteen named codes:
+fail-open default hides. Nineteen named codes:
 
 | code | fires when |
 |---|---|
@@ -330,12 +330,16 @@ fail-open default hides. Fifteen named codes:
 | `UNBOUNDED_RETRY` | no positive `budget` or no positive `attempt` |
 | `BUDGET_EXHAUSTED` | `attempt` past `budget` |
 | `UNSCOPED` | the proposal declared no scope |
+| `APPLIES_TO_MISSING` | the proposal declared no `applies_to` tag |
 | `FORBIDDEN_GRANT` | the granted set names a decider service |
+| `PROMOTION_INVALID` | the promotion target is not a known target |
+| `DOMAIN_PROMOTED` | a domain-scoped change targets the shared part |
 | `DIFF_UNVERIFIED` | the tree's diff cannot be measured |
 | `DIFF_DISAGREES` | the declared diff understates the tree |
 | `FENCE_TOUCHED` | the diff reaches the lifecycle's own rules |
 | `KERNEL_INTERSECTION` | the diff reaches the admission kernel |
 | `AUTHORITY_WIDENED` | a non-empty or absent authority axis |
+| `DOMAIN_ESCAPE` | a domain-scoped diff leaves its declared domain |
 | `JUDGE_RAISED` | a judge raised, or answered for the wrong stage |
 
 `EVIDENCE_MISSING` is the one the item warns about directly. A controller that
@@ -348,6 +352,13 @@ for an empty evidence list.
 `PRECONDITION_FAILED` because issue #1222's exit test asks for a refusal **by
 name** on a non-empty diff, and a single generic code would satisfy the letter
 of that while losing what a reader needs: which authority moved.
+
+`DOMAIN_ESCAPE` and `DOMAIN_PROMOTED` are separate codes for the two ways a
+domain-scoped change can become global (issue #2807): the measured diff leaving
+the declared domain, and the promotion target being the shared realm or the
+default composition. The first is measured and the second is the declared
+target, and both are refusals routed to a human rather than a judgement that
+the scoped lesson is general.
 
 `JUDGE_RAISED` is the fail-closed arm for an exception inside a judge. A
 `try`-less implementation would abort the run and leave a human to decide what
