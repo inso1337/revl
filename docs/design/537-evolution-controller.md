@@ -90,7 +90,7 @@ boundary.
 | `trigger` | precondition | a gap record naming the artifact it was read off (item 535) | did a gap start this, or the clock |
 | `propose` | precondition | the candidate record and its retry budget (item 536's `Candidate{tree, base, scope}`) | is it scoped, and can it terminate |
 | `admit` | precondition | the standalone self-extension compile and the forbidden-grant rule (item 334, `Gate.propose`) | may this code exist at all |
-| `authority` | precondition | the attenuation product, plus this module's fence and kernel enumeration (items 543, 544) | did any authority move |
+| `authority` | precondition | the attenuation product, the operator allow set (`--allow` / `REVL_EDIT_ALLOW`), and this module's fence and kernel enumeration (items 543, 544; issue #2803) | did any authority move, and is the diff inside the operator's grant |
 | `shadow` | measured | a draw the candidate could not read (item 537) | does it behave on inputs it never saw |
 | `canary` | measured | the SLO contracts (`docs/design/473-slo-contracts.md`) | does it behave on real traffic |
 | `observe` | measured | the reward conjunction (item 536) | is the trajectory worth keeping |
@@ -269,6 +269,18 @@ accept the candidate's account of it. It does not:
 matters here: a candidate declaring a clean diff while the tree edits
 `src/revl/attest.py` is still refused with `KERNEL_INTERSECTION`.
 
+### 5.3a The measured diff must also sit inside the operator's grant
+
+The declared scope is the proposal's claim, and a claim is not a bound (issue
+#2803). The editable set therefore arrives from whoever starts the run, as
+`--allow` (repeatable or comma-separated) or `REVL_EDIT_ALLOW`, and never as a
+record key: a proposal carrying an `allow` key has it dropped into
+`prose_ignored` like any other key outside the whitelist. The grant is checked
+against the measured diff at the `authority` precondition. No grant is
+`NO_ALLOW_SET`; a measured path outside it is `OUTSIDE_ALLOW`, and the reason
+names the paths. Both refuse before shadow or canary is read, so the ordering
+barrier covers the new check exactly as it covers the fence and the kernel.
+
 ### 5.4 An absent axis counts as moved
 
 `authority_moved` treats an axis missing from the record as moved, not as empty.
@@ -318,7 +330,7 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
-fail-open default hides. Fifteen named codes:
+fail-open default hides. Seventeen named codes:
 
 | code | fires when |
 |---|---|
@@ -333,6 +345,8 @@ fail-open default hides. Fifteen named codes:
 | `FORBIDDEN_GRANT` | the granted set names a decider service |
 | `DIFF_UNVERIFIED` | the tree's diff cannot be measured |
 | `DIFF_DISAGREES` | the declared diff understates the tree |
+| `NO_ALLOW_SET` | the operator supplied no allow set |
+| `OUTSIDE_ALLOW` | the measured diff leaves the operator allow set |
 | `FENCE_TOUCHED` | the diff reaches the lifecycle's own rules |
 | `KERNEL_INTERSECTION` | the diff reaches the admission kernel |
 | `AUTHORITY_WIDENED` | a non-empty or absent authority axis |
