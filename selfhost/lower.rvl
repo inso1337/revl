@@ -15430,7 +15430,7 @@ fn tk_check_flat(e: Expr, expected: Str, env: List[Bind], where_: Str) -> TInf {
   // got `Int``). The native gate does not instantiate a bare one, so it names
   // the shape instead of admitting it silently.
   let bh = parse_head(expected)
-  if (expected == bh && tk_is_struct(r.ty) && tenv_get(env, "gpar ".concat(bh)) != "") {
+  if (expected == bh && tk_is_struct(r.ty) && tenv_get(env, "grec ".concat(bh)) != "") {
     return tk_no("TYPE", "a record literal for the bare generic record `"
       .concat(bh).concat("` is not typed by the native gate (issue #2405)"))
   }
@@ -17565,13 +17565,24 @@ fn ba_unknown_msg(n: Str) -> Str {
 
 // Whether the reference has a payload type for `pat` over a scrutinee declared
 // `ty`: `_variant_case_payload`, `model_answer.arm_payload`, then the builtin
-// `Opt`/`Result` heads. `_variant_case_payload` is keyed by the scrutinee's
-// whole spelling, so a declared type answers only when it is written with no
-// type arguments. A provided type answers yes, which is the silent direction.
+// `Opt`/`Result` heads. `_variant_case_payload` substitutes the selector's type
+// arguments for an applied USER variant, and reads the case from the type's own
+// case list; a provided type answers yes, which is the silent direction.
 fn ba_payload_known(ty: Str, pat: Str, env: List[Bind]) -> Bool {
   let head = parse_head(ty)
   if (head == "") { return true }
   let args = type_args(ty)
+  // issue #2325: the reference types this binder for an applied user variant,
+  // so its block-arm lift admits an arm reading it. The `cases <head>` row is
+  // the type's OWN case list, which resolves a case name another type shares
+  // (or one the global table dropped, like a user `Some`); `gpar` gives the
+  // arity a raw generic fails.
+  let cs = tenv_get(env, "cases ".concat(head))
+  if (cs != "" && contains(split_top_commas(cs), pat)) {
+    let ps = tenv_get(env, "gpar ".concat(head))
+    if (ps == "") { return true }
+    return args.length() == split_top_commas(ps).length()
+  }
   if (tenv_get(env, "decl ".concat(head)) == "1" && args.length() == 0) { return true }
   if (head == "Answer" || head == "Aggregate" || head == "DissentEntry") { return true }
   if (head == "Opt") { return pat == "Some" && args.length() > 0 }
@@ -30310,15 +30321,38 @@ fn arm_payload(scrutTy: Str, pat: Str, env: List[Bind]) -> Str {
   // scrutinee's ADT. The built-in `Opt`/`Result` payloads come from the
   // scrutinee's type ARGUMENTS below, so the built-in table entries
   // (`Result[Any, Any]`) never match a concrete `Result[Int, Str]` here.
-  if (scrutTy != "" && tenv_get(env, "case ".concat(pat)) == scrutTy) {
-    return tenv_get(env, "payload ".concat(pat))
-  }
+  //
+  // issue #2325: an APPLIED generic variant (`Box[Int]`) substitutes the
+  // selector's type arguments into the case payload (`Held(T)` -> `Int`), the
+  // same rule as the reference's `_variant_case_payload`. A generic variant's
+  // parameters ride the case table as `gpar <Name>` (the row generic records
+  // already use), and the built-ins are answered first so their seeded
+  // `Result[Any, Any]` rows never shadow the concrete arguments.
   let head = parse_head(scrutTy)
   let args = type_args(scrutTy)
   if (head == "Opt" && pat == "Some" && args.length() >= 1) { return args[0] }
   if (head == "Result" && args.length() == 2) {
     if (pat == "Ok") { return args[0] }
     if (pat == "Err") { return args[1] }
+  }
+  if (scrutTy != "" && tenv_get(env, "case ".concat(pat)) == head) {
+    let payload = tenv_get(env, "payload ".concat(pat))
+    let params = tenv_get(env, "gpar ".concat(head))
+    if (params != "") {
+      let names = split_top_commas(params)
+      // A raw generic selector (`Box`, no arguments) has no arguments to
+      // substitute and answers nothing, as the reference does; returning the
+      // bare parameter would name a type that is not in scope.
+      if (names.length() != args.length()) { return "" }
+      var sub: List[Bind] = []
+      var i = 0
+      while (i < names.length()) {
+        sub = sub.push({ name: names[i], ty: args[i] })
+        i += 1
+      }
+      return tk_subst(payload, sub)
+    }
+    return payload
   }
   return ""
 }
@@ -30911,6 +30945,16 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> CaseSte
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
   var k = j
   var acc = a
+  // issue #2325: a generic variant's parameters, under the same `gpar <Name>`
+  // row generic records use, so `arm_payload` can substitute an applied
+  // selector's arguments into the case payload.
+  if (atk(ts, i + 2, "[")) {
+    let tps = cfg_tparams(ts, i + 2)
+    if (tps.length() > 0) {
+      acc = { binds: acc.binds.push({ name: "gpar ".concat(nm), ty: tps.join(",") }),
+              amb: acc.amb }
+    }
+  }
   while (k < lineHi) {
     if (atk(ts, k, "ident")) {
       let cn = tkc(ts, k).text
@@ -31543,6 +31587,21 @@ fn pins_return_only_call(node: Str, env: List[Bind]) -> Bool {
     i += 1
   }
   return n != "" && tenv_get(env, "rog ".concat(n)) == "1"
+}
+
+// `_pin_record_expected` (issue #2325): an ANNOTATED `let`-bound generic
+// record literal carries the local's applied type on the literal (`expected`),
+// so the Java emitters can name the constructor's type arguments when javac
+// cannot infer them. An unannotated literal is not pinned: its type is what the
+// checker inferred, and the native producer must answer the same type for the
+// byte-identical IR.
+fn pins_record_expected(node: Str, declared: Str, env: List[Bind]) -> Str {
+  if (declared == "" || !node.startsWith("{\"kind\":\"record\"")) { return "" }
+  let h = parse_head(declared)
+  if (tenv_get(env, "grec ".concat(h)) == "") { return "" }
+  let ps = tenv_get(env, "gpar ".concat(h))
+  if (ps == "" || type_args(declared).length() != ps.split(",").length()) { return "" }
+  return declared
 }
 
 // The `?`-marked type parameters a marked spelling mentions, in first-use order.
@@ -32940,6 +32999,13 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (declared != "" && pins_return_only_call(rjs, env)) {
       value = value.slice(0, value.length() - 1)
         .concat(",\"expected\":").concat(jstr(declared)).concat("}")
+    }
+    // issue #2325: `_pin_record_expected`, after both; a generic record
+    // literal carries the local's applied type when javac cannot infer it.
+    let rec_pin = pins_record_expected(rjs, declared, env)
+    if (rec_pin != "") {
+      value = value.slice(0, value.length() - 1)
+        .concat(",\"expected\":").concat(jstr(rec_pin)).concat("}")
     }
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false")
