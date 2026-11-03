@@ -292,16 +292,18 @@ The lock row's metadata is a verbatim projection of the index row
 The hash fields are not copied. `sourceHash`, `manifestHash` and
 `dossierHash` are the sha256 of the `component.rvl`, `manifest.json` and
 `dossier.json` text truc writes under `trucs/<name>/`. The commit plan
-carries the hash of each file the planner read and the gate admitted
-(a file the entry does not ship is carried as ""); `commit_add` reads the
-registry again to vendor it and refuses, with nothing written, unless the
-text it is about to write hashes to the admitted value. The commit-time index
-row must agree too, so a registry that rewrote its own hashes is refused
-rather than believed. A disagreement means the registry changed between plan
-and commit, and it is refused even when an entry and its index row were
-replaced together: the index cannot vouch for itself. A vendored
-`dossier.json` is pinned the same way as `dossierHash`, which the index does
-not carry, so the plan's own hash is the only check on it.
+carries the hash of each file `truc add` read and checked (`component.rvl` is
+also the text the gate admits; `manifest.json`/`dossier.json` never enter the
+gate; a file the entry does not ship is carried as ""); `commit_add` reads the
+registry again to vendor it and refuses, with nothing written, unless the text
+it is about to write hashes to the checked value, and a re-add drops a
+vendored dossier the entry no longer ships. The commit-time index row must
+agree too, so a registry that rewrote its own hashes is refused rather than
+believed. A disagreement means the registry changed between plan and commit,
+and it is refused even when an entry and its index row were replaced together:
+the index cannot vouch for itself. A vendored `dossier.json` is pinned the
+same way as `dossierHash`, which the index does not carry, so the plan's own
+hash is the only check on it.
 `registry/index.json` already carries every other field the lock needs; truc
 adds only *when* and *from-where*.
 
@@ -332,7 +334,7 @@ not exist and is not worth building for a machine-only file.
 ```
 
 - `sourceHash`/`manifestHash`/`dossierHash`: computed from the vendored
-  text at `add` and required to equal the hash the commit plan admitted
+  text at `add` and required to equal the hash `truc add` read and checked
   (section 4.2); `assemble` recomputes sha256 of each pinned file under
   `trucs/<name>/` and refuses on mismatch, naming the file, and
   `assemble --check` reports the same drift without writing (drift is a
@@ -495,9 +497,10 @@ cli.run(["add", name])              (or ["add", name, "--trust-host-code"])
    │    sourceHash, manifestHash, dossierHash}          pure
    ├ ws.commit_add(".", commit)                        host_commit_add
    │    reads the entry again, hashes the text it is about to write, and
-   │    refuses unless each hash equals the admitted one and the index row
-   │    agrees; on agreement it vendors trucs/<name>/ and writes the lock
-   │    row and the truc.toml entry. An empty commit writes nothing.
+   │    refuses unless each hash equals the one `truc add` checked and the
+   │    index row agrees; on agreement it vendors trucs/<name>/ (dropping a
+   │    dossier the entry no longer ships) and writes the lock row and the
+   │    truc.toml entry. An empty commit writes nothing.
    └ (refusal leaves the disk untouched)
 ```
 

@@ -51,9 +51,11 @@ type Wiring  = { provided: List[Str], needs: List[Need] }
 type Report   = { code: Int, message: Str, sources: Str, commit: Str }
 // `admission` is how the gate admitted the row: "profiled", or
 // "trusted-host-code" when only --trust-host-code admitted its host code.
-// The three hashes are the hashes of the entry text the planner read and the
-// gate admitted — the bytes `commit_add` must find when it vendors them. A
-// file the entry does not ship is carried as "" and asserted absent.
+// The three hashes are the hashes of the entry text `truc add` read and checked
+// — the bytes `commit_add` must find when it vendors them. `component.rvl` is
+// also the text the gate admits; `manifest.json`/`dossier.json` are pinned but
+// never enter the gate. A file the entry does not ship is carried as "" and
+// asserted absent.
 type LockAdd  = { name: Str, registry: Str, admission: Str,
                   sourceHash: Str, manifestHash: Str, dossierHash: Str }
 type Commit   = { lockAdd: LockAdd }
@@ -242,9 +244,10 @@ fn plan_assemble_report(dj: Str, vj: Str, gj: Str) -> Str {
 }
 
 // The plan the commit executes. The three hashes are computed from the SAME
-// `entryJson` the planner checked against the index and the gate admitted, so
-// `commit_add` can refuse any registry read that no longer matches what was
-// admitted — including an entry and its index row replaced together.
+// `entryJson` the planner checked against the index and read for admission (its
+// `component.rvl` is the gate's candidate), so `commit_add` can refuse any
+// registry read that no longer matches what was checked — including an entry
+// and its index row replaced together.
 fn build_commit(name: Str, admission: Str, sourceHash: Str, manifestHash: Str,
                 dossierHash: Str) -> Str {
   let c: Commit = { lockAdd: { name: name, registry: "local", admission: admission,

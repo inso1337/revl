@@ -235,6 +235,22 @@ def test_dossier_appearing_after_plan_is_refused(tmp_path):
     assert "changed between plan and commit" in message
 
 
+def test_a_re_add_drops_a_dossier_the_registry_no_longer_ships(world):
+    """The other side of asserting an absent dossier: a re-add must remove the
+    previous release's vendored dossier, or it would sit in `trucs/<name>/`
+    unpinned (the new row has no `dossierHash`) and never checked."""
+    reg, proj = world
+    assert _host.commit_add(str(proj), _admitted_plan(reg)) == "committed"
+    assert (proj / "trucs" / ENTRY / "dossier.json").exists()
+
+    (reg / "components" / ENTRY / "dossier.json").unlink()
+    assert _host.commit_add(str(proj), _admitted_plan(reg)) == "committed"
+
+    assert not (proj / "trucs" / ENTRY / "dossier.json").exists()
+    assert "dossierHash" not in _lock_row(proj)
+    assert _host.write_assembly(str(proj), ADMITTED) == "written"
+
+
 def test_index_row_removed_after_plan_is_refused(world):
     """A registry that drops the entry's index row between plan and commit is
     not the registry that admitted it: the add is refused, not written with
@@ -346,6 +362,33 @@ def test_cli_assemble_check_names_a_drifted_vendored_manifest(tmp_path):
     assert r.returncode != 0, r.stdout + r.stderr
     assert "invalid" in r.stdout + r.stderr
     assert "trucs/user_cache/manifest.json" in r.stdout + r.stderr
+    assert not (proj / "build" / "assembly.json").exists()
+
+
+@_cli
+def test_cli_add_of_a_dossier_shipping_entry_pins_the_dossier(tmp_path):
+    """The planner's `Some(text)` dossier branch is only reached by an entry
+    that ships a dossier; the repo registry has none. Drive the real add, then
+    a drifted vendored dossier through `assemble --check`."""
+    reg = _registry(tmp_path)
+    proj = _new_project(tmp_path)
+    toml = proj / "truc.toml"
+    toml.write_text(toml.read_text(encoding="utf-8").replace(str(REGISTRY), str(reg)))
+
+    r = _truc(proj, "add", ENTRY)
+    assert r.returncode == 0, r.stdout + r.stderr
+    vendored = proj / "trucs" / ENTRY / "dossier.json"
+    assert vendored.read_text(encoding="utf-8") == '{"dossier": 1}\n'
+    assert _lock_row(proj)["dossierHash"] == _sha(
+        vendored.read_text(encoding="utf-8"))
+
+    r = _truc(proj, "assemble", "--check")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    vendored.write_text('{"dossier": 2}\n')
+    r = _truc(proj, "assemble", "--check")
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert f"trucs/{ENTRY}/dossier.json" in r.stdout + r.stderr
     assert not (proj / "build" / "assembly.json").exists()
 
 

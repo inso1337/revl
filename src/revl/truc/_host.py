@@ -35,14 +35,14 @@ bytes truc owns are the bytes under `trucs/`, and an entry that is a link is
 bytes it does not own.
 
 The third exception is the pin on those bytes (issue #2555). `truc add` reads
-an entry once and the gate admits that text; the commit plan carries the
-sha256 of each file admitted. The registry is read again when the plan is
-carried out, so `commit_add` hashes the text it writes, records that, and
-refuses unless it equals the admitted hash — a registry read that disagrees is
-not the entry that was checked, even when an entry and its index row were
+an entry once and the gate admits its `component.rvl`; the commit plan carries
+the sha256 of each file read and checked. The registry is read again when the
+plan is carried out, so `commit_add` hashes the text it writes, records that,
+and refuses unless it equals the checked hash — a registry read that disagrees
+is not the entry that was checked, even when an entry and its index row were
 replaced together. `write_assembly` refuses a vendored `manifest.json` or
-`dossier.json` that no longer matches its pin, and `assemble --check` reads
-the same drift (`vendored_drift`) so the dry run reports it without writing.
+`dossier.json` that no longer matches its pin, and `assemble --check` reads the
+same drift (`vendored_drift`) so the dry run reports it without writing.
 """
 
 from __future__ import annotations
@@ -747,18 +747,18 @@ def _vendored_pins(name: str, texts: dict[str, str], add: dict,
     """The lock row's hash fields: each the sha256 of the text `commit_add` is
     about to write under `trucs/<name>/`, never a value copied from the index.
 
-    Each must equal the hash the ADD ADMITTED for that file, carried in the
-    commit plan (`add`). `truc add` read the entry once and the gate admitted
-    that text; this call reads the registry again to vendor it, so comparing
-    the second read with the plan is what makes the bytes written the bytes
-    that were checked. It holds even when the registry replaces an entry and
-    its index row together between plan and commit: the index cannot vouch for
-    itself, and a replaced entry still hashes differently from the admitted
-    one. The commit-time index row must agree too, when it carries a value, so
-    a registry that rewrote its own hashes is refused rather than believed.
-    A file the plan did not admit is asserted absent: a file that appears or
-    disappears between plan and commit is refused here, before the first
-    write."""
+    Each must equal the hash `truc add` CHECKED for that file, carried in the
+    commit plan (`add`). `truc add` read the entry once and checked that text
+    (`component.rvl` is also the gate's candidate); this call reads the registry
+    again to vendor it, so comparing the second read with the plan is what makes
+    the bytes written the bytes that were checked. It holds even when the
+    registry replaces an entry and its index row together between plan and
+    commit: the index cannot vouch for itself, and a replaced entry still
+    hashes differently from the checked one. The commit-time index row must
+    agree too, when it carries a value, so a registry that rewrote its own
+    hashes is refused rather than believed. A file the plan did not check is
+    asserted absent: a file that appears or disappears between plan and commit
+    is refused here, before the first write."""
     pins: dict[str, str] = {}
     for fname, field in _PIN_FIELDS:
         text = texts.get(fname)
@@ -769,18 +769,18 @@ def _vendored_pins(name: str, texts: dict[str, str], add: dict,
             raise TrucNameRefusal(
                 f"refusing to vendor `{name}`: `components/{name}/{fname}` "
                 f"hashes to {actual or 'nothing (it is missing)'}, but "
-                f"`truc add` admitted "
+                f"`truc add` checked "
                 f"{admitted or 'nothing (the entry did not ship it)'}. The "
                 f"registry changed between plan and commit, so these are not "
-                f"the bytes the gate checked and admitted. Nothing was "
-                f"written; re-run `truc add {name}`.")
+                f"the bytes `truc add` checked. Nothing was written; re-run "
+                f"`truc add {name}`.")
         if expected and actual != expected:
             raise TrucNameRefusal(
                 f"refusing to vendor `{name}`: `components/{name}/{fname}` "
                 f"hashes to {actual}, but the registry index pins {expected}. "
                 f"The registry changed between plan and commit, so these are "
-                f"not the bytes `truc add` checked and admitted. Nothing was "
-                f"written; re-run `truc add {name}`.")
+                f"not the bytes `truc add` checked. Nothing was written; "
+                f"re-run `truc add {name}`.")
         if actual:
             pins[field] = actual
     return pins
@@ -916,6 +916,24 @@ def _clear_vendored_knowledge(dst_dir: pathlib.Path) -> None:
                 old.unlink()
 
 
+def _clear_stale_dossier(dst_dir: pathlib.Path,
+                         sources: list[tuple[str, str]]) -> None:
+    """Drop a vendored `dossier.json` when the entry being added ships none.
+
+    A re-add must leave exactly the triple the plan admitted. The plan asserts
+    an absent dossier as absent; without this the previous release's dossier
+    would survive in `trucs/<name>/`, be pinned by the new row's absence, and
+    so never be checked by `assemble` or `assemble --check` (`_vendored_drift`
+    skips an unpinned file). Only a regular file or a link is removed: a
+    directory named `dossier.json` is not something `commit_add` wrote, and is
+    left alone rather than deleted recursively."""
+    if any(fname == "dossier.json" for fname, _ in sources):
+        return
+    stale = dst_dir / "dossier.json"
+    if stale.is_symlink() or (stale.exists() and stale.is_file()):
+        stale.unlink()
+
+
 def _knowledge_pin(src_dir: pathlib.Path, dst_dir: pathlib.Path) -> dict | None:
     """The lock row's `knowledge` entry: the vendored records' hash, and whether
     the entry's attestation binds them (issue #1769).
@@ -974,10 +992,13 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     verbatim projection of the index row (§4.2), plus an `admitted`
     provenance stamp. Its hashes are not copied: they are computed from the
     text this call writes (`_vendored_pins`), and each must equal the hash the
-    plan carries for it — the text `truc add` read once and the gate admitted
-    — before the first write, or the add is refused with nothing written. The
-    plan is what makes the bytes written the bytes that were checked, even
-    when the registry replaces an entry and its index row together."""
+    plan carries for it — the hash `truc add` checked on its single read (its
+    `component.rvl` is also what the gate admitted) — before the first write,
+    or the add is refused with nothing written. The plan is what makes the
+    bytes written the bytes that were checked, even when the registry replaces
+    an entry and its index row together. A re-add drops a vendored
+    `dossier.json` when the entry no longer ships one, so the directory keeps
+    exactly the triple the plan checked."""
     if not plan_json:
         return "skipped"
     plan = json.loads(plan_json)
@@ -1022,6 +1043,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
             raise _symlink_refusal(dst_dir / fname, f"trucs/{name}/{fname}")
     dst_dir.mkdir(parents=True, exist_ok=True)
     _clear_vendored_knowledge(dst_dir)
+    _clear_stale_dossier(dst_dir, sources)
     for fname, text in sources:
         _write_no_follow(dst_dir / fname, text, f"trucs/{name}/{fname}")
     for fname, sp in copies:

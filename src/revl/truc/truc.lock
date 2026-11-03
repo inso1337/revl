@@ -8,7 +8,7 @@
     },
     {
       "path": "components/fetcher.rvl",
-      "sha256": "cf4a939231e628bafae13b9bfd5ab711fba563625f991e89daea63aee537f3f2"
+      "sha256": "7e284ae55cfba003575674f94d7c17f876f06b9c80072f11ef03f08741462547"
     },
     {
       "path": "components/gatekeeper.rvl",
@@ -20,7 +20,7 @@
     },
     {
       "path": "components/planner.rvl",
-      "sha256": "d67d8e8cc054b8aef2fa8b2f7c72f06385333b93f5643b78cadb1ee66d560d10"
+      "sha256": "57dcaadee7fb0d1595d1f3bf373c6870f4aa73924fcdf82ff45552d6cae3e909"
     },
     {
       "path": "components/assembler.rvl",
