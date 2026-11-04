@@ -551,6 +551,20 @@
     },
     {
       "sites": [
+        "src/revl/lower.py::_variant_case_payload",
+        "src/revl/model_answer.py::applied_spec"
+      ],
+      "tokens": [
+        "cases",
+        "kind",
+        "name",
+        "params",
+        "payload"
+      ],
+      "note": "FALSE POSITIVE. Two functions that read the same variant-spec fields, one from the document's declared user types and one from the provided model-answer types. Neither declares the vocabulary; lowering produces it and both consume it."
+    },
+    {
+      "sites": [
         "src/revl/lsp/protocol.py::error",
         "src/revl/mcp/composed.py::_error",
         "src/revl/mcp/server.py::_error"
