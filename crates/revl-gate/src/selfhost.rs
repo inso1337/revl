@@ -34746,6 +34746,10 @@ fn infer_index(t: String) -> String {
     if (h == "Str") {
         return String::from("Str");
     }
+    if (h == "Map") {
+        let a = type_args(&t);
+        return if (a.revl_length() > 1i64) { (a)[(1i64) as usize].clone() } else { String::from("") };
+    }
     return String::from("");
 }
 
