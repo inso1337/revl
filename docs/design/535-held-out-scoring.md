@@ -247,12 +247,19 @@ is **required** -- a run that does not know what the candidate changed cannot
 claim the candidate could not reach the scorer, so `no-diff` is a refusal --
 and a diff that touches a fenced path is refused with the path named.
 
-The changed set is also bounded. More than `MAX_DIFF_FILES` (200) changed files,
-or more than `MAX_DIFF_LINES` (2000) lines added plus removed when a base
-supplied the line count, is refused with the limit named
-(`diff-too-large:...`). An unbounded diff is a review problem the draw cannot
-answer; the dependency-closure half of the same demand is still a named demand
-in section 6.
+The changed set is also bounded, but the FENCE is checked first: a large diff
+that touches a fenced path keeps the `diff-reaches-fence` refusal, which CI
+treats as a warning. On a diff that does not reach the fence, more than
+`MAX_DIFF_FILES` (200) changed files, or more than `MAX_DIFF_LINES` (2000) lines
+added plus removed when a base supplied the line count, is refused with the
+limit named (`diff-too-large:...`). The line count leaves REGENERATED paths out
+(`REGENERATED_PATHS` / `REGENERATED_PREFIXES`): the census reproduction records
+and the census-artifact catalogue, `crates/revl-gate/src/selfhost.rs`, and the
+corpus provenance manifest. Regenerating one of those is not a candidate's edit
+and can add thousands of lines by itself; `selfhost/lower.rvl` is deliberately
+not on the list because it is a source. An unbounded diff is a review problem
+the draw cannot answer; the dependency-closure half of the same demand is still
+a named demand in section 6.
 
 What is deliberately **not** fenced is the load-bearing half. `src/`,
 `selfhost/`, `backends/`, `crates/`, `stdlib/`, `tests/` and the corpus
@@ -594,10 +601,12 @@ A seed that lives for one run and is never recorded is also harder to read than
 a long-lived one, which is residual 2.1.3; what it gives up is reproducibility,
 so the job prints the seed only when there is a finding to reproduce. The three
 exit statuses are not collapsed: clean passes, a finding fails, and a refusal
-fails except `diff-reaches-fence`, which passes with an annotation because a
-candidate changing the scorer is making a semantic change that routes to human
-review. The job is advisory (`NOT_REQUIRED_CHECKS`) for that reason and the
-enforcement is in the reward, where a conjunction admits no advisory verdict.
+fails except `diff-reaches-fence` and `diff-too-large`, which pass with an
+annotation because a candidate changing the scorer is making a semantic change
+that routes to human review, and the size bound is a review bound whose
+regenerated-artifact churn is already excluded from the line count. The job is
+advisory (`NOT_REQUIRED_CHECKS`) for that reason and the enforcement is in the
+reward, where a conjunction admits no advisory verdict.
 
 **Slice 5 -- rotation and custody (CUSTODY DONE, ROTATION ENFORCED).** Where the
 seed comes from, who holds it, how often it changes, and what happens when it
@@ -658,26 +667,32 @@ buckets; the tool refuses on each of `no-seed`, `seed-too-short`,
 `seed-in-tree`, a seed file inside this work tree, a seed file inside a sibling
 work tree, one behind a symlink into that work tree, an oversized seed file, a
 corrupt rotation ledger, a seed file other users can read, a reused seed
-digest, a diff over the file limit, a diff over the line limit, `no-diff`, each
-of the six fenced paths, an engine that will not build, an unreadable bypass
-allowance, a draw a tell separates, and both vacuity shapes; a refused run
-consumes no rotation and a second scored seed advances the count to 2; a scored
-verdict carries the seed digest and `rotation_count` and the seed itself appears
-nowhere in the record; a scoring run leaves `git status --porcelain`
-byte-identical; the reference admits every `inside:` program of a 200-program
-draw; a certifier mutated to admit everything is caught; a gate with no compiler
-in it that rides a surface tell is caught 50 times in 200 on the draw that ships
-and **is not caught at all** on a draw shaped the way slice 1's was; a gate
-whose refusal arm is gone is caught as a new `false-admit` family under an
-injected in-slice reference and is clean under a baselined one.
+digest, a diff over the file limit, a diff over the line limit, a large diff
+that touches the fence keeping the fence refusal, the line count skipping the
+regenerated paths, `no-diff`, each of the six fenced paths, an engine that will
+not build, an unreadable bypass allowance, a draw a tell separates, and both
+vacuity shapes; a refused run consumes no rotation and a second scored seed
+advances the count to 2; a scored verdict carries the seed digest and
+`rotation_count` and the seed itself appears nowhere in the record; a scoring
+run leaves `git status --porcelain` byte-identical; the reference admits every
+`inside:` program of a 200-program draw; a certifier mutated to admit
+everything is caught; a gate with no compiler in it that rides a surface tell
+is caught 50 times in 200 on the draw that ships and **is not caught at all** on
+a draw shaped the way slice 1's was; a gate whose refusal arm is gone is caught
+as a new `false-admit` family under an injected in-slice reference and is clean
+under a baselined one.
 
 Verified on the wiring: `tools/evolution_reward.py` fails the `held-out`
 component on an unset seed file, on a refusal, on a divergence and on a run that
 writes no record, and verifies only on a clean one; the probe leaves the
 candidate tree as it found it. The CI job, run on the branch that adds it,
 exits 2 with `diff-reaches-fence` naming both scorer files, which is the
-annotated-and-not-blocking path; its seed is written to `$RUNNER_TEMP` outside
-the checkout with mode 0600 before the scorer is invoked.
+annotated-and-not-blocking path; because it stops at the fence, this change's
+own CI run never reaches a scored pass with a file seed, so the `$RUNNER_TEMP`
+seed file and the ledger write beside it are covered by the unit tests and not
+by CI. A pinned test reads the workflow and holds `diff-too-large:*` in the
+same warning branch as `diff-reaches-fence:*`; the job's live behavior on a
+batch push over the line bound is not exercised by this pull request.
 
 **Not verified, and not claimed.** That the draw is indistinguishable from real
 programs: it is not, `closed-vocabulary` recognition is 1.00, and section 3.7
@@ -690,10 +705,15 @@ the tool checks that the file is outside every git repository and owner-only, no
 that another process running as the same user cannot read it. That the line
 limit is enforced when the caller uses `--diff-paths` instead of a git base:
 that mode has no diff to count, so only the file-count limit applies. That the
-fence is complete against a candidate that reaches the scorer by a route other
-than editing one of its files, for example by changing a file `src/revl/`
-imports that the census's reference depends on: the closure test classifies
-that file as **subject**, which is correct (the candidate must be able to
-change it) and is also the limit of what a fence can do. That the CI job has
-ever run on GitHub: it is added by this change and its first run is this pull
-request's.
+size bound covers every regenerated artifact: the exclusion list is explicit
+and pinned, and a newly generated path that is not on it counts toward the
+limit until it is added. That the CI job's live behavior on a batch push over
+the line bound was exercised by this pull request: its own run stops at the
+fence, so the warning branch for `diff-too-large` is held by a test on the
+workflow text rather than by a run. That the fence is complete against a
+candidate that reaches the scorer by a route other than editing one of its
+files, for example by changing a file `src/revl/` imports that the census's
+reference depends on: the closure test classifies that file as **subject**,
+which is correct (the candidate must be able to change it) and is also the
+limit of what a fence can do. That the CI job has ever run on GitHub: it is
+added by this change and its first run is this pull request's.

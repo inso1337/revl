@@ -47,11 +47,17 @@ THE FOUR ENFORCEMENTS
 
 4. THE CANDIDATE'S DIFF MUST NOT REACH THE SCORER. `HELD_OUT_FENCE` lists the
    paths that decide what is drawn and what counts as a divergence. The
-   candidate's changed-file set is required, a diff over the size limit is
-   REFUSED with the limit named, and a diff that touches a fenced path is
-   REFUSED rather than scored, because a candidate that edited the scorer has
-   not been scored by it. Refused is not failed: it is the verdict that routes
-   a semantic change to a human, which is what item 537 asks for.
+   candidate's changed-file set is required and a diff that touches a fenced
+   path is REFUSED rather than scored, because a candidate that edited the
+   scorer has not been scored by it. Refused is not failed: it is the verdict
+   that routes a semantic change to a human, which is what item 537 asks for.
+   The fence is checked BEFORE the diff-size bound, so a large diff that
+   reaches the scorer keeps the fence refusal; on a diff that does not reach
+   it, more than `MAX_DIFF_FILES` changed files or more than `MAX_DIFF_LINES`
+   non-regenerated lines is REFUSED with the limit named. Regenerated
+   artifacts (the census records and catalogue, the crate's generated
+   `selfhost.rs`, the corpus provenance manifest) are left out of the line
+   count because their churn is not the candidate's edit.
 
 THE FAILURE DIRECTION IS CLOSED
 -------------------------------
@@ -230,12 +236,18 @@ DATA_INPUTS = (
 # `--check` / `--record-lines` and by `tests/test_gate_reference_census.py`,
 # never by `run()`: the scorer counts verdict divergences, not lines, so the
 # ledger decides nothing a scoring run draws.
+#
+# `.github/workflows/ci.yml` is read by `tests/test_heldout_scoring.py` to pin
+# how CI treats the `diff-too-large` refusal, never by `run()`: the workflow
+# decides how a refusal is reported, not what is drawn or what counts as a
+# divergence.
 SCORING_UNREACHED = (
     "tools/fuzz_frontend.py",
     "tools/corpus_provenance.py",
     "tools/affected_tests.py",
     "pyproject.toml",
     "tools/gate_reference_line_ledger.json",
+    ".github/workflows/ci.yml",
 )
 
 
@@ -491,27 +503,55 @@ def record_rotation(ledger: Path, digest: str) -> int:
 MAX_DIFF_FILES = 200
 MAX_DIFF_LINES = 2000
 
+# Regenerated artifacts are left out of the LINE count: regenerating one is not
+# a candidate's work and can add thousands of lines by itself (the census
+# reproduction records and the crate's generated selfhost module are the
+# measured offenders). The changed-FILE count still includes them, because a
+# diff that touches two hundred files is a review problem whatever they are.
+# `selfhost/lower.rvl` is deliberately NOT here: it is a source, and the
+# regeneration registry's entry for it is a sort, not a generation.
+REGENERATED_PATHS = (
+    "crates/revl-gate/src/selfhost.rs",
+    "tests/fixtures/corpus_provenance.json",
+)
+REGENERATED_PREFIXES = (
+    "docs/census-artifact/",
+    "tests/fixtures/census_crate_reproduction/",
+)
+
+
+def is_regenerated(path: str) -> bool:
+    """True for a path whose line churn is a regeneration, not an edit."""
+    norm = path.replace("\\", "/").strip()
+    return (norm in REGENERATED_PATHS
+            or any(norm.startswith(prefix) for prefix in REGENERATED_PREFIXES))
+
 
 def fence_verdict(changed, fence=HELD_OUT_FENCE, diff_lines=None):
     """The fenced paths a candidate's changed-file set reaches, in order.
 
     `changed` is repo-relative. A path outside the fence is not inspected: this
-    is a reachability question about the scorer, not a review of the diff. A
-    changed-file set or a line count over the size limit refuses with the limit
-    named; the line half is skipped when no base supplied it (`--diff-paths`),
-    never assumed to be zero.
+    is a reachability question about the scorer, not a review of the diff. The
+    FENCE is checked before the size bound, so a large diff that reaches the
+    scorer keeps the `diff-reaches-fence` refusal (which CI treats as a
+    warning) instead of becoming a size error. A changed-file set or a line
+    count over the size limit, on a diff that does not reach the fence, refuses
+    with the limit named; the line half is skipped when no base supplied it
+    (`--diff-paths`), never assumed to be zero.
     """
+    reached = []
+    for path in changed:
+        norm = path.replace("\\", "/").lstrip("./")
+        if norm in fence:
+            reached.append(norm)
+    if reached:
+        return reached
     if len(changed) > MAX_DIFF_FILES:
         raise Refusal("diff-too-large:files:" + str(len(changed))
                       + ">" + str(MAX_DIFF_FILES))
     if diff_lines is not None and diff_lines > MAX_DIFF_LINES:
         raise Refusal("diff-too-large:lines:" + str(diff_lines)
                       + ">" + str(MAX_DIFF_LINES))
-    reached = []
-    for path in changed:
-        norm = path.replace("\\", "/").lstrip("./")
-        if norm in fence:
-            reached.append(norm)
     return reached
 
 
@@ -538,9 +578,11 @@ def diff_lines_from_base(root: Path, base: str):
     """Lines added plus lines removed in `base..HEAD`, or a refusal.
 
     `--numstat` rather than `--shortstat` so a binary file (which `git` reports
-    as `-`) can be counted as zero lines instead of poisoning the sum. The
-    bound this feeds is a review bound, not an exactness claim: a candidate
-    that changes ten thousand lines is not one a 200-program draw can judge.
+    as `-`) can be counted as zero lines instead of poisoning the sum. Paths in
+    `REGENERATED_PATHS` / `REGENERATED_PREFIXES` are skipped: their churn is a
+    regeneration, not a candidate's edit. The bound this feeds is a review
+    bound, not an exactness claim: a candidate that changes ten thousand lines
+    is not one a 200-program draw can judge.
     """
     try:
         done = subprocess.run(
@@ -553,7 +595,9 @@ def diff_lines_from_base(root: Path, base: str):
     total = 0
     for line in done.stdout.splitlines():
         fields = line.split("\t")
-        if len(fields) < 2:
+        if len(fields) < 3:
+            continue
+        if is_regenerated(fields[2]):
             continue
         for field in fields[:2]:
             if field.isdigit():

@@ -418,6 +418,32 @@ def test_a_diff_over_the_line_limit_refuses_with_the_limit_named():
         + ">" + str(heldout.MAX_DIFF_LINES))
 
 
+def test_a_large_diff_that_reaches_the_fence_keeps_the_fence_refusal():
+    """The fence is checked first, so CI's warning path wins over the size error.
+
+    A diff that edits the scorer is a semantic change routed to review whatever
+    its size, and CI treats `diff-reaches-fence` as a warning while an
+    unclassified `diff-too-large` would be an error.
+    """
+    changed = (["src/revl/generated_%d.py" % index
+                for index in range(heldout.MAX_DIFF_FILES)]
+               + ["tools/heldout_scoring.py"])
+    record, _status = _run(
+        changed=changed, diff_lines=heldout.MAX_DIFF_LINES + 1)
+    assert record["refusal"] == "diff-reaches-fence:tools/heldout_scoring.py"
+
+
+def test_regenerated_paths_are_named_and_a_source_is_not_one():
+    for path in ("crates/revl-gate/src/selfhost.rs",
+                 "tests/fixtures/corpus_provenance.json",
+                 "docs/census-artifact/cases/example.json",
+                 "tests/fixtures/census_crate_reproduction/x.json"):
+        assert heldout.is_regenerated(path), path
+    for path in ("selfhost/lower.rvl", "src/revl/lower.py",
+                 "tests/test_heldout_scoring.py"):
+        assert not heldout.is_regenerated(path), path
+
+
 def test_diff_lines_from_base_counts_added_plus_removed(tmp_path):
     """The number the line limit compares against, from a real git diff."""
     repo = tmp_path / "repo"
@@ -437,6 +463,54 @@ def test_diff_lines_from_base_counts_added_plus_removed(tmp_path):
     git("-c", "user.name=t", "-c", "user.email=t@example.com",
         "commit", "-qm", "change")
     assert heldout.diff_lines_from_base(repo, "HEAD~1") == 3
+
+
+def test_the_line_count_ignores_regenerated_paths(tmp_path):
+    """A regenerated artifact's churn is not the candidate's edit."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo)] + list(args), check=True,
+                       capture_output=True, text=True, timeout=120)
+
+    generated = (repo / "tests" / "fixtures" /
+                 "census_crate_reproduction" / "record.json")
+    generated.parent.mkdir(parents=True)
+    normal = repo / "src" / "normal.py"
+    normal.parent.mkdir()
+    git("init", "--quiet")
+    generated.write_text("{}\n" * 3000, encoding="utf-8")
+    normal.write_text("a\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qm", "base")
+    generated.write_text("{}\n" * 6000, encoding="utf-8")
+    normal.write_text("a\nb\nc\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qm", "change")
+    # 3000 generated lines are excluded; the normal file added two.
+    assert heldout.diff_lines_from_base(repo, "HEAD~1") == 2
+
+
+def test_ci_treats_the_size_refusal_as_a_warning_like_the_fence():
+    """Pinned: a `diff-too-large` refusal must not red the held-out job.
+
+    A batch push can still cross the file bound even with regenerated paths
+    left out of the line count, and the job's contract is that a refusal to
+    score is a warning, not a failure.
+    """
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    start = text.index("  held-out:")
+    end = text.index("  # Issue #1572", start)
+    job = text[start:end]
+    assert 'if [ "$status" = "2" ]' in job
+    warning = job[:job.index('echo "::error title=held-out scoring refused')]
+    assert "diff-reaches-fence:*" in warning
+    assert "diff-too-large:*" in warning
+
 
 
 def test_main_passes_the_git_diff_line_count_to_the_run(

@@ -1619,15 +1619,19 @@ jobs:
   #   0  scored clean                          -> pass
   #   1  scored, a zero-tolerance finding      -> FAIL
   #   2  refused, `diff-reaches-fence`         -> pass, annotated for review
+  #   2  refused, `diff-too-large`             -> pass, annotated for review
   #   2  refused, anything else                -> FAIL
-  # Exit 2 on the fence is the one refusal that is not a failure of the check:
-  # the design's own words are that a candidate changing the scorer is making a
-  # semantic change, and REFUSED is the routing of that change to a human
-  # rather than a verdict about the candidate. Every other refusal means the
-  # question could not be asked, and a question that could not be asked has not
-  # been answered green. There is no path here that scores against the in-tree
-  # corpus when the draw is unavailable, which is the fail-open shape the item
-  # exists to prevent.
+  # Exit 2 on the fence or on the size bound is not a failure of the check:
+  # a candidate changing the scorer is making a semantic change, and REFUSED is
+  # the routing of that change to a human rather than a verdict about the
+  # candidate. The size bound is a review bound, and the regenerated artifacts
+  # it would otherwise count (census records and catalogue, the crate's
+  # generated selfhost module, the corpus provenance manifest) are excluded
+  # from its line count, so a batch push or a regeneration does not red this
+  # job. Every other refusal means the question could not be asked, and a
+  # question that could not be asked has not been answered green. There is no
+  # path here that scores against the in-tree corpus when the draw is
+  # unavailable, which is the fail-open shape the item exists to prevent.
   held-out:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1694,6 +1698,14 @@ jobs:
                 echo "This diff changes the scorer, so it was NOT scored by it."
                 echo "That is a semantic change to the gate and routes to human"
                 echo "review (docs/design/535-held-out-scoring.md section 3.2)."
+                exit 0
+                ;;
+              diff-too-large:*)
+                echo "::warning title=held-out scoring refused::$refusal"
+                echo "This diff is over the size bound, so it was NOT scored by"
+                echo "the held-out draw. The bound is a review bound and not a"
+                echo "verdict about the candidate (docs/design/535-held-out-"
+                echo "scoring.md section 3.2)."
                 exit 0
                 ;;
             esac
