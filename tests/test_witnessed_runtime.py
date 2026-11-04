@@ -32,6 +32,7 @@ resolution is a separate cordis path, not what these tests exercise).
 import copy
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -640,8 +641,18 @@ def test_a_failed_compensation_lands_as_residue_and_abort_still_succeeds(target,
 def test_compensate_call_site_emits_through_frame_compensation():
     emit = _emit_backend()
     body = emit.emit(_comp_ir(_compensated_component("CompClean", abort=False)))
-    assert ("yield _revl_frame.compensation(lambda: offset('go'), "
-            "call={'receiver': None, 'method': 'offset', 'args': ['go']})") in body
+    # The compensation is still registered as a `Frame.compensation` entry,
+    # with the named call the WAL pairing needs, but issue #2688 moved the
+    # registration to the host-extern seam: the fire carries it as a zero-arg
+    # factory, so a crossing that fires and is then refused on its return (a
+    # `time` overrun is only observable when the host call returns) keeps it.
+    # The body yields the entry the seam returns instead of yielding the
+    # registration directly, which is why the seam form is the contract here.
+    assert ("compensate=lambda: _revl_frame.compensation("
+            "lambda: offset('go'), "
+            "call={'receiver': None, 'method': 'offset', 'args': ['go']}, "
+            "crossing='note')") in body
+    assert re.search(r"^ +yield _revl_emit\d+\.compensation$", body, re.M)
     # not a bare disposer: no plain `yield lambda:` for the compensate step
     # (the witnessed step's own transactional yield is also absent here,
     # since `stash`'s registration itself is `_revl_frame.transactional`,
