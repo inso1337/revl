@@ -81,7 +81,7 @@ regenerated rather than edited.
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 9 |  |
-| delivery-semantics.md | needs-work | 7 |  |
+| delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 86 |  |
