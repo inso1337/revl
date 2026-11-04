@@ -8710,19 +8710,145 @@ fn mth_body_tys(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind
                       hv_bind(bound == "" ? env : tenv_put(env, s.bind, bound), s), cx)
 }
 
+// ------------------------- the component binders item 445 owns (G6, #2544)
+//
+// The reference's item-445 scan (`_refuse_callable_shadowing`,
+// `src/revl/lower.py`) walks a WHOLE component at once: every binder anywhere
+// in it is a G6 candidate, and a CALL anywhere in the component makes a bound
+// name ambiguous. A component setup `let`/effect, a method `let`/`for`/`every`
+// binder (the component statement reader flattens nested blocks), an arrow
+// parameter, a match-arm payload and a block arm's `let` all count, including
+// binders in a method OTHER than the one holding the call.
+//
+// A provide method's PARAMETERS are the one form that scan cannot see (its
+// parameter list is names, not typed nodes), which is why `mth_param_tys` marks
+// them for the #2544 typecheck guard. The guard may claim the module
+// `fn`/extern half only where NO other binder of that name exists in the
+// component: when one does, the reference spells G6 and the guard must stand
+// down rather than answer T1. These walkers collect exactly that set, and a
+// component the statement reader could not model (a `skip` statement) makes the
+// set unknowable, so `partial` turns the claim off instead of guessing.
+type G6B = { names: List[Str], partial: Bool }
+
+fn g6_expr_binds(e: Expr, acc: List[Str]) -> List[Str] {
+  return match e {
+    Bin(b)      => g6_expr_binds(b.r, g6_expr_binds(b.l, acc)),
+    Un(u)       => g6_expr_binds(u.e, acc),
+    Emit(u)     => g6_expr_binds(u.e, acc),
+    Call(c)     => g6_expr_binds_list(c.args, 0, g6_expr_binds(c.target, acc)),
+    Field(f)    => g6_expr_binds(f.target, acc),
+    OptField(f) => g6_expr_binds(f.target, acc),
+    OptCall(c)  => g6_expr_binds_list(c.args, 0, g6_expr_binds(c.target, acc)),
+    Index(x)    => g6_expr_binds(x.idx, g6_expr_binds(x.target, acc)),
+    If(f)       => g6_expr_binds(f.els,
+                    g6_expr_binds(f.then_, g6_expr_binds(f.cond, acc))),
+    Rec(r)      => g6_expr_binds_inits(r.fields, 0, acc),
+    RecUpd(r)   => g6_expr_binds_inits(r.upds, 0, g6_expr_binds(r.base, acc)),
+    Lst(l)      => g6_expr_binds_list(l.items, 0, acc),
+    Arrow(a)    => g6_expr_binds(a.body, union_into(acc, param_names(a.params))),
+    Match(m)    => g6_expr_binds_arms(m.arms, 0, g6_expr_binds(m.scrut, acc)),
+    Templ(t)    => g6_expr_binds_parts(t.parts, 0, acc),
+    _           => acc,
+  }
+}
+
+fn g6_expr_binds_list(xs: List[Expr], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return g6_expr_binds_list(xs, i + 1, g6_expr_binds(xs[i], acc))
+}
+
+fn g6_expr_binds_inits(xs: List[InitN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return g6_expr_binds_inits(xs, i + 1, g6_expr_binds(xs[i].value, acc))
+}
+
+fn g6_expr_binds_parts(ps: List[PartN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ps.length()) { return acc }
+  let next = ps[i].kind == "e" ? g6_expr_binds(ps[i].e, acc) : acc
+  return g6_expr_binds_parts(ps, i + 1, next)
+}
+
+fn g6_expr_binds_arms(xs: List[ArmN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  let a = xs[i]
+  var out = a.bind != "" ? union_into(acc, [a.bind]) : acc
+  if (a.isBlk) {
+    var k = 0
+    while (k < a.blk.length()) {
+      out = union_into(out, [a.blk[k].name])
+      out = g6_expr_binds(a.blk[k].value, out)
+      k += 1
+    }
+    out = g6_expr_binds(a.blkTail, out)
+  } else {
+    out = g6_expr_binds(a.body, out)
+  }
+  return g6_expr_binds_arms(xs, i + 1, out)
+}
+
+// One statement list's binders: the statement's own binder (a `let`/`for`/
+// `every` item, nested blocks flattened into this list by the reader) and the
+// binders inside its expression.
+fn g6_stmt_binds(ss: List[Stmt], i: Int, acc: G6B) -> G6B {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  var out = acc
+  if (s.kind == "skip") { out = { names: acc.names, partial: true } }
+  if (s.bind != "") {
+    out = { names: union_into(out.names, [s.bind]), partial: out.partial }
+  }
+  return g6_stmt_binds(ss, i + 1,
+                       { names: g6_expr_binds(s.e, out.names),
+                         partial: out.partial })
+}
+
+fn g6_component_binds(comp: CompD) -> G6B {
+  var out: G6B = g6_stmt_binds(comp.setup, 0, { names: [], partial: false })
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let ms = comp.provs[pi].methods
+    var mi = 0
+    while (mi < ms.length()) {
+      out = g6_stmt_binds(ms[mi].body, 0, out)
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+// The set as type-environment rows, never keyed like a source name.
+fn g6_bind_rows(comp: CompD) -> List[Bind] {
+  let b = g6_component_binds(comp)
+  var out: List[Bind] = b.partial ? [{ name: "g6 partial", ty: "1" }] : []
+  var i = 0
+  while (i < b.names.length()) {
+    out = out.push({ name: "g6b ".concat(b.names[i]), ty: "1" })
+    i += 1
+  }
+  return out
+}
+
 // The method's parameters at the types the SERVICE declares, over the
 // program-wide table. A method's own annotation is preferred where it wrote one
 // (the two have already been held to each other by `a6_annotation_verdict`, so
 // they agree wherever both are present), and a parameter neither side spells
 // contributes nothing.
+//
+// The `mp` marker names the parameter, whether or not a type was available: the
+// one binder form the reference's item-445 scan cannot see, so the #2544 guard
+// may claim its module-`fn`/extern fall-through (`tk_names_fallthrough`). The
+// caller appends `g6_bind_rows` so that claim can be withheld when the
+// component binds the name anywhere else.
 fn mth_param_tys(pm: ProvM, decl: MSig, i: Int, acc: List[Bind]) -> List[Bind] {
   if (i >= pm.params.length()) { return acc }
   var ty = ""
   if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
   if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
   ty = tk_solid(ty, acc)
+  let b = tenv_put(acc, "mp ".concat(pm.params[i]), "1")
   return mth_param_tys(pm, decl, i + 1,
-                       ty == "" ? acc : tenv_put(acc, pm.params[i], ty))
+                       ty == "" ? b : tenv_put(b, pm.params[i], ty))
 }
 
 fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
@@ -9947,6 +10073,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind],
   // the component-scope names a provide-method binding may not reuse
   // (`_check_rebind`'s `env.locals`): the activation body's own `let`s.
   let compLocals = stmt_binds(comp.setup, 0, [])
+  // the component-wide binder set item 445's G6 scan sees, so the #2544 guard
+  // does not answer T1 for a method parameter when another binder of that name
+  // (anywhere in the component) makes the reference spell G6.
+  let g6Rows = g6_bind_rows(comp)
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
@@ -9992,8 +10122,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind],
       // under-refusing direction.
       // a parameter shadows a same-named host local of the activation body
       let mtv = mth_type_verdict(arrow_typed_body(pm), 0,
-                                 hv_shadow(ct_req_ret_rows(mcx, mth_param_tys(pm, decl, 0, setupTys)),
-                                           pm.params), mcx,
+                                 concat_binds(
+                                   hv_shadow(ct_req_ret_rows(mcx, mth_param_tys(pm, decl, 0, setupTys)),
+                                             pm.params),
+                                   g6Rows), mcx,
                                  tk_solid(taint_strip(decl.ret), gtys), pm.name,
                                  comp.line)
       if (mtv.v != "") { return mtv }
@@ -15809,6 +15941,59 @@ fn tk_ty_has_tparam(t: Str, env: List[Bind]) -> Bool {
   return true
 }
 
+// ------------------------------------------ the non-function call (#2544)
+//
+// `typecheck.refuse_call_on_non_function`: a bare-name call whose callee is a
+// BINDER the type environment holds a definitely-not-a-function type for, while
+// a module `fn`/extern or ADT case of the same name exists. Such a call names
+// the module callable instead and silently drops the binding, which the
+// reference refuses by TYPE. This is where that refusal belongs: `tk_call` is
+// the expression walk both the module-`fn` and the provide-method type layers
+// run, and the reference raises it while typing the call.
+//
+// The callable-existence half keeps the refusal true: with no case row and no
+// reachable module `fn`/extern there is no fall-through to name, and the call is
+// left to the ordinary checks. A function-typed binder (`->`, `Fn[...]`) is the
+// callee (issue #1823), and the open heads `Any`/`Value`/`Never` are not
+// "definitely not a function", so all of them stay admitted. The `sigv`
+// comparison comes first so a module `fn` called under its own declaration row
+// costs no type parse; a rebinding local never matches that row.
+//
+// THE METHOD-PARAMETER MARKER is what keeps the layer honest, and it is not
+// enough by itself. The reference's item-445 scan (`_refuse_callable_shadowing`,
+// G6) runs before the type layer and sees every binder except a provide
+// method's PARAMETERS (its parameter list is names, not typed nodes). That scan
+// is COMPONENT-WIDE: a `let` in another method, an arrow parameter or a
+// match-arm payload makes the name G6 even when the call is on a method
+// parameter, and this guard must not answer T1 there. So the fn/extern half is
+// claimed only when `mth_param_tys` marked the parameter AND the component-wide
+// binder set (`g6_bind_rows`) holds the name nowhere else; `g6 partial`
+// withdraws the claim for a component the statement reader could not model. A
+// CASE constructor is not in item 445's universe at all, so the case half is
+// decided in every stratum.
+fn tk_names_fallthrough(n: Str, env: List[Bind]) -> Bool {
+  if (tenv_get(env, "case ".concat(n)) != "") { return true }
+  if (tenv_get(env, "g6 partial") == "1") { return false }
+  if (tenv_get(env, "g6b ".concat(n)) == "1") { return false }
+  return tenv_get(env, "mp ".concat(n)) == "1" && sig_declared(env, n)
+}
+
+fn tk_non_function_call_msg(n: Str, ty: Str) -> Str {
+  return "`".concat(n).concat("` is bound here as `").concat(tk_render(ty))
+    .concat("`, which is not a function, so it cannot be called")
+}
+
+fn tk_non_function_call(c: CallN, env: List[Bind]) -> TInf {
+  let n = match c.target { Var(v) => v, _ => "", }
+  if (n == "") { return tk_ok("") }
+  let local = tenv_get(env, n)
+  if (local == "") { return tk_ok("") }
+  if (local == tenv_get(env, sig_key("sigv", n))) { return tk_ok("") }
+  if (is_callable_value_ty(local)) { return tk_ok("") }
+  if (!tk_names_fallthrough(n, env)) { return tk_ok("") }
+  return tk_no("T1", tk_non_function_call_msg(n, local))
+}
+
 // A call: every argument is walked for the refusals inside it. Argument-vs-
 // signature checking is T2b's slice, so the call's own type comes from the
 // annotation engine.
@@ -15840,6 +16025,11 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }
+  // issue #2544: the reference types the arguments, then decides a bare-name
+  // callee against the type environment BEFORE the case payload and the
+  // signature table, so a call on a non-function binder is refused here.
+  let nfc = tk_non_function_call(c, env)
+  if (nfc.v != "") { return nfc }
   // Issue #2448: a variant CASE CONSTRUCTOR call checks its payload against the
   // case's declared type (`typecheck.infer_ast`'s ExprCall arm; the counterpart
   // is `selfhost/checker.rvl`'s `case_call_ty`). This walk resolved a case name
