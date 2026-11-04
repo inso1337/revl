@@ -631,6 +631,55 @@ def test_native_ir_infers_callable_results(lower_to_ir, source):
     assert native == reference
 
 
+# Issue #2945: every arithmetic shape over an extern call. The reference types
+# the call from its declared signature, so the `operands` tag lands on the
+# arithmetic and the python backend wraps it in the Int bound check. The
+# self-host `case_binds` table bound a module `fn`'s name to its signature but
+# SKIPPED an `extern`, so each of these reached the IR unannotated and lost the
+# check. `bump(x) / 2` keeps Int operands but yields Float, which is why the
+# return type is written per shape rather than fixed.
+_EXTERN_ARITHMETIC_SHAPES = [
+    ("return 1 + bump(x)", "Int"),
+    ("return bump(x) + 1", "Int"),
+    ("return bump(x) * 2", "Int"),
+    ("return 2 - bump(x)", "Int"),
+    ("return bump(x) / 2", "Float"),
+    ("return bump(x) % 2", "Int"),
+    ("return -bump(x)", "Int"),
+    ("let y = bump(x) + 1 return y", "Int"),
+    ("let y = bump(x) return y + 1", "Int"),
+]
+
+
+@pytest.mark.parametrize("body,returns", _EXTERN_ARITHMETIC_SHAPES,
+                         ids=[shape[0] for shape in _EXTERN_ARITHMETIC_SHAPES])
+def test_native_ir_types_arithmetic_over_an_extern_call(lower_to_ir, body, returns):
+    source = (
+        "extern pure fn bump(n: Int) -> Int = @py { return n + 1 }\n"
+        f"pub fn f(x: Int) -> {returns} {{ {body} }}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert '"operands": "Int"' in json.dumps(reference)
+    assert native == reference
+
+
+def test_native_ir_lets_a_parameter_shadow_an_extern(lower_to_ir):
+    """The extern rows go UNDER the parameters. The reference's `infer_ast`
+    reads `tenv` before its signature table, so a parameter spelled like an
+    extern is an `Int` local, not the extern's function type; a
+    `fn f(bump: Int)` was read as the function and lost the `operands` tag on
+    `bump + 1` (issue #2945)."""
+    source = (
+        "extern pure fn bump(n: Int) -> Int = @py { return n + 1 }\n"
+        "pub fn f(bump: Int) -> Int { return bump + 1 }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][-1]["expr"]["operands"] == "Int"
+    assert native == reference
+
+
 @pytest.mark.parametrize("actual,expected", [
     ("Int", "Float"), ("Int32", "Float"), ("Int32", "Int"),
 ])
