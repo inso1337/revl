@@ -182,7 +182,7 @@ whichever one the file order reaches first.
   **SUPERSEDED by slice 2.** `src/revl/slo.py` landed the observed half over a
   RECORDED trace: the `on breach` response surface, the measurement, the
   dispatch, the signed `revl.slo-receipt` and the E4 rollout gate, with `revl
-  slo` as the operator's door. The sink was built rather than waited for — it
+  slo` as the operator's door. The sink was built rather than waited for, it
   reads the three `why_runtime` event kinds that already exist instead of adding
   a fourth. What stays open is the LIVE producer (nothing calls the monitor from
   inside a generation yet) and the standby-row vocabulary a full fallback

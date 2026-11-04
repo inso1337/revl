@@ -488,7 +488,7 @@ Three limits, recorded rather than smoothed over:
 
 The row's most important count is the refused one: briefs revl did not admit
 that another host loaded and ran. It is `0` in the committed row. That is a
-result, and at this `n` it is a weak one — which is the point of printing `n`
+result, and at this `n` it is a weak one, which is the point of printing `n`
 beside it rather than a rate.
 
 An earlier version of this pass could not run at all: when it was built, the

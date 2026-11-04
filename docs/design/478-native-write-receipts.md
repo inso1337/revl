@@ -21,8 +21,8 @@ the integration base settled, the stable public API is `revl.fs`
 (`src/revl/fs.py`, `WRITE_RECEIPT_API_VERSION = 1`):
 `fs.write(path, data, *, expect=<prior_digest | fs.ABSENT | None>) ->
 fs.WriteReceipt(path, prev_digest, new_digest, replaced)`. It is a thin Python
-shim over the machinery below — it reuses `original_receipt` / `expect_existing`
-rather than reinventing them — and is documented in
+shim over the machinery below, it reuses `original_receipt` / `expect_existing`
+rather than reinventing them, and is documented in
 [../witnessed-fs.md](../witnessed-fs.md) with coverage in
 `tests/test_fs_public_write_api.py`. The witnessed `stdlib/fs.rvl` bodies are
 still untouched, so requirement 7 (legacy execution byte-identical) holds.
@@ -151,8 +151,8 @@ parallel subsystem. The mapping:
    (`original_receipt` / `expect_existing` / `write_through` / `confirm_landed`),
    which keeps confinement intact without touching the witnessed `stdlib/fs.rvl`
    bodies. A future witnessed-op variant that emits the receipt onto the
-   `WriteWitness` itself — wiring the entry points into `PATH_FAMILIES` and the
-   family scan, and mirroring on the ts tier — remains available on top of this.
+   `WriteWitness` itself, wiring the entry points into `PATH_FAMILIES` and the
+   family scan, and mirroring on the ts tier, remains available on top of this.
 4. **Bounds and partial-call reporting.** Size/write-count/handle bounds
    (requirement 6) and distinct-failure-vs-uncertainty reporting across a
    multi-write call (requirement 5). No automatic compensation or retry.

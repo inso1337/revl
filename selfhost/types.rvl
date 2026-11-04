@@ -449,7 +449,7 @@ fn wf_walk(name: Str, root: Str, allow_async: Bool, in_fn_return: Bool) -> WfR {
   return { ok: true, msg: "" }
 }
 
-fn int_str(n: Int) -> Str {
+pub fn int_str(n: Int) -> Str {
   if (n == 0) { return "0" }
   var v = n
   var neg = false

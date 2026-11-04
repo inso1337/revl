@@ -1,0 +1,9 @@
+// issue #2328 remaining slice (the reference boxing pass is issue #919): an
+// `Opt` payload is stored INLINE by Rust, so a record field that recurses
+// through it needs a Box (E0072); reading the non-recursive `val` field stays
+// an ordinary read.
+pub type Node = { val: Str, next: Opt[Node] }
+
+pub fn tag(n: Node) -> Str {
+  return n.val
+}

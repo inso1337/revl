@@ -5707,14 +5707,23 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         # emitted one level deeper, inside the per-test async context the
         # `_revl_test_context` wrapper below enters.
         body: list[str] = []
-        body.append("  const root = new Context()")
+        # issue #2975: every local the driver binds for ITSELF carries the
+        # `$revl_` sigil. `$` is not in revl's identifier alphabet (the lexer
+        # admits `[A-Za-z_][A-Za-z0-9_]*`), so a user `let` can never spell one.
+        # This is the same collision-proof convention the assert temporaries
+        # use (`$revl_l`, `$revl_match_N`). Plain `root` was emitted bare and a
+        # `let root = call ...` made the generated suite redeclare it, so the
+        # whole file failed to parse and the run reported `Tests no tests`
+        # instead of naming the binding. tests/test_2975_lifecycle_driver_locals.py
+        # derives this set from the emitted source and fails on a bare local.
+        body.append("  const $revl_root = new Context()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
             # item 102: the clock coeffect is a module-global; reset it so this
             # test's `advance` steps start from t=0 and see only its own timers,
             # independent of any earlier lifecycle test in the file.
             body.append("  host.clockReset()")
-        body.append("  const _revl_baseline = snapshotRuntime(root)")
-        body.append("  const _revl_fibers = new Map<string, any>()")
+        body.append("  const $revl_baseline = snapshotRuntime($revl_root)")
+        body.append("  const $revl_fibers = new Map<string, any>()")
         for step in test.get("body") or []:
             kind = step.get("step")
             if kind == "load":
@@ -5724,15 +5733,15 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
                     for field, value in cfg.items())
                 body.append("  {")
-                body.append(f"    const _f = plug(root, {component}, {{{cfg_items}}})")
+                body.append(f"    const _f = plug($revl_root, {component}, {{{cfg_items}}})")
                 body.append("    await _f")
-                body.append(f"    _revl_fibers.set({_string(component)}, await _f)")
+                body.append(f"    $revl_fibers.set({_string(component)}, await _f)")
                 body.append("    await _revl_settle()")
                 body.append("  }")
             elif kind == "unload":
                 component = step["component"]
-                body.append(f"  await (await _revl_fibers.get({_string(component)})).dispose()")
-                body.append("  _revl_fibers.delete(" + _string(component) + ")")
+                body.append(f"  await (await $revl_fibers.get({_string(component)})).dispose()")
+                body.append("  $revl_fibers.delete(" + _string(component) + ")")
                 body.append("  await _revl_settle()")
             elif kind == "call":
                 key = step["key"]
@@ -5744,7 +5753,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     raise EmitError(f"{where}: unknown method {step['method']!r}")
                 args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
                 await_ = "await " if method.get("async") else ""
-                call = (f"root.{_ident(_host_key(key), 'provision key')}."
+                call = (f"$revl_root.{_ident(_host_key(key), 'provision key')}."
                         f"{_method_ident(step['method'])}({args})")
                 bind = step.get("bind")
                 if bind is not None:
@@ -5767,7 +5776,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
             elif kind == "assert_no_residue":
                 body.append("  // R4 + R1: same introspection the py reference")
                 body.append("  // tier's `assert no_residue` performs.")
-                body.append("  assertNoResidue(root, _revl_baseline)")
+                body.append("  assertNoResidue($revl_root, $revl_baseline)")
             elif kind == "abort":
                 # issue #1911 (the py reference tier's item 377): drive the
                 # enclosing session's 245 abort. `Frame.abort()` is this tier's
@@ -5781,10 +5790,10 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 # (the ordering py's single `begin_abort` call implies).
                 body.append("  // mark every live activation aborting, so its teardown")
                 body.append("  // reverts rather than commits (item 245).")
-                body.append("  for (const _fiber of Array.from(_revl_fibers.values())) {")
+                body.append("  for (const _fiber of Array.from($revl_fibers.values())) {")
                 body.append("    frameForCtx(_fiber.ctx)?.abort()")
                 body.append("  }")
-                body.append("  for (const _fiber of Array.from(_revl_fibers.values()).reverse()) {")
+                body.append("  for (const _fiber of Array.from($revl_fibers.values()).reverse()) {")
                 body.append("    try {")
                 body.append("      await _fiber.dispose()   // replay the witnessed inverses")
                 body.append("    } catch {")
@@ -5792,7 +5801,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 body.append("      // LIFO unwind; py's `abort` step swallows the same")
                 body.append("    }")
                 body.append("  }")
-                body.append("  _revl_fibers.clear()")
+                body.append("  $revl_fibers.clear()")
                 # the aborted session is over: py resets its session owner here,
                 # so a component loaded after the abort is a clean new session
                 # and never inherits the aborted verdict. On this tier the bit

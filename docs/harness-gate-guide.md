@@ -74,9 +74,10 @@ posture. Two ways to change it:
   names its destinations in source keeps the fold under both.
 
 **The default is `withheld`.** The two mistakes are not symmetric. Recording a
-caller value is irreversible and silent — it lands in a plaintext log on disk, it
-is somebody else's value rather than the operator's, and which values land there
-is decided by whether a parameter happens to be NAMED `path`, `host` or `table`.
+caller value is irreversible and silent: it lands in a plaintext log on disk,
+and it is somebody else's value rather than the operator's. Whether a value
+lands there depends on whether a parameter happens to be NAMED `path`, `host` or
+`table`.
 Withholding is neither: its whole cost is that approvals whose target came from a
 caller argument no longer fold into a distilled rule, the distiller SAYS SO when
 that bites (`RESOURCE_SCOPE_UNRECORDED` names this flag in its refusal), and
@@ -88,7 +89,7 @@ So: **turn `bound` on deliberately**, for a workspace whose crossing targets are
 routine (an internal hostname, a spool directory) and where you want a series of
 approvals to distil into one reviewed rule. Leave it off wherever a caller's
 `path=` or `host=` could carry a tenant identifier, a token, or a customer's
-data — those are exactly the values a durable cross-session log should not hold.
+data; those are exactly the values a durable cross-session log should not hold.
 
 Self-approval was the old identity model's hole: with no operator profile bound,
 every verb including `approve` is ungated, so the calling agent could answer its
@@ -158,7 +159,7 @@ component Agent provides ops: Ops {
 at the call site with G4 ("a witnessed mutation is only valid in effect
 position"): write `effect stash_path(p)` instead.
 
-Both class folds — the auto-approve `ClassMap` and the erase report — read the
+Both class folds (the auto-approve `ClassMap` and the erase report) read the
 one predicate `Composition.witnessed_registered`, which is exactly the test the
 emitter registers on, so a class can never be more optimistic than the runtime's
 behaviour and the two folds cannot disagree. The predicate can only ever
@@ -172,7 +173,7 @@ A relay stays class (c) when:
 - it also reaches any non-witnessed emission (the worst rule is unchanged);
 - it relays a `witnessed` op whose inverse is not registered (a `witnessed`
   extern reached as a marked `emit`, which builds an emission step and not an
-  effect step) — the relay takes its target's (c);
+  effect step), so the relay takes its target's (c);
 - the forwarding emission is `compensate`d (a compensation offsets an
   irreversible crossing, it does not make one revertible, 247);
 - its target is not provided inside the composition (a host-provided or

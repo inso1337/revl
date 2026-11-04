@@ -1,6 +1,6 @@
 # Design: effect ownership modes, owned / borrowed / shared (item 308)
 
-Status: OWNED+BORROWED v1 LANDED (2026-08-31, merged 66e2999) — owned/borrowed
+Status: OWNED+BORROWED v1 LANDED (2026-08-31, merged 66e2999); owned/borrowed
 inferred over the teardown accumulator with zero new grammar: R0 (acquire/
 witnessed returns are nominal opaque handles), O1 (no hand-call of a declared
 inverse), B1 (the seven-clause borrow-does-not-escape). F10 retention audit
@@ -388,7 +388,7 @@ auto-registers on the enclosing activation's transactional accumulator,
 once per acquisition, with `result` bound to what the acquisition
 returned. That is precisely "release exactly the handle that was
 acquired", on the frame whose teardown is the right one, on the `Ok`
-branch only — which is why it is the wrong fix for a resource that must
+branch only, which is why it is the wrong fix for a resource that must
 also revert on a clean unload, where a site `undo` is what runs. Making
 `result` available in a site `undo`, or admitting a general method-scope
 acquire binding (the F9 surface, DECIDED below and not built), would each
@@ -548,7 +548,7 @@ Parsing all 873 `.rvl` files with the real front end and walking every
 `backends/go/scenarios/method_compensate.rvl:52`,
 `backends/java/scenarios/method_witnessed.rvl:56`), against 107
 activation-scope acquisitions. GENERAL method-scope acquires: zero. Not
-zero by accident either — `_lower_provide` refuses the form outright
+zero by accident either; `_lower_provide` refuses the form outright
 (`src/revl/lower.py`, "only `spawn` may be acquired inside a
 provide-method body"), so option B of the original decision ("v1 refuses
 method-scope acquires with a diagnostic naming the restructure") was
@@ -561,7 +561,7 @@ that is two forms:
 1. a result-declared host verb (item 397, today exactly
    `insert_if_absent`), which binds a checked `Bool`. No handle, no
    lifetime, nothing for F9 to decide.
-2. `spawn`. This one yields a live instance — and it is already the one
+2. `spawn`. This one yields a live instance, and it is already the one
    acquisition in the language with an early release.
 
 **The surface exists, spelled in the grammar revl already had.** A spawn
@@ -569,7 +569,7 @@ is a CHILD FIBER (`docs/design-v2-instances.md`, item zero): its own
 nested teardown scope. `w.dispose()` unloads it now, mid-method, written
 `effect w.dispose() undo w.dispose()`. There is no explicit-release
 surface owed, and building the general `release conn` form would be a
-third weaker copy of a mechanism that already works — the same judgment
+third weaker copy of a mechanism that already works, the same judgment
 the provide-method seam paragraph reaches about `witnessed`.
 
 **Why that does not disturb teardown**, which is the reason a general
@@ -594,15 +594,15 @@ what it was, so LIFO-completeness needs no re-argument.
   way: registered, not run, not dropped, kept for `revl recover`. Where
   the release already happened the stranded record names one entry whose
   replay is a no-op, so the halt OVER-reports by one. That is the R4-safe
-  direction — residue is never under-reported — and it is precisely why
+  direction (residue is never under-reported) and it is precisely why
   early release must not discharge: a discharge would drop the descriptor
   the halt is required to keep, and THAT would contradict
   `RevL.G7.estop_strands_everything`. Stranding acts on ENTRIES, early
   release acts on the EFFECT; the two ideas are adjacent and do not meet.
 
 **What F9 therefore ADDS**, since the release surface needed nothing. The
-nested scope's promise — "a request-scoped instance is reclaimed when the
-request ends" — was UNENFORCED. An `Instance[C]` is not an `extern
+nested scope's promise ("a request-scoped instance is reclaimed when the
+request ends") was UNENFORCED. An `Instance[C]` is not an `extern
 acquire` return, so it is not in the resource-taint base and no B1 clause
 ever bound it: a provide method could return the handle, park it in
 activation state, alias it, seat it in a carrier, or close over it, and
@@ -619,7 +619,7 @@ handle is read and not retained as the receiver of a host method call
 (`w.dispose()`) and as the base of a provision read (`w.task.run(..)`),
 which are the two things the instance surface is for. Everything else is
 refused. Inside an arrow body even those two stop counting, because an
-arrow's type erases what it closes over — B1 clause 2's reasoning, applied
+arrow's type erases what it closes over: B1 clause 2's reasoning, applied
 for B1 clause 2's reason.
 
 **Additivity.** The corpus contains one method-scope spawn, in
@@ -868,7 +868,7 @@ The minimal cut that pays for itself immediately:
 5. The retention audit (F10, SHIPPED): `revl audit` lists resource-typed
    arguments reaching non-inverse externs and bridge services
    (report-only, the B1 limitation's mitigation).
-6. The method-scope acquire decision (F9, DECIDED — see "F9, decided"):
+6. The method-scope acquire decision (F9, DECIDED; see "F9, decided"):
    the count is zero because the general form is already refused, the one
    handle-yielding method-scope acquisition (`spawn`) already has its
    early release (`w.dispose()`, a nested teardown scope), and what F9
@@ -906,21 +906,21 @@ stage map; if rejection parity is asserted, the flow walk ports to
 lower.rvl. Decide at slice 2, do not let it be discovered by a red oracle.
 
 **DECIDED (slice 2): port DEFERRED, gap named.** The self-host checker's
-second half is not expression-only — it walks component/provide bodies for
+second half is not expression-only; it walks component/provide bodies for
 G4 emission-declaration and call-site typing, message-for-message with the
 reference (`selfhost/checker.rvl` slice two, `tests/test_selfhost_checker.py`).
 But it carries NO O1/B1 flow walk: those live in `src/revl/lower.py` over the
 resource-taint base, and are not ported. Measured on the reference base
 (a nominal `Sock`, its declared inverse, an `acquire`): a POSITIVE
-owner-holds-and-lends program is admitted by BOTH sides — they AGREE, so a
-positive ownership program is safe in the self-host corpus — while an O1
+owner-holds-and-lends program is admitted by BOTH sides; they AGREE, so a
+positive ownership program is safe in the self-host corpus, while an O1
 borrower-close and a B1 non-owner-return are REFUSED by the reference (with
 the item-308 message) and ACCEPTED by the self-host. So rejection parity
 holds for everything the self-host actually checks, and the ONLY divergence
 is an O1/B1 REJECTION, which no self-host corpus fixture spells today. The
 port is deferred to the ownership-dialect self-host slice; until then no
 O1/B1 rejection fixture may enter the self-host corpus (adding one would red
-the oracle for this designed gap — the "discovered by a red oracle" outcome
+the oracle for this designed gap: the "discovered by a red oracle" outcome
 this note forbids). The gap is pinned executably in
 `tests/test_selfhost_ownership_gap_308.py`: its two divergence pins flip when
 the flow walk is ported, directing the porter to move the rejection fixtures

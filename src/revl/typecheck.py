@@ -2526,6 +2526,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
             return targs[0] if targs else None
+        if thead == "Map":
+            # issue #2949: a `Map[K, V]` subscript yields `V`, so an operand
+            # read out of a map is a `Float`/`Int32`/`Int` like any other.
+            # Without this the equality site saw an unknown type and never
+            # marked `m["a"] == 3` for the mixed-width widening, so TypeScript
+            # compared a number with a bigint and rust/java disagreed with
+            # python. A `List` read has answered its element type here for the
+            # same reason.
+            return targs[1] if len(targs) > 1 else None
         if thead == "Str":
             return "Str"
         return None
@@ -4044,6 +4053,14 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
             return targs[0] if targs else None
+        if thead == "Map":
+            # issue #2949: a subscript on a `Map[K, V]` yields `V`, so the
+            # equality site can mark `m["a"] == 3` for the mixed-width
+            # widening exactly as it already does for a `List` element. The
+            # lowered node's own `value_type` (set by `_map_key_value_types`)
+            # answers first: it is the declared value type even when the target
+            # type is no longer recoverable here.
+            return node.get("value_type") or (targs[1] if len(targs) > 1 else None)
         if thead == "Str":
             return "Str"
         return None

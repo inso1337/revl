@@ -1,4 +1,4 @@
-# 527 — aligning revl persistence with Cordis Database (Minato)
+# 527: aligning revl persistence with Cordis Database (Minato)
 
 **Roadmap:** the persistence tier of item 462 (proposes a new item, see below); milestone issue #725 · **Source:** cordiverse/database study, 2026-09-08 · **Status:** DESIGN DRAFT
 

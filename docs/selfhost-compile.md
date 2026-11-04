@@ -402,9 +402,15 @@ Still admitted silently, each listed on the issue:
   argument. The FN-TYPED `let` position is closed (the reference's message on
   both sides); the call-argument position is not.
 - gap 7: a declared type applied with the wrong number of type arguments
-  (`Box[Int, Int]` for `type Box[T]`, `Mb[Int]` for `type Mb = Jj(Int) | Nn`).
-  The reference refuses it where it is written (issue #2942); the native gate
-  does not count a declared head's arguments yet.
+  (`Box[Int, Int]` for `type Box[T]`, `Mb[Int]` for `type Mb = Jj(Int) | Nn`)
+  at an annotation site the native declared-arity pass does not visit: a `let`
+  annotation in a `fn` or component body, a component method's parameters and
+  return, a provide-method signature, an arrow parameter or return type,
+  `hole[...]`, `handoff`, and a service method's parameters and return. The
+  reference refuses each where it is written (issue #2942); the native gate
+  covers component config, declared record fields, case payloads and alias
+  right-hand sides, module `fn` and `extern` signatures, extern config and
+  prop test parameters.
 - gap 8: an `Opt[Box[Str]]` match binder used as `Box[Int]`; a block-arm `let`
   is not typed against the binder.
 - gap 10: a prop body whose match block arm ends in an `if`; the reference

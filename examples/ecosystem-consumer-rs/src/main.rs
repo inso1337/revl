@@ -8,10 +8,10 @@
 //!
 //! READ THIS BEFORE YOU COPY IT: THE ASYMMETRIC CONTRACT, RUST EDITION
 //! ===================================================================
-//! The py gate (`pip install revl`, `revl.gate.admit`) can both refuse and
-//! ADMIT: it is the full reference compiler. This crate cannot. It decides the
-//! composition and guarantee layer only, so it has three arms and none of them
-//! is an admission:
+//! The py gate (installed from source or a git tag, then `revl.gate.admit`) can
+//! both refuse and ADMIT: it is the full reference compiler. This crate cannot.
+//! It decides the composition and guarantee layer only, so it has three arms
+//! and none of them is an admission:
 //!
 //! * [`Verdict::Refused`] — authoritative and fail-closed. The reference
 //!   compiler refuses this source too, with the same code and the same message
