@@ -1,4 +1,4 @@
-"""Issue #2686 — a policy rule over two capabilities held TOGETHER.
+"""Issue #2686: a policy rule over two capabilities held TOGETHER.
 
 The existing reach rules constrain one capability at a time (a deny-list, a
 closed allow-list, a taint flow) or two components (`tenants never reach each

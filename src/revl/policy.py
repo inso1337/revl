@@ -84,7 +84,7 @@ class InertDenyPolicyWarning(UserWarning):
 class InertPairPolicyWarning(UserWarning):
     """A pair rule (`component X may not reach A together with B`) selected a
     component in this audit, but no selected component reaches BOTH
-    capabilities — so the rule refuses nothing (issue #2686, the pair form of
+    capabilities, so the rule refuses nothing (issue #2686, the pair form of
     the fail-open issue #1984 closed for deny-lists).
 
     Each pattern may match a reach somewhere and the pair may still never occur
@@ -129,11 +129,11 @@ class PairRule:
     refuses `sendEmail`, an allow-list bounds the union of what a component may
     reach, and `tenants never reach each other` pairs components. None of them
     can say "no single component may hold capability X together with capability
-    Y" — each capability is legal alone, and the COMBINATION is what an
+    Y". Each capability is legal alone, and the COMBINATION is what an
     operator refuses (a private-data read together with an outbound network
     call). This rule states exactly that: `first` and `second` are capability
-    globs, and a component matched by `selector` is refused iff its reach — the
-    same `Reach` set the allow/deny legs read — contains a token matching each.
+    globs, and a component matched by `selector` is refused iff its reach, the
+    same `Reach` set the allow/deny legs read, contains a token matching each.
 
     The two must be DISTINCT reached tokens. One token satisfying both patterns
     is one capability, not the forbidden pair; it is the failure the issue's
@@ -827,7 +827,7 @@ class Policy:
     wasm_fuel: int | None = None
     wasm_memory_bytes: int | None = None
     wasm_wall_seconds: float | None = None
-    # issue #2686: `component <glob> may not reach <cap> together with <cap>` —
+    # issue #2686: `component <glob> may not reach <cap> together with <cap>`:
     # the per-component pair rule. Each capability may be legal alone; one
     # component holding both is refused. Empty by default, so every policy
     # written before this rule parses and behaves byte-identically.
@@ -1548,7 +1548,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             never_standing_rules.append(NeverStandingRule(parts[1]))
             continue
         # issue #2686: `component <glob> may not reach <cap> together with
-        # <cap>` — the per-component PAIR rule. Checked before the generic
+        # <cap>`: the per-component PAIR rule. Checked before the generic
         # reach loop (it CONTAINS `may not reach`) so the two capabilities are
         # read as a pair rather than as one whitespace-bearing token.
         if " together with " in low:
@@ -1557,7 +1557,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                 raise PolicyError(
                     source, lineno,
                     f"a pair rule is `component <glob> may not reach <cap> "
-                    f"together with <cap>` — it refuses a component holding "
+                    f"together with <cap>`. It refuses a component holding "
                     f"BOTH capabilities, so it has no allow form and no "
                     f"`realm` subject in this slice; got {raw.strip()!r}")
             idx = low.find(marker)
@@ -2841,7 +2841,7 @@ def _warn_if_pair_rules_are_inert(policy: Policy, audit: dict) -> None:
     such a rule enforces exactly like a clean pass. Warn when a rule selected a
     component in THIS audit and no selected component holds the pair.
 
-    A rule that selects no component here says nothing — that is a policy
+    A rule that selects no component here says nothing. That is a policy
     written for other compositions, not an inert one."""
     if not policy.pair_rules:
         return
@@ -2907,7 +2907,7 @@ def _pair_violation(manifest: dict, name: str, rule: PairRule,
     neither reach causes the other)."""
     message = (f"policy violation: components matching `{rule.selector}` may "
                f"not reach `{rule.first}` together with `{rule.second}`, but "
-               f"`{name}` reaches both `{first.token}` and `{second.token}` — "
+               f"`{name}` reaches both `{first.token}` and `{second.token}`: "
                f"one component holding the pair is forbidden; admission "
                f"refused (boundary policy, issue #2686)")
     steps = _reach_step(manifest, name, first) + _reach_step(manifest, name,

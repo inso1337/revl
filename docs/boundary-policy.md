@@ -95,7 +95,7 @@ realm billing may reach db, ledger
 # reach a common named boundary are refused; their isolation is not real
 tenants never reach each other
 
-# a PAIR rule (issue #2686) — each capability is accepted alone, but no single
+# a PAIR rule (issue #2686): each capability is accepted alone, but no single
 # component may hold both. One glob on each side of `together with`
 component Agent*   may not reach fs.read together with network.call
 
@@ -160,14 +160,16 @@ The JSON form parses to the same policy:
 * **`may not reach X together with Y` (pair rule, issue #2686).** A component
   matched by the `component` glob that holds BOTH capability patterns is
   refused; each capability is admitted alone. The two sides are read over the
-  component's reach set — emission capabilities and reached host externs, the
-  same set the allow/deny legs read — and must be two **distinct** reached
+  component's reach set: emission capabilities and reached host externs, the
+  same set the allow/deny legs read, and must be two **distinct** reached
   tokens: one token matching both patterns is one capability, not the pair.
   `together with` names exactly two patterns, one on each side; a comma list,
   an allow form and a `realm` subject are refused at parse time. A
   composition-wide form (a pair split across components or realms) is a later
   slice and is not this rule: two realms holding X and Y separately must not
-  trip the per-component pair.
+  trip the per-component pair. Like a deny-list, the pair rule does not match
+  an unbounded `*` reach, so a component reaching `fs.read` plus an unnameable
+  dispatch is admitted unless an allow-list catches it.
 * **`mcp` / `agent` (the sandbox).** An allow-list that applies only to
   components admitted through the MCP session (see below). Everywhere else it
   is inert.
@@ -316,12 +318,12 @@ is not real; admission refused (boundary policy, item 33)
 ```
 
 For a pair rule the trace is the two reach chains as co-equal exhibits (a set,
-not a chain — neither reach causes the other):
+not a chain; neither reach causes the other):
 
 ```
 policy violation: components matching `Agent*` may not reach `fs.read`
 together with `network.call`, but `AgentExfiltrate` reaches both `fs.read` and
-`network.call` — one component holding the pair is forbidden; admission refused
+`network.call`: one component holding the pair is forbidden; admission refused
 (boundary policy, issue #2686)
   why `AgentExfiltrate` was rejected:
     AgentExfiltrate  agents.rvl  reaches `fs.read` via emission `files.read`
