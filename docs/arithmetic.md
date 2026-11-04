@@ -424,6 +424,10 @@ above 2^53 — so the frontend marks that operand with the same
 `"widen": "Float"`, and Int/Int (`long`/`long`, `bigint`/`bigint`) stays the
 native exact comparison. The executing cross-tier probe covers a parameter, a
 record field and a list element, in both operand orders, for `==` and `!=`.
+A `Map[Str, V]` subscript is a bare operand too: since issue #2949 the map
+read answers its declared value type, so `m["a"] == 3` with a `Float` (or
+`Int32`) value is marked exactly as a list element read is, and an `Int` value
+stays unmarked and byte-identical.
 
 The same mixed-width rule covers the OTHER adjacent pair, `Int32` and `Int`,
 which issue #2715 originally missed. `a: Int32 == 3` is `Int32` against an
