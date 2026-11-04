@@ -14930,9 +14930,12 @@ fn ct_args(root_: &str, meth: &str, decl: MSig, args: &[Expr], env: Vec<Bind>, i
     }
     let pt = tk_solid(taint_strip((decl.ps)[(i) as usize].ty.clone()), &env);
     let inf = tk_infer((args)[(i) as usize].clone(), env.clone());
+    if (inf.v != "") {
+        return inf.v;
+    }
     let raw = taint_strip((decl.ps)[(i) as usize].ty.clone());
     let mut cmp_pt = pt.clone();
-    if (((inf.v == "") && tk_is_struct(&inf.ty)) && tk_generic_record(&raw, &env)) {
+    if (tk_is_struct(&inf.ty) && tk_generic_record(&raw, &env)) {
         let gs = grec_shape(&raw, &env);
         let ge = if (gs == "") { String::from("") } else { grec_expand(&gs, &env, 0i64) };
         if (ge == "") {
@@ -14940,10 +14943,10 @@ fn ct_args(root_: &str, meth: &str, decl: MSig, args: &[Expr], env: Vec<Bind>, i
         }
         cmp_pt = ge.clone();
     }
-    if (((inf.v == "") && (cmp_pt != "")) && ct_too_deep(cmp_pt.clone(), &inf.ty, &env)) {
+    if ((cmp_pt != "") && ct_too_deep(cmp_pt.clone(), &inf.ty, &env)) {
         return tagged("TYPE", &(((((((String::from("`").revl_concat(&root_)).revl_concat(".")).revl_concat(&meth)).revl_concat("` argument `")).revl_concat(&(decl.ps)[(i) as usize].name)).revl_concat("`: a record literal nested deeper than 5 levels is not typed by ")).revl_concat("the native gate (issue #2362)")));
     }
-    if ((((inf.v == "") && (pt != "")) && (inf.ty != "")) && (ct_struct_to_variant(cmp_pt.clone(), &inf.ty, &env) || (!tk_compatible(ct_record_shape(cmp_pt.clone(), &inf.ty, &env), inf.ty.clone())))) {
+    if (((pt != "") && (inf.ty != "")) && (ct_struct_to_variant(cmp_pt.clone(), &inf.ty, &env) || (!tk_compatible(ct_record_shape(cmp_pt.clone(), &inf.ty, &env), inf.ty.clone())))) {
         return tagged("T1", &((((((((((String::from("`").revl_concat(&root_)).revl_concat(".")).revl_concat(&meth)).revl_concat("` argument `")).revl_concat(&(decl.ps)[(i) as usize].name)).revl_concat("` expects `")).revl_concat(&tk_render(pt))).revl_concat("`, got `")).revl_concat(&tk_render(inf.ty.clone()))).revl_concat("`")));
     }
     return ct_args(root_, meth, decl, args, env, (i).checked_add(1i64).expect("revl: Int overflow"));
@@ -15258,7 +15261,7 @@ fn ct_arms(xs: &[ArmN], i: i64, cx: Ctx__m2, env: Vec<Bind>) -> String {
     if (i >= xs.revl_length()) {
         return String::from("");
     }
-    let inner = if ((xs)[(i) as usize].bind == "") { env.clone() } else { hv_shadow(env.clone(), &(vec![(xs)[(i) as usize].bind.clone()])) };
+    let inner = if ((xs)[(i) as usize].bind == "") { env.clone() } else { svc_shadow(hv_shadow(env.clone(), &(vec![(xs)[(i) as usize].bind.clone()])), &(vec![(xs)[(i) as usize].bind.clone()])) };
     let v = ct_scan((xs)[(i) as usize].body.clone(), cx.clone(), inner);
     if (v != "") {
         return v;
@@ -15495,7 +15498,7 @@ fn ct_scan(e: Expr, cx: Ctx__m2, env: Vec<Bind>) -> String {
     Expr::If(x) => { let x = *x; ct_exprs(&(vec![x.cond.clone(), x.then_.clone(), x.els.clone()]), 0i64, cx.clone(), env.clone()) },
     Expr::Rec(r) => ct_inits(&r.fields, 0i64, cx.clone(), env.clone()),
     Expr::Lst(l) => ct_exprs(&l.items, 0i64, cx.clone(), env.clone()),
-    Expr::Arrow(a) => { let a = *a; ct_scan(a.body, cx.clone(), env.clone()) },
+    Expr::Arrow(a) => { let a = *a; ct_scan(a.body.clone(), cx.clone(), svc_shadow(env.clone(), &param_names(&a.params))) },
     Expr::Match(m) => { let m = *m; ct_first(ct_scan(m.scrut.clone(), cx.clone(), env.clone()), ct_arms(&m.arms, 0i64, cx.clone(), env.clone())) },
     Expr::Templ(t) => ct_parts(&t.parts, 0i64, cx.clone(), env.clone()),
     Expr::RecUpd(r) => { let r = *r; ct_first(ct_scan(r.base.clone(), cx.clone(), env.clone()), ct_inits(&r.upds, 0i64, cx.clone(), env.clone())) },

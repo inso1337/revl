@@ -7866,13 +7866,19 @@ fn ct_req_op(tg: Expr) -> Str {
 // One call's arguments against the declared parameter list, positionally. An
 // argument whose own type this walk cannot decide ("" — the gradual frontier)
 // and a parameter the declaration leaves unspelled are both skipped rather than
-// guessed at; an argument that REFUSES is left to the expression walk, which has
-// already reported it.
+// guessed at; an argument that REFUSES is the call's verdict, because the
+// reference infers it in raising mode here (`_component_req_call`).
 fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
            env: List[Bind], i: Int) -> Str {
   if (i >= args.length() || i >= decl.ps.length()) { return "" }
   let pt = tk_solid(taint_strip(decl.ps[i].ty), env)
   let inf = tk_infer(args[i], env)
+  // Issue #2448: the argument is inferred in RAISING mode, so a refusal inside
+  // it (a wrong-typed case payload included) is reported HERE. The expression
+  // walk usually reports it first, but a requirement handle's receiver is
+  // untyped in a component body and `tk_call` leaves a host-object call's whole
+  // subtree alone, so an `emit k.put(Box("x"))` argument reaches only this walk.
+  if (inf.v != "") { return inf.v }
   let raw = taint_strip(decl.ps[i].ty)
   // Issue #2374: a record literal for a generic record parameter is held to
   // the record's shape with its type arguments substituted (`Cell[Int]` against
@@ -7880,7 +7886,7 @@ fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
   // reference's `compatible` resolves. When the shape or a nested substitution
   // cannot be built here the literal is still refused by name (issue #2362).
   var cmp_pt = pt
-  if (inf.v == "" && tk_is_struct(inf.ty) && tk_generic_record(raw, env)) {
+  if (tk_is_struct(inf.ty) && tk_generic_record(raw, env)) {
     let gs = grec_shape(raw, env)
     let ge = gs == "" ? "" : grec_expand(gs, env, 0)
     if (ge == "") {
@@ -7891,13 +7897,13 @@ fn ct_args(root: Str, meth: Str, decl: MSig, args: List[Expr],
     }
     cmp_pt = ge
   }
-  if (inf.v == "" && cmp_pt != "" && ct_too_deep(cmp_pt, inf.ty, env)) {
+  if (cmp_pt != "" && ct_too_deep(cmp_pt, inf.ty, env)) {
     return tagged("TYPE", "`".concat(root).concat(".").concat(meth)
       .concat("` argument `").concat(decl.ps[i].name)
       .concat("`: a record literal nested deeper than 5 levels is not typed by ")
       .concat("the native gate (issue #2362)"))
   }
-  if (inf.v == "" && pt != "" && inf.ty != ""
+  if (pt != "" && inf.ty != ""
       && (ct_struct_to_variant(cmp_pt, inf.ty, env)
           || !tk_compatible(ct_record_shape(cmp_pt, inf.ty, env), inf.ty))) {
     return tagged("T1", "`".concat(root).concat(".").concat(meth)
@@ -8205,8 +8211,13 @@ fn ct_inits(xs: List[InitN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
 
 fn ct_arms(xs: List[ArmN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
   if (i >= xs.length()) { return "" }
-  // a binder shadows a same-named host local (issue #2569)
-  let inner = xs[i].bind == "" ? env : hv_shadow(env, [xs[i].bind])
+  // an arm's binder is a new local: the reference seeds it with the payload
+  // type when it has one, and this walk carries none, so the binder shadows a
+  // same-named typed local rather than inheriting that local's type. Same
+  // shape as `vm_arms`, which already shadows it (issue #2448).
+  let inner = xs[i].bind == ""
+    ? env
+    : svc_shadow(hv_shadow(env, [xs[i].bind]), [xs[i].bind])
   let v = ct_scan(xs[i].body, cx, inner)
   if (v != "") { return v }
   return ct_arms(xs, i + 1, cx, env)
@@ -8478,9 +8489,12 @@ fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
     If(x)       => ct_exprs([x.cond, x.then_, x.els], 0, cx, env),
     Rec(r)      => ct_inits(r.fields, 0, cx, env),
     Lst(l)      => ct_exprs(l.items, 0, cx, env),
-    // an arrow's body is walked under the same environment: its parameters are
-    // names this walk does not type, so they stay on the gradual frontier.
-    Arrow(a)    => ct_scan(a.body, cx, env),
+    // an arrow's body is a new scope: the reference pops an untyped parameter
+    // from its type env (`_lower_component_pure_expr`), so the parameter
+    // shadows a same-named typed local. Without this an argument inference
+    // inside the body read the enclosing local's type and refused a call the
+    // reference admits (issue #2448).
+    Arrow(a)    => ct_scan(a.body, cx, svc_shadow(env, param_names(a.params))),
     Match(m)    => ct_first(ct_scan(m.scrut, cx, env),
                             ct_arms(m.arms, 0, cx, env)),
     Templ(t)    => ct_parts(t.parts, 0, cx, env),
