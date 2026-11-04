@@ -1676,9 +1676,19 @@ def _check_principal_producers(program: Program, filename: str) -> None:
 
 def _lower_type_decls(program: Program, filename: str) -> dict:
     types: dict[str, dict] = {}
+    declared_at: dict[str, tuple[str, int]] = {}
     for decl in program.type_decls:
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in types:
-            raise RevlError(filename, decl.line, f"duplicate type `{decl.name}`")
+            first_file, first_line = declared_at[decl.name]
+            if first_file == decl_file:
+                raise RevlError(decl_file, decl.line, f"duplicate type `{decl.name}`")
+            # issue #3033: across files, name both declarations, as a
+            # duplicate service across files does
+            raise RevlError(
+                decl_file, decl.line,
+                f"duplicate type `{decl.name}` (also declared in {first_file}:{first_line})")
+        declared_at[decl.name] = (decl_file, decl.line)
         if decl.name == PRINCIPAL:
             # item 457 S2 (docs/design/457-endpoint-one-definition.md,
             # "Authorization: explicit, and not derivable"): `Principal` is the
@@ -1688,7 +1698,7 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
             # user-scoped guard without authorizing. Reserve the name so the
             # opacity is enforced, not merely conventional.
             raise RevlError(
-                filename, decl.line,
+                decl_file, decl.line,
                 "`Principal` is the reserved opaque authorization principal and "
                 "cannot be declared as a revl type",
                 hint=PRINCIPAL_PRODUCER_HINT, code="G4", category="route")
@@ -1699,7 +1709,7 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
             # constructor that carries the members' disagreement, and the
             # exhaustiveness rule over that constructor would then be checking
             # a type the program had already opted out of.
-            raise model_answer.reserved_name_error(filename, decl.line,
+            raise model_answer.reserved_name_error(decl_file, decl.line,
                                                    decl.name)
         if decl.fields:
             fields: dict[str, str] = {}
@@ -1708,9 +1718,9 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
                 # reach a backend (protocol hijacking). Complementary to the
                 # reserved-word renaming `_safe_name` applies at binding sites.
                 _reject_dunder_name(field.name, "field", f"record `{decl.name}`",
-                                    filename, field.line)
+                                    decl_file, field.line)
                 if field.name in fields:
-                    raise RevlError(filename, field.line,
+                    raise RevlError(decl_file, field.line,
                                     f"duplicate field `{field.name}` in record `{decl.name}`")
                 fields[field.name] = field.type
             types[decl.name] = {"params": decl.params, "kind": "record", "fields": fields}
@@ -1719,7 +1729,7 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
             seen: set[str] = set()
             for case in decl.cases:
                 if case.name in seen:
-                    raise RevlError(filename, case.line,
+                    raise RevlError(decl_file, case.line,
                                     f"duplicate case `{case.name}` in type `{decl.name}`")
                 seen.add(case.name)
                 cases.append({"name": case.name, "payload": case.payload})
@@ -2581,12 +2591,29 @@ def _is_sized_type(type_name: str | None) -> bool:
 
 
 def _variant_case_payload(types: dict, type_name: str | None, case_name: str) -> str | None:
-    spec = types.get(type_name or "")
+    """The payload a case binds, with the selector's type arguments substituted.
+
+    A generic variant is declared once (`type Box[T] = Full(T) | Empty`), so
+    the case table is keyed by the head. `Box[Int]` must answer `Int` for
+    `Full`, not the bare parameter `T`: the arm's payload type is what a
+    backend types the binding with, and a bare `T` names no Java type (issue
+    #2325). A raw generic selector (`Box`) has no arguments to substitute and
+    stays unknown; so does an arity mismatch.
+    """
+    head, args = parse_type(type_name)
+    spec = types.get(head or "")
     if spec is None or spec.get("kind") != "variant":
         return None
+    params = spec.get("params") or []
+    if params and len(args) != len(params):
+        return None
+    subst = dict(zip(params, args)) if params else {}
     for case in spec.get("cases", []):
         if case["name"] == case_name:
-            return case["payload"]
+            payload = case.get("payload")
+            if payload is None:
+                return None
+            return substitute(payload, subst)
     return None
 
 
@@ -6949,6 +6976,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
         _pin_return_only_call(declared, lowered_value, types)
+        _pin_record_expected(declared, lowered_value, types)
         body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -7505,6 +7533,36 @@ def _return_only_tparams(sig: dict | None) -> list[str]:
         if w in tparams and w not in in_params and w not in found:
             found.append(w)
     return found
+
+
+def _pin_record_expected(local_type: str | None, node: dict | None,
+                         types: dict) -> None:
+    """An annotated `let`-bound generic record literal carries the local's type
+    (issue #2325).
+
+    `let b: Bx[List[Int]] = { v: [] }` is not diamond-inferable by javac:
+    `new Bx(List.of())` infers `Bx<List<Object>>` and `b` stays raw, so a field
+    read is an `Object` operation. The annotation is the pin, and the frontend
+    is the only stage that knows it, so it rides the literal as
+    ``"expected": "Bx[List[Int]]"``, the same marker an empty collection gets.
+    The emitter renders the arguments from it instead of a diamond or a raw
+    constructor.
+
+    Only a DECLARED type is pinned. An unannotated literal's type is what the
+    checker inferred, and the Java argument must be the same type the native
+    (self-host) producer infers for the byte-identical IR; where that inference
+    differs (a generic variant constructor or generic call field), the literal
+    stays raw. The marker is additive and appears only on such a literal, so
+    every other document is byte-identical.
+    """
+    if not local_type or not isinstance(node, dict) or node.get("kind") != "record":
+        return
+    head, args = parse_type(local_type)
+    spec = types.get(head or "")
+    if isinstance(spec, dict) and spec.get("kind") == "record":
+        params = list(spec.get("params") or ())
+        if params and len(args) == len(params):
+            node["expected"] = local_type
 
 
 def _pin_return_only_call(declared: str | None, node: dict | None,
@@ -9953,6 +10011,7 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
             if st.type is not None:
                 check_type_wellformed(filename, st.line, st.type)
                 env.type_env[safe] = st.type
+                _pin_record_expected(st.type, value, env.types)
             else:
                 inferred = infer_ir(value, env.type_env, env.types, env.services)
                 if inferred is not None:
@@ -15359,6 +15418,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 check_type_wellformed(filename, ms.line, ms.type)
                 env.type_env[safe] = ms.type
                 _pin_empty_literal(ms.type, value)
+                _pin_record_expected(ms.type, value, env.types)
             elif swept is not None:
                 env.type_env[safe] = swept
             out.append({"step": "let", "name": safe, "value": value,

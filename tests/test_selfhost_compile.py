@@ -975,8 +975,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     refusal = (
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 6 "
-        "is not supported by the self-host compiler, which would emit the "
-        "component without its body.")
+        "(a `let`/`var` binding whose value the producer cannot read) is not "
+        "supported by the self-host compiler, which would emit the component "
+        "without its body.")
     got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
     assert got == refusal, got[:200]
     # the manifest-aware driver runs its own emit, so it carries its own guard
@@ -985,7 +986,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert "body" not in native
-    assert native["unlowered"] == "the body statement at line 6"
+    assert native["unlowered"] == (
+        "the body statement at line 6 "
+        "(a `let`/`var` binding whose value the producer cannot read)")
 
 
 def test_a_bodyless_component_refusal_names_the_inner_statement(
@@ -1007,6 +1010,26 @@ def test_a_bodyless_component_refusal_names_the_inner_statement(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert _refused_line(native["unlowered"]) == 6
+
+
+def test_a_bodyless_component_refusal_carries_the_failing_statements_reason(
+        compile_to, lower_to_ir):
+    """Every `cir_method_stmts`/`cir_prov_methods` failure point records why it
+    stopped the producer (issue #2594), and `ir_component` carries that reason
+    into the component's refusal next to the line. Two documents that stop on
+    different statements carry different reasons, not one generic sentence."""
+    arity = load_by_path("test_case_call_arity",
+                         ROOT / "tests" / "test_case_call_arity.py")
+    source, _ = arity.REFUSED["provide_block_body"]
+    reasons = {}
+    for name, doc in (("block arm", _BODYLESS_COMPONENT_SRC),
+                      ("case arity", source)):
+        comp = json.loads(lower_to_ir(doc))["components"][0]
+        match = re.search(r"\((.+)\)$", comp["unlowered"])
+        assert match is not None, comp["unlowered"]
+        reasons[name] = match.group(1)
+        assert reasons[name] in compile_to(doc, "py")
+    assert reasons["block arm"] != reasons["case arity"], reasons
 
 
 def _refused_line(text: str) -> int:
@@ -3307,16 +3330,21 @@ _BOX = "type Box[T] = { v: T }\n"
 _EXTERN = "extern pure fn g() = @py { return [1] }\n"
 
 _ISSUE_2399_REFUSED.update({
-    # an arm binder is typed only where `_arm_payload_type` types it
+    # an arm binder is typed only where `_arm_payload_type` types it; an
+    # applied user variant now is (issue #2325), so the two builtin
+    # mismatches below are the remaining unknown-payload arms.
     "arm_opt_matched_with_ok": (
         "fn f(o: Opt[Int]) -> Int {\n"
         "  return match o { Ok(x) => { let k = x\n k }, _ => 0 }\n}\n"),
     "arm_result_matched_with_some": (
         "fn f(o: Result[Int, Str]) -> Int {\n"
         "  return match o { Some(x) => { let k = x\n k }, _ => 0 }\n}\n"),
-    "arm_binder_of_applied_declared_generic": (
-        "type Option[T] = Some(T) | None\nfn f(o: Option[Int]) -> Int {\n"
-        "  return match o { Some(x) => { let k = x\n k }, None => 0 }\n}\n"),
+    # issue #2325: a raw generic selector has no arguments to substitute, so the
+    # binder stays unknown. The arm returns a literal so the reference reaches
+    # the arm check and refuses there, matching the native message.
+    "raw_generic_selector_block_arm": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n 1 }, Nothing => 0 }\n}\n"),
     # a test written right after an extern is still checked
     "test_body_host_method_after_extern": (
         _EXTERN + "test \"t\" {\n  let a = g()\n  let n = a.length()\n  assert true\n}\n"),
@@ -3494,6 +3522,27 @@ _ISSUE_2399_ADMITTED = {
     "arm_binder_of_declared_variant": (
         "type Sh = Circle(Int) | Pt\nfn f(s: Sh) -> Int {\n"
         "  return match s { Circle(r) => { let k = r\n k }, Pt => 0 }\n}\n"),
+    # issue #2325: an applied user variant's binder is typed now, so this arm
+    # reads a value of known type and both sides admit it. `Option`/`Some`/`None`
+    # is the issue's own spelling even though the native table reserves those
+    # names for Opt; the type's own `cases` row resolves the owner.
+    "arm_binder_of_applied_declared_generic": (
+        "type Option[T] = Some(T) | None\nfn f(o: Option[Int]) -> Int {\n"
+        "  return match o { Some(x) => { let k = x\n k }, None => 0 }\n}\n"),
+    "arm_binder_of_applied_declared_generic_renamed": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder[Int]) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => 0 }\n}\n"),
+    # a case name two user types share resolves by the type's own case list
+    "arm_binder_of_shared_case_name": (
+        "type A[T] = Same(T) | OnlyA\ntype B[T] = Same(T) | OnlyB\n"
+        "fn f(a: A[Int]) -> Int {\n"
+        "  return match a { Same(x) => { let k = x\n k }, OnlyA => 0 }\n}\n"),
+    # issue #2325: a generic fn's applied selector now types the binder too, so
+    # a block arm reading it is admitted
+    "arm_binder_of_applied_declared_generic_fn": (
+        "type Holder[T] = Has(T) | Nothing\n"
+        "fn f[T](o: Holder[T], d: T) -> T {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => d }\n}\n"),
     "arm_rebinds_untyped_name": (
         "fn f(o: Option[Int]) -> Int {\n"
         "  return match o { Some(x) => { let x2 = 1\n x2 }, None => 0 }\n}\n"),
@@ -3911,6 +3960,143 @@ def test_the_well_typed_generic_record_forms_are_admitted(admit, name):
     assert admit(text) == ""
 
 
+# Issue #2942, the self-host half: a declared type applied to the wrong number
+# of type arguments. PR #2947 gave the reference checker the refusal where the
+# annotation is written; the native gate now runs the reference's declared-arity
+# pass, in its own site order, ahead of every other admission phase.
+_TYPE_ARITY_2942_REFUSED = {
+    "zero_parameter_applied": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb[Int]) -> Int {\n"
+        "  return match m { Jj(x) => x, Nn => 0 }\n"
+        "}\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "generic_wrong_count": (
+        "type Box[T] = { v: T }\n"
+        "fn f(b: Box[Int, Int]) -> Int { return 1 }\n",
+        "`Box` takes 1 type argument(s), got 2 (`Box[Int, Int]`)",
+    ),
+    "record_field": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type R = { a: Int, m: Mb[Int] }\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "case_payload": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type W = Wr(Mb[Int]) | Em\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "alias_right_hand_side": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type Al = Mb[Int]\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+}
+
+_TYPE_ARITY_2942_ADMITTED = {
+    "zero_parameter_bare": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb) -> Int {\n"
+        "  return match m { Jj(x) => x, Nn => 0 }\n"
+        "}\n"),
+    "generic_right_count": (
+        "type Box[T] = { v: T }\n"
+        "fn f(b: Box[Int]) -> Int { return b.v }\n"),
+    # a declaration's own type parameter names the parameter, not the declared
+    # head of the same name
+    "declaration_type_parameter_shadows": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type W[Mb] = { v: Mb[Int] }\n"
+        "fn f() -> Int { return 1 }\n"),
+    # a declared head that reuses a builtin name keeps the builtin reading
+    "declared_name_that_is_a_builtin": (
+        "type Opt = A | B\n"
+        "fn f(o: Opt[Int]) -> Int { return 1 }\n"),
+}
+
+# Two-fault programs: `type_arity.check_declared_type_arity` runs before
+# `check_and_lower`, so its message wins over a builtin wellformed refusal, an
+# alias cycle, a later-line declaration and a fn parameter check. The native
+# gate must pick the same one.
+_TYPE_ARITY_2942_ORDERING = {
+    "before_a_builtin_wellformed_refusal": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(x: List[Int, Int], y: Mb[Int]) -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "before_a_later_record_field": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type A = List[Int, Int]\n"
+        "type R = { m: Mb[Int] }\n"
+        "fn f() -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    "before_an_alias_cycle": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type A = B\n"
+        "type B = A\n"
+        "fn f(m: Mb[Int]) -> Int { return 1 }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Int]`)",
+    ),
+    # a FnDecl's return is checked before its parameters
+    "return_before_parameter": (
+        "type Mb = Jj(Int) | Nn\n"
+        "fn f(m: Mb[Int]) -> Mb[Str] { return Nn }\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Str]`)",
+    ),
+    # Program visits components before type_decls
+    "config_before_a_type_declaration": (
+        "type Mb = Jj(Int) | Nn\n"
+        "type R = { m: Mb[Int] }\n"
+        "component C {\n"
+        "  config {\n"
+        "    k: Mb[Str]\n"
+        "  }\n"
+        "}\n",
+        "`Mb` takes 0 type argument(s), got 1 (`Mb[Str]`)",
+    ),
+}
+
+
+@pytest.mark.parametrize("tier", ["py", "go", "java", "rust"])
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_REFUSED))
+def test_a_declared_type_with_the_wrong_argument_count_draws_the_reference_refusal(
+        compile_rvl, name, tier):
+    text, message = _TYPE_ARITY_2942_REFUSED[name]
+    assert _reference_refusal(text) == message
+    got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
+    assert got == "REFUSED|T1|" + message, got[:160]
+
+
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_ADMITTED))
+def test_the_right_declared_type_argument_count_is_admitted(admit, name):
+    text = _TYPE_ARITY_2942_ADMITTED[name]
+    assert _reference_refusal(text) == ""
+    assert admit(text) == ""
+
+
+@pytest.mark.parametrize("name", sorted(_TYPE_ARITY_2942_ORDERING))
+def test_the_declared_arity_pass_keeps_the_reference_order(admit, name):
+    text, message = _TYPE_ARITY_2942_ORDERING[name]
+    assert _reference_refusal(text) == message
+    assert admit(text) == "T1|" + message
+
+
+def test_a_fn_type_parameter_is_scoped_out_of_the_arity_check(admit):
+    text = ("type Mb = Jj(Int) | Nn\n"
+            "fn g[Mb](x: Mb[Int]) -> Int { return 1 }\n")
+    # The reference scopes an explicit type parameter out of the arity table, so
+    # this spelling is not an arity refusal: it is refused later for
+    # `type parameter `Mb` shadows a declared type`, a rule the native gate does
+    # not port yet. The arity pass must not claim it first.
+    assert _reference_refusal(text) == "type parameter `Mb` shadows a declared type"
+    assert "type argument(s), got" not in admit(text)
+
+
 # Issue #2460: an `if` whose branches join `Int` and `Float` is a `Float` in the
 # reference (`join`) and the native annotation engine answered unknown, so a
 # NESTED one fell back to `Int` on the outer join and the return-position widen
@@ -4108,11 +4294,13 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
     # issue #2594: the producer cannot lower this provide step, and the
-    # bodyless component it used to emit is now refused by name.
+    # bodyless component it used to emit is now refused by name, with the
+    # failing statement's reason.
     "provide_block_body":
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 7 "
-        "is not supported by the self-host compiler, which would emit the "
-        "component without its body.",
+        "(a `let`/`var` binding whose value is outside the producer's "
+        "expression surface) is not supported by the self-host compiler, which "
+        "would emit the component without its body.",
     "provide_expression_body": "EMITS",
     "ok_extra": "EMITS",
     "some_extra": "EMITS",

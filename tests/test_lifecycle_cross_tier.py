@@ -74,6 +74,42 @@ def test_ts_tier_lifecycle_tests_pass_and_catch_the_leak():
     _lifecycle_on_tier("ts")
 
 
+_DRIVER_LOCAL_SOURCE = """
+service Box { fn label() -> Str }
+
+component BoxC provides box: Box {
+  provide box {
+    fn label() = "b"
+  }
+}
+
+lifecycle test "bind root" {
+  load BoxC
+  let root = call box.label()
+  assert root == "b"
+  let again = call box.label()
+  assert again == "b"
+  unload BoxC
+  assert no_residue
+}
+"""
+
+
+@needs_vitest
+def test_ts_tier_runs_a_binding_named_like_a_driver_local(tmp_path):
+    """issue #2975: the generated ts suite used to declare `const root` twice
+    (the driver's context and the user binding), fail to parse, and report
+    `Tests no tests`. One binding rename was the only difference from the
+    passing control."""
+    path = tmp_path / "driver_local.rvl"
+    path.write_text(_DRIVER_LOCAL_SOURCE, encoding="utf-8")
+
+    result = _revl_test("--backend", "ts", str(path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[ts] pass:" in result.stdout
+    assert "vitest: 1 test(s) passed" in result.stdout
+
+
 @needs_go
 def test_go_tier_lifecycle_tests_pass_and_catch_the_leak():
     _lifecycle_on_tier("go")
