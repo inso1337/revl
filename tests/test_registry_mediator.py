@@ -457,6 +457,36 @@ def test_a_wider_decoy_marking_does_not_become_the_incumbent(tmp_path):
     assert decoy["replacementBar"]["mediators"] == ["decoy", "fs_mediator"]
 
 
+def test_an_attested_candidate_ranks_above_the_unbarred_in_the_ambiguous_case(tmp_path):
+    """The ambiguity removes the EXEMPTION, not the bar: a candidate with a
+    valid attestation binding a passing sweep still ranks above the marked
+    candidates and the unattested narrower candidate that lack it."""
+    reg = _build(tmp_path, {
+        "fs_mediator": (WIDE_MEDIATOR, MEDIATOR_META),
+        "net_mediator": (NARROW_MEDIATOR, NARROW_META),
+        # the narrowest, unattested candidate would win on authority alone.
+        "aaa_unattested": (FAST, None),
+        "zzz_evidenced": (FAST, None),
+    })
+    sweep = _fault_sweep(12, 12)
+    _put_evidence(reg, "zzz_evidenced",
+                  {registry.EVIDENCE_FAULT_SWEEP: sweep})
+    _put_evidence(reg, "zzz_evidenced", {registry.EVIDENCE_ATTESTATION: _attestation(
+        reg, "zzz_evidenced",
+        bindings={"fault-sweep": registry._facet_hash(sweep)})})
+    result = registry.resolve(reg, NEED, key=KEY)
+    assert result["mediatorAmbiguity"] == ["fs_mediator", "net_mediator"]
+    assert _names(result)[0] == "zzz_evidenced"
+    assert "replacementBar" not in result["candidates"][0]
+    unattested = next(c for c in result["candidates"]
+                      if c["name"] == "aaa_unattested")
+    assert unattested["replacementBar"]["ambiguous"] is True
+    # every candidate without the bar is demoted, including the marked ones.
+    marked = [c for c in result["candidates"] if "mediator" in c]
+    assert len(marked) == 2
+    assert all("replacementBar" in c for c in marked)
+
+
 def test_migrate_meta_refuses_an_unverified_mediator_before_writing(tmp_path):
     """A mediator lifted out of a committed index is an authority field. The
     migration verifies it before writing anything, so a refusing rebuild cannot

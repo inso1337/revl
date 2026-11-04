@@ -293,10 +293,11 @@ on the ordinary ranking again. When SEVERAL marked mediators match, the answer
 does not guess an incumbent from the ranking (which a decoy marking could
 select): it reports the ambiguity in `mediatorAmbiguity`, no candidate is
 exempt, and every candidate that lacks the bar is ranked below those that have
-it. This is a hard lexical term ahead of least authority, not a score: a
-narrower component cannot buy the mediator's place on an unsubstantiated claim.
-Without a verification key no attestation can grade `valid`, so no replacement
-can clear the bar and a single marked mediator keeps its place.
+it. An unmarked narrower candidate is not exempt either: it must clear the bar
+to rank above a marked mediator, so it cannot buy the mediator's place on an
+unsubstantiated claim. This is a hard lexical term ahead of least authority, not
+a score. Without a verification key no attestation can grade `valid`, so no
+replacement can clear the bar and a single marked mediator keeps its place.
 
 ## 2. `revl_resolve` — the one search verb
 

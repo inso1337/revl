@@ -2589,14 +2589,6 @@ def resolve(registry, need, manifest: dict | None = None,
     # would otherwise let a component with a narrower surface win over the
     # mediator on a claim it never substantiated.
     #
-    # WHICH mediator is protected matters. Exempting every marked candidate
-    # would let a second marking (for any capability the publisher alone holds)
-    # bypass the bar for the component the bar is meant to protect. So the
-    # protected incumbent is the marked candidate with the WIDEST authority -
-    # the one holding the raw capability, which is exactly the component whose
-    # narrow replacement least-authority ranking would otherwise prefer. Every
-    # other candidate is a replacement and must clear the bar.
-    #
     # WHICH mediator is protected matters. Inferring an incumbent from the
     # authority ranking is attacker-selectable: a decoy marked mediator with a
     # wider surface would become the protected one and the genuine mediator
@@ -2633,7 +2625,7 @@ def resolve(registry, need, manifest: dict | None = None,
             # consumer sees. Discount that class - and only that class.
             evidence = _discount_error_semantics(evidence)
         displacement = 0
-        if (protected_name and match.entry.name != protected_name
+        if (mediator_names and match.entry.name != protected_name
                 and not _replacement_bar(assessment)[0]):
             displacement = 1
         return (displacement, match.authority_fit_key(), evidence,
