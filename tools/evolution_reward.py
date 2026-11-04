@@ -393,8 +393,14 @@ def changed_files(candidate: Candidate):
 
     Committed and uncommitted changes both count, because a trajectory is scored
     on the tree it produced and not on how tidily it was committed.
+
+    `--no-renames` keeps this the same read as
+    `tools/evolution_controller.py`'s `measured_diff`: with rename detection on,
+    `--name-only` prints only the destination, so a file moved out of the
+    declared scope would not be seen as leaving it.
     """
-    ok, out = run_git(candidate, ["diff", "--name-only", candidate.base])
+    ok, out = run_git(candidate, ["diff", "--no-renames", "--name-only",
+                                  candidate.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -621,11 +627,11 @@ def probe_scope(candidate: Candidate) -> Verdict:
             name,
             f"{len(stray)} changed path(s) outside the declared scope: "
             + ", ".join(stray[:6]),
-            [f"git diff --name-only {candidate.base}"])
+            [f"git diff --no-renames --name-only {candidate.base}"])
     return verified(
         name,
         f"{len(paths)} changed path(s), all inside the declared scope",
-        [f"git diff --name-only {candidate.base}", "scope=" + ";".join(candidate.scope)])
+        [f"git diff --no-renames --name-only {candidate.base}", "scope=" + ";".join(candidate.scope)])
 
 
 def _glob_to_regex(pattern: str):

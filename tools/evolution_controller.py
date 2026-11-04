@@ -562,11 +562,9 @@ def measured_diff(proposal: Proposal):
 
     Committed and uncommitted changes both count, because a proposal is judged
     on the tree it produced and not on how tidily it was committed. This is the
-    same read `tools/evolution_reward.py` performs for its `scope` component,
-    plus `--no-renames`: git reports only the destination of a rename with
-    `--name-only`, so a `git mv` out of a domain, the fence or the kernel would
-    hide the removed path. `--no-renames` reports the removal as a deletion and
-    the arrival as an addition, so both paths are measured.
+    same read `tools/evolution_reward.py` performs for its `scope` component:
+    `--no-renames` makes a rename report the removal as a deletion and the
+    arrival as an addition, so both paths are measured.
     """
     tree = proposal.tree
     if not (tree / ".git").exists():
