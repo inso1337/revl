@@ -455,11 +455,17 @@ def measured_diff(proposal: Proposal):
     Committed and uncommitted changes both count, because a proposal is judged
     on the tree it produced and not on how tidily it was committed. This is the
     same read `tools/evolution_reward.py` performs for its `scope` component.
+
+    `--no-renames` so a move is reported under BOTH of its paths. Rename
+    detection on would list only the destination, and a file moved out of the
+    operator grant, the fence or the kernel would look like an addition
+    somewhere else. The measured set is the one those checks are made against,
+    so neither half of a move can be hidden.
     """
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", proposal.base])
+    ok, out = _git(tree, ["diff", "--no-renames", "--name-only", proposal.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -744,7 +750,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
                 "the declared changed-file set understates the tree by "
                 + str(len(understated)) + " path(s): "
                 + ", ".join(understated[:6]),
-                (f"git diff --name-only {proposal.base}",))
+                (f"git diff --no-renames --name-only {proposal.base}",))
 
     allow = proposal.candidate.allow
     if not allow:
@@ -763,7 +769,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
             f"({';'.join(allow)}): " + ", ".join(outside[:6])
             + ". The measured stages are not read for a diff outside the "
               "operator's grant",
-            (f"git diff --name-only {proposal.base}",
+            (f"git diff --no-renames --name-only {proposal.base}",
              "allow=" + ";".join(allow)))
 
     hits = fence_hits(measured)
@@ -809,7 +815,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
         f"authority diff empty on all {len(AUTHORITY_AXES)} axes; "
         f"{len(measured)} measured path(s), all inside the operator allow set "
         f"and none in the fence or the kernel",
-        base.evidence + (f"git diff --name-only {proposal.base}",
+        base.evidence + (f"git diff --no-renames --name-only {proposal.base}",
                          "allow=" + ";".join(allow),
                          f"axes={';'.join(AUTHORITY_AXES)}"))
 

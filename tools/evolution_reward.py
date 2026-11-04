@@ -163,11 +163,11 @@ two check different things:
 `probe_scope` verifies only when every measured path matches BOTH, and it refuses
 by name when no allow set was supplied at all. That is default deny: a run with
 no grant names nothing as editable, so it can retain nothing. A declared scope
-that names a fenced evaluator path, or that is `**` over the whole tree, is a
-declaration that bounds nothing and is refused too. The measured diff is fenced
-as well: a change to an evaluator file is refused even when a directory glob in
-the grant covers it, because the grant names the subject and the fence is the
-judge.
+that names a fenced evaluator path, or that admits every path in the tree (`**`,
+`***`, `**/**`), is a declaration that bounds nothing and is refused too. The
+measured diff is fenced as well: a change to an evaluator file is refused even
+when a directory glob in the grant covers it, because the grant names the
+subject and the fence is the judge.
 
 Exit status is 0 only when the trajectory is retained.
 """
@@ -482,8 +482,16 @@ def changed_files(candidate: Candidate):
 
     Committed and uncommitted changes both count, because a trajectory is scored
     on the tree it produced and not on how tidily it was committed.
+
+    `--no-renames` so a move is reported under BOTH of its paths. With rename
+    detection on, `git diff --name-only` prints only the destination, so
+    `git mv src/a.py tools/a.py` would look like one addition inside the grant
+    and the path it left would never be judged against the declared scope, the
+    operator grant or the fence. The measured set is what the grant is meant to
+    be default deny over, so neither half of a move can be hidden.
     """
-    ok, out = run_git(candidate, ["diff", "--name-only", candidate.base])
+    ok, out = run_git(candidate,
+                      ["diff", "--no-renames", "--name-only", candidate.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -706,10 +714,12 @@ def probe_scope(candidate: Candidate) -> Verdict:
         declaration and the grant both admit the directory, because the grant
         names the subject and the fence is the judge.
 
-    A declared whole-tree scope is refused by name too. It is checked after the
-    measured grant so that when a `**` candidate's diff ALSO leaves the grant,
-    the verdict names the path rather than only the pattern: the declaration
-    fails either way, and the path is the actionable reason.
+    A declared whole-tree scope is refused by name too, whatever its spelling:
+    the check tests whether the scope admits every probe path, so `***` and
+    `**/**` are refused with the literal `**`. It is checked after the measured
+    grant so that when a whole-tree candidate's diff ALSO leaves the grant, the
+    verdict names the path rather than only the pattern: the declaration fails
+    either way, and the path is the actionable reason.
 
     The diff is the MEASURED one. A declared change set is never consulted, for
     the same reason the controller refuses one: it is the candidate's account
@@ -748,7 +758,7 @@ def probe_scope(candidate: Candidate) -> Verdict:
             f"{len(outside_allow)} changed path(s) outside the operator allow "
             f"set ({';'.join(candidate.allow)}): "
             + ", ".join(outside_allow[:6]),
-            [f"git diff --name-only {candidate.base}",
+            [f"git diff --no-renames --name-only {candidate.base}",
              "allow=" + ";".join(candidate.allow)])
     measured_fence = [p for p in paths if p in set(EVALUATOR_FENCE)]
     if measured_fence:
@@ -759,15 +769,18 @@ def probe_scope(candidate: Candidate) -> Verdict:
             + ". The operator grant names the subject; the fence is the judge, "
             "and a change to it is refused even when a directory glob in the "
             "grant covers it",
-            [f"git diff --name-only {candidate.base}",
+            [f"git diff --no-renames --name-only {candidate.base}",
              "fence=" + ";".join(EVALUATOR_FENCE)])
     if _whole_tree(candidate.scope):
         return failed(
             name,
-            "the declared scope is `**` over the whole tree, so it bounds "
-            "nothing. The operator allow set is the bound now, and a "
-            "declaration that does not narrow it is refused by name",
-            [f"git diff --name-only {candidate.base}",
+            "the declared scope ("
+            + ";".join(candidate.scope)
+            + ") admits every path this check probes for, so it is a whole-tree "
+            "declaration and bounds nothing. Spelling it `**`, `***` or "
+            "`**/**` does not change that. The operator allow set is the bound "
+            "now, and a declaration that does not narrow it is refused by name",
+            [f"git diff --no-renames --name-only {candidate.base}",
              "scope=" + ";".join(candidate.scope)])
     stray = [p for p in paths if not _in_scope(p, candidate.scope)]
     if stray:
@@ -775,12 +788,12 @@ def probe_scope(candidate: Candidate) -> Verdict:
             name,
             f"{len(stray)} changed path(s) outside the declared scope: "
             + ", ".join(stray[:6]),
-            [f"git diff --name-only {candidate.base}"])
+            [f"git diff --no-renames --name-only {candidate.base}"])
     return verified(
         name,
         f"{len(paths)} changed path(s), all inside the declared scope and the "
         "operator allow set",
-        [f"git diff --name-only {candidate.base}",
+        [f"git diff --no-renames --name-only {candidate.base}",
          "scope=" + ";".join(candidate.scope),
          "allow=" + ";".join(candidate.allow)])
 
@@ -804,9 +817,23 @@ def _declared_fence(scope):
     return sorted({_norm_pattern(p) for p in scope} & fence)
 
 
+#: Paths a declared scope must admit if it is to be refused as covering the
+#: whole tree. They are all NESTED on purpose: `**/**` admits every nested path
+#: without admitting a top-level file, and the literal `**`, `***` and `**/**`
+#: all tie on this set, which is the property the refusal is about. A
+#: top-level-only wildcard such as `*` still bounds the nested tree and is not
+#: this rule's target.
+WHOLE_TREE_SENTINELS = ("a/b", "a/b/c", ".github/x", "x/y/z")
+
+
 def _whole_tree(scope) -> bool:
-    """Whether a declared scope is the unbounded `**` over the whole tree."""
-    return "**" in {_norm_pattern(p) for p in scope}
+    """Whether a declared scope admits every path this check probes for.
+
+    Comparing the string `**` misses other spellings that cover the same paths:
+    `***` compiles to a pattern that matches everything, and `**/**` covers
+    every nested path. Test the property rather than the spelling.
+    """
+    return all(_in_scope(path, scope) for path in WHOLE_TREE_SENTINELS)
 
 
 def _glob_to_regex(pattern: str):

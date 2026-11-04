@@ -62,7 +62,7 @@ reported success.
 | `conformance` | the two divergence registers | `tools/tier_guarantees.py --json`, ratcheted against the committed matrix at `base` | **3** |
 | `artifact-stability` | every generated artifact | `tools/regen_goldens.py --all --check` exit status, which contains the crate and wasm digest checks | **1** |
 | `formal` | the `formal/` ledger | the two pure-python ledger gates, plus a coverage read against `base` | **3** |
-| `scope` | the changed-file set | `git diff --name-only <base>` plus untracked files, against the declared globs AND the operator allow set (`--allow` / `REVL_EDIT_ALLOW`); no grant fails the component | **1, 6** |
+| `scope` | the changed-file set | `git diff --no-renames --name-only <base>` plus untracked files, against the declared globs AND the operator allow set (`--allow` / `REVL_EDIT_ALLOW`); no grant fails the component | **1, 6** |
 | `documentation` | the citation gate and the generated blocks | `tools/docgen.py --check` and `tools/check_roadmap_claims.py --check` exit status | **1** |
 | `held-out` | a draw the candidate could not read | `tools/heldout_scoring.py --diff-base`, where a REFUSAL is a fail | **1b** |
 | `progress` | the census allowance, the native-chain residual, the reach ledger | `tools/evolution_progress.py`, against the merge base of the candidate's `HEAD` and `base`: none regressed and at least one improved | **5** |
@@ -187,7 +187,7 @@ hides. Every one of these is `failed`:
 * the probe answers under a different component's name
 * the candidate declared no scope, or changed no file
 * the operator supplied no allow set
-* a declared scope names a fenced evaluator path, or is `**` over the whole tree
+* a declared scope names a fenced evaluator path, or admits every path in the tree
 * a changed path is outside the operator allow set, or outside the declared scope
 
 Each line has a test. A probe that raises fails its own component and does not
@@ -203,11 +203,15 @@ against a grant the candidate cannot write. The grant arrives as `--allow`
 and `RECORD_KEYS` drops a record that carries one. No grant is `failed`, which is
 default deny: a run that names nothing as editable retains nothing. A declared
 scope that NAMES a fenced evaluator path is refused before the diff is read. A
-declared `**` over the whole tree is refused by name as well; it is checked
-after the grant so that, when the diff also leaves the grant, the verdict names
-the path rather than only the pattern. The MEASURED diff is checked against the
-same fence after the grant, so a directory glob that covers a judge file does
-not let a candidate edit it; the grant names the subject, the fence is the
+declared scope that admits every path in the tree is refused by name as well,
+whatever its spelling (`**`, `***` and `**/**` are the same property); it is
+checked after the grant so that, when the diff also leaves the grant, the
+verdict names the path rather than only the pattern. The MEASURED diff is read
+with `--no-renames`, so both halves of a move are judged: rename detection on
+would list only the destination and a file moved out of the grant, the fence or
+the kernel would read as an allowed addition. It is checked against the same
+fence after the grant, so a directory glob that covers a judge file does not
+let a candidate edit it; the grant names the subject, the fence is the
 judge. The fence is
 `EVALUATOR_FENCE`: the reward's own two files, `tools/heldout_scoring.py`'s
 fence, and `tools/evolution_controller.py`'s. `tests/test_evolution_controller.py`
@@ -493,10 +497,12 @@ candidate-written claim and `**` bounded nothing, so `probe_scope` now also chec
 the measured diff against an operator grant (`--allow` / `REVL_EDIT_ALLOW`, never
 a record key). No grant fails the component by name, a path outside the grant is
 refused and listed, and a declared scope that names an `EVALUATOR_FENCE` path or
-is `**` over the whole tree is refused. A measured change that reaches a fenced
-evaluator is refused even when the grant's directory glob covers it. The
-controller applies the same grant at its `authority` precondition
-(`NO_ALLOW_SET`, `OUTSIDE_ALLOW`), before any measured stage is read.
+admits every path in the tree (`**`, `***`, `**/**`) is refused. The measured
+diff is read with `--no-renames`, so a move is judged by both its old and new
+path, and a change that reaches a fenced evaluator is refused even when the
+grant's directory glob covers it. The controller applies the same grant at its
+`authority` precondition (`NO_ALLOW_SET`, `OUTSIDE_ALLOW`) against a
+`--no-renames` measured diff, before any measured stage is read.
 Oracle: the `scope` block of `tests/test_evolution_reward.py`, the `allow` block
 of `tests/test_evolution_controller.py`, and `tools/evolution_reward.py`'s
 `ALLOW_ENV`, `parse_allow`, `allow_from_env` and `EVALUATOR_FENCE`.

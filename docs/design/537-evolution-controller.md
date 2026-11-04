@@ -258,9 +258,12 @@ boundary and a freeze, and it is why `FENCE_TOUCHED` is a distinct code from
 Every check in section 5 reads the changed-file set, so the controller must not
 accept the candidate's account of it. It does not:
 
-* when the tree is a git tree, the set comes from `git diff --name-only <base>`
-  plus untracked files, exactly the read `tools/evolution_reward.py` performs
-  for its `scope` component, and that set wins;
+* when the tree is a git tree, the set comes from
+  `git diff --no-renames --name-only <base>` plus untracked files, exactly the
+  read `tools/evolution_reward.py` performs for its `scope` component, and that
+  set wins. `--no-renames` so a move is judged by both paths: rename detection
+  on would list only the destination, and a file moved out of the grant, the
+  fence or the kernel would read as an allowed addition;
 * a declared set that **understates** the measured one is `DIFF_DISAGREES`;
 * a tree whose diff cannot be measured is `DIFF_UNVERIFIED` and has no
   satisfiable path, so a proposal on an unreadable tree cannot promote.

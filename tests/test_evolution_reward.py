@@ -553,16 +553,19 @@ def test_a_whole_tree_declaration_cannot_escape_the_operator_allow_set(
     assert "operator allow set" in verdict.reason
 
 
+@pytest.mark.parametrize("scope", (("**",), ("***",), ("**/**",)))
 def test_a_whole_tree_declaration_is_refused_by_name_when_the_grant_admits_it(
-        reward, tiny_repo):
-    """The other half: a scope of `**` bounds nothing even when the measured
-    diff happens to sit inside the grant, because the declaration is what the
-    candidate says it may edit."""
+        reward, tiny_repo, scope):
+    """The other half: a scope that admits every path bounds nothing even when
+    the measured diff happens to sit inside the grant, because the declaration
+    is what the candidate says it may edit. `***` and `**/**` are the same
+    property spelled differently and are refused by the same check."""
     (tiny_repo / "tools" / "a.py").write_text("a\n")
     verdict = reward.probe_scope(_candidate(
-        reward, tiny_repo, base="HEAD", scope=("**",), allow=("tools/**",)))
+        reward, tiny_repo, base="HEAD", scope=scope, allow=("tools/**",)))
     assert verdict.verified is False
-    assert "`**`" in verdict.reason and "whole tree" in verdict.reason
+    assert ";".join(scope) in verdict.reason
+    assert "whole-tree" in verdict.reason
 
 
 def test_no_operator_allow_set_fails_scope_by_name(reward, tiny_repo):
@@ -599,6 +602,42 @@ def test_a_change_to_a_fenced_evaluator_is_refused_even_inside_the_grant(
     assert verdict.verified is False
     assert "fenced" in verdict.reason
     assert "tools/evolution_reward.py" in verdict.reason
+
+
+def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(reward, tiny_repo):
+    """A rename is two changes. With rename detection on, `git diff --name-only`
+    lists only the destination, so `git mv src/a.py tools/a.py` would look like
+    one addition inside the grant and the source path would go unjudged."""
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "a.py").write_text("a\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "a path the grant does not cover")
+    _git(tiny_repo, "mv", "src/a.py", "tools/a.py")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("src/**", "tools/**"),
+        allow=("tools/**",)))
+    assert verdict.verified is False
+    assert "src/a.py" in verdict.reason
+    assert "operator allow set" in verdict.reason
+
+
+def test_renaming_a_fenced_evaluator_out_of_the_fence_is_still_refused(
+        reward, tiny_repo):
+    """With rename detection on, `git mv tests/test_evolution_reward.py
+    tests/renamed.py` lists only the new path, which is not fenced.
+    `--no-renames` keeps the old path in the measured set, where the fence
+    finds it."""
+    (tiny_repo / "tests").mkdir()
+    (tiny_repo / "tests" / "test_evolution_reward.py").write_text("# judge\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "the judge")
+    _git(tiny_repo, "mv", "tests/test_evolution_reward.py", "tests/renamed.py")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tests/**",),
+        allow=("tests/**",)))
+    assert verdict.verified is False
+    assert "tests/test_evolution_reward.py" in verdict.reason
+    assert "fenced" in verdict.reason
 
 
 def test_a_declared_scope_naming_a_fenced_path_is_refused_before_measurement(

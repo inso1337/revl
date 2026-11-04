@@ -403,6 +403,20 @@ def test_the_allow_set_does_not_choose_itself(clean_tree):
     assert "allow" in proposal.candidate.prose_ignored
 
 
+def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(tmp_path):
+    """A rename is two changes. With rename detection on, `git diff --name-only`
+    lists only the destination, so moving a file out of the grant and into a
+    granted directory would read as one allowed addition. The measured set is
+    what the authority precondition signs off, so both halves count."""
+    tree = make_tree(tmp_path / "rename", {"src/svc.rvl": "candidate\n"})
+    (tree / "tools").mkdir()
+    _git(tree, "mv", "src/svc.rvl", "tools/svc.rvl")
+    verdict = run(proposal_record(tree), allow=("tools/**",))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+
+
 def test_a_diff_inside_the_operator_allow_set_still_promotes(clean_tree):
     """The control: the same complete proposal promotes when the grant covers
     the measured diff, so the new precondition is not a refusal of everything."""
