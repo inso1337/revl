@@ -30861,6 +30861,67 @@ fn module_callable_fnty(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
   return out
 }
 
+// The DECLARED fn-type spelling of every top-level `extern`, in the same
+// `(p1, p2) -> ret` shape `module_callable_fnty` renders for a `fn`. The
+// producer's body environment already gets a sibling `fn` through
+// `case_binds`, which the admission gate reads too; an extern goes HERE
+// instead of there (issue #2945). Binding it in `case_binds` would also move
+// the gate's refusal ordering, so the gate keeps the table it had and only the
+// IR producer learns an extern's return type. `base` carries the rows already
+// present (the sync-monomorph table), and a name it holds is not added twice;
+// those rows keep their existing spelling there, which is a pre-existing
+// normalization gap (a `Secret[T]` extern is not taint-stripped by that table),
+// not a decision of this helper.
+//
+// ONE PASS over the tokens, in the shape `case_binds_walk` uses, because a
+// `FnD` carries no general "is an extern" flag: `isEmExtern` means an
+// emission/witnessed extern only, so it cannot tell a `pure` extern from a
+// module `fn`.
+fn extern_callable_binds(ts: List[Token], al: Map[Str, Str],
+                         base: List[Bind]) -> List[Bind] {
+  var out = base
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    let t = tkc(ts, i)
+    if (at_boot(ts, i)) { i += 1 }
+    else if (at_event(ts, i)) { i = event_decl_end(ts, i) }
+    else if (at_qual_test(ts, i)) {
+      let qe = qual_test_end(ts, i)
+      i = qe == 0 - 1 ? skip_line(ts, i) : qe
+    }
+    else if (t.kind != "kw") { i = skip_line(ts, i) }
+    else if (at_pub_prefix(ts, i)) { i += 1 }
+    else if (t.text == "extern") {
+      let h = ext_head(ts, i)
+      let nx = p_extern(ts, i, empty_prog()).i
+      if (h.ok && tenv_get(base, h.name) == "") {
+        let sps = alias_subst_params(h.ps, al)
+        var tys: List[Str] = []
+        var k = 0
+        while (k < sps.length()) {
+          tys = tys.push(taint_strip(sps[k].ty))
+          k += 1
+        }
+        let ret = taint_strip(alias_subst(h.ret, al))
+        out = out.push({ name: h.name,
+                         ty: "(".concat(join_strs(tys, ", ")).concat(") -> ")
+                               .concat(ret == "" ? "Unit" : ret) })
+      }
+      i = nx
+    }
+    else if (t.text == "type") { i = type_decl_end(ts, i + 1) }
+    else if (t.text == "test") {
+      let e = test_block_end(ts, i)
+      i = e == 0 - 1 ? skip_line(ts, i) : e
+    }
+    else if (t.text == "service") { i = p_service(ts, i, empty_prog()).i }
+    else if (t.text == "component") { i = p_component(ts, i, empty_prog()).i }
+    else if (t.text == "fn") { i = p_fn(ts, i, empty_prog()).i }
+    else { i = skip_line(ts, i) }
+  }
+  return out
+}
+
 // `_synthesize_sync_monomorphs`'s parameter rewrite: every `Async[T]` slot of a
 // clone is stripped back to a plain fn type, so the clone is checkable against
 // the sync arrow the redirected call hands it.
@@ -34018,8 +34079,9 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
 // `nmOut` overrides the emitted name (a `_revl_sync` clone re-renders its
 // origin's span under the monomorph's name) and `strip` drops both the `async`
 // stamp and the async half of every parameter's type, which is the whole of
-// `_synthesize_sync_monomorphs`. `fnty` carries the module callables' declared
-// signatures; it is empty unless this document has a sync monomorph.
+// `_synthesize_sync_monomorphs`. `fnty` carries the module callables'
+// declared signatures: a document with a sync monomorph gets that table, and
+// every document gets each top-level `extern`'s row (issue #2945).
 fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
                       colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str],
                       nmOut: Str, strip: Bool, fnty: List[Bind]) -> LirFn {
@@ -34061,7 +34123,13 @@ fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Boo
   let tmarks = om.marks.set("@try_fn", i).set("@try_end", bend).set("@lift", 1)
   // the caller's own redirect row rides the body environment under a reserved
   // key no identifier can spell, the way `mut_key` and `local_key` already do.
-  let benv = append_binds(params_env(ps.ps, cases, tps), fnty)
+  // The declared callable rows (`cases` already holds a sibling `fn`; `fnty`
+  // adds an `extern` and the sync monomorphs) go UNDER the parameters, not over
+  // them: the reference's `infer_ast` reads `tenv` before the signature table,
+  // so a parameter spelled like an extern wins. Appending `fnty` after
+  // `params_env` made a `fn f(bump: Int)` read `bump` as the extern's function
+  // type, which dropped the `operands` tag on `bump + 1` (issue #2945).
+  let benv = params_env(ps.ps, append_binds(cases, fnty), tps)
     .push({ name: "@mono", ty: mget_str(al, "@mono:".concat(nm)) })
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1, benv, [], retTy, tmarks, om.births, al)
   let js = "{\"name\":".concat(jstr(nmOut == "" ? nm : nmOut))
@@ -35549,7 +35617,15 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   // `_synthesize_sync_monomorphs`). The recolour reaches the component reader
   // too, which reads the same `colored`.
   let plan = mono_plan(pg.fns, colored, slots, al)
-  let fnty = plan.origins.length() == 0 ? [] : module_callable_fnty(ts, plan.al)
+  // Issue #2945: the body environment a module `fn` is lowered under types a
+  // sibling `fn` through `case_binds` but had no row for an `extern`, so a call
+  // to one lowered as unknown. The extern rows join the callable table here,
+  // NOT in `case_binds`, because that table is the admission gate's too and its
+  // refusal ordering must not move. `module_callable_fnty` already carries the
+  // extern rows in a document with a sync monomorph, so only the missing ones
+  // are added.
+  let fnty = extern_callable_binds(
+    ts, plan.al, plan.origins.length() == 0 ? [] : module_callable_fnty(ts, plan.al))
   let a = ir_walk(ts, 0, mk_iracc("", "", false, false, plan.colored, slots), fname, al, src_text(src))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   let fo = fns_walk(ts, 0, "", return_only_rows(ts, case_binds(ts, plan.al), plan.al), plan.colored, own_program_summary(ts),
