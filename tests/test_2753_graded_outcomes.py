@@ -57,6 +57,14 @@ component CsvReader requires store: Store {
 }
 """
 
+WITNESSED = """
+type Stash = { path: Str }
+type FsError = { code: Str }
+extern pure fn unstash(w: Stash) -> Unit = @py { pass }
+extern witnessed[fs] fn stash() -> Result[Stash, FsError] undo unstash(result) = @py { pass }
+component C { effect stash() }
+"""
+
 
 def _audit(src=SOLO):
     return audit_report(compile_source(src))
@@ -196,6 +204,40 @@ def test_register_floor_holding_grades_admit():
                      origins={"CsvReader": "source"})
     assert result["outcome"]["name"] == "admit"
     assert result["refused"] is False
+
+
+def test_reach_deny_forces_a_hard_refuse_outcome():
+    """A refusal from another rule family must not sit beside `admit`: the
+    graded outcome becomes `refuse` and names the violation."""
+    result = _explain(
+        "component CsvReader may not reach db\n"
+        "component CsvReader requires evidence [capabilities present]",
+        evidence={"CsvReader": _bundle()})
+    comp = result["components"][0]
+    assert comp["refused"] is True
+    assert comp["outcome"]["name"] == "refuse"
+    assert comp["outcome"]["hard"] is True
+    assert comp["outcome"]["decidedBy"]["kind"] == "deny"
+    assert comp["outcome"]["decidedBy"]["token"] == "db"
+    assert result["outcome"]["name"] == "refuse"
+    assert result["outcome"]["hard"] is True
+    assert "graded outcome: admit" not in render_explain(result)
+
+
+def test_teardown_refusal_forces_a_hard_refuse_outcome():
+    """The teardown floor is document-global and its violation names the
+    recovery entry, not a component. The overall outcome must still refuse;
+    the owning component's evidence grade stays whatever its clauses say."""
+    policy = parse_policy(
+        "requires idempotent-teardown\n"
+        "component C requires evidence [capabilities present]")
+    result = explain(policy, _audit(WITNESSED),
+                     evidence={"C": _bundle()}, origins={"C": "source"})
+    assert result["refused"] is True
+    assert result["outcome"]["name"] == "refuse"
+    assert result["outcome"]["hard"] is True
+    assert result["outcome"]["decidedBy"]["kind"] == "teardown"
+    assert result["outcome"]["decidedBy"]["token"] == "stash"
 
 
 # --------------------------------------- soft outcome precedence

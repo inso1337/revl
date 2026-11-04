@@ -1025,7 +1025,7 @@ def _split_evidence_body(body: str, source, lineno,
             raise PolicyError(
                 source, lineno,
                 f"unexpected trailer after `{rule_name} [...]`: "
-                f"{body[close + 1:].strip()!r} — only `self-attested` "
+                f"{body[close + 1:].strip()!r}: only `self-attested` "
                 f"is allowed (item 290, §6.3)")
         body = body[:close + 1]
     return _parse_require_list(body, source, lineno), self_attested
@@ -1050,7 +1050,7 @@ def _parse_soft_outcome(outcome: str, source, lineno) -> str:
     if name not in _SOFT_OUTCOMES:
         raise PolicyError(
             source, lineno,
-            f"unknown graded outcome {outcome.strip()!r} — a soft evidence "
+            f"unknown graded outcome {outcome.strip()!r}: a soft evidence "
             f"rule declares one of [{', '.join(_SOFT_OUTCOMES)}] (issue "
             f"#2753); `admit` and `quarantine` are computed")
     return name
@@ -1301,12 +1301,13 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         if low in ("evidence-root: local", "evidence-root local"):
             evidence_root_local = True
             continue
-        # issue #2753: `<subject> <outcome> on evidence [...]` — the ADVISORY
-        # graded form. It evaluates the same closed clause vocabulary as
-        # `requires evidence`, but a failing clause never appends a violation;
-        # the rule names the operator's graded disposition instead. Checked
-        # before the hard form so a typo'd outcome gets a diagnostic naming the
-        # allowed vocabulary rather than falling through to the reach grammar.
+        # issue #2753: the ADVISORY graded form,
+        # `<subject> <outcome> on evidence [...]`. It evaluates the same closed
+        # clause vocabulary as `requires evidence`, but a failing clause never
+        # appends a violation; the rule names the operator's graded disposition
+        # instead. Checked before the hard form so a typo'd outcome gets a
+        # diagnostic naming the allowed vocabulary rather than falling through
+        # to the reach grammar.
         phrase = " on evidence"
         at = low.find(phrase)
         if at != -1:
@@ -1319,7 +1320,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                 raise PolicyError(
                     source, lineno,
                     f"a soft evidence rule is `<subject> <outcome> on evidence "
-                    f"[<facet> <threshold>, ...]`, got {raw.strip()!r} — the "
+                    f"[<facet> <threshold>, ...]`, got {raw.strip()!r}; the "
                     f"outcome is one of [{', '.join(_SOFT_OUTCOMES)}] (issue "
                     f"#2753)")
             outcome = _parse_soft_outcome(parts[-1], source, lineno)
@@ -3213,6 +3214,12 @@ def _graded_outcome(policy: Policy, entry: dict) -> dict:
 
     The result names the clause that decided it; `decidedBy` is None only for
     `admit`, where no clause decided anything.
+
+    This function grades the evidence and register reports only. The caller
+    MUST override a non-hard result to `refuse` when the component is refused
+    by another rule family (reach, approval, tenant, idempotent-teardown):
+    otherwise the report would pair `refused: true` with `admit`, turning a
+    refusal into an admission for anything reading `outcome.name`.
     """
     hard = None
     soft = None
@@ -3259,6 +3266,14 @@ def _outcome_text(outcome: dict, component: str | None = None) -> str:
     decided = outcome.get("decidedBy")
     if not decided:
         return f"graded outcome: {name} (every selected hard clause holds)"
+    if "kind" in decided:
+        # A refusal from another rule family overrides the evidence grade; its
+        # `decidedBy` names the violation (kind and token) and its subject,
+        # which may be a recovery entry rather than the owning component.
+        subject = decided.get("component")
+        where = f"subject `{subject}`, " if subject else ""
+        return (f"graded outcome: {name} ({where}{decided['kind']} violation "
+                f"on `{decided.get('token') or '-'}`)")
     who = f"component {component}, " if component else ""
     return (f"graded outcome: {name} ({who}{decided['facet']} "
             f"{decided['threshold']} is {decided['fact']}; decided by "
@@ -3305,6 +3320,9 @@ def explain(policy: Policy, audit: dict,
         recompute_producer=recompute_producer) if (
             policy.evidence_rules or policy.register_rules) else {}
     refused = {v.component for v in violations}
+    violations_by_component: dict[str, list] = {}
+    for violation in violations:
+        violations_by_component.setdefault(violation.component, []).append(violation)
     inert = _inert_evidence_selectors(policy, reports) if reports else []
     has_graded_rules = bool(policy.evidence_rules or policy.register_rules)
     comps = []
@@ -3361,7 +3379,20 @@ def explain(policy: Policy, audit: dict,
             audit, origins, name), "selected": n_selecting > 0,
             "rules": rule_objs, "refused": refused_here, "verdict": verdict}
         if has_graded_rules:
-            comp_obj["outcome"] = _graded_outcome(policy, entry)
+            graded = _graded_outcome(policy, entry)
+            if refused_here and not graded["hard"]:
+                # A refusal from another rule family (reach, approval, tenant,
+                # idempotent-teardown) is a hard refusal too. Never report
+                # `admit` next to `refused: true`: that would turn a refusal
+                # into an admission for anything reading `outcome.name`.
+                violation = violations_by_component[name][0]
+                graded = {
+                    "name": "refuse", "hard": True,
+                    "decidedBy": {"kind": violation.kind,
+                                  "token": violation.token,
+                                  "message": violation.message},
+                }
+            comp_obj["outcome"] = graded
         all_comps.append(comp_obj)
         if component and name != component:
             continue
@@ -3385,6 +3416,19 @@ def explain(policy: Policy, audit: dict,
             outcome = {"name": candidate["name"], "hard": candidate["hard"],
                        "decidedBy": ({**decided, "component": name}
                                      if decided else None)}
+        if violations and not outcome["hard"]:
+            # A violation that is not attributed to a reportable component (the
+            # document-global `requires idempotent-teardown` floor names the
+            # recovery entry) must still make the overall outcome hard. The
+            # layer may never report `admit` while `refused` is true.
+            violation = violations[0]
+            outcome = {
+                "name": "refuse", "hard": True,
+                "decidedBy": {"kind": violation.kind,
+                              "token": violation.token,
+                              "message": violation.message,
+                              "component": violation.component},
+            }
     result = {
         "policy": policy.source,
         "recomputed": bool(recompute),
@@ -3441,7 +3485,7 @@ def render_explain(result: dict) -> str:
         demand = ("grades nothing" if " on evidence" in inert["rule"]
                   else "requires nothing")
         lines.append(f"inert selector ({inert['kind']}): `{inert['rule']}` "
-                     f"selects no component in this composition — it {demand} "
+                     f"selects no component in this composition; it {demand} "
                      f"(item 290, §7; item 249 inert-taint precedent)")
     if result["inertSelectors"]:
         lines.append("")

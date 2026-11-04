@@ -695,11 +695,14 @@ on every failing clause. `admit` is computed when every selected hard
 evidence or register clause holds and no soft clause fails; a hard failure
 maps to `quarantine` when the policy declares `quarantine required` and to
 the gate's own `refuse` otherwise. The strictest failing soft outcome
-decides, and the report names the clause that decided it. The
-`requires idempotent-teardown` floor and the reach, approval and tenant rule
-families stay outside this outcome. The facet vocabulary stays the same; the
-diff-size, shadow-agreement, proposer-agreement and proposer-history facets
-named in the issue are a later slice, not silently invented here.
+decides, and the report names the clause that decided it. A refusal from a
+reach, approval or tenant rule overrides that component's evidence grade to
+`refuse`. A document-global refusal such as the
+`requires idempotent-teardown` floor forces the overall outcome to `refuse`,
+naming the recovery entry. The outcome therefore never reports `admit` while
+the gate refuses. The facet vocabulary stays the same; the diff-size,
+shadow-agreement, proposer-agreement and proposer-history facets named in the
+issue are a later slice, not silently invented here.
 
 ## 10. Exit tests
 

@@ -580,18 +580,23 @@ whole composition's worst even when `--component` narrows the report:
     "rule": "component CsvReader review on evidence [fault-sweep full] self-attested",
     "facet": "fault-sweep",
     "threshold": "full",
-    "fact": "8/12 partial"
+    "fact": "8/12 partial",
+    "standing": "self-attested"
   }
 }
 ```
 
 The exit status remains the gate's: a soft-only failure is a graded `review`,
-`canary` or `observe`, not a refusal, so it exits 0. The outcome grades the
-evidence and register clauses only; `refused` remains the whole gate's answer,
-so the `requires idempotent-teardown` floor and the reach, approval or tenant
-rules can still refuse a component whose evidence outcome is `admit`. A policy
-with no evidence or register rules has no `outcome` section and evaluates
-exactly as before.
+`canary` or `observe`, not a refusal, so it exits 0. The outcome's clause-level
+grading covers the evidence and register clauses. When a reach, approval or
+tenant rule refuses a component, that component's outcome is `refuse` with
+`hard: true`, and its `decidedBy` names the violation's `kind` and `token`
+instead of a clause. A document-global refusal such as the
+`requires idempotent-teardown` floor forces the overall outcome to `refuse` the
+same way, naming the recovery entry, so the outcome never reports `admit` while
+the gate refuses. `refused` remains the whole gate's answer. A policy with no
+evidence or register rules has no `outcome` section and evaluates exactly as
+before.
 
 ### `revl simulate`
 
