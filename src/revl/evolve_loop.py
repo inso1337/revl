@@ -33,9 +33,9 @@ The loop reaches the Gate through `gate_service.admit_structured` (the
 machine-readable sibling of item 144's `admit`), so it inherits the exact same
 guarantees — evolve orchestrates the gate, it does not re-implement admission.
 
-The proposer is handed a **`ProposerPacket`** — the brief, the parent
-candidate, the last refusal, and a capped list of notes — and every refused
-attempt records the digest of the packet it handed over (`Attempt.packet_digest`).
+The proposer is handed a **`ProposerPacket`**: the brief, the parent
+candidate, the last refusal, and a capped list of notes. Every refused attempt
+records the digest of the packet it handed over (`Attempt.packet_digest`).
 `rounds` wraps the loop: each bounded run ends at a retained component, and the
 next round starts from a fresh packet built from that component and the
 original brief, with no refusal text carried across the round boundary. See
@@ -205,18 +205,6 @@ class ProposerPacket:
         return hashlib.sha256(
             self.canonical_json().encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def from_json(text: str) -> "ProposerPacket":
-        obj = json.loads(text) if text else {}
-        candidate = obj.get("candidate") or {}
-        return ProposerPacket(
-            brief=obj.get("brief") or "",
-            candidate=Candidate(sources=candidate.get("sources") or {},
-                                manifest=candidate.get("manifest") or ""),
-            last_refusal=obj.get("last_refusal"),
-            notes=tuple(obj.get("notes") or ()),
-        )
-
 
 def refusal_note(n: int, payload: dict) -> str:
     """A bounded one-line summary of a refusal, safe to surface to a proposer
@@ -273,8 +261,8 @@ def register_proposer(proposer: Proposer) -> None:
 @dataclass
 class Attempt:
     """One turn of the loop: the candidate offered, the Gate verdict, and — on
-    a refusal that still had an attempt left — the digest of the `ProposerPacket`
-    that was handed to `propose`."""
+    a refusal that still had an attempt left, the digest of the
+    `ProposerPacket` that was handed to `propose`."""
 
     n: int
     candidate: Candidate
@@ -332,7 +320,7 @@ class Round:
 @dataclass
 class RoundsResult:
     """The bounded multi-round run: every round in order, whether the last
-    round ended at a retained component, and — on a failed round — the final
+    round ended at a retained component, and (on a failed round) the final
     rejection. `final_candidate` is the last component a round retained, or
     `None` when no round admitted."""
 
