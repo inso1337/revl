@@ -1,4 +1,4 @@
-# 529 — aligning revl authentication with Cordis SSO
+# 529: aligning revl authentication with Cordis SSO
 
 **Roadmap:** item 457 (issue #720), whose exit test requires an explicit authorization step; part of the 462 arc · **Source:** cordiverse/sso study, 2026-09-08 · **Status:** DESIGN DRAFT
 
