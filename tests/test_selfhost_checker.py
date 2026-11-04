@@ -1748,6 +1748,10 @@ REJECTED_PROG_EXPR = [
     ("type Bad = Result", "1"),
     ("type R = { a: Opt }", "1"),
     ("type S = A(Opt) | B", "1"),
+    # a builtin scalar takes no type arguments (issue #2963)
+    ("type R = { a: Int[Str] }", "1"),
+    ("type S = A(Int[Str]) | B", "1"),
+    ("type Bad = Int[Str]", "1"),
     # `Never` is the inferred bottom, uninhabited and ONE-WAY: it flows out of a
     # `Never` position into any other, and nothing flows in. So an `Int` payload
     # for a `Wrap(Never)` case is a definite argument mismatch, not a cast.

@@ -441,14 +441,24 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             code="L4", category="termination",
         )
     arity = _GENERIC_ARITY.get(head or "")
+    if arity is None and head in _CONFIG_DATA_SCALARS:
+        # issue #2963: a builtin scalar is not parametric, so a written
+        # application (`Int[Str]`) has no meaning; it used to type through with
+        # the head read as `Int` and the written arguments dropped.
+        arity = 0
     if arity is not None and len(args) != arity:
-        example = {"Opt": "Opt[Int]", "List": "List[Int]",
-                   "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
+        if arity == 0:
+            hint = (f"`{head}` is a builtin scalar and takes no type "
+                    f"arguments; write `{head}`")
+        else:
+            example = {"Opt": "Opt[Int]", "List": "List[Int]",
+                       "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
+            hint = f"write e.g. `{example}` — a bare `{head}` is not a type"
         raise RevlError(
             filename, line,
             f"`{head}` takes {arity} type argument(s), got {len(args)} "
             f"(`{type_name}`)",
-            hint=f"write e.g. `{example}` — a bare `{head}` is not a type",
+            hint=hint,
         )
     for i, arg in enumerate(args):
         # Only the *immediate* function type's return position may carry an

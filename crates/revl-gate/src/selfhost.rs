@@ -42564,12 +42564,19 @@ pub fn validate_explicit_tparams(names: Vec<String>, declared: Vec<String>) -> V
     return VetR { ok: true, msg: String::from(""), names: list_sort(seen) };
 }
 
+fn is_scalar_head(h: &str) -> bool {
+    return (((((((h == "Int") || (h == "Int32")) || (h == "Float")) || (h == "Str")) || (h == "Bool")) || (h == "Bytes")) || (h == "Unit"));
+}
+
 fn generic_arity(h: &str) -> i64 {
     if ((h == "Opt") || (h == "List")) {
         return 1i64;
     }
     if ((h == "Map") || (h == "Result")) {
         return 2i64;
+    }
+    if is_scalar_head(h) {
+        return 0i64;
     }
     return (0i64).checked_sub(1i64).expect("revl: Int overflow");
 }
