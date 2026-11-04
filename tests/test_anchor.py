@@ -495,3 +495,18 @@ def test_cli_attest_anchor_refuses_verify_mode(tmp_path, capsys):
                "--digest", "receipt:one=" + "a" * 64, "--key", str(keyf)])
     assert rc == 1
     assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_cli_attest_refuses_digest_without_anchor(tmp_path, capsys,
+                                                 monkeypatch):
+    """A normal attestation must not silently drop a digest the operator asked
+    to commit to. The refusal happens before key resolution, so a missing key
+    cannot mask it."""
+    comp = _write(tmp_path / "base.rvl", BASE)
+    monkeypatch.delenv(A.KEY_ENV, raising=False)
+    monkeypatch.delenv(A.KEY_FILE_ENV, raising=False)
+    rc = main(["attest", str(comp), "--digest", "composition=" + "a" * 64])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--digest applies only with --anchor" in err
+    assert "no signing key" not in err

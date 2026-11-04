@@ -313,6 +313,14 @@ def _run_attest(args) -> int:
     from .. import attest as _attest  # noqa: PLC0415
     from ..composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
 
+    # Only the anchor paths at `_run_anchor` and `run_anchor_verify` read
+    # `args.digest`. In sign mode a silently dropped digest would produce a
+    # signed record that omits a commitment the operator asked for, so the
+    # option is refused before any key is resolved.
+    if getattr(args, "digest", None) and not getattr(args, "anchor", False):
+        print("error: --digest applies only with --anchor", file=sys.stderr)
+        return 2
+
     if not getattr(args, "anchor", False) and not args.target:
         if args.verify or getattr(args, "verify_certificate", False):
             print("error: this mode needs a record to check as TARGET",
