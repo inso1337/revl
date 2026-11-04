@@ -148,7 +148,10 @@ _EVALUATOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("src/revl/attest.py", ("kernel",)),
     ("src/revl/taint.py", ("kernel",)),
     ("src/revl/retention.py", ("kernel",)),
-    ("src/revl/kernel_boundary.py", ("kernel",)),
+    # This file DEFINES the held-out fence, so it is on that fence too: a diff
+    # that edits the enumeration must not be scored by the fence it widened.
+    # The controller still refuses it with KERNEL_INTERSECTION, not this fence.
+    ("src/revl/kernel_boundary.py", ("kernel", "held_out")),
     ("crates/revl-gate", ("kernel",)),
     ("formal", ("kernel",)),
     ("tools/gate_reference_census.py", ("kernel", "held_out")),

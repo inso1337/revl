@@ -228,7 +228,7 @@ not copies:
 | `src/revl/attest.py` | kernel | the attestation chain |
 | `src/revl/taint.py` | kernel | the authority lattice and declassification |
 | `src/revl/retention.py` | kernel | the retention deadline (`G-RETAIN`) |
-| `src/revl/kernel_boundary.py` | kernel | this enumeration, its views and the digest |
+| `src/revl/kernel_boundary.py` | kernel, held-out | this enumeration, its views and the digest; it defines the held-out fence, so it is on that fence too |
 | `crates/revl-gate` | kernel | the embedded admission gate |
 | `formal` | kernel | the formal models the guarantees cite |
 | `tools/gate_reference_census.py` | kernel, held-out | the census and the reference it compares |
@@ -249,9 +249,11 @@ not copies:
 Read the table as the refusal, not as a directory map. A path in the `kernel`
 column is refused by the controller with `KERNEL_INTERSECTION`; a path in the
 `authority` column is refused with `FENCE_TOUCHED`; a path in the `held-out`
-column is refused by this tool with `diff-reaches-fence:<path>`. The census and
-its baseline are in two columns because they decide two questions, which is why
-they are one row and not two. `tools/evolution_reward.py` and
+column is refused by this tool with `diff-reaches-fence:<path>`. The census, its
+baseline and this enumeration are in two columns because they decide two
+questions, which is why they are one row and not two. The enumeration is on the
+held-out fence because it DEFINES that fence: a diff that edits the table must
+not be scored by the fence it widened. `tools/evolution_reward.py` and
 `tools/evolution_progress.py` were on none of the old lists, so a diff could
 edit the retention rule and no check named it.
 

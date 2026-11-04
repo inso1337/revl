@@ -528,8 +528,9 @@ def _record_for(proposal: Proposal, stage: str):
     separate checks that ran on every PR and could not fail. The third is issue
     #2802's: a record that names ANOTHER protocol is not evidence about this
     one. An absent digest is read rather than invented as a mismatch, because
-    the lifecycle also judges hand-written records; the verdict they feed
-    carries the protocol this checkout actually ran.
+    the lifecycle also judges hand-written records; a digest that is PRESENT
+    and not this checkout's, `null` included, is a mismatch. The verdict the
+    record feeds carries the protocol this checkout actually ran.
     """
     record = proposal.stages.get(stage)
     if record is None:
@@ -544,17 +545,19 @@ def _record_for(proposal: Proposal, stage: str):
             f"the `{stage}` record is {type(record).__name__}, not an object")
     record = _normalise(stage, record)
     own = own_protocol_digest()
-    supplied = record.get("protocol_digest")
-    if supplied and supplied != own:
-        return False, failed(
-            stage, "PROTOCOL_MISMATCH",
-            f"the `{stage}` record was produced by a different evaluator: it "
-            f"carries protocol digest {supplied}, and this checkout's is "
-            f"{own}. Two rounds scored by different protocols "
-            f"cannot show they were scored by the same one, so the record is "
-            f"refused rather than read",
-            (f"record-protocol={supplied}",
-             f"checkout-protocol={own}"))
+    if "protocol_digest" in record:
+        supplied = record["protocol_digest"]
+        if supplied != own:
+            return False, failed(
+                stage, "PROTOCOL_MISMATCH",
+                f"the `{stage}` record was produced by a different evaluator: it "
+                f"carries protocol digest {supplied!r} (`null` means its scorer "
+                f"could not name its own protocol), and this checkout's is "
+                f"{own}. Two rounds scored by different protocols "
+                f"cannot show they were scored by the same one, so the record is "
+                f"refused rather than read",
+                (f"record-protocol={supplied!r}",
+                 f"checkout-protocol={own}"))
     if not record.get("evidence"):
         return False, failed(
             stage, "EVIDENCE_MISSING",
@@ -573,22 +576,29 @@ def _normalise(stage: str, record: dict) -> dict:
     --json` is wired in without a translation step that could soften the
     conjunction. `retained` maps to `verified` because it is the same
     all-or-nothing question, and the component names become the evidence.
-    `protocol_digest` is carried through, because the adapter must not drop the
-    field the mismatch check reads.
+    `protocol_digest` is carried through only when the scorecard HAS the key,
+    because the mismatch check distinguishes an absent key (a hand-written
+    record) from a present `null` (a scorer that could not name its protocol).
     """
     if "retained" not in record:
         return record
     components = record.get("components") or []
     names = [c.get("component") for c in components if isinstance(c, dict)]
     blockers = list(record.get("blockers") or [])
-    return {
+    normalised = {
         "verified": bool(record.get("retained")),
         "reason": ("every reward component verified" if record.get("retained")
                    else "reward components did not verify: " + ", ".join(blockers)),
         "evidence": [f"tools/evolution_reward.py: {n}" for n in names if n],
         "diff": record.get("diff"),
-        "protocol_digest": record.get("protocol_digest"),
     }
+    # Copied only when the scorecard HAS the key. A scorecard that omits it is a
+    # hand-written record, and `_record_for` reads it; a scorecard that carries
+    # `null` is a scorer which could not name its protocol, and that is a
+    # mismatch rather than an absence.
+    if "protocol_digest" in record:
+        normalised["protocol_digest"] = record["protocol_digest"]
+    return normalised
 
 
 def _plain(stage: str, record: dict) -> Verdict:

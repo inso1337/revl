@@ -105,11 +105,12 @@ def test_every_evaluator_path_exists_in_the_tree():
 def test_the_named_views_partition_the_evaluator_set():
     """Three views cover the whole set, and no row is kernel and authority.
 
-    The census tool and its baseline deliberately appear in TWO views: the
-    kernel decides admissions and the held-out scorer reads the allowance out
-    of the same baseline, so refusing it under both names is the decision, not
-    a duplicate row. The held-out files the controller also refuses are the
-    same kind of double membership in the other pair.
+    Three rows deliberately appear in TWO views. The census tool and its
+    baseline are kernel paths and decide the held-out allowance; the enumeration
+    itself defines the held-out fence, so it is on that fence too. Refusing a
+    path under both names is the decision, not a duplicate row. The held-out
+    files the controller also refuses are the same kind of double membership in
+    the other pair.
     """
     kernel = set(kb.KERNEL_PATHS)
     authority = set(protocol.AUTHORITY_FENCE)
@@ -117,6 +118,7 @@ def test_the_named_views_partition_the_evaluator_set():
     assert kernel | authority | held_out == set(kb.EVALUATOR_PATHS)
     assert not (kernel & authority)
     assert kernel & held_out == {
+        "src/revl/kernel_boundary.py",
         "tools/gate_reference_census.py",
         "tools/gate_reference_census_baseline.json",
     }

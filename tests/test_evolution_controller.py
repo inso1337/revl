@@ -377,6 +377,40 @@ def test_the_scorecard_adapter_carries_the_protocol_digest_through(clean_tree):
     assert verdict.refusing_stage == "observe"
 
 
+def test_a_scorecard_whose_protocol_is_null_is_refused(clean_tree):
+    """A scorer that could not name its protocol is not a pass.
+
+    `evolution_reward.score()` writes `protocol_digest: null` when its own
+    checkout cannot be read (a missing git, a missing member). The adapter used
+    to treat that null like an ABSENT key, so the record was read and could
+    promote; the held-out scorer refuses the same situation, so one of the two
+    was failing open.
+    """
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [],
+        "components": [{"component": "tests"}],
+        "protocol_digest": None,
+    }
+    verdict = run(record)
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "observe"
+    assert "null" in verdict.by_name()["observe"].reason
+
+
+def test_a_scorecard_from_this_protocol_promotes(clean_tree):
+    """The control for the two cases above: a present digest equal to this
+    checkout's is read, so the adapter did not turn the check into a refusal of
+    every scorecard."""
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [],
+        "components": [{"component": "tests"}],
+        "protocol_digest": ec.own_protocol_digest(),
+    }
+    assert run(record).decision == "PROMOTE"
+
+
 # ----------------------------------------- the kernel (item 544, #1223)
 
 @pytest.mark.parametrize("path", [
