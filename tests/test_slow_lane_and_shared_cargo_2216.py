@@ -18,7 +18,10 @@ the fixtures' own source) rather than restating the intent in prose.
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -138,6 +141,44 @@ def test_the_local_fast_lane_is_gated_on_affected_mode():
 def test_the_pre_commit_hook_is_a_fast_lane():
     text = (ROOT / "tools" / "hooks" / "pre-commit").read_text(encoding="utf-8")
     assert re.search(r"^export REVL_SKIP_SLOW=1$", text, re.MULTILINE), text
+
+
+# The deselection itself, run rather than read. A source scan cannot see a
+# deleted `if _SKIP_SLOW:` block in tests/conftest.py; a child collection can.
+_SLOW_PROBE = ("tests/test_retention_summary_worklist_539.py::"
+               "test_worklist_not_slower_than_reference_on_lower_rvl")
+
+
+def _collect_the_worklist(skip_slow):
+    """One `pytest --collect-only` over the file, in a fresh interpreter.
+
+    The child must start from the same environment as this session except for
+    the switch under test, so the lane and shard variables are removed rather
+    than inherited (this test may itself run inside the fast lane, where
+    REVL_SKIP_SLOW is set in the parent).
+    """
+    env = os.environ.copy()
+    for name in ("REVL_SKIP_SLOW", "REVL_TEST_SHARD", "REVL_SHARD_WEIGHTS",
+                 "PYTEST_ADDOPTS"):
+        env.pop(name, None)
+    if skip_slow is not None:
+        env["REVL_SKIP_SLOW"] = skip_slow
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider",
+         "tests/test_retention_summary_worklist_539.py"],
+        cwd=ROOT, env=env, text=True, capture_output=True, timeout=600)
+
+
+def test_the_fast_lane_deselects_the_marked_test_in_a_real_collection():
+    fast = _collect_the_worklist("1")
+    assert fast.returncode == 0, fast.stdout + fast.stderr
+    assert "1 deselected" in fast.stdout, fast.stdout
+    assert _SLOW_PROBE not in fast.stdout, fast.stdout
+
+    full = _collect_the_worklist(None)
+    assert full.returncode == 0, full.stdout + full.stderr
+    assert _SLOW_PROBE in full.stdout, full.stdout
 
 
 # ------------------------------------------------- the shared cargo directory
