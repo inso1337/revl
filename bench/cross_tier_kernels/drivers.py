@@ -79,7 +79,7 @@ fn main() {
         "hash_bytes" => emitted::hash_bytes(n),
         "simulate" => emitted::simulate(n),
         "batch_transform" => emitted::batch_transform(n),
-        "overhead_probe" => emitted::overhead_probe(n),
+        "loop_probe" => emitted::loop_probe(n),
         other => {
             eprintln!("unknown kernel: {other}");
             std::process::exit(2);

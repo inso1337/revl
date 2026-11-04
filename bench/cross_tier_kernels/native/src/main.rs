@@ -201,7 +201,7 @@ fn batch_transform(n: i64) -> i64 {
     total
 }
 
-fn overhead_probe(n: i64) -> i64 {
+fn loop_probe(n: i64) -> i64 {
     let pins = [1i64, 2, 3, 4, 5, 6, 7, 8];
     let mut acc = 0i64;
     let mut i = 0i64;
@@ -229,7 +229,7 @@ fn main() {
         "hash_bytes" => hash_bytes(n),
         "simulate" => simulate(n),
         "batch_transform" => batch_transform(n),
-        "overhead_probe" => overhead_probe(n),
+        "loop_probe" => loop_probe(n),
         other => {
             eprintln!("unknown kernel: {other}");
             std::process::exit(2);

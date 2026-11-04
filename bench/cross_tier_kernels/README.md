@@ -18,9 +18,9 @@ and against `native/`, the handwritten Rust reference for the same seven
 shapes and the same checksums. The kernels are:
 
 `schema_validate`, `regex_scan`, `vector_rerank`, `policy_eval`, `hash_bytes`,
-`simulate`, `batch_transform`. A control, `overhead_probe`, is a minimal
+`simulate`, `batch_transform`. A control, `loop_probe`, is a minimal
 pinned-list scan; the tier's per-call cost over the native control is reported
-as call overhead.
+as loop overhead. It does not cross a host or tier boundary.
 
 Every tier's checksum is compared with the native reference at the same `n`
 before a latency is reported. A disagreement fails that row rather than
@@ -37,7 +37,12 @@ python3 bench/cross_tier_kernels/harness.py --only rust,wasm --keep /tmp/ct
 Needs `cargo` and `rustc` for the `rust` and `native` tiers, `node` for `ts`,
 and `wasm-tools` plus `wasmtime` for `wasm`. A missing toolchain is reported as
 a skipped tier and its rows are not measured; nothing is inferred for it. The
-Python tier and its emitted module need only `python3`.
+native reference is not optional when an emitted tier is requested: the harness
+builds it too (so `--only rust,wasm` still checks agreement), and it refuses to
+report emitted rows if `cargo` is missing. `--write` is refused unless all five
+tiers were measured and no row failed, so a partial run cannot overwrite the
+committed result. The Python tier's own emitted module needs only `python3`,
+but the native floor requires `cargo` for any run that reports a row.
 
 The committed table is
 [results/cross-tier-kernels.md](../results/cross-tier-kernels.md).
@@ -52,7 +57,7 @@ The committed table is
 | `artifact bytes` | the deployed artifact: emitted module source, release binary, or `.wasm` |
 | `cold start ms` | tier-level: minimum wall time of three warm `n=0` runs, so process start plus module load |
 | `peak memory KB` | maximum resident set of the timed run, from `/usr/bin/time` |
-| `call overhead ns` | tier-level: the tier's control per call minus the native control's per call, floored at 0 |
+| `loop overhead ns` | tier-level: the tier's control per call minus the native control's per call, floored at 0 |
 | `capability overhead ns` | tier-level: the Python tier's witnessed crossing minus its body; n/a where the harness does not isolate a witnessed path |
 | `n` | the calibrated repetition count for that row |
 
@@ -92,6 +97,10 @@ work is only justified when the gain survives call overhead.** A native kernel
 under 20% faster than the emitted path is not worth a tier boundary; a 5x to
 10x gain is; anything between needs the call overhead subtracted before it
 counts. The rule is also stated in [bench/README.md](../README.md).
+
+This harness reports loop overhead, not call overhead, so applying the rule
+needs the crossing number from
+[results/extern-call-cost.md](../results/extern-call-cost.md).
 
 The ratio is the emitted path against the floor, not a verdict that a native
 kernel is the right repair. Where the gap is a shape the emitter writes badly,

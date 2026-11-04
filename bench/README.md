@@ -449,8 +449,10 @@ The second half of the issue is the cross-tier harness,
 on the Python, TypeScript, Rust and wasm tiers, against the same work in a
 handwritten native Rust reference as the floor. It gates every tier's checksum
 against that reference before reporting a latency, then writes latency,
-throughput, artifact size, cold start, peak memory, call overhead and
-capability-enforcement overhead. The committed run is
+throughput, artifact size, cold start, peak memory, loop overhead and
+capability-enforcement overhead. It states that call overhead across a
+boundary is not isolated here; the Python tier's extern crossing is the first
+slice's result. The committed run is
 [results/cross-tier-kernels.md](results/cross-tier-kernels.md).
 
 The decision rule it exists to serve, stated now so the cross-tier numbers

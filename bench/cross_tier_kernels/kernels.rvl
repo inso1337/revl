@@ -205,13 +205,14 @@ pub fn batch_transform(n: Int) -> Int {
   return total
 }
 
-// The control: a minimal pinned-list scan. An empty `while (i < n) { i += 1 }`
-// is a closed form that an optimising native compiler rewrites away (measured:
-// native reported 0 ns for 128,000 calls), which would make the call-overhead
-// column a comparison against zero. The lookup keeps a real loop on every tier,
-// and the native floor pays the same loop, so the difference is the emitted
-// call and loop scaffolding.
-pub fn overhead_probe(n: Int) -> Int {
+// The loop control: a minimal pinned-list scan. An empty
+// `while (i < n) { i += 1 }` is a closed form that an optimising native
+// compiler rewrites away (measured: native reported 0 ns for 128,000 calls),
+// which would make the column a comparison against zero. The lookup keeps a
+// real loop on every tier, and the native floor pays the same loop, so the
+// difference is the emitted loop and list-index cost. It does NOT cross a
+// host or tier boundary: call overhead is not isolated by this harness.
+pub fn loop_probe(n: Int) -> Int {
   let pins: List[Int] = [1, 2, 3, 4, 5, 6, 7, 8]
   var acc = 0
   var i = 0
