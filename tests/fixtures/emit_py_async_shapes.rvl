@@ -12,8 +12,14 @@
 //                a bind named after one of the emitter's walrus temps keeps
 //                the tuple spelling;
 //   Relay      - async provide operations: an `await` statement, an awaited
-//                async host-extern emission, an awaited coloured-fn call, and
-//                an awaited match over an async operation's result;
+//                async host-extern emission, an awaited coloured-fn call, a
+//                value-position `emit` of a sync wrapper, and a match over an
+//                async operation's result. The value emits here go through
+//                `look`, which reaches a sync extern: an async-coloured wrapper
+//                in value position records no emission step and is refused
+//                (issue #2969), and a value emission inside a match arm is the
+//                port's deferred nested-value slice, so neither belongs in a
+//                document held to byte agreement;
 //   Ticker     - an async-coloured timer whose body mixes a sync emission (run
 //                inline) with an async one (spawned into the in-flight window),
 //                in a document with no lifecycle test;
@@ -30,6 +36,10 @@ extern emission async fn host_get(path: Str) -> Str = @py {
     return path
 }
 
+extern emission fn sync_get(path: Str) -> Str = @py {
+    return path
+}
+
 fn drive(cb: (Str) -> Async[Str], path: Str) -> Str {
   let body = cb(path)
   return body
@@ -41,6 +51,10 @@ pub fn lift(path: Str) -> Str {
 
 fn fetch(path: Str) -> Str {
   return host_get(path)
+}
+
+fn look(path: Str) -> Str {
+  return sync_get(path)
 }
 
 fn pick(o: Opt[Str], p: Opt[Str], q: Opt[Str], r: Opt[Str]) -> Str {
@@ -81,11 +95,12 @@ component Relayer provides relay: Relay {
     async fn send(path) {
       await emit fetch(path)
       emit host_get(path)
-      let got = emit fetch(path)
-      return match got.length() > 0 ? Some(got) : None {
-        Some(g) => emit fetch(g),
+      let got = emit look(path)
+      let seen = match got.length() > 0 ? Some(got) : None {
+        Some(g) => g,
         None => "empty"
       }
+      return seen
     }
     fn note(path) = path
   }

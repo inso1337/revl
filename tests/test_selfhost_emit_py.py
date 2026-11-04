@@ -537,6 +537,48 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
     )
 
 
+WRAPPER_EMIT = """
+service Ops {
+  emission fn value(msg: Str) -> Str
+  emission fn stmt(msg: Str) -> Str
+}
+
+extern emission fn ext(msg: Str) -> Str
+  = @py { return "ext:" + msg }
+
+fn helper(msg: Str) -> Str { return ext(msg) }
+fn relay(msg: Str) -> Str { return helper(msg) }
+
+component Agent provides ops: Ops {
+  provide ops {
+    fn value(msg) {
+      let r = emit helper(msg)
+      return r
+    }
+    fn stmt(msg) {
+      emit relay(msg)
+      return "done"
+    }
+  }
+}
+"""
+
+
+def test_a_wrapper_emit_is_keyed_by_the_crossed_extern_in_both_emitters(
+        emitted, reference, tmp_path):
+    """Issue #2969: a marked `emit` of a plain `fn` records the host extern the
+    checker's reach names (`ext`), not the wrapper, and the port must render the
+    same bytes. The value form (the issue's shape) and the statement form over a
+    transitive wrapper both fire through the seam keyed `ext`."""
+    path = tmp_path / "wrapper_emit.rvl"
+    path.write_text(WRAPPER_EMIT, encoding="utf-8")
+    ir = compile_files([str(path)])
+    want = reference.emit(ir)
+    assert "r = _revl_extern_emit(_revl_ctx, 'ext', helper, (msg,))" in want
+    assert "_revl_extern_emit(_revl_ctx, 'ext', relay, (msg,))" in want
+    assert emitted["emit_py_src"](ir) == want
+
+
 def test_selfhosted_emitter_output_is_executable_python(emitted, reference):
     """A byte-identical output is trivially valid, but pin it: the emitted
     module for a corpus program compiles and its functions run."""

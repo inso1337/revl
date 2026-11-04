@@ -661,7 +661,8 @@ class Timeline:
                                        component=self.component)
         step = self._add(
             # item 414: a direct host-extern crossing has no receiver, so its
-            # name is both its key and its method; it is printed once.
+            # name is both its key and its method; it is printed once. A wrapper
+            # reaching several externs keeps its own name, which is both.
             KIND_EMISSION, key if method == key else f"{key}.{method}", None,
             file=file, lineno=lineno, source=self.sources.line(file, lineno),
             detail={"key": key, "method": method, "service": service,
