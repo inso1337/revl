@@ -105,7 +105,7 @@ def _run_canary(args) -> int:
 
 
 def _run_migrate(args) -> int:
-    """`revl migrate OLD NEW --against COMPOSITION` — the read-only migration
+    """`revl migrate OLD NEW --against COMPOSITION`: the read-only migration
     plan (issue #2685, first slice): which real consumers can move to the new
     version now, which need an adapter or a declared state hand-off, which are
     refused, what authority widens, and whether the old version is removable

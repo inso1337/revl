@@ -1,4 +1,4 @@
-"""`revl migrate` — the read-only version-change plan (issue #2685, slice 1).
+"""`revl migrate`: the read-only version-change plan (issue #2685, slice 1).
 
 The command joins facts the tree already derives: the structural diff, the
 derived semver bump, `admission._service_compatible` against the REAL consumers
