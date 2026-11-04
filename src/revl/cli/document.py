@@ -66,7 +66,8 @@ _RESOLVES_A_COMPOSITION = frozenset({
 
 def _composition_document(args, *, label: str | None = None,
                           files: list[str] | None = None,
-                          refuse_code: int = 1):
+                          refuse_code: int = 1,
+                          read_report: dict | None = None):
     """A COMPOSITION document argument, for the commands that share the module
     compile step (item 439, issue #118).
 
@@ -123,7 +124,10 @@ def _composition_document(args, *, label: str | None = None,
 
     Returns `None` when no argument declares a composition (the caller falls
     through to the shared module compile), an `int` exit code when the command
-    refuses, or the compiled composition document.
+    refuses, or the compiled composition document. `read_report`, when given, is
+    the same caller-supplied out-parameter `compile_files` takes: the compile
+    records what it read there (issue #1779), so a caller that has to ask which
+    module a `use` resolved to can, without changing the IR bytes.
     """
     import os  # noqa: PLC0415 — one call site
 
@@ -183,7 +187,7 @@ def _composition_document(args, *, label: str | None = None,
     # question.
     try:
         return compile_composition(docs[0], getattr(args, "root", None),
-                                   confine=True)
+                                   confine=True, report=read_report)
     except RevlError as error:
         if getattr(args, "json_diagnostics", False):
             print(json.dumps(report(error), indent=2))

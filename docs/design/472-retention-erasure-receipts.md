@@ -311,13 +311,13 @@ correction 3 above, which is the reason it is recorded here at length.
 ## Corrections after the third review
 
 The third review asked what happens to the persistence refusal when the sink is
-not in the unit that holds the value — and found that the guarantee stopped at
+not in the unit that holds the value, and found that the guarantee stopped at
 the seam. It is recorded here because the doc above claimed the opposite.
 
 1. **The persistence refusal was argument-blind across a service seam.** The
    `### What is still open` list asserted that an operation persisting through a
    provider's extern "is refused at that extern, which is where the capability is
-   declared." That is true of the DECLARATION half — the provider's own body is
+   declared." That is true of the DECLARATION half: the provider's own body is
    checked against the extern's declared capability, and a `Retained[T, P]`
    parameter declared on the operation is refused by name. It was not true of the
    FLOW half. The refusal that follows a value (`_refuse_retention`, the
@@ -337,7 +337,7 @@ the seam. It is recorded here because the doc above claimed the opposite.
    ```
 
    was ADMITTED. The caller held a value past its deadline, handed it across the
-   boundary, and the provider wrote it to durable storage, with no diagnostic —
+   boundary, and the provider wrote it to durable storage, with no diagnostic,
    which is the whole of what G-RETAIN says cannot happen. The interface
    parameter cannot carry the qualifier that would have caught it (nothing else
    can cross a unit boundary, so a qualifier there is a promise the caller could
@@ -350,7 +350,7 @@ the seam. It is recorded here because the doc above claimed the opposite.
    (`parameter index -> (sink, scope, via)`), the sibling of the existing
    `reaches_sink`; `_on_persistence` populates it from the same inference walk
    that already computes the return taint, so the reach is INTERPROCEDURAL for
-   free — a provider that reaches the sink through a helper fn carries the reach
+   free: a provider that reaches the sink through a helper fn carries the reach
    out too. The caller then refuses with the same `_refuse_retention`, gaining a
    `via` chain that names the seam rather than only the sink:
    `load() -> Store.stash -> db_put`.
@@ -366,8 +366,8 @@ the seam. It is recorded here because the doc above claimed the opposite.
    red before the change and the four controls green either way.
 
    This correction is scoped to G-RETAIN. The same body-walk blindness affects
-   the G-SECRET-FLOW argument direction — a `Secret[T]` handed to an operation
-   whose provider discloses it — but that is a different guarantee with a
+   the G-SECRET-FLOW argument direction: a `Secret[T]` handed to an operation
+   whose provider discloses it; but that is a different guarantee with a
    different rule (a crossing refuses where the receiver does not DECLARE
    `Secret[T]`, not where a policy's deadline has passed), so it is sequenced
    separately rather than folded in here.
@@ -530,7 +530,7 @@ member, so an over-claim is refused even with an intact MAC.
   * No inferred derivative relation (prerequisite 4).
   * No derived residence: a replica's region is what the caller says it is.
   * The persistence refusal covers a crossing declared through an `extern` with
-    a durable-storage capability, and — since the seam-reach correction above —
+    a durable-storage capability, and, after the seam-reach correction above,
     a crossing reached through a service operation whose PROVIDER's body holds
     that extern. An operation carries no capability of its own, so the refusal
     names the extern, which is where the capability is declared, and reports the

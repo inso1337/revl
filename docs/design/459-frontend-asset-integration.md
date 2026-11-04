@@ -552,7 +552,7 @@ The proof is committed, not described:
 sixteen source mutations (the escaper table returning its argument, the context
 gates removed, each escaper replaced by each other escaper), rewrites
 `stdlib/template.rvl` and `stdlib/escape.rvl` into `tmp_path` and recompiles
-from there — so a mutation reaches the layer the checks execute — and fails if
+from there (so a mutation reaches the layer the checks execute) and fails if
 the security checks do not notice. `test_the_proof_has_a_baseline_the_shipped_module_passes_every_check`
 is the other half: with no mutation every check holds, so "the checks failed" is
 only meaningful evidence against a green baseline. The wrongly-contextual half

@@ -276,10 +276,10 @@ stays visible.
 record of why it was not taken here.** The arm is live: the declarations decide
 it, the declined files declare their tokens, and the two cordis-guarded
 fixtures the measurement above predicted now name the boundary their bodies
-reach. `test_the_key_namespaced_residual_is_still_admitted` no longer pins an
-open residual — it asserts the closure — and
-`test_the_namespace_alone_cannot_decide_the_residual` is the test that keeps
-the `svc:`-namespace reading from being mistaken for the rule again.
+reach. `test_the_key_namespaced_residual_is_still_admitted` now asserts the
+closure rather than pinning an open residual, while
+`test_the_namespace_alone_cannot_decide_the_residual` keeps the `svc:` namespace
+reading from being mistaken for the rule again.
 `docs/design/561-undeclared-emission-boundary.md` §"The kernel arm, taken"
 carries the counts this section predicted and what was re-measured instead: 7
 reds across 2 files, not 9 across 4, and the third module named above was not

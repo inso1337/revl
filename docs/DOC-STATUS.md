@@ -80,7 +80,7 @@ regenerated rather than edited.
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 52 |  |
-| dash.md | current | 11 |  |
+| dash.md | current | 9 |  |
 | delivery-semantics.md | needs-work | 7 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
@@ -104,8 +104,8 @@ regenerated rather than edited.
 | gen-types.md | needs-work | 0 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 9 |  |
-| guarantees.md | needs-work | 2 |  |
-| guide-ai-agents.md | stale-fixed | 4 |  |
+| guarantees.md | needs-work | 0 |  |
+| guide-ai-agents.md | stale-fixed | 0 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 0 |  |
 | holes.md | needs-work | 29 |  |
@@ -128,7 +128,7 @@ regenerated rather than edited.
 | model-scheduling.md | needs-work | 7 |  |
 | namespacing.md | needs-work | 16 |  |
 | network-path.md | needs-work | 24 |  |
-| network-placement.md | needs-work | 4 |  |
+| network-placement.md | needs-work | 1 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
 | operator-capabilities.md | needs-work | 41 |  |
 | parallel-activation.md | needs-work | 17 |  |
@@ -178,7 +178,7 @@ regenerated rather than edited.
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 3 |  |
-| ts-runtime-contract.md | needs-work | 4 |  |
+| ts-runtime-contract.md | needs-work | 0 |  |
 | updates.md | needs-work | 0 |  |
 | verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |

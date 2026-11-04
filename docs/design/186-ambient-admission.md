@@ -1,4 +1,4 @@
-# 186 — ambient / running-manifest composition admission
+# 186: ambient / running-manifest composition admission
 
 Issue #86, roadmap item 186. This note records the shape of the ambient
 (running-manifest) admission entry point and lands its FIRST concrete slice:
@@ -8,12 +8,12 @@ provision disjointness against an already-running manifest.
 
 `admit_src(src)` (`selfhost/lower.rvl`) is the single-source gate. It answers
 one question: *does this one program text admit?* It has everything it needs in
-the text — every component, every provision, every requirement is in front of
+the text: every component, every provision, every requirement is in front of
 it, so its G2 provision-disjointness scan (`_link` / `collect_g2`) compares each
 component's provision keys against the other components in the SAME text.
 
 The reference `check_and_lower` carries a second input `admit_src` has no
-analogue for: `ambient`. That is a DIFFERENT admission entry point — not "does
+analogue for: `ambient`. That is a DIFFERENT admission entry point, not "does
 this program admit" but "may this component join a composition that is ALREADY
 RUNNING". The running composition is not in the incoming text; there is nothing
 in one program to compare it against. So this needs a NEW entry point that takes
@@ -29,12 +29,12 @@ replacement, and a differential oracle that constructs a running manifest on
 BOTH the reference and the selfhost side. This note carries the whole shape so
 it is not lost, and lands the one piece that is self-contained TODAY.
 
-## Slice 1 — provision disjointness against the manifest
+## Slice 1: provision disjointness against the manifest
 
 The manifest is the linker's already-live provision table: which component
 provides which key, in which realm. A component being admitted against it
 conflicts exactly when it provides a `(key, realm)` the manifest already
-provides — the cross-manifest analogue of the in-text G2 conflict `admit_src`
+provides: the cross-manifest analogue of the in-text G2 conflict `admit_src`
 already computes among the components of one text.
 
 ### Manifest wire
@@ -48,7 +48,7 @@ Store/db/ ; KvA/kv/tenant_a
 
 `parse_manifest` reads it into the same `List[Prov3]` (`{key, rlm, comp}`) the
 in-text linker builds. An empty manifest is the empty table, so
-`admit_ambient(src, "")` is `admit_src(src)` exactly — the base invariant.
+`admit_ambient(src, "")` is `admit_src(src)` exactly: the base invariant.
 
 ### Algorithm
 
@@ -56,7 +56,7 @@ in-text linker builds. An empty manifest is the empty table, so
    refused component, so a non-empty single-source verdict is forwarded
    unchanged. (This is the seam a later wave relaxes for handoff /
    state-migration, where a replacement legitimately overrides what the manifest
-   already holds — see "What remains".)
+   already holds; see "What remains".)
 2. Seed `collect_g2` with the manifest's provisions instead of an empty table
    and scan the incoming components' provision keys against it. A key the
    manifest already provides in the same realm is a conflict, reported against
@@ -82,17 +82,17 @@ admit_ambient(X, manifest_of(M))  ==  admit_src(M ++ X)  ==  reference(M ++ X)
 ```
 
 `tests/test_selfhost_lower.py` pins all three legs. This equivalence is precisely
-what a later wave BREAKS — a hot-swap replaces `M`'s provision rather than
+what a later wave BREAKS: a hot-swap replaces `M`'s provision rather than
 conflicting with it, and there is no single-source text whose G2 scan models
-replacement — which is why replacement is a wave and disjointness is a slice.
+replacement, which is why replacement is a wave and disjointness is a slice.
 
-## Slice 2 — multi-realm routing validation against ambient realms
+## Slice 2: multi-realm routing validation against ambient realms
 
 Item 162's `isolate <key> in realms("a","b")` route distributes a *required* key
 across N named realms; the link-time half checks every routed realm has a
 provider (`route_realm_scan` / `collect_routes`). For the single-source path
 that provider must be in the same text. Against a running manifest, a route may
-legitimately target a realm provided ONLY by the manifest — the store already
+legitimately target a realm provided ONLY by the manifest; the store already
 running that a newly admitted router binds to.
 
 Slice 1 seeded only `collect_g2`. Slice 2 makes `admit_ambient` recompute the
@@ -100,7 +100,7 @@ WHOLE G2/ROUTE/G3 link seeded with the manifest (`link_refusals(pg, seed)`),
 because a route refusal is *composition-dependent*, not internal: forwarding the
 self-verdict wholesale (slice 1's `if admit_src(src) != "" return it`) wrongly
 refused a route the manifest satisfies. So `admit_ambient` now splits
-`admit_src` into its internal refusals (`collect_nonlink` — per-component,
+`admit_src` into its internal refusals (`collect_nonlink`: per-component,
 module-fn, spawn, boot, shared verbatim with the single-source path) plus the
 manifest-seeded link, ordered together by `(line, seq)`.
 
@@ -116,7 +116,7 @@ A realm provided by neither the text nor the manifest still refuses ROUTE,
 byte-identical to the composed single source. `tests/test_selfhost_lower.py`
 pins both directions (admit and the surviving-dangling-leg refusal) plus the
 diagnostic-ordering case where an earlier-line ambient G2 outranks a later
-internal refusal — the merge slice 2 enables.
+internal refusal, which the merge slice 2 enables.
 
 ## What remains for full closure of #86 / item 186
 
@@ -128,8 +128,8 @@ internal refusal — the merge slice 2 enables.
   laundered by the manifest.
 - **G3 acyclicity across the manifest boundary.** Slices 1-2 seed the G2/ROUTE
   provider table, which the wire (rows of PROVISIONS) fully carries. The
-  manifest's provider→consumer edges — which require the manifest to also carry
-  each running component's REQUIREMENTS — are not folded into the acyclicity
+  manifest's provider→consumer edges (which require the manifest to also carry
+  each running component's REQUIREMENTS) are not folded into the acyclicity
   scan, so a cycle that closes THROUGH the running manifest is not yet caught.
   Extending the wire is part of the replacement wave.
 - **Residual coloring approximation (b).** Callee collection descends into a

@@ -1,4 +1,4 @@
-# 867 — canonical HTTP request framing
+# 867: canonical HTTP request framing
 
 **Roadmap:** no item (filed as issue #867; searched `docs/v2.0-roadmap.md` for
 smuggling / `Content-Length` / `Transfer-Encoding` / framing and found no
@@ -180,17 +180,17 @@ instead, in both directions, and `tests/test_serve_http_framing.py` and
 loopback socket to pin them.
 
 **Reading a request** (`_frame_request`). The reader this note once named here
-was `int(self.headers.get("Content-Length") or 0)` — first-value-wins, no
-duplicate check, no ceiling. It is now the four refusals this module makes —
+was `int(self.headers.get("Content-Length") or 0)`, first-value-wins, no
+duplicate check, no ceiling. It is now the four refusals this module makes,
 `unsupported_transfer_encoding`, `duplicate_content_length`,
-`malformed_content_length`, `over_ceiling` — against the same `_MAX_BODY`
+`malformed_content_length`, `over_ceiling`, against the same `_MAX_BODY`
 ceiling, and the same refuse-and-close: a refused framing means the byte stream
 is no longer trustworthy, so the connection is closed rather than a pipelined
 request behind it parsed.
 
 **Writing a reply** (`_write`). The face owns its replies' framing for the same
 reason it owns a request's. `http.server`'s `send_header` performs no validation
-at all — it interpolates into `"%s: %s\r\n"` and nothing more, and
+at all; it interpolates into `"%s: %s\r\n"` and nothing more, and
 `_is_illegal_header_value` exists only in `http.client`, i.e. on the receiving
 side. A routed handler returns a `Response` whose status, headers and body all
 reach the wire, and whose headers routinely carry a decoded path or query
@@ -198,13 +198,13 @@ scalar, so four rules follow.
 
 | rule | why |
 |---|---|
-| a handler-supplied status must be three digits (RFC 9110 15) | `send_response` writes the handler's own code into the status line unchecked, and a reader is required to reject a status it cannot read as three digits — so a `1000`, a `99` or a `0` is a reply no conforming client can parse |
-| a handler-supplied field name must be a token and its value HTAB / SP / VCHAR / obs-text (RFC 9110 5.1, 5.5) | a value carrying CR or LF ends the field early, so everything after it is read as further fields — or, after a blank line, as the body |
+| a handler-supplied status must be three digits (RFC 9110 15) | `send_response` writes the handler's own code into the status line unchecked, and a reader is required to reject a status it cannot read as three digits: so a `1000`, a `99` or a `0` is a reply no conforming client can parse |
+| a handler-supplied field name must be a token and its value HTAB / SP / VCHAR / obs-text (RFC 9110 5.1, 5.5) | a value carrying CR or LF ends the field early, so everything after it is read as further fields, or, after a blank line, as the body |
 | `Content-Length`, `Transfer-Encoding` and `Connection` are refused, not overwritten | two framings on one message is how a reader downstream and this face come to disagree about where the reply ends (RFC 9110 6.1, RFC 9112 6.3) |
 | a `HEAD` reply carries no body, and a contentless status (1xx, 204, 304) carries neither a body nor a `Content-Length` | RFC 9110 9.3.2, and 15.2 / 15.3.5 / 15.4.5 with 8.6: a body its own framing says is not there is read as the start of the next reply on a kept-alive connection |
 
-A refusal is a `500` whose `category` is the reason — the request was
-well-formed, so what broke is the program that answered it — and it is
+A refusal is a `500` whose `category` is the reason: the request was
+well-formed, so what broke is the program that answered it, and it is
 substituted *before* the reply is written, so nothing of the handler's reply
 reaches the wire. `content-type` is the one handler header the face replaces
 rather than refuses, because it always has a content type of its own.
@@ -251,8 +251,8 @@ The face's mirror is pinned the same way, over a real loopback socket rather tha
 a function's return value, because both halves are properties of the byte stream:
 `tests/test_serve_http_framing.py` for the request reader and
 `tests/test_serve_http_response_framing.py` (22 tests) for the reply writer. The
-hostile header value in each response case is built *from* the bound argument —
-the stub echoes what the router decoded — so those tests are about a
+hostile header value in each response case is built *from* the bound argument,
+the stub echoes what the router decoded, so those tests are about a
 remote-controlled value and not about a constant the test file chose. The
 contentless-status case is asserted on the reply BOUNDARY across two pipelined
 requests, not on one reply in isolation: what the status has to get right is

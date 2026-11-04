@@ -94,3 +94,50 @@ def test_pure_and_lifecycle_tests_coexist_in_one_document(tmp_path):
     result = _revl_test(str(path))
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[py] pass: 3 test(s) passed" in result.stdout
+
+
+# The three names the issue #2975 table measured. The driver's own locals were
+# emitted bare (`root`, `events`, `baseline`), so a `let` of the same spelling
+# either rebound the driver (python) or failed to parse (typescript). This is
+# the issue's own program: one binding renamed per test, nothing else.
+_DRIVER_LOCAL_SOURCE = """
+service Box { fn label() -> Str }
+
+component BoxC provides box: Box {
+  provide box {
+    fn label() = "b"
+  }
+}
+"""
+
+
+def _binding_case(name: str) -> str:
+    return f'''
+lifecycle test "bind {name}" {{
+  load BoxC
+  let {name} = call box.label()
+  assert {name} == "b"
+  let again = call box.label()
+  assert again == "b"
+  unload BoxC
+  assert no_residue
+}}
+'''
+
+
+def test_a_binding_named_like_a_driver_local_still_runs(tmp_path):
+    """issue #2975: before the fix `bind root` failed with an AttributeError
+    from the NEXT step and `bind baseline` with a TypeError from the residue
+    check; a rename of the binding decided whether the same program ran.
+    `Context` is the driver's import: it was assigned inside `_run` and the
+    first line raised UnboundLocalError."""
+    path = tmp_path / "driver_locals.rvl"
+    path.write_text(_DRIVER_LOCAL_SOURCE + "".join(
+        _binding_case(n) for n in ("root", "baseline", "events", "Context")),
+        encoding="utf-8")
+
+    result = _revl_test(str(path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("root", "baseline", "events", "Context"):
+        assert f"PASS bind {name}" in result.stdout
+    assert "[py] pass: 4 test(s) passed" in result.stdout
