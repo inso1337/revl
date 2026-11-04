@@ -49,14 +49,22 @@ class Fix:
 
 # --------------------------------------------------------------- the engine
 
-def generate_fix(text: str, diagnostic: dict, filename: str = "<lsp>.rvl") -> Fix | None:
+def generate_fix(text: str, diagnostic: dict, filename: str = "<lsp>.rvl",
+                 *, verify=None) -> Fix | None:
     """The shared engine: one diagnostic (an LSP ``Diagnostic``) + its source
     to a verified ``Fix``, or None when no safe mechanical rewrite applies.
 
     Dispatch is by diagnostic ``code``. A generator returns a *candidate* Fix;
     this function accepts it only if applying its edits makes the diagnostic go
-    away (``_resolves``). That check is the honesty gate — a candidate that does
-    not actually resolve the rejection is dropped, not returned."""
+    away (``_resolves``). That check is the honesty gate: a candidate that does
+    not actually resolve the rejection is dropped, not returned.
+
+    ``verify`` hands the patched text to the CALLER's checker instead of the
+    editor's plain ``compute_diagnostics`` compile (issue #2684 review): the
+    MCP repair path must verify under the same authoring profile and the same
+    in-memory modules the check compiled with. It returns the patched
+    program's diagnostics, or None when the patch could not be checked (the
+    compile stopped before the refusal's line), which drops the candidate."""
     generator = _GENERATORS.get(diagnostic.get("code"))
     if generator is None:
         return None
@@ -64,6 +72,13 @@ def generate_fix(text: str, diagnostic: dict, filename: str = "<lsp>.rvl") -> Fi
     if candidate is None:
         return None
     patched = apply_edits(text, candidate.edits)
+    if verify is not None:
+        patched_diagnostics = verify(patched)
+        if patched_diagnostics is None:
+            return None
+        if not _resolves_against(diagnostic, patched_diagnostics):
+            return None
+        return candidate
     if not _resolves(diagnostic, patched, filename):
         return None
     return candidate
@@ -77,10 +92,15 @@ def _resolves(original: dict, patched: str, filename: str) -> bool:
     rejection for a syntax error (our edit broke the file) or for a fresh
     diagnostic on the edited line (a rewrite that only moved the problem). A
     genuinely separate, pre-existing rejection further down the file is allowed
-    to remain — this fix resolved *its* diagnostic, which is all it claims."""
+    to remain: this fix resolved *its* diagnostic, which is all it claims."""
+    return _resolves_against(original, compute_diagnostics(patched, filename))
+
+
+def _resolves_against(original: dict, diagnostics: list[dict]) -> bool:
+    """``_resolves`` over diagnostics a caller already computed (see `verify`)."""
     original_code = original.get("code")
     original_line = original["range"]["start"]["line"]
-    for diag in compute_diagnostics(patched, filename):
+    for diag in diagnostics:
         code = diag.get("code")
         line = diag["range"]["start"]["line"]
         if code == original_code and line == original_line:
@@ -259,7 +279,7 @@ def _dotted_target(expr) -> str | None:
 
 
 def _g4_site_undo(text: str, diagnostic: dict, filename: str) -> Fix | None:
-    """G4 — a mutation with no inverse; spell the inverse at the site.
+    """G4: a mutation with no inverse; spell the inverse at the site.
 
     The one mechanical repair on a missing-undo refusal is the `site-undo`
     one: on the bound acquisition (`let h = effect open_h()`), append
@@ -327,7 +347,7 @@ def _lexical_site_inverse(row: str, text: str) -> str | None:
     if bound is None:
         return None
     bind, target = bound.group("bind"), site.group("target")
-    from ..typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415 — heavy module
+    from ..typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415
     release = _HOST_ACQUIRE_VERBS.get(target)
     if release is not None:
         return f"{bind}.{release}()"
@@ -355,7 +375,7 @@ def _site_inverse(bind: str | None, target: str | None,
     and therefore spelled at the site on the bound handle, `close(bind)`."""
     if target is None or bind is None:
         return None
-    from ..typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415 — heavy module
+    from ..typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415
     release = _HOST_ACQUIRE_VERBS.get(target)
     if release is not None:
         return f"{bind}.{release}()"
@@ -430,22 +450,29 @@ _GENERATORS = {
 
 # --------------------------------------------------------------- agent payload
 
-def fix_code(rejection: dict, source: str, filename: str = "<lsp>.rvl") -> dict:
+def fix_code(rejection: dict, source: str, filename: str = "<lsp>.rvl",
+             *, diagnostic: dict | None = None, verify=None) -> dict:
     """The agent-facing front door: a structured rejection (``diagnostics.classify``)
     plus its source to an applyable ``fix_code`` payload.
 
-    On success: ``{ok, code, title, edits}`` — the same verified edits the LSP
+    On success: ``{ok, code, title, edits}``, the same verified edits the LSP
     code-action carries. When no safe mechanical fix exists: ``{ok: False,
     code, reason}``; the prose ``fix`` from item 286 remains the guidance. The
     rejection carries a code and a line but no span, so the ranged diagnostic is
     recomputed from the source and matched to the rejection, then run through
-    the one shared engine."""
+    the one shared engine.
+
+    ``diagnostic`` supplies that ranged diagnostic directly for a caller that
+    must not recompile the text on its own (the MCP repair path, issue #2684
+    review); ``verify`` is passed through to `generate_fix`, so the patched
+    candidate is checked by the caller's profile-aware compiler."""
     code = rejection.get("code")
-    diagnostic = _match_diagnostic(source, rejection, filename)
+    if diagnostic is None:
+        diagnostic = _match_diagnostic(source, rejection, filename)
     if diagnostic is None:
         return {"ok": False, "code": code,
                 "reason": "the rejection was not reproduced from this source"}
-    fix = generate_fix(source, diagnostic, filename)
+    fix = generate_fix(source, diagnostic, filename, verify=verify)
     if fix is None:
         return {"ok": False, "code": code, "reason": "no mechanical fix for this diagnostic"}
     return {"ok": True, "code": fix.code, "title": fix.title, "edits": fix.edits}

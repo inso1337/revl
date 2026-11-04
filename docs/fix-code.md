@@ -97,7 +97,7 @@ component Cache provides db: Store {
 With zero or several declared provisions the intended key is ambiguous, so no
 rename is safe and no action is emitted.
 
-### G4 — the acquire and its ranked repairs
+### G4: the acquire and its ranked repairs
 
 The reversibility refusal (G4) is the one a model-driven author hits most, and
 the per-code sentence is deliberately general: "give the mutation an `undo`, or
@@ -132,8 +132,8 @@ declaration resolves) with the class the checker derived for this call
 `action` a person or a model can enact: `site-undo`, `declare-inverse`,
 `witnessed`, `plain-call`, `reclassify`, `service-emission`.
 
-Only the repair whose edit the engine can determine — `site-undo`, the declared
-inverse (or the host family's release) on the bound handle — carries a
+Only the repair whose edit the engine can determine, `site-undo` (the declared
+inverse or the host family's release on the bound handle), carries a
 `fix_code`. It is built and verified exactly like any other code action: the
 engine applies the candidate edit and re-checks the patched source, and the
 field is absent when the candidate does not resolve the refusal (an unbound

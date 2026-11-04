@@ -692,7 +692,8 @@ def obligations(holes: list[dict]) -> dict:
     }
 
 
-def report(error: RevlError, *, sources: dict[str, str] | None = None) -> dict:
+def report(error: RevlError, *, sources: dict[str, str] | None = None,
+           verifier=None) -> dict:
     """A failed compile as an agent-consumable document.
 
     A multi-refusal compile raises a `RevlErrors` carrier (item 386) whose
@@ -712,16 +713,24 @@ def report(error: RevlError, *, sources: dict[str, str] | None = None) -> dict:
     Issue #2684: a G4 missing-undo record's `repairs` list gains a `fix_code`
     on the repair the fixgen engine can verify. The engine applies a candidate
     edit and re-checks the patched source ("verified or nothing"), so a repair
-    that does not resolve the refusal is never offered as code. That is two
-    extra compiles of the text for one G4 record: matching the ranged
-    diagnostic, then re-checking the patch. They are paid only on a refusal.
+    that does not resolve the refusal is never offered as code.
 
-    `sources` maps a compile-level filename to the text that compile actually
-    read for it, and is the ONLY text the engine will verify against. It is
-    deliberately not read from `error.filename`: a compile may overlay edited
-    buffers on real paths (`revl_check {files, modules}`), so the file on disk
-    can be pre-edit text that never compiled. A caller that does not hold the
-    text passes nothing and gets the prose repairs.
+    The check is the caller's, not this module's, and both arguments are
+    required to run it:
+
+    * `sources` maps a compile-level filename to the text that compile actually
+      read for it. It is deliberately not read from `error.filename`: a compile
+      may overlay edited buffers on real paths (`revl_check {files, modules}`),
+      so the file on disk can be pre-edit text that never compiled.
+    * `verifier(patched_text, error)` returns the patched program's diagnostics
+      from the SAME compiler door the check used (same authoring profile, same
+      in-memory modules), as LSP-shaped `{code, range}` records, or None when
+      the patched source could not be checked (the compile stopped before the
+      refusal's line). The fixgen engine carries the profile into the verify
+      compile this way instead of compiling the candidate unprofiled from the
+      editor's analysis path.
+
+    A caller that holds neither, or only the text, gets the prose repairs.
     """
     errors = getattr(error, "errors", None) or [error]
     records = [classify(e) for e in errors]
@@ -731,20 +740,22 @@ def report(error: RevlError, *, sources: dict[str, str] | None = None) -> dict:
         if repair is not None:
             payload["repair"] = repair
             break
-    _attach_repair_fixes(records, errors, sources)
+    _attach_repair_fixes(records, errors, sources, verifier)
     return payload
 
 
 def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
-                         sources: dict[str, str] | None) -> None:
+                         sources: dict[str, str] | None, verifier) -> None:
     """Verify the mechanical repair a G4 record lists, in place (issue #2684).
 
     Only the `site-undo` repair has a generator: it is the one whose edit is
     determined by the refused call (spell the declared inverse, or the host
     family's release, on the bound handle). Every other repair is prose a
     person or a model enacts, and is listed without a `fix_code` rather than
-    given an edit the engine could not verify."""
-    if not sources:
+    given an edit the engine could not verify. The ranged diagnostic the
+    generator reads is synthesized from the record, so this path never
+    recompiles the candidate to find its own diagnostic."""
+    if not sources or verifier is None:
         return
     for record, one in zip(records, errors):
         repairs = record.get("repairs")
@@ -753,8 +764,19 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
         text = _compiled_text(one, sources)
         if text is None:
             continue
-        from .lsp import fixgen  # noqa: PLC0415 — fixgen imports this module
-        fix = fixgen.fix_code(record, text, one.filename)
+        diagnostic = {
+            "code": record["code"],
+            "message": record["message"],
+            "range": {"start": {"line": record["line"] - 1, "character": 0},
+                      "end": {"line": record["line"] - 1, "character": 0}},
+        }
+        from .lsp import fixgen  # noqa: PLC0415
+
+        def verify(patched: str, refusal: RevlError = one):
+            return verifier(patched, refusal)
+
+        fix = fixgen.fix_code(record, text, one.filename,
+                              diagnostic=diagnostic, verify=verify)
         if not fix.get("ok"):
             continue
         for repair in repairs:

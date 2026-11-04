@@ -77,7 +77,7 @@ from xml.etree import ElementTree as ET
 
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
-from ..diagnostics import FIXES, GUARANTEES, explain, report
+from ..diagnostics import FIXES, GUARANTEES, classify, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
@@ -4705,6 +4705,50 @@ def _compiled_sources(source: str | None, modules: dict | None,
     return texts
 
 
+def _verify_repair(patched: str, error: RevlError, source: str | None,
+                   files: list[str] | None, modules: dict | None):
+    """The fixgen repair verifier for one check candidate (issue #2684 review).
+
+    Two things the editor's own `compute_diagnostics` cannot supply:
+
+    * the SAME authoring door. A repair is verified through
+      `compile_under_authoring`, so the patched text compiles under the same
+      profile and with the same in-memory modules the check compiled with.
+      Reaching `compile_source` directly here would compile agent text
+      unprofiled.
+    * the module overlays. The patched candidate must resolve an overlay-only
+      (or edited) `use` target, or the verification stops at the `use` line
+      and never re-judges the refusal.
+
+    Returns the patched program's diagnostics as `{code, range}` records, or
+    None when the patched compile refused at or before the fixed line (or on a
+    parse error anywhere): the fix was not re-judged, so it is not verified.
+    """
+    name = error.filename
+    patched_source = source
+    patched_modules = dict(modules or {})
+    if source is not None and name == "<candidate>.rvl":
+        patched_source = patched
+    else:
+        # the refusal is in a module (or a `files` root): substitute its text
+        patched_modules[name] = patched
+        patched_modules[os.path.abspath(name)] = patched
+    try:
+        compile_under_authoring(patched_source, files,
+                                modules=patched_modules or None)
+    except RevlError as refusal:
+        refused = getattr(refusal, "errors", None) or [refusal]
+        records = [classify(e) for e in refused]
+        if any(one["line"] <= error.line or one["code"] == "SYNTAX"
+               for one in records):
+            return None
+        return [{"code": one["code"],
+                 "range": {"start": {"line": one["line"] - 1, "character": 0},
+                           "end": {"line": one["line"] - 1, "character": 0}}}
+                for one in records]
+    return []
+
+
 def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     """Compile a candidate as sent, and return `(payload, ir)`.
 
@@ -4727,7 +4771,11 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
         # rather than only the prose. It is never read from `error.filename`:
         # an edited buffer rides as a `modules` overlay over a real path, and
         # the disk copy there is pre-edit text that did not compile.
-        refused = report(error, sources=_compiled_sources(source, modules, held))
+        refused = report(
+            error,
+            sources=_compiled_sources(source, modules, held),
+            verifier=lambda patched, one: _verify_repair(
+                patched, one, source, _files, modules))
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])

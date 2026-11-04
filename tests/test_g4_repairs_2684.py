@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from revl.compiler import compile_source
-from revl.diagnostics import report
+from revl.diagnostics import classify, report
 from revl.errors import RevlError
 from revl.lsp.fixgen import apply_edits
 from revl.mcp.server import handle
@@ -104,6 +104,37 @@ G4_FILES_EDITED = (
     "  let h = effect open_g()\n"
     "}\n"
 )
+
+# a bare-name G4 whose root `use`s a module that exists only as an overlay:
+# verifying the patch without the overlay stops at line 1 and never re-judges
+# the G4
+G4_USE_OVERLAY = (
+    'use "./g4_overlay_2684.rvl" { helper }\n'
+    "type H = Opaque\n"
+    "extern pure fn close_h(h: H) -> Unit = @py { return }\n"
+    "extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\n"
+    "component C {\n"
+    "  let h = effect open_h()\n"
+    "}\n"
+)
+G4_OVERLAY_MODULE = "pub fn helper(u: Str) -> Int { return 1 }\n"
+
+
+def _lsp(record: dict) -> dict:
+    return {"code": record["code"],
+            "range": {"start": {"line": record["line"] - 1, "character": 0},
+                      "end": {"line": record["line"] - 1, "character": 0}}}
+
+
+def _recompile_verifier(patched: str, error: RevlError):
+    """The test's stand-in for the MCP verifier: the patched program's
+    diagnostics, as the report contract expects."""
+    try:
+        compile_source(patched, error.filename)
+    except RevlError as refusal:
+        errors = getattr(refusal, "errors", None) or [refusal]
+        return [_lsp(classify(one)) for one in errors]
+    return []
 
 
 def _check(source: str) -> dict:
@@ -199,12 +230,89 @@ def test_a_local_extern_points_at_dropping_the_bracket():
 
 
 def test_the_mcp_record_is_the_classified_record_unchanged():
-    # the MCP front door passes the compiled text to the fixgen engine and
-    # hands the resulting record straight out: no reshaping, no parallel
-    # vocabulary
+    # the MCP front door passes the compiled text and its profile-aware
+    # verifier to the fixgen engine, then hands the resulting record straight
+    # out: no reshaping, no parallel vocabulary
     expected = report(_refusal(G4_HOST),
-                      sources={"<candidate>.rvl": G4_HOST})["diagnostics"][0]
+                      sources={"<candidate>.rvl": G4_HOST},
+                      verifier=_recompile_verifier)["diagnostics"][0]
     assert _g4(G4_HOST) == expected
+
+
+def test_a_patch_the_verifier_cannot_check_is_not_labelled_verified():
+    # the verifier answers None when the patched compile stopped before the
+    # refusal's line; a fix that was never re-judged must not carry fix_code
+    payload = report(_refusal(G4_HOST),
+                     sources={"<candidate>.rvl": G4_HOST},
+                     verifier=lambda patched, one: None)
+    assert "fix_code" not in payload["diagnostics"][0]["repairs"][0]
+
+
+def test_the_repair_verifier_compiles_under_the_authoring_profile(monkeypatch):
+    # issue #2684 review: the verifying compile must go through the same
+    # authoring door as the check, not the editor's plain `compile_source`.
+    # Every compile this check runs, including the repair verification, must
+    # carry the profile.
+    from revl.lsp import analysis
+    from revl.mcp import server as server_mod
+    server_mod.set_authoring_trust(host_code=False)
+    seen = []
+    real_server = server_mod.compile_source
+    real_analysis = analysis.compile_source
+
+    def server_spy(*args, **kwargs):
+        seen.append(kwargs.get("profile"))
+        return real_server(*args, **kwargs)
+
+    def analysis_spy(*args, **kwargs):
+        seen.append(kwargs.get("profile"))
+        return real_analysis(*args, **kwargs)
+
+    monkeypatch.setattr(server_mod, "compile_source", server_spy)
+    monkeypatch.setattr(analysis, "compile_source", analysis_spy)
+    record = _g4(G4_HOST)
+    assert record["repairs"][0]["fix_code"]
+    assert len(seen) >= 2              # the check, then the repair verification
+    assert all(profile is not None for profile in seen)
+
+
+def test_the_repair_verifier_carries_the_module_overlays():
+    # a `use` target that exists only as an overlay: the check compiles it from
+    # `modules`, so the verifying compile must too. Without the overlay the
+    # patched compile stops on line 1 and the repair could not be verified.
+    response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "revl_check",
+                                  "arguments": {
+                                      "source": G4_USE_OVERLAY,
+                                      "modules": {"g4_overlay_2684.rvl":
+                                                  G4_OVERLAY_MODULE}}}})
+    record = response["result"]["structuredContent"]["diagnostics"][0]
+    assert record["code"] == "G4"
+    fix = record["repairs"][0]["fix_code"]
+    assert "undo close_h(h)" in fix["edits"][0]["newText"]
+    patched = apply_edits(G4_USE_OVERLAY, fix["edits"])
+    after = handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "revl_check",
+                               "arguments": {
+                                   "source": patched,
+                                   "modules": {"g4_overlay_2684.rvl":
+                                               G4_OVERLAY_MODULE}}}})
+    assert after["result"]["structuredContent"]["ok"] is True
+
+
+def test_the_repair_verifier_declines_a_patch_that_never_reaches_the_refusal():
+    # issue #2684 review: if the patched compile stops before the refused line
+    # (or on any parse error), the fix was not re-judged and must not count as
+    # verified. The verifier says so, and report() then omits fix_code.
+    from revl.mcp import server as server_mod
+    error = _refusal(G4_HOST)                       # refused at line 6
+    assert server_mod._verify_repair(
+        "this is not revl\n" + G4_HOST, error, G4_HOST, None, None) is None
+    assert server_mod._verify_repair(
+        G4_HOST + "this is not revl\n", error, G4_HOST, None, None) is None
+    site = _g4(G4_HOST)["repairs"][0]["fix_code"]
+    patched = apply_edits(G4_HOST, site["edits"])
+    assert server_mod._verify_repair(patched, error, G4_HOST, None, None) == []
 
 
 def test_an_edited_buffer_is_verified_against_the_text_that_compiled(tmp_path):
