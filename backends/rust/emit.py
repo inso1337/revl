@@ -7266,6 +7266,13 @@ class _V3Ctx:
                  components: list | None = None,
                  analyses: "_V3Analyses | None" = None) -> None:
         self.types = types or {}
+        # The reverse of `_ident` for declaration names, built once: a record
+        # literal carries the EMITTED ident (`Box_`) while `var_types` /
+        # `_v3_infer_type` carry the RAW surface name (`Box`), and both must
+        # reach the same declaration without scanning the whole type table (or
+        # confusing a declared `Box_` with `Box`).
+        self.raw_by_emitted = {_ident(name, "type name"): name
+                               for name in self.types}
         # issue #540: the whole-program scans (`fn_borrow`, `fn_list_borrow`,
         # the char views, the recursive-Box edges) are pure in `functions`/
         # `types`; `_emit_v3` computes them once and passes the bundle in, so
@@ -7482,23 +7489,23 @@ class _V3Ctx:
         synthesized/unknown name.
 
         Callers pass either the RAW surface name (a declared type read from
-        `var_types`/`_v3_infer_type`) or the EMITTED ident (a record literal),
-        so one lookup matches both: the raw name, or the ident it mangles to
-        (`Box` -> `Box_`).
+        `var_types`/`_v3_infer_type`) or the EMITTED ident (a record literal).
+        The raw key wins when it exists, because a declared `Box_` is a
+        different declaration from the `Box` that mangles to `Box_`; otherwise
+        the ident is resolved through the `_ident` reverse map.
         """
-        raw = next((name for name in self.types
-                    if name == type_name
-                    or _ident(name, "type name") == type_name), None)
+        raw = (type_name if type_name in self.types
+               else self.raw_by_emitted.get(type_name))
         spec = self.types.get(raw) if raw is not None else None
         record = isinstance(spec, dict) and spec.get("kind") == "record"
         return dict(spec.get("fields") or {}) if record else {}
 
     def declaration_params(self, type_name: str) -> frozenset:
-        """The type parameters of the record/variant whose EMITTED ident is
-        `type_name` (empty for a non-generic or unknown declaration). A field
+        """The type parameters of the record/variant whose RAW or EMITTED ident
+        is `type_name` (empty for a non-generic or unknown declaration). A field
         typed as one of these is a parameter, not the erased `Value`."""
-        raw = next((name for name in self.types
-                    if _ident(name, "type name") == type_name), None)
+        raw = (type_name if type_name in self.types
+               else self.raw_by_emitted.get(type_name))
         spec = self.types.get(raw) if raw is not None else None
         return frozenset(spec.get("params") or []) if spec else frozenset()
 
@@ -11413,6 +11420,13 @@ _SCALAR_OPTION = ("Option<String>", "Option<i64>", "Option<bool>", "Option<f64>"
 # without one, so every existing bridge emits byte-identically.
 _BRIDGE_OPAQUE_TYPES: frozenset = frozenset()
 
+# A rendered Rust type's BARE identifiers. A user declaration always renders
+# bare (`Blob`, `HashMap`), while a path segment (`std::collections::HashMap`)
+# is preceded by `::` and belongs to the prelude, so only the former can name a
+# declaration. Matching without that rule made a value-carrying user type named
+# `HashMap` mark every unrelated `Map[..]` service parameter as opaque.
+_BARE_TYPE_WORD = re.compile(r"(?<!::)\b[A-Za-z_][A-Za-z0-9_]*\b")
+
 
 def _bridge_serde_ok(rtype: str) -> bool:
     """True when `rtype` can cross via serde: not the opaque cordis `Value`, nor
@@ -11420,7 +11434,17 @@ def _bridge_serde_ok(rtype: str) -> bool:
     if re.search(r"\bValue\b", rtype):
         return False
     return not any(word in _BRIDGE_OPAQUE_TYPES
-                   for word in _RUST_TYPE_WORD.findall(rtype))
+                   for word in _BARE_TYPE_WORD.findall(rtype))
+
+
+def _result_is_opaque(ok_type: str, err_type: str) -> bool:
+    """True when either half of a `Result` cannot cross via serde.
+
+    `_result_to_json`/`_result_ok_err` serde-serialize BOTH halves, so one
+    opaque half (a record carrying the erased `Value`) makes the whole Result
+    unmarshallable; the method is then treated as the opaque `Value` itself.
+    """
+    return not (_bridge_serde_ok(ok_type) and _bridge_serde_ok(err_type))
 
 
 def _split_result(rtype: str):
@@ -11476,7 +11500,8 @@ def _bridge_arg_ser(name: str, rtype: str) -> str:
     """Serialize a proxy method argument to a serde_json::Value."""
     if rtype in ("String", "i64", "f64", "bool"):
         return f"serde_json::json!({name})"
-    if _split_result(rtype):
+    result = _split_result(rtype)
+    if result is not None and not _result_is_opaque(*result):
         return _result_to_json(name)
     if _bridge_serde_ok(rtype):
         return f"serde_json::to_value(&{name}).unwrap_or(serde_json::Value::Null)"
@@ -11494,7 +11519,7 @@ def _bridge_arg_extract(index: int, rtype: str) -> str | None:
     if rtype == "bool":
         return f"args[{index}].as_bool().unwrap_or(false)"
     result = _split_result(rtype)
-    if result:
+    if result is not None and not _result_is_opaque(*result):
         return _result_ok_err(f"args[{index}]", result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>(args[{index}].clone()).expect("bridge: decode arg")'
@@ -11518,7 +11543,7 @@ def _bridge_ret_deser(value: str, rtype: str) -> str | None:
     if rtype in table:
         return table[rtype]
     result = _split_result(rtype)
-    if result:
+    if result is not None and not _result_is_opaque(*result):
         return _result_ok_err(value, result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>({value}.clone()).expect("bridge: decode return")'
@@ -11535,7 +11560,8 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
         return (f"{{ let _r = {call}; serde_json::json!(_r.iter().map(|v| "
                 f"v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default())"
                 f".collect::<Vec<_>>()) }}")
-    if _split_result(rtype):
+    result = _split_result(rtype)
+    if result is not None and not _result_is_opaque(*result):
         # item 421 F5: only a document that declares a `Secret[T]` carries the
         # funnel, so a marking-free unit stays byte-identical (`_SECRET_MODE`).
         return _result_to_json_funneled(call) if _SECRET_MODE else _result_to_json(call)

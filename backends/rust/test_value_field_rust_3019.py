@@ -59,17 +59,27 @@ pub fn make(n: Int) -> Box { return { tags: [], v: n, m: Map.empty() } }
 
 # A Value-carrying record crossing the generated interop bridge. The record has
 # no serde impls, so the bridge must treat it as opaque (like an erased `Value`)
-# instead of emitting `serde_json::to_value`/`from_value` for it.
+# instead of emitting `serde_json::to_value`/`from_value` for it, including
+# inside a `Result`. A `HashMap` declaration that carries a `Value` must not
+# make an unrelated `Map[Str, Int]` parameter look opaque: its rendered
+# `std::collections::HashMap<..>` path must not be read as the declaration.
 BRIDGE_VALUE = """\
 service Store {
   fn get() -> Blob
   fn put(b: Blob) -> Str
+  fn getr() -> Result[Blob, Str]
+  fn putr(r: Result[Blob, Str]) -> Str
+  fn count(m: Map[Str, Int]) -> Int
 }
 type Blob = { v: Value, n: Int }
+type HashMap = { v: Value }
 component C provides store: Store {
   provide store {
     fn get() = { v: 1, n: 2 }
     fn put(b) = "ok"
+    fn getr() = Ok({ v: 1, n: 2 })
+    fn putr(r) = "ok"
+    fn count(m) = 1
   }
 }
 """
@@ -139,6 +149,22 @@ def test_record_field_types_resolve_raw_and_emitted_names():
     assert ctx.record_field_types("Nope") == {}
 
 
+def test_a_declared_mangled_name_is_not_shadowed_by_its_source_name():
+    """`Box` emits as `Box_` and `Box_` as `Box__`, so a lookup of the RAW
+    `Box_` must return the `Box_` declaration and not the `Box` that also
+    matches the mangled spelling; the reverse map is built once, so a lookup is
+    a dict probe rather than an `_ident` scan over every declared type."""
+    m = _load_rust_emit()
+    ctx = m._V3Ctx({
+        "Box": {"kind": "record", "fields": {"v": "Value"}},
+        "Box_": {"kind": "record", "fields": {"n": "Int"}},
+    }, [], [])
+    assert ctx.record_field_types("Box") == {"v": "Value"}
+    assert ctx.record_field_types("Box_") == {"n": "Int"}
+    assert ctx.record_field_types("Box__") == {"n": "Int"}  # Box_'s emitted ident
+    assert ctx.declaration_params("Box_") == frozenset()
+
+
 def test_any_field_reduces_like_value():
     """Every surface that erases to the opaque `Value` counts: the wildcard
     `Any` renders `Value` too, so a record field of it cannot derive the full
@@ -177,11 +203,19 @@ def test_bridge_treats_a_value_carrying_record_as_opaque():
     """The record derives no serde traits, so the generated bridge must not
     marshal it: a parameter type with no wire form is refused at dispatch and a
     return is left to the proxy's unsupported-return path, as for a bare
-    `Value`. Emitting serde for it was `crate does not compile` (#3019)."""
+    `Value`. That includes either half of a `Result`, whose canonical encoding
+    serde-serializes both halves. A carrying declaration merely NAMED `HashMap`
+    must not make an unrelated `Map[Str, Int]` parameter opaque through the
+    rendered `std::collections::HashMap<..>` path."""
     m = _load_rust_emit()
     out = m.emit(compile_source(BRIDGE_VALUE, "bridge_value.rvl"))
-    assert "from_value::<Blob>" not in out
+    assert "from_value::<Blob" not in out
+    assert "from_value::<Result" not in out
+    assert '"$kind"' not in out  # no canonical Result encoding was built
     assert "serde_json::to_value(&b)" not in out
+    assert "serde_json::to_value(&r)" not in out  # Result param is opaque
+    assert "serde_json::to_value(&m)" in out  # Map param still marshals
+    assert 'from_value::<std::collections::HashMap<String, i64>>' in out
     assert "cannot be called across a seam" in out
 
 
