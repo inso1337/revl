@@ -631,7 +631,7 @@ them, and neither note contradicts the other.
   `Untrusted[<T>]` (`on_failure(result)` wraps the whole `Result[T, Str]`), which
   `taint.extract_and_normalize` reads as a taint source whose origin is the
   crossing's reach class (`net`). The provide method returns that source, so the
-  flow walk taints it interprocedurally at every consumer of the key — exactly
+  flow walk taints it interprocedurally at every consumer of the key, exactly
   how `revl import a2a` taints by declaring its service operation
   `-> Untrusted[Str]`, except here the service the engineer wrote is unchanged
   and the qualifier lives only on the synthesized crossing. A remote result
@@ -722,9 +722,9 @@ question.
    is the same pair on the importer's body.
    The **`@ts` half of the funnel** is LANDED too, so B1 is now complete on
    both tiers. `a2a_boundary.ts_funnel` emits the same rule the py bodies
-   carry — the placeholder and the minimum length read off the same two module
+   carry: the placeholder and the minimum length read off the same two module
    constants, the needle walk spelled the way `backends/typescript/bridge.ts`
-   spells it — into BOTH coloured ts bodies (`message/send` and the REST
+   spells it into BOTH coloured ts bodies (`message/send` and the REST
    `message:send`), around each of the four peer-authored interpolations. Exit
    test:
    `tests/test_import_a2a.py::test_the_ts_crossing_scrubs_every_peer_authored_interpolation`,
@@ -795,7 +795,7 @@ effort against this binding.
   envelope gates, the result and task-identity shape gates, and the F5 funnel,
   all as EMITTED source, in the one place the three generated py bodies share
   them. Also the ts correlation binding, the ts envelope gates and `ts_funnel`,
-  which the importer's two coloured ts bodies use — so what the boundary does
+  which the importer's two coloured ts bodies use, so what the boundary does
   with a peer's text does not depend on which tier answered.
 - `tests/test_439_a2a_boundary.py`: B1's shared contract. The placeholder and the
   needle bound pinned equal to `backends/python/confidential.py`'s AND to

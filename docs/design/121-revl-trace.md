@@ -141,7 +141,7 @@ the two halves of the proof are carried:
    and, after the walk (crossings are reported newest-first), resolves each
    `producedBy` onto the hop and appends the DOWNSTREAM emission's seq to its
    `producedSeq`. A `producedBy` that resolves to no hop in the activation being
-   recorded, or to a hop under a different activation id, draws no edge — this is
+   recorded, or to a hop under a different activation id, draws no edge; this is
    the driver-side activation check that replaces the token's dropped argument.
 5. **The activation id gains its per-activation discriminator.** `component#gN`
    is `component + gen`, which the NEW CRITICAL above calls insufficient. Each
@@ -312,7 +312,7 @@ form "did this fiber observe a completion" is therefore consumed by whichever
 crossing the walk reaches first: a run that crossed a completion and then wrote a
 file gave the model, token, cost and latency numbers to the write. Fiber-locality
 cannot repair that, for the same reason §2.2's NEW CRITICAL gives for
-`producedSeq` — it isolates concurrent ACTIVATIONS, and both crossings are in one
+`producedSeq`: it isolates concurrent ACTIVATIONS, and both crossings are in one
 fiber. So `replay.Timeline.record_emission` publishes each crossing's identity
 (`component` + step index) as it mints the step, the seam binds its observation
 to the crossing `make_call` just recorded, and the driver reads the entry for the
@@ -320,7 +320,7 @@ crossing it is recording. Two completions in one body are two crossings, hence
 two entries: the same finer-than-fiber property `producedSeq` gets from the
 activation id. The bound on the pre-fix defect is worth keeping: it could not
 forge a `produced` edge, because the back-patch requires the resolved target to
-carry an `llm` payload, so a misattached payload degrades to no edge — what was
+carry an `llm` payload, so a misattached payload degrades to no edge: what was
 wrong was the hop itself.
 
 ### 2.2 The widened `emit` record

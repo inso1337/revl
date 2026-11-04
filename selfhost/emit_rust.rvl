@@ -21,7 +21,10 @@
 //   * the module scaffold — `_module_header(3)` (the two `//!` banner lines, the
 //     `#![allow(..)]`, and the `use std::sync::Arc;` / `use cordis::Value;`);
 //   * the v3 TYPED-CORE (slice 2) — `_emit_v3_types` (a record as a
-//     `PartialEq`-deriving `pub struct`, a variant as a serde-tagged `pub enum`);
+//     `PartialEq`-deriving `pub struct`, a variant as a serde-tagged `pub enum`;
+//     a recursive case payload or record field at a containment cycle is
+//     `Box`-indirected, and an unbuilt same-shape record twin lowers to
+//     `pub type Twin = Canonical;`);
 //     record literals (`Struct { f: v, .. }`, with the by-value field clone);
 //     ADT construction (`Enum::Case` / `Enum::Case(arg)`, and the built-in
 //     Result/Option constructors); `match` over user variants (with the
@@ -2858,17 +2861,226 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
   return out
 }
 
+// `_inline_cycle_target`: the bare user type a declared field/case type reaches
+// with NO heap indirection in between, or "" when the type cannot make its
+// owner infinite-size. Rust stores `Vec`/`HashMap` payloads on the heap, so a
+// `List[T]`/`Map[K, T]` wrapper already breaks a containment cycle;
+// `Option`/`Result` store their payload INLINE, so `Opt[Node]` is exactly as
+// infinite as a bare `Node` field (E0072/E0391, issue #919). A wrapper chain is
+// unwrapped all the way down (`Opt[Opt[Node]]` is still inline) and the first
+// heap-backed wrapper on the way stops the walk. Returns the RAW name as it
+// appears in `types`, matching the boxed-edge keys.
+fn inline_cycle_target(ftype: Str, types: Any) -> Str {
+  var t = ftype
+  var seen = 0
+  while (true) {
+    let lb = t.indexOf("[")
+    if (!t.endsWith("]") || lb <= 0) {
+      // A bare name is direct containment exactly when it is a declared type.
+      if (value_has(types, t)) { return t }
+      return ""
+    }
+    let head = t.slice(0, lb)
+    let inner = t.slice(lb + 1, t.length() - 1)
+    if (head == "Opt") {
+      t = strip_spaces(inner)
+    } else {
+      if (head == "Result") {
+        // Both payloads are inline; an edge exists if EITHER one recurses.
+        for (part of split_generic(inner)) {
+          let target = inline_cycle_target(part, types)
+          if (target != "") { return target }
+        }
+        return ""
+      } else {
+        // `List`/`Map`/anything else: heap-backed (or unknown), no edge.
+        return ""
+      }
+    }
+    seen = seen + 1
+    if (seen > 64) { return "" }
+  }
+  return ""
+}
+
+// A containment edge the boxing pass reasons over: `owner` reaches `target`
+// through a variant `case` payload or a record `field`, with no heap-backed
+// wrapper in between.
+type BoxEdge = { owner: Str, kind: Str, member: Str, target: Str }
+
+// `_recursive_boxed_edges` result: the case edges and field edges to
+// Box-indirect, keyed by the RAW owner name and the RAW case/field name so the
+// declaration, the constructor and the record literal all agree.
+type BoxedEdges = { cases: Map[Str, Map[Str, Bool]], fields: Map[Str, Map[Str, Bool]] }
+
+fn edge_is_boxed(m: Map[Str, Map[Str, Bool]], owner: Str, member: Str) -> Bool {
+  if (!m.has(owner)) { return false }
+  return match m.lookup(owner) { Some(v) => v.has(member), None => false }
+}
+
+fn edge_box(m: Map[Str, Map[Str, Bool]], owner: Str, member: Str) -> Map[Str, Map[Str, Bool]] {
+  var members: Map[Str, Bool] = Map.empty()
+  if (m.has(owner)) {
+    members = match m.lookup(owner) { Some(v) => v, None => Map.empty() }
+  }
+  return m.set(owner, members.set(member, true))
+}
+
+fn edges_of(adj: Map[Str, List[BoxEdge]], node: Str) -> List[BoxEdge] {
+  return match adj.lookup(node) { Some(v) => v, None => [] }
+}
+
+// Can `goal` be reached from `start` with the already-boxed (now-indirected)
+// edges removed? Breadth-first, so a visited set bounds a cyclic graph.
+fn boxed_reaches(start: Str, goal: Str, adj: Map[Str, List[BoxEdge]],
+                 cases: Map[Str, Map[Str, Bool]],
+                 fields: Map[Str, Map[Str, Bool]]) -> Bool {
+  var seen: Map[Str, Bool] = Map.empty()
+  var queue = [start]
+  var cursor = 0
+  while (cursor < queue.length()) {
+    let node = queue[cursor]
+    cursor = cursor + 1
+    for (e of edges_of(adj, node)) {
+      if (e.kind == "case") {
+        if (edge_is_boxed(cases, node, e.member)) { continue }
+      } else {
+        if (edge_is_boxed(fields, node, e.member)) { continue }
+      }
+      if (e.target == goal) { return true }
+      if (!seen.has(e.target)) {
+        seen = seen.set(e.target, true)
+        queue = queue.push(e.target)
+      }
+    }
+  }
+  return false
+}
+
+// `_recursive_boxed_edges`: the case/field edges that must be `Box`-indirected
+// so a recursive ADT is finite-sized on the Rust tier (E0072), which also
+// breaks the drop-check cycle those types otherwise trigger (E0391).
+//
+// Greedy feedback-edge selection. An edge owner -> target lies on a cycle iff
+// `target` can still reach `owner`; box the first such edge, preferring enum
+// payloads (in declaration order) over struct fields, then repeat until no
+// cycle remains. Each pass boxes at most one edge, so this terminates.
+fn recursive_boxed_edges(types: Any) -> BoxedEdges {
+  var adj: Map[Str, List[BoxEdge]] = Map.empty()
+  var enum_edges: List[BoxEdge] = []
+  var field_edges: List[BoxEdge] = []
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    var edges: List[BoxEdge] = []
+    if (kind == "record") {
+      let fields = value_field(spec, "fields")
+      for (field of value_keys(fields)) {
+        let target = inline_cycle_target(value_str(value_field(fields, field)), types)
+        if (target != "") {
+          let e: BoxEdge = { owner: name, kind: "field", member: field, target: target }
+          edges = edges.push(e)
+          field_edges = field_edges.push(e)
+        }
+      }
+    } else {
+      if (kind == "variant") {
+        for (case of value_list(value_field(spec, "cases"))) {
+          let target = inline_cycle_target(value_str(value_field(case, "payload")), types)
+          if (target != "") {
+            let e: BoxEdge = { owner: name, kind: "case", member: value_str(value_field(case, "name")), target: target }
+            edges = edges.push(e)
+            enum_edges = enum_edges.push(e)
+          }
+        }
+      }
+    }
+    adj = adj.set(name, edges)
+  }
+  var cases: Map[Str, Map[Str, Bool]] = Map.empty()
+  var fields: Map[Str, Map[Str, Bool]] = Map.empty()
+  var changed = true
+  while (changed) {
+    changed = false
+    for (e of enum_edges) {
+      if (edge_is_boxed(cases, e.owner, e.member)) { continue }
+      if (boxed_reaches(e.target, e.owner, adj, cases, fields)) {
+        cases = edge_box(cases, e.owner, e.member)
+        changed = true
+        break
+      }
+    }
+    if (changed) { continue }
+    for (e of field_edges) {
+      if (edge_is_boxed(fields, e.owner, e.member)) { continue }
+      if (boxed_reaches(e.target, e.owner, adj, cases, fields)) {
+        fields = edge_box(fields, e.owner, e.member)
+        changed = true
+        break
+      }
+    }
+  }
+  let result: BoxedEdges = { cases: cases, fields: fields }
+  return result
+}
+
+// One record's field -> type shape, as an injective string: the fields sorted
+// by name (the reference sorts the `(field, type)` pairs), each pair encoded
+// length-prefixed so two different shapes cannot collide.
+fn record_shape(spec: Any) -> Str {
+  let fields = value_field(spec, "fields")
+  var parts = []
+  for (field of list_sort(value_keys(fields))) {
+    let ftype = value_str(value_field(fields, field))
+    parts = parts.push(`${field.length()}:${field}${ftype.length()}:${ftype}`)
+  }
+  return parts.join("")
+}
+
+// `_emit_v3_types`'s same-shape record twin alias: the canonical (first in
+// declaration order) RAW record name for every record name. Two records with
+// the IDENTICAL field -> type shape are interchangeable in revl (structural
+// equality, item 268), so a value of one is admitted where the other is
+// declared. Rust sees distinct nominal types (E0308), so the emitter emits ONE
+// canonical struct per shape and lowers each twin to `pub type Twin =
+// Canonical;` (sharing its constructor, fields, derives and serde form).
+fn record_canonicals(types: Any) -> Map[Str, Str] {
+  var canonical: Map[Str, Str] = Map.empty()
+  var by_shape: Map[Str, Str] = Map.empty()
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    if (value_str(value_field(spec, "kind")) == "record") {
+      let shape = record_shape(spec)
+      if (by_shape.has(shape)) {
+        canonical = canonical.set(name, map_get(by_shape, shape))
+      } else {
+        by_shape = by_shape.set(shape, name)
+        canonical = canonical.set(name, name)
+      }
+    }
+  }
+  return canonical
+}
+
 // `_emit_v3_types`: user `type` decls as Rust items. A record is a `pub struct`
 // (nominal, so `{a:1} == {a:1}` compiles — the `PartialEq` derive is load-bearing,
 // not decoration); a variant is a serde-tagged `pub enum`. Each item is followed
 // by a blank line, exactly as the reference does.
 fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
   var out = []
+  let boxed = recursive_boxed_edges(types)
+  let canonicals = record_canonicals(types)
   for (name of value_keys(types)) {
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
     let nm = type_ident(name)
     if (kind == "record") {
+      let twin = match canonicals.lookup(name) { Some(v) => v, None => "" }
+      if (twin != "" && twin != name) {
+        out = out.push(`pub type ${nm} = ${type_ident(twin)};`)
+        out = out.push("")
+        continue
+      }
       out = out.push("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
       out = out.push(`pub struct ${nm} {`)
       let fields = value_field(spec, "fields")
@@ -2881,7 +3093,12 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
           // other tier writes and a decode of the wire object faults.
           out = out.push(`    #[serde(rename = "${field}")]`)
         }
-        out = out.push(`    ${fname}: ${rust_type_t(value_field(fields, field), tnames)},`)
+        var rendered = rust_type_t(value_field(fields, field), tnames)
+        if (edge_is_boxed(boxed.fields, name, field)) {
+          // A recursive struct-field edge is a `Box` indirection (E0072).
+          rendered = `Box<${rendered}>`
+        }
+        out = out.push(`    ${fname}: ${rendered},`)
       }
       out = out.push("}")
     } else {
@@ -2893,7 +3110,14 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
           let cname = mangle(value_str(value_field(case, "name")))
           let payload = value_field(case, "payload")
           if (value_is_null(payload)) { out = out.push(`    ${cname},`) }
-          else { out = out.push(`    ${cname}(${rust_type_t(payload, tnames)}),`) }
+          else {
+            var rendered = rust_type_t(payload, tnames)
+            if (edge_is_boxed(boxed.cases, name, value_str(value_field(case, "name")))) {
+              // A recursive variant payload is a `Box` indirection (E0072).
+              rendered = `Box<${rendered}>`
+            }
+            out = out.push(`    ${cname}(${rendered}),`)
+          }
         }
         out = out.push("}")
       } else {

@@ -80,7 +80,7 @@ regenerated rather than edited.
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 52 |  |
-| dash.md | current | 11 |  |
+| dash.md | current | 9 |  |
 | delivery-semantics.md | needs-work | 7 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
@@ -104,7 +104,7 @@ regenerated rather than edited.
 | gen-types.md | needs-work | 0 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 9 |  |
-| guarantees.md | needs-work | 2 |  |
+| guarantees.md | needs-work | 0 |  |
 | guide-ai-agents.md | stale-fixed | 0 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 0 |  |
