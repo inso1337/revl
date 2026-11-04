@@ -562,12 +562,16 @@ def measured_diff(proposal: Proposal):
 
     Committed and uncommitted changes both count, because a proposal is judged
     on the tree it produced and not on how tidily it was committed. This is the
-    same read `tools/evolution_reward.py` performs for its `scope` component.
+    same read `tools/evolution_reward.py` performs for its `scope` component,
+    plus `--no-renames`: git reports only the destination of a rename with
+    `--name-only`, so a `git mv` out of a domain, the fence or the kernel would
+    hide the removed path. `--no-renames` reports the removal as a deletion and
+    the arrival as an addition, so both paths are measured.
     """
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", proposal.base])
+    ok, out = _git(tree, ["diff", "--no-renames", "--name-only", proposal.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -897,7 +901,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
                 "the declared changed-file set understates the tree by "
                 + str(len(understated)) + " path(s): "
                 + ", ".join(understated[:6]),
-                (f"git diff --name-only {proposal.base}",))
+                (f"git diff --no-renames --name-only {proposal.base}",))
 
     hits = fence_hits(measured)
     if hits:
@@ -950,7 +954,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
                   "nobody declared, so this is routed to a human, not "
                   "promoted (issue #2807)",
                 (f"applies_to={json.dumps(proposal.applies_to.as_dict())}",
-                 f"git diff --name-only {proposal.base}"))
+                 f"git diff --no-renames --name-only {proposal.base}"))
 
     base = _plain("authority", record)
     if not base.verified:
@@ -959,7 +963,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
         "authority",
         f"authority diff empty on all {len(AUTHORITY_AXES)} axes; "
         f"{len(measured)} measured path(s), none in the fence or the kernel",
-        base.evidence + (f"git diff --name-only {proposal.base}",
+        base.evidence + (f"git diff --no-renames --name-only {proposal.base}",
                          f"axes={';'.join(AUTHORITY_AXES)}"))
 
 

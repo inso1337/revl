@@ -258,9 +258,14 @@ boundary and a freeze, and it is why `FENCE_TOUCHED` is a distinct code from
 Every check in section 5 reads the changed-file set, so the controller must not
 accept the candidate's account of it. It does not:
 
-* when the tree is a git tree, the set comes from `git diff --name-only <base>`
-  plus untracked files, exactly the read `tools/evolution_reward.py` performs
-  for its `scope` component, and that set wins;
+* when the tree is a git tree, the set comes from
+  `git diff --no-renames --name-only <base>` plus untracked files, exactly the
+  read `tools/evolution_reward.py` performs for its `scope` component, and that
+  set wins;
+* `--no-renames` is load-bearing. With git's rename detection on, `--name-only`
+  prints only the destination of a rename, so a `git mv` out of a domain, the
+  fence or the kernel would hide the removed path. `--no-renames` reports the
+  removal as a deletion and the arrival as an addition, so both are measured;
 * a declared set that **understates** the measured one is `DIFF_DISAGREES`;
 * a tree whose diff cannot be measured is `DIFF_UNVERIFIED` and has no
   satisfiable path, so a proposal on an unreadable tree cannot promote.
@@ -268,6 +273,9 @@ accept the candidate's account of it. It does not:
 `test_the_kernel_hit_is_found_even_when_the_candidate_hid_it` is the test that
 matters here: a candidate declaring a clean diff while the tree edits
 `src/revl/attest.py` is still refused with `KERNEL_INTERSECTION`.
+`test_a_rename_out_of_the_domain_is_a_domain_escape` is the same argument for a
+`git mv`: the removed path is measured even though `--name-only` alone would
+print only its destination.
 
 ### 5.4 An absent axis counts as moved
 
@@ -366,7 +374,7 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-Three demonstrations, all in `tests/test_evolution_controller.py`: 98 tests,
+Three demonstrations, all in `tests/test_evolution_controller.py`: 99 tests,
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four

@@ -472,6 +472,24 @@ def test_the_domain_escape_is_measured_not_declared(tmp_path):
     assert verdict.decision == "PROMOTE", verdict.render()
 
 
+def test_a_rename_out_of_the_domain_is_a_domain_escape(tmp_path):
+    """A `git mv` reports only its destination with `--name-only`, so a move
+    from the shared part into the declared domain would otherwise measure as an
+    in-domain change. `--no-renames` keeps the removed path in the set, and the
+    escape names it."""
+    tree = make_tree(tmp_path / "rename",
+                     {"src/shared/core.rvl": "candidate\n"})
+    (tree / "src/svc").mkdir(parents=True)
+    _git(tree, "mv", "src/shared/core.rvl", "src/svc/core.rvl")
+    _git(tree, "commit", "-q", "-m", "move the shared file into the domain")
+    record = proposal_record(tree)
+    record["applies_to"] = {"domain": ["src/svc"]}
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "DOMAIN_ESCAPE"
+    assert "src/shared/core.rvl" in verdict.by_name()["authority"].reason
+
+
 def test_a_domain_proposal_inside_its_domain_promotes(clean_tree):
     """The control for the escape refusal: same tag, diff inside the domain."""
     record = proposal_record(clean_tree)
