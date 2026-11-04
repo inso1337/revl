@@ -96,9 +96,12 @@ def check_src(ns):
 # without it the positive bitwise path (`m & m` -> Int32) could not be exercised.
 # `opt`/`xs` are slice T2a's: the optional-escape refusals (a field read and an
 # index THROUGH an `Opt`) and the `??` rule need an optional in scope, and the
-# index rules need a `List`. The fuzz generators do not draw either name.
+# index rules need a `List`. `mf`/`mi` are issue #2949's Map reads: a
+# `Map[Str, V]` subscript answers `V`, and the two checkers must agree on that.
+# The fuzz generators do not draw these names.
 ENV = {"x": "Int", "y": "Int", "f": "Float", "s": "Str", "flag": "Bool",
-       "m": "Int32", "opt": "Opt[Str]", "xs": "List[Int]"}
+       "m": "Int32", "opt": "Opt[Str]", "xs": "List[Int]",
+       "mf": "Map[Str, Float]", "mi": "Map[Str, Int]"}
 
 
 def _ref_parse(src: str):
@@ -167,6 +170,10 @@ ACCEPTED = [
     # index: a List indexes to its element; the target and the index are each
     # walked first
     "xs[0]", "xs[x]", "xs[q]", "q[0]", "q[s]", "xs.length", "xs[0] + 1",
+    # issue #2949: a Map[Str, V] subscript answers V, so a mixed-width equality
+    # against it sees a real operand type in both checkers
+    'mf["a"]', 'mi["a"]', 'mf["a"] == 3', '3 == mf["a"]', 'mi["a"] == 3',
+    'mf["a"] + 1', 'mf["a"] < f',
     # ternary: the branches join, and a disagreement is named
     "flag ? 1 : 2", "flag ? x : f", "flag ? q : 1", "q ? 1 : 2", "flag ? s : s",
     # lists: the elements join, and an element whose type is unknown leaves the
@@ -189,6 +196,12 @@ ACCEPTED = [
 ]
 
 REJECTED = [
+    # issue #2949: a Map read answers its declared V. On main both checkers
+    # answered unknown for `mf["a"]`, so `unknown & Int32` (accepted, like
+    # `q & m`) and `unknown && Bool` (accepted, like `flag && q`) stayed
+    # admissible. Now V is Float and both operands are known, so both
+    # checkers must refuse.
+    'mf["a"] & m', 'mf["a"] && flag',
     # Bool in arithmetic (refusal-parity: `/` on Bool is the headline case)
     "flag / flag", "flag + 1", "true * false", "x + flag", "1 % flag",
     "flag / x", "x - true",
@@ -1735,6 +1748,10 @@ REJECTED_PROG_EXPR = [
     ("type Bad = Result", "1"),
     ("type R = { a: Opt }", "1"),
     ("type S = A(Opt) | B", "1"),
+    # a builtin scalar takes no type arguments (issue #2963)
+    ("type R = { a: Int[Str] }", "1"),
+    ("type S = A(Int[Str]) | B", "1"),
+    ("type Bad = Int[Str]", "1"),
     # `Never` is the inferred bottom, uninhabited and ONE-WAY: it flows out of a
     # `Never` position into any other, and nothing flows in. So an `Int` payload
     # for a `Wrap(Never)` case is a definite argument mismatch, not a cast.

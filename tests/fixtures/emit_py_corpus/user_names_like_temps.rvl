@@ -25,4 +25,6 @@ pub fn temps(x: Int) -> Int {
   return _TEMPS_CONFIG - 1 + a * _bi + (mk(x).a + _fv) + ((pick(x) ?? 0) + _ov0 - 1) + (x % 3 + _revl_rem - 1) + m
 }
 
-pub fn bumped(x: Int) -> Int { return bump(x) }
+// Arithmetic over the extern call (issue #2945): this keeps the lowered
+// `operands` tag, and the python backend's Int bound check with it.
+pub fn bumped(x: Int) -> Int { return bump(x) + 1 }
