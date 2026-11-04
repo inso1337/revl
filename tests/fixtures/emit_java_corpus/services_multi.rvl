@@ -4,12 +4,17 @@
 // `String`/`void`), a `return <name>` (a bound param), and the empty void body
 // that lowers to the reference's `UnsupportedOperationException("effectful method
 // body")` trap. Still the simple path: pure providers, no config/req/isolate.
+// A provider parameter is named `root`, which collides with the emitter's own
+// `root` local: the scaffolding ladder must escape it at the service interface,
+// the provider signature and the body use (issue #2797). `root` is deliberately
+// not one of the names the frontend pre-renames (unlike `ctx`), so the escape
+// under test is the emitter's own.
 fn seed() -> Int {
   return 1
 }
 
 service Counter {
-  fn bump(n: Int) -> Int
+  fn bump(root: Int) -> Int
   fn reset()
   fn ready(flag: Bool) -> Bool
 }
@@ -20,7 +25,7 @@ service Namer {
 
 component Registry provides count: Counter, name: Namer {
   provide count {
-    fn bump(n) = n
+    fn bump(root) = root
     fn reset() { }
     fn ready(flag) = flag
   }
