@@ -675,6 +675,41 @@ def test_a_live_body_past_the_slice_is_still_named(emitted, reference, tmp_path)
     assert "pure typed-core tier" not in got
 
 
+def test_a_method_let_bound_to_an_opt_or_result_call_is_named(
+        emitted, reference, tmp_path):
+    """A provide-method `let` bound to an `Opt`-returning call is outside the
+    component slice, and the port names the component instead of emitting
+    divergent Go.
+
+    The reference's `_emit_method_body` pins the interface only when the
+    document declares a type (`_V3_TYPED_COMPONENTS and _V3_TYPES`) and spells
+    the pin with `_go_v3_type` (`RevlOpt[int64]`); with no type declared it
+    emits a bare `r := revlSelf.source.Lookup(k)`. The port's component type
+    spelling for `Opt` is a pointer (`*int64`) and its interface pin does not
+    depend on the type table, so the two disagree on both shapes. Declining the
+    let keeps the slice at what the patch promises: a method body whose binding
+    carries one of the sum surfaces the component renderer does not spell.
+    """
+    path = tmp_path / "method_opt_let.rvl"
+    path.write_text(
+        "service Source { fn lookup(k: Str) -> Opt[Int] }\n"
+        "service Store { fn value(k: Str) -> Int }\n"
+        "component C requires source: Source provides store: Store {\n"
+        "  provide store {\n"
+        "    fn value(k) {\n"
+        "      let n = k.length()\n"
+        "      let r = source.lookup(k)\n"
+        "      return n\n"
+        "    }\n"
+        "  }\n"
+        "}\n")
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert "r := revlSelf.source.Lookup(k)" in want
+    assert_boundary_witness(want, got, "revlSelf.source.Lookup(k)",
+                            "<<UNSUPPORTED-COMPONENT:C>>")
+
+
 @pytest.mark.parametrize("source", [
     pytest.param("service S { fn g(n: Int) -> Str }\n"
                  "component C provides acme::s: S { provide acme::s { fn g(n) = n.to_str() } }\n",

@@ -5298,7 +5298,19 @@ fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
 fn method_let_ok(st: Any, env: CEnv) -> Bool {
   let kind = node_step(st)
   if (kind != "let" && kind != "var") { return false }
-  return comp_expr_ok(value_field(st, "value"), env)
+  let v = value_field(st, "value")
+  // A binding whose value carries one of the sum surfaces is outside this
+  // slice. The reference's let arm pins it with `_go_v3_type` and only when
+  // the document declares a type (`_V3_TYPED_COMPONENTS and _V3_TYPES`), so
+  // the same document spells `r := ...` with no types and `RevlOpt[int64]`
+  // with one; the port's component spelling is `comp_go_type` (`*int64` for
+  // Opt, `RevlResult[...]` for Result) and its pin does not depend on the type
+  // table, so it would write a different literal either way. Declining the
+  // let names the component instead of emitting Go the reference does not.
+  let surface = comp_infer(v, env)
+  let sum = surface == "any" || (surface.startsWith("Opt[") && surface.endsWith("]"))
+    || (surface.startsWith("Result[") && surface.endsWith("]"))
+  return comp_expr_ok(v, env) && !sum
 }
 
 // A method-body `emit`: its expression, and a site-spelled `compensate` clause
