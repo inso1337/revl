@@ -407,8 +407,14 @@ def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(tmp_path):
     """A rename is two changes. With rename detection on, `git diff --name-only`
     lists only the destination, so moving a file out of the grant and into a
     granted directory would read as one allowed addition. The measured set is
-    what the authority precondition signs off, so both halves count."""
+    what the authority precondition signs off, so both halves count.
+
+    The moved content is byte-identical to the base blob on purpose: a changed
+    file falls below git's similarity threshold, stops being detected as a
+    rename, and the test would pass without `--no-renames`.
+    """
     tree = make_tree(tmp_path / "rename", {"src/svc.rvl": "candidate\n"})
+    (tree / "src" / "svc.rvl").write_text("base\n")
     (tree / "tools").mkdir()
     _git(tree, "mv", "src/svc.rvl", "tools/svc.rvl")
     verdict = run(proposal_record(tree), allow=("tools/**",))
