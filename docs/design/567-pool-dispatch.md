@@ -260,11 +260,16 @@ the other is inadmissible everywhere.
   business: a peer without one answers with the runtime's own message and a
   nonzero exit code rather than pretending to have run it.
 
-The result record is `{runner, exit_code, stdout, stderr}` and the peer's own
-workspace path is replaced in every line before it is signed. A receipt is a
-signed record that leaves the peer's machine, so a local absolute path in it is
-both a reproducibility problem - the digest would differ per run for the same
-work - and a needless disclosure about the peer.
+The result record is `{runner, exit_code, stdout, stderr, timed_out}` and the
+peer's own workspace path is replaced in every line before it is signed. A
+receipt is a signed record that leaves the peer's machine, so a local absolute
+path in it is both a reproducibility problem - the digest would differ per run
+for the same work - and a needless disclosure about the peer. `timed_out` is in
+the record because it is deterministic, the peer's own observation of the call
+it made. The wall time is NOT in the record, for the same reason the path is
+not: it would make two runs of the same work two different results. It is
+returned beside the result and appears only in the receipt's `budget_consumed`
+claim.
 
 ## A flag that is ignored is not implemented
 

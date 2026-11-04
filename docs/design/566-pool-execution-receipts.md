@@ -199,7 +199,7 @@ the peer's charter is refused on `policy-identity` before the work is run.
 
 | field | inside the peer signature | inside the attestation digest | checked | a claim |
 |---|---|---|---|---|
-| `task_digest` | yes | yes | the digest of the signed task presented to `check_receipt` | |
+| `task_digest` | yes | yes | the digest of the signed task presented to `check_receipt`, and the task's `task_id`, `peer_id`, `pool_id` and `artifact_digest` must equal the receipt's | |
 | `grant` | yes | yes | equals the task's grant | |
 | `policy_digest` | yes | yes | equals the task's policy digest | |
 | `outcome` | yes | yes | one of `completed`, `failed`, `timed_out`, `refused` | which ending the peer observed |
@@ -223,9 +223,10 @@ statement, never as arithmetic the pool verified.
 
 ### Checked facts and claims, stated once
 
-- CHECKED: `task_digest`, `grant`, `policy_digest`, the two signatures, the
-  pool, the peer, the artifact digest, the admission time and the attestor's
-  authority.
+- CHECKED: `task_digest` and the task's identity (`task_id`, `peer_id`,
+  `pool_id`, `artifact_digest`), `grant`, `policy_digest`, the two signatures,
+  the pool, the peer, the artifact digest, the admission time and the
+  attestor's authority.
 - CLAIMED: `outcome`, `budget_consumed`.
 - NOT CLAIMED: that the run was correct or that the reported budget is true.
   The correctness check remains the attestor link, and the budget report has no

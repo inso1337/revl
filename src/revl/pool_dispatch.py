@@ -956,8 +956,8 @@ def _runner_argv(runner: str, names: list[str]) -> list[str]:
 
 
 def execute(runner: str, source: Artifact, workspace: Path,
-            *, timeout: float = 300.0) -> dict:
-    """Run one artifact in one workspace and return the result record.
+            *, timeout: float = 300.0) -> tuple[dict, float]:
+    """Run one artifact in one workspace and return ``(result, wall_seconds)``.
 
     The artifact is written under ``workspace`` and named RELATIVELY on the
     command line, with ``workspace`` as the working directory, so no absolute
@@ -966,11 +966,15 @@ def execute(runner: str, source: Artifact, workspace: Path,
     own under ``workspace``, each file at its bundle path with its mode, and
     the runner is handed its ``.rvl`` files in path order.
 
-    ``timed_out`` and ``wall_seconds`` are measured HERE, by the peer, and
-    travel into the receipt with ``result``. ``timed_out`` is the peer's own
-    observation of the call it made: a program is free to exit 124, so the
-    receipt never infers a timeout from the exit code. ``wall_seconds`` is the
-    only budget-like quantity this runner can honestly report."""
+    The wall time is returned BESIDE the result, not inside it. The result
+    record is hashed into ``result_digest``, and a duration in it would make
+    two runs of the same work two different results, which is exactly the
+    reproducibility property ``_scrub`` exists to protect. Only the peer's
+    ``budget_consumed`` claim carries it.
+
+    ``timed_out`` stays in the result because it is deterministic: it is the
+    peer's own observation of the call it made. A program is free to exit 124,
+    so the receipt never infers a timeout from the exit code."""
     if runner not in RUNNERS:
         raise DispatchError(f"unknown runner {runner!r}")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -1000,10 +1004,10 @@ def execute(runner: str, source: Artifact, workspace: Path,
         code, out, err = 124, "", f"the runner exceeded {timeout:g}s"
     except OSError as error:  # pragma: no cover - the interpreter is gone
         code, out, err = 125, "", f"the runner could not start: {error}"
-    return {"kind": RESULT_KIND, "version": RESULT_VERSION, "runner": runner,
-            "exit_code": code, "stdout": _scrub(out, workspace),
-            "stderr": _scrub(err, workspace), "timed_out": timed_out,
-            "wall_seconds": round(time.monotonic() - started, 6)}
+    result = {"kind": RESULT_KIND, "version": RESULT_VERSION, "runner": runner,
+              "exit_code": code, "stdout": _scrub(out, workspace),
+              "stderr": _scrub(err, workspace), "timed_out": timed_out}
+    return result, round(time.monotonic() - started, 6)
 
 
 def _receive_bundle(record: Mapping[str, Any], task_id: str
@@ -1181,8 +1185,9 @@ class PeerRunner:
                 f"this peer already ran task {task_id!r}; a task is run once, "
                 f"so a captured task cannot be replayed for a second receipt",
                 task_id=task_id)
-        result = execute(runner, source, self.workspace / task_id,
-                         timeout=self.timeout)
+        result, wall_seconds = execute(runner, source,
+                                       self.workspace / task_id,
+                                       timeout=self.timeout)
         # A 1.1 task names the authority it hands the peer, so the receipt
         # echoes it back (issue #2720). A 1.0 task names none, and the peer
         # signs the old shape rather than inventing a grant the operator never
@@ -1196,8 +1201,10 @@ class PeerRunner:
                 "outcome": _outcome_of(result),
                 # The peer's own report, a CLAIM: nothing here measured the
                 # operator's budget keys, and the one quantity this runner
-                # measures is wall-clock seconds.
-                "budget_consumed": {"wall_seconds": result.get("wall_seconds", 0.0)},
+                # measures is wall-clock seconds. It is passed beside the
+                # result, never inside it, so the hashed result stays
+                # reproducible.
+                "budget_consumed": {"wall_seconds": wall_seconds},
             }
         receipt = pool_receipt.issue_receipt(
             pool_id=record["pool_id"], task_id=task_id,

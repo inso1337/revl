@@ -666,6 +666,24 @@ def test_the_peer_workspace_path_is_not_in_the_signed_result(tmp_path):
     assert str(runner.workspace) not in blob
 
 
+def test_two_runs_of_the_same_work_produce_the_same_result_digest(tmp_path):
+    """The result record is hashed into ``result_digest``, so it must be
+    reproducible. The wall time is returned BESIDE the result and reported only
+    in the receipt's ``budget_consumed`` claim; a duration inside the record
+    would make every run of the same work a different result, which is exactly
+    the reproducibility property ``_scrub`` protects and a receipt cannot
+    satisfy while it is true."""
+    first, first_seconds = pd.execute(pd.RUNNER_TEST_PY, PURE_SOURCE,
+                                      tmp_path / "first")
+    second, second_seconds = pd.execute(pd.RUNNER_TEST_PY, PURE_SOURCE,
+                                        tmp_path / "second")
+
+    assert pr.result_digest(first) == pr.result_digest(second)
+    assert "wall_seconds" not in first
+    assert "wall_seconds" not in second
+    assert first_seconds >= 0.0 and second_seconds >= 0.0
+
+
 # ---------------------------------------------------------------------------
 # 4. what may be sent at all: the effect class is derived, not declared
 # ---------------------------------------------------------------------------

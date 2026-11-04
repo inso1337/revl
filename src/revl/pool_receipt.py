@@ -579,9 +579,12 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
     :data:`RECEIPT_VERSION` receipt REQUIRES it: the receipt echoes the task
     digest, the granted capability set and the policy digest, and each is
     compared against the operator-signed task, which is the party that decided
-    them. Those are checkable facts. The receipt's ``outcome`` and
-    ``budget_consumed`` are the peer's own claims and are carried through, not
-    proven here.
+    them. The task's ``task_id``, ``peer_id``, ``pool_id`` and
+    ``artifact_digest`` must also equal the receipt's, because a digest match
+    names a record and the record has to describe the work the receipt claims;
+    otherwise a receipt for one task could cite another task's record. Those
+    are checkable facts. The receipt's ``outcome`` and ``budget_consumed`` are
+    the peer's own claims and are carried through, not proven here.
 
     ``require_bound`` is what a promotion asks for. A version
     :data:`RECEIPT_VERSION_V1` receipt still VERIFIES with this flag false: the
@@ -687,6 +690,19 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
             return refuse(LINK_RECEIPT_TASK,
                           f"the receipt answers task {record['task_digest'][:16]} "
                           f"and the task presented is {expected_task[:16]}")
+        # The digest matches, so the task is the record the receipt echoed.
+        # That record must still be ABOUT the task the receipt names: a
+        # receipt for task-1 whose peer signed a claim pointing at task-2's
+        # record would otherwise verify against task-2 and cite it as
+        # evidence for work it does not describe.
+        for member in ("task_id", "peer_id", "pool_id", "artifact_digest"):
+            if task.get(member) != record[member]:
+                return refuse(
+                    LINK_RECEIPT_TASK,
+                    f"the receipt names {member} {record[member]!r} and the "
+                    f"task it answers names {task.get(member)!r}; a receipt "
+                    f"answers the task it names, not another record that "
+                    f"carries the same digest")
         task_grant = grant_block(task.get("grant"))
         if task_grant is None:
             return refuse(LINK_RECEIPT_GRANT,

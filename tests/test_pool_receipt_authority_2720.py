@@ -197,6 +197,38 @@ def test_a_bound_receipt_without_its_task_verifies_nowhere():
     assert verdict.link == pr.LINK_RECEIPT_TASK, verdict.as_dict()
 
 
+@pytest.mark.parametrize("member,wrong", [
+    ("task_id", "task-2"),
+    ("peer_id", "peer-other"),
+    ("pool_id", "other-pool"),
+    ("artifact_digest", "e" * 64),
+])
+def test_a_receipt_and_the_task_it_answers_must_agree_on_identity(
+        member, wrong):
+    """A digest match names a RECORD, and the record must describe the work the
+    receipt claims. Here the peer signs a receipt for task-1 whose
+    `task_digest` points at a record that differs in one identity member: the
+    digest check alone would accept it, and the receipt would cite evidence for
+    work it does not describe. Each member is refused on `receipt-task`."""
+    record = make_charter()
+    roster, pinned = joined(record)
+    task = signed_task(record)
+    task[member] = wrong
+    task = pd.sign_task(task, OPERATOR_ID)
+    receipt = pr.issue_receipt(
+        pool_id=record["pool_id"], task_id="task-1",
+        artifact_digest=GOOD_ARTIFACT, result=RESULT, identity=WORKER_ID,
+        task_digest=pr.receipt_digest(task), grant=task["grant"],
+        policy_digest=task["policy_digest"], outcome=pr.COMPLETED,
+        budget_consumed={})
+    assert receipt["task_digest"] == pr.receipt_digest(task)
+
+    verdict = check(receipt, record, roster, pinned, task=task)
+    assert not verdict.counts, f"{member} was accepted: {verdict.as_dict()}"
+    assert verdict.link == pr.LINK_RECEIPT_TASK, verdict.as_dict()
+    assert member in verdict.reason, verdict.reason
+
+
 def test_a_budget_claim_that_is_not_a_non_negative_number_is_malformed():
     """The budget map is a claim, but it has to be a claim ABOUT something: a
     negative or non-numeric amount is a malformed receipt, not a smaller

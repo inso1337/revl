@@ -553,11 +553,10 @@ def test_two_receipts_sharing_a_task_id_count_once(tmp_path):
     ledger.deliver(task_id="task-1", peer_id=WORKER, result_digest="r" * 64,
                    receipt_digest="c" * 64, counts=False, receipt=first,
                    attestation=pr.attest_receipt(first, identity=ATTESTOR_ID))
-    # A second ledger slot, but the SAME `task_id` inside the receipt: the
-    # work being claimed does not change because the slot did. It is bound to
-    # its own task record so the authority check passes and only the dedup
-    # can refuse it.
-    again_task = signed_task(pool.record, task_id="task-2")
+    # A second ledger slot, but the SAME `task_id` inside both the receipt and
+    # the task it answers: the work being claimed does not change because the
+    # slot did. Only the dedup can refuse it.
+    again_task = signed_task(pool.record, task_id="task-1")
     again = pr.issue_receipt(pool_id=pool.record["pool_id"], task_id="task-1",
                              artifact_digest=ARTIFACT, result={"rows": 2},
                              identity=WORKER_ID,
