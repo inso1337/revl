@@ -1,0 +1,60 @@
+// The single-crossing attribution rule for a declared ceiling (issue #2688).
+// The meter at `extern_emit` charges ONE crossing, with the arguments the
+// emission was handed. Every local function that reaches the budgeted extern
+// is classified (`plain` reaches none), and only an exact pass-through wrapper
+// (`inner`, `nested`) is attributable: the others transform the payload, cross
+// more than once, cross inside a loop or a condition, or recurse. Emitting any
+// of them would leave `net(calls=1)` silently unenforced, so the reference
+// refuses the document at emit time with the named `CeilingUnattributable`,
+// naming the capability and the shape. No corpus document can reach that
+// refusal because the reference REFUSES this document, so it lives here where
+// `tools/selfhost_line_coverage.py` drives both halves.
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+extern emission[net(calls=1)] fn call2(a: Str, b: Str) -> Int = @py { return 1 }
+extern emission[net] fn put(s: Str) -> Int compensate undo_put() = @py { return 1 }
+extern pure fn undo_put() = @py { return None }
+extern pure fn undo_call() = @py { return None }
+
+fn inner(x: Str) -> Int { return call(x) }
+fn nested(x: Str) -> Int { return inner(x) }
+fn nested_multi(x: Str) -> Int { return multi(x) }
+fn nested_transformed(x: Str) -> Int { return transformed(x) }
+fn nested_in_loop(x: Str) -> Int { while (inner(x) > 0) { return 1 } return 0 }
+fn nested_in_cond(x: Str) -> Int { if (x != "") { return inner(x) } return 0 }
+fn nested_transformed2(x: Str) -> Int { return inner("z") }
+fn multi(x: Str) -> Int { let a = call(x) let b = call(x) return a }
+fn transformed(x: Str) -> Int { return call("0123456789") }
+fn short(x: Str) -> Int { return call2(x, x) }
+fn looped(x: Str) -> Int { while (call(x) > 0) { return 1 } return 0 }
+fn forlooped(xs: List[Str]) -> Int { for (x of xs) { let a = call(x) } return 0 }
+fn conditional(x: Str) -> Int { if (call(x) > 0) { return 1 } return 0 }
+fn conditional_expr(x: Str) -> Int { return if (call(x) > 0) { 1 } else { 0 } }
+fn matched(x: Str) -> Int { return match x { _ => call(x) } }
+fn recursive(x: Str) -> Int { let a = call(x) return recursive(x) }
+fn plain(x: Str) -> Int { return 0 }
+pub fn public_wrapper(x: Str) -> Int { return call(x) }
+
+service Ops {
+  emission fn load(s: Str) -> Int
+}
+
+service Model {
+  emission validated async fn later(h: Str) -> Str
+  emission validated fn revert(h: Str) -> Str
+}
+
+component A requires model: Model provides ops: Ops {
+  await emit model.later("boot") compensate model.revert("undo")
+  emit call("a") compensate undo_call()
+  provide ops {
+    fn load(s) {
+      emit put("a")
+      let r = emit put("b")
+      return r
+    }
+  }
+}
+
+component C {
+  emit transformed("a")
+}
