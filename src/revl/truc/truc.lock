@@ -20,7 +20,7 @@
     },
     {
       "path": "components/planner.rvl",
-      "sha256": "57dcaadee7fb0d1595d1f3bf373c6870f4aa73924fcdf82ff45552d6cae3e909"
+      "sha256": "1ab0453cb101d816efc6b0af4bb1b98669292540c88edfc3772ac918f6228f12"
     },
     {
       "path": "components/assembler.rvl",

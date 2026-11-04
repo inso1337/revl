@@ -38,7 +38,7 @@ The third exception is the pin on those bytes (issue #2555). `truc add` reads
 an entry once and the gate admits its `component.rvl`; the commit plan carries
 the sha256 of each file read and checked. The registry is read again when the
 plan is carried out, so `commit_add` hashes the text it writes, records that,
-and refuses unless it equals the checked hash — a registry read that disagrees
+and refuses unless it equals the checked hash. A registry read that disagrees
 is not the entry that was checked, even when an entry and its index row were
 replaced together. `write_assembly` refuses a vendored `manifest.json` or
 `dossier.json` that no longer matches its pin, and `assemble --check` reads the
@@ -992,9 +992,9 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     verbatim projection of the index row (§4.2), plus an `admitted`
     provenance stamp. Its hashes are not copied: they are computed from the
     text this call writes (`_vendored_pins`), and each must equal the hash the
-    plan carries for it — the hash `truc add` checked on its single read (its
-    `component.rvl` is also what the gate admitted) — before the first write,
-    or the add is refused with nothing written. The plan is what makes the
+    plan carries for it (the hash `truc add` checked on its single read; its
+    `component.rvl` is also what the gate admitted) before the first write, or
+    the add is refused with nothing written. The plan is what makes the
     bytes written the bytes that were checked, even when the registry replaces
     an entry and its index row together. A re-add drops a vendored
     `dossier.json` when the entry no longer ships one, so the directory keeps
