@@ -30,6 +30,11 @@ sys.path.insert(0, str(ROOT / "bench"))
 
 import mcp_response_size as responses  # noqa: E402
 
+# Imported so tools/affected_tests.py selects this pin for every module on the
+# MCP response path: the ceilings below pin the text that path returns, so a
+# change to server.py (or remedy.py/brief.py behind it) must run this file.
+from revl.mcp import server  # noqa: F401,E402
+
 # One ceiling per scripted call, in the proxy tokens of `bench/tokens.py`
 # (`count_tokens` over the text payload the agent receives).
 SCRIPTED_STEPS = ["ship-pass", "ship-refused", "plan"]
