@@ -2,7 +2,7 @@
 
 The premise is that `revl` already records "how can this be undone" facts in
 several unrelated places, and an audit reader had to consult a different
-document per crossing — with the "nothing is known" case existing only as a
+document per crossing, with the "nothing is known" case existing only as a
 crash-recovery OUTCOME after the fact. This file pins the single field that
 replaces that scatter: `inverse`, a closed-vocabulary value carried on every
 extern crossing in `revl audit --json`, derived from facts already in the IR,
@@ -12,7 +12,7 @@ Three things are load-bearing here:
 
   * the vocabulary is closed (`declared`/`generated`/`compensation`/`forward`/
     `irreversible`/`unknown`), and `unknown` is a VALUE, never a missing field;
-  * the class is derived, never inferred from a name or a shape — an `open`/
+  * the class is derived, never inferred from a name or a shape: an `open`/
     `close` pair with no declared inverse stays `unknown`;
   * a class that WEAKENS between two generations is authority drift the
     `--diff` gate reports and fails unless it is acknowledged.
@@ -91,6 +91,35 @@ extern pure fn rollback() -> Unit = @py { return None }
 extern emission fn deposit(p: Str) -> Str compensate rollback() = @py { return p }
 component C {
   emit deposit("t")
+}
+"""
+
+# A read that turns into an effect under the same crossing name. `unknown` is
+# the weakest inverse class, so the rank alone would call this a strengthening;
+# an effect appearing where there was none is the dangerous direction.
+_READ = """\
+extern pure fn deposit(p: Str) -> Str = @py { return p }
+service J { fn run() -> Str }
+component C provides j: J {
+  provide j { fn run() = deposit("t") }
+}
+"""
+
+_READ_TO_EMISSION = """\
+extern emission fn deposit(p: Str) -> Str = @py { return p }
+service J { emission fn run() -> Str }
+component C provides j: J {
+  provide j { fn run() { emit deposit("t"); return "x" } }
+}
+"""
+
+_READ_TO_WITNESSED = """\
+type W = { path: Str }
+type E = { msg: Str }
+extern pure fn restore(w: W) -> Unit = @py { return None }
+extern witnessed fn deposit(p: Str) -> Result[W, E] undo restore(result) = @py { return {"path": p} }
+component C {
+  effect deposit("t")
 }
 """
 
@@ -308,6 +337,42 @@ def test_compensation_to_declared_is_a_strengthening_and_passes():
     result = evaluate(before, after)
     assert result["inverse_weakened"] == []
     assert result["inverse_strengthened"] == ["inverse:deposit"]
+    assert result["widened"] is False
+
+
+def test_a_read_that_becomes_an_emission_fails_the_gate():
+    # `unknown` is the weakest inverse class, so the rank alone would call this
+    # a strengthening. An effect appearing where there was none is the
+    # dangerous direction, and the unchanged `host:C:deposit` token means this
+    # diff is the only place it shows.
+    before = _audit(_READ)
+    after = _audit(_READ_TO_EMISSION)
+    assert _extern(before, "deposit")["inverse"] == "unknown"
+    assert _extern(after, "deposit")["inverse"] == "irreversible"
+    result = evaluate(before, after)
+    assert result["inverse_weakened"] == ["inverse:deposit"]
+    assert result["inverse_strengthened"] == []
+    assert result["widened"] is True
+    assert "inverse:deposit" in result["unacknowledged"]
+    assert "inverse provenance WEAKENED" in render(result, "before.json")
+
+
+def test_a_read_that_becomes_a_witnessed_mutation_fails_the_gate():
+    # Same shape, but the new class outranks `unknown` in the inverse
+    # vocabulary (`declared`), so only the effect-class rule catches it.
+    before = _audit(_READ)
+    after = _audit(_READ_TO_WITNESSED)
+    assert _extern(before, "deposit")["inverse"] == "unknown"
+    assert _extern(after, "deposit")["inverse"] == "declared"
+    result = evaluate(before, after)
+    assert result["inverse_weakened"] == ["inverse:deposit"]
+    assert result["inverse_strengthened"] == []
+    assert result["widened"] is True
+
+
+def test_an_acknowledged_read_to_emission_passes():
+    result = evaluate(_audit(_READ), _audit(_READ_TO_EMISSION),
+                      accepted={"inverse:deposit"})
     assert result["widened"] is False
 
 
