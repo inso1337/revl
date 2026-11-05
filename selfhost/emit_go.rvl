@@ -3997,17 +3997,7 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
-// issue #3053: the names the emitted lifecycle driver binds at the user's
-// scope, plus the call-step block locals the driver writes the user's binding
-// through. The function-scope half is its `revlT` receiver, the `root`
-// context, the `_fibers` registry, the `_revlLoadOrder` teardown order and the
-// `_revlAt` breadcrumb; the call-step half is `_svc`, `_err`, `_r`, `_ok`,
-// which a user binding of the same spelling captured because the step's short
-// declaration shadows it before `<bind> = (_svc).Label()`. `_f`, `i`, `_i` and
-// `_j` are not listed: their shadows are never read as a user value. go has no
-// identifier sigil a revl name cannot spell, so like rust's `root` the USER
-// name shifts one ladder rung and the driver keeps the bare token. Mirrors
-// `_EMITTER_RESERVED` in backends/go/emit.py.
+// issue #3053: the lifecycle driver's own names; go renames the USER binding. Mirrors backends/go/emit.py.
 fn is_emitter_reserved(name: Str) -> Bool {
   return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
                         "_svc", "_err", "_r", "_ok"], name)
