@@ -235,6 +235,12 @@ unset $(git rev-parse --local-env-vars)
 unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE \
     GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# Issue #2216: the hook is a fast lane. A test that is slow by NATURE carries
+# `@pytest.mark.slow` and tests/conftest.py deselects it here; plain
+# `make pre-merge` and the merge-queue matrix run the slow lane, so it still
+# runs before land. This is not a skip: the lane is marked and named.
+export REVL_SKIP_SLOW=1
+
 if [ -n "$NOTHING_STAGED" ]; then
     echo "  frontend                           nothing staged (the commit changes no file)"
 else
