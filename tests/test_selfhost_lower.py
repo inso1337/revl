@@ -4238,6 +4238,75 @@ def test_rejected_programs_agree(admit, case):
     _agree(admit, src)
 
 
+# issue #2968: a block arm may hold two statements written side by side on one
+# line, `Some(v) => { let z = 1  z }`. The reference's recursive descent reads
+# them as two statements; the gate's arm reader read the line as one, so the
+# arm's TAIL became `(let z = 1 z)`, the expression reader could not parse it,
+# and the whole statement holding the arm was skipped, dropping every sibling
+# arm's calls. An unmarked emission in the sibling was then admitted, and the
+# `let r = match ...` shape left `r` unbound for a G1 on the next line.
+_ONE_LINE_BLOCK_ARM_HEADER = """\
+extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn m() -> Int }
+component C provides ops: Ops { provide ops { fn m() {
+let o = Some(1)
+"""
+
+_ONE_LINE_BLOCK_ARM_FOOTER = """
+} } }
+"""
+
+_ONE_LINE_BLOCK_ARM_CASES = [
+    # the issue's repro: the unmarked call after the block arm
+    ("the unmarked call after the block arm",
+     'return match o { Some(v) => { let z = 1  z }, None => send("x") }',
+     "G4"),
+    # the unmarked call before the block arm
+    ("the unmarked call before the block arm",
+     'return match o { Some(v) => send("x"), None => { let z = 1  z } }',
+     "G4"),
+    # the arm inside a `let` initializer: the statement after it must still be
+    # read, so `r` is bound and the emission is the refusal (main drew G1 on `r`)
+    ("the block arm inside a let initializer",
+     'let r = match o { Some(v) => { let z = 1  z }, None => send("x") }\n'
+     "return r",
+     "G4"),
+    # controls that already refused G4 on main
+    ("a block arm with no let",
+     'return match o { Some(v) => { 1 }, None => send("x") }',
+     "G4"),
+    ("no block arm",
+     'return match o { Some(v) => v, None => send("x") }',
+     "G4"),
+    ("a two-line block arm",
+     'return match o { Some(v) => {\nlet z = 1\nz\n}, None => send("x") }',
+     "G4"),
+]
+
+
+@pytest.mark.parametrize(
+    "name, body, tag", _ONE_LINE_BLOCK_ARM_CASES,
+    ids=[name for name, _, _ in _ONE_LINE_BLOCK_ARM_CASES])
+def test_a_one_line_block_arm_splits_like_the_reference(admit, name, body, tag):
+    source = _ONE_LINE_BLOCK_ARM_HEADER + body + _ONE_LINE_BLOCK_ARM_FOOTER
+    ref_tag, ref_msg = _ref(source)
+    assert ref_tag == tag, \
+        f"corpus bug: reference tag for {name} is {ref_tag!r}, expected {tag!r}"
+    got = admit(source)
+    assert got == f"{tag}|{ref_msg}", f"{name}: selfhost {got!r}"
+
+
+def test_a_one_line_block_arm_without_an_emission_still_admits(admit):
+    source = """service Ops { fn m() -> Int }
+component C provides ops: Ops { provide ops { fn m() {
+let o = Some(1)
+return match o { Some(v) => { let z = 1  z }, None => 0 }
+} } }
+"""
+    assert _ref(source) == ("", "")
+    assert admit(source) == ""
+
+
 def test_generic_variant_exhaustiveness_matches_reference(admit):
     """Issue #2926: both checkers resolve an applied variant to its declared head."""
     _agree(admit, _fixture("t1_generic_variant_match_nonexhaustive"))
