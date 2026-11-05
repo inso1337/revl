@@ -66,6 +66,11 @@ WAL_KIND_EMISSION = "emission"
 #: half-built audit graph as if the missing inputs had been evaluated. The
 #: admission verdict at the bottom runs the WHOLE policy over the compiled
 #: candidate, so no rule family is left unheard on the question of admission.
+#: The issue-#2686 pair rule (`pair`) is excluded for a sibling reason: it reads
+#: ONE component's whole reach, and the synthetic graph does carry that, but a
+#: single crossing's verdict cannot express "these two together are forbidden",
+#: so the pair is decided by the admission verdict rather than attributed to
+#: either crossing.
 REACH_VIOLATION_KINDS = ("capability", "deny")
 
 #: One sentence per bound, keyed, so a reader sees what this surface cannot

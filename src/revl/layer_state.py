@@ -46,6 +46,22 @@ absence of a statement and has none. This is the shape
 to the unnameable `*` rather than to `set()`: the missing answer resolves to
 the value nothing covers, not to the empty one.
 
+A CHANGE OF MODEL IS A LAYER-STATE EVENT
+----------------------------------------
+A change of the model a layer depends on is a layer-state event: learned state
+recorded under the old model is marked stale until re-validated under the new
+one. The registry records the dependence as :attr:`Layer.model_bound`, derived
+from `accumulates` for the same reason `ceiling` is: a layer whose state is a
+statistic over the model's choices has that statistic tied to the model that
+made them, while the three declaration layers are restored by re-declaring
+them whatever model wrote the declaration.
+
+Staleness is NOT a fourth state class. The class says what a rollback can do
+with a part, and a stale layer's class is unchanged. What staleness suspends is
+whether the state may be read as a measurement under the current model at all,
+and the only way back is a re-validation the caller records.
+:func:`stale_after_model_change` returns the layers the change stales.
+
 CONSUMED, NOT DUPLICATED
 ------------------------
 Two lanes answered this shape for one layer each, and this module is the
@@ -108,7 +124,8 @@ __all__ = [
     "LAYERS", "STATE_CLASSES", "UNDECLARED", "UNTOUCHED", "LINKS",
     "Layer", "Part", "LayerDeclaration", "RollbackPlan", "Refusal",
     "Rollback", "PlanRefused",
-    "weakest", "at_or_below", "fold", "classify", "check", "report",
+    "weakest", "at_or_below", "fold", "stale_after_model_change",
+    "classify", "check", "report",
     "UI_CLASSES", "SHADOW_PARTS",
 ]
 
@@ -188,6 +205,20 @@ class Layer:
     @property
     def ceiling(self) -> str:
         return "compensatable" if self.accumulates else "revertible"
+
+    @property
+    def model_bound(self) -> bool:
+        """Whether this layer's learned state is a statistic over the model
+        behind it, so a different model is a different world.
+
+        Derived from `accumulates` for the same reason `ceiling` is: a layer
+        whose state is learned is a layer whose state was recorded under the
+        model that produced the behaviour, and re-declaring the prior world is
+        not available for it. The three declaration layers are restored by
+        re-declaring them whatever model wrote the declaration. A later layer
+        where accumulation and model dependence disagree needs its own column,
+        not a redefinition of this property."""
+        return self.accumulates
 
 
 #: The seven layers the 512-541 wave would evolve, with the four the item
@@ -281,6 +312,43 @@ def fold(vocabulary: str, token: str) -> tuple:
             f"{token!r} is not one of item 522's classes "
             f"{sorted(UI_CLASSES) + ['confirm-required']}."))
     return UI_CLASSES[token]
+
+
+# ---------------------------------------------------------------------------
+# a change of model is a layer-state event
+# ---------------------------------------------------------------------------
+
+
+def stale_after_model_change(previous: object, current: object, *,
+                             revalidated: Sequence[str] = ()) -> tuple:
+    """The model-bound layers a change of model leaves stale.
+
+    A change of the model a layer depends on is a layer-state event: learned
+    state recorded under the old model is marked stale until re-validated
+    under the new one. Returns the :attr:`Layer.model_bound` layers in
+    registry order, minus the layers named in `revalidated`.
+
+    `previous` and `current` are whatever identity the caller pins a model by,
+    normally a role or a version string. Two equal non-empty strings are not a
+    change and stale nothing. An identity that is empty or not a string is
+    treated as a change rather than a match, because it cannot be shown to be
+    the same model and the safe direction is stale.
+
+    `revalidated` is a CLAIM the caller writes, in the sense `tested` is one
+    in a compensation: naming a layer says its learned state was re-validated
+    under `current`, not that a re-validation exists. Nothing in the tree
+    holds a layer store to persist the mark or to check the claim. An unknown
+    name stales nothing extra: a typo leaves the layer it meant stale, which is
+    the safe direction."""
+    same = (
+        isinstance(previous, str) and isinstance(current, str)
+        and bool(previous) and bool(current) and previous == current
+    )
+    if same:
+        return ()
+    done = set(revalidated)
+    return tuple(layer.name for layer in LAYERS
+                 if layer.model_bound and layer.name not in done)
 
 
 # ---------------------------------------------------------------------------

@@ -1788,6 +1788,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `generic_fn.rvl`
 - `../emit_rust_corpus/generic_variant.rvl`
 - `../emit_rust_corpus/comp_provide_generic_variant.rvl`
+- `comp_provide_empty_list.rvl`
 
 `java`:
 

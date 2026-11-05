@@ -52,7 +52,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -85,6 +85,12 @@ CORPUS = [
     "calls.rvl",     # free-function calls + the call-return type pin on a `let`
     "strings.rvl",   # string `+` as Go `+`, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow, Map-typed passthru
+    # issue #2898: an untyped `[]` typed from where its binding flows, from what
+    # is pushed or concatenated into it, else the slice main gave it when only
+    # sized; two bindings of one name in disjoint blocks take their own types,
+    # and a third binding of one name takes the third key. The shapes the
+    # reference refuses live in tests/fixtures/emit_go_refusals/.
+    "empty_list_inference.rvl",
     "records.rvl",   # user record `type`s -> structs, record literals, field access
     "variants.rvl",  # user variant `type`s -> sealed ifaces, ADT construction, match
     # item 383 / 391 (self-host port) — the `.reduce` transform desugars to the
@@ -225,6 +231,10 @@ CORPUS = [
     "comp_provide_arith.rvl",
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
     "comp_to_char.rvl",  # Int.to_char in a provide body (issue #2285)
+    # ... and method-body `let` bindings on the combined path (issue #2898):
+    # an untyped `[]` typed from the method's declared return and its pin, and
+    # a user variant held at its interface type by a later match
+    "comp_provide_empty_list.rvl",
 ]
 
 # The combined-path and live-path documents, which import stc-go and are built
@@ -319,6 +329,9 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     "inference.rvl", "accumulators.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     # issue #106: every preamble and import the ported surface pulls in
     "stdlib_surface.rvl", "loop_shapes.rvl", "extern_config.rvl", "in_file_tests.rvl",
+    # issue #2898: every shape of an untyped `[]` the inference types, with the
+    # document's own test block run by `go test`
+    "empty_list_inference.rvl",
 ])
 def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
     """Agreement alone cannot catch a type error shared by both emitters."""
@@ -478,6 +491,28 @@ def test_the_closed_families_now_agree(emitted, reference, tmp_path, source):
     path.write_text(source)
     ir = compile_files([str(path)])
     assert emitted["emit_go_src"](ir) == reference.emit(ir)
+
+
+def test_an_untyped_empty_list_the_reference_refuses_is_named(emitted, reference):
+    """issue #2898: the shapes `_empty_list_type` refuses are refused here too.
+
+    A rejected document has no bytes to agree with, so these live in
+    `tests/fixtures/emit_go_refusals/` rather than in CORPUS: the reference
+    raises by name, and the port has no refusal channel, so it answers with the
+    marker instead of printing a literal Go would later reject.
+    """
+    cases = {
+        "unpinned_empty_list.rvl": "needs an expected List type",
+        "conflicting_empty_list.rvl": "conflicting expected List types",
+        "sliced_empty_list.rvl": "needs an expected List type",
+        "method_untyped_empty_list.rvl": "needs an expected List type",
+    }
+    for name, message in cases.items():
+        ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_go_refusals"
+                                / name)])
+        with pytest.raises(reference.EmitError, match=message):
+            reference.emit(ir)
+        assert "<<UNSUPPORTED-EMPTY-LIST-TYPE>>" in emitted["emit_go_src"](ir)
 
 
 def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_path):
@@ -647,6 +682,41 @@ def test_a_live_body_past_the_slice_is_still_named(emitted, reference, tmp_path)
     assert_boundary_witness(want, got, "isRevlResult()", "<<UNSUPPORTED-COMPONENT:C>>")
     assert got.splitlines()[:3] == want.splitlines()[:3]
     assert "pure typed-core tier" not in got
+
+
+def test_a_method_let_bound_to_an_opt_or_result_call_is_named(
+        emitted, reference, tmp_path):
+    """A provide-method `let` bound to an `Opt`-returning call is outside the
+    component slice, and the port names the component instead of emitting
+    divergent Go.
+
+    The reference's `_emit_method_body` pins the interface only when the
+    document declares a type (`_V3_TYPED_COMPONENTS and _V3_TYPES`) and spells
+    the pin with `_go_v3_type` (`RevlOpt[int64]`); with no type declared it
+    emits a bare `r := revlSelf.source.Lookup(k)`. The port's component type
+    spelling for `Opt` is a pointer (`*int64`) and its interface pin does not
+    depend on the type table, so the two disagree on both shapes. Declining the
+    let keeps the slice at what the patch promises: a method body whose binding
+    carries one of the sum surfaces the component renderer does not spell.
+    """
+    path = tmp_path / "method_opt_let.rvl"
+    path.write_text(
+        "service Source { fn lookup(k: Str) -> Opt[Int] }\n"
+        "service Store { fn value(k: Str) -> Int }\n"
+        "component C requires source: Source provides store: Store {\n"
+        "  provide store {\n"
+        "    fn value(k) {\n"
+        "      let n = k.length()\n"
+        "      let r = source.lookup(k)\n"
+        "      return n\n"
+        "    }\n"
+        "  }\n"
+        "}\n")
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert "r := revlSelf.source.Lookup(k)" in want
+    assert_boundary_witness(want, got, "revlSelf.source.Lookup(k)",
+                            "<<UNSUPPORTED-COMPONENT:C>>")
 
 
 @pytest.mark.parametrize("source", [
@@ -1131,3 +1201,36 @@ def test_an_unpinned_generic_variant_is_named_by_the_port(emitted, reference):
                        match="has no type argument for T"):
         reference.emit(ir)
     assert "<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:Nn:T>>" in emitted["emit_go_src"](ir)
+
+
+#: issue #3053: go has no identifier sigil a revl name cannot spell, so the
+#: reference renames a user binding that would redeclare one of the lifecycle
+#: driver's own names (`root` -> `root_`, rust's posture), including the call
+#: step's block locals the driver writes the user's binding through. A
+#: provide-method parameter is the widest user-binding position both the
+#: reference and this port render; it proves the two `safe_local` ladders carry
+#: the same reserved set, byte for byte.
+_RESERVED_DRIVER_NAMES = ("revlT", "root", "_fibers", "_revlAt", "_revlLoadOrder",
+                          "_svc", "_err", "_r", "_ok")
+
+
+@pytest.mark.parametrize("name", _RESERVED_DRIVER_NAMES)
+def test_the_component_tier_reserves_the_lifecycle_driver_names(emitted, reference,
+                                                                name):
+    source = f"""service Box {{ fn echo(msg: Str) -> Str }}
+
+component BoxC provides box: Box {{
+  provide box {{
+    fn echo({name}) = {name}
+  }}
+}}
+
+fn identity(x: Int) -> Int {{ return x }}
+"""
+    ir = compile_source(source)
+    want = reference.emit(ir)
+    got = emitted["emit_go_src"](ir)
+    assert got == want, f"the port's safe_local diverges on {name!r} (issue #3053)"
+    assert f"{name}_ " in got, (
+        f"a provide-method parameter named {name!r} was not moved clear of the "
+        f"lifecycle driver's own name (issue #3053)")

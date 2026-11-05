@@ -726,6 +726,32 @@ def build_parser() -> argparse.ArgumentParser:
     version_cmd.add_argument("--json", action="store_true",
                              help="machine-readable derivation")
 
+    # issue #2685, first slice: plan one component version change against its
+    # real consumers. Read-only: it composes the diff, version and
+    # compatibility facts and changes nothing.
+    migrate_cmd = sub.add_parser(
+        "migrate",
+        help="plan one component version change against its real consumers: "
+             "which can move now, which need an adapter or a state hand-off, "
+             "what authority widens, and whether the old version is removable "
+             "(read-only; docs/commands-reference.md)")
+    migrate_cmd.add_argument(
+        "old", metavar="OLD",
+        help="the old version of the component: a compiled composition "
+             "document (`revl compile -o`) or a `.rvl` source")
+    migrate_cmd.add_argument(
+        "new", metavar="NEW",
+        help="the new version of the component (same accepted forms as OLD)")
+    migrate_cmd.add_argument(
+        "--against", metavar="COMPOSITION", required=True,
+        help="the compiled composition whose real consumers decide whether a "
+             "migration is safe (`revl compile <sources> -o comp.json`); it "
+             "must carry each consumer's required service, not just key lists, "
+             "and must still run the old version")
+    migrate_cmd.add_argument(
+        "--json", action="store_true",
+        help="machine-readable plan an agent or a CI gate can consume")
+
     contract = sub.add_parser(
         "contract",
         help="federated contracts between sovereign compositions: export a "

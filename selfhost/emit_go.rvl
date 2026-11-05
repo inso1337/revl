@@ -36,10 +36,11 @@
 //   * externs: the verbatim `@go` body, the declared `Secret[T]` wrapper (item
 //     421 F6), the item 378 `config` schema and its `_revl_config` bind, and
 //     the `//revl:import` hoist.
-//   * statements: let (with the int64/float64 and interface/two-value pins),
-//     assign (with the item 434 (e) string builders and the item 445
-//     destructive self-rebind), return, if/else, while (with the item 434 (c)
-//     code-point scan as `range`), for, break/continue, expr, assert.
+//   * statements: let (with the int64/float64 and interface/two-value pins,
+//     and the issue #2898 untyped-empty-list inference below), assign (with
+//     the item 434 (e) string builders and the item 445 destructive
+//     self-rebind), return, if/else, while (with the item 434 (c) code-point
+//     scan as `range`), for, break/continue, expr, assert.
 //   * expressions: the scalar algebra, structural `==` through `revlEq`, the
 //     `??` coalesce, built-in Opt/Result construction and `match`, user ADT
 //     construction and type-switch `match`, records and field access, lists,
@@ -322,7 +323,11 @@ type Ctx = {
   rt: Str, builders: Map[Str, Str], builder_seq: Int,
   reserved: Map[Str, Str], strings_alias: Str,
   sc: Map[Str, Str], scan_seq: Int, body: List[Any], tn: Str,
-  fh: Map[Str, Str]
+  fh: Map[Str, Str],
+  // issue #2898: the untyped-empty-list analysis of this body, and the
+  // binding keys in emission order (`keys`/`key_i` thread the emitter's
+  // cursor through them, since revl has no node identity).
+  et: Map[Str, Str], keys: List[Str], key_i: Int
 }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds one `_V3GoCtx` for the function list,
@@ -349,7 +354,8 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
-    fh: ctx.fh
+    fh: ctx.fh,
+    et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
 
@@ -364,7 +370,8 @@ fn set_fh(ctx: Ctx, fh: Map[Str, Str]) -> Ctx {
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
-    fh: fh
+    fh: fh,
+    et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
 fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
@@ -376,8 +383,29 @@ fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: sc, scan_seq: seq, body: ctx.body, tn: ctx.tn,
-    fh: ctx.fh
+    fh: ctx.fh,
+    et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
+}
+
+// `ctx.var_types` replaced wholesale: the untyped-empty-list analysis types a
+// body's locals forward through a scratch copy, and renders every inference
+// against that view.
+fn with_vt_map(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
+  return {
+    vt: vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
+    tnames: ctx.tnames, gv: ctx.gv, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias,
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh, et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
+  }
+}
+
+// Attach an untyped-empty-list analysis to the context that renders its body.
+fn set_scan(ctx: Ctx, scan: HintScan) -> Ctx {
+  return { ctx | et = scan.et, keys = scan.order, key_i = 0 }
 }
 
 fn collect_reserved(node: Any, reserved: Map[Str, Str]) -> Map[Str, Str] {
@@ -1865,41 +1893,560 @@ fn typed_generic_arg(arg: Any, rendered: Str, declared: Str, tparams: List[Str])
   return rendered
 }
 
-// `_v3_flow_hints`: `{binding: declared type}` for each local a body hands on
-// whole. `return x` flows into the declared return, `f(x)` into `f`'s declared
-// parameter; the first occurrence in document order wins.
-fn flow_hints(body: List[Any], ret_type: Str, ctx: Ctx) -> Map[Str, Str] {
-  var hints: Map[Str, Str] = Map.empty()
-  for (n of walk_nodes(body)) {
-    if (node_step(n) == "return" && ret_type != "") {
-      let e = value_field(n, "expr")
-      if (node_kind(e) == "var") {
-        let x = value_str(value_field(e, "name"))
-        if (!hints.has(x)) { hints = hints.set(x, ret_type) }
+// --------------------------------------------- untyped empty lists (#2898)
+// The reference types a `let x = []` from where the binding flows (a declared
+// return, a parameter, a record field, another binding it is assigned to, or
+// what is pushed or concatenated into it), refuses the shapes it cannot type,
+// and keys that evidence by BINDING (issue #2915): two `let out` in disjoint
+// sibling blocks are two bindings, each with its own element type. revl has no
+// node identity, so this port does not rename a copy of the body the way
+// `_v3_binding_keys` does. It re-derives each binding's key (`out`, `out#2`,
+// ...) by the same fresh-name rule, resolves every reference through the scope
+// in force where it stands, and records the let keys in body order so the
+// statement emitter can take its own let's key off that list.
+
+fn fresh_binding(name: Str, seen: Map[Str, Str]) -> Str {
+  if (!seen.has(name)) { return name }
+  var n = 2
+  while (seen.has(`${name}#${n}`)) { n = n + 1 }
+  return `${name}#${n}`
+}
+
+fn is_empty_list_lit(n: Any) -> Bool {
+  return node_kind(n) == "list" && value_list(value_field(n, "items")).length() == 0
+}
+
+// `_list_pin`: the `List[T]` an annotated `var x: List[T] = []` threads onto its
+// itemless literal.
+fn empty_list_pin(n: Any) -> Str {
+  let pin = value_str(value_field(n, "expected"))
+  return pin.startsWith("List[") && pin.endsWith("]") ? pin : ""
+}
+
+// An untyped itemless list literal: the shape this whole analysis types.
+fn untyped_empty_list(n: Any) -> Bool {
+  return is_empty_list_lit(n) && empty_list_pin(n) == ""
+}
+
+// `_empty_list_type.is_list`: a fully concrete List surface (`List[any]` is the
+// erased fallback, not evidence).
+fn is_list_surface(t: Str) -> Bool {
+  return t.startsWith("List[") && t.endsWith("]") && !has_any_word(t)
+}
+
+// `_local_ref`: the local a bare reference names.
+fn local_ref_of(node: Any) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  let k = node_kind(node)
+  if (k == "var" || k == "name") { return ref_name(node) }
+  return ""
+}
+
+// `_self_concat`: the argument of an `out = out.concat(arg)` assignment, else
+// `[]` (so a caller can tell the shape without an erased maybe value).
+fn self_concat_of(step: Any) -> List[Any] {
+  let value = value_field(step, "value")
+  var args: List[Any] = []
+  if (node_step(step) == "assign" && node_kind(value) == "builtin"
+      && value_str(value_field(value, "method")) == "concat"
+      && local_ref_of(value_field(value, "target")) == value_str(value_field(step, "name"))) {
+    let items = value_list(value_field(value, "args"))
+    if (items.length() == 1) { args = items }
+  }
+  return args
+}
+
+fn map_list_get(m: Map[Str, List[Str]], k: Str) -> List[Str] {
+  return match m.lookup(k) { Some(v) => v, None => [] }
+}
+
+// `_FlowHints` plus the binding-key bookkeeping and the two list-only analyses
+// (`_only_sized_or_appended`, `_empty_list_class`). Those read the body as
+// evidence about a binding, so the scan records the read POSITIONS and write
+// KINDS instead of the reference's node identities.
+//   primary        [key, declared] flow targets, in document order
+//   assign_offers  [key, type] assigned-list evidence (`out = xs`)
+//   pushed_ev      [key, type] evidence of a push or a self-concat
+//   aliases        [target, source] a bare `out = res`
+//   concat_aliases [target, source] the argument of `out = out.concat(a)`
+//   push_aliases   [target, source, "element"] any `out.push(x)` node
+//   writes         [target, kind, source] an assignment to a local
+//   reads          [key, position, other] a reference and how it is read
+type HintAcc = {
+  seen: Map[Str, Str], order: List[Str], empties: List[Str],
+  fh: Map[Str, Str], targets: Map[Str, List[Str]], pushed: Map[Str, Str],
+  primary: List[Any], assign_offers: List[Any], pushed_ev: List[Any],
+  aliases: List[Any], concat_aliases: List[Any], push_aliases: List[Any],
+  writes: List[Any], reads: List[Any], scratch: Map[Str, Str]
+}
+type HintWalk = { scope: Map[Str, Str], acc: HintAcc }
+// What the body's analysis hands the statement emitter: the first-offer hints,
+// the binding keys in emission order, and each untyped empty list's declared
+// type ("" marks a refusal).
+type HintScan = { hints: Map[Str, Str], order: List[Str], et: Map[Str, Str] }
+
+fn empty_acc(scope: Map[Str, Str]) -> HintAcc {
+  return {
+    seen: scope, order: [], empties: [],
+    fh: Map.empty(), targets: Map.empty(), pushed: Map.empty(),
+    primary: [], assign_offers: [], pushed_ev: [],
+    aliases: [], concat_aliases: [], push_aliases: [],
+    writes: [], reads: [], scratch: Map.empty()
+  }
+}
+
+// `_FlowHints.offer`: `declared` is always a target of `name`, and the first
+// offer fixes `name`'s own type.
+fn hint_offer(acc: HintAcc, name: Str, declared: Str) -> HintAcc {
+  var a = acc
+  let seen = map_list_get(a.targets, name)
+  if (!list_contains(seen, declared)) {
+    a = { a | targets = a.targets.set(name, seen.push(declared)) }
+  }
+  if (!a.fh.has(name)) { a = { a | fh = a.fh.set(name, declared) } }
+  return a
+}
+
+fn add_read(acc: HintAcc, key: Str, kind: Str, other: Str) -> HintAcc {
+  return { acc | reads = acc.reads.push([key, kind, other]) }
+}
+
+// The `let`-body flow analysis must type the locals FORWARD in document order
+// (`_push_evidence`'s scratch): a binding in scope is spelled by its source
+// name, but its type lives under its binding key.
+fn scoped_infer(node: Any, scope: Map[Str, Str], scratch: Map[Str, Str], ctx: Ctx) -> Str {
+  var vt: Map[Str, Str] = ctx.vt
+  for (nm of scope.keys()) {
+    let k = map_get(scope, nm)
+    if (scratch.has(k)) { vt = vt.set(nm, map_get(scratch, k)) }
+  }
+  return infer_type(node, with_vt_map(ctx, vt))
+}
+
+// Walk an expression: record the read position every binding reference
+// occupies, the flow target a call or record literal declares, and the `push`
+// aliases `_flow_through_assigns` carries.
+fn scan_expr_pos(node: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx, pos: Str, other: Str) -> HintAcc {
+  if (value_kind(node) == "list") {
+    var la = acc
+    for (child of value_list(node)) { la = scan_expr_pos(child, scope, la, ctx, "other", "") }
+    return la
+  }
+  if (value_kind(node) != "record") { return acc }
+  let ref = local_ref_of(node)
+  if (ref != "") {
+    if (!scope.has(ref)) { return acc }
+    return add_read(acc, map_get(scope, ref), pos, other)
+  }
+  var a = acc
+  let k = node_kind(node)
+  if (k == "builtin" && value_str(value_field(node, "method")) == "length") {
+    a = scan_expr_pos(value_field(node, "target"), scope, a, ctx, "length", "")
+    return scan_expr(value_field(node, "args"), scope, a, ctx)
+  }
+  if (k == "builtin" && value_str(value_field(node, "method")) == "push") {
+    let target = local_ref_of(value_field(node, "target"))
+    let args = value_list(value_field(node, "args"))
+    if (target != "" && scope.has(target) && args.length() > 0) {
+      let src = local_ref_of(args[0])
+      if (src != "" && scope.has(src)) {
+        a = { a | push_aliases = a.push_aliases.push([map_get(scope, target), map_get(scope, src), "element"]) }
       }
     }
-    if (node_kind(n) == "call") {
-      let callee = value_field(n, "callee")
-      if (node_kind(callee) == "var") {
-        let cn = value_str(value_field(callee, "name"))
-        var params = declared_params(ctx.signatures, cn)
-        let args = value_list(value_field(n, "args"))
-        // issue #2495: a generic callee's `T` is no flow target; the
-        // instantiation the other arguments bind is
-        let g = go_generic_call(cn, args, ctx, value_str(value_field(n, "expected")))
-        if (g.generic) { params = g.params }
-        var i = 0
-        while (i < args.length() && i < params.length()) {
-          if (node_kind(args[i]) == "var" && params[i] != "") {
-            let x = value_str(value_field(args[i], "name"))
-            if (!hints.has(x)) { hints = hints.set(x, params[i]) }
+  }
+  if (k == "call") { a = scan_call_offers(node, scope, a, ctx) }
+  if (k == "record") { a = scan_record_offers(node, scope, a, ctx) }
+  // a match arm's binder and an arrow's parameters bind over their own body
+  // (`_v3_binding_keys` gives each a fresh key), so a bind that shadows an
+  // empty-list binding is not a use of the outer one
+  if (k == "match") {
+    a = scan_expr_pos(value_field(node, "scrutinee"), scope, a, ctx, "other", "")
+    for (arm of value_list(value_field(node, "arms"))) {
+      var inner = scope
+      let bind = value_str(value_field(arm, "bind"))
+      if (has_bind(bind)) {
+        let key = fresh_binding(bind, a.seen)
+        a = { a | seen = a.seen.set(key, "1") }
+        inner = scope.set(bind, key)
+      }
+      a = scan_expr_pos(value_field(arm, "body"), inner, a, ctx, "other", "")
+    }
+    return a
+  }
+  if (k == "arrow") {
+    var fscope = scope
+    for (pn of value_list(value_field(node, "params"))) {
+      let pname = value_str(pn)
+      if (has_bind(pname)) {
+        let key = fresh_binding(pname, a.seen)
+        a = { a | seen = a.seen.set(key, "1") }
+        fscope = fscope.set(pname, key)
+      }
+    }
+    return scan_expr_pos(value_field(node, "body"), fscope, a, ctx, "other", "")
+  }
+  for (child of value_children(node)) {
+    a = scan_expr_pos(child, scope, a, ctx, "other", "")
+  }
+  return a
+}
+
+fn scan_expr(node: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintAcc {
+  return scan_expr_pos(node, scope, acc, ctx, "other", "")
+}
+
+fn scan_call_offers(n: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintAcc {
+  let callee = value_field(n, "callee")
+  if (node_kind(callee) != "var") { return acc }
+  let cn = value_str(value_field(callee, "name"))
+  var params = declared_params(ctx.signatures, cn)
+  let args = value_list(value_field(n, "args"))
+  // issue #2495: a generic callee's `T` is no flow target; the instantiation
+  // the other arguments bind is
+  let g = go_generic_call(cn, args, ctx, value_str(value_field(n, "expected")))
+  if (g.generic) { params = g.params }
+  var a = acc
+  var i = 0
+  while (i < args.length() && i < params.length()) {
+    if (node_kind(args[i]) == "var" && params[i] != "") {
+      let nm = value_str(value_field(args[i], "name"))
+      if (scope.has(nm)) { a = { a | primary = a.primary.push([map_get(scope, nm), params[i]]) } }
+    }
+    i = i + 1
+  }
+  return a
+}
+
+fn scan_record_offers(n: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintAcc {
+  let fields = value_list(value_field(n, "fields"))
+  var names: List[Str] = []
+  for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
+  let raw = map_get(ctx.rbf, sorted_key(names))
+  var a = acc
+  if (resolved(raw)) {
+    for (f of fields) {
+      let field = value_str(value_at(f, 0))
+      let src = local_ref_of(value_at(f, 1))
+      let declared = map_get(ctx.rf, `${raw}.${field}`)
+      if (src != "" && declared != "" && scope.has(src)) {
+        a = { a | primary = a.primary.push([map_get(scope, src), declared]) }
+      }
+    }
+  }
+  return a
+}
+
+fn scan_stmts(stmts: List[Any], scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk {
+  var sc = scope
+  var a = acc
+  for (st of stmts) {
+    let r = scan_stmt(st, sc, a, ctx)
+    sc = r.scope
+    a = r.acc
+  }
+  return { scope: sc, acc: a }
+}
+
+fn scan_stmt(st: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk {
+  let step = node_step(st)
+  var a = acc
+  if (step == "let") {
+    let raw = value_str(value_field(st, "name"))
+    let valnode = value_field(st, "value")
+    var key = raw
+    if (has_bind(raw)) {
+      key = fresh_binding(raw, a.seen)
+      a = { a | seen = a.seen.set(key, "1"), order = a.order.push(key) }
+      if (untyped_empty_list(valnode)) {
+        a = { a | empties = a.empties.push(key) }
+      }
+    }
+    // the value is read against the scope BEFORE this binding joins it
+    a = scan_expr(valnode, scope, a, ctx)
+    let pin = empty_list_pin(valnode)
+    if (pin != "") {
+      if (!a.scratch.has(key)) { a = { a | scratch = a.scratch.set(key, pin) } }
+    } else if (!is_empty_list_lit(valnode)) {
+      let t = scoped_infer(valnode, scope, a.scratch, ctx)
+      if (t != "" && !has_any_word(t) && !a.scratch.has(key)) {
+        a = { a | scratch = a.scratch.set(key, t) }
+      }
+    }
+    let bound = has_bind(raw) ? scope.set(raw, key) : scope
+    return { scope: bound, acc: a }
+  }
+  if (step == "assign") {
+    let raw = value_str(value_field(st, "name"))
+    let target = scope.has(raw) ? map_get(scope, raw) : raw
+    let val = value_field(st, "value")
+    let concat = self_concat_of(st)
+    if (is_empty_list_lit(val)) {
+      a = { a | writes = a.writes.push([target, "empty", ""]) }
+      return { scope: scope, acc: a }
+    }
+    if (node_kind(val) == "builtin" && value_str(value_field(val, "method")) == "push") {
+      let args = value_list(value_field(val, "args"))
+      let tref = local_ref_of(value_field(val, "target"))
+      let key = tref != "" && scope.has(tref) ? map_get(scope, tref) : ""
+      if (key != "" && args.length() > 0) {
+        let src = local_ref_of(args[0])
+        if (src != "" && scope.has(src)) {
+          a = { a | push_aliases = a.push_aliases.push([key, map_get(scope, src), "element"]) }
+        }
+      }
+      // `_only_sized_or_appended` allows the receiver only for a UNIQUE self
+      // rebind (`out = out.push(x)`); `_push_evidence` types it without that.
+      if (tref == raw && tref != "") {
+        if (value_bool(value_field(st, "unique"))) {
+          a = { a | writes = a.writes.push([target, "selfpush", ""]) }
+          a = add_read(a, target, "selfpush", "")
+        } else {
+          a = { a | writes = a.writes.push([target, "other", ""]) }
+          a = scan_expr(value_field(val, "target"), scope, a, ctx)
+        }
+        for (arg of args) { a = scan_expr(arg, scope, a, ctx) }
+        if (args.length() > 0) {
+          let elem = scoped_infer(args[0], scope, a.scratch, ctx)
+          if (elem != "" && !has_any_word(elem)) {
+            a = { a | pushed_ev = a.pushed_ev.push([target, `List[${elem}]`]) }
           }
-          i = i + 1
+        }
+      } else {
+        a = { a | writes = a.writes.push([target, "other", ""]) }
+        for (arg of args) { a = scan_expr(arg, scope, a, ctx) }
+        a = scan_expr(value_field(val, "target"), scope, a, ctx)
+        // `_push_evidence`'s general arm: a push on ANOTHER receiver still
+        // types the assigned binding from the value's List type
+        let t = scoped_infer(val, scope, a.scratch, ctx)
+        if (is_list_surface(t)) { a = { a | assign_offers = a.assign_offers.push([target, t]) } }
+      }
+      return { scope: scope, acc: a }
+    }
+    if (concat.length() == 1) {
+      let src = local_ref_of(concat[0])
+      let srckey = src != "" ? (scope.has(src) ? map_get(scope, src) : src) : ""
+      a = { a | writes = a.writes.push([target, "concat", srckey]) }
+      if (srckey != "") { a = { a | concat_aliases = a.concat_aliases.push([target, srckey]) } }
+      a = add_read(a, target, "concat", srckey)
+      if (srckey != "") { a = add_read(a, srckey, "concatarg", target) }
+      else { a = scan_expr(concat[0], scope, a, ctx) }
+      let t = scoped_infer(concat[0], scope, a.scratch, ctx)
+      if (is_list_surface(t)) { a = { a | pushed_ev = a.pushed_ev.push([target, t]) } }
+      return { scope: scope, acc: a }
+    }
+    let src = local_ref_of(val)
+    let srckey = src != "" ? (scope.has(src) ? map_get(scope, src) : src) : ""
+    if (srckey != "") {
+      a = { a | writes = a.writes.push([target, "ref", srckey]) }
+      a = { a | aliases = a.aliases.push([target, srckey]) }
+      a = add_read(a, srckey, "assignval", target)
+    } else {
+      a = { a | writes = a.writes.push([target, "other", ""]) }
+      a = scan_expr(val, scope, a, ctx)
+    }
+    let t = scoped_infer(val, scope, a.scratch, ctx)
+    if (is_list_surface(t)) { a = { a | assign_offers = a.assign_offers.push([target, t]) } }
+    return { scope: scope, acc: a }
+  }
+  if (step == "return") {
+    let e = value_field(st, "expr")
+    if (ctx.rt != "" && node_kind(e) == "var") {
+      let nm = value_str(value_field(e, "name"))
+      if (scope.has(nm)) { a = { a | primary = a.primary.push([map_get(scope, nm), ctx.rt]) } }
+    }
+    a = scan_expr(e, scope, a, ctx)
+    return { scope: scope, acc: a }
+  }
+  if (step == "if") {
+    a = scan_expr(value_field(st, "cond"), scope, a, ctx)
+    let thenR = scan_stmts(value_list(value_field(st, "then")), scope, a, ctx)
+    let elseR = scan_stmts(value_list(value_field(st, "else")), scope, thenR.acc, ctx)
+    return { scope: scope, acc: elseR.acc }
+  }
+  if (step == "while") {
+    a = scan_expr(value_field(st, "cond"), scope, a, ctx)
+    let bodyR = scan_stmts(value_list(value_field(st, "body")), scope, a, ctx)
+    return { scope: scope, acc: bodyR.acc }
+  }
+  if (step == "for") {
+    let raw = value_str(value_field(st, "bind"))
+    let it = scoped_infer(value_field(st, "iterable"), scope, a.scratch, ctx)
+    a = scan_expr(value_field(st, "iterable"), scope, a, ctx)
+    var inner = scope
+    if (has_bind(raw)) {
+      let key = fresh_binding(raw, a.seen)
+      a = { a | seen = a.seen.set(key, "1") }
+      if (it.startsWith("List[") && it.endsWith("]") && !a.scratch.has(key)) {
+        a = { a | scratch = a.scratch.set(key, it.slice(5, it.length() - 1)) }
+      }
+      inner = scope.set(raw, key)
+    }
+    let bodyR = scan_stmts(value_list(value_field(st, "body")), inner, a, ctx)
+    return { scope: scope, acc: bodyR.acc }
+  }
+  a = scan_expr(value_field(st, "expr"), scope, a, ctx)
+  a = scan_expr(value_field(st, "cond"), scope, a, ctx)
+  return { scope: scope, acc: a }
+}
+
+// `_flow_through_assigns`: extend the first-offer hints across aliases. Go
+// assigns only between identical types, so a source is declared as its target
+// is; every offer is recorded, but only a NEW binding makes progress.
+fn flow_through(acc: HintAcc) -> HintAcc {
+  var a = acc
+  var changed = true
+  let edges = a.aliases.concat(a.concat_aliases).concat(a.push_aliases)
+  while (changed) {
+    changed = false
+    for (e of edges) {
+      let target = value_str(value_at(e, 0))
+      let source = value_str(value_at(e, 1))
+      if (!a.fh.has(target)) { continue }
+      var want = map_get(a.fh, target)
+      if (value_list(e).length() > 2) {
+        if (!(want.startsWith("List[") && want.endsWith("]"))) { continue }
+        want = want.slice(5, want.length() - 1)
+      }
+      let fresh = !a.fh.has(source)
+      a = hint_offer(a, source, want)
+      if (fresh) { changed = true }
+    }
+  }
+  return a
+}
+
+// `_empty_list_class`: `name` and every untyped empty-list binding it is
+// assigned to or from, directly or through a chain.
+fn empty_class(name: Str, empties: List[Str], edges: List[Any]) -> List[Str] {
+  var group = [name]
+  var changed = true
+  while (changed) {
+    changed = false
+    for (e of edges) {
+      let a = value_str(value_at(e, 0))
+      let b = value_str(value_at(e, 1))
+      if (a != b && list_contains(empties, a) && list_contains(empties, b)) {
+        let ina = list_contains(group, a)
+        let inb = list_contains(group, b)
+        if (ina != inb) {
+          group = group.push(ina ? b : a)
+          changed = true
         }
       }
     }
   }
-  return hints
+  return group
+}
+
+fn group_order(name: Str, group: List[Str]) -> List[Str] {
+  var rest: List[Str] = []
+  for (m of group) { if (m != name) { rest = rest.push(m) } }
+  return [name].concat(list_sort(rest))
+}
+
+fn evidence_targets(order: List[Str], targets: Map[Str, List[Str]]) -> List[Str] {
+  var found: List[Str] = []
+  for (m of order) {
+    for (t of map_list_get(targets, m)) {
+      if (is_list_surface(t) && !list_contains(found, t)) { found = found.push(t) }
+    }
+  }
+  return found
+}
+
+fn evidence_pushed(order: List[Str], pushed: Map[Str, Str]) -> List[Str] {
+  var found: List[Str] = []
+  for (m of order) {
+    let t = map_get(pushed, m)
+    if (is_list_surface(t) && !list_contains(found, t)) { found = found.push(t) }
+  }
+  return found
+}
+
+// `_only_sized_or_appended`: every read of a group member is a `.length()`, an
+// allowed alias position, or (with `appends`) its own unique push receiver, and
+// every write is one of those or another `[]`.
+fn group_ok(group: List[Str], writes: List[Any], reads: List[Any], appends: Bool) -> Bool {
+  for (w of writes) {
+    let target = value_str(value_at(w, 0))
+    if (list_contains(group, target)) {
+      let kind = value_str(value_at(w, 1))
+      let source = value_str(value_at(w, 2))
+      var ok = kind == "empty"
+      if (kind == "ref") { ok = list_contains(group, source) }
+      if (kind == "concat") { ok = source != "" && list_contains(group, source) }
+      if (kind == "selfpush") { ok = appends }
+      if (!ok) { return false }
+    }
+  }
+  for (r of reads) {
+    let key = value_str(value_at(r, 0))
+    if (list_contains(group, key)) {
+      let kind = value_str(value_at(r, 1))
+      let other = value_str(value_at(r, 2))
+      var ok = kind == "length"
+      if (kind == "assignval") { ok = list_contains(group, other) }
+      if (kind == "concat") { ok = other != "" && list_contains(group, other) }
+      if (kind == "concatarg") { ok = other != "" && list_contains(group, other) }
+      if (kind == "selfpush") { ok = appends }
+      if (!ok) { return false }
+    }
+  }
+  return true
+}
+
+// `_empty_list_type`: one untyped empty list's declared type, "" for a refusal.
+// `_empty_list_type`: the whole decision, from the facts one body walk
+// collected. `appends` is true on the pure tier (a unique self rebind lowers to
+// `append`) and false in a provide method.
+fn decide_empty_parts(name: Str, empties: List[Str], aliases: List[Any],
+                      targets: Map[Str, List[Str]], pushed: Map[Str, Str],
+                      writes: List[Any], reads: List[Any],
+                      fallback: Str, appends: Bool) -> Str {
+  let group = empty_class(name, empties, aliases)
+  let order = group_order(name, group)
+  // the declared-target pass is consulted first, the weaker push evidence only
+  // when it found nothing; either pass with two types is a refusal
+  let by_targets = evidence_targets(order, targets)
+  let by_pushed = evidence_pushed(order, pushed)
+  let found = by_targets.length() > 0 ? by_targets : by_pushed
+  if (found.length() > 1) { return "" }
+  if (found.length() == 1) { return found[0] }
+  if (group_ok(group, writes, reads, appends)) { return fallback }
+  return ""
+}
+
+fn decide_empty(name: Str, acc: HintAcc, fallback: Str, appends: Bool) -> Str {
+  return decide_empty_parts(name, acc.empties, acc.aliases.concat(acc.concat_aliases),
+                            acc.targets, acc.pushed, acc.writes, acc.reads,
+                            fallback, appends)
+}
+
+// The three evidence passes, applied in the reference's order: primary offers,
+// then assignment aliases, then the push/assignment evidence.
+fn finish_scan(acc: HintAcc, fallback: Str, appends: Bool) -> HintScan {
+  var a = acc
+  for (o of a.primary) {
+    a = hint_offer(a, value_str(value_at(o, 0)), value_str(value_at(o, 1)))
+  }
+  a = flow_through(a)
+  for (o of a.assign_offers) {
+    a = hint_offer(a, value_str(value_at(o, 0)), value_str(value_at(o, 1)))
+  }
+  for (o of a.pushed_ev) {
+    let k = value_str(value_at(o, 0))
+    if (!a.pushed.has(k)) { a = { a | pushed = a.pushed.set(k, value_str(value_at(o, 1))) } }
+  }
+  var et: Map[Str, Str] = Map.empty()
+  for (k of a.empties) { et = et.set(k, decide_empty(k, a, fallback, appends)) }
+  return { hints: a.fh, order: a.order, et: et }
+}
+
+// `_v3_flow_hints` + the untyped-empty-list analysis, in one body walk.
+fn flow_hints(body: List[Any], ret_type: Str, ctx: Ctx) -> HintScan {
+  var scope: Map[Str, Str] = Map.empty()
+  for (k of ctx.vt.keys()) { scope = scope.set(k, k) }
+  return finish_scan(scan_stmts(body, scope, empty_acc(scope), ctx).acc, "List[any]", true)
 }
 
 // The kind dispatch, mirroring `_go_v3_expr`'s branch order (post-widen).
@@ -2324,7 +2871,8 @@ fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
     builders: builders, builder_seq: seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
-    fh: ctx.fh
+    fh: ctx.fh,
+    et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
 
@@ -2339,7 +2887,8 @@ fn with_reserved(ctx: Ctx, reserved: Map[Str, Str]) -> Ctx {
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: reserved, strings_alias: ctx.strings_alias,
     sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
-    fh: ctx.fh
+    fh: ctx.fh,
+    et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
 
@@ -2384,9 +2933,23 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     let raw = value_str(value_field(node, "name"))
     let nm = v3_ident(raw)
     let valnode = value_field(node, "value")
-    let inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, raw), ctx.gv)
-    var nctx = ctx
-    if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
+    // the binding's key: the analysis renamed the body's bindings, this port
+    // keeps the source names and takes the matching key off `keys`
+    var key = raw
+    if (has_bind(raw) && ctx.key_i < ctx.keys.length()) { key = ctx.keys[ctx.key_i] }
+    var inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, key), ctx.gv)
+    var nctx = { ctx | key_i = ctx.key_i + (has_bind(raw) ? 1 : 0) }
+    if (inferred == "" && is_empty_list_lit(valnode)) {
+      // `_empty_list_type`: where the binding flows decides, else what is
+      // pushed into it, else the slice main gave it when it is only sized or
+      // appended; anything else is refused by name (#2898). This port has no
+      // refusal channel, so a refusal is one named marker.
+      inferred = map_get(ctx.et, key)
+      if (inferred == "") {
+        return { lines: [line(indent, "<<UNSUPPORTED-EMPTY-LIST-TYPE>>")], ctx: nctx }
+      }
+    }
+    if (inferred != "") { nctx = set_vt(nctx, raw, inferred) }
     let value = render_expr(valnode, ctx, inferred)
     var got = ""
     if (inferred != "") { got = go_type(inferred, ctx.gv) }
@@ -2929,9 +3492,11 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
       gv: t.gv, rt: rt, builders: Map.empty(), builder_seq: 0,
       reserved: reserved, strings_alias: strings_alias,
       sc: Map.empty(), scan_seq: 0, body: body, tn: "",
-      fh: Map.empty()
+      fh: Map.empty(),
+      et: Map.empty(), keys: [], key_i: 0
     }
-    let ctx = set_fh(ctx0, flow_hints(body, rt, ctx0))
+    let scan = flow_hints(body, rt, ctx0)
+    let ctx = set_scan(set_fh(ctx0, scan.hints), scan)
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"), t.gv)}`)
@@ -3014,9 +3579,11 @@ fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTab
       gv: t.gv, rt: "", builders: Map.empty(), builder_seq: 0,
       reserved: res, strings_alias: strings_alias,
       sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT",
-      fh: Map.empty()
+      fh: Map.empty(),
+      et: Map.empty(), keys: [], key_i: 0
     }
-    let ctx = set_fh(ctx0, flow_hints(body, "", ctx0))
+    let scan = flow_hints(body, "", ctx0)
+    let ctx = set_scan(set_fh(ctx0, scan.hints), scan)
     // `revlT` (not `t`) so a user binding named `t` can't shadow it.
     out = out.push(`func ${tname}(revlT *testing.T) {`)
     let r = emit_stmts(body, ctx, 1)
@@ -4249,11 +4816,17 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
+// issue #3053: the lifecycle driver's own names; go renames the USER binding. Mirrors backends/go/emit.py.
+fn is_emitter_reserved(name: Str) -> Bool {
+  return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
+                        "_svc", "_err", "_r", "_ok"], name)
+}
+
 fn safe_local(name: Str) -> Str {
   var root = name
   var go = true
   while (go && root != "") {
-    if (is_go_keyword(root)) { return name.concat("_") }
+    if (is_go_keyword(root) || is_emitter_reserved(root)) { return name.concat("_") }
     if (!root.endsWith("_")) { go = false } else { root = root.slice(0, root.length() - 1) }
   }
   return name
@@ -4341,7 +4914,7 @@ fn is_tuple_surface(tv: Any) -> Bool {
 
 // `_Env` inside a provide method: params are bare locals, a required key is a
 // field on the method receiver.
-type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any, cfg: Map[Str, Str] }
+type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any, cfg: Map[Str, Str], et: Map[Str, Str] }
 
 fn comp_name_ref(env: CEnv, ident: Str) -> Str {
   if (list_contains(env.params, ident)) { return safe_local(ident) }
@@ -4356,7 +4929,23 @@ fn ref_ident(n: Any) -> Str {
 
 fn with_vt(env: CEnv, name: Str, t: Str) -> CEnv {
   return { params: env.params, reqs: env.reqs, types: env.types, vt: env.vt.set(name, t),
-           fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg }
+           fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg, et: env.et }
+}
+
+// `env.var_types` replaced wholesale, for the untyped-empty-list forward pass.
+fn with_comp_vt(env: CEnv, vt: Map[Str, Str]) -> CEnv {
+  return { params: env.params, reqs: env.reqs, types: env.types, vt: vt,
+           fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg, et: env.et }
+}
+
+// `_go_v3_is_interface` over a component env's declared types.
+fn comp_is_interface(t: Str, types: Any) -> Bool {
+  // A generic applied variant (`Mb[Int]`, issue #2471) is outside this
+  // component slice, so the declared-name check is the whole variant arm.
+  let s = trim(t)
+  return s == "any" || (s.startsWith("Opt[") && s.endsWith("]"))
+    || (s.startsWith("Result[") && s.endsWith("]"))
+    || decl_kind(types, s) == "variant"
 }
 
 // ------------------------------------------- declared records and variants
@@ -4988,6 +5577,67 @@ fn service_methods(services: Any, svc: Str) -> Any {
   return value_field(value_field(services, svc), "methods")
 }
 
+// ---------------------------------- untyped empty lists in a provide body
+// `_method_flow_hints` + `_empty_list_type`: the same evidence analysis over
+// `_comp_infer`, keyed by name (the component tier's hints carry no binding
+// keys, as in the reference) and with `appends` false: a method body's `push`
+// is a call, not the pure tier's `append`, so nothing may be sized only.
+fn method_add_read(acc: HintAcc, key: Str, kind: Str, other: Str) -> HintAcc {
+  return { acc | reads = acc.reads.push([key, kind, other]) }
+}
+
+fn method_reads(node: Any, acc: HintAcc, pos: Str, other: Str, env: CEnv) -> HintAcc {
+  if (value_kind(node) == "list") {
+    var la = acc
+    for (child of value_list(node)) { la = method_reads(child, la, "other", "", env) }
+    return la
+  }
+  if (value_kind(node) != "record") { return acc }
+  let ref = local_ref_of(node)
+  if (ref != "") { return method_add_read(acc, ref, pos, other) }
+  var a = acc
+  let k = node_kind(node)
+  if (k == "builtin" && value_str(value_field(node, "method")) == "length") {
+    a = method_reads(value_field(node, "target"), a, "length", "", env)
+    return method_reads(value_field(node, "args"), a, "other", "", env)
+  }
+  for (child of value_children(node)) { a = method_reads(child, a, "other", "", env) }
+  return a
+}
+
+// The body is the slice's flat one (`emit` steps and a final `return` beside
+// `let`/`var` bindings), so the forward typing and the push/reassign evidence
+// are collected in one pass over the top-level steps, in document order.
+fn method_scan(body: List[Any], ret_surface: Str, env: CEnv) -> HintScan {
+  var a = empty_acc(Map.empty())
+  for (st of body) {
+    let step = node_step(st)
+    if (step == "let" || step == "var") {
+      let nm = value_str(value_field(st, "name"))
+      let v = value_field(st, "value")
+      a = method_reads(v, a, "other", "", env)
+      let pin = empty_list_pin(v)
+      if (untyped_empty_list(v)) { a = { a | empties = a.empties.push(nm) } }
+      if (pin != "") {
+        if (!a.scratch.has(nm)) { a = { a | scratch = a.scratch.set(nm, pin) } }
+      } else if (!is_empty_list_lit(v)) {
+        let t = comp_infer(v, with_comp_vt(env, a.scratch))
+        if (t != "" && !has_any_word(t) && !a.scratch.has(nm)) {
+          a = { a | scratch = a.scratch.set(nm, t) }
+        }
+      }
+    } else if (step == "return") {
+      let e = value_field(st, "expr")
+      let r = local_ref_of(e)
+      if (ret_surface != "" && r != "") { a = { a | primary = a.primary.push([r, ret_surface]) } }
+      a = method_reads(e, a, "other", "", env)
+    } else {
+      a = method_reads(value_field(st, "expr"), a, "other", "", env)
+    }
+  }
+  return finish_scan(a, "List[Int]", false)
+}
+
 // Is this provide method an empty body or a single `return` the slice renders?
 fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
   let steps = value_list(value_field(m, "body"))
@@ -5000,11 +5650,32 @@ fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
   for (st of steps) {
     let e = value_field(st, "expr")
     let last = i == steps.length() - 1
-    body_ok = body_ok && (method_emit_ok(st, env)
+    body_ok = body_ok && (method_emit_ok(st, env) || method_let_ok(st, env)
                           || (last && node_step(st) == "return" && (value_is_null(e) || comp_expr_ok(e, env))))
     i = i + 1
   }
   return !is_tuple_surface(value_field(decl, "returns")) && !secret && body_ok
+}
+
+// A method-body `let`/`var` the slice renders: its value is an expression the
+// slice renders (an untyped `[]` included), so `_emit_method_body`'s let arm is
+// the only statement form this widens.
+fn method_let_ok(st: Any, env: CEnv) -> Bool {
+  let kind = node_step(st)
+  if (kind != "let" && kind != "var") { return false }
+  let v = value_field(st, "value")
+  // A binding whose value carries one of the sum surfaces is outside this
+  // slice. The reference's let arm pins it with `_go_v3_type` and only when
+  // the document declares a type (`_V3_TYPED_COMPONENTS and _V3_TYPES`), so
+  // the same document spells `r := ...` with no types and `RevlOpt[int64]`
+  // with one; the port's component spelling is `comp_go_type` (`*int64` for
+  // Opt, `RevlResult[...]` for Result) and its pin does not depend on the type
+  // table, so it would write a different literal either way. Declining the
+  // let names the component instead of emitting Go the reference does not.
+  let surface = comp_infer(v, env)
+  let sum = surface == "any" || (surface.startsWith("Opt[") && surface.endsWith("]"))
+    || (surface.startsWith("Result[") && surface.endsWith("]"))
+  return comp_expr_ok(v, env) && !sum
 }
 
 // A method-body `emit`: its expression, and a site-spelled `compensate` clause
@@ -5086,7 +5757,7 @@ fn method_env(m: Any, decl: Any, c: Any, doc: CDoc) -> CEnv {
     vt = vt.set(name, map_get(ptypes, name))
   }
   return { params: params, reqs: value_keys(rq), types: doc.types, vt: vt, fr: doc.fr,
-           rq: rq, services: doc.services, cfg: cfg }
+           rq: rq, services: doc.services, cfg: cfg, et: Map.empty() }
 }
 
 fn component_ok(c: Any, doc: CDoc) -> Bool {
@@ -5353,7 +6024,13 @@ fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
     if (ret != "") { sig = sig.concat(" ").concat(ret) }
     out = out.push(sig.concat(" {"))
     let env = method_env(m, decl, c, doc)
-    for (st of value_list(value_field(m, "body"))) { out = out.concat(emit_method_step(st, env, decl)) }
+    let body = value_list(value_field(m, "body"))
+    var cur = with_comp_scan(env, method_scan(body, value_str(value_field(decl, "returns")), env))
+    for (st of body) {
+      let r = emit_method_step(st, cur, decl)
+      out = out.concat(r.lines)
+      cur = r.env
+    }
     out = out.push("}").push("")
   }
   return out
@@ -5362,19 +6039,57 @@ fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
 // `_emit_method_body` over the slice's steps. An `emit` fires inline, then
 // parks its site-spelled offset on the activation frame through
 // `registerMethodCompensation` (item 247): discharged on a clean commit,
-// enqueued for Phase 2 on an abort.
-fn emit_method_step(st: Any, env: CEnv, decl: Any) -> List[Str] {
+// enqueued for Phase 2 on an abort. A `let`/`var` is `_emit_method_body`'s let
+// arm: an untyped `[]` takes its type from the method's flow hints or is named
+// as a refusal, an integer/float binding is pinned to the tier's type, and a
+// user-variant binding holds its interface (issue #2898 / item 280).
+type MethodStep = { lines: List[Str], env: CEnv }
+
+fn with_comp_scan(env: CEnv, scan: HintScan) -> CEnv {
+  return { env | et = scan.et }
+}
+
+fn emit_method_step(st: Any, env: CEnv, decl: Any) -> MethodStep {
   let e = value_field(st, "expr")
-  if (node_step(st) == "emit") {
+  let step = node_step(st)
+  if (step == "emit") {
     var out = [line(1, comp_expr(e, env, ""))]
     let comp = value_field(st, "compensate")
     if (!value_is_null(comp)) {
       let d = call_descriptor(comp)
       out = out.push(line(1, `revlSelf.revlFrame.registerMethodCompensation(${go_string(d[0])}, ${go_string(d[1])}, func() error { ${comp_expr(comp, env, "")}; return nil })`))
     }
-    return out
+    return { lines: out, env: env }
   }
-  return [line(1, value_is_null(e) ? "return" : `return ${comp_expr(e, env, value_str(value_field(decl, "returns")))}`)]
+  if (step == "let" || step == "var") {
+    let raw = value_str(value_field(st, "name"))
+    let nm = safe_local(raw)
+    let v = value_field(st, "value")
+    var surface = comp_infer(v, env)
+    if (is_empty_list_lit(v)) {
+      let pin = empty_list_pin(v)
+      surface = pin != "" ? pin : map_get(env.et, raw)
+    }
+    if (surface == "" && is_empty_list_lit(v)) {
+      return { lines: [line(1, "<<UNSUPPORTED-EMPTY-LIST-TYPE>>")], env: env }
+    }
+    var nenv = env
+    if (surface != "") { nenv = with_vt(env, raw, surface) }
+    let value = comp_expr(v, nenv, surface)
+    let go_t = surface != "" ? comp_go_type(surface, env.types) : ""
+    let pinned = surface == "Int" ? "int64" : (surface == "Float" ? "float64" : "")
+    var out = []
+    if (go_t != "" && comp_is_interface(surface, env.types)) {
+      out = out.push(line(1, `var ${nm} ${go_t} = ${value}`))
+    } else if (pinned != "") {
+      out = out.push(line(1, `var ${nm} ${pinned} = ${value}`))
+    } else {
+      out = out.push(line(1, `${nm} := ${value}`))
+    }
+    out = out.push(line(1, `_ = ${nm}`))
+    return { lines: out, env: nenv }
+  }
+  return { lines: [line(1, value_is_null(e) ? "return" : `return ${comp_expr(e, env, value_str(value_field(decl, "returns")))}`)], env: env }
 }
 
 // `_emit_load_helpers`: a component that isolates a key into a
@@ -6083,7 +6798,8 @@ fn typed_ctx() -> Ctx {
     builders: Map.empty(), builder_seq: 0,
     reserved: Map.empty(), strings_alias: "strings",
     sc: Map.empty(), scan_seq: 0, body: [], tn: "",
-    fh: Map.empty()
+    fh: Map.empty(),
+    et: Map.empty(), keys: [], key_i: 0
   }
 }
 

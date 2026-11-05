@@ -58,6 +58,7 @@ _run_branch = _deferred(".cli.change", "_run_branch")
 _run_canary = _deferred(".cli.change", "_run_canary")
 _run_compare = _deferred(".cli.change", "_run_compare")
 _run_estop = _deferred(".cli.change", "_run_estop")
+_run_migrate = _deferred(".cli.change", "_run_migrate")
 _run_plan = _deferred(".cli.change", "_run_plan")
 _run_quarantine = _deferred(".cli.change", "_run_quarantine")
 _run_recover = _deferred(".cli.change", "_run_recover")
@@ -455,7 +456,8 @@ def _runtime_ceiling_surface(wal_path: str) -> dict:
     from .wal import read_wal  # noqa: PLC0415 — only when a WAL was requested
 
     loaded = read_wal(wal_path)
-    outcomes = {"emission-complete", "emission-refused", "emission-failed"}
+    outcomes = {"emission-complete", "emitted-then-refused",
+                "emission-refused", "emission-failed"}
     records = []
     for entry in loaded["records"]:
         if not isinstance(entry, dict) or entry.get("record") not in outcomes:
@@ -1575,6 +1577,10 @@ def _dispatch(args) -> int:
         return _run_contract(args)
     if args.command == "diff":
         return _run_diff(args)
+    # `revl migrate` reads its own three documents (two versions and the real
+    # consumer composition), so it is routed before the shared compile step.
+    if args.command == "migrate":
+        return _run_migrate(args)
     # `revl changelog` has its own two-input loader (like `diff`), so it is
     # routed before the shared single-source compile step.
     if args.command == "changelog":

@@ -74,6 +74,13 @@ pub extern emission fn host_commit_rm(project_dir: Str, plan: Str) -> Str
 pub extern emission fn host_write_assembly(project_dir: Str, manifest: Str) -> Str
   = @py { from revl.truc._host import write_assembly; return write_assembly(project_dir, manifest) }
 
+// The manifest/dossier half of the vendored-file drift check as a planner
+// `Drift` JSON ({ok, message}), the same list `write_assembly` refuses on.
+// `assemble --check` reads it as a value: a dry run writes nothing, so it never
+// reaches `write_assembly` to be refused there.
+pub extern emission fn host_vendored_drift(project_dir: Str) -> Str
+  = @py { from revl.truc._host import vendored_drift; return vendored_drift(project_dir) }
+
 // ---- composition layers: apply / stack check (emission; slice S6) ----
 
 // Resolve the entry composition's declared layer stack, HEADER-ONLY, and
