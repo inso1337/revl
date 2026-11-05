@@ -97,6 +97,59 @@ component Cache provides db: Store {
 With zero or several declared provisions the intended key is ambiguous, so no
 rename is safe and no action is emitted.
 
+### G4: the acquire and its ranked repairs
+
+The reversibility refusal (G4) is the one a model-driven author hits most, and
+the per-code sentence is deliberately general: "give the mutation an `undo`, or
+admit it is irreversible". A missing-undo record now says *which* acquisition it
+is and what to do about it, in three additive fields beside `fix`:
+
+```json
+{
+  "code": "G4",
+  "acquire": {"file": "<candidate>.rvl", "line": 6,
+              "extern": "Pool", "method": "open"},
+  "declaredClass": {"declared": "host", "derived": "mutation"},
+  "repairs": [
+    {"kind": "site-undo",
+     "action": "bind the acquisition and spell its one inverse: ...",
+     "fix_code": {"title": "Add the acquisition's inverse: `undo pool.close()`",
+                  "edits": [ ... ]}},
+    {"kind": "witnessed", "action": "declare the acquisition as an `extern witnessed fn` ..."},
+    {"kind": "service-emission", "action": "move the crossing behind a service operation declared `emission` ..."}
+  ]
+}
+```
+
+`acquire` names the exact position (file and line, from the record itself, so a
+raise site cannot disagree with the diagnostic) and the extern and method the
+call reaches; a bare extern call has `method: null`. `declaredClass` pairs the
+class the declaration gives (`pure`, `acquire`, `emission`, `local`,
+`witnessed`, or `host` for the host-stub family surface; `null` when no
+declaration resolves) with the class the checker derived for this call
+(`mutation` when it needs an inverse, `unknown` when nothing resolves).
+`repairs` is ordered by preference and each entry carries a `kind` and the
+`action` a person or a model can enact: `site-undo`, `declare-inverse`,
+`witnessed`, `plain-call`, `reclassify`, `service-emission`.
+
+Only the repair whose edit the engine can determine, `site-undo` (the declared
+inverse or the host family's release on the bound handle), carries a
+`fix_code`. It is built and verified exactly like any other code action: the
+engine applies the candidate edit and re-checks the patched source, and the
+field is absent when the candidate does not resolve the refusal (an unbound
+acquisition has no handle to release). The prose repairs stay prose: they cannot
+be checked mechanically, so they are listed with no `fix_code` rather than
+given an edit the engine did not verify.
+
+`diagnostics.report` attaches the verified `fix_code` when it is handed the
+text that compiled (`report(error, sources={filename: text})`), which is what
+`revl_check` does for an inline candidate and for an edited buffer riding as a
+`modules` overlay. It never reads `error.filename` from disk: a multi-file
+compile can overlay edited text on a real path, so the file there may be
+pre-edit text that never compiled. A compile the caller describes only by disk
+paths carries the prose repairs. The record itself is unchanged in shape either
+way, and the MCP `revl_check` answer carries it as classified.
+
 ## The agent payload
 
 `fix_code(rejection, source)` takes a structured rejection (the
@@ -122,6 +175,11 @@ a code and a line but no span, so the ranged diagnostic is recomputed from the
 source and matched to the rejection, then run through the one shared engine —
 the LSP code action and the agent payload carry byte-identical edits. (An MCP
 verb over `fix_code` is left for later; this item ships the engine.)
+
+The same engine backs the G4 `site-undo` repair above, so the edit a G4 record
+carries in `repairs[i].fix_code` is byte-identical to the one
+`fix_code(rejection, source)` returns for that refusal, and to the LSP quick
+fix.
 
 ## Adding a code
 

@@ -2632,8 +2632,9 @@ class Parser:
                             f"expected {wanted}, found {got}", hint)
         return self.next()
 
-    def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
-        return RevlError(self.filename, line, message, hint)
+    def err(self, line: int, message: str, hint: str | None = None,
+            **fields) -> RevlError:
+        return RevlError(self.filename, line, message, hint, **fields)
 
     def _doc_above(self, line: int, floor: int | None = None) -> str | None:
         """The comment block directly above `line` (issue #1952).
@@ -6416,7 +6417,7 @@ class Parser:
                              "src/revl/typecheck.py); drop the annotation",
                     )
                 acquire, undo, line, setup, is_async, mode, replay = \
-                    self.effect_form(tok.line)
+                    self.effect_form(tok.line, bind=bind)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
                                  is_async, mode=mode, replay=replay)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
@@ -6860,7 +6861,7 @@ class Parser:
         acting = self._acting_clause() if self._at_acting_clause() else None
         return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
-    def effect_form(self, line: int):
+    def effect_form(self, line: int, bind: str | None = None):
         self.expect("kw", "effect")
         # item 308 (issue #96): the ownership mode a plain acquisition may carry
         # is threaded out as the final tuple element; `owned` for spawn/lease and
@@ -7044,8 +7045,9 @@ class Parser:
                     isinstance(acquire, ExprCall)
                     and isinstance(acquire.callee, ExprVar)):
                 return acquire, None, line, setup, is_async, mode, replay
-            message, hint = missing_undo_refusal(_describe_expr(acquire))
-            raise self.err(line, message, hint=hint)
+            message, hint, fields = missing_undo_refusal(_describe_expr(acquire),
+                                                         bind=bind)
+            raise self.err(line, message, hint=hint, **fields)
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async, mode, replay
@@ -9835,9 +9837,68 @@ def _describe_expr(expr) -> str:
     return "the expression"
 
 
+_ACQUIRE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
+
+
+def _undo_acquire_fields(spelling: str, declared: str | None, derived: str,
+                         repairs: list[dict]) -> dict:
+    """The structured half of a G4 missing-undo refusal (issue #2684).
+
+    `acquire` names the extern and method; `diagnostics.classify` completes it
+    with the record's own file and line, so a raise site cannot disagree with
+    the position it refused at. `declaredClass` pairs the class an extern
+    declares (or `host` for the host-stub surface, `None` when no declaration
+    resolves) with the class the checker derived for this call. `repairs` is
+    ordered by preference; a repair whose edit is mechanical gains a verified
+    `fix_code` from the fixgen engine when the report holds the source."""
+    extern, method = spelling, None
+    if not _ACQUIRE_NAME.fullmatch(spelling):
+        # a complex acquisition expression has no extern name to report
+        extern = None
+    elif "." in spelling:
+        extern, method = spelling.rsplit(".", 1)
+    return {
+        "acquire": {"extern": extern, "method": method},
+        "declared_class": {"declared": declared, "derived": derived},
+        "repairs": repairs,
+    }
+
+
+def acquire_without_undo_fields(name: str, returns: str | None) -> dict:
+    """The structured half of G4's declaration refusal (issue #2684).
+
+    An `extern acquire fn` with no `undo` has no inverse at all, so the
+    repairs are declaration-level: declare the teardown, or say what this
+    write really is (a `local` write with no crossing, or an irreversible
+    `emission`). Neither is mechanical: the compiler cannot invent the extern
+    that releases the handle, and a reclassification changes every call site."""
+    ret = f" -> {returns}" if returns else ""
+    return {
+        "acquire": {"extern": name, "method": None},
+        "declared_class": {"declared": "acquire", "derived": "mutation"},
+        "repairs": [
+            {"kind": "declare-inverse",
+             "action": f"declare the teardown on the extern: `extern acquire fn "
+                       f"{name}(...){ret} undo <release>(result)`, where "
+                       f"`<release>` is the extern that releases the acquired "
+                       f"handle"},
+            {"kind": "reclassify",
+             "action": "if the write crosses no boundary it is `local`, called "
+                       "plainly with no bracket and no inverse; if it crosses "
+                       "irreversibly it is `emission`, and every call site is "
+                       "marked `emit`"},
+        ],
+    }
+
+
 def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
-                         declared_local: bool = False) -> tuple[str, str]:
-    """The ONE rendering of G4's bare-acquisition refusal: `(message, hint)`.
+                         declared_local: bool = False, *,
+                         bind: str | None = None) -> tuple[str, str, dict]:
+    """The ONE rendering of G4's bare-acquisition refusal.
+
+    Returns `(message, hint, fields)`: the prose both positions share, and the
+    structured `acquire` / `declaredClass` / `repairs` a record carries
+    (issue #2684).
 
     Two positions raise it and neither may drift from the other. The parser
     refuses at the point it can prove the acquisition is not a bare name
@@ -9868,8 +9929,12 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
     resolve one file at a time, after parsing, so an imported extern's
     classification is unknown there. Its domain is exactly the shapes that
     can never BE a bare-name extern call, which is why the generic wording
-    is the right one for every refusal it still raises."""
+    is the right one for every refusal it still raises.
+
+    `bind` is the name the acquisition is bound to, where the caller has it
+    (`let pool = effect …`). It only sharpens the `site-undo` repair's text."""
     spelling = head.strip("`")
+    handle = bind or "<name>"
     if declared_local:
         # item 2146: the callee IS a declared extern, and its class is `local`.
         # The generic wording below ("{head} is not pure") is true but useless
@@ -9884,7 +9949,17 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"a `local` extern writes durable local state and crosses no "
             f"boundary, so it is called plainly and takes no bracket or "
             f"inverse: write `{spelling}(...)` as a plain call "
-            f"(docs/syntax-2.0.md §6.1, G4)")
+            f"(docs/syntax-2.0.md §6.1, G4)",
+            _undo_acquire_fields(spelling, "local", "mutation", [
+                {"kind": "plain-call",
+                 "action": f"a `local` extern crosses no boundary, so drop the "
+                           f"bracket and call `{spelling}(...)` plainly"},
+                {"kind": "declare-inverse",
+                 "action": "if the write is a boundary crossing, declare it "
+                           "`extern acquire` with an `undo` (or `witnessed` "
+                           "with a `Result[..., Error]` return) and spell that "
+                           "inverse at the site"},
+            ]))
     if declared is not None:
         classification, inverse = declared
         article = "an" if classification[:1].lower() in "aeiou" else "a"
@@ -9900,7 +9975,18 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"registers it on the `Ok` branch and requires the return be "
             f"`Result[Witness, Error]` "
             f"(docs/design/243-witnessed-externs.md, G4)")
-        return message, hint
+        return (
+            message, hint,
+            _undo_acquire_fields(spelling, classification, "mutation", [
+                {"kind": "site-undo",
+                 "action": f"spell the inverse at the site: `effect "
+                           f"{spelling}(...) undo {inverse}(<the acquired "
+                           f"handle>)`"},
+                {"kind": "witnessed",
+                 "action": f"classify {head} `witnessed` with a "
+                           f"`Result[Witness, Error]` return, so its declared "
+                           f"inverse is registered by the teardown accumulator"},
+            ]))
     from .typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415
     release = _HOST_ACQUIRE_VERBS.get(spelling)
     if release is not None:
@@ -9910,11 +9996,39 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"effect has no `undo` and {head} is not pure",
             f"write `let <name> = effect {spelling}(...) undo "
             f"<name>.{release}()`: a host acquisition's inverse is its "
-            f"family's release on the handle it bound (G4)")
+            f"family's release on the handle it bound (G4)",
+            _undo_acquire_fields(spelling, "host", "mutation", [
+                {"kind": "site-undo",
+                 "action": f"bind the acquisition and spell its one inverse: "
+                           f"`let {handle} = effect {spelling}(...) undo "
+                           f"{handle}.{release}()`"},
+                {"kind": "witnessed",
+                 "action": "declare the acquisition as an `extern witnessed "
+                           "fn` that returns `Result[<handle>, Error]` with a "
+                           "declared `undo`, so the teardown accumulator "
+                           "replays it"},
+                {"kind": "service-emission",
+                 "action": "move the crossing behind a service operation "
+                           "declared `emission`, and mark its call `emit`: an "
+                           "emission is admitted as irreversible"},
+            ]))
     return (
         f"effect has no `undo` and {head} is not pure",
         f"write `effect {spelling}(...) undo <expr>`, or mark the call `emit` "
-        f"if it deliberately crosses the system boundary (G4)")
+        f"if it deliberately crosses the system boundary (G4)",
+        _undo_acquire_fields(spelling, None, "unknown", [
+            {"kind": "site-undo",
+             "action": f"give the call an inverse: `effect {spelling}(...) undo "
+                       f"<inverse>`"},
+            {"kind": "witnessed",
+             "action": f"declare `{spelling}` as an `extern witnessed fn` with "
+                       f"a declared `undo` and a `Result[..., Error]` return, "
+                       f"so the teardown accumulator replays it"},
+            {"kind": "service-emission",
+             "action": "move the crossing behind a service operation declared "
+                       "`emission`, and mark its call `emit`: an emission is "
+                       "admitted as irreversible"},
+        ]))
 
 
 def _dotted_path(expr) -> str | None:

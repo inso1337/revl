@@ -113,6 +113,7 @@ from .parser import (
     recursion_headroom,
     _describe_expr,
     missing_undo_refusal,
+    acquire_without_undo_fields,
     AbortStmt,
     AdvanceStmt,
     AssertStmt,
@@ -5063,6 +5064,7 @@ def _lower_externs(program: Program, filename: str, types: dict,
                 filename, decl.line,
                 f"acquire extern `{decl.name}` must declare `undo` (G4)",
                 hint="an `acquire` crosses into an observable effect and needs a teardown inverse",
+                **acquire_without_undo_fields(decl.name, decl.returns)
             )
         # R0 (item 308): an `acquire` return must be a NOMINAL OPAQUE HANDLE
         # type. A primitive (`Int`) or a structural carrier (`Result[..]`,
@@ -13039,10 +13041,11 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
             # the class so the refusal tells the author to drop the bracket
             # rather than to reclassify the write `pure`.
             declared_local = True
-        message, hint = missing_undo_refusal(head, declared, declared_local)
+        message, hint, fields = missing_undo_refusal(
+            head, declared, declared_local, bind=bind)
         raise RevlError(
             filename, line, message, hint=hint,
-            code="G4", category="witnessed",
+            code="G4", category="witnessed", **fields
         )
     else:
         # G5 (docs/design/teardown-contract.md): a bracket inverse may NOT emit
