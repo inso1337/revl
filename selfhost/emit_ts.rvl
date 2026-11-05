@@ -332,7 +332,9 @@ fn ts_scalar_type(name: Str) -> Str {
   if (name == "Str") { return "string" }
   if (name == "Bytes") { return "Uint8Array" }
   if (name == "Unit") { return "void" }
-  if (name == "Any") { return "any" }
+  // `Value` (stdlib/value.rvl) is the named erased-dynamic builtin and takes
+  // the same host erasure as the `Any` wildcard (issue #3019).
+  if (name == "Any" || name == "Value") { return "any" }
   if (name == "Never") { return "never" }
   return ""
 }

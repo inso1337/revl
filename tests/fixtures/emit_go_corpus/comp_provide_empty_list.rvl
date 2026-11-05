@@ -1,0 +1,44 @@
+// Two provide methods the combined path carries, one per method-body `let`
+// shape the issue #2898 port added.
+//
+// The first binds an untyped `[]` and returns it: the binding takes the
+// method's declared return type, which is `_emit_method_body`'s let arm. An
+// annotated `let pinned: List[Str] = []` takes its pin with no inference, and
+// the `.length()` read is a `builtin` node, which is what makes the frontend
+// stamp the document ir_version 3 (a document of components alone is v1). The
+// reference's let arm reads the literal's own `expected` first and only then
+// the method's flow hints, so both shapes have to be spelled to exercise both
+// arms of that decision.
+//
+// The second binds a user variant. A provide-method binding of a variant holds
+// the variant's interface type, not the concrete case struct (item 280, the
+// method-body twin): a later `match` type-switches on it, and Go rejects a
+// type switch on a concrete struct. The `match` is what makes the pin
+// observable rather than cosmetic: with `var o Outcome` the type switch
+// compiles and each arm returns its value; a bare `o := OutcomeMissing{}`
+// would make the switch a Go compile error. The declared `type Outcome` is
+// also what routes this document to the combined path, so the type, the
+// service interfaces and both components ride one package.
+type Outcome = Found(Int) | Missing
+
+service Dup { fn dup(xs: List[Str]) -> List[Str] }
+component D provides dup: Dup {
+  provide dup {
+    fn dup(xs) {
+      var out = []
+      let pinned: List[Str] = []
+      let n = out.length()
+      return out
+    }
+  }
+}
+
+service Pick { fn pick(n: Int) -> Int }
+component P provides pick: Pick {
+  provide pick {
+    fn pick(n) {
+      let o = Missing
+      return match o { Missing => 1, Found(v) => v }
+    }
+  }
+}

@@ -779,6 +779,26 @@ def test_selfhosted_emitter_reserved_names_at_declarations_and_uses(emitted):
         assert declaration in src
 
 
+def test_selfhosted_emitter_unbuilt_same_shape_record_is_a_twin_alias(emitted, reference):
+    """issue #2797 item 1: the document the differential survey flagged. The
+    reference emits ONE canonical struct per field->type shape and lowers an
+    unbuilt same-shape twin (`UnusedCell`, same shape as `Cell`) to
+    `pub type UnusedCell = Cell;`; materializing it as a second struct was the
+    silent divergence.
+
+    The document lives in another tier's corpus, and the gate crate's admit
+    oracle reads this module's `CORPUS` as basenames of `emit_rust_corpus/`, so
+    it is NOT added there: this test compares the whole document byte for byte
+    itself."""
+    ir = compile_files(
+        [str(ROOT / "tests" / "fixtures" / "emit_java_corpus" / "branch_shapes.rvl")])
+    src = emitted["emit_rust_src"](ir)
+    assert src == reference.emit(ir)
+    assert "pub struct Cell {" in src
+    assert "pub type UnusedCell = Cell;" in src
+    assert "pub struct UnusedCell" not in src
+
+
 def test_selfhosted_emitter_output_scaffold(emitted):
     """A byte-identical output is trivially valid Rust source; pin the scaffold
     and a representative body detail so a regression in the header or the

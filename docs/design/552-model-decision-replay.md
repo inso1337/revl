@@ -147,10 +147,12 @@ account together, with no reader change and no second correlation.
 ## 3. Slice 3: reading the decision back
 
 `revl.model_evidence.reconstruct(record, key)` verifies and then returns what
-the decision was: the crossing, the placement, what answered and on what host
-profile, how the prompt was bound, what the candidates were and which was
-taken, how it was asked, under which rule and how far down the ladder, plus
-`reproducible()`.
+the decision was: the crossing, the placement, what answered and on what basis,
+on what host profile, how the prompt was bound and from which template (or why
+no template is named), what the candidates were and which was taken, how it was
+asked, under which rule, and how far down the ladder and why, plus
+`reproducible()`. A `1.0` record is readable too; the members its version does
+not carry read as `None`, alongside the version that explains why.
 
 **`decision` is `None` whenever `verified` is false.** This is stronger than the
 exit clause's "an edited field fails its digest", and deliberately: a reader

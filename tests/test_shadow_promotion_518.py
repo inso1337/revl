@@ -310,6 +310,144 @@ def test_agreement_is_a_ratio_over_a_comparison_not_a_metric():
 
 
 # --------------------------------------------------------------------------
+# 1a. what a clean sample does and does not license
+# --------------------------------------------------------------------------
+
+def test_a_clean_promotion_states_sampled_and_the_rule_of_three_bound():
+    """Thirty clean draws put the failure rate below 3/30 at 95 percent, and
+    the verdict says so only because the plan declared the window fresh."""
+    verdict = decide(p=plan(window_fresh=True), obs=window(30))
+    assert verdict.decision == sp.PROMOTE
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.tally.paired == 30
+    assert verdict.tally.agreed == 30
+    assert verdict.tally.diverged == 0
+    assert verdict.failure_rate_upper_95 == pytest.approx(0.1)
+    assert verdict.bound_conditions == sp.BOUND_CONDITIONS_QUOTABLE
+
+
+def test_a_clean_window_the_plan_does_not_declare_fresh_is_not_quotable():
+    """A window used to choose among candidates is a selection, not a random
+    sample, so the clean tally stands alone and no bound is quoted."""
+    verdict = decide(p=plan(window_fresh=False), obs=window(30))
+    assert verdict.decision == sp.PROMOTE
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.tally.paired == 30
+    assert verdict.failure_rate_upper_95 == sp.NOT_QUOTABLE
+    assert verdict.bound_conditions == sp.BOUND_CONDITIONS_NOT_QUOTABLE
+
+
+def test_a_plan_that_says_nothing_about_its_window_is_not_quotable():
+    """The one default that narrows rather than widens: silence is read as
+    "not fresh", never as a licence to quote the bound."""
+    verdict = decide(obs=window(30))
+    assert verdict.failure_rate_upper_95 == sp.NOT_QUOTABLE
+    assert verdict.bound_conditions == sp.BOUND_CONDITIONS_NOT_QUOTABLE
+
+
+def test_a_clean_window_too_small_to_promote_quotes_no_bound():
+    """A refusal is not a pass. 3/2 would be an "upper bound" of 1.5, so the
+    clean tally stands alone instead of quoting an impossible number."""
+    verdict = decide(p=plan(window_fresh=True), obs=window(2))
+    assert verdict.decision == sp.REFUSE
+    assert verdict.refusal.link == sp.SAMPLE_TOO_SMALL
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.tally.paired == 2
+    assert verdict.tally.diverged == 0
+    assert verdict.failure_rate_upper_95 is None
+    assert verdict.bound_conditions is None
+    text = sp.render(verdict)
+    assert "failure rate upper 95: omitted (the verdict did not promote)" \
+        in text
+
+
+def test_a_promotion_with_too_few_draws_quotes_no_impossible_bound():
+    """A plan may declare a one-draw sample. The gate then promotes on it,
+    but 3/1 and 3/2 are above one and cannot be quoted as failure rates."""
+    verdict = decide(p=plan(window_fresh=True, min_observations=2),
+                     obs=window(2))
+    assert verdict.decision == sp.PROMOTE
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.failure_rate_upper_95 == sp.NOT_QUOTABLE
+    assert verdict.bound_conditions == sp.BOUND_CONDITIONS_TOO_SMALL
+
+
+def test_a_non_boolean_window_fresh_is_refused():
+    """The member is a declaration, so a truthy string is not one. The plan
+    document reader checks it; direct construction is checked too."""
+    verdict = decide(p=plan(window_fresh="yes"))
+    assert verdict.decision == sp.REFUSE
+    assert verdict.refusal.link == sp.PLAN_MALFORMED
+    assert "window_fresh" in verdict.refusal.reason
+
+
+def test_a_divergence_omits_the_bound_and_leaves_the_counts():
+    """One divergence in thirty still clears the 0.95 threshold, so this
+    verdict PROMOTES. It quotes no bound anyway: the counts are a tally, not
+    a rule-of-three sample."""
+    verdict = decide(p=plan(window_fresh=True),
+                     obs=window(30, diverge_at=7))
+    assert verdict.decision == sp.PROMOTE
+    assert verdict.evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdict.tally.paired == 30
+    assert verdict.tally.agreed == 29
+    assert verdict.tally.diverged == 1
+    assert verdict.failure_rate_upper_95 is None
+    assert verdict.bound_conditions is None
+
+
+def test_no_shadow_path_tags_its_evidence_exact():
+    """`exact` names whole-domain comparison or proof, and this module does
+    neither: it reduces a sample. Every verdict that read evidence is tagged
+    sampled, a refusal before the barrier has no tag, and none is exact."""
+    verdicts = [
+        decide(p=plan(window_fresh=True), obs=window(30)),
+        decide(obs=window(30, diverge_at=7)),
+        decide(p=plan(live=True), obs=window(8, diverge_at=0)),
+        decide(obs=window(2)),
+        decide(plan(authority_diff=dict(EMPTY_DIFF, origins=["secret"]))),
+    ]
+    assert set(sp.EVIDENCE_STRENGTHS) == {sp.EVIDENCE_EXACT,
+                                         sp.EVIDENCE_SAMPLED}
+    for verdict in verdicts:
+        assert verdict.evidence_strength in (None, sp.EVIDENCE_SAMPLED)
+        assert verdict.evidence_strength != sp.EVIDENCE_EXACT
+    assert verdicts[0].evidence_strength == sp.EVIDENCE_SAMPLED
+    assert verdicts[-1].evidence_strength is None
+
+
+def test_window_fresh_round_trips_and_absence_reads_as_not_fresh():
+    """The plan document is an artifact. `window_fresh` is additive within
+    version 1.0: a document written before it declares nothing, which reads
+    as not fresh; a document that states it must state a boolean."""
+    document = plan(window_fresh=True).as_dict()
+    assert document["window_fresh"] is True
+    back, refusal = sp.plan_from_dict(document)
+    assert refusal is None
+    assert back.window_fresh is True
+
+    del document["window_fresh"]
+    back, refusal = sp.plan_from_dict(document)
+    assert refusal is None
+    assert back.window_fresh is False
+
+    document["window_fresh"] = "yes"
+    _, refusal = sp.plan_from_dict(document)
+    assert refusal is not None
+    assert refusal.link == sp.PLAN_MALFORMED
+
+
+def test_the_report_prints_the_strength_and_the_bound_conditions():
+    text = sp.render(decide(p=plan(window_fresh=True), obs=window(30)))
+    assert "evidence strength: sampled" in text
+    assert "failure rate upper 95: 0.1" in text
+    assert "bound conditions:" in text
+
+    text = sp.render(decide(p=plan(window_fresh=False), obs=window(30)))
+    assert "failure rate upper 95: not quotable" in text
+
+
+# --------------------------------------------------------------------------
 # 1b. non-vacuity: absent and unusable evidence
 # --------------------------------------------------------------------------
 
@@ -1023,6 +1161,7 @@ def test_a_window_of_really_sealed_records_promotes():
             model_digest=DIGEST_B, placement_digest=PLACEMENT_LOCAL,
             prompt_binding={"mode": "content-addressed", "value": DIGEST_C,
                             "reason": None},
+            template_digest=DIGEST_A,
             origins=["input"], candidates=[DIGEST_A], chosen=0,
             outcome="validated",
             sampling={"max_tokens": 256, "seed": 7, "stop_digest": None,
@@ -1049,6 +1188,7 @@ def test_a_really_sealed_record_that_was_edited_refuses():
             model_digest=DIGEST_B, placement_digest=PLACEMENT_LOCAL,
             prompt_binding={"mode": "content-addressed", "value": DIGEST_C,
                             "reason": None},
+            template_digest=DIGEST_A,
             origins=["input"], candidates=[DIGEST_A], chosen=0,
             outcome="validated",
             sampling={"max_tokens": 256, "seed": 7, "stop_digest": None,

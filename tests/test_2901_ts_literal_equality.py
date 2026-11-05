@@ -11,9 +11,11 @@ The literal is written `(5n as bigint)`: tsc narrows a `boolean` inside
 
 An Int literal needs the IR to state the other operand's Int type (a literal,
 annotated arithmetic or negation, a Map index with `value_type` Int): a bare
-name's type is not stated, and a Float or Int32 Map value carries no widen
-marker, so `number === bigint` would not typecheck. Those keep `revlEq`, as do
-structural operands, Float and None literals and widened operands (#2715).
+name's type is not stated and keeps `revlEq`. A Map value of `Float` or `Int32`
+now carries the widen marker issue #2715 defined (#2949), so it too keeps
+`revlEq`: the map read is converted (`Number`/`BigInt`) rather than compared
+as a raw `number` with a bigint. Structural operands, Float and None literals
+and widened operands keep `revlEq` as before.
 """
 
 import importlib.util
@@ -95,20 +97,26 @@ def test_literal_comparison_emits_strict_equality():
 
 
 def test_untyped_structural_and_mixed_comparisons_keep_revl_eq():
-    """An Int literal against an operand whose Int type the IR does not
-    state keeps `revlEq`: a Map index of Float or Int32 carries no widen
-    marker."""
+    """An Int literal against a bare name whose Int type the IR does not state
+    keeps `revlEq`, as do structural and mixed comparisons."""
     emitted = _emit_ts(STRUCTURAL)
     for fn in ("rec", "lst", "opt", "opt_none", "opt_int", "same",
-               "i_var", "map_float", "map_i32", "list_index", "i_div", "fl",
-               "mixed", "widened"):
+               "i_var", "list_index", "i_div", "fl", "mixed", "widened"):
         body = _body(emitted, fn)
         assert "revlEq(" in body, f"{fn}: {body}"
         assert "===" not in body, f"{fn}: {body}"
     assert "revlEq(a, b)" in _body(emitted, "rec")
     assert "revlEq(a, b)" in _body(emitted, "lst")
     assert "revlEq(a, b)" in _body(emitted, "opt")
-    assert 'revlEq(revlMapIndex(m, "a"), 3n)' in _body(emitted, "map_float")
+    # #2949: a Float or Int32 Map value carries the widen marker now, so the
+    # read is converted and the comparison stays `revlEq` (#2715's rule).
+    assert ('revlEq(revlMapIndex(m, "a"), Number(3n))'
+            in _body(emitted, "map_float"))
+    assert ('revlEq(BigInt(revlMapIndex(m, "a")), 3n)'
+            in _body(emitted, "map_i32"))
+    for fn in ("map_float", "map_i32"):
+        body = _body(emitted, fn)
+        assert "===" not in body, f"{fn}: {body}"
     # #2715: the Int against Float comparisons are unchanged, byte for byte
     assert "revlEq(x, 3.0)" in _body(emitted, "fl")
     assert "revlEq(x, Number(3n))" in _body(emitted, "mixed")
@@ -164,10 +172,14 @@ def test_strict_equality_typechecks_under_narrowing(tmp_path):
                          ("(1n as bigint)", "1n"), ("(2n as bigint)", "2n")]:
         bare = bare.replace(typed, plain)
     # and the shapes that keep revlEq would be refused as `===`
-    for call in ('revlEq(revlMapIndex(m, "a"), 3n)',):
-        assert call in bare
-        left, right = call[len("revlEq("):-1].rsplit(", ", 1)
-        bare = bare.replace(call, f"({left} === {right})")
+    for call, strict in [
+        ('revlEq(revlMapIndex(m, "a"), Number(3n))',
+         '(revlMapIndex(m, "a") === 3n)'),
+        ('revlEq(BigInt(revlMapIndex(m, "a")), 3n)',
+         '(revlMapIndex(m, "a") === 3n)'),
+    ]:
+        assert call in bare, call
+        bare = bare.replace(call, strict)
     status, errors = _tsc(tsc, tmp_path / "bare.ts", bare)
     assert status != 0
     assert len([e for e in errors if "TS2367" in e]) >= 5, errors

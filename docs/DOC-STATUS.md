@@ -81,7 +81,7 @@ regenerated rather than edited.
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 9 |  |
-| delivery-semantics.md | needs-work | 7 |  |
+| delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 86 |  |
@@ -124,6 +124,7 @@ regenerated rather than edited.
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 0 |  |
+| mediator.md | needs-work | 0 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 7 |  |
 | namespacing.md | needs-work | 16 |  |
@@ -176,7 +177,7 @@ regenerated rather than edited.
 | tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
-| token-economy.md | needs-work | 19 |  |
+| token-economy.md | needs-work | 16 |  |
 | truc.md | needs-work | 3 |  |
 | ts-runtime-contract.md | needs-work | 0 |  |
 | updates.md | needs-work | 0 |  |

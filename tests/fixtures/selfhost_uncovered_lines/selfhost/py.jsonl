@@ -70,9 +70,7 @@
 
 ["function", "issue-721-method-block-renders-pass-for-an", "method_block", 1, 1]
 
-["reason", "item-522-slice-3-issue-1369-the-ui", "Item 522 slice 3 (issue #1369), the UI transaction unit, ported into selfhost/emit_py.rvl by issue #1972, together with tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl. What the corpus leaves unexecuted here is structural rather than a missing document: `ui_verb_known` is one `return (... or ...)` statement and a short-circuit cannot execute part of a single statement; `is_computer_use_token`'s `len(segs) < 2` arm needs a capability token with no dot, and every capability in the corpus and in revl.ui_family.REVERSIBILITY is dotted (screen.observe, ui.find, ui.text, ui.click, ui.download); `reaches_computer_use`'s `{kind: 'call', callee: {kind: 'var'}}` arm is entered only from a body-level call node, and the corpus's one such node lives inside the module `fn peek_pane`, which `method_lines` reads at emit time and never at run time. The input family is tests/test_selfhost_emit_py.py and tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS."]
-
-["function", "item-522-slice-3-issue-1369-the-ui", "is_computer_use_token", 1, 1]
+["reason", "item-522-slice-3-issue-1369-the-ui", "Item 522 slice 3 (issue #1369), the UI transaction unit, ported into selfhost/emit_py.rvl by issue #1972, together with tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl. What the corpus leaves unexecuted here is structural rather than a missing document: `ui_verb_known` is one `return (... or ...)` statement and a short-circuit cannot execute part of a single statement; `reaches_computer_use`'s `{kind: 'call', callee: {kind: 'var'}}` arm is entered only from a body-level call node, and the corpus's one such node lives inside the module `fn peek_pane`, which `method_lines` reads at emit time and never at run time. The dotless-capability arm of `is_computer_use_token` is now covered: the issue-#2688 ceiling refusal documents declare `[net(calls=1)]`, whose capability token has no dot. The input family is tests/test_selfhost_emit_py.py and tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS."]
 
 ["function", "item-522-slice-3-issue-1369-the-ui", "reaches_computer_use", 1, 1]
 
@@ -104,7 +102,7 @@
 
 ["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "cmatch", 1, 1]
 
-["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "match_expr", 2, 2]
+["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "match_expr", 1, 1]
 
 ["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "match_folds", 1, 1]
 
@@ -150,7 +148,7 @@
 
 ["reason", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "The self-host port of the reference `_named_call_kwarg` / `_inert` (issue #1369): the named call an inverse or a compensation writes into its WAL discharge descriptor. The corpus reaches the required-service shape and the witnessed inverse, where the two emitters agree byte for byte. Not reached: an unrecognised call shape, a non-`req` target, a `fn`-kind callee, a field-read argument, and an argument that is itself a call, for the reason the reference entry gives."]
 
-["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "call_kwarg", 2, 2]
+["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "call_kwarg", 1, 1]
 
 ["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "inert_arg", 1, 1]
 

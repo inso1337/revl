@@ -149,6 +149,10 @@ BENCH_DEPENDENT_TESTS = (
     # committed median, so a bench change to that artifact can change its verdict.
     "tests/test_mcp_admission_walkthrough_2748.py",
     "tests/test_mcp_edit.py",
+    # Issue #2939: imports `bench/mcp_response_size.py` by path and pins the
+    # per-verb response-size ceilings recorded from it, so a bench change must
+    # re-run it.
+    "tests/test_mcp_response_size.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
     # endpoint clients send through the runtime adapters.

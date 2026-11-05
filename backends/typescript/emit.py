@@ -3091,6 +3091,12 @@ _TS_V3_TYPE = {
     # fell through to `_ident` and emitted a bare `Any` that `tsc` rejects with
     # `Cannot find name 'Any'` in every non-signature position (roadmap 79).
     "Any": "any",
+    # `Value` (stdlib/value.rvl, docs/stdlib-value.md) is the NAMED erased-
+    # dynamic builtin, never a DECLARED type: a record field or service
+    # signature naming it fell through to `_ident` and emitted a bare `Value`
+    # that `tsc` rejects with `Cannot find name 'Value'` (issue #3019). It is
+    # the same host erasure `Any` takes, so it is TS's `any` in every position.
+    "Value": "any",
     # `Never` is the empty type; TS spells it `never`.
     "Never": "never",
 }

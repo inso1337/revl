@@ -10,6 +10,8 @@
 
 ["reason", "generated-python-inlines-these-tiny-rvl-helpers-into", "Generated Python inlines these tiny RVL helpers into emitter call sites; their substituted bodies execute while the retained definitions do not. Any residual named calls occur only in the RVL file's own unit-test functions, which are outside the corpus emitter entry point."]
 
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "empty_acc", 1, 1]
+
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "flags_or", 1, 1]
 
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "has_bind", 1, 1]
@@ -122,7 +124,7 @@
 
 ["reason", "remaining-branches-handle-null-malformed-unresolved-inferenc", "Remaining branches handle null/malformed/unresolved inference, missing List element/index type, nonreference callees, an unknown left + operand, unknown operators/conditional branches, ambiguous records and unresolved constructors. The late Float % fallback is frontend-rejected; supported Int32 complement and Float arithmetic are covered."]
 
-["function", "remaining-branches-handle-null-malformed-unresolved-inferenc", "infer_type", 10, 10]
+["function", "remaining-branches-handle-null-malformed-unresolved-inferenc", "infer_type", 9, 9]
 
 ["reason", "remaining-branches-mark-a-component-style-call-with", "Remaining branches mark a component-style call with no callee and read the payload type of a user constructor in call shape; the frontend lowers user constructors as `adt`, and a component call only appears in a document already refused by its component marker."]
 
@@ -155,10 +157,6 @@
 ["function", "remaining-guards-mark-a-missing-go-body-the", "has_extra_linebreak", 1, 1]
 
 ["function", "remaining-guards-mark-a-missing-go-body-the", "is_extra_linebreak", 3, 3]
-
-["reason", "remaining-id-lookup-is-compatibility-with-older-reference", "Remaining id lookup is compatibility with older reference-node encoding; canonical v3 source references carry name."]
-
-["function", "remaining-id-lookup-is-compatibility-with-older-reference", "ref_name", 1, 1]
 
 ["reason", "remaining-marker-rejects-an-unsupported-unary-operator-canon", "Remaining marker rejects an unsupported unary operator; canonical negation/not/Int32 complement lowering is implemented."]
 
