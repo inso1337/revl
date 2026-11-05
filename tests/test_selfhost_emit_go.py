@@ -52,7 +52,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -1216,3 +1216,35 @@ def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_pa
         f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
         f"add the document to CORPUS.")
 
+
+#: issue #3053: go has no identifier sigil a revl name cannot spell, so the
+#: reference renames a user binding that would redeclare one of the lifecycle
+#: driver's own names (`root` -> `root_`, rust's posture), including the call
+#: step's block locals the driver writes the user's binding through. A
+#: provide-method parameter is the widest user-binding position both the
+#: reference and this port render; it proves the two `safe_local` ladders carry
+#: the same reserved set, byte for byte.
+_RESERVED_DRIVER_NAMES = ("revlT", "root", "_fibers", "_revlAt", "_revlLoadOrder",
+                          "_svc", "_err", "_r", "_ok")
+
+
+@pytest.mark.parametrize("name", _RESERVED_DRIVER_NAMES)
+def test_the_component_tier_reserves_the_lifecycle_driver_names(emitted, reference,
+                                                                name):
+    source = f"""service Box {{ fn echo(msg: Str) -> Str }}
+
+component BoxC provides box: Box {{
+  provide box {{
+    fn echo({name}) = {name}
+  }}
+}}
+
+fn identity(x: Int) -> Int {{ return x }}
+"""
+    ir = compile_source(source)
+    want = reference.emit(ir)
+    got = emitted["emit_go_src"](ir)
+    assert got == want, f"the port's safe_local diverges on {name!r} (issue #3053)"
+    assert f"{name}_ " in got, (
+        f"a provide-method parameter named {name!r} was not moved clear of the "
+        f"lifecycle driver's own name (issue #3053)")

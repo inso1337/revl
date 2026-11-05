@@ -4564,11 +4564,17 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
+// issue #3053: the lifecycle driver's own names; go renames the USER binding. Mirrors backends/go/emit.py.
+fn is_emitter_reserved(name: Str) -> Bool {
+  return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
+                        "_svc", "_err", "_r", "_ok"], name)
+}
+
 fn safe_local(name: Str) -> Str {
   var root = name
   var go = true
   while (go && root != "") {
-    if (is_go_keyword(root)) { return name.concat("_") }
+    if (is_go_keyword(root) || is_emitter_reserved(root)) { return name.concat("_") }
     if (!root.endsWith("_")) { go = false } else { root = root.slice(0, root.length() - 1) }
   }
   return name
