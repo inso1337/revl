@@ -176,7 +176,7 @@ regenerated rather than edited.
 | tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
-| token-economy.md | needs-work | 19 |  |
+| token-economy.md | needs-work | 16 |  |
 | truc.md | needs-work | 3 |  |
 | ts-runtime-contract.md | needs-work | 0 |  |
 | updates.md | needs-work | 0 |  |
