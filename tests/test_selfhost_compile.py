@@ -795,7 +795,7 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Opt-gap document, the issue #1631 erased-Result document, and the
         # combined path's `comp_provide_pure.rvl`.)
         # no other residual: the fully-native chain reproduces the rest of the
-        # go corpus.
+        # go corpus, except the two entries below.
         # issue #2495: the generic-function document. Emitter-exact from the
         # reference IR (selfhost/emit_go.rvl mirrors the type-parameter list
         # and the call binding); the native IR producer reads a call to a
@@ -805,6 +805,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
+        # issue #2898: a provide-method `let pinned: List[Str] = []` in the
+        # combined document. The emitter half is byte-exact from the reference
+        # IR; the native IR producer drops the annotation's `expected` on a
+        # component-body literal, so the port falls back to `_comp_infer`'s
+        # `List[Int]` guess (`pinned := []int64{}` instead of `[]string{}`).
+        # That is a selfhost/lower.rvl gap, not an emitter one: the reference
+        # frontend threads the declared type onto the itemless node.
+        "comp_provide_empty_list.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
