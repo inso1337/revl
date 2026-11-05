@@ -104,6 +104,39 @@ def _run_canary(args) -> int:
     return 1 if breached else 0
 
 
+def _run_migrate(args) -> int:
+    """`revl migrate OLD NEW --against COMPOSITION`: the read-only migration
+    plan (issue #2685, first slice): which real consumers can move to the new
+    version now, which need an adapter or a declared state hand-off, which are
+    refused, what authority widens, and whether the old version is removable
+    (docs/commands-reference.md).
+
+    A plan, not a gate: nothing is compiled beyond the three input documents,
+    nothing is admitted, and no file is written. The classification travels in
+    the plan (human form and `--json`), so a consumer can gate on it without
+    this command taking a side."""
+    from ..composition_diff import load_composition  # noqa: PLC0415
+    from ..migrate import plan as build_plan, render as render_plan  # noqa: PLC0415
+
+    try:
+        old = load_composition(args.old)
+        new = load_composition(args.new)
+        against = load_composition(args.against)
+    except (OSError, RevlError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    try:
+        result = build_plan(old, new, against, old_label=args.old,
+                            new_label=args.new, against_label=args.against)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, indent=2) if args.json else render_plan(result))
+    return 0
+
+
 def _run_apply(args) -> int:
     """`revl apply change.plan` — boot the plan's pre-state, then execute the
     plan against it: drift-refuse if the composition moved, verify each step
