@@ -569,8 +569,9 @@ capability verdict is the gate's own: the diff calls the same
 predicate reads, the deny-lists and the closed allow-lists. The admission
 refuses a crossing on more legs than those two, and the diff reads none of the
 rest: the agent-sandbox allow-list, the taint-flow tier, the approval and
-declassify rules, the declaration-strength floors, the evidence bundle and the
-recovery surface all decide by facts a WAL does not carry. Every leg is named in
+declassify rules, the per-component pair rule, the declaration-strength floors,
+the evidence bundle and the recovery surface all decide by facts a WAL does not
+carry. Every leg is named in
 the report and in `--json`, and a recorded pair whose surface moves on one of
 them is reported undecided with the leg named, never as unchanged, so a widening
 on a leg this diff cannot read is not reported clean.

@@ -80,6 +80,18 @@ class InertDenyPolicyWarning(UserWarning):
     reads exactly like a clean pass. This warns loudly rather than passing
     clean."""
 
+
+class InertPairPolicyWarning(UserWarning):
+    """A pair rule (`component X may not reach A together with B`) selected a
+    component in this audit, but no selected component reaches BOTH
+    capabilities, so the rule refuses nothing (issue #2686, the pair form of
+    the fail-open issue #1984 closed for deny-lists).
+
+    Each pattern may match a reach somewhere and the pair may still never occur
+    in ONE component, which is the only thing a per-component pair rule refuses.
+    Enforcing such a rule reads exactly like a clean pass, so this warns loudly
+    rather than passing clean."""
+
 # a reach of `*` is an unbounded emission or a first-class dispatch — a
 # boundary the analysis cannot name (docs/capabilities.md). It is the token no
 # allow-list can bound implicitly, exactly as G4 treats it.
@@ -106,6 +118,46 @@ class Rule:
         if self.scope == "component":
             return fnmatchcase(name, self.selector)
         return self.selector in realms
+
+
+@dataclass(frozen=True)
+class PairRule:
+    """``component <glob> may not reach <cap> together with <cap>`` (issue
+    #2686): the per-component PAIR rule.
+
+    The other reach rules constrain one capability at a time: a deny-list
+    refuses `sendEmail`, an allow-list bounds the union of what a component may
+    reach, and `tenants never reach each other` pairs components. None of them
+    can say "no single component may hold capability X together with capability
+    Y". Each capability is legal alone, and the COMBINATION is what an
+    operator refuses (a private-data read together with an outbound network
+    call). This rule states exactly that: `first` and `second` are capability
+    globs, and a component matched by `selector` is refused iff its reach, the
+    same `Reach` set the allow/deny legs read, contains a token matching each.
+
+    The two must be DISTINCT reached tokens. One token satisfying both patterns
+    is one capability, not the forbidden pair; it is the failure the issue's
+    acceptance calls out, where a component "reaching only one of them is
+    admitted". Overlapping patterns are therefore harmless rather than an
+    accidental deny-list.
+
+    Only the per-component form is part of this slice. A whole-composition
+    pair rule needs a decision on how realms count (two realms holding X and Y
+    separately must not trip the per-component rule and may trip a composition
+    rule), so a realm or composition subject is refused at parse time rather
+    than silently read as per-component."""
+
+    selector: str                    # glob over component names
+    first: str                       # capability glob
+    second: str                      # capability glob
+
+    def selects(self, name: str) -> bool:
+        return fnmatchcase(name, self.selector)
+
+    def to_dsl(self) -> str:
+        """Render the rule back to the line an operator writes."""
+        return (f"component {self.selector} may not reach {self.first} "
+                f"together with {self.second}")
 
 
 # the units a `ttl` duration may name — parsed to milliseconds, the unit the
@@ -775,6 +827,11 @@ class Policy:
     wasm_fuel: int | None = None
     wasm_memory_bytes: int | None = None
     wasm_wall_seconds: float | None = None
+    # issue #2686: `component <glob> may not reach <cap> together with <cap>`:
+    # the per-component pair rule. Each capability may be legal alone; one
+    # component holding both is refused. Empty by default, so every policy
+    # written before this rule parses and behaves byte-identically.
+    pair_rules: tuple[PairRule, ...] = ()
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
@@ -786,6 +843,7 @@ class Policy:
             and not self.reissue_rules \
             and not self.auto_approve_rules \
             and not self.never_standing_rules \
+            and not self.pair_rules \
             and not self.approvals_bounded \
             and not self.wasm_confined \
             and self.wasm_fuel is None and self.wasm_memory_bytes is None \
@@ -900,6 +958,38 @@ def _validate_cap_globs(caps: tuple[str, ...], text: str, source,
     for token in caps:
         if not _is_cap_glob(token):
             raise PolicyError(source, lineno, _cap_token_error(token, text))
+
+
+def _pair_token_error(token, text: str) -> str:
+    """The diagnostic for a token that cannot be a capability pattern in a pair
+    rule (issue #2686).
+
+    The generic reach-rule message would tell the operator to separate the
+    tokens with commas, which is exactly wrong for the pair form: the two
+    capabilities sit one on each side of `together with`."""
+    if isinstance(token, str) and _EXCEPT_WORD.search(token):
+        return (f"`except` is not part of the pair grammar: {text.strip()!r} "
+                f"names {token!r}, which is prose, not a capability. A pair "
+                f"rule (`component <glob> may not reach <cap> together with "
+                f"<cap>`) carries no carve-out, so an exception cannot be "
+                f"expressed there. Name the components the rule applies to "
+                f"instead, or gate the crossing with `capability <glob> "
+                f"requires approval` (issue #2686)")
+    return (f"{token!r} is not a capability glob: a pair rule is `component "
+            f"<glob> may not reach <cap> together with <cap>`, and "
+            f"{text.strip()!r} names a token that can never match a "
+            f"capability. A capability is a dotted identifier path such as "
+            f"`mail.send`, optionally globbed with `*`, `?` or a character set "
+            f"(docs/capabilities.md §2), and a pair rule names exactly TWO of "
+            f"them, one on each side of `together with`. It is refused at "
+            f"parse time because a pair rule carrying it would silently "
+            f"refuse nothing (the closed vocabulary of §3.3, issue #2686)")
+
+
+def _validate_pair_globs(first, second, text: str, source, lineno) -> None:
+    for token in (first, second):
+        if not _is_cap_glob(token):
+            raise PolicyError(source, lineno, _pair_token_error(token, text))
 
 
 def _json_caps(values, source) -> tuple[str, ...]:
@@ -1216,6 +1306,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     reissue_rules: list[ReissueRule] = []
     auto_approve_rules: list[AutoApproveRule] = []
     never_standing_rules: list[NeverStandingRule] = []
+    pair_rules: list[PairRule] = []
     evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -1456,6 +1547,56 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             _validate_cap_globs((parts[1],), parts[1], source, lineno)
             never_standing_rules.append(NeverStandingRule(parts[1]))
             continue
+        # issue #2686: `component <glob> may not reach <cap> together with
+        # <cap>`: the per-component PAIR rule. Checked before the generic
+        # reach loop (it CONTAINS `may not reach`) so the two capabilities are
+        # read as a pair rather than as one whitespace-bearing token.
+        if " together with " in low:
+            marker = " may not reach "
+            if marker not in low:
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule is `component <glob> may not reach <cap> "
+                    f"together with <cap>`. It refuses a component holding "
+                    f"BOTH capabilities, so it has no allow form and no "
+                    f"`realm` subject in this slice; got {raw.strip()!r}")
+            idx = low.find(marker)
+            head = line[:idx].strip()
+            tail = line[idx + len(marker):]
+            together = low.find(" together with ", idx + len(marker))
+            if together == -1:
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule puts one capability on each side of "
+                    f"`together with`: `component <glob> may not reach <cap> "
+                    f"together with <cap>`, got {raw.strip()!r}")
+            first = line[idx + len(marker):together].strip()
+            second = line[together + len(" together with "):].strip()
+            parts = head.split()
+            if len(parts) != 2 or parts[0].lower() != "component":
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule selects components with `component <glob> "
+                    f"may not reach <cap> together with <cap>`; a "
+                    f"composition-wide or realm-scoped pair rule is not part "
+                    f"of this slice, got {raw.strip()!r}")
+            if not first or not second:
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule names two capabilities, one on each side of "
+                    f"`together with`: `component <glob> may not reach <cap> "
+                    f"together with <cap>`, got {raw.strip()!r}")
+            _validate_pair_globs(first, second, tail, source, lineno)
+            pair_rules.append(PairRule(parts[1], first, second))
+            continue
+        if low.rstrip().endswith(" together with"):
+            # the marker with no second capability is still a pair rule being
+            # written, not a whitespace-bearing capability token.
+            raise PolicyError(
+                source, lineno,
+                f"a pair rule names two capabilities, one on each side of "
+                f"`together with`: `component <glob> may not reach <cap> "
+                f"together with <cap>`, got {raw.strip()!r}")
         # <head> may [not] reach <caps>
         for verb, allow in (("may not reach", False), ("may reach", True)):
             idx = low.find(verb)
@@ -1501,7 +1642,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   wasm_confined=wasm_confined,
                   wasm_fuel=wasm_fuel,
                   wasm_memory_bytes=wasm_memory_bytes,
-                  wasm_wall_seconds=wasm_wall_seconds)
+                  wasm_wall_seconds=wasm_wall_seconds,
+                  pair_rules=tuple(pair_rules))
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -1510,6 +1652,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
     { "components": [{"pattern": "Agent*", "allow": [...], "deny": [...]}],
       "realms":     [{"realm": "billing", "allow": [...], "deny": [...]}],
       "tenants":    {"neverReachEachOther": true},
+      "pairs":      [{"component": "Agent*",
+                      "together": ["fs.read", "network.call"]}],
       "mcp":        {"allow": [...]} }
     """
     try:
@@ -1694,6 +1838,23 @@ def _parse_json(text: str, source: str | None) -> Policy:
                               "a never-standing entry needs a `capability` glob")
         _validate_cap_globs((cap,), cap, source, 1)
         never_standing_rules.append(NeverStandingRule(cap))
+    # issue #2686: the `pairs` array, the JSON equivalent of
+    # `component <glob> may not reach <cap> together with <cap>`. Each entry is
+    # {"component": "<glob>", "together": ["<cap>", "<cap>"]}.
+    pair_rules: list[PairRule] = []
+    for entry in doc.get("pairs") or []:
+        component = entry.get("component") if isinstance(entry, dict) else None
+        together = entry.get("together") if isinstance(entry, dict) else None
+        if not component or not isinstance(together, list) \
+                or len(together) != 2:
+            raise PolicyError(
+                source, 1,
+                "a pair rule needs a `component` glob and a `together` list "
+                "of exactly two capability patterns: {\"component\": "
+                "\"Agent*\", \"together\": [\"fs.read\", \"network.call\"]}")
+        first, second = (str(token) for token in together)
+        _validate_pair_globs(first, second, json.dumps(together), source, 1)
+        pair_rules.append(PairRule(str(component), first, second))
     # issue #2729: the `wasm` object, the JSON equivalent of the two DSL
     # clauses. `limits` implies confinement; `confined` without `limits` is
     # parsed (so the policy reads as written) but refused at use.
@@ -1760,7 +1921,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   wasm_confined=wasm_confined,
                   wasm_fuel=wasm_fuel,
                   wasm_memory_bytes=wasm_memory_bytes,
-                  wasm_wall_seconds=wasm_wall_seconds)
+                  wasm_wall_seconds=wasm_wall_seconds,
+                  pair_rules=tuple(pair_rules))
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -1843,11 +2005,12 @@ def component_realms(manifest: dict, name: str) -> frozenset[str]:
 @dataclass(frozen=True)
 class Violation:
     """One way the composition breaches the policy."""
-    kind: str                        # capability | deny | tenant | mcp-sandbox
-                                     #   | approval | declassify | taint-flow
-                                     #   | evidence | register (item 290)
+    kind: str                        # capability | deny | pair | tenant
+                                     #   | mcp-sandbox | approval | declassify
+                                     #   | taint-flow | evidence | register
     component: str
-    token: str
+    token: str                       # for a pair rule, both tokens joined by
+                                     #   ` + `; every other kind reaches one
     message: str
     why: WhyTrace
     # item 274: the navigable-refusal map for this violation, computed from the
@@ -1882,6 +2045,27 @@ def _deny_matches(token: str, patterns: tuple[str, ...]) -> bool:
     diff read one predicate rather than three spellings of it."""
     return _matches_any(token, patterns) or \
         (token == UNBOUNDED and UNBOUNDED in patterns)
+
+
+def _pair_reach(rule: PairRule, reach: list[Reach]) \
+        -> tuple[Reach, Reach] | None:
+    """The two DISTINCT reaches a component holds that make `rule` fire, or
+    None when it does not hold the pair (issue #2686).
+
+    Each side is every reach matching that side's pattern; the first pair of
+    distinct tokens is the violation. A component whose only match for both
+    patterns is ONE token holds one capability, not the forbidden pair, so it
+    is admitted. Gathering both sides first (rather than taking the first
+    match of `first` and then looking for a different second) matters when a
+    token matches both patterns: another token matching `first` alone can still
+    pair with it."""
+    firsts = [r for r in reach if _matches_any(r.token, (rule.first,))]
+    seconds = [r for r in reach if _matches_any(r.token, (rule.second,))]
+    for a in firsts:
+        for b in seconds:
+            if a.token != b.token:
+                return a, b
+    return None
 
 
 def capability_verdict(policy: Policy, name: str, realms: frozenset[str],
@@ -2353,6 +2537,9 @@ def unpredicted_rules(policy: Policy) -> list[str]:
             for rule in policy.register_rules]
     out += [f"requires idempotent-teardown(strength: {rule.strength})"
             for rule in policy.teardown_rules]
+    # issue #2686: a pair rule reads the component's whole reach, which a
+    # single candidate standing alone does not carry into `predict_refusals`.
+    out += [rule.to_dsl() for rule in policy.pair_rules]
     return out
 
 
@@ -2497,6 +2684,18 @@ def evaluate(policy: Policy, audit: dict,
                     _allow_violation(manifest, name, r, sandbox, "mcp-sandbox",
                                      profile))
 
+        # issue #2686: the per-component pair rule. Each capability may be
+        # reached alone; a component matched by the selector that reaches BOTH
+        # distinct capabilities the rule names is refused. Read over the same
+        # reach set the allow/deny legs above just used.
+        for rule in policy.pair_rules:
+            if not rule.selects(name):
+                continue
+            pair = _pair_reach(rule, reach)
+            if pair is not None:
+                violations.append(
+                    _pair_violation(manifest, name, rule, pair[0], pair[1]))
+
         # item 249, Slice C: a forbidden taint downgrade. Read the origins this
         # component declassifies off the `declassify:` audit surface and refuse
         # any a matching `may not declassify` rule forbids.
@@ -2575,6 +2774,7 @@ def evaluate(policy: Policy, audit: dict,
     # operator is not lulled by a rule that protects nothing.
     _warn_if_taint_rules_are_inert(policy, audit)
     _warn_if_deny_rules_are_inert(policy, audit)
+    _warn_if_pair_rules_are_inert(policy, audit)
     return violations
 
 
@@ -2634,6 +2834,34 @@ def _warn_if_deny_rules_are_inert(policy: Policy, audit: dict) -> None:
             InertDenyPolicyWarning, stacklevel=2)
 
 
+def _warn_if_pair_rules_are_inert(policy: Policy, audit: dict) -> None:
+    """Issue #2686's half of the issue-#1984 fail-open. A pair rule protects
+    only when ONE component reaches both capabilities. Two well-formed patterns
+    can each match a reach somewhere and still never meet in one component, and
+    such a rule enforces exactly like a clean pass. Warn when a rule selected a
+    component in THIS audit and no selected component holds the pair.
+
+    A rule that selects no component here says nothing. That is a policy
+    written for other compositions, not an inert one."""
+    if not policy.pair_rules:
+        return
+    names = _components(audit)
+    reaches = {name: component_reach(audit, name) for name in names}
+    for rule in policy.pair_rules:
+        selected = [name for name in names if rule.selects(name)]
+        if not selected:
+            continue
+        if any(_pair_reach(rule, reaches[name]) for name in selected):
+            continue
+        warnings.warn(
+            f"`{rule.to_dsl()}` refuses nothing: it selected "
+            f"[{', '.join(selected)}], and no selected component reaches both "
+            f"`{rule.first}` and `{rule.second}`. Check the patterns against "
+            f"the reach surface (`revl audit`). An inert pair rule is not a "
+            f"protecting one (issue #2686).",
+            InertPairPolicyWarning, stacklevel=2)
+
+
 def _allow_violation(manifest: dict, name: str, reach: Reach,
                      allow: tuple[str, ...], kind: str,
                      profile=None) -> Violation:
@@ -2668,6 +2896,26 @@ def _deny_violation(manifest: dict, name: str, reach: Reach,
                    steps=_reach_step(manifest, name, reach))
     nav = _deny_navigate(reach, rule, profile)
     return Violation("deny", name, reach.token, message, why, navigate=nav)
+
+
+def _pair_violation(manifest: dict, name: str, rule: PairRule,
+                    first: Reach, second: Reach) -> Violation:
+    """A component holding both capabilities of a pair rule (issue #2686).
+
+    The message names the rule, the component and both capabilities; the
+    why-trace is the two reach chains as co-equal exhibits (a SET, not a path:
+    neither reach causes the other)."""
+    message = (f"policy violation: components matching `{rule.selector}` may "
+               f"not reach `{rule.first}` together with `{rule.second}`, but "
+               f"`{name}` reaches both `{first.token}` and `{second.token}`: "
+               f"one component holding the pair is forbidden; admission "
+               f"refused (boundary policy, issue #2686)")
+    steps = _reach_step(manifest, name, first) + _reach_step(manifest, name,
+                                                             second)
+    why = WhyTrace(kind="policy-authority", subject=name, shape=SET,
+                   steps=steps)
+    return Violation("pair", name, f"{first.token} + {second.token}",
+                     message, why)
 
 
 # ------------------------------------------------ item 274: navigable refusals
