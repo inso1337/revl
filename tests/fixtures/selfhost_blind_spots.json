@@ -20,7 +20,11 @@
     "BEFORE the port and seen to fail."
   ],
   "go": {
-    "blind": {},
+    "blind": {
+      "The frontend lowers the `var` keyword to a `step` of `let` with `mutable=true`, so no corpus document can spell a `step=var` step. The reference's `_emit_method_body` renders both kinds (`s in (\"let\", \"var\")`), and `selfhost/emit_go.rvl` mirrors that arm for the provide-method slice, so the construct is mirrored rather than a port gap. It is reachable only from pre-lowered or hand-written IR; the live and combined documents this slice carries all bind through `step=let`.": [
+        "step=var"
+      ]
+    },
     "unported": {
       "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method opens a lexical scope (`uiScope`, `revlUiCross`). It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/ui_transaction/exec_test.go.": [
         "key=<activation>"
@@ -60,7 +64,6 @@
         "step=stream-iter",
         "step=timer",
         "step=unload",
-        "step=var",
         "subscribe=<true>"
       ],
       "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err` from either). A user variant can still declare its own case named `Ok`: backends/java/scenarios/runtime_values.rvl's `Outcome` does, and that document joined the go corpus with issue #106's fifth slice, so `name=Ok` left this list.": [

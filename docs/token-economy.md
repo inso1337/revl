@@ -1,9 +1,13 @@
 # The token economy — make revl the cheapest language for an agent to write
 
-**Status:** output metric + one compound verb implemented (roadmap item 50); the
-benchmark now records provider-reported input tokens beside model turns.
+**Status:** generation and response metrics + one compound verb implemented
+(roadmap item 50); the benchmark now records provider-reported input tokens
+beside model turns.
 - **Metric:** `bench/tokens.py`, committed snapshot `bench/results/tokens-to-green.md`,
   pinned by `tests/test_tokens_to_green.py`.
+- **Response metric:** `bench/mcp_response_size.py`, pinned by
+  `tests/test_mcp_response_size.py`: how much text an MCP verb's answer puts
+  back into the agent's context.
 - **Compound verb:** `revl_ship` in `src/revl/mcp/ship.py`, registered in
   `src/revl/mcp/server.py`, pinned by `tests/test_mcp_ship.py`.
 - **Deferred this wave:** the terse authoring form (needs the parser — owned by
@@ -50,16 +54,24 @@ motivated the instrumentation, but it does not link a committed raw run
 artifact. This document does not carry forward an unverified per-turn baseline
 or reduction claim.
 
-There are two halves to the spend, and the metric names both:
+There are three measured halves to the spend:
 
-- **Generation side** — the tokens the model emits to write the component.
-  That is what tokens-to-green measures directly, and it is the *small* half.
-- **Protocol side** — the tokens the agent spends *driving the MCP surface* to
+- **Generation side**: the tokens the model emits to write the component. That
+  is what tokens-to-green measures directly, and it is the *small* half.
+- **Protocol side**: the tokens the agent spends *driving the MCP surface* to
   ship that component. `bench/results/token-surface-audit.md` ranks these:
   re-sending source the session already holds, and walking chatty verb
   sequences that take three or four round-trips to express one intent. That is
-  the large, and until now unmeasured, half — and it is what the compound verb
-  below attacks.
+  the large half, and it is what the compound verb below attacks.
+- **Response side**: the text each verb's answer puts back into the agent's
+  context, paid again as input tokens on every later turn of the session. A
+  verbose refusal, a full IR echo or a long diagnostic list is easy to miss
+  until it is measured: `bench/mcp_response_size.py` runs a fixed scripted
+  session (a passing `revl_ship`, a refused one, a `revl_plan`) through the
+  real dispatcher and reports per-call and per-verb (count, median, max) sizes
+  in the same proxy tokens. `tests/test_mcp_response_size.py` pins one ceiling
+  per scripted call at its measured size, so a response that grows has to raise
+  the ceiling in the same diff.
 
 ---
 

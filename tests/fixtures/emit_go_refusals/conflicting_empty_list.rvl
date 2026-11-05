@@ -1,0 +1,18 @@
+// An untyped `[]` returned as `List[Int]` and handed to a `List[Str]`
+// parameter at once. The frontend admits it, and the go reference REFUSES it
+// by name: no one Go type satisfies both flows (issue #2898).
+//
+// This is the conflicting-targets refusal, not the no-target one: both flows
+// are concrete List types, so `_empty_list_type` reaches its two-evidence
+// branch and has to reject the document rather than pick whichever flow the
+// walk saw first. The refusal also covers the second offer to a binding, which
+// is why the `targets` list has to keep every distinct declared type instead
+// of only the first.
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS.
+fn takes(xs: List[Str]) -> Bool { return xs.length() == 0 }
+fn c() -> List[Int] {
+  var out = []
+  let e = takes(out)
+  return out
+}

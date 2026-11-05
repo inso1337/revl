@@ -7019,9 +7019,13 @@ class _FlowHints(dict):
         return self.keys.get(id(step), step.get("name"))
 
     def offer(self, name, declared) -> bool:
-        """Record `declared` as a target of `name`; True if it is new."""
-        if not (isinstance(name, str) and isinstance(declared, str)):
-            return False
+        """Record `declared` as a target of `name`; True if it is new.
+
+        `name` and `declared` are always strings: every caller reads them off
+        an IR node's `name`/`id` or a declared type, and each one checks that
+        before offering. A guard here for a non-string never ran, which the
+        line-coverage ledger recorded as an unreachable statement.
+        """
         seen = self.targets.setdefault(name, [])
         if declared not in seen:
             seen.append(declared)

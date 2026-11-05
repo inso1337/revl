@@ -936,11 +936,15 @@ def revl_declare_model_decision(**members) -> None:
 
     Called from inside the host body that performs the completion, which is the
     only place that knows what this names: which weights answered
-    (`model_digest`), on what host profile (`placement_digest`, item 538's own
-    digest, opaque to revl), how the prompt was bound (`prompt_binding`), what
-    the input carried (`origins`), what the candidates were and which was taken
-    (`candidates`, `chosen`), how it was asked (`sampling`), under which rule
-    (`policy_digest`, `fallback_depth`) and where it ran (`role`, `residence`).
+    (`model_digest`, with `model_digest_basis` saying whether that digest was
+    checked against the loaded bytes or only declared), on what host profile
+    (`placement_digest`, item 538's own digest, opaque to revl), how the prompt
+    was bound (`prompt_binding`) and from which template
+    (`template_digest`, or `template_absence_reason`), what the input carried
+    (`origins`), what the candidates were and which was taken (`candidates`,
+    `chosen`), how it was asked (`sampling`), under which rule
+    (`policy_digest`), how far down the ladder and why (`fallback_depth`,
+    `fallback_reason`), and where it ran (`role`, `residence`).
 
     It may NOT name `component`, `step_index` or `outcome`: the crossing is the
     one the recorder just made and the outcome is the one the validation seam
@@ -7452,14 +7456,23 @@ class Subscription:
         closing here closes it, each link closes the one above, and closing a
         merge is what detaches it from both sources. The PROVIDERS are untouched:
         each is closed by its own bracket, which keeps the LIFO close order the
-        core guarantee is pinned on."""
+        core guarantee is pinned on.
+
+        Items still buffered here are DISCARDED with the subscription: the
+        consumer is gone, so there is nobody left to take them. That drop is
+        recorded (`stream.discard N`), not silent, because the provider was
+        told each of them was accepted (issue #2711)."""
         if self._closed:
             return False
+        discarded = len(self._buffer)
         self._closed = True
         self._signal()   # item 416b: resolve a parked `next` as `Closed`
         self._cancel_drain()
         self._source._detach(self)
         _record("stream.close")
+        if discarded:
+            _record(f"stream.discard {discarded}")
+            self._buffer.clear()
         if self._source._derived:
             self._source.close()
         return True

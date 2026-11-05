@@ -12,11 +12,11 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  update  version
-contract  erase-report  retention-receipt  plan  apply  undo  canary
-promote  query  fmt  quarantine  analyze  test  mcp  gen-types  import
-export  sourcemap  serve  run  dev  recover  act  estop  slo  branch
-compare  replay  why  metrics  trace  profile  pool  attest  dash
-repair  bundle  emit  verify  deploy  deploy-admit  truc
+migrate  contract  erase-report  retention-receipt  plan  apply  undo
+canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
+import  export  sourcemap  serve  run  dev  recover  act  estop  slo
+branch  compare  replay  why  metrics  trace  profile  pool  attest
+dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -755,6 +755,55 @@ compositions (roadmap item 123, [revl-diff.md](revl-diff.md)).
 
 ```bash
 revl diff before.ir.json after.rvl
+```
+
+### `revl migrate`
+
+Plan one component version change against the real consumers in a composition
+(issue #2685, first slice). Read-only: it joins the semantic diff, the derived
+semver bump, the consumer compatibility predicate and the declared state
+hand-off, and reports what a migration would require. It compiles the three
+inputs, admits nothing, swaps nothing and writes no file.
+
+- `OLD` - the old version of the component: a compiled composition document
+  (`revl compile -o`) or a `.rvl` source (required).
+- `NEW` - the new version, same accepted forms (required).
+- `--against COMPOSITION` - the compiled composition whose real consumers
+  decide compatibility (required). It must carry each consumer's required
+  service (`requires` as a `{key: service}` map), which a compiled composition
+  does; an `revl audit --json` report carries only key lists and is refused. It
+  must also still run the OLD version: a composition already compiled against
+  NEW is refused, because its consumers no longer pin the interface the plan
+  is asking about.
+- `--json` - machine-readable plan. Exit status is 0 whenever a plan is
+  produced; unreadable or insufficient inputs are nonzero. The classification
+  travels in the plan, so a CI gate can decide on `classification` without this
+  command taking a side.
+
+The plan reports the changed provisions, the derived bump, each real consumer,
+the authority delta and the state hand-off. Classification is read off those
+facts only:
+
+| classification | meaning |
+| --- | --- |
+| `refused` | a real consumer cannot move (its pinned shape broke) or the declared state hand-off cannot cross the swap |
+| `needs-approval` | the new version widens the measured authority surface (a new crossing or host backend, a weakened reach, a widened emission capability or emission ceiling, a dropped or weakened recovery), a consumer needs an authored adapter, or the successor drops the predecessor's state |
+| `needs-handoff` | the successor declares a compatible state hand-off; live state must cross the swap |
+| `needs-canary` | every real consumer can move, but the interface changed; exercise it on a canary slice first |
+| `safe` | no consumer work, no authority widening, no state crossing |
+
+Each consumer is `movable`, `needs-adapter` (an adapter is synthesizable, see
+`revl adapt`) or `blocked`, with the failing service difference when one
+exists. The adapter check uses the predicate's default opt-in map; an authored
+opt-in is supplied through `revl adapt --adapt`. The plan also reports whether
+the old version is removable (no consumer is still pinned to it) and whether a
+rollback is proven possible. `realm` is the empty string for the shared realm.
+A plan is not a gate: policy rules such as "refuse every widening" are a later
+slice.
+
+```bash
+revl migrate cache_v1.rvl cache_v2.rvl --against production.json
+revl migrate old.ir.json new.ir.json --against comp.json --json
 ```
 
 ### `revl version`
