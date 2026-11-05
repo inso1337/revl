@@ -472,8 +472,9 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   let tm = type_map(name)
   if (tm != "") { return box(tm, boxed) }
   // `Any` has no `type_map` entry; it is the open type, `Object` in every
-  // position (issue #2303).
-  if (name == "Any") { return "Object" }
+  // position (issue #2303). `Value` (stdlib/value.rvl) is the named
+  // erased-dynamic builtin and takes the same erasure (issue #3019).
+  if (name == "Any" || name == "Value") { return "Object" }
   if (name.indexOf("[") >= 0) {
     let lb = name.indexOf("[")
     let base = name.slice(0, lb)
