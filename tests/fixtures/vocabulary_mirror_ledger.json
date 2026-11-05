@@ -755,16 +755,18 @@
     {
       "sites": [
         "tools/evolution_controller.py::measured_diff",
+        "tools/evolution_progress.py::changed_paths",
         "tools/evolution_reward.py::changed_files"
       ],
       "tokens": [
         "--exclude-standard",
         "--name-only",
+        "--no-renames",
         "--others",
         "diff",
         "ls-files"
       ],
-      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
+      "note": "Three copies of the changed-files listing, one in the controller, one in the reward and one in the progress counter. Near-clones down to the git argument vector, and the three tools are run and imported separately, so the copies are kept in step here rather than by an import. A flag added to one must be added to all: --no-renames is what keeps a renamed file visible on both sides, so a move out of a domain or a scope is measured."
     },
     {
       "sites": [

@@ -81,6 +81,11 @@ failure with a NAMED code:
     the diff reaches the admission kernel  -> KERNEL_INTERSECTION
     a non-empty capability/taint/budget or
     retention diff                         -> AUTHORITY_WIDENED
+    no `applies_to` tag                    -> APPLIES_TO_MISSING
+    a domain diff outside its domain       -> DOMAIN_ESCAPE
+    a domain change promoted to the shared
+    realm or the default composition       -> DOMAIN_PROMOTED
+    an unknown promotion target            -> PROMOTION_INVALID
 
 `AUTHORITY_WIDENED` and `KERNEL_INTERSECTION` are separate codes on purpose.
 Issue #1222's exit test asks for a refusal BY NAME on a non-empty diff, and a
@@ -112,6 +117,37 @@ than loop. A proposal therefore carries `attempt` and `budget`, and the
 proposal that declares no budget at all (`UNBOUNDED_RETRY`). A missing budget
 is the unbounded case, so it fails closed rather than defaulting to a number
 this module invented.
+
+WHERE A CHANGE APPLIES
+----------------------
+Issue #2807. A proposal that does not say whether it applies everywhere or only
+in the domain where it was learned can be promoted as if it were general, and a
+scoped lesson applied globally is a regression nobody declared. So a proposal
+carries a REQUIRED `applies_to` tag, with no default:
+
+    "applies_to": "invariant"
+    "applies_to": {"domain": ["<component path prefix>", ...]}
+
+`invariant` says the change is meant to hold everywhere. `domain` names the
+components the change is for; a component is named by the path prefix its files
+live under, because the changed-file set is the controller's measured unit (a
+component whose tests live in a sibling tree lists that prefix too). The
+tag is the PROPOSER's declaration, and it is not trusted: the controller
+attributes every path in the MEASURED diff to the declared domain (or to the
+shared part outside it) and refuses a domain-scoped proposal whose diff leaves
+it, naming the escaping paths (`DOMAIN_ESCAPE`). The `changed` field is never
+read for this, for the same reason `DIFF_DISAGREES` exists.
+
+A proposal also names its `promotion` target: `candidate` (the tree it
+produced, which is the default), `shared` (the shared realm) or `default` (the
+default composition). A domain-scoped change promoted into the shared realm or
+the default composition is refused by name (`DOMAIN_PROMOTED`) and routed to a
+human, as a fenced diff is: the shared part is where a scoped lesson would
+apply everywhere, which is the regression the tag exists to refuse.
+
+The tag carries no authority. An `invariant` change that widens a capability is
+refused by the authority precondition exactly as before: `applies_to` adds a
+refusal direction, it does not earn a permission.
 
 WHAT SLICE 1 DOES NOT DO
 ------------------------
@@ -182,8 +218,8 @@ STAGES = PRECONDITIONS + MEASURED
 SUPPLIED_BY = {
     "trigger": "a gap record naming the repository artifact it came from "
                "(item 535, tools/evolve_curriculum.py)",
-    "propose": "the candidate record and its retry budget (item 536's "
-               "Candidate{tree, base, scope})",
+    "propose": "the candidate record, its retry budget and its `applies_to` "
+               "tag (item 536's Candidate{tree, base, scope}; issue #2807)",
     "admit": "the standalone self-extension compile and the FORBIDDEN_GRANT "
              "rule (item 334, Gate.propose in src/revl/gate.py)",
     "authority": "the attenuation product plus this module's fence and kernel "
@@ -322,12 +358,89 @@ def not_reached(component: str, blocker: str) -> Verdict:
 # controller does not read the candidate's account of itself" structural rather
 # than a convention: a key that is not here never reaches a check, whatever it
 # says. Item 536 uses the same mechanism and reports the dropped keys back.
-RECORD_KEYS = ("tree", "base", "scope", "trigger", "granted", "attempt",
-               "budget", "changed", "stages")
+RECORD_KEYS = ("tree", "base", "scope", "applies_to", "promotion", "trigger",
+               "granted", "attempt", "budget", "changed", "stages")
 
 # The three that item 536's `Candidate` carries. Kept as a named subset so the
 # two lanes can be held to the same shape by a test.
 CANDIDATE_KEYS = ("tree", "base", "scope")
+
+# Issue #2807: where a change applies. `invariant` applies everywhere; `domain`
+# names the components (their path prefixes) the change is for. The tag is
+# required and has no default: an untagged proposal does not say whether its
+# lesson is global or scoped, and a scoped lesson promoted as general is the
+# regression the tag exists to refuse.
+APPLIES_TO_KINDS = ("invariant", "domain")
+
+# Where a proposal wants its change to land. `candidate` is the tree the
+# proposal produced (the default, and not a global target). The other two are
+# the shared part: the shared realm and the default composition. Those are the
+# targets a domain-scoped change may not reach.
+PROMOTION_TARGETS = ("candidate", "shared", "default")
+GLOBAL_PROMOTION_TARGETS = ("shared", "default")
+
+
+@dataclass(frozen=True)
+class AppliesTo:
+    """Where a proposal's change is meant to apply (issue #2807).
+
+    The declaration is the proposer's and is never trusted on its own: the
+    controller reads it, then checks the MEASURED diff against it. `domains`
+    are component path prefixes and are matched segment-wise, the same rule the
+    fence and the kernel use, so `src/svc` does not match `src/svc2`.
+    """
+
+    kind: str
+    domains: tuple = ()
+
+    def __post_init__(self):
+        if self.kind not in APPLIES_TO_KINDS:
+            raise ValueError(
+                f"`applies_to` kind must be one of {APPLIES_TO_KINDS}, not "
+                f"{self.kind!r}")
+        if self.kind == "domain" and not self.domains:
+            raise ValueError(
+                "`applies_to` of kind `domain` needs at least one component")
+
+    def contains(self, path: str) -> bool:
+        if self.kind == "invariant":
+            return True
+        return any(_under(path, domain) for domain in self.domains)
+
+    def as_dict(self) -> object:
+        """The tag in its recorded, hand-written form."""
+        if self.kind == "invariant":
+            return "invariant"
+        return {"domain": list(self.domains)}
+
+
+def parse_applies_to(value) -> AppliesTo:
+    """Parse the required `applies_to` tag, refusing rather than guessing.
+
+    Only two shapes exist. `"invariant"` and `{"domain": [...]}` with a
+    non-empty list of component path prefixes. A missing tag is not parsed
+    here; the `propose` stage refuses it by name so the verdict records it.
+    """
+    if value == "invariant":
+        return AppliesTo("invariant")
+    if isinstance(value, dict):
+        if set(value) != {"domain"}:
+            raise ValueError(
+                'proposal `applies_to` object must carry exactly one key, '
+                '`domain`')
+        domains = value["domain"]
+        if not isinstance(domains, (list, tuple)) or not domains:
+            raise ValueError(
+                'proposal `applies_to.domain` must be a non-empty list of '
+                'component path prefixes')
+        if any(not isinstance(d, str) or not d.strip() for d in domains):
+            raise ValueError(
+                'proposal `applies_to.domain` entries must be non-empty '
+                'strings')
+        return AppliesTo("domain", tuple(domains))
+    raise ValueError(
+        'proposal `applies_to` must be `invariant` or '
+        '{"domain": [<component>...]}')
 
 
 @dataclass(frozen=True)
@@ -351,6 +464,8 @@ class Proposal:
 
     candidate: Candidate
     trigger: dict = field(default_factory=dict)
+    applies_to: object = None
+    promotion: str = "candidate"
     granted: tuple = ()
     attempt: object = None
     budget: object = None
@@ -373,6 +488,12 @@ def load_proposal(record: dict) -> Proposal:
     cannot be judged, and an unjudgeable proposal is not a promotable one. The
     three are exactly item 536's required keys, so a candidate record written
     for the reward scorer is a valid proposal record here.
+
+    The `applies_to` tag (issue #2807) is required too, but a MISSING tag is
+    left to the `propose` stage so the refusal is recorded by name with a code
+    (`APPLIES_TO_MISSING`) rather than raised out of the loader. A tag of the
+    wrong SHAPE cannot be read at all, so it is refused here, as a malformed
+    `scope` is.
     """
     missing = [k for k in CANDIDATE_KEYS if k not in record]
     if missing:
@@ -381,6 +502,13 @@ def load_proposal(record: dict) -> Proposal:
     scope = record["scope"]
     if not isinstance(scope, (list, tuple)):
         raise ValueError("proposal `scope` must be a list of path globs")
+    raw_applies = record.get("applies_to")
+    applies_to = None if raw_applies is None else parse_applies_to(raw_applies)
+    promotion = record.get("promotion", "candidate")
+    if not isinstance(promotion, str) or not promotion:
+        raise ValueError(
+            "proposal `promotion` must name a target: "
+            + ", ".join(PROMOTION_TARGETS))
     stages = record.get("stages") or {}
     if not isinstance(stages, dict):
         raise ValueError("proposal `stages` must be an object keyed by stage name")
@@ -402,6 +530,8 @@ def load_proposal(record: dict) -> Proposal:
     return Proposal(
         candidate=candidate,
         trigger=dict(trigger),
+        applies_to=applies_to,
+        promotion=promotion,
         granted=tuple(str(g) for g in granted),
         attempt=record.get("attempt"),
         budget=record.get("budget"),
@@ -432,12 +562,14 @@ def measured_diff(proposal: Proposal):
 
     Committed and uncommitted changes both count, because a proposal is judged
     on the tree it produced and not on how tidily it was committed. This is the
-    same read `tools/evolution_reward.py` performs for its `scope` component.
+    same read `tools/evolution_reward.py` performs for its `scope` component:
+    `--no-renames` makes a rename report the removal as a deletion and the
+    arrival as an addition, so both paths are measured.
     """
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", proposal.base])
+    ok, out = _git(tree, ["diff", "--no-renames", "--name-only", proposal.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -594,13 +726,19 @@ def judge_trigger(proposal: Proposal) -> Verdict:
 
 
 def judge_propose(proposal: Proposal) -> Verdict:
-    """The candidate record, its scope, and the TERMINATION obligation.
+    """The candidate record, its scope, its `applies_to` tag and the
+    TERMINATION obligation.
 
     Item 520: a proposal that cannot reach a verdict halts rather than loops.
     That is a proof obligation about the loop, and the checkable projection of
     it onto one proposal is the retry budget. A proposal with no declared
     budget is the unbounded case and fails closed; a proposal past its budget
     HALTS with a named code instead of being handed back to the proposer.
+
+    Issue #2807 makes `applies_to` required with no default. An untagged
+    proposal does not say whether its change is global or scoped, and a
+    proposal whose applicability is unknown cannot be refused for escaping a
+    domain it never named.
     """
     ok, record = _record_for(proposal, "propose")
     if not ok:
@@ -610,6 +748,14 @@ def judge_propose(proposal: Proposal) -> Verdict:
             "propose", "UNSCOPED",
             "the proposal declared no scope, so nothing bounds what it may "
             "change. An unbounded scope cannot be satisfied and is not a pass")
+    if proposal.applies_to is None:
+        return failed(
+            "propose", "APPLIES_TO_MISSING",
+            "the proposal declares no `applies_to` tag, so it does not say "
+            "whether the change applies everywhere or only in the domain where "
+            "it was learned. A scoped lesson promoted as if it were general is "
+            "a regression nobody declared, so an untagged proposal cannot be "
+            "judged (issue #2807)", ())
     budget = proposal.budget
     if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1:
         return failed(
@@ -655,6 +801,12 @@ def judge_admit(proposal: Proposal) -> Verdict:
     by a future adapter), and a rule enforced at only one of two entry points
     is a rule with a way around it. A proposal that DID pass through
     `Gate.propose` has already met the stronger form.
+
+    Issue #2807's third slice is checked here too: a domain-scoped change whose
+    promotion target is the shared realm or the default composition is refused
+    by name. The target is the one thing a promotion cannot be measured from,
+    so it is checked against the tag and the route to a human is the refusal,
+    exactly as a fenced diff is routed rather than judged.
     """
     forbidden = sorted(set(proposal.granted) & set(DECIDER_SERVICES))
     if forbidden:
@@ -667,6 +819,31 @@ def judge_admit(proposal: Proposal) -> Verdict:
             f"src/revl/gate.py). Re-entrant propose is deferred and this rule "
             f"enforces it",
             (f"granted={';'.join(proposal.granted)}",))
+    applies = proposal.applies_to
+    if proposal.promotion not in PROMOTION_TARGETS:
+        return failed(
+            "admit", "PROMOTION_INVALID",
+            f"the proposal names `{proposal.promotion}` as its promotion "
+            f"target, which is not one of {', '.join(PROMOTION_TARGETS)}. An "
+            f"unknown target cannot be checked against the `applies_to` tag, "
+            f"and this lifecycle does not invent a default for it",
+            ("applies_to="
+             + (json.dumps(applies.as_dict()) if applies is not None
+                else "missing"),
+             f"promotion={proposal.promotion}"))
+    if (applies is not None and applies.kind == "domain"
+            and proposal.promotion in GLOBAL_PROMOTION_TARGETS):
+        return failed(
+            "admit", "DOMAIN_PROMOTED",
+            f"the proposal applies only inside the domain(s) "
+            f"{', '.join(applies.domains)} and names "
+            f"`{proposal.promotion}` as its promotion target. A domain-scoped "
+            f"change promoted into the shared realm or the default composition "
+            f"would apply its lesson everywhere, which is the regression the "
+            f"`applies_to` tag exists to refuse (issue #2807). It is routed to "
+            f"a human, not promoted",
+            (f"applies_to={json.dumps(applies.as_dict())}",
+             f"promotion={proposal.promotion}"))
     ok, record = _record_for(proposal, "admit")
     if not ok:
         return record
@@ -694,6 +871,11 @@ def judge_authority(proposal: Proposal) -> Verdict:
       4. THE AXES. A non-empty capability, taint, budget, realm or retention
          diff is refused by name, per issue #1222's exit test. An axis that is
          absent from the record counts as moved, not as empty.
+      5. THE DOMAIN. A domain-scoped proposal whose measured diff leaves its
+         declared domain is refused by name (`DOMAIN_ESCAPE`), per issue
+         #2807. The `changed` field is not read for this: the tag is checked
+         against the measured set, never against the candidate's account of
+         itself.
     """
     ok, record = _record_for(proposal, "authority")
     if not ok:
@@ -717,7 +899,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
                 "the declared changed-file set understates the tree by "
                 + str(len(understated)) + " path(s): "
                 + ", ".join(understated[:6]),
-                (f"git diff --name-only {proposal.base}",))
+                (f"git diff --no-renames --name-only {proposal.base}",))
 
     hits = fence_hits(measured)
     if hits:
@@ -754,6 +936,24 @@ def judge_authority(proposal: Proposal) -> Verdict:
               "543, issue #1222). Refused before shadow and canary are read",
             tuple(record.get("evidence") or ()))
 
+    if proposal.applies_to.kind == "domain":
+        escaped = sorted(p for p in measured
+                         if not proposal.applies_to.contains(p))
+        if escaped:
+            more = (f" (+{len(escaped) - 6} more)"
+                    if len(escaped) > 6 else "")
+            return failed(
+                "authority", "DOMAIN_ESCAPE",
+                "the proposal applies only inside the domain(s) "
+                + ", ".join(proposal.applies_to.domains)
+                + " and its measured diff leaves them: "
+                + ", ".join(escaped[:6]) + more
+                + ". A scoped lesson applied outside its domain is a change "
+                  "nobody declared, so this is routed to a human, not "
+                  "promoted (issue #2807)",
+                (f"applies_to={json.dumps(proposal.applies_to.as_dict())}",
+                 f"git diff --no-renames --name-only {proposal.base}"))
+
     base = _plain("authority", record)
     if not base.verified:
         return base
@@ -761,7 +961,7 @@ def judge_authority(proposal: Proposal) -> Verdict:
         "authority",
         f"authority diff empty on all {len(AUTHORITY_AXES)} axes; "
         f"{len(measured)} measured path(s), none in the fence or the kernel",
-        base.evidence + (f"git diff --name-only {proposal.base}",
+        base.evidence + (f"git diff --no-renames --name-only {proposal.base}",
                          f"axes={';'.join(AUTHORITY_AXES)}"))
 
 
@@ -823,6 +1023,9 @@ class LifecycleVerdict:
             "supplied_by": dict(SUPPLIED_BY),
             "base": self.proposal.base,
             "scope": list(self.proposal.candidate.scope),
+            "applies_to": (None if self.proposal.applies_to is None
+                           else self.proposal.applies_to.as_dict()),
+            "promotion": self.proposal.promotion,
             "attempt": self.proposal.attempt,
             "budget": self.proposal.budget,
             "prose_ignored": list(self.proposal.candidate.prose_ignored),
@@ -830,7 +1033,13 @@ class LifecycleVerdict:
 
     def render(self) -> str:
         lines = [f"evolution controller over {self.proposal.tree}",
-                 f"base {self.proposal.base}", ""]
+                 f"base {self.proposal.base}"]
+        if self.proposal.applies_to is not None:
+            lines.append(
+                "applies to "
+                + json.dumps(self.proposal.applies_to.as_dict())
+                + f"; promotion target `{self.proposal.promotion}`")
+        lines.append("")
         for v in self.verdicts:
             kind = "precondition" if v.component in PRECONDITIONS else "measured"
             mark = "ok  " if v.verified else "FAIL"
