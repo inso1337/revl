@@ -936,11 +936,15 @@ def revl_declare_model_decision(**members) -> None:
 
     Called from inside the host body that performs the completion, which is the
     only place that knows what this names: which weights answered
-    (`model_digest`), on what host profile (`placement_digest`, item 538's own
-    digest, opaque to revl), how the prompt was bound (`prompt_binding`), what
-    the input carried (`origins`), what the candidates were and which was taken
-    (`candidates`, `chosen`), how it was asked (`sampling`), under which rule
-    (`policy_digest`, `fallback_depth`) and where it ran (`role`, `residence`).
+    (`model_digest`, with `model_digest_basis` saying whether that digest was
+    checked against the loaded bytes or only declared), on what host profile
+    (`placement_digest`, item 538's own digest, opaque to revl), how the prompt
+    was bound (`prompt_binding`) and from which template
+    (`template_digest`, or `template_absence_reason`), what the input carried
+    (`origins`), what the candidates were and which was taken (`candidates`,
+    `chosen`), how it was asked (`sampling`), under which rule
+    (`policy_digest`), how far down the ladder and why (`fallback_depth`,
+    `fallback_reason`), and where it ran (`role`, `residence`).
 
     It may NOT name `component`, `step_index` or `outcome`: the crossing is the
     one the recorder just made and the outcome is the one the validation seam
