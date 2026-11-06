@@ -187,6 +187,23 @@ def _manifest_rows(manifest, what: str) -> dict:
     return rows
 
 
+def normalize_manifest(manifest) -> dict:
+    """The admitted manifest as `{role: {name: digest}}`, refusing anything that
+    is not the shape an identity statement has to have.
+
+    `detect` takes the same shape, but a producer that builds a reading has to
+    hold the admitted rows on their own before there is a reading to compare
+    them against (the monitor that re-measures local subjects, for one). This is
+    the one validator both paths use, so a producer cannot admit a manifest
+    `detect` would later refuse.
+    """
+    rows = _manifest_rows(manifest, "the admitted manifest")
+    normalized = {}
+    for (role, name), value in rows.items():
+        normalized.setdefault(role, {})[name] = value
+    return normalized
+
+
 def _live_reading(live) -> tuple:
     """`(values, reasons)` from a live reading.
 

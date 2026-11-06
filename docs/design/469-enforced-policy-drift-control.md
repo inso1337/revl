@@ -1,8 +1,10 @@
 # 469: Enforced policy-drift control
 
 Design note for roadmap item 469 (issue #821). It records the spike that pins
-the gap, the one slice that lands with this note, and the two follow-ups that
-stay design only until they are scoped on their own.
+the gap, the pure decision half that landed with it, and the running half that
+issue #2758 now lands for the subjects whose bytes are local: the monitor that
+re-measures them, the durable record, and the two responses that narrow
+authority.
 
 Item 127 makes admission a hash-level identity statement: a signed attestation
 binds the composition, the checker, the ruleset and the published dossiers to
@@ -156,72 +158,96 @@ counts and the policy that was in force, so a post-mortem can ask what the
 control knew and what it was configured to do. `drift_records(records)` indexes
 them in recorded order, and `render(report, decision)` is the operator's view.
 
-This slice is the decision half only. It names the monitor that produces its
-input and the actuators that carry its output out, and it does neither.
+This slice is the decision half. The running half below, landed by issue #2758,
+re-measures the local subjects and carries out the two responses that narrow
+authority.
 
-## Follow-up 1: the re-measurement, and the record it writes - NOT LANDED
+## The running half, part 1: the re-measurement and the record it writes - LANDED for local subjects
 
-The item's Exit line needs an induced hash drift to be DETECTED. That needs a
-producer, and it is a separate slice because it is a runtime concern:
+`src/revl/drift_monitor.py` is the monitor, tested by
+`tests/test_2758_drift_monitor.py`. It keeps the same boundary as the pure half:
+the verdict is still `drift.detect`, the response is still `drift.resolve`, and
+the record is still `drift.wal_record`. Nothing in it re-argues a decision.
 
-* the admitted manifest of a running activation has to be persisted where the
-  monitor can read it, and it already is, in three parts: the composition row
-  from `attest.canonical_hash` on the admitted IR, the artifact rows from
-  `deploy.artifact_digest` per emitted tree, and the generation from the WAL
-  header (`wal.read_wal(path)["header"]["generation"]`), which is what makes two
-  drift records comparable;
-* the cadence, and the per-role re-measurement: for `dependency` and `policy`
-  the digest of the bundled bytes, for `model` and `tool` the artifact tree the
-  tier actually loaded (again `deploy.artifact_digest`, which is why this control
-  reuses it rather than inventing a second tree hash), and for `peer` the peer's
-  attested composition hash, which a verifiable peer pool already carries;
-* an UNMEASURABLE subject has to be reported as unverified rather than omitted,
-  which means the monitor's reading has to distinguish "measured and absent"
-  (`None`) from "not measured" (key absent). `detect` takes that distinction as
-  its input; producing it honestly is the monitor's job.
+The subjects are DECLARED once, at admission, as `{role, name, kind, path}`, and
+`drift_monitor.admit` derives the manifest from the bytes rather than asking an
+author to type a hash they cannot type. This slice measures the subjects whose
+bytes are local:
 
-Where the record goes is open in one respect worth stating: `wal.py` is a
-READ-ONLY module, and `drift.wal_record` returns a record rather than writing
-one. The writer is the runtime's, next to the effects and model-decision
-records, and it has to seal a torn tail before appending the way
-`_deploy_participant._raw` does (`_seal_torn_tail`, item 535).
+* a `tool` is an emitted artifact *tree*, hashed by
+  `deploy.artifact_digest`, the same tree digest a deploy receiver recomputes;
+* a `policy` is a file, hashed by `drift.digest`.
 
-## Follow-up 2: the declaration, and the actuators - NOT LANDED
+A later pass re-reads the same declarations, builds the reading, and calls the
+verdict. The reading keeps the distinction the `unverified` row depends on:
 
-The `driftControl` policy has to be DECLARED somewhere. Stage 1 fixes the shape
-it has (`onDrift`, `byRole`, `onUnverified`, and the fail-closed defaults), so
-what remains is where the key lives and how it is parsed:
+* a declared path that is gone is `None`, the measured absence `detect` reads as
+  `missing` (drift, suspend by default);
+* a path that exists but cannot be measured (a symlink, an empty tree, an
+  unreadable file, a tree replaced by a file) is left OUT of the reading and
+  carries its cause, so the subject is `unverified` and never a match;
+* an admitted subject with no declaration at all - a hosted model that exposes no
+  hash, for instance - is also left out and reported unverified with the reason,
+  so the monitor says so loudly instead of passing it.
 
-* it belongs to the admitted COMPOSITION, not to a `revl.policy.Policy`
-  document. A `Policy` is the boundary document `admission.admit_under_policy`
-  enforces (`src/revl/admission.py`, line 455) and holds no IR; what
-  `revl attest` signs and `revl load` admits is the composition. Item 469 says
-  "policy" in the sense of the whole declared policy of a composition, which is
-  the IR plus its boundary policy, so the control is declared on the composition
-  and travels with the hashes it protects;
-* the source-level clause and the JSON key that fill it are open, and should
-  follow the JSON convention the policy parser already uses (`policy._parse_json`
-  accepts a camelCase key with a snake_case fallback). The manifest the control
-  compares against should be DERIVED rather than hand-written wherever possible
-  (the composition hash is not something an author can type), which is the
-  design question the clause has to answer;
+`drift_monitor.run_pass` writes one `drift-detected` record for every
+non-matched pass (a matched pass writes nothing, so a loop does not fill the
+WAL with confirmations). The record is the `drift.wal_record` shape plus
+`actuation` (what was carried out and whether it is in force) and `monitor`
+(what was and was not measured), and it is appended with `wal.seal_torn_tail`
+first so an interrupted write is never merged with a new record (§535).
 
-and the four responses have to be carried out:
+What remains of this part: the cadence loop, persisting the admitted manifest of
+a live activation where the monitor reads it (the composition row from
+`attest.canonical_hash`, the artifact rows from `deploy.artifact_digest`, the
+generation from the WAL header), and the per-role measurement for `model`,
+`dependency` and `peer` (a peer's attested composition hash, a model that
+exposes no hash staying unverified). The WAL is single-writer: a host that
+shares a live run's effect WAL has to serialize the monitor with that writer,
+and a dedicated drift WAL carrying the run generation is the recommended shape.
 
-* `read-only` narrows the running composition's effect authority. There is no
-  single switch for this today; the honest first actuator is the approval and
-  capability path a downgrade would refuse at;
-* `suspend` arms the durable operator halt (`estop.latch_path`, `estop.read_latch`)
-  and inherits its per-tier honesty: `estop.tier_estop_status` already reports
-  which tiers honour a latch and which are `static`, and a suspension of a
-  `wasm` composition has to say so rather than claim a halt it cannot deliver;
-* `re-admit` re-runs the admission gate, which is what makes the response
-  recoverable at all;
-* `rollback` deploys the pinned artifact, and the pinned target `resolve` refuses
-  to proceed without is exactly the `deploy` bundle digest an operator pinned.
+## The running half, part 2: the declaration and the actuators - LANDED for read-only and suspend
 
-A `revl drift` verb reading the last record, and a monitor loop, are the
-interface on top of both follow-ups.
+The monitor document is the declaration this slice reads:
+
+    {"version": 1,
+     "manifest": {...},          # derived by admit(), never hand-written
+     "subjects": [{"role", "name", "kind", "path"}],
+     "control": {"onDrift": ..., "byRole": {...}, "onUnverified": ...}}
+
+`control` is the stage-1 shape; a key this monitor does not read is refused, and
+`run_pass` also accepts an explicit control argument so a host can bind the
+policy to the composition it protects. The `driftControl` clause on the admitted
+COMPOSITION is still open, and so is deriving the composition row itself; this
+slice fixes the runtime half it will feed.
+
+Only the two responses that narrow authority are carried out:
+
+* `read-only` arms a durable latch beside the WAL (`<wal>.read-only`). The py
+  runtime reads it at every NEW effectful crossing seam (extern crossings
+  through `estop_gated` and `extern_emit`, effect acquisition, deferred emit,
+  approval crossing and deferred fire), so a component may still read but may
+  no longer start a world-changing crossing, and the refusal happens before the
+  host body runs. Teardown, inverse registration and recovery paths are not
+  narrowed, because a read-only hold must not strand cleanup. The runtime must
+  be pointed at the exact latch path with `arm_read_only_latch` or the ambient
+  `REVL_READ_ONLY_LATCH`; the actuator reports which tiers honour it, and this
+  slice wires the py reference runtime only.
+* `suspend` arms the item-443 E-Stop latch beside the WAL (`<wal>.estop`, via
+  `estop.latch_path` / `estop.read_latch`), so the runtime, the conductor and
+  `revl estop --report` observe it with no reader change, and the per-tier
+  honesty `estop.tier_estop_status` already states is inherited.
+
+`drift_monitor.apply_response` carries those two out and REFUSES `re-admit` and
+`rollback` by name: they change what runs, so a pass that cannot perform one
+records it as unapplied rather than downgrading it to a response that looks
+applied. A response is always a downgrade; no path here widens authority.
+
+What remains of this part: the `re-admit` actuator (re-running the admission
+gate), the `rollback` actuator (deploying the pinned target `resolve` requires),
+read-only honouring on the other tiers, and the `revl drift` verb that reads the
+last record. A monitor loop and a `revl drift` verb are the interface on top of
+these.
 
 ## Relates to
 
