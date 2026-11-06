@@ -103,6 +103,12 @@ fn helper() -> Int { ... }                        // default: module-private
   (`` `raw` is module-private in `m.rvl` and cannot be imported (G1) ``). The
   files compiled together as roots (a composition's rows and the files it
   `use`s) keep one shared namespace.
+- **A `pub` declaration is reachable only through the `use` list that names it
+  (issue #3023).** The rule above is the private half of the same rule: a
+  `fn`, `test` or `prop test` body, or a component, that names a `pub` `fn` or
+  `extern` of another module without importing it is refused as not declared,
+  exactly as an un-imported `pub fn` already was in a plain fn body. `pub`
+  declares a name importable, not globally visible.
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
 - **Resolution (roadmap 319).** `use` resolves the path relative to the
