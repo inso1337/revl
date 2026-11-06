@@ -38,7 +38,7 @@ review's own words for the rung it produces. See
 docs/design/533-evolution-curriculum.md for the argument, the measured
 populations, and the cases the signal gets wrong.
 
-SOURCES. The review names eight. This module reads four of them; the rest are
+SOURCES. The review names eight. This module reads five of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
 can go and look.
@@ -497,11 +497,103 @@ def adapter_formal_obligation() -> Derivation:
     return Derivation("formal-obligation", (signal,), tuple(tasks))
 
 
+# --------------------------------------------------------------------------- #
+# Adapter 5 -- cross-tier differential probes: the rejection corpus vs the census
+# --------------------------------------------------------------------------- #
+# The lower oracle's probes (tests/test_selfhost_lower.py's REJECTED_PROGRAMS)
+# are curated to be IN SLICE: every row there is a program whose reference
+# refusal selfhost/lower.rvl decides with the same tag and message. The census
+# records the other half, the programs the reference refuses and the port raises
+# NO OBJECTION to: `no-objection-out-of-slice`. Those are the differential
+# probes the lower oracle cannot carry yet, and teaching the port the family is
+# the task.
+#
+# The programs are read from the committed census record (docs/census-artifact),
+# not from a fresh run: the record is what `tools/census_artifact.py --verify
+# --strict` holds current, and a fresh census over the eight-directory corpus
+# costs more than the whole curriculum does today. The RECORD is the artifact
+# the locator names; the program it classifies is what the task carries.
+CENSUS_CASES = ROOT / "docs" / "census-artifact" / "cases"
+NO_OBJECTION_OUT_OF_SLICE = "no-objection-out-of-slice"
+# A program under this directory exists to be REFUSED, which is what makes the
+# reference's verdict a probe. A single-source compile of a library file the
+# census cannot supply its `use`d modules for is refused too, and teaching the
+# port that refusal would teach it nothing.
+PROBE_CORPUS = "examples/rejections"
+
+
+def _census_out_of_slice_programs(cases_dir=None) -> list[tuple[str, str]]:
+    """`(program, record)` for every rejection the census parks out of slice."""
+    base = Path(cases_dir) if cases_dir else CENSUS_CASES
+    found: set[tuple[str, str]] = set()
+    for path in sorted(base.rglob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        program = record.get("case", "")
+        if NO_OBJECTION_OUT_OF_SLICE not in record.get("buckets", ()):
+            continue
+        if not program.startswith(PROBE_CORPUS + "/"):
+            continue
+        if not (ROOT / program).is_file():
+            continue
+        try:
+            record = str(path.relative_to(ROOT))
+        except ValueError:
+            # A staged record the test owns, outside the checkout. The program
+            # is still named relative to ROOT, which is what a task carries.
+            record = str(path)
+        found.add((program, record))
+    return sorted(found)
+
+
+def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
+    census = _load("_ec_census", "tools/gate_reference_census.py")
+    sys.path.insert(0, str(ROOT / "src"))
+    from revl import compile_files
+    from revl.errors import RevlError
+
+    # Measured before the instances are looked at, off the mechanism's own
+    # corpus table: the census re-decides over all eight of its directories,
+    # whether or not a single program is parked out of slice here.
+    signal = Signal(impls=(REFERENCE, SELFHOST),
+                    breadth=breadth_of(census.CORPUS_DIRS))
+    tasks: list[Task] = []
+    for program, record in _census_out_of_slice_programs(cases_dir):
+        try:
+            compile_files([str(ROOT / program)])
+        except RevlError:
+            pass
+        else:
+            # The record says the reference refuses it and the reference admits
+            # it: the record is stale for this program, and a task derived from
+            # it would be an invented one.
+            continue
+        tasks.append(_task(
+            task_id=f"probe/{Path(program).stem}",
+            source="cross-tier differential probes",
+            artifact=program,
+            locator=f"{record} buckets[{NO_OBJECTION_OUT_OF_SLICE!r}]",
+            gap=(f"the reference refuses {program} and selfhost/lower.rvl "
+                 "raises no objection to it; the census parks it in "
+                 f"{NO_OBJECTION_OUT_OF_SLICE} and tests/test_selfhost_lower.py "
+                 "carries no REJECTED_PROGRAMS row for it"),
+            subject=("selfhost/lower.rvl + "
+                     "tests/test_selfhost_lower.py (REJECTED_PROGRAMS)"),
+            mechanism="tests/test_selfhost_lower.py",
+            verify=("python3 -m pytest tests/test_selfhost_lower.py "
+                    f"# a REJECTED_PROGRAMS row for {program} compares tag and "
+                    "message; python3 tools/gate_reference_census.py --check "
+                    f"# {NO_OBJECTION_OUT_OF_SLICE} no longer lists {program}"),
+            signal=signal,
+        ))
+    return Derivation("cross-tier-probes", (signal,), tuple(tasks))
+
+
 ADAPTERS = {
     "construct-reach": adapter_construct_reach,
     "census-bypass": adapter_census_bypass,
     "unexplained-refusal": adapter_unexplained_refusal,
     "formal-obligation": adapter_formal_obligation,
+    "cross-tier-probes": adapter_cross_tier_probe,
 }
 
 
