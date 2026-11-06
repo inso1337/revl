@@ -1642,6 +1642,13 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
 - `--formal DIR` - the formal package to read the evidence from, instead of the
   one found from the working directory or `REVL_FORMAL_DIR`. A directory with no
   `STATUS.md` is refused rather than silently searched past.
+- `--anchor` - anchor mode: sign a chain-neutral record over named sha256
+  digests to publish to an external log or timestamping service
+  ([revl-anchor.md](revl-anchor.md)). No gate runs, because an anchor records a
+  digest set and not a verdict.
+- `--digest NAME=DIGEST` - with `--anchor`: one named sha256 digest to commit
+  to, repeatable. A composition `TARGET` adds its canonical hash under the name
+  `composition`.
 - `--against COMPOSITION` - with `--verify` or `--verify-certificate`: the
   composition to re-hash and check the record against. Omit to check only the
   signature over the embedded hash.
@@ -2122,12 +2129,24 @@ Check a bundle: that each tier in it is present, well-formed and agrees with
 the manifest. Exits nonzero when a tier fails, so it is usable as a release
 gate.
 
-- `BUNDLE` - a bundle directory written by `revl bundle` (required).
-- `--json` - machine-readable tier-by-tier report.
+With `--anchor FILE`, check a chain-neutral anchor record written by
+`revl attest --anchor` instead ([revl-anchor.md](revl-anchor.md)): recheck its
+signature, recompute its anchor hash, and compare any digest the verifier holds.
+No network access is performed.
+
+- `BUNDLE` - a bundle directory written by `revl bundle`. Required unless
+  `--anchor` is given.
+- `--anchor FILE` - an anchor record to verify instead of a bundle.
+- `--key PATH` - with `--anchor`: the verifying key file, or the
+  `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY` environment variables.
+- `--digest NAME=DIGEST` - with `--anchor`: a digest the verifier holds; the
+  anchor may not omit it or commit to a different value. Repeatable.
+- `--json` - machine-readable tier-by-tier report, or the anchor verdict.
 
 ```bash
 revl verify app.revlbundle
 revl verify app.revlbundle --json    # CI: parse the per-tier verdict
+revl verify --anchor anchor.json --key ci-signer.key
 ```
 
 ### `revl deploy`
