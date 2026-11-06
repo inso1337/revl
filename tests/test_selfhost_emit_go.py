@@ -152,6 +152,11 @@ CORPUS = [
     # bound from their arguments; issue #2496: a `Str` call result, field or
     # index in a `+`
     "generic_fn.rvl",
+    # issue #2494: a user generic variant as Go generics, at every use site
+    # (`Mb[int64]`, `MbJj[int64]{..}`, `case MbJj[int64]:`), with the
+    # substituted payload type, two parameters, a phantom parameter and
+    # unpinned list literals. The document the old port-gap pin was replaced by.
+    "../emit_rust_corpus/generic_variant.rvl",
     # issue #106: the v3 COMBINED path's first slice (`_emit_v3_combined`). A
     # top-level declaration beside components whose provide methods are single
     # `return`s or empty bodies, with or without `requires`: the pure tier, the
@@ -160,6 +165,10 @@ CORPUS = [
     # load helpers, in one package. Keep these last: COMBINED_CORPUS below is
     # the tail of this list from the first of them.
     "comp_provide_pure.rvl",
+    # issue #2494: a user generic variant on the component tier, in a service
+    # signature and in provide methods (instantiated case structs, the
+    # substituted payload, an unpinned list literal)
+    "../emit_rust_corpus/comp_provide_generic_variant.rvl",
     "../emit_rust_corpus/service.rvl",
     "../emit_rust_corpus/requires.rvl",
     "../emit_rust_corpus/services_multi.rvl",
@@ -1182,39 +1191,16 @@ def test_a_host_identifier_collision_is_refused_by_name(reference):
         reference.emit(ir)
 
 
-# Issue #2471: the reference go emitter lowers a user generic variant (`type
-# Mb[T] = Jj(T) | Nn`) to Go generics (`type Mb[T any] interface`, `case
-# MbJj[int64]:`); selfhost/emit_go.rvl still emits the earlier form, which
-# does not build (`Mb[Int]` passed through and `case Mb[Int]Jj:`). The port is
-# fed the reference IR here, so the difference is NAMED rather than passing
-# for agreement. The fully-native chain does not reach it: selfhost/lower.rvl
-# refuses these documents loudly first (GENERIC_VARIANT_LOUD_REFUSALS in
-# tests/test_selfhost_compile.py). Same ratchet as that table: the day the
-# port follows the reference this fails, and the entry is DELETED and the
-# document added to CORPUS. issue #2494
-GENERIC_VARIANT_PORT_GAPS: dict[str, tuple[str, str, str]] = {
-    "construct_and_match": (
-        "type Mb[T] = Jj(T) | Nn\n"
-        "fn un(m: Mb[Int]) -> Int { return match m { Jj(x) => x, Nn => 0 } }\n"
-        "fn one() -> Mb[Int] { return Jj(1) }\n",
-        "case MbJj[int64]:",
-        "case Mb[Int]Jj:"),
-}
-
-
-@pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_PORT_GAPS))
-def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_path,
-                                                     name):
-    source, reference_token, port_token = GENERIC_VARIANT_PORT_GAPS[name]
-    doc = tmp_path / f"{name}.rvl"
-    doc.write_text(source)
-    ir = compile_files([str(doc)])
-    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
-    assert reference_token in want, want
-    assert got != want and port_token in got, (
-        f"{name}: the port no longer emits {port_token!r}. If it now matches "
-        f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
-        f"add the document to CORPUS.")
+def test_an_unpinned_generic_variant_is_named_by_the_port(emitted, reference):
+    """Issue #2494: a payload-less case of a generic variant that nothing pins
+    is a reference refusal; the port names the construction instead of emitting
+    `MbNn[any]`, a different instantiation that would not build."""
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_go_refusals"
+                             / "unpinned_generic_variant.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match="has no type argument for T"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:Nn:T>>" in emitted["emit_go_src"](ir)
 
 
 #: issue #3053: go has no identifier sigil a revl name cannot spell, so the

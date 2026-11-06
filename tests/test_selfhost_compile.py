@@ -795,7 +795,7 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Opt-gap document, the issue #1631 erased-Result document, and the
         # combined path's `comp_provide_pure.rvl`.)
         # no other residual: the fully-native chain reproduces the rest of the
-        # go corpus, except the two entries below.
+        # go corpus, except the entries below.
         # issue #2495: the generic-function document. Emitter-exact from the
         # reference IR (selfhost/emit_go.rvl mirrors the type-parameter list
         # and the call binding); the native IR producer reads a call to a
@@ -805,6 +805,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
+        # issue #2472: the native chain still refuses a user generic variant,
+        # so both emitter corpus documents that declare one diverge through
+        # the fully-native chain. The emitter half is byte-exact on the
+        # reference IR (tests/test_selfhost_emit_go.py).
+        "../emit_rust_corpus/generic_variant.rvl",
+        "../emit_rust_corpus/comp_provide_generic_variant.rvl",
         # issue #2898: a provide-method `let pinned: List[Str] = []` in the
         # combined document. The emitter half is byte-exact from the reference
         # IR; the native IR producer drops the annotation's `expected` on a
@@ -887,6 +893,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Both now read through `fn_params_i` and this document reproduces
         # byte-exactly, so the ledger no longer carries it. A non-generic
         # control of the same shape was already byte-exact.
+        # issue #2472: the native chain still refuses a user generic variant,
+        # so both emitter corpus documents that declare one diverge through
+        # the fully-native chain. The emitter half is byte-exact on the
+        # reference IR (tests/test_selfhost_emit_rust.py).
+        "generic_variant.rvl",
+        "comp_provide_generic_variant.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -2423,9 +2435,13 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # — the gate admits it, and its `lower_to_ir` externs section was already
     # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
     #
-    # The table is EMPTY, and that is the ratchet having worked rather than a
-    # list nobody maintained: both entries it ever held closed by returning "",
-    # and a closed entry is DELETED rather than reworded.
+    # The table holds the two generic-variant documents in the Rust emit
+    # corpus (issue #2472). The reference admits them while selfhost/lower.rvl
+    # still constructs a nullary case as a bare `Mb`, so the native gate
+    # refuses them by name; they are a self-host FRONTEND gap, not an emitter
+    # one, since selfhost/emit_rust.rvl is byte-exact on the reference IR, and
+    # their residual is also named in LOWER_GAP_DOCS above. Every earlier entry
+    # closed by returning "" and was DELETED rather than reworded.
     #
     # The stream entry (`emit_rust_corpus/comp_stream.rvl`, pinned to
     # `G1|`sub` is not a declared requirement of Parked`) was the second of the
@@ -2443,7 +2459,15 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # returns "" here, and the document's residual moved to the byte comparison
     # `LOWER_GAP_DOCS` above rather than leaving the corpus: the rust emit
     # oracle holds it byte-exact against the reference, stream runtime and all.
-NATIVE_GATE_GAPS: dict[str, str] = {}
+NATIVE_GATE_GAPS: dict[str, str] = {
+    # issue #2472: the native gate still refuses a user generic variant, so the
+    # two generic-variant documents in the Rust emitter corpus are a named
+    # false refusal until selfhost/lower.rvl follows the reference.
+    "emit_rust_corpus/comp_provide_generic_variant.rvl":
+        "T1|`bump` returns expects `Mb[Int]`, got `Mb`",
+    "emit_rust_corpus/generic_variant.rvl":
+        "T1|this function's return expects `Mb[Int]`, got `Mb`",
+}
 
 
 def test_native_gate_admits_the_whole_emit_surface(admit):

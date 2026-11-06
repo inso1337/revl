@@ -910,6 +910,7 @@
   "tests/fixtures/emit_go_refusals/record_update.rvl",
   "tests/fixtures/emit_go_refusals/sliced_empty_list.rvl",
   "tests/fixtures/emit_go_refusals/unpinned_empty_list.rvl",
+  "tests/fixtures/emit_go_refusals/unpinned_generic_variant.rvl",
   "tests/fixtures/emit_go_refusals/validated_emission_operation.rvl",
   "tests/fixtures/emit_go_silent_differences/import_directive_alias.rvl",
   "tests/fixtures/emit_java_corpus/adts.rvl",
@@ -1063,6 +1064,7 @@
   "tests/fixtures/emit_rust_corpus/comp_provide_generic.rvl",
   "tests/fixtures/emit_rust_corpus/comp_provide_generic_add.rvl",
   "tests/fixtures/emit_rust_corpus/comp_provide_generic_let.rvl",
+  "tests/fixtures/emit_rust_corpus/comp_provide_generic_variant.rvl",
   "tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl",
   "tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl",
   "tests/fixtures/emit_rust_corpus/comp_stream.rvl",
@@ -1076,6 +1078,7 @@
   "tests/fixtures/emit_rust_corpus/externs.rvl",
   "tests/fixtures/emit_rust_corpus/float_pub.rvl",
   "tests/fixtures/emit_rust_corpus/generic_fn.rvl",
+  "tests/fixtures/emit_rust_corpus/generic_variant.rvl",
   "tests/fixtures/emit_rust_corpus/held_acquire_binds.rvl",
   "tests/fixtures/emit_rust_corpus/in_file_tests.rvl",
   "tests/fixtures/emit_rust_corpus/intercept_metadata.rvl",
@@ -1118,6 +1121,7 @@
   "tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl",
   "tests/fixtures/emit_rust_refusals/nested_empty_list.rvl",
   "tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl",
+  "tests/fixtures/emit_rust_refusals/unpinned_generic_variant.rvl",
   "tests/fixtures/emit_rust_refusals/untyped_empty_list.rvl",
   "tests/fixtures/emit_rust_refusals/validated_emission_operation.rvl",
   "tests/fixtures/emit_ts_corpus/arith.rvl",
@@ -1429,5 +1433,10 @@
   "tests/fixtures/verified_method_effect/t1_let_bound.rvl",
   "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
  ],
- "tracked_buckets": {}
+ "tracked_buckets": {
+  "false-reject/T1": [
+   "tests/fixtures/emit_rust_corpus/comp_provide_generic_variant.rvl",
+   "tests/fixtures/emit_rust_corpus/generic_variant.rvl"
+  ]
+ }
 }

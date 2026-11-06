@@ -136,11 +136,11 @@
 
 ["function", "issue-2495-generic-call-residuals", "_v3_unify", 1, 1]
 
-["reason", "issue-2497-unpinned-case-no-corpus-document", "issue #2497: a `let` the body never reads nor assigns again, whose value is a bare `None` (annotated `Option<Value>`) or a payload-less case of a generic variant (refused by name). The annotation is mirrored by selfhost/emit_rust.rvl and held by generic_fn.rvl; what remains is the refusal half and the guard for a value that is no record: a refusal is not emitted at all, and the port lowers no generic variant (issue #2494). backends/rust/test_unpinned_case_rust_2497.py pins both halves."]
+["reason", "issue-2497-unpinned-case-no-corpus-document", "issue #2497: a `let` the body never reads nor assigns again, whose value is a bare `None` (annotated `Option<Value>`) or a payload-less case of a generic variant (refused by name). Both halves are ported in selfhost/emit_rust.rvl: the annotation is held by generic_fn.rvl, and the refusal is reached by tests/fixtures/emit_rust_refusals/unpinned_generic_variant.rvl, which the reference refuses. What remains is the guard for a value that is no record, and the early return of `_v3_refuse_unbound_case` for a case that is not a payload-less generic variant. backends/rust/test_unpinned_case_rust_2497.py pins both halves."]
 
-["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_dead_let_annotation", 2, 2]
+["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_dead_let_annotation", 1, 1]
 
-["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_refuse_unbound_case", 7, 7]
+["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_refuse_unbound_case", 1, 1]
 
 ["reason", "issue-2545-type-parameter-residuals", "issue #2545: an explicit type-parameter list (`type_params` in the IR fn) and a type parameter only the return mentions, bound from the type the call flows into, are held by the corpus document generic_fn.rvl. What remains: the explicit-list branch for a callee or function the corpus reaches through the other path, a listed name no signature mentions, and the bail-outs that leave a call alone (no return-only parameter, a parameter still unbound, an argument that is not such a call, a slot spelled with the outer callee's own type parameter)."]
 
@@ -236,7 +236,7 @@
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_v3_spawn", 14, 14]
 
-["reason", "record-variant-context-invariants-the-remaining-branches-dia", "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice now mirrors the DECLARATION half of recursive boxing (`Box<..>` case payloads and record fields, ported for the remaining slice of issue #2328, whose reference pass is #919); the 5 residual `_emit_v3_types` statements are the generic-variant PhantomData arm (4, issue #2471) and the unsupported-kind raise (1). emit_rust_corpus/bridge_types.rvl (item 391) reaches 2 more of `_V3Ctx._disambiguate_record`'s statements. Issue #2471 adds four to `_emit_v3_types`: a type parameter no case payload names gets a hidden `PhantomData` case, since rustc rejects an unused parameter (E0392). No CORPUS document declares a generic variant until the self-host port lands (issue #2494)."]
+["reason", "record-variant-context-invariants-the-remaining-branches-dia", "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice now mirrors the DECLARATION half of recursive boxing (`Box<..>` case payloads and record fields, ported for the remaining slice of issue #2328, whose reference pass is #919); the one residual `_emit_v3_types` statement is the unsupported-kind raise; the generic-variant PhantomData arm (4, issue #2471) is reached below. emit_rust_corpus/bridge_types.rvl (item 391) reaches 2 more of `_V3Ctx._disambiguate_record`'s statements. Issue #2471's four `_emit_v3_types` statements (a type parameter no case payload names gets a hidden `PhantomData` case, since rustc rejects an unused parameter, E0392) are reached by emit_rust_corpus's generic_variant.rvl. What remains is the unsupported type-kind raise."]
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx.__init__", 1, 1]
 
@@ -252,7 +252,7 @@
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx.record_type_for_names", 9, 9]
 
-["function", "record-variant-context-invariants-the-remaining-branches-dia", "_emit_v3_types", 5, 5]
+["function", "record-variant-context-invariants-the-remaining-branches-dia", "_emit_v3_types", 1, 1]
 
 ["reason", "recursive-struct-field-boxing-issue-919-the-second", "Recursive boxing (reference issue #919, ported here for the remaining slice of issue #2328). `_recursive_boxed_edges`, its `reaches` walk and `_inline_cycle_target` now run to completion over the byte-agreement corpus: emit_rust_corpus/recursive_variant.rvl boxes the `Tree` payload, recursive_record_field.rvl boxes the `Node.next` field, and recursive_boxing.rvl exercises the greedy selection (an enum payload before a record field: `Expr`'s `Neg` and `Bin` are boxed and `BinN`'s fields are not), the already-boxed-edge skips, the two boxes on one owner (`N.a` and `N.b`) and the inline `Result` payload. What remains of this reason is the construction/read half the self-host port does not mirror yet: `_boxed_field_read`'s two residuals (the early return for a field read rooted in something other than a var/renderable name, and the nested `base.f1.f2` owner resolution, neither reachable without a document that reads a nested boxed chain), plus `_inline_cycle_target`'s non-recursing `Result` return and its 64-deep `Opt` cap (2). A corpus document that BUILDS or READS a boxed edge would diverge until the port carries that half, so tests/test_emit_rust_opt_recursion_919.py keeps it pinned directly."]
 
@@ -308,7 +308,7 @@
 
 ["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 29, 29]
 
-["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements. Issue #2471 adds six to `_rust_type`: a generic variant renders with its type arguments (`Mb<i64>`). No CORPUS document declares a generic variant until the self-host port lands (issue #2494)."]
+["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements. Issue #2471's six `_rust_type` statements (a generic variant renders with its type arguments, `Mb<i64>`) are reached by emit_rust_corpus's generic_variant.rvl. What remains is the `Value` fallback for an unknown or empty type."]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_arg_ref_name", 2, 2]
 
@@ -328,7 +328,7 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_fn_type", 1, 1]
 
-["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 7, 7]
+["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 1, 1]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_v3_lit", 2, 2]
 
