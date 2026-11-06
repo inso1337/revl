@@ -1,4 +1,8 @@
 import RevL.Manifest
+-- The G2 theorem file carries the IR image (issue #2739): the
+-- `IRD`/`IRS` rows decide `RevL.G2.IRDisjoint` and compare
+-- `RevL.G2.irSlots` against the model's own slots.
+import RevL.Theorems.G2_ProvisionDisjoint
 import RevL.Lemmas.CapLemmas
 import RevL.Theorems.CapCeilings
 import RevL.Theorems.G5_ClassifiedTeardownPure
@@ -310,6 +314,12 @@ Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 
 Verdict rows out:
   V <file> <disjoint=ok|fail> <closed=ok|fail> <link=ok|fail>
+  IRD <file> <disjoint=ok|fail>                    G2 over the LOWERED IR
+                                                   document (issue #2739):
+                                                   `RevL.G2.IRDisjoint` over
+                                                   the `JR` facts
+  IRS <file> <kept=ok|fail>                        the lowered document keeps
+                                                   the composition's slots
   G <file> <comp> <g4=ok|fail>                     marker rule (incl. handle)
                                                    AND host-acquisition rule
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
@@ -433,6 +443,45 @@ theorem linkOKB_iff : ∀ l : List LComponent, linkOKB l = true ↔ LinkOK l := 
       | cons _ _ h1 h2 h3 h4 =>
         simp only [linkOKB, Bool.and_eq_true, decide_eq_true_eq]
         exact ⟨⟨⟨h1, h2⟩, h3⟩, ih.mpr h4⟩
+
+/-! ## Deciding G2 over the IR image (issue #2739)
+
+The `IRD` row decides `RevL.G2.IRDisjoint` over the components a LOWERED IR
+document carries (`JR` facts: `provides` and the sparse `isolate` map), so the
+verdict is the L2 model applied to the document the backends consume. The
+`IRS` row is the second half of the same claim: the IR carries exactly the
+`(key, realm)` slots the model proved disjoint, compared as multisets because
+`provides` order is not a claim either side makes. -/
+
+/-- G2 over one lowered IR document, as a decision procedure. -/
+def irdisjointB (cs : List RevL.G2.IRComponent) : Bool :=
+  decide (RevL.G2.IRDisjoint cs)
+
+/-- **The IR verdict is the model's judgment.** -/
+theorem irdisjointB_iff (cs : List RevL.G2.IRComponent) :
+    irdisjointB cs = true ↔ RevL.G2.IRDisjoint cs := by
+  simp [irdisjointB]
+
+/-- Multiset equality of slot lists: symmetric containment. Order is not a
+claim the row makes, so nothing is sorted. -/
+def sameSlots (a b : List Slot) : Bool :=
+  a.all (fun s => b.contains s) && b.all (fun s => a.contains s)
+
+/-- The source slots of the component called `n`, or none if the composition
+has no such component. -/
+def slotsOfName (cs : List LComponent) (n : String) : List Slot :=
+  match cs.find? (fun c => c.name == n) with
+  | some c => slots c
+  | none => []
+
+/-- Does the lowered IR carry exactly the composition's slots? Every IR
+component must name a source component and carry its slots, and every source
+component must appear, so a lowering that drops, adds or moves a slot is a
+`fail` rather than a silent agreement. -/
+def irKeptB (ir : List RevL.G2.IRComponent) (src : List LComponent) : Bool :=
+  ir.all (fun c => src.any (fun s => s.name == c.name) &&
+    sameSlots (RevL.G2.irSlots c) (slotsOfName src c.name)) &&
+  src.all (fun c => ir.any (fun i => i.name == c.name))
 
 /-- Pick a component whose consumed slots are all already provided — the
 linker's Kahn step. Returns it with the rest of the queue. -/
@@ -1052,6 +1101,12 @@ structure MRow where
   realms : List (String × String)
   isTemplate : Bool
 
+structure JRRow where
+  path : String
+  comp : String
+  provides : List String
+  realms : List (String × String)
+
 structure URow where
   path : String
   comp : String
@@ -1389,6 +1444,13 @@ def parseM (f : List String) : Option MRow :=
   | ["M", path, name, reqs, provs, realms, role] =>
       some ⟨path, name, splitKeys reqs, splitKeys provs, parseRealms realms,
             role == "template"⟩
+  | _ => none
+
+def parseJR (f : List String) : Option JRRow :=
+  match f with
+  | ["JR", path, comp, provs, realms] =>
+      some ⟨path, comp, (if provs == "-" then [] else splitKeys provs),
+            parseRealms realms⟩
   | _ => none
 
 def parseU (f : List String) : Option URow :=
@@ -2974,6 +3036,7 @@ def main (args : List String) : IO UInt32 := do
     let fields := (text.splitOn "\n").filter (fun l => l != "")
       |>.map (·.splitOn "\t")
     let mrows := fields.filterMap parseM
+    let jrrows := fields.filterMap parseJR
     let urows := fields.filterMap parseU
     let brows := fields.filterMap parseB
     let qrows := fields.filterMap parseQ
@@ -3135,6 +3198,20 @@ def main (args : List String) : IO UInt32 := do
       let cv := if decide (RequiresClosed comps) then "ok" else "fail"
       let lv := if linkVerdict comps then "ok" else "fail"
       out := out ++ s!"V\t{p}\tdisjoint={dv}\tclosed={cv}\tlink={lv}\n"
+      -- G2 over the IR image (issue #2739): the same disjointness judgment,
+      -- decided over the components the LOWERED document carries, plus the
+      -- claim that that document is the composition the V row just decided.
+      -- Only files that lowered have rows: a document the checker refused
+      -- produces no IR, and its refusal is the V/X rows' business.
+      let jc := jrrows.filter (fun r => r.path == p)
+      if !jc.isEmpty then
+        let irComps : List RevL.G2.IRComponent :=
+          jc.map fun r => { name := r.comp, provides := r.provides,
+                            isolate := r.realms }
+        let ird := if irdisjointB irComps then "ok" else "fail"
+        let irk := if irKeptB irComps comps then "ok" else "fail"
+        out := out ++ s!"IRD\t{p}\tdisjoint={ird}\n"
+        out := out ++ s!"IRS\t{p}\tkept={irk}\n"
       let aPairs := ua.map (fun r => (r.comp, r.cap))
       let fPairs := uf.map (fun r => (r.comp, r.cap))
       let owns := groupCaps (aPairs ++ fPairs)
@@ -3339,6 +3416,7 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.stmtSurfaceB_iff
 #print axioms RevLOracle.registrationsB_iff
 #print axioms RevLOracle.linkOKB_iff
+#print axioms RevLOracle.irdisjointB_iff
 #print axioms RevLOracle.pathPrefixB_iff
 #print axioms RevLOracle.pleqB_iff
 #print axioms RevLOracle.mem_keys_of_lookupV

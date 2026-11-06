@@ -24,6 +24,14 @@ import RevL
 #print axioms RevL.G2.linkOK_requires_closed
 #print axioms RevL.G2.realm_separation_admitted
 #print axioms RevL.G2.same_realm_conflict_refused
+-- G2 over the IR image (issue #2739): the invariant stated over the `provides`
+-- and sparse `isolate` fields the BACKENDS read, from the same link judgment,
+-- with the admitted IR document and the lost-realm mutation as witnesses.
+#print axioms RevL.G2.slots_ofIR
+#print axioms RevL.G2.linkOK_ir_disjoint
+#print axioms RevL.G2.tenants_link_ir
+#print axioms RevL.G2.tenants_ir_disjoint
+#print axioms RevL.G2.isolate_entry_is_load_bearing
 
 -- G3: the layering certificate excludes dependency cycles, and the link
 -- judgment supplies the certificate (so the hypothesis is dischargeable).

@@ -26,6 +26,11 @@ RevL.G2.linkOK_provision_disjoint	instance	RevL.G2.realm_separation_admitted,Rev
 RevL.G2.linkOK_requires_closed	instance	RevL.G2.realm_separation_admitted	the same admitted composition supplies the LinkOK hypothesis
 RevL.G2.realm_separation_admitted	concrete	-	computes LinkOK and ProvidesDisjoint on the shape of examples/tenants.rvl
 RevL.G2.same_realm_conflict_refused	concrete	-	the same two providers without their isolate clauses, refused
+RevL.G2.linkOK_ir_disjoint	instance	RevL.G2.slots_ofIR,RevL.G2.tenants_link_ir,RevL.G2.tenants_ir_disjoint,RevL.G2.isolate_entry_is_load_bearing	LinkOK holds of the IR image of the tenants composition, so the hypothesis has an instance, and the same document is not disjoint once both isolate entries are dropped
+RevL.G2.slots_ofIR	concrete	-	the model an IR component denotes carries exactly its IR slots, a definitional identity the theorem rewrites with
+RevL.G2.tenants_link_ir	concrete	-	the tenants composition in IR form, admitted by LinkOK
+RevL.G2.tenants_ir_disjoint	concrete	-	the theorem's conclusion computed on the same admitted IR document
+RevL.G2.isolate_entry_is_load_bearing	concrete	-	one key in two realms is disjoint with the isolate entries and collides without them, so the IR row's verdict is mutation-sensitive
 RevL.G3.depPath_rank_lt	instance	RevL.G3.g3_not_vacuous	a layering and a dependency path hold together on the admitted composition, and the rank really drops across the edge
 RevL.G3.no_dependency_cycles	necessity	RevL.G3.g3_not_vacuous,RevL.G3.layering_exists_for_admitted	the conclusion is False, so joint satisfiability is what it denies: the layering is establishable, a self-path is representable, only their conjunction is refused
 RevL.G3.linkOK_layeredBy_rankOf	instance	RevL.G3.g3_not_vacuous	LinkOK is derivable for a composition with a real dependency edge

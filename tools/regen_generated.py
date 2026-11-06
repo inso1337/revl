@@ -161,11 +161,17 @@ REGISTRY = [
         "merge": "three-way",
         "requires": ["lake"],
         "write": [{"run": ["lake", "build"], "cwd": "formal"},
+                  # the oracle summary is generated from the map in the same
+                  # file, so it is regenerated before the block below
+                  {"run": ["{python}", "formal/scripts/oracle_summary.py",
+                           "--write"]},
                   {"run": ["{python}", "formal/harness/diff_corpus.py",
                            "--write-status"]}],
         # the differential gate reads the build output, so it is checked
         # against a fresh build of THIS tree, never a stale one
         "check": [{"run": ["lake", "build"], "cwd": "formal"},
+                  {"run": ["{python}", "formal/scripts/oracle_summary.py",
+                           "--check"]},
                   {"run": ["{python}", "formal/harness/diff_corpus.py"]}],
     },
     {
