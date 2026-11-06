@@ -142,11 +142,16 @@ revl mcp import server-tools.json --service Tools --key tools --backend ts
 ```revl
 service Tools {
   // Search the corpus
-  fn query(q: Str, limit: Opt[Int]) -> Str
+  fn query(q: Str, limit: Opt[Int]) -> Untrusted[Str]
   // imported without a verifiable read-only claim
-  emission fn write(path: Str, body: Str) -> Str
+  emission fn write(path: Str, body: Str) -> Untrusted[Str]
 }
 ```
+
+Every answer is `Untrusted[...]` and its crossing declares the `net` origin
+(issue #2990): the server's answer is evidence, so G9 refuses it at a `Trusted`
+sink without a declared declassification, exactly as it refuses a web fetch.
+The authority class is still the classifier's, as before.
 
 Generated sources compile as-is, and the imported surface appears in
 `revl audit` under host code — imported trust is *visible* trust (G8).
