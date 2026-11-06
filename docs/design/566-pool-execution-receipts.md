@@ -51,7 +51,7 @@ distinction that decides whether the evidence is worth anything.
 
 | | signed by | over | saying |
 |---|---|---|---|
-| execution receipt | the PEER | pool, peer, task, artifact digest, result digest, issue time | "I ran this and produced that" |
+| execution receipt | the PEER | pool, peer, task, grant, policy digest, artifact digest, result digest, outcome, budget claim, issue time | "I ran this and produced that, under this authority" |
 | attestation | an ATTESTING AUTHORITY named in the charter | the DIGEST of the receipt | "I checked that result and it is admissible" |
 
 The attestor signs the receipt's digest rather than a copy of its body. There
@@ -136,14 +136,14 @@ different claims.
 
 ## Non-vacuity
 
-Twelve receipts, each of which WOULD have promoted a peer under the old gate,
+Thirteen receipts, each of which WOULD have promoted a peer under the old gate,
 because the old gate never looked at a receipt. Each is refused here on a named
 link, and an honest control differing only in being well formed goes through
 the same function and is counted.
 
 ```
-forged receipts in the corpus            12
-counted as evidence by the new check      0 / 12
+forged receipts in the corpus            13
+counted as evidence by the new check      0 / 13
 distinct refusal links exercised         >= 8
 honest control, counted                   1 / 1
 two honest receipts + one forgery         2, and the member stays put
@@ -159,7 +159,7 @@ not a receipt.
 
 ## Refusals are links, not guarantee codes
 
-Twelve lowercase links, following `peer_pool` and `revl.deploy`. Nothing enters
+Sixteen lowercase links, following `peer_pool` and `revl.deploy`. Nothing enters
 `revl.diagnostics.GUARANTEES`: a receipt refusal is a decision about a
 deployment, not a verdict about a program, and there is no program to write
 under `examples/rejections/` for "this receipt was already counted". An AST
@@ -169,6 +169,105 @@ Nothing is published in `stdlib/crypto.rvl`. The stdlib still publishes exactly
 the four symmetric primitives that `tests/test_stdlib_crypto.py` asserts it
 publishes; this is a Python-side deployment module and it needs no `.rvl`
 surface to do its job.
+
+## The grant, the policy, the outcome and the budget claim (issue #2720)
+
+A receipt used to say which peer ran which artifact and what result digest came
+out, and nothing about the authority the peer ran under. A reader could not
+tell, from the receipt alone, which capabilities the peer was granted, which
+policy was in force, how the run ended or what it reports using. That is fixed
+by two changes, one on each side of the channel.
+
+### What the operator signs
+
+`pool_dispatch.build_task` writes a 1.1 task that carries:
+
+| field | value | decided by |
+|---|---|---|
+| `grant` | `{caps: [...], budgets: {...}}`, the member's tier grant | the operator, from the roster and the charter |
+| `policy_digest` | the digest of the pool charter in force | the operator, from the charter it signs |
+
+The grant is read from the member the dispatcher loaded, not accepted as a
+parameter, so there is no path by which a caller hands a wider grant to the
+task than the tier actually issued. The policy digest is the charter digest:
+the charter IS the pool's policy, and a task that names a different policy than
+the peer's charter is refused on `policy-identity` before the work is run.
+
+### What the peer echoes
+
+`pool_receipt.issue_receipt` writes a 1.1 receipt that adds:
+
+| field | inside the peer signature | inside the attestation digest | checked | a claim |
+|---|---|---|---|---|
+| `task_digest` | yes | yes | the digest of the signed task presented to `check_receipt`, and the task's `task_id`, `peer_id`, `pool_id` and `artifact_digest` must equal the receipt's | |
+| `grant` | yes | yes | equals the task's grant | |
+| `policy_digest` | yes | yes | equals the task's policy digest | |
+| `outcome` | yes | yes | one of `completed`, `failed`, `timed_out`, `refused` | which ending the peer observed |
+| `budget_consumed` | yes | yes | a map of non-negative numbers | everything in it |
+
+All five live in the signed body, so `receipt_digest` covers them and the
+attestation, which signs that digest, binds them. Changing any of them after
+the peer signs breaks the peer's signature AND moves the digest the attestor
+signed away from the record in hand; the tests assert the two failures
+separately because they are different statements about the same bytes.
+
+`outcome` is the peer's own report of how its run ended. `refused` is in the
+vocabulary for a receipt issued for a run the runner itself declined; the
+dispatcher's peer refusals happen BEFORE a run and are refusal records with a
+link, not receipts. `timed_out` is measured by the peer
+(`pool_dispatch.execute`), never inferred from exit code 124, because a program
+may exit 124 itself. `budget_consumed` is the peer's own report and is a CLAIM:
+nothing here meters the operator's budget keys, and the one quantity this
+runner measures is wall-clock seconds. A reader must treat it as the peer's
+statement, never as arithmetic the pool verified.
+
+### Checked facts and claims, stated once
+
+- CHECKED: `task_digest` and the task's identity (`task_id`, `peer_id`,
+  `pool_id`, `artifact_digest`), `grant`, `policy_digest`, the two signatures,
+  the pool, the peer, the artifact digest, the admission time and the
+  attestor's authority.
+- CLAIMED: `outcome`, `budget_consumed`.
+- NOT CLAIMED: that the run was correct or that the reported budget is true.
+  The correctness check remains the attestor link, and the budget report has no
+  second signature behind it.
+
+A refusal names which of these failed: `receipt-task` (the receipt answers a
+task that was not presented, or a different one), `receipt-grant` (the echoed
+grant is not the task's), `receipt-policy` (the echoed policy is not the
+task's). The task/grant/policy checks run before the attestation is looked at,
+because an attestation over the wrong task is a downstream fact.
+
+### The version field decides, and old receipts still verify
+
+`RECEIPT_VERSION` is `1.1`; `RECEIPT_VERSION_V1` is `1.0`. `check_receipt`
+reads the version and requires the members of THAT shape: a 1.1 receipt that
+drops the grant is malformed on `receipt-shape`, never read as a 1.0 receipt
+that happened to lose a member. A 1.0 receipt still VERIFIES under the default
+`require_bound=False`: the signature arithmetic is real and the work really
+happened. It does NOT count as evidence for a promotion that requires the
+binding. `count_evidence` defaults `require_bound=True`, and it refuses such a
+receipt on `unbound-receipt` after every other check passes, so an operator
+sees the specific fault when there is one and the weakness of the shape only
+when there is not.
+
+The ledgers written before this change have deliveries with no stored task; a
+1.1 receipt cannot be re-checked without one, so `check_receipt` refuses
+`receipt-task` rather than trusting the echo. `evidence_pairs` returns the task
+beside the pair when the ledger kept it. A pool that wants to promote on old
+evidence must re-run the work; that is the fail-closed direction, because a
+receipt that names no authority cannot be evidence for authority.
+
+### Non-vacuity
+
+`tests/test_pool_receipt_authority_2720.py` pins the three acceptance clauses:
+a receipt built with a grant the task did not grant is refused on
+`receipt-grant` while both signatures still verify; changing each new field
+after signing breaks the peer signature and the attestor binding; a 1.0 receipt
+verifies and is refused as evidence on `unbound-receipt`, while a 1.1 receipt
+with a missing member is malformed rather than guessed at. The positive
+control counts a bound receipt and promotes on it, so the gate is not one that
+refuses everything.
 
 ## What is left
 
