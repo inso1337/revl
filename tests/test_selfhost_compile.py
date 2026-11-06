@@ -833,7 +833,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `stdlib_builtins.rvl` and the borrowed
         # `../emit_ts_corpus/property_edges.rvl` — left it with the
         # `sized_length` property form.)
-        # no residual: the fully-native chain reproduces the whole java corpus.
+        # issue #3095: the native producer leaves the component's `let-effect`
+        # binder raw (`ctx` stays `ctx` in its IR), so the native emitter's
+        # binding ladder lands on `ctx_` while the reference frontend escaped
+        # the binder to `ctx_` and the ladder reaches `ctx__`. The java byte
+        # oracle in tests/test_selfhost_emit_java.py holds this document
+        # byte-exact on the REFERENCE IR, so the residual is the producer's
+        # `_safe_name` handling, not the emitter.
+        "comp_provide_ctx_bind.rvl",
     ),
     "rust": (
         # (`component_edges.rvl` left this list with issue #1818: its provide
