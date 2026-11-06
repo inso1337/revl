@@ -673,6 +673,26 @@ _EVIDENCE_STATUS_THRESHOLDS = {
     "capabilities": ("present",),
 }
 
+# issue #2753: the operator-declared SOFT outcomes. A soft rule (`<subject>
+# <outcome> on evidence [...]`) grades exactly the same closed facet vocabulary
+# as a hard rule, but a failing clause NEVER becomes a violation: it maps the
+# candidate to the declared graded outcome. `admit` and `quarantine` are
+# deliberately absent: they are COMPUTED from the hard predicate (every hard
+# clause holds, or one fails), never declared, so an operator cannot weaken the
+# gate by labelling a failing clause with an admission.
+_SOFT_OUTCOMES = ("observe", "canary", "review")
+_COMPUTED_OUTCOMES = ("admit", "quarantine")
+
+# The graded-outcome order: a component's outcome is the STRICTEST failing soft
+# outcome, so one review clause is never hidden behind a canary clause. The
+# computed outcomes are ordered above the soft ones because a hard failure is
+# at least as restrictive as any advisory grade; `refuse` is the gate's own
+# final answer, so it is strictest of all.
+_OUTCOME_RANK = {
+    "admit": 0, "observe": 1, "canary": 2, "review": 3,
+    "quarantine": 4, "refuse": 5,
+}
+
 # The facets whose evidence is author-produced and therefore UNROOTED unless a
 # binding-covering `attestation valid` clause roots them (item 290, §6.2/6.3).
 # `attestation` and `publisher` are checked against operator-held inputs (a key,
@@ -702,12 +722,19 @@ class EvidenceRule:
     clauses (no scores, no partial credit), fail-closed (a missing facet fails),
     refuse-only (it can append a `Violation`, never widen past a deny or waive
     an approval). `origin` is ``"registry"`` for the origin-scoped
-    ``component registry:<glob>`` selector (§3.2), else None."""
+    ``component registry:<glob>`` selector (§3.2), else None.
+
+    Issue #2753 adds the SOFT form ``<subject> <outcome> on evidence [...]``.
+    It evaluates the same closed vocabulary, but its failing clauses are
+    advisory: `outcome` names the operator's graded disposition (`observe`,
+    `canary`, `review`) and the rule never appends a `Violation`. ``outcome is
+    None`` is the shipped hard rule; every existing rule keeps that value."""
     scope: str                        # "component" | "realm" | "mcp" | "capability"
     selector: str                     # glob / realm name ("" for mcp)
     origin: str | None                # "registry" for origin-scoped rules, else None
     require: tuple                    # ((facet, threshold), ...) conjunction
     self_attested: bool = False       # explicit unrooted acknowledgment (§6.3)
+    outcome: str | None = None        # None = hard; else a `_SOFT_OUTCOMES` member
 
     def unrooted_facets(self) -> frozenset:
         """The named facets that are UNROOTED — self-attesting evidence not
@@ -1074,6 +1101,51 @@ def _parse_require_list(text: str, source, lineno) -> tuple:
     return tuple(_parse_facet_clause(c, source, lineno) for c in clauses)
 
 
+def _split_evidence_body(body: str, source, lineno,
+                         rule_name: str) -> tuple[tuple, bool]:
+    """Split an evidence rule's ``[...] [self-attested]`` body into its
+    validated clause conjunction and the unrooted acknowledgment (§6.3)."""
+    self_attested = False
+    close = body.rfind("]")
+    if close != -1:
+        trailer = body[close + 1:].strip().lower()
+        if trailer == "self-attested":
+            self_attested = True
+        elif trailer:
+            raise PolicyError(
+                source, lineno,
+                f"unexpected trailer after `{rule_name} [...]`: "
+                f"{body[close + 1:].strip()!r}: only `self-attested` "
+                f"is allowed (item 290, §6.3)")
+        body = body[:close + 1]
+    return _parse_require_list(body, source, lineno), self_attested
+
+
+def _parse_soft_outcome(outcome: str, source, lineno) -> str:
+    """Validate an operator-declared soft outcome (issue #2753).
+
+    `admit` and `quarantine` are COMPUTED from the hard predicate, so naming
+    one here is a `PolicyError`: a soft rule may never *declare* an admission
+    or a containment, only a review stage. The vocabulary is closed, like every
+    other evidence spelling."""
+    name = outcome.strip().lower()
+    if name in _COMPUTED_OUTCOMES:
+        raise PolicyError(
+            source, lineno,
+            f"`{name}` is a computed graded outcome, not a declarable soft "
+            f"outcome: `admit` means every hard clause held and `quarantine` "
+            f"follows a hard failure under `quarantine required` (issue "
+            f"#2753). A soft rule declares one of "
+            f"[{', '.join(_SOFT_OUTCOMES)}]")
+    if name not in _SOFT_OUTCOMES:
+        raise PolicyError(
+            source, lineno,
+            f"unknown graded outcome {outcome.strip()!r}: a soft evidence "
+            f"rule declares one of [{', '.join(_SOFT_OUTCOMES)}] (issue "
+            f"#2753); `admit` and `quarantine` are computed")
+    return name
+
+
 def _parse_evidence_subject(head: str, source, lineno) -> tuple[str, str, str | None]:
     """Parse an evidence-rule subject into ``(scope, selector, origin)``.
 
@@ -1320,6 +1392,37 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         if low in ("evidence-root: local", "evidence-root local"):
             evidence_root_local = True
             continue
+        # issue #2753: the ADVISORY graded form,
+        # `<subject> <outcome> on evidence [...]`. It evaluates the same closed
+        # clause vocabulary as `requires evidence`, but a failing clause never
+        # appends a violation; the rule names the operator's graded disposition
+        # instead. Checked before the hard form so a typo'd outcome gets a
+        # diagnostic naming the allowed vocabulary rather than falling through
+        # to the reach grammar.
+        phrase = " on evidence"
+        at = low.find(phrase)
+        if at != -1:
+            # Split the ORIGINAL line at the lowercased phrase's offset, so a
+            # mixed-case `ON EVIDENCE` is still read as the soft form.
+            head = line[:at]
+            tail = line[at + len(phrase):]
+            parts = head.split()
+            if len(parts) < 2:
+                raise PolicyError(
+                    source, lineno,
+                    f"a soft evidence rule is `<subject> <outcome> on evidence "
+                    f"[<facet> <threshold>, ...]`, got {raw.strip()!r}; the "
+                    f"outcome is one of [{', '.join(_SOFT_OUTCOMES)}] (issue "
+                    f"#2753)")
+            outcome = _parse_soft_outcome(parts[-1], source, lineno)
+            scope, selector, origin = _parse_evidence_subject(
+                " ".join(parts[:-1]), source, lineno)
+            require, self_attested = _split_evidence_body(
+                tail.strip(), source, lineno, f"{outcome} on evidence")
+            evidence_rules.append(
+                EvidenceRule(scope, selector, origin, require, self_attested,
+                             outcome))
+            continue
         # item 290: `<subject> requires evidence [<facet> <threshold>, ...]
         # [self-attested]`. Checked before the approval/reach loops (it shares
         # neither phrase). A trailing `self-attested` is the per-rule unrooted
@@ -1328,21 +1431,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             head, _, tail = line.partition(" requires evidence")
             scope, selector, origin = _parse_evidence_subject(
                 head.strip(), source, lineno)
-            self_attested = False
-            body = tail.strip()
-            close = body.rfind("]")
-            if close != -1:
-                trailer = body[close + 1:].strip().lower()
-                if trailer == "self-attested":
-                    self_attested = True
-                elif trailer:
-                    raise PolicyError(
-                        source, lineno,
-                        f"unexpected trailer after `requires evidence [...]`: "
-                        f"{body[close + 1:].strip()!r} — only `self-attested` "
-                        f"is allowed (item 290, §6.3)")
-                body = body[:close + 1]
-            require = _parse_require_list(body, source, lineno)
+            require, self_attested = _split_evidence_body(
+                tail.strip(), source, lineno, "requires evidence")
             evidence_rules.append(
                 EvidenceRule(scope, selector, origin, require, self_attested))
             continue
@@ -1751,6 +1841,9 @@ def _parse_json(text: str, source: str | None) -> Policy:
     for entry in doc.get("evidence") or []:
         self_attested = bool(entry.get("selfAttested")
                              or entry.get("self_attested"))
+        raw_outcome = entry.get("outcome")
+        outcome = (_parse_soft_outcome(str(raw_outcome), source, 1)
+                   if raw_outcome is not None else None)
         require_obj = entry.get("require") or {}
         if not isinstance(require_obj, dict) or not require_obj:
             raise PolicyError(source, 1,
@@ -1761,17 +1854,17 @@ def _parse_json(text: str, source: str | None) -> Policy:
             for facet, threshold in require_obj.items())
         if entry.get("mcp"):
             evidence_rules.append(
-                EvidenceRule("mcp", "", None, require, self_attested))
+                EvidenceRule("mcp", "", None, require, self_attested, outcome))
             continue
         if entry.get("capability"):
             evidence_rules.append(
                 EvidenceRule("capability", entry["capability"], None, require,
-                             self_attested))
+                             self_attested, outcome))
             continue
         if entry.get("realm"):
             evidence_rules.append(
                 EvidenceRule("realm", entry["realm"], None, require,
-                             self_attested))
+                             self_attested, outcome))
             continue
         comp = entry.get("component")
         if not comp:
@@ -1781,7 +1874,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
         scope, selector, origin = _parse_evidence_subject(
             f"component {comp}", source, 1)
         evidence_rules.append(
-            EvidenceRule(scope, selector, origin, require, self_attested))
+            EvidenceRule(scope, selector, origin, require, self_attested,
+                         outcome))
     register_rules: list[RegisterRule] = []
     for entry in doc.get("registers") or []:
         cap = entry.get("capability") or entry.get("pattern")
@@ -2154,15 +2248,29 @@ class ClauseVerdict:
 @dataclass(frozen=True)
 class RuleReport:
     """One evidence rule's verdict for one component: whether it selected the
-    component, and every clause verdict when it did."""
+    component, and every clause verdict when it did. `outcome` is None for a
+    hard `requires evidence` rule and the operator's soft outcome for a
+    `<outcome> on evidence` rule (issue #2753)."""
     scope: str
     selector: str
     origin: str | None
     self_attested: bool
     selected: bool
     clauses: tuple = ()
+    outcome: str | None = None
 
     def failed(self) -> list:
+        """Failing clauses of a HARD rule. A soft rule's failures are advisory
+        and are read through `soft_failed`, so the gate can never refuse on
+        one (issue #2753)."""
+        if self.outcome is not None:
+            return []
+        return [c for c in self.clauses if not c.passed]
+
+    def soft_failed(self) -> list:
+        """Failing clauses of a SOFT rule (issue #2753); empty for a hard rule."""
+        if self.outcome is None:
+            return []
         return [c for c in self.clauses if not c.passed]
 
 
@@ -2288,10 +2396,12 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                   evidence_ir, recompute=False, recompute_ir=None,
                   recompute_gauntlet=None, recompute_producer=None) -> dict:
     """The single comparison site: every evidence rule against every component,
-    every clause verdict (pass and fail). `evaluate` turns failing clauses into
-    violations; `revl policy evaluate` renders the whole thing. Register rules
-    are reported alongside (slice 1: a `declared` floor is met by every selected
-    component; higher floors are parse-rejected until 309's ledger).
+    every clause verdict (pass and fail). `evaluate` turns a HARD rule's failing
+    clauses into violations; a soft rule's failing clauses are advisory and feed
+    the graded outcome instead (issue #2753). `revl policy evaluate` renders the
+    whole thing. Register rules are reported alongside (slice 1: a `declared`
+    floor is met by every selected component; higher floors are parse-rejected
+    until 309's ledger).
 
     Returns {component: {"evidence": [RuleReport], "registers": [RuleReport]}}.
 
@@ -2335,7 +2445,7 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
             if not selected:
                 ev_reports.append(RuleReport(rule.scope, rule.selector,
                                              rule.origin, rule.self_attested,
-                                             False, ()))
+                                             False, (), rule.outcome))
                 continue
             if assessment is None:
                 b = bundle if bundle is not None else reg.EvidenceBundle()
@@ -2372,7 +2482,8 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                     key_present=key_bytes is not None, standing=standing,
                     att_detail=att_detail))
             ev_reports.append(RuleReport(rule.scope, rule.selector, rule.origin,
-                                         rule.self_attested, True, tuple(clauses)))
+                                         rule.self_attested, True,
+                                         tuple(clauses), rule.outcome))
         for rrule in policy.register_rules:
             # item 309 §3.2: read the per-token register off the audit's
             # `capability_registers` map (built from the IR's declared registers,
@@ -2530,9 +2641,10 @@ def unpredicted_rules(policy: Policy) -> list[str]:
     # — the line reads exactly as written in the policy file, facets included.
     out = [_rule_line(RuleReport(
                rule.scope, rule.selector, rule.origin, rule.self_attested, False,
-               tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require)))
+               tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require),
+               rule.outcome))
            for rule in policy.evidence_rules
-           if rule.scope in _UNPREDICTABLE_SCOPES]
+           if rule.scope in _UNPREDICTABLE_SCOPES and rule.outcome is None]
     out += [f"capability {rule.capability} requires register {rule.at_least}"
             for rule in policy.register_rules]
     out += [f"requires idempotent-teardown(strength: {rule.strength})"
@@ -2586,8 +2698,11 @@ def predict_refusals(policy: Policy, name: str, *,
     from . import registry as reg  # noqa: PLC0415 — lazy, pulls the compiler
 
     unpredicted = unpredicted_rules(policy)
+    # A soft rule never refuses, so it is neither predictable as a refusal nor
+    # an unpredicted refusal (issue #2753). It is graded by `policy evaluate`.
     predictable = [r for r in policy.evidence_rules
-                   if r.scope not in _UNPREDICTABLE_SCOPES]
+                   if r.scope not in _UNPREDICTABLE_SCOPES
+                   and r.outcome is None]
     if not predictable:
         return {"wouldBeRefused": [], "unpredicted": unpredicted}
 
@@ -3309,7 +3424,108 @@ def _rule_line(report: "RuleReport") -> str:
                    else f"component {report.selector}"))
     tail = f" [{facets}]" if facets else ""
     sa = " self-attested" if report.self_attested else ""
-    return f"{prefix} requires evidence{tail}{sa}"
+    # issue #2753: a soft rule reads as written (`review on evidence [...]`),
+    # so the report names the operator's declared disposition, not a refusal.
+    kind = (f"{report.outcome} on evidence" if report.outcome
+            else "requires evidence")
+    return f"{prefix} {kind}{tail}{sa}"
+
+
+def _decided_clause(report: "RuleReport", clause: "ClauseVerdict", *,
+                    register: bool = False) -> dict:
+    """The clause that decided one component's graded outcome (issue #2753).
+
+    `register` selects the `requires register` rule line, because a register
+    report is a hard member of the same admission family but is not an
+    evidence-facet rule (`_rule_line` would spell it as `requires evidence`)."""
+    rule = (f"capability {report.selector} requires register {clause.threshold}"
+            if register else _rule_line(report))
+    return {"rule": rule, "facet": clause.facet,
+            "threshold": clause.threshold, "fact": clause.fact,
+            "standing": clause.standing}
+
+
+def _graded_outcome(policy: Policy, entry: dict) -> dict:
+    """Grade one component's evidence and register clauses into ONE advisory
+    outcome (issue #2753).
+
+    The hard predicate decides first and can never grade `admit`: a failing
+    hard clause maps to `quarantine` when the policy declares `quarantine
+    required` (the operator's containment path) and to the gate's own `refuse`
+    otherwise. `requires register` floors are hard members of the same
+    admission family, so a failing floor decides here too; leaving them
+    ungraded would report `admit` for a component the gate refuses on a
+    register violation. With no hard failure, the STRICTEST failing soft
+    outcome wins (`review` over `canary` over `observe`), so a lenient soft
+    rule can never hide a stricter one. If nothing fails, the outcome is
+    `admit`.
+
+    The result names the clause that decided it; `decidedBy` is None only for
+    `admit`, where no clause decided anything.
+
+    This function grades the evidence and register reports only. The caller
+    MUST override a non-hard result to `refuse` when the component is refused
+    by another rule family (reach, approval, tenant, idempotent-teardown):
+    otherwise the report would pair `refused: true` with `admit`, turning a
+    refusal into an admission for anything reading `outcome.name`.
+    """
+    hard = None
+    soft = None
+    for report in entry["evidence"]:
+        if not report.selected:
+            continue
+        if report.outcome is None:
+            for clause in report.failed():
+                if hard is None:
+                    hard = (report, clause, False)
+                break
+        else:
+            for clause in report.soft_failed():
+                if (soft is None or
+                        _OUTCOME_RANK[report.outcome]
+                        > _OUTCOME_RANK[soft[0].outcome]):
+                    soft = (report, clause)
+                break
+    if hard is None:
+        for report in entry["registers"]:
+            if not report.selected:
+                continue
+            for clause in report.failed():
+                hard = (report, clause, True)
+                break
+            if hard is not None:
+                break
+    if hard is not None:
+        report, clause, register = hard
+        return {"name": "quarantine" if policy.quarantine_required else "refuse",
+                "hard": True,
+                "decidedBy": _decided_clause(report, clause,
+                                             register=register)}
+    if soft is not None:
+        report, clause = soft
+        return {"name": report.outcome, "hard": False,
+                "decidedBy": _decided_clause(report, clause)}
+    return {"name": "admit", "hard": False, "decidedBy": None}
+
+
+def _outcome_text(outcome: dict, component: str | None = None) -> str:
+    """Render one graded outcome for the human `policy evaluate` report."""
+    name = outcome["name"]
+    decided = outcome.get("decidedBy")
+    if not decided:
+        return f"graded outcome: {name} (every selected hard clause holds)"
+    if "kind" in decided:
+        # A refusal from another rule family overrides the evidence grade; its
+        # `decidedBy` names the violation (kind and token) and its subject,
+        # which may be a recovery entry rather than the owning component.
+        subject = decided.get("component")
+        where = f"subject `{subject}`, " if subject else ""
+        return (f"graded outcome: {name} ({where}{decided['kind']} violation "
+                f"on `{decided.get('token') or '-'}`)")
+    who = f"component {component}, " if component else ""
+    return (f"graded outcome: {name} ({who}{decided['facet']} "
+            f"{decided['threshold']} is {decided['fact']}; decided by "
+            f"`{decided['rule']}`)")
 
 
 def explain(policy: Policy, audit: dict,
@@ -3325,6 +3541,12 @@ def explain(policy: Policy, audit: dict,
     refusal set is authoritative), plus the per-clause reports for the explain
     body. Returns a JSON-able dict; `render_explain` prints it. Nothing is
     admitted, refused, or mutated (§7).
+
+    A policy with evidence or register rules also gets a graded `outcome`
+    section (issue #2753), per component and overall: `admit`, a soft
+    `observe`/`canary`/`review`, or the hard `quarantine`/`refuse`. The outcome
+    is ADVISORY and is derived from the same clause verdicts; it never adds a
+    violation, and the gate's `refused` flag remains authoritative.
 
     With `recompute` (slice 3, §4), the same recompute inputs feed BOTH the
     authoritative `evaluate` and the report, so the recomputed facts the report
@@ -3346,15 +3568,20 @@ def explain(policy: Policy, audit: dict,
         recompute_producer=recompute_producer) if (
             policy.evidence_rules or policy.register_rules) else {}
     refused = {v.component for v in violations}
+    violations_by_component: dict[str, list] = {}
+    for violation in violations:
+        violations_by_component.setdefault(violation.component, []).append(violation)
     inert = _inert_evidence_selectors(policy, reports) if reports else []
+    has_graded_rules = bool(policy.evidence_rules or policy.register_rules)
     comps = []
+    all_comps = []
     for name in _components(audit):
-        if component and name != component:
-            continue
         entry = reports.get(name, {"evidence": [], "registers": []})
         rule_objs = []
         n_selected_clauses = 0
         n_selecting = 0
+        n_hard_clauses = 0
+        n_soft_failed = 0
         for r in entry["evidence"]:
             clause_objs = [
                 {"facet": c.facet, "threshold": c.threshold, "fact": c.fact,
@@ -3364,9 +3591,16 @@ def explain(policy: Policy, audit: dict,
             if r.selected:
                 n_selecting += 1
                 n_selected_clauses += len(r.clauses)
-            rule_objs.append({"rule": _rule_line(r), "selected": r.selected,
-                              "selfAttested": r.self_attested,
-                              "clauses": clause_objs})
+                if r.outcome is None:
+                    n_hard_clauses += len(r.clauses)
+                else:
+                    n_soft_failed += len(r.soft_failed())
+            rule_obj = {"rule": _rule_line(r), "selected": r.selected,
+                        "selfAttested": r.self_attested,
+                        "clauses": clause_objs}
+            if r.outcome is not None:
+                rule_obj["outcome"] = r.outcome
+            rule_objs.append(rule_obj)
         for r in entry["registers"]:
             rule_objs.append(
                 {"rule": f"capability {r.selector} requires register "
@@ -3379,20 +3613,79 @@ def explain(policy: Policy, audit: dict,
             verdict = "would be REFUSED"
         elif n_selecting == 0:
             verdict = "admitted: no evidence rule selects this component"
+        elif n_soft_failed:
+            if n_hard_clauses:
+                verdict = (f"admitted: {n_hard_clauses} hard clause(s) hold; "
+                           f"{n_soft_failed} soft clause(s) fail")
+            else:
+                verdict = (f"admitted: no hard clause fails; "
+                           f"{n_soft_failed} soft clause(s) fail")
         else:
             verdict = (f"admitted: all {n_selected_clauses} clause(s) across "
                        f"{n_selecting} selecting rule(s) hold")
-        comps.append({"component": name, "origin": _component_origin(
+        comp_obj = {"component": name, "origin": _component_origin(
             audit, origins, name), "selected": n_selecting > 0,
-            "rules": rule_objs, "refused": refused_here, "verdict": verdict})
-    return {
+            "rules": rule_objs, "refused": refused_here, "verdict": verdict}
+        if has_graded_rules:
+            graded = _graded_outcome(policy, entry)
+            if refused_here and not graded["hard"]:
+                # A refusal from another rule family (reach, approval, tenant,
+                # idempotent-teardown) is a hard refusal too. Never report
+                # `admit` next to `refused: true`: that would turn a refusal
+                # into an admission for anything reading `outcome.name`.
+                violation = violations_by_component[name][0]
+                graded = {
+                    "name": "refuse", "hard": True,
+                    "decidedBy": {"kind": violation.kind,
+                                  "token": violation.token,
+                                  "message": violation.message},
+                }
+            comp_obj["outcome"] = graded
+        all_comps.append(comp_obj)
+        if component and name != component:
+            continue
+        comps.append(comp_obj)
+    outcome = None
+    if has_graded_rules:
+        # The overall outcome is the WHOLE composition's worst, not the
+        # `--component`-filtered report's, so `--component Clean` cannot report
+        # admit while another component fails a hard clause (issue #2753).
+        best = None
+        for comp_obj in all_comps:
+            candidate = comp_obj["outcome"]
+            if (best is None or _OUTCOME_RANK[candidate["name"]]
+                    > _OUTCOME_RANK[best[1]["name"]]):
+                best = (comp_obj["component"], candidate)
+        if best is None:
+            outcome = {"name": "admit", "hard": False, "decidedBy": None}
+        else:
+            name, candidate = best
+            decided = candidate["decidedBy"]
+            outcome = {"name": candidate["name"], "hard": candidate["hard"],
+                       "decidedBy": ({**decided, "component": name}
+                                     if decided else None)}
+        if violations and not outcome["hard"]:
+            # A violation that is not attributed to a reportable component (the
+            # document-global `requires idempotent-teardown` floor names the
+            # recovery entry) must still make the overall outcome hard. The
+            # layer may never report `admit` while `refused` is true.
+            violation = violations[0]
+            outcome = {
+                "name": "refuse", "hard": True,
+                "decidedBy": {"kind": violation.kind,
+                              "token": violation.token,
+                              "message": violation.message,
+                              "component": violation.component},
+            }
+    result = {
         "policy": policy.source,
         "recomputed": bool(recompute),
         "components": comps,
         "inertSelectors": [
             {"kind": kind,
              "rule": (_rule_line(RuleReport(
-                 r.scope, r.selector, r.origin, r.self_attested, False, ()))
+                 r.scope, r.selector, r.origin, r.self_attested, False, (),
+                 r.outcome))
                  if kind == "evidence"
                  else f"capability {r.capability} requires register {r.at_least}")}
             for kind, r in inert],
@@ -3400,6 +3693,9 @@ def explain(policy: Policy, audit: dict,
         "violations": [{"kind": v.kind, "component": v.component,
                         "token": v.token, "message": v.message} for v in violations],
     }
+    if outcome is not None:
+        result["outcome"] = outcome
+    return result
 
 
 def render_explain(result: dict) -> str:
@@ -3429,13 +3725,21 @@ def render_explain(result: dict) -> str:
                     f"    {c['facet']:<18}{c['fact']:<24}"
                     f"required {c['threshold']:<10}({c['standing']}) "
                     f"{glyph}{detail}")
+        if comp.get("outcome"):
+            lines.append("  " + _outcome_text(comp["outcome"]))
         lines.append(f"  verdict: {comp['verdict']}")
         lines.append("")
     for inert in result["inertSelectors"]:
+        demand = ("grades nothing" if " on evidence" in inert["rule"]
+                  else "requires nothing")
         lines.append(f"inert selector ({inert['kind']}): `{inert['rule']}` "
-                     f"selects no component in this composition — it requires "
-                     f"nothing (item 290, §7; item 249 inert-taint precedent)")
+                     f"selects no component in this composition; it {demand} "
+                     f"(item 290, §7; item 249 inert-taint precedent)")
     if result["inertSelectors"]:
+        lines.append("")
+    if result.get("outcome"):
+        decided = result["outcome"].get("decidedBy") or {}
+        lines.append(_outcome_text(result["outcome"], decided.get("component")))
         lines.append("")
     verdict = ("REFUSED — at least one component would be refused"
                if result["refused"]

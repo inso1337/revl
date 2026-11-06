@@ -544,6 +544,60 @@ revl policy evaluate prod.policy app.rvl --json --component Billing
 revl policy evaluate local.policy app.rvl --recompute
 ```
 
+#### Graded outcomes
+
+The hard `requires evidence` rule is unchanged: every clause must hold or the
+gate refuses. A policy may also grade the same clauses without gating them,
+with a soft rule that names the operator's disposition:
+
+```
+component vendored-* requires evidence [attestation valid]
+component vendored-* review  on evidence [fault-sweep full] self-attested
+component vendored-* canary  on evidence [inverse-roundtrip pass] self-attested
+component vendored-* observe on evidence [gauntlet admissible] self-attested
+```
+
+A soft rule's failing clause never becomes a violation and never changes the
+gate; it contributes to the component's graded `outcome`. The operator declares
+only `observe`, `canary` and `review`, and each rule names its own facet and
+threshold, so nothing is defaulted. `admit` and `quarantine` are computed: every
+hard clause holding (with no soft failure) maps to `admit`; a hard failure maps
+to `quarantine` when the policy declares `quarantine required`, and otherwise to
+the gate's own `refuse`. When several soft clauses fail, the strictest outcome
+wins (`review` over `canary` over `observe`).
+
+The `--json` report carries an `outcome` object per component and one overall
+(worst) outcome. Each names the clause that decided it, except `admit`, where
+no clause decided anything and `decidedBy` is `null`. The overall outcome is the
+whole composition's worst even when `--component` narrows the report:
+
+```json
+"outcome": {
+  "name": "review",
+  "hard": false,
+  "decidedBy": {
+    "component": "CsvReader",
+    "rule": "component CsvReader review on evidence [fault-sweep full] self-attested",
+    "facet": "fault-sweep",
+    "threshold": "full",
+    "fact": "8/12 partial",
+    "standing": "self-attested"
+  }
+}
+```
+
+The exit status remains the gate's: a soft-only failure is a graded `review`,
+`canary` or `observe`, not a refusal, so it exits 0. The outcome's clause-level
+grading covers the evidence and register clauses. When a reach, approval or
+tenant rule refuses a component, that component's outcome is `refuse` with
+`hard: true`, and its `decidedBy` names the violation's `kind` and `token`
+instead of a clause. A document-global refusal such as the
+`requires idempotent-teardown` floor forces the overall outcome to `refuse` the
+same way, naming the recovery entry, so the outcome never reports `admit` while
+the gate refuses. `refused` remains the whole gate's answer. A policy with no
+evidence or register rules has no `outcome` section and evaluates exactly as
+before.
+
 ### `revl simulate`
 
 Simulate a change against a recorded run (roadmap item 468). `simulate` has
