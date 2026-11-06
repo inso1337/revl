@@ -522,30 +522,66 @@ NO_OBJECTION_OUT_OF_SLICE = "no-objection-out-of-slice"
 PROBE_CORPUS = "examples/rejections"
 
 
-def _census_out_of_slice_programs(cases_dir=None) -> list[tuple[str, str]]:
-    """`(program, record)` for every rejection the census parks out of slice."""
+def _census_record_paths(cases_dir=None) -> list[Path]:
+    """Every committed census record, or none when the directory is not there.
+
+    `Path.rglob` on a missing directory returns nothing, which is why the
+    adapter must tell "no records at all" apart from "records, none out of
+    slice": the first is a source that cannot read its artifact, and the empty
+    derivation the adapter returns for it reds in `check`. The second is a
+    measured empty rung and stays green.
+    """
     base = Path(cases_dir) if cases_dir else CENSUS_CASES
+    return sorted(base.rglob("*.json")) if base.is_dir() else []
+
+
+def _census_out_of_slice_programs(paths) -> list[tuple[str, str]]:
+    """`(program, record)` for every rejection the census parks out of slice.
+
+    A record that is not an object, or whose `case` is not a string, is refused
+    WITH ITS PATH rather than skipped or left to raise AttributeError: the
+    source did not read its artifact, and `derive` turns the refusal into a
+    named `check` problem instead of a traceback.
+    """
     found: set[tuple[str, str]] = set()
-    for path in sorted(base.rglob("*.json")):
-        record = json.loads(path.read_text(encoding="utf-8"))
+    for path in paths:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{path}: unreadable census record ({exc})") from exc
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"{path}: census record is {type(record).__name__}, not an object")
         program = record.get("case", "")
-        if NO_OBJECTION_OUT_OF_SLICE not in record.get("buckets", ()):
+        if not isinstance(program, str):
+            raise ValueError(
+                f"{path}: census record's case is {type(program).__name__}, "
+                "not a string")
+        buckets = record.get("buckets") or ()
+        if (not isinstance(buckets, (list, tuple))
+                or NO_OBJECTION_OUT_OF_SLICE not in buckets):
             continue
         if not program.startswith(PROBE_CORPUS + "/"):
             continue
         if not (ROOT / program).is_file():
             continue
         try:
-            record = str(path.relative_to(ROOT))
+            record_path = str(path.relative_to(ROOT))
         except ValueError:
             # A staged record the test owns, outside the checkout. The program
             # is still named relative to ROOT, which is what a task carries.
-            record = str(path)
-        found.add((program, record))
+            record_path = str(path)
+        found.add((program, record_path))
     return sorted(found)
 
 
 def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
+    records = _census_record_paths(cases_dir)
+    if not records:
+        # No record to read is not an empty bucket. Returning no signal makes
+        # `check` say the source measured nothing, which is the case a renamed
+        # docs/census-artifact directory must not hide.
+        return Derivation("cross-tier-probes", (), ())
     census = _load("_ec_census", "tools/gate_reference_census.py")
     sys.path.insert(0, str(ROOT / "src"))
     from revl import compile_files
@@ -557,7 +593,7 @@ def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
     signal = Signal(impls=(REFERENCE, SELFHOST),
                     breadth=breadth_of(census.CORPUS_DIRS))
     tasks: list[Task] = []
-    for program, record in _census_out_of_slice_programs(cases_dir):
+    for program, record in _census_out_of_slice_programs(records):
         try:
             compile_files([str(ROOT / program)])
         except RevlError:

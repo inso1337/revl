@@ -258,20 +258,23 @@ def test_probe_tasks_come_from_the_census_out_of_slice_bucket(curriculum):
         assert task.mechanism == "tests/test_selfhost_lower.py"
 
 
-def _staged_census_record(tmp_path, program):
+def _staged_census_record(directory, program,
+                          buckets=("no-objection-out-of-slice",)):
     """One census case, in the record's own shape, for a program the test owns.
 
     `t13_unknown_match_case` is a checked-in rejection the reference genuinely
     refuses. The STAGED record says the census parked it out of slice; that is
     this test's claim, not HEAD's, so staging it demonstrates the source firing
-    without re-opening a closed gap or editing the committed record.
+    without re-opening a closed gap or editing the committed record. `buckets`
+    is a parameter so a test can stage a record the source READS and finds
+    nothing in, which is different from a directory that is not there.
     """
     import json
 
-    cases = tmp_path / "cases"
+    cases = directory / "cases"
     cases.mkdir()
     (cases / "case.json").write_text(json.dumps(
-        {"case": program, "buckets": ["no-objection-out-of-slice"]}))
+        {"case": program, "buckets": list(buckets)}))
     return cases
 
 
@@ -279,25 +282,30 @@ def test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it(
         derived, tmp_path):
     """The probe source's vacuity detection, in both directions.
 
-    With no record to read it finds nothing and still DECLARES `hard`, so an
-    empty rung is a measurement rather than a source that stopped working.
-    With one staged record it emits one task, on `hard`, naming the program and
-    the record. What changes between the two runs is one directory this test
-    owns, and `hard` stays reachable through `census-bypass`, so the gate is
-    green in both.
+    With a record it reads and finds nothing in, it emits no tasks and still
+    DECLARES `hard`, so an empty rung is a measurement rather than a source
+    that stopped working. With one staged out-of-slice record it emits one
+    task, on `hard`, naming the program and the record. What changes between
+    the two runs is one directory this test owns, and `hard` stays reachable
+    through `census-bypass`, so the gate is green in both.
     """
     tool, live = derived
     others = [d for d in live if d.source not in
               ("census-bypass", "cross-tier-probes")]
     reachable = [d for d in live if d.source == "census-bypass"]
 
-    empty = tool.adapter_cross_tier_probe(tmp_path)
+    program = "examples/rejections/t13_unknown_match_case.rvl"
+    quiet = tmp_path / "quiet"
+    quiet.mkdir()
+    empty = tool.adapter_cross_tier_probe(
+        _staged_census_record(quiet, program, buckets=()))
     assert empty.tasks == ()
     assert "hard" in empty.rungs(), "an empty source must still declare its rung"
 
-    program = "examples/rejections/t13_unknown_match_case.rvl"
+    staged = tmp_path / "staged"
+    staged.mkdir()
     filled = tool.adapter_cross_tier_probe(
-        _staged_census_record(tmp_path, program))
+        _staged_census_record(staged, program))
     assert len(filled.tasks) == 1
     task = filled.tasks[0]
     assert task.tier == "hard"
@@ -315,6 +323,40 @@ def test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it(
     assert "cross-tier-probes" in tool.empty_rungs(emptied)["hard"]
     assert tool.check(emptied) == [], \
         "an empty but reachable rung is a measurement, not a failure"
+
+
+def test_a_missing_census_record_reds_instead_of_reading_as_empty(derived,
+                                                                 tmp_path):
+    """A renamed or missing record directory is not an empty bucket.
+
+    `Path.rglob` on a missing directory returns nothing, so the adapter must
+    return no signal: the gate then names the source as one that measured
+    nothing rather than reporting `hard` as empty and reachable.
+    """
+    tool, derivations = derived
+    missing = tool.adapter_cross_tier_probe(tmp_path / "does-not-exist")
+    assert missing.tasks == ()
+    assert missing.signals == ()
+    live = [d for d in derivations if d.source != "cross-tier-probes"]
+    problems = tool.check(live + [missing])
+    assert any("'cross-tier-probes' ran and measured no signal" in p
+               for p in problems), problems
+    assert "cross-tier-probes" not in \
+        tool.empty_rungs(live + [missing]).get("hard", [])
+
+
+def test_a_malformed_census_record_is_refused_with_its_path(tmp_path):
+    """A record that is not an object, or whose case is not a string, is named
+    with its path instead of raising AttributeError from inside the source."""
+    tool = _tool()
+    cases = _staged_census_record(tmp_path, "examples/counter_pair.rvl")
+    (cases / "case.json").write_text("[]")
+    with pytest.raises(ValueError, match="case.json"):
+        tool.adapter_cross_tier_probe(cases)
+
+    (cases / "case.json").write_text('{"case": 3}')
+    with pytest.raises(ValueError, match="case.json"):
+        tool.adapter_cross_tier_probe(cases)
 
 
 # A baseline entry is a recorded divergence, so it cannot be conjured from
@@ -432,15 +474,19 @@ def test_check_reds_on_a_source_that_ran_and_measured_nothing(derived):
 
     A source whose artifacts were renamed away skips every branch and returns
     empty. That must not read as `hard` being done, so a derivation with no
-    signal is named, and the rung it fed reds as unreachable.
+    signal is named, and the rung it fed reds as unreachable. Both sources that
+    feed `hard` are blinded: `hard` is reachable only while one of them keeps
+    stamping it.
     """
     tool, derivations = derived
     import dataclasses
     blinded = [dataclasses.replace(d, signals=(), tasks=())
-               if d.source == "census-bypass" else d for d in derivations]
+               if d.source in ("census-bypass", "cross-tier-probes") else d
+               for d in derivations]
     problems = tool.check(blinded)
-    assert any("'census-bypass' ran and measured no signal" in p
-               for p in problems), problems
+    for source in ("census-bypass", "cross-tier-probes"):
+        assert any(f"'{source}' ran and measured no signal" in p
+                   for p in problems), problems
     assert any("tier 'hard' is unreachable" in p for p in problems), problems
     assert tool.empty_rungs(blinded) == {}, \
         "a source that measured nothing must not be reported as merely empty"
