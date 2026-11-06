@@ -1,0 +1,44 @@
+// wrong_release_sku - the two holds release each other's sku
+//
+// Seeded defect: the first hold's inverse releases `sku-2` and the second
+// releases `sku-1`; LIFO is mechanically correct, so the derived order cannot
+// see the swap. The provider is Map-backed, so the fault sweep's host-residue
+// check does see the key an undo did not reverse.
+// Expected catch: fault-test
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  let rows = effect Map.new() undo rows.drop()
+  provide payments {
+    fn charge(order, cents) = rows.insert(order, cents)
+    fn refund(order, cents) = rows.remove(order)
+    fn settle(order, cents) = rows.insert(order, cents)
+    fn reverse(order, cents) = rows.remove(order)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  let first = effect inventory.reserve("sku-1", 1) undo inventory.release("sku-2", 1)
+  let second = effect inventory.reserve("sku-2", 1) undo inventory.release("sku-1", 1)
+  emit payments.settle("order-1", 4200) compensate payments.reverse("order-1", 4200)
+}
