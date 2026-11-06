@@ -32,6 +32,7 @@ from .compiler import compile_files
 from .diagnostics import obligations, report
 from .errors import RevlError
 from .holes import render as render_holes
+from .inverse import inverse_class
 
 from .cli.document import (  # noqa: F401 — _wiring_documents re-exported
     _RESOLVES_A_COMPOSITION, _composition_document, _wiring_documents)
@@ -573,6 +574,10 @@ def _run_audit(args, ir: dict) -> int:
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
+         # issue #2692: the derived inverse-provenance class. Always present,
+         # `unknown` included, so a consumer never reads "no fact" as "no field".
+         # Must match `audit_report`'s entry key-for-key.
+         "inverse": inverse_class(ext),
          # item 396: a ref-only extern has no `bodies` key but DOES cross on its
          # ref tier, so union the ref backends in — otherwise a ref-only extern
          # would audit as "no bodies" while emitting fine.

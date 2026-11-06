@@ -634,6 +634,20 @@ for review instead. A row is a may-retain, and an absent row is not a proof of
 non-retention. Declared inverses are excluded: teardown closing a handle is the
 contract working, not a hazard.
 
+`--json` also carries one derived `inverse` class per extern crossing, so a
+reviewer gets a single answer to "how can this be undone, and how far can the
+undo be trusted" instead of reading the recovery, approval and compensation
+documents separately. The closed vocabulary is `declared` (an exact inverse the
+author declared), `generated` (an exact inverse derived from trusted metadata;
+reserved, no current declaration produces one), `compensation` (a best-effort
+offset), `forward` (irreversible, recovered forward by a safe re-issue),
+`irreversible`, and `unknown`. `unknown` is a value, never a missing field. No
+class is inferred from a name or a shape: an inverse is accepted only from a
+declaration or from trusted metadata, and anything else is `unknown`. The
+meanings and the drift rule are in
+[interchange-format.md](interchange-format.md#the-inverse-class) and
+[audit-diff.md](audit-diff.md#inverse-provenance-drift).
+
 A `FILES` argument may be a MODULE or a single COMPOSITION document. A
 composition is RESOLVED before it is audited (roadmap item 439): its rows are
 compiled and the providers a `remote` row SYNTHESIZES are on the surface with
@@ -675,11 +689,14 @@ question.
   directory), the same root `revl composition` takes. Ignored for module
   arguments.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if
-  the new generation ADDS boundary crossings not in `PREV.json`
+  the new generation ADDS boundary crossings not in `PREV.json`, or if a
+  crossing's derived `inverse` class WEAKENS
   ([audit-diff.md](audit-diff.md)).
-- `--accept CROSSING` - acknowledge one added crossing so it no longer fails
-  `--diff` (the token printed after `+`); repeatable.
-- `--accept-all` - acknowledge every added crossing under `--diff`.
+- `--accept CROSSING` - acknowledge one added crossing, or one weakened
+  `inverse:<name>` token, so it no longer fails `--diff` (the token printed
+  after `+`); repeatable.
+- `--accept-all` - acknowledge every added crossing or weakened inverse under
+  `--diff`.
 - `--policy POLICY` - boundary-policy gate (roadmap item 33): evaluate a
   policy file over the audit graph and REFUSE admission (nonzero) if any
   component reaches a capability it may not ([boundary-policy.md](boundary-policy.md)).
