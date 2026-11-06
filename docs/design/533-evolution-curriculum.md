@@ -107,7 +107,7 @@ test_tier_is_a_total_function_of_the_signal` asserts that every task's rung
 equals `tier(task.signal)` and that two tasks with the same triple never carry
 different rungs, so a source cannot smuggle a difficulty in.
 
-## 3. The four adapters, and the gap each one reads
+## 3. The five adapters, and the gap each one reads
 
 ### 3.1 `construct-reach` (source: known gaps) -> medium, 244 tasks
 
@@ -215,12 +215,19 @@ the reference verdict is a probe. `stdlib/` and `selfhost/` members of the same
 bucket are single-source compiles that merely lack a `use`d module, and
 teaching the port those refusals would teach it nothing.
 
-At the landing commit 23 programs are in the bucket: the `a2`/`a9`, `g5`, `g9`,
-`gsecret`, `lifecycle`, `service_compat` and `v2_use` rejection families. The
-artifact is the program, the locator is the record's bucket entry, `impls` is
-`(reference, selfhost)` and `breadth` is the census's eight directories. Rung:
-hard. A task is emitted only if the reference still refuses the program, so a
-stale record cannot invent one.
+At the landing commit 20 programs are in the bucket: the `a2`/`a9`, `g5`,
+`g9`, `gsecret`, `lifecycle` and `service_compat` rejection families. Three
+more rejection fixtures (`v2_use_cycle`, `v2_use_missing`, `v2_use_private`)
+sit in the same bucket but are excluded, because the census compiles an
+in-memory source and refuses them only because it was given no `modules=`. That
+is a limit of the harness, not a refusal the port should learn, and the lower
+oracle's own `_ref` uses the same in-memory call, so no `REJECTED_PROGRAMS` row
+can carry them. The artifact is the program, the locator is the record's bucket
+entry, `impls` is `(reference, selfhost)` and `breadth` is the census's eight
+directories, so the census is the mechanism the task names. Rung: hard. A task
+is emitted only if the reference still refuses the program, so a stale record
+cannot invent one, and a missing record directory returns no signal so `check`
+reds on the source instead of reading `hard` as empty.
 
 ## 4. Non-vacuity: the tasks, and the gate
 
@@ -453,7 +460,7 @@ the *subject* and asks whether the suite notices. They fail on different things
 and only the second is a difficulty signal, because it measures whether the
 suite that scores a candidate is sensitive enough to be worth scoring against.
 
-Slice 3 does not add it, and does not pretend to. It is slice 7 because it is
+Slices 1 and 3 do not add it, and do not pretend to. It is slice 7 because it is
 the one source whose machinery does not exist, and because it interacts with
 issue #1207: a mutation test a candidate can read is not a hidden mutation
 test, so where the mutants live is that item's question and not this one's.
@@ -464,8 +471,8 @@ test, so where the mutants live is that item's question and not this one's.
   calibrated against anything. Section 5 is the measurement, and it is
   negative on both proxies the tree offers.
 - It does not claim to read all eight sources. It reads five. The other three
-  are slices 2, 4 and 5 with a named oracle each, and slice 6 (the tracker)
-  stays an offline snapshot.
+  sources are slices 4 (design documents), 5 (fuzz seeds) and 6 (the tracker),
+  each with a named oracle; slice 2 is an extra oracle, not one of the eight.
 - It does not claim the derived tasks are a complete list of what is wrong with
   the tree. They are the gaps five artifacts exhibit, no more.
 - It does not touch the reward (issue #1206) or the held-out scoring set

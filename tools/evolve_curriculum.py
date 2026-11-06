@@ -584,20 +584,30 @@ def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
         return Derivation("cross-tier-probes", (), ())
     census = _load("_ec_census", "tools/gate_reference_census.py")
     sys.path.insert(0, str(ROOT / "src"))
-    from revl import compile_files
+    from revl.compiler import compile_source
     from revl.errors import RevlError
 
     # Measured before the instances are looked at, off the mechanism's own
     # corpus table: the census re-decides over all eight of its directories,
-    # whether or not a single program is parked out of slice here.
+    # whether or not a single program is parked out of slice here. The census
+    # is the mechanism (it is what records the bucket), so `mechanism` below
+    # names it; the lower oracle is the change site the task carries.
     signal = Signal(impls=(REFERENCE, SELFHOST),
                     breadth=breadth_of(census.CORPUS_DIRS))
     tasks: list[Task] = []
     for program, record in _census_out_of_slice_programs(records):
+        # The census compiles an IN-MEMORY source, so a program with a `use`
+        # declaration is refused by the harness (`use` declarations need
+        # `modules=`) before any language rule runs. That refusal is not a
+        # port gap: the lower oracle's `_ref` uses the same in-memory call and
+        # its corpus has no REJECTED_PROGRAMS row for one. Compiling the same
+        # way as the census is what keeps this re-derivation the recorded one.
         try:
-            compile_files([str(ROOT / program)])
-        except RevlError:
-            pass
+            compile_source((ROOT / program).read_text(encoding="utf-8"),
+                           "census.rvl")
+        except RevlError as exc:
+            if "modules=" in exc.message:
+                continue
         else:
             # The record says the reference refuses it and the reference admits
             # it: the record is stale for this program, and a task derived from
@@ -614,11 +624,13 @@ def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
                  "carries no REJECTED_PROGRAMS row for it"),
             subject=("selfhost/lower.rvl + "
                      "tests/test_selfhost_lower.py (REJECTED_PROGRAMS)"),
-            mechanism="tests/test_selfhost_lower.py",
-            verify=("python3 -m pytest tests/test_selfhost_lower.py "
-                    f"# a REJECTED_PROGRAMS row for {program} compares tag and "
-                    "message; python3 tools/gate_reference_census.py --check "
-                    f"# {NO_OBJECTION_OUT_OF_SLICE} no longer lists {program}"),
+            mechanism="tools/census_artifact.py (records in docs/census-artifact)",
+            verify=("python3 tools/census_artifact.py --write && "
+                    "python3 tools/census_artifact.py --check  "
+                    f"# the record for {program} no longer lists "
+                    f"{NO_OBJECTION_OUT_OF_SLICE}; "
+                    "python3 -m pytest tests/test_selfhost_lower.py  "
+                    "# a REJECTED_PROGRAMS row for it compares tag and message"),
             signal=signal,
         ))
     return Derivation("cross-tier-probes", (signal,), tuple(tasks))

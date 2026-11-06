@@ -241,12 +241,27 @@ def test_hard_tasks_name_a_program_the_reference_refuses(curriculum):
 
 def test_probe_tasks_come_from_the_census_out_of_slice_bucket(curriculum):
     """The probe's route is the committed census record, so re-read the record:
-    the case is the artifact, and the bucket the task quotes is there."""
+    the case is the artifact, and the bucket the task quotes is there.
+
+    The expected set is every out-of-slice rejection record minus the
+    `use`-bearing ones, which the census refuses only because an in-memory
+    source has no `modules=` (a harness limit, not a port gap). Deriving the
+    exclusion from the source text, rather than from the generator's compile,
+    is what catches a record the source silently drops.
+    """
     import json
 
-    _, tasks = curriculum
+    tool, tasks = curriculum
     probes = [t for t in tasks if t.task_id.startswith("probe/")]
-    assert probes, "no probe tasks to check"
+    records = tool._census_out_of_slice_programs(tool._census_record_paths())
+    use_bearing = {
+        program for program, _ in records
+        if any(line.strip().startswith("use ")
+               for line in (ROOT / program).read_text(encoding="utf-8").splitlines())
+    }
+    expected = {program for program, _ in records} - use_bearing
+    assert len(probes) == 20
+    assert {task.artifact for task in probes} == expected
     for task in probes:
         record = task.locator.split(" buckets[", 1)[0]
         saved = json.loads((ROOT / record).read_text(encoding="utf-8"))
@@ -255,7 +270,9 @@ def test_probe_tasks_come_from_the_census_out_of_slice_bucket(curriculum):
         assert "no-objection-out-of-slice" in saved["buckets"], \
             f"{task.task_id}: {record} is {saved['buckets']}"
         assert task.subject.startswith("selfhost/lower.rvl")
-        assert task.mechanism == "tests/test_selfhost_lower.py"
+        assert "census_artifact.py" in task.mechanism, \
+            "the tier is read off the census corpus, so the census is the " \
+            "mechanism that decides the task"
 
 
 def _staged_census_record(directory, program,
@@ -287,12 +304,13 @@ def test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it(
     that stopped working. With one staged out-of-slice record it emits one
     task, on `hard`, naming the program and the record. What changes between
     the two runs is one directory this test owns, and `hard` stays reachable
-    through `census-bypass`, so the gate is green in both.
+    through a STAGED empty census-bypass source, so the gate is green in both
+    and this test does not depend on a recorded bypass being absent at HEAD.
     """
     tool, live = derived
     others = [d for d in live if d.source not in
               ("census-bypass", "cross-tier-probes")]
-    reachable = [d for d in live if d.source == "census-bypass"]
+    reachable = [tool.adapter_census_bypass(_staged_baseline(tmp_path, ()))]
 
     program = "examples/rejections/t13_unknown_match_case.rvl"
     quiet = tmp_path / "quiet"
