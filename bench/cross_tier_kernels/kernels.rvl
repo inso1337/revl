@@ -1,0 +1,224 @@
+// Kernel shapes for the cross-tier host cost harness (issue #2709).
+//
+// Each kernel takes the repetition count `n` and builds its pinned input once,
+// so the per-call figure is one kernel invocation and not input construction.
+// The same file compiles to every emitted tier; the handwritten native
+// reference in native/src/main.rs computes the same checksums.
+//
+// Inputs are ASCII and results stay far inside Int's 64-bit range, so no
+// backend's overflow trap is reached and the checksums are comparable as
+// plain agreement.
+
+pub fn schema_validate(n: Int) -> Int {
+  let doc = "{\"name\":\"alice\",\"tags\":[\"alpha\",\"beta\",\"gamma\"],\"active\":true,\"score\":42}"
+  var hits = 0
+  var r = 0
+  while (r < n) {
+    var depth = 0
+    var in_str = false
+    var esc = false
+    var i = 0
+    let len = doc.length()
+    while (i < len) {
+      let c = doc.charAt(i)
+      if (esc) {
+        esc = false
+      } else if (c == "\\") {
+        esc = true
+      } else if (c == "\"") {
+        in_str = !in_str
+      } else if (!in_str) {
+        if (c == "{") { depth += 1 }
+        if (c == "}") { depth -= 1 }
+        if (c == ":") { hits += depth }
+        if (c == ",") { hits += 1 }
+      }
+      i += 1
+    }
+    r += 1
+  }
+  return hits
+}
+
+pub fn regex_scan(n: Int) -> Int {
+  let text = "abcXabcdXabbbcdXacXabcdXabdXabcd"
+  var hits = 0
+  var r = 0
+  while (r < n) {
+    var i = 0
+    let len = text.length()
+    while (i < len) {
+      if (match_here(text, i, len)) {
+        hits += 1
+        i += 4
+      } else {
+        i += 1
+      }
+    }
+    r += 1
+  }
+  return hits
+}
+
+fn match_here(s: Str, start: Int, len: Int) -> Bool {
+  // glob "a*b*c" anchored at start: find an 'a', then any run, then 'b', then
+  // any run, then 'c'. The `*` is greedy-but-backtracking over the fixed tail.
+  if (start + 3 > len) { return false }
+  if (s.charAt(start) != "a") { return false }
+  var i = start + 1
+  var b = -1
+  while (i < len) {
+    if (s.charAt(i) == "b") { b = i }
+    i += 1
+  }
+  if (b < 0) { return false }
+  var j = b + 1
+  while (j < len) {
+    if (s.charAt(j) == "c") { return true }
+    j += 1
+  }
+  return false
+}
+
+pub fn vector_rerank(n: Int) -> Int {
+  let vectors: List[List[Int]] = [
+    [3, 1, 4, 1, 5, 9, 2, 6],
+    [2, 7, 1, 8, 2, 8, 1, 8],
+    [5, 5, 5, 5, 5, 5, 5, 5],
+    [1, 0, 0, 0, 0, 0, 0, 0],
+    [9, 9, 9, 9, 9, 9, 9, 9],
+    [2, 3, 5, 7, 11, 13, 17, 19],
+    [1, 2, 4, 8, 16, 32, 64, 128],
+    [7, 3, 7, 3, 7, 3, 7, 3]
+  ]
+  let query: List[Int] = [1, 2, 3, 4, 5, 6, 7, 8]
+  var best = 0
+  var best_score = 0
+  var r = 0
+  while (r < n) {
+    var v = 0
+    while (v < vectors.length()) {
+      let vec = vectors[v]
+      var dot = 0
+      var i = 0
+      while (i < query.length()) {
+        dot += vec[i] * query[i]
+        i += 1
+      }
+      if (dot > best_score) {
+        best_score = dot
+        best = v
+      }
+      v += 1
+    }
+    r += 1
+  }
+  return best
+}
+
+pub fn policy_eval(n: Int) -> Int {
+  let actions: List[Int] = [1, 0, 2, 1, 0, 2, 2, 1, 0, 1, 2, 2, 0, 1]
+  let thresholds: List[Int] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140]
+  var allowed = 0
+  var r = 0
+  while (r < n) {
+    var i = 0
+    while (i < actions.length()) {
+      let want = r % 3
+      if (actions[i] == want) {
+        let limit = thresholds[i]
+        if ((r % 150) < limit) {
+          allowed += 1
+        }
+      }
+      i += 1
+    }
+    r += 1
+  }
+  return allowed
+}
+
+pub fn hash_bytes(n: Int) -> Int {
+  let text = "the quick brown fox jumps over the lazy dog, then does it again"
+  let len = text.length()
+  var h = 0
+  var r = 0
+  while (r < n) {
+    h = 5381
+    var i = 0
+    while (i < len) {
+      let hh = h * 33 + text.charCodeAt(i)
+      h = hh - (hh.div_trunc(4294967296) * 4294967296)
+      i += 1
+    }
+    r += 1
+  }
+  return h
+}
+
+pub fn simulate(n: Int) -> Int {
+  var pos = 1000
+  var vel = 3
+  var acc = 0
+  var r = 0
+  while (r < n) {
+    var step = 0
+    while (step < 64) {
+      vel -= pos.div_trunc(100)
+      pos += vel
+      if (pos < 0) { pos = 0 }
+      if (pos > 100000) { pos = 100000 }
+      let aa = acc + pos
+      acc = aa - (aa.div_trunc(1000003) * 1000003)
+      step += 1
+    }
+    r += 1
+  }
+  return acc
+}
+
+pub fn batch_transform(n: Int) -> Int {
+  let rows: List[Int] = [
+    31, 7, 92, 14, 63, 8, 27, 55, 41, 2, 88, 19, 73, 6, 50, 99,
+    12, 44, 81, 23, 64, 5, 77, 38, 90, 16, 58, 33, 71, 9, 47, 85
+  ]
+  var total = 0
+  var r = 0
+  while (r < n) {
+    var i = 0
+    var acc = 0
+    let floor = 20 + (r % 9)
+    let shift = r % 5
+    while (i < rows.length()) {
+      let x = rows[i]
+      if (x > floor) {
+        if (x < 90) {
+          acc += ((x * 3) - 17 + shift)
+        }
+      }
+      i += 1
+    }
+    let tt = total + acc
+    total = tt - (tt.div_trunc(1000003) * 1000003)
+    r += 1
+  }
+  return total
+}
+
+// The loop control: a minimal pinned-list scan. An empty
+// `while (i < n) { i += 1 }` is a closed form that an optimising native
+// compiler rewrites away (measured: native reported 0 ns for 128,000 calls),
+// which would make the column a comparison against zero. The lookup keeps a
+// real loop on every tier, and the native floor pays the same loop, so the
+// difference is the emitted loop and list-index cost. It does NOT cross a
+// host or tier boundary: call overhead is not isolated by this harness.
+pub fn loop_probe(n: Int) -> Int {
+  let pins: List[Int] = [1, 2, 3, 4, 5, 6, 7, 8]
+  var acc = 0
+  var i = 0
+  while (i < n) {
+    acc += pins[i % 8]
+    i += 1
+  }
+  return acc
+}

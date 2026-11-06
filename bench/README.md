@@ -448,9 +448,18 @@ registers (the entry row includes its own gate, and the report subtracts it),
 and states what it cannot isolate: the capability check is a compile-time
 refusal (G4) with no per-call runtime step, and the WAL discharge record is
 not on the path unless a recorder is attached. The report also names the
-residual it cannot decompose: allocation at the emitted call site. The
-cross-tier harness (TypeScript, Rust, wasm) the issue asks for next is not
-built yet.
+residual it cannot decompose: allocation at the emitted call site.
+
+The second half of the issue is the cross-tier harness,
+[cross_tier_kernels/](cross_tier_kernels/README.md). Seven kernel shapes run
+on the Python, TypeScript, Rust and wasm tiers, against the same work in a
+handwritten native Rust reference as the floor. It gates every tier's checksum
+against that reference before reporting a latency, then writes latency,
+throughput, artifact size, cold start, peak memory, loop overhead and
+capability-enforcement overhead. It states that call overhead across a
+boundary is not isolated here; the Python tier's extern crossing is the first
+slice's result. The committed run is
+[results/cross-tier-kernels.md](results/cross-tier-kernels.md).
 
 The decision rule it exists to serve, stated now so the cross-tier numbers
 land against it instead of being read as a win by themselves: **native work is
