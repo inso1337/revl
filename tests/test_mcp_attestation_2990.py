@@ -124,6 +124,15 @@ def test_an_expired_attestation_is_refused():
     assert "expired" in reason
 
 
+def test_verify_pin_enforces_expiry_without_a_caller_supplied_clock():
+    """The proxy calls `verify_pin` with no clock, so the default path must
+    still refuse an expired record."""
+    record = _record(ttl=0.0)
+    verdict = att.verify_pin(record, _pin())
+    assert verdict["ok"] is False
+    assert "expired" in verdict["reason"]
+
+
 def test_a_pin_without_a_manifest_is_refused(tmp_path):
     target = tmp_path / "empty.pin.json"
     target.write_text('{"kind": "revl.mcp.pin", "version": "1.0", '

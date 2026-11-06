@@ -225,9 +225,15 @@ def verify_attestation(record, public_key: bytes, *, now: datetime | None = None
                        ) -> tuple[bool, str]:
     """`(ok, reason)` for one attestation under a public key the verifier
     pins. Never raises: a hostile record must not turn a refusal into a crash
-    (the rule `peer_identity.verify_record` states)."""
+    (the rule `peer_identity.verify_record` states).
+
+    Expiry is ALWAYS checked; `now` exists so a test can name the instant
+    rather than sleep. An expired record is refused exactly as a bad signature
+    is, because it makes the same claim about a moment nobody is checking.
+    """
     if not isinstance(record, dict):
         return False, "the server presented no attestation"
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     ok, reason = verify_record(ATTESTATION_SIGN_DOMAIN, record, public_key)
     if not ok:
         return False, reason
@@ -245,8 +251,8 @@ def verify_attestation(record, public_key: bytes, *, now: datetime | None = None
         return False, str(error)
     if issued > expires:
         return False, "the attestation expires before it was issued"
-    if now is not None and expires <= now.astimezone(timezone.utc):
-        return False, (f"the attestation expired at {record.get('expires_at')}")
+    if expires <= current:
+        return False, f"the attestation expired at {record.get('expires_at')}"
     digests = record.get("tools")
     if not isinstance(digests, dict) or not digests:
         return False, "the attestation covers no tool manifest"
