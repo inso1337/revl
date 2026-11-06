@@ -110,6 +110,7 @@ fn helper() -> Int { ... }                        // default: module-private
   (`` `raw` is module-private in `m.rvl` and cannot be imported (G1) ``). The
   files compiled together as roots (a composition's rows and the files it
   `use`s) keep one shared namespace.
+<<<<<<< HEAD
 - **A name a `use` list imports may not also be declared in the importing
   module (issue #3364).** `use "./kit.rvl" { dice }` beside `fn dice(...)` in
   the same file is the same collision as two declarations of `dice`, and is
@@ -118,6 +119,14 @@ fn helper() -> Int { ... }                        // default: module-private
   `extern` names a list imports; `use "./kit.rvl" as kit` names nothing locally,
   so a local `dice` and `kit.dice` coexist. A diagnostic shows a name as the
   author wrote it, never with the `__m<N>` suffix the module-privacy pass adds.
+=======
+- **A `pub` declaration is reachable only through the `use` list that names it
+  (issue #3023).** The rule above is the private half of the same rule: a
+  `fn`, `test` or `prop test` body, or a component, that names a `pub` `fn` or
+  `extern` of another module without importing it is refused as not declared,
+  exactly as an un-imported `pub fn` already was in a plain fn body. `pub`
+  declares a name importable, not globally visible.
+>>>>>>> 299e93572 (use: refuse a bare reference to an un-imported pub declaration (#3023))
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
 - **Resolution (roadmap 319).** `use` resolves the path relative to the

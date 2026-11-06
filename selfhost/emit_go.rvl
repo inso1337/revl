@@ -115,7 +115,12 @@
 // file under 256 KiB: tests/test_selfhost_census_buckets.py fails when a
 // self-host file crosses it or its census bucket moves unrecorded.
 use "../stdlib/value.rvl" {
+<<<<<<< HEAD
   value_is_null, value_field, value_list, value_str, value_keys
+=======
+  value_kind, value_is_null, value_field, value_children,
+  value_list, value_at, value_str, value_int, value_bool, value_keys
+>>>>>>> 299e93572 (use: refuse a bare reference to an un-imported pub declaration (#3023))
 }
 use "../stdlib/str.rvl" { rstrip, str_tab }
 // The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
