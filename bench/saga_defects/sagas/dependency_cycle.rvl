@@ -1,0 +1,16 @@
+// dependency_cycle - two saga components require each other
+//
+// Seeded defect: OrderBook requires invoices to provide orders and InvoiceBook requires orders to provide invoices; neither can ever activate.
+// Expected catch: compile (G3)
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+service Orders { fn order(id: Str) -> Str }
+service Invoices { fn invoice(id: Str) -> Str }
+
+component OrderBook requires invoices: Invoices provides orders: Orders {
+  provide orders { fn order(id) = invoices.invoice(id) }
+}
+
+component InvoiceBook requires orders: Orders provides invoices: Invoices {
+  provide invoices { fn invoice(id) = orders.order(id) }
+}
