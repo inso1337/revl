@@ -1490,17 +1490,17 @@ QUERIES = {
     "authority": authority,
 }
 
+# the verbs the live query surface exposes, named once so the MCP verb enum
+# and this dispatch table cannot drift. `authority` is static-only: it answers
+# over the declared routes and secret bindings, and the live tool's argument
+# shape (one target or component) has no capability slot.
+LIVE_VERBS = ("emits-to", "withdraw", "depends-on", "reaches", "drift")
+
 # the same verbs, addressed by the result `query` name — what `live_query`
 # dispatches on. Live mode runs these against the session's post-swap IR;
 # historical mode adds its own verbs (`emitted-between`, `lifetime`) that only
 # a recorded run can answer.
-_VERB_FN = {
-    "emits-to": emitters,
-    "withdraw": withdrawal,
-    "depends-on": dependents,
-    "reaches": reach,
-    "drift": drift,
-}
+_VERB_FN = {name: QUERIES[name] for name in LIVE_VERBS}
 
 
 # ---------------------------------------------------------------- rendering

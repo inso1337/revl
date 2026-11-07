@@ -265,7 +265,7 @@ QUERY_TOOLS = [
 # envelope is the same one the static tools use; `mode` says which world.
 # --------------------------------------------------------------------------
 
-_VERBS = ["emits-to", "withdraw", "depends-on", "reaches", "drift"]
+_VERBS = list(Q.LIVE_VERBS)
 
 LIVE_QUERY_TOOLS = [
     {
