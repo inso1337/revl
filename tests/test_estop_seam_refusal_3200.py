@@ -3,11 +3,14 @@ read the E-Stop latch at its crossing seams refuses an armed latch instead of
 booting and running every crossing unwatched.
 
 The py tier is the reference: with a halted latch it refuses the first plug
-(tests/test_estop_443.py). The ts and wasm tiers have no such seam on their
-single-process path, so before this fix `revl run --backend ts --estop-latch L`
-ran the composition to `DOWN` and exited 0 with the operator's halt written
-to L. These tests need no node and no wasmtime: the refusal happens before a
-runtime is imported, the same way `--attestation` is refused off the py tier.
+(tests/test_estop_443.py). No other tier reads the latch on its single-process
+path: ts and wasm have no seam, and the rust, go and java runs do not forward
+the latch to their runner (their placement runners honour it, which is why they
+are in `revl.estop.TIERS_WITH_ESTOP`). Before this fix
+`revl run --backend ts --estop-latch L` ran the composition to `DOWN` and
+exited 0 with the operator's halt written to L. These tests need no toolchain:
+the refusal happens before a runtime is imported, the same way `--attestation`
+is refused off the py tier.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ def halted_latch(tmp_path, monkeypatch):
     return latch
 
 
-@pytest.mark.parametrize("backend", ["ts", "wasm"])
+@pytest.mark.parametrize("backend", ["ts", "wasm", "rust", "go", "java"])
 def test_the_flag_is_refused_on_a_tier_without_a_seam(backend, halted_latch,
                                                       capsys):
     capsys.readouterr()
@@ -49,6 +52,17 @@ def test_the_flag_is_refused_on_a_tier_without_a_seam(backend, halted_latch,
     assert rc != 0
     assert f"--backend {backend} has no E-Stop seam" in err
     assert "--estop-latch" in err
+
+
+@pytest.mark.parametrize("backend", ["rust", "go", "java"])
+def test_the_ambient_latch_is_refused_off_py(backend, halted_latch,
+                                             monkeypatch, capsys):
+    monkeypatch.setenv(estop.LATCH_ENV, str(halted_latch))
+    capsys.readouterr()
+    rc = _cli("run", EXAMPLE, "--backend", backend, "--once")
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert f"--backend {backend} has no E-Stop seam" in err
 
 
 def test_the_ambient_latch_is_refused_on_ts(halted_latch, monkeypatch, capsys):
@@ -80,11 +94,15 @@ def test_every_tier_outside_the_honouring_set_refuses(monkeypatch):
     from revl.run import KNOWN_BACKENDS, _estop_seam_problem  # noqa: PLC0415
     for backend in KNOWN_BACKENDS:
         problem = _estop_seam_problem(backend, "some.estop")
-        if backend in estop.TIERS_WITH_ESTOP:
-            assert problem is None, backend
+        if backend == "py":
+            assert problem is None
         else:
             assert problem and f"--backend {backend}" in problem, backend
         assert _estop_seam_problem(backend, None) is None, backend
     monkeypatch.setenv(estop.LATCH_ENV, "ambient.estop")
     assert _estop_seam_problem("py", None) is None
     assert "ambient.estop" in _estop_seam_problem("ts", None)
+
+
+def test_the_placement_honouring_set_is_unchanged():
+    assert estop.TIERS_WITH_ESTOP == frozenset({"py", "go", "rust", "java"})

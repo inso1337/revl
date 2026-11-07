@@ -2809,6 +2809,14 @@ def _is_model_refusal(exc: BaseException) -> bool:
                             ProvisionRefused, ProviderError))
 
 
+#: The tiers whose SINGLE-PROCESS `revl run` path reads the E-Stop latch at
+#: its crossing seams (issue #3200). This is narrower than
+#: `revl.estop.TIERS_WITH_ESTOP`, which names the tiers whose PLACEMENT runners
+#: honour the latch: the rust, go and java single-process runs do not forward
+#: `--estop-latch` to their runner yet, and ts and wasm have no seam at all.
+SINGLE_PROCESS_ESTOP_TIERS = frozenset({"py"})
+
+
 def _estop_seam_problem(backend: str, flag_latch: str | None) -> str | None:
     """Why a single-process run on `backend` must refuse an armed E-Stop, or
     None when there is no latch or the tier honours it (issue #3200).
@@ -2816,18 +2824,20 @@ def _estop_seam_problem(backend: str, flag_latch: str | None) -> str | None:
     A latch counts as armed when it is named by `--estop-latch` or by the
     ambient `REVL_ESTOP_LATCH`, whether or not a halt is already written to it:
     the run is asking to be haltable, and a tier with no seam cannot be."""
-    from .estop import LATCH_ENV, TIERS_WITH_ESTOP  # noqa: PLC0415 - lazy
-    if backend in TIERS_WITH_ESTOP:
+    from .estop import LATCH_ENV  # noqa: PLC0415 - lazy
+    if backend in SINGLE_PROCESS_ESTOP_TIERS:
         return None
     if flag_latch:
         return (f"--estop-latch needs a tier whose runtime checks the latch at "
                 f"its crossing seams; --backend {backend} has no E-Stop seam "
-                f"to honour it")
+                f"on a single-process run to honour it (py has; --placement "
+                f"halts the other tiers through the conductor)")
     ambient = os.environ.get(LATCH_ENV)
     if ambient:
         return (f"{LATCH_ENV} names an E-Stop latch ({ambient}), but "
-                f"--backend {backend} has no E-Stop seam to honour it; unset "
-                f"it or run on a tier that checks the latch")
+                f"--backend {backend} has no E-Stop seam on a single-process "
+                f"run to honour it; unset it or run on a tier that checks the "
+                f"latch")
     return None
 
 
