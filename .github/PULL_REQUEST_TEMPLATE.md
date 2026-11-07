@@ -21,6 +21,12 @@ mechanism, and the residual risk from replay.
 <!--
 The commands you ran and their result. Name the selector, not "the suite".
 Read the skips: a skip is not a pass.
+
+For a test this PR adds or edits, paste the receipt from
+`python3 tools/evidence_receipt.py --base origin/main --node <node>`. It names
+the base failure line and the head pass line. Hand-typed counts are not
+evidence, and a red produced by mutating the implementation is not a base
+failure.
 -->
 
 ## Issue linkage

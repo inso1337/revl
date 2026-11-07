@@ -227,6 +227,12 @@ cannot run.
    emitter, run its tier's goldens; the frontend suite alone does **not** cover
    every per-backend golden.
 
+A change that adds or edits a test also carries its red-before / green-after
+receipt: run `python3 tools/evidence_receipt.py --base origin/main --node
+<node>` and put the block in the PR's Verification section. It names the base
+failure line and the head pass line, and it refuses when the node passes on
+base, so a reviewer never has to re-ask for hand-typed counts.
+
 ## The pre-merge gate
 
 > **Run `make pre-merge` before a change reaches `main`.** It is the gate that
