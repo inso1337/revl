@@ -996,7 +996,14 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
         -> list[tuple[str, frozenset[str]]]:
     """The components a swap actually touches: those added, removed, or whose
     IR entry differs (modulo provenance) between the running composition and
-    the candidate. Realms come off whichever side declares the component."""
+    the candidate.
+
+    A changed component is labelled with its realms on BOTH sides: the realms
+    the running manifest puts it in and the realms the candidate puts it in
+    (issue #3188). Reading only the candidate let the swap itself choose the
+    labels the gate saw, so a candidate that moved a component out of a realm
+    escaped a `may not` rule written against that realm. With the union a deny
+    applies to where the component was as well as to where it will be."""
     from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
 
     old = {c["name"]: _semantic(c) for c in old_ir.get("components") or []}
@@ -1007,10 +1014,13 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
     for name in sorted(set(old) | set(new)):
         if old.get(name) == new.get(name):
             continue  # untouched by this swap
-        man = new_man if name in new else old_man
-        source_ir = new_ir if name in new else old_ir
-        changed.append((name, _labels_for(source_ir, name,
-                                          component_realms(man, name))))
+        realms: frozenset[str] = frozenset()
+        if name in old:
+            realms |= component_realms(old_man, name)
+        if name in new:
+            realms |= component_realms(new_man, name)
+        changed.append((name, _labels_for(new_ir if name in new else old_ir,
+                                          name, realms)))
     return changed
 
 
