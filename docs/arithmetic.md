@@ -177,8 +177,8 @@ gains nothing from it, and the IR should not grow a field it does not use.
 
 ## `Float` is IEEE 754 binary64
 
-Every host revl targets implements it natively, JS `number`, Rust `f64`,
-Java `double`, Python `float`, so the commitment costs nothing to honour and
+Every host revl targets implements it natively (JS `number`, Rust `f64`,
+Java `double`, Python `float`), so the commitment costs nothing to honour and
 there is no better-specified alternative. Rationals and decimals are different
 *types*, not a better `Float`.
 
@@ -207,7 +207,7 @@ a digit follows, so a method call on an integer is never mistaken for one:
 
 - **`<` on Float is a partial order.** NaN is unordered against everything,
   including itself, so `a < b`, `a == b` and `a > b` can all be false. Any
-  code that assumes a total order, sorting, binary search, is wrong on Float
+  code that assumes a total order (sorting, binary search) is wrong on Float
   unless it excludes NaN first.
 
 #
@@ -223,7 +223,7 @@ The width costs nothing on the tiers that can express it: rust already mapped
 anything, and measured on a dependent scalar chain it is about **9%**
 (0.98 → 1.07 ns/iter); on a vectorisable reduction it is much worse, because
 the check defeats auto-vectorisation. revl components index, count and size
-things, the scalar case, so this is the right default, and a future
+things (the scalar case), so this is the right default, and a future
 `Int32` is the answer for numeric kernels rather than making the default
 unsafe.
 
@@ -256,8 +256,8 @@ now it is one diagnostic instead of a behaviour per tier.
 This is also why `Int.MIN` has no spelling in the surface. Unary minus binds
 to the *positive* literal, so writing `-9223372036854775808` negates an
 out-of-range literal and is refused by the same rule. The negative bound is
-reachable by computation from in-range literals, `0 - 9223372036854775807 -
-1`, which is an ordinary runtime value on every tier, inside the range and
+reachable by computation from in-range literals (`0 - 9223372036854775807 -
+1`), which is an ordinary runtime value on every tier, inside the range and
 checked like any other arithmetic.
 
 A `Float` literal has the same rule for the same reason
@@ -282,9 +282,9 @@ Two did not, and both were closed by the ports written up below: wasm was
 exact only to 2^53. Neither was a platform limit: WebAssembly has native
 `i64`, and JavaScript has `BigInt`.
 
-Both are asserted by *execution* in `tests/test_cross_tier_execution.py`,
-in-range arithmetic on every bounded tier, and overflow that must fault rather
-than return a value, so neither can regress quietly.
+Both are asserted by *execution* in `tests/test_cross_tier_execution.py`
+(in-range arithmetic on every bounded tier, and overflow that must fault rather
+than return a value), so neither can regress quietly.
 
 Unary minus is arithmetic too: negation is `0 - x`, and `0 - Int.MIN`
 overflows. python imposed the bound on `+`, `-` and `*` but let `-x` lower to
@@ -318,8 +318,8 @@ and it is closed: `Int` is i64 there now, and overflow traps.
 The port was not a find-and-replace, because that emitter uses i32 for two
 different things and only one of them moved:
 
-- **values**, arithmetic, Int comparisons, Int literals, and every Int-typed
-  parameter, local, result and global, are i64;
+- **values** (arithmetic, Int comparisons, Int literals, and every Int-typed
+  parameter, local, result and global) are i64;
 - **linear-memory addresses** stay i32, because wasm32 addressing is 32-bit.
   So do `Bool`, the string byte-length and list-count prefixes, the variant
   tag, and the loop cursors. `_wasm_ty` in `backends/wasm/emit.py` is the
@@ -380,8 +380,8 @@ a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
 `compatible("Float", "Int")` is true, so `1.5 + 2` and `ident(3)` (for
 `fn ident(x: Float) -> Float`) both type-check. The `bin` node carries
 `operands`, so the *arithmetic* case was always specifiable and every tier
-got it right. The rest, a `call` argument, a `let` value, a `return`
-expression, used to reach every backend as a bare `lit`/`var` with no
+got it right. The rest (a `call` argument, a `let` value, a `return`
+expression) used to reach every backend as a bare `lit`/`var` with no
 declared type on the node, the same shape of gap `operands` was created to
 close for `/`. The tiers that keep `Int` and `Float` apart therefore split
 on `ident(3)`, and not in the same direction:
@@ -398,7 +398,7 @@ on `ident(3)`, and not in the same direction:
 A refusal was survivable and the wrong answer was not, so the gap was pinned
 in `tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to
 be rediscovered. It is now closed the same way `operands` closed `/`: the
-frontend, the single IR producer, and the only stage that knows both types,
+frontend (the single IR producer, and the only stage that knows both types)
 marks each coercion site on the node itself (`"widen": "Float"`), and
 every backend emits the conversion explicitly instead of letting a host rule
 absorb it. The marker is additive, so no `ir_version` changes and the
@@ -515,13 +515,13 @@ carries no payload, so it faults without the message.
 ### The coercion rule: widen implicitly, narrow explicitly
 
 The lattice is `Int32 → Int`, each step lossless. Widening runs that way and is
-**implicit** at every value-flow position, a call argument, a `let`/`return`
-target, a field, exactly as `Int → Float` widens. The IR marks each site
+**implicit** at every value-flow position (a call argument, a `let`/`return`
+target, a field), exactly as `Int → Float` widens. The IR marks each site
 (`"widen": "Int"`, beside the existing `"widen": "Float"`) so the tiers that
 keep the widths apart emit the conversion (`as i64`, `(long)`, `int64(..)`,
 `BigInt(..)`, `i64.extend_i32_s`) instead of letting a host rule absorb it.
 
-Narrowing, `Int → Int32`, can lose bits, so it is **always explicit and
+Narrowing (`Int → Int32`) can lose bits, so it is **always explicit and
 checked**. There is no silent truncation and no `Int32` literal suffix: an
 `Int32` value comes from `.to_int32()`, which re-imposes the 32-bit bound at
 runtime and faults out of range, or from an `Int32`-typed parameter. `.to_int()`
@@ -637,7 +637,7 @@ Three edges of that helper, and of the Float `%` beside it, were wrong until
 issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
 
 - **A NaN dividend is not zero and has no sign.** The helper reached its
-  zero-divisor branch for `NaN / 0.0`, `a == 0` is false for a NaN, and read
+  zero-divisor branch for `NaN / 0.0` (`a == 0` is false for a NaN) and read
   the sign off it, answering `Infinity` where IEEE says `NaN`. python is the
   *reference* tier, so this was the one tier disagreeing with the other five.
 - **`%` on `Float` has an IEEE answer at a zero divisor**, `NaN`, where the Int
@@ -645,7 +645,7 @@ issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
   `ZeroDivisionError`. The two are separate helpers now: `x % 0.0` is `NaN` and
   `x % 0` still faults, on every tier.
 - **A zero remainder keeps the dividend's sign.** `(-0.0) % 1.0` is `-0.0`, and
-  the python form, `abs(a) % abs(b) if a >= 0`, took the positive branch,
+  the python form (`abs(a) % abs(b) if a >= 0`) took the positive branch,
   because `-0.0 >= 0` is true. The sign is invisible in `to_str` (both zeros
   render `0`) and visible through a division.
 
@@ -691,8 +691,8 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
 ## Still open
 
 - **TypeScript is still not 64-bit.** `Int` has a stated width everywhere
-  else, python imposes the bound, rust/java/go/wasm are all 64-bit and all
-  fault at the edge, but TypeScript maps it to f64, exact only to 2^53, so
+  else (python imposes the bound, rust/java/go/wasm are all 64-bit and all
+  fault at the edge), but TypeScript maps it to f64, exact only to 2^53, so
   `MAX + 1` silently loses precision there. Closing it means `BigInt`.
 - ~~**An `Int` literal outside the range is not diagnosed.**~~ **Closed.** The
   checker now refuses an `Int` literal outside `[-2^63, 2^63-1]`: one
@@ -708,8 +708,8 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   forms below return `Result[Int, Str]`, so a program handles a zero divisor
   without faulting. `fail` could not serve here: it is a component construct
   (A8) and is refused in a pure `fn`, so making division "fail" would have
-  meant either extending `fail` into the pure stratum, which costs totality,
-  the property `verified` rests on, or a `Result` form. The second is what
+  meant either extending `fail` into the pure stratum (which costs totality,
+  the property `verified` rests on) or a `Result` form. The second is what
   was built.
 
 ## The total division forms

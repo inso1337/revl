@@ -104,13 +104,13 @@ revl refuses.)
 ## Host objects: constructor-tracked receivers are checked
 
 v1 host stub objects (`Pool.open(...)`, `Map.new()`) carry their own methods
-(`query`, `insert`, `drop`, ...). The checker tracks host provenance, a
-`let` bound to a host-constructor call infers the *family*, and checks a
+(`query`, `insert`, `drop`, ...). The checker tracks host provenance (a
+`let` bound to a host-constructor call infers the *family*) and checks a
 method call on such a receiver against that family's surface (the dotted
 names in `_HOST_ARG_SIG`): an unknown method is refused (`HOST-METHOD`, with
 the real surface named), and arity/argument types are checked exactly like
-the call form. The stub's *result* stays opaque, no entry claims to know
-what comes back, so values flowing out of host objects remain on the audit
+the call form. The stub's *result* stays opaque (no entry claims to know
+what comes back), so values flowing out of host objects remain on the audit
 surface. Receivers with no pinned family (an extern's return, a host-object
 result) type unknown, and **every** method call on them is refused,
 stdlib-named or not (roadmap 75(b)): a value cannot lower *through* the
@@ -161,7 +161,7 @@ rebinds, exactly like `out = out.push(v)`), because revl has no mutation and
 no free-function namespace to pollute. The surface grows by specification,
 not by accretion: build/read/member shipped first; `size`/`keys`/`remove`
 graduate by the spec step below. Iteration's **order was decided before it
-shipped**, see *Iteration order* below and **docs/collections.md**, because
+shipped** (see *Iteration order* below and **docs/collections.md**) because
 that is the moment the
 tiers would otherwise diverge for free.
 
@@ -219,8 +219,8 @@ like what they are: an empty persistent value vs a stateful host object.
   {b=2, a=1}`. Insertion order is never observable through `==`.
 - **Iteration order is sorted, not insertion.** When iteration ships,
   `keys()` (and any `for`-over-a-map) yields keys in ascending **canonical
-  `Str` order**, Unicode scalar value, equivalently UTF-8 byte
-  lexicographic, on every tier. Order is a pure function of the key set,
+  `Str` order** (Unicode scalar value, equivalently UTF-8 byte
+  lexicographic) on every tier. Order is a pure function of the key set,
   never of construction history, which is the same line `==` already draws.
   The full decision, the three options costed per tier, and the canonical
   order live in **docs/collections.md**; the short form is the subsection
@@ -377,8 +377,8 @@ it.
 equal `p`; `x.endsWith(p)` is true iff its last `p.length()` code points do.
 The empty string is a prefix and a suffix of every string (so
 `x.startsWith("")` is always true), and a string is a prefix of itself.
-The probes are **Str-only**, declared on the Str family exactly like
-`charAt`/`split`, and both arguments count in code points
+The probes are **Str-only** (declared on the Str family exactly like
+`charAt`/`split`) and both arguments count in code points
 (docs/strings.md), never UTF-16 units.
 
 They exist because protocol parsing is the harness's daily bread: the wire
@@ -414,8 +414,8 @@ it never raises. All four are **Str-only**, declared on the Str family like
 They exist to cut the **self-host lexer's per-byte cost**. The lexer scans
 identifiers and numbers one source byte at a time; each byte previously paid a
 revl-fn call (`is_alnum(c)`) plus a `charCodeAt`/`ord` round-trip and a
-code-point range compare. Lowered native, a chained comparison (`"0" <= x <=
-"9"`) or tuple membership, the classification collapses to an inline test with
+code-point range compare. Lowered native (a chained comparison (`"0" <= x <=
+"9"`) or tuple membership), the classification collapses to an inline test with
 no call and no intermediate `ord`. See `docs/bench-selfhost.md` for the lexer
 before→after.
 
@@ -451,8 +451,8 @@ and `tests/test_str_index_bounds_cross_tier.py`.
 `charCodeAt` helper (a lone JS surrogate would otherwise leak through
 `String.charCodeAt`); rust `x.chars().nth(i).unwrap() as u32 as i64`; wasm the
 UTF-8-decoding `$str_cp_char_code_at` helper. On the **py tier** the win is
-small: CPython caches 1-char Latin-1 strings, so the `charAt` "allocation" was
-already near-free and only the fn call is reclaimed, but on the **native tiers**
+small (CPython caches 1-char Latin-1 strings, so the `charAt` "allocation" was
+already near-free and only the fn call is reclaimed), but on the **native tiers**
 `charAt`'s lowering allocates a heap `String` (`…to_string()` on rust) per byte,
 which `codepoint_at` avoids entirely. That is the residual-lexer perf lever the
 item-231a finding pointed at. See `docs/bench-selfhost.md` for the before→after.
@@ -464,7 +464,7 @@ ASCII digits with an optional leading `-` (`"42"`, `"-7"`, `"007"`), `None`
 for **everything else**: empty, `"-"`, `"+"`-prefixed, whitespace, partial
 digit runs (`"12a"`), non-ASCII digits, and **out-of-i64-range magnitudes**
 (`"9223372036854775808"` is `None`, exactly like a non-digit; `Int.MIN`
-itself, `"-9223372036854775808"`, parses, whose magnitude has no positive
+itself (`"-9223372036854775808"`) parses, whose magnitude has no positive
 representative, the same edge `Int.to_str` renders). It mirrors
 `Int.to_str()`: the same name family, the reverse direction, the same total
 domain (every `Int` renders, every digit string parses).
@@ -472,7 +472,7 @@ domain (every `Int` renders, every digit string parses).
 It is a *method*, not a free function, on purpose (the `Int.to_str()` grain),
 and it is the first builtin whose **spelling is shared by two receiver
 families**: `to_int` is also the Int32→Int widening (docs/arithmetic.md,
-"Sized integers"). The checker dispatches by receiver head, `Int32.to_int`
+"Sized integers"). The checker dispatches by receiver head: `Int32.to_int`
 widens, `Str.to_int` parses, and a receiver that is neither (`Bool.to_int`,
 `Int.to_int`) is refused listing both families. The IR carries the receiver's
 static type on the builtin node (`recv`), because the backends must dispatch

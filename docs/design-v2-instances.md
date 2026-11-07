@@ -20,8 +20,8 @@ tenant. In revl today those cannot be components at all. They live in the pure
 stratum as records and ADTs, which have no `requires`/`provides`, no effects, and
 no teardown.
 
-So the dynamic structure of an application, precisely the part where residue
-accumulates, sits outside G1-G8.
+So the dynamic structure of an application (precisely the part where residue
+accumulates) sits outside G1-G8.
 
 ## What the runtime already does
 
@@ -140,8 +140,8 @@ Recommendations are mine and are not accepted.
    (`lower.py:3053-3077`) is a link-time injectivity proof over a finite table,
    and with N unknown there is no table.
    *Recommendation: forbid an instance providing into any realm but its own local
-   one.* That replaces the table **for instances** with a structural argument,
-   disjointness by construction, while static entries keep the table. My earlier
+   one.* That replaces the table **for instances** with a structural argument
+   (disjointness by construction) while static entries keep the table. My earlier
    "a rule to write down, not a research problem" was too glib: the rule is
    simple, but proving the two regimes compose is not.
 
@@ -390,7 +390,7 @@ version bump, no new check), and goldens stay byte-identical.
   there is no surface form for it, and the runtime always isolates each provided
   key.
 - **G3 (acyclicity), decision 6.** Quantified over the *instance* graph. The
-  instance graph is a **tree by construction**: every spawn mints a fresh child,
+  instance graph is a **tree by construction** (every spawn mints a fresh child),
   so spawn edges never form an instance cycle, and a `Session` spawning a
   `Session` is allowed. It is a self-edge on the type graph, but a template is
   not a static entry, so the categorical self-provision rejection in `_link`
@@ -402,7 +402,7 @@ version bump, no new check), and goldens stay byte-identical.
   `emission[caps]`) is rejected when the target's emission surface is non-empty
   (or not ⊆ caps). The surface is a sound, conservative over-approximation: the
   union of the target's provided-service emission capabilities, its own `emit`
-  steps, and, by fixpoint over the spawn graph, its own children's surfaces.
+  steps, and (by fixpoint over the spawn graph) its own children's surfaces.
   A body-level spawn has no emission clause to widen, exactly as body-level
   `emit` has none, so it is unconstrained here.
 - **G7 (LIFO teardown).** Unchanged in rule; already dynamic at the effect
@@ -441,8 +441,8 @@ version bump, no new check), and goldens stay byte-identical.
 
 - **A component cannot be both statically composed and a spawn template
   (phase-1 restriction).** Being named by any `spawn C` makes C a template,
-  fully excluded from static composition. This is the clean model: it is what
-  makes the recursive-self-spawn / self-provision paradox disappear, but it is
+  fully excluded from static composition. This is the clean model (it is what
+  makes the recursive-self-spawn / self-provision paradox disappear), but it is
   a restriction, and lifting it (a component with one static instance *and*
   runtime instances) is the natural phase-2 question. It needs exactly the
   hierarchical `_realm` decision 9 asks for, plus a provide-realm/require-realm
@@ -475,7 +475,7 @@ per-fiber realm-prefix runtime change recorded in
 ## Instance accessor: frozen (frontend + cordis-py reference landed)
 
 Phase 1's spawn handle exposed only `.dispose()`, so property (d)'s *positive*
-direction, a spawner **reading a provision back** from its own instance, was
+direction (a spawner **reading a provision back** from its own instance) was
 inexpressible in revl. The accessor closes that with **no new grammar form**:
 field access on the handle.
 
@@ -495,8 +495,8 @@ field access on the handle.
   `service` is frozen inline (the typing rule's result) so no tier re-derives
   it: mirroring how `spawn.realms` carries the provided keys.
 - **Runtime contract:** every tier resolves `key` through the handle's stored
-  instance context, the private local realm the matching `spawn` node isolated
-  the key into, yielding *that instance's* provision and no other's.
+  instance context (the private local realm the matching `spawn` node isolated
+  the key into), yielding *that instance's* provision and no other's.
 
 **Landed:** typecheck + lower (`src/revl/`) and the cordis-py reference
 (`backends/python/emit.py` + `runtime.py` `SpawnHandle`), with an executed
@@ -643,8 +643,8 @@ it):** the next moves each need a cross-tier fan-out, so they are recorded, not
 taken here:
 
 - **Runtime honour + fan-out.** Actually landing a named instance in process P
-  (rather than the spawning process) is the cross-tier port, reference tier
-  first, then the other five, under the standing constraint that no tier's
+  (rather than the spawning process) is the cross-tier port (reference tier
+  first, then the other five) under the standing constraint that no tier's
   spawn lowering may bake "same process" into its shape. The
   `manifest["named_instances"]` index is the substrate that port consumes.
 - **Migration** (with item 23): migrate a named instance across tiers, keyed on

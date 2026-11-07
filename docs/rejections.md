@@ -1,7 +1,7 @@
 # Rejections: what the compiler refuses, and how to fix it
 
 A rejection is a deliverable, not a failure mode (DESIGN.md §9): every
-refusal names the guarantee it enforces, the `(G4)` in the message, and,
+refusal names the guarantee it enforces (the `(G4)` in the message) and,
 where one exists, carries a fix hint on the line below. The point is that an
 author, or an agent, learns something from being refused.
 
@@ -30,7 +30,7 @@ One set of codes is deliberately *not* covered: those the evolution curriculum
 (`docs/design/533-evolution-curriculum.md`) reserves as the tasks an agent must
 work out from the refusal itself rather than look up. `emitted_codes.reserved_codes()`
 derives that set by the same rule the curriculum generator uses, so covering a
-reserved code, by adding it to `GUARANTEES`, removes its task and admits it
+reserved code (by adding it to `GUARANTEES`) removes its task and admits it
 back into the roster in one move, and the two cannot drift.
 
 The fenced examples below are compiled by `tests/test_doc_examples.py`: a
@@ -887,7 +887,7 @@ treat the list as remaining work, not as a rejection. Fix: fill the hole in.
 
 ## T4: no field read off an erased value (`Any` / `Value`)
 
-An erased value, a `json_parse` result, any `Any` or `Value`, has no known
+An erased value (a `json_parse` result, any `Any` or `Value`) has no known
 fields, so a plain field read on it (`v.kind`) is the silent-divergence class
 items 279/299 chased: the py tier raises `KeyError` on an absent key, the ts
 tier yields `undefined`, and neither is a defensible total answer for a field
@@ -913,8 +913,8 @@ field read `.kind` on a value of type `Any` — an erased value has no known fie
 Fix, two designed surfaces (roadmap item 380):
 
 * bind the value to a **record type** and read the field there. A field whose
-  declared type is `Opt[T]` then reads TOTAL on every tier, absent is the
-  empty Opt, never a raise or a stray `undefined`, so `e.kind ?? "<none>"` is
+  declared type is `Opt[T]` then reads TOTAL on every tier (absent is the
+  empty Opt, never a raise or a stray `undefined`), so `e.kind ?? "<none>"` is
   the one spelling for "may be absent" and it means the same everywhere;
 * walk the erased value with the total **shape accessors** in `stdlib/value.rvl`:
   `value_is_object(v)` / `value_is_list(v)` / `value_is_scalar(v)` discriminate
