@@ -73,8 +73,26 @@ def test_the_ledger_covers_every_self_host_file_and_tier(ledger):
 
 def test_a_moved_source_or_emitter_marks_the_ledger_stale(ledger):
     found = sm.problems(ledger, sm.load_gaps(), expected_digest="0" * 64)
-    assert any("different self-host sources or tier emitters" in problem
+    assert any("different self-host, stdlib or tier emitter sources" in problem
                for problem in found)
+
+
+def test_the_digest_covers_every_kind_of_source_the_measurement_reads(tmp_path):
+    """A digest that quietly stopped hashing an emitter or a stdlib file would
+    make the gate stop noticing the change it exists to notice."""
+    (tmp_path / "selfhost").mkdir()
+    (tmp_path / "stdlib").mkdir()
+    (tmp_path / "backends" / "go").mkdir(parents=True)
+    corpus = tmp_path / "selfhost" / "a.rvl"
+    stdlib = tmp_path / "stdlib" / "s.rvl"
+    emitter = tmp_path / "backends" / "go" / "emit.py"
+    for path, text in ((corpus, "corpus"), (stdlib, "stdlib"), (emitter, "emitter")):
+        path.write_text(text, encoding="utf-8")
+    seen = {sm.digest(tmp_path)}
+    for path, text in ((emitter, "emitter2"), (stdlib, "stdlib2"), (corpus, "corpus2")):
+        path.write_text(text, encoding="utf-8")
+        seen.add(sm.digest(tmp_path))
+    assert len(seen) == 4
 
 
 # -------------------------------------------------------------- acknowledgement
@@ -91,7 +109,8 @@ def test_an_acknowledgement_whose_cell_emits_now_is_stale(ledger):
     cell = _a_cell(ledger, sm.OK)
     gaps = sm.load_gaps() + [{"cell": cell, "issue": 1, "reason": "planted"}]
     found = _changed_problems(ledger, gaps)
-    assert any(cell in problem and "emits now" in problem for problem in found), found
+    assert any(cell in problem and "needs no acknowledgement now" in problem
+               for problem in found), found
 
 
 def test_an_acknowledgement_needs_an_issue_or_a_scope_decision(ledger):
@@ -111,6 +130,15 @@ def test_an_acknowledgement_needs_a_reason(ledger):
     entry["reason"] = ""
     found = _changed_problems(ledger, gaps)
     assert any(cell in problem and "`reason`" in problem for problem in found)
+
+
+def test_a_frontend_refusal_is_unmeasured_and_needs_no_acknowledgement(ledger):
+    cell = _a_cell(ledger, sm.OK)
+    name, tier = cell.split("::")
+    changed = copy.deepcopy(ledger)
+    changed["cells"][name][tier] = {"kind": sm.FRONTEND, "message": "planted"}
+    gaps = [entry for entry in sm.load_gaps() if entry["cell"] != cell]
+    assert _changed_problems(changed, gaps) == []
 
 
 def test_an_acknowledgement_for_a_cell_the_measurement_lost_is_reported(ledger):
