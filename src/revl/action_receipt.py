@@ -252,6 +252,12 @@ class Verdict:
     link: str = ""
     reason: str = ""
 
+    def __post_init__(self) -> None:
+        if self.link and self.link not in VERDICT_LINKS:
+            raise ValueError(
+                f"{self.link!r} is not a verdict link; the vocabulary is "
+                f"{list(VERDICT_LINKS)}")
+
     def __bool__(self) -> bool:
         return self.ok
 
@@ -460,6 +466,20 @@ def check_commitment(value: Any, origins: Any, label: str) -> Optional[str]:
 
 
 def check_body(receipt: Any) -> Optional[str]:
+    """Validate a receipt body, never raising on an unprintable member.
+
+    The refusal messages interpolate untrusted members. A JSON integer above
+    Python's 4300-digit conversion limit has no printable form, so building the
+    message can itself raise `ValueError`. The contract here is a reason
+    string, not an exception, so that case is a refusal.
+    """
+    try:
+        return _check_body(receipt)
+    except (ValueError, TypeError, RecursionError):
+        return "the receipt cannot be read: a member has no bounded printable form"
+
+
+def _check_body(receipt: Any) -> Optional[str]:
     """Validate a receipt body, ignoring the signature (which is checked
     first, by :func:`verify_receipt`).
 
@@ -751,6 +771,22 @@ def _keyring(keys: Any) -> dict:
 def verify_receipt(receipt: Any, keys: Any) -> Verdict:
     """Check one sealed receipt against a key or key set. Fail-closed.
 
+    See :func:`_verify_receipt` for the checks. This wrapper is what makes the
+    module's contract hold against a hostile document: a refusal message that
+    cannot be built (a huge int, a cycle, a value with no canonical spelling)
+    is a refusal, never an exception escaping the verifier.
+    """
+    try:
+        return _verify_receipt(receipt, keys)
+    except (ValueError, TypeError, RecursionError):
+        return Verdict(False, "envelope",
+                       "the receipt cannot be read: a member has no bounded "
+                       "printable form")
+
+
+def _verify_receipt(receipt: Any, keys: Any) -> Verdict:
+    """Check one sealed receipt against a key or key set. Fail-closed.
+
     Order: the record and its signature first, because a tampered member must
     be refused as tampered rather than as malformed; then the body, which the
     MAC does not make well-formed.
@@ -790,6 +826,21 @@ def verify_receipt(receipt: Any, keys: Any) -> Verdict:
 
 
 def verify_chain(document: Any, keys: Any) -> Verdict:
+    """Check a whole receipt chain against a key or key set. Fail-closed.
+
+    See :func:`_verify_chain` for the checks. The wrapper is the same guard
+    :func:`verify_receipt` has: a document whose refusal cannot be rendered is
+    refused rather than raising, because a presented chain is untrusted.
+    """
+    try:
+        return _verify_chain(document, keys)
+    except (ValueError, TypeError, RecursionError):
+        return Verdict(False, "envelope",
+                       "the chain cannot be read: a member has no bounded "
+                       "printable form")
+
+
+def _verify_chain(document: Any, keys: Any) -> Verdict:
     """Check a whole receipt chain against a key or key set. Fail-closed.
 
     The checks, in order, are: the envelope and its signature; every receipt's
@@ -980,6 +1031,7 @@ __all__ = [
     "SESSION_VERDICTS",
     "SIGN_ALG",
     "SUPPRESSION_REASONS",
+    "VERDICT_LINKS",
     "Verdict",
     "check_body",
     "check_commitment",

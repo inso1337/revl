@@ -32,14 +32,14 @@ def _load(path: str):
 def _actions_document(args):
     """Read the export input, which is either a bare list of actions or an
     object carrying ``actions`` and an optional ``session_verdict``."""
+    # `json.load` raises a plain `ValueError` for an integer above Python's
+    # 4300-digit conversion limit and a `UnicodeDecodeError` for non-UTF-8
+    # input. Both are a refusal, not a traceback, because the document is
+    # untrusted input.
     try:
         document = _load(args.actions)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         print(f"error: cannot read the actions document: {error}", file=sys.stderr)
-        return None
-    except json.JSONDecodeError as error:
-        print(f"error: the actions document is not JSON: {error.msg}",
-              file=sys.stderr)
         return None
     if isinstance(document, list):
         return {"actions": document,
@@ -92,13 +92,14 @@ def _export(args) -> int:
 
 
 def _verify(args) -> int:
+    # `json.load` raises a plain `ValueError` for an integer above Python's
+    # 4300-digit conversion limit and a `UnicodeDecodeError` for non-UTF-8
+    # input. Both are a refusal, not a traceback, because the chain is
+    # untrusted input.
     try:
         document = _load(args.file)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         print(f"error: cannot read the chain: {error}", file=sys.stderr)
-        return 1
-    except json.JSONDecodeError as error:
-        print(f"error: the chain is not JSON: {error.msg}", file=sys.stderr)
         return 1
     # A key that cannot be resolved is not "no opinion": the chain was
     # PRESENTED, so the answer is a refusal with the reason, not a pass.
@@ -113,7 +114,9 @@ def _verify(args) -> int:
         print(json.dumps({"ok": verdict.ok, "link": verdict.link,
                           "reason": verdict.reason,
                           "kind": document.get("kind")
-                          if isinstance(document, dict) else None}, indent=2))
+                          if isinstance(document, dict)
+                          and isinstance(document.get("kind"), str) else None},
+                         indent=2))
     else:
         print(action_receipt.render_verify(
             verdict, document if isinstance(document, dict) else {}))

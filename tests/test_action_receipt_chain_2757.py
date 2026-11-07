@@ -364,7 +364,7 @@ def test_cli_exports_and_verifies(tmp_path, capsys):
     assert main(["receipts", "export", "--actions", str(actions),
                  "--session", "session-1", "--key", str(key),
                  "--out", str(chain)]) == 0
-    document = json.loads(chain.read_text())
+    document = json.loads(chain.read_text(encoding="utf-8"))
     assert document["kind"] == R.CHAIN_KIND
     assert main(["receipts", "verify", str(chain), "--key", str(key),
                  "--json"]) == 0
@@ -431,3 +431,26 @@ def test_hostile_origins_and_salts_are_refused_without_crashing():
         R.commitment("x", [["not", "a", "string"]], salt=SALT, label="input")
     with pytest.raises(ValueError):
         R.commitment("x", ["input"], salt="not-hex", label="input")
+
+
+def test_a_huge_integer_is_refused_not_raised():
+    """A JSON integer above Python's string-conversion limit has no printable
+    form, so building a refusal message must not escape the verifier."""
+    huge = 10 ** 5000
+    assert not R.verify_chain({"kind": huge}, KEY).ok
+    assert not R.verify_receipt({"signature": "0" * 64, "key_id": huge},
+                                KEY).ok
+    assert isinstance(R.check_body({"kind": huge}), str)
+
+
+def test_cli_huge_integer_documents_are_refusals(tmp_path):
+    """The CLI reads an untrusted document; a huge integer is a refusal with
+    exit 1, not a traceback."""
+    chain = tmp_path / "huge-chain.json"
+    chain.write_text('{"kind": ' + "9" * 5000 + "}")
+    key = _write_key(tmp_path, "key", KEY)
+    assert main(["receipts", "verify", str(chain), "--key", str(key)]) == 1
+    actions = tmp_path / "huge-actions.json"
+    actions.write_text('{"actions": ' + "9" * 5000 + "}")
+    assert main(["receipts", "export", "--actions", str(actions),
+                 "--session", "session-1", "--key", str(key)]) == 1
