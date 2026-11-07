@@ -144,6 +144,12 @@
           "description": "The extern's classification, one of the four G4 boundary classes: \"pure\" (no observable effect), \"acquire\" (takes a resource that must be released), \"emission\" (an irreversible crossing out of the system), or \"witnessed\" (a reversible host mutation that names its inverse). The pseudo-class \"first-class dispatch\" appears (with name \"*\") for a reach through a value whose target is not statically nameable. May be null when unknown.",
           "type": ["string", "null"]
         },
+        "inverse": {
+          "description": "Issue #2692: the single derived inverse-provenance class of this crossing, one value of the closed vocabulary. \"declared\" is an exact inverse the author declared (`undo ...`); \"generated\" is an exact inverse derived from trusted metadata (reserved: no current declaration produces one); \"compensation\" is a best-effort offset (`compensate ...`), not a restoration; \"forward\" is irreversible but recoverable forward by a re-issue the declaration's idempotency register covers (a deferred emission with `idempotent` or `idempotent(key: ...)`; the register says whether the re-issue is free or fenced); \"irreversible\" is an emission with no inverse, offset or forward claim; \"unknown\" is no provenance fact at all. This version emits it on every entry, `unknown` included, and it is never inferred from a name or a shape. Optional in the schema so a document captured before the field existed still validates; absence there is not `unknown`. See docs/interchange-format.md.",
+          "type": "string",
+          "enum": ["declared", "generated", "compensation", "forward",
+                   "irreversible", "unknown"]
+        },
         "capabilities": {
           "description": "The declared capability scope of a scoped `emission[...]`/`witnessed[...]` extern, as a sorted list of tokens (e.g. [\"fs\"]). This token — not the extern name — is what a `capability <glob>` policy rule and the register floor key on. Absent for an unscoped extern, whose token is its own name. This is the machine-readable form of the ` [fs]` clause on the human render's `host code:` line.",
           "type": "array",

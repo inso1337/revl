@@ -108,6 +108,18 @@ No component is a placeholder any more. See
 `docs/design/535-held-out-scoring.md` for `held-out`'s, and
 `docs/design/546-evolution-progress-term.md` for `progress`'s.
 
+THE SCORECARD NAMES THE PROTOCOL THAT PRODUCED IT
+-------------------------------------------------
+Issue #2802. The scorecard already recorded short digests of the census
+baseline, the formal axioms and the held-out draw, and none of them named the
+scorer itself. `protocol_digest` is `sha256:<hex>` over the evaluator's tracked
+bytes (`EVALUATOR_PATHS` in `src/revl/kernel_boundary.py`), read from THIS
+checkout, the one the scorer runs from. A later round carries the same digest
+when it was scored by the same protocol, and `tools/evolution_controller.py`
+refuses a stage record whose digest differs from its own. The digest proves
+identity, not correctness: who holds the expected value, and how it rotates, is
+issue #2762's custody question and not something a hash decides.
+
 THE EMPTY DIFF IS NOT RETAINED
 ------------------------------
 Every component above `progress` is a preservation check, and a reward made of
@@ -154,6 +166,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -1713,10 +1726,53 @@ PROBES = {
 
 # ----------------------------------------------------------------- the score
 
+def _evaluator_protocol():
+    """`tools/evaluator_protocol.py` from THIS checkout, loaded by path.
+
+    This file can be imported by the controller and by a test loader with
+    `tools/` not on `sys.path`, and importing `revl.kernel_boundary` through
+    `revl/__init__.py` would pull the compiler into the scorer. The helper is
+    loaded by path under a name that carries `ROOT`, so a scorer that reads
+    another checkout (a staged test) gets that checkout's helper and not one
+    some earlier import happened to register. Registered in `sys.modules`
+    before `exec_module` because `kernel_boundary.py` declares a dataclass.
+    """
+    name = ("_revl_reward_evaluator_protocol_"
+            + hashlib.sha1(str(ROOT).encode("utf-8")).hexdigest()[:12])
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    path = ROOT / "tools" / "evaluator_protocol.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load the evaluator protocol from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+#: "the scorecard was assembled by hand, read the digest now".
+_UNSET = object()
+
+
 @dataclass
 class Scorecard:
     candidate: Candidate
     verdicts: list = field(default_factory=list)
+    #: The scorer's evaluator identity, taken once in `score()`. `None` means
+    #: the checkout could not name it; `_UNSET` means this scorecard was
+    #: assembled by hand (a test or a stub) and `as_dict` should read it now.
+    protocol: object = field(default=_UNSET)
+
+    def _protocol_identity(self):
+        if self.protocol is _UNSET:
+            return _evaluator_protocol().protocol_digest(ROOT)
+        return self.protocol
 
     @property
     def retained(self) -> bool:
@@ -1744,6 +1800,11 @@ class Scorecard:
             "prose_ignored": list(self.candidate.prose_ignored),
             "base": self.candidate.base,
             "scope": list(self.candidate.scope),
+            # Issue #2802. The scorer's own protocol identity, taken from THIS
+            # checkout and not the candidate's: a scorecard from two rounds that
+            # carry the same digest names the same scorer, component list and
+            # retention rule. It proves identity, not correctness.
+            "protocol_digest": self._protocol_identity(),
         }
         # The counter ledger the `progress` verdict was decided on, in the
         # shape `evolution_progress.promote` reads, so a generation is judged
@@ -1758,7 +1819,8 @@ class Scorecard:
 
     def render(self) -> str:
         lines = [f"evolution reward over {self.candidate.tree}",
-                 f"base {self.candidate.base}", ""]
+                 f"base {self.candidate.base}",
+                 f"protocol {self._protocol_identity() or 'unavailable'}", ""]
         for v in self.verdicts:
             mark = "ok  " if v.verified else "FAIL"
             lines.append(f"  {mark} {v.component:<22} {v.reason}")
@@ -1799,7 +1861,15 @@ def score(candidate: Candidate, probes=None) -> Scorecard:
             verdict = failed(
                 name, f"probe answered for {verdict.component!r}, not {name!r}")
         verdicts.append(verdict)
-    return Scorecard(candidate, verdicts)
+    # The protocol identity is taken once for the scorecard the run produces,
+    # not on every serialisation of it. A checkout that cannot name its
+    # protocol still gets a scorecard, with `protocol_digest: null` visible in
+    # the artifact rather than a crash after every probe has already run.
+    try:
+        protocol = _evaluator_protocol().protocol_digest(ROOT)
+    except (OSError, RuntimeError, ImportError):
+        protocol = None
+    return Scorecard(candidate, verdicts, protocol)
 
 
 def main(argv=None) -> int:

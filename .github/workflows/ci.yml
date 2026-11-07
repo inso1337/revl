@@ -1208,6 +1208,10 @@ jobs:
           SEL_FULL: ${{ steps.select.outputs.full }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: 4
+          # Issue #2216: this is a fast lane. Tests marked `slow` (a fuzz grown
+          # to a size bound, a wall-clock comparison) are deselected here; the
+          # merge-queue `frontend` job runs the full suite and keeps them.
+          REVL_SKIP_SLOW: "1"
         run: |
           set -euo pipefail
           set -f

@@ -8,7 +8,7 @@
     },
     {
       "path": "components/fetcher.rvl",
-      "sha256": "cf4a939231e628bafae13b9bfd5ab711fba563625f991e89daea63aee537f3f2"
+      "sha256": "7e284ae55cfba003575674f94d7c17f876f06b9c80072f11ef03f08741462547"
     },
     {
       "path": "components/gatekeeper.rvl",
@@ -16,15 +16,15 @@
     },
     {
       "path": "components/workspace.rvl",
-      "sha256": "40d4b26c69a7a1f69080a18b5c861be4dfe5ed68c0457bcc45f4b6697dd6656b"
+      "sha256": "2dd94714af86e86f9fc056c27113ac99caf4e8599625d14f2f434dfdfae5411d"
     },
     {
       "path": "components/planner.rvl",
-      "sha256": "0bf6368023cda8311f004730cb58c2de5edfbc458a3ba95ddb83f7c1c6e1f3dc"
+      "sha256": "1ab0453cb101d816efc6b0af4bb1b98669292540c88edfc3772ac918f6228f12"
     },
     {
       "path": "components/assembler.rvl",
-      "sha256": "60dfc4640b290ef0962683b04817a37bf48eefca70f07d8ef9092ffb64c96601"
+      "sha256": "c5da99942981dfd79289aeddc3b803d5a06525fad036e63f69b94642ade251d2"
     },
     {
       "path": "components/shipper.rvl",
@@ -38,7 +38,7 @@
   "imports": [
     {
       "path": "externs.rvl",
-      "sha256": "3f66592326dd82dcfe9449c852ff87ffad0a04d46e74e17ac1fc5f33695c3e58"
+      "sha256": "d47c1ce1d779b21788d8de5214337675049c27c00913e4513e0fd20e21fef5fc"
     }
   ]
 }

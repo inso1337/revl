@@ -84,7 +84,9 @@ pub fn count(bs: List[Box[Str]]) -> Int { return bs.length() }
 
 #: A generic record built in a `let` (issue comment 4). It used to be built
 #: raw, `new Bx(n)`, so `final var b` was a raw `Bx` and `b.v + 1L` read an
-#: `Object`. It is built with the diamond now, and javac infers `Bx<Long>`.
+#: `Object`. It is built with the diamond when javac can infer the arguments,
+#: and with the local's own type otherwise (`pinned`: an empty list infers
+#: `List<Object>`, so the annotation names `List<Long>`).
 RECORD_LITERAL_PROGRAM = """\
 type Bx[T] = { v: T }
 type Pair[A, B] = { first: A, second: B }
@@ -109,13 +111,17 @@ pub fn listed(n: Int) -> Int {
   let b = { v: [n, 2] }
   return b.v.length()
 }
+pub fn pinned(n: Int) -> Int {
+  let xs: Bx[List[Int]] = { v: [] }
+  return xs.v[0] + 1
+}
 """
 
-#: Controls: a literal whose field javac would infer looser than revl types it
-#: (an empty list, `None`, `Map.empty()`, a variant case, a local bound to one,
-#: a field read off a raw record) stays raw, because `Bx<List<Object>>` does
-#: not convert to the declared `Bx<List<Long>>` where the raw `Bx` did. Each
-#: compiles on main and must keep compiling.
+#: Controls: a literal whose inferred field type mentions a placeholder (an
+#: empty list is `List[Never]`, `None` is `Opt[Never]`, an empty map and
+#: `Ok(n)` mention `Any`, and a local/field inherits one) stays raw, because
+#: the Java type argument cannot be named from it. Each compiles on main and
+#: must keep compiling.
 LOOSE_RECORD_PROGRAM = """\
 type Bx[T] = { v: T }
 type Box[T] = Full(T) | Empty
@@ -207,8 +213,8 @@ pub fn done(b: Box[Unit]) -> Int {
 
 #: Controls: a selector whose type the emitter does not know keeps the raw
 #: pattern. An arrow's `b` is inlined as the call's argument, a `Box<String>`
-#: here, so the function's `b: Box[Int]` must not type it; a `let` local's
-#: annotation is not in the IR. Each compiles on main and must keep compiling.
+#: here, so the function's `b: Box[Int]` must not type it. Each compiles on
+#: main and must keep compiling.
 RAW_MATCH_PROGRAM = """\
 type Box[T] = Full(T) | Empty
 pub fn full_of(n: Int) -> Box[Int] { return Full(n) }
@@ -222,10 +228,41 @@ pub fn local(n: Int) -> Int {
 }
 """
 
+#: issue #2325: a `let` local (or an arm bind) has no selector type at the
+#: pattern site, so the pattern stays raw. The frontend now carries the arm's
+#: payload type (`_arm_payload_type` substitutes the selector's type
+#: arguments), and each binding is declared at it, which is what makes the
+#: payload readable (`v + 1L`) where a raw `Object` was refused.
+BOUND_MATCH_PROGRAM = """\
+type Box[T] = Full(T) | Empty
+type Either[L, R] = Left(L) | Right(R) | Neither
+pub fn full_of(n: Int) -> Box[Int] { return Full(n) }
+pub fn either_of(n: Int) -> Either[Str, Int] { return Right(n) }
+pub fn local(n: Int) -> Int {
+  let b = full_of(n)
+  return match b { Full(v) => v + 1, Empty => 0 }
+}
+pub fn local_either(n: Int) -> Int {
+  let e = either_of(n)
+  return match e { Right(x) => x * 2, _ => 0 }
+}
+pub fn constructor(n: Int) -> Int {
+  let b: Box[Int] = Full(n)
+  return match b { Full(v) => v + 2, Empty => 0 }
+}
+pub fn arm_bind(b: Box[Box[Int]]) -> Int {
+  return match b {
+    Full(inner) => match inner { Full(v) => v + 1, Empty => 0 },
+    Empty => 0,
+  }
+}
+"""
+
 PROGRAMS = {
     "variant": VARIANT_PROGRAM,
     "match": MATCH_PROGRAM,
     "raw_match": RAW_MATCH_PROGRAM,
+    "bound_match": BOUND_MATCH_PROGRAM,
     "record_literal": RECORD_LITERAL_PROGRAM,
     "loose_record": LOOSE_RECORD_PROGRAM,
     "unit": UNIT_PROGRAM,
@@ -261,6 +298,19 @@ def test_generic_variant_match_applies_the_selector_arguments():
     assert "case Box.Full<java.lang.Double> " in java
     assert "case Box.Full<java.lang.Void> " in java
     assert "case Box.Full __" not in java and "case Box.Empty __" not in java
+
+
+def test_let_bound_match_declares_the_payload_binding():
+    java = _java_source(BOUND_MATCH_PROGRAM)
+    # A `let` local and an arm bind have no selector type at the pattern site,
+    # so their patterns stay raw (`case Box.Full __revl_case_N`), unlike a
+    # parameter's. Each binding is declared at the payload type the frontend
+    # derived from the local's type, so reading it is not an `Object` read.
+    assert "switch (b) {\n            case Box.Full __revl_case_" in java
+    assert "switch (e) {\n            case Either.Right __revl_case_" in java
+    assert "switch (inner) {\n            case Box.Full __revl_case_" in java
+    assert "final java.lang.Long v = (java.lang.Long) __revl_case_" in java
+    assert "final java.lang.Long x = (java.lang.Long) __revl_case_" in java
 
 
 def test_unknown_selector_keeps_the_raw_pattern():
@@ -341,6 +391,12 @@ def test_generic_record_literal_uses_the_diamond():
     assert "final var b = new Bx<>(java.util.Optional.of(n));" in java
 
 
+def test_non_inferable_record_literal_names_the_local_type():
+    java = _java_source(RECORD_LITERAL_PROGRAM)
+    assert ("final var xs = new Bx<java.util.List<java.lang.Long>>"
+            "(java.util.List.of());") in java
+
+
 def test_plain_record_literal_has_no_diamond():
     java = _java_source(
         "type P = { x: Int }\npub fn f(n: Int) -> Int {\n  let p = { x: n }\n"
@@ -350,6 +406,11 @@ def test_plain_record_literal_has_no_diamond():
 
 def test_loosely_inferred_record_literal_stays_raw():
     java = _java_source(LOOSE_RECORD_PROGRAM)
+    # An UNANNOTATED literal is not pinned: its type is what the checker
+    # inferred, and the native producer must answer the same type for the
+    # byte-identical IR. That leaves a placeholder (`List[Never]`, `Any`), a
+    # variant case and a local/field raw; the Java arguments cannot be named
+    # from them safely.
     for arg in ("java.util.List.of()", "java.util.Optional.empty()",
                 "java.util.Map.of()", "new S.B(1L)", "new S.A()",
                 "new RevlResult.Ok<>(n)", "new Box.Full(n)", "x", "a.v", "a"):
@@ -357,15 +418,15 @@ def test_loosely_inferred_record_literal_stays_raw():
     assert "new Bx<>" not in java
 
 
-def test_generic_fn_call_keeps_the_record_raw():
-    # Text only: a generic top-level fn does not compile on this tier yet (its
-    # method declares no `<U>`), but its return type is inferred from its
-    # arguments, so once it does, a diamond around it would be loose.
+def test_annotated_generic_fn_call_names_the_local_type():
+    # Text only: a generic top-level fn still does not compile on this tier
+    # (its method declares no `<U>`), but the annotated local pins the literal,
+    # so once that gap closes the field is an `Opt<Long>`, not an `Object`.
     java = _java_source(
         "type Bx[T] = { v: T }\nfn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
-        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b = { v: wrap(n) }\n"
+        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b: Bx[Opt[Int]] = { v: wrap(n) }\n"
         "  return b\n}\n")
-    assert "final var b = new Bx(wrap(n));" in java
+    assert "final var b = new Bx<java.util.Optional<java.lang.Long>>(wrap(n));" in java
 
 
 @needs_jdk

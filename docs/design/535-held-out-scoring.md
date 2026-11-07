@@ -223,10 +223,10 @@ rather than leaving the distinction to a comment.
 
 **A scored seed is consumed once and the consumption is visible.** Every run
 that produces a score appends the seed's digest -- never the seed -- to a
-rotation ledger beside the seed file (outside every git repository) and records the
-rotation count in the verdict. A digest the ledger has already seen is refused
-(`seed-digest-reused`) before anything is drawn. A REFUSED run produced no
-score, so it does not consume the seed and can be retried; that is the
+rotation ledger beside the seed file (outside every git repository) and records
+the rotation count in the verdict. A digest the ledger has already seen is
+refused (`seed-digest-reused`) before anything is drawn. A REFUSED run produced
+no score, so it does not consume the seed and can be retried; that is the
 difference between "the gate declined to answer" and "this draw has been paid
 for". Rotation itself is the operator's act: writing a new seed file is what
 rotates, and replay of an old one is now visible in the artifact and refused.
@@ -237,13 +237,10 @@ alone cannot distinguish that fork from a legitimate first run: `rotation_count`
 1 is exactly what a real first run reports. That is a limit of a ledger the
 scorer keeps, not a guarantee about an operator who deliberately forks it.
 
-**The diff cannot reach the scorer.** `HELD_OUT_FENCE` is six paths:
-`tools/heldout_scoring.py`, `tests/test_heldout_scoring.py`,
-`tools/gate_reference_census.py`, `tools/build_gate_crate.py`,
-`tests/test_selfhost_lower.py` and
-`tools/gate_reference_census_baseline.json`. Those are the files that decide
-what is drawn and what counts as a divergence. The candidate's changed-file set
-is **required** -- a run that does not know what the candidate changed cannot
+**The diff cannot reach the scorer.** `HELD_OUT_FENCE` is the `held_out` view
+of the evaluator set in the table below. Those are the files that decide what is
+drawn and what counts as a divergence. The candidate's changed-file set is
+**required** -- a run that does not know what the candidate changed cannot
 claim the candidate could not reach the scorer, so `no-diff` is a refusal --
 and a diff that touches a fenced path is refused with the path named.
 
@@ -265,9 +262,58 @@ What is deliberately **not** fenced is the load-bearing half. `src/`,
 `selfhost/`, `backends/`, `crates/`, `stdlib/`, `tests/` and the corpus
 directories are the **subject**: a candidate improving the gate has to be able
 to change them, and fencing them would forbid the work the loop exists to
-produce. The fence is the scorer, never the subject. Two of the six fenced
-paths are under `tests/`, and they are exempted by name rather than by
-forbidding the directory.
+produce. The fence is the scorer, never the subject. The fenced paths under
+`tests/` are exempted by name rather than by forbidding the directory.
+
+#### The evaluator set (issue #2802)
+
+The fence above is one view of one enumeration. `EVALUATOR_PATHS` in
+`src/revl/kernel_boundary.py` is the whole evaluator: the code, data and
+protocol that decide a scorecard and a draw. The three refusals are views of it,
+not copies:
+
+| evaluator path | refused by | what it decides |
+|---|---|---|
+| `src/revl/admission.py` | kernel | the admit decider |
+| `src/revl/admit_profile.py` | kernel | the profile a candidate is admitted under |
+| `src/revl/attest.py` | kernel | the attestation chain |
+| `src/revl/taint.py` | kernel | the authority lattice and declassification |
+| `src/revl/retention.py` | kernel | the retention deadline (`G-RETAIN`) |
+| `src/revl/kernel_boundary.py` | kernel, held-out | this enumeration, its views and the digest; it defines the held-out fence, so it is on that fence too |
+| `crates/revl-gate` | kernel | the embedded admission gate |
+| `formal` | kernel | the formal models the guarantees cite |
+| `tools/gate_reference_census.py` | kernel, held-out | the census and the reference it compares |
+| `tools/gate_reference_census_baseline.json` | kernel, held-out | the census allowance and the held-out bypass allowance |
+| `tools/heldout_scoring.py` | held-out, authority | this scorer |
+| `tests/test_heldout_scoring.py` | held-out, authority | this scorer's own tests |
+| `tools/build_gate_crate.py` | held-out, authority | the gate crate the draw is scored against |
+| `tests/test_selfhost_lower.py` | held-out, authority | the differential oracle programs |
+| `tools/evolution_controller.py` | authority | the lifecycle that reduces stage records |
+| `tests/test_evolution_controller.py` | authority | the lifecycle's own tests |
+| `tools/evolution_reward.py` | authority | the component list and the retention rule |
+| `tests/test_evolution_reward.py` | authority | the reward's own tests |
+| `tools/evolution_progress.py` | authority | the progress counters |
+| `tests/test_evolution_progress.py` | authority | the counters' own tests |
+| `tools/evaluator_protocol.py` | held-out, authority | the loader that puts the enumeration in front of the tools |
+| `tests/test_evaluator_protocol.py` | authority | the enumeration, the views and the digest |
+
+Read the table as the refusal, not as a directory map. A path in the `kernel`
+column is refused by the controller with `KERNEL_INTERSECTION`; a path in the
+`authority` column is refused with `FENCE_TOUCHED`; a path in the `held-out`
+column is refused by this tool with `diff-reaches-fence:<path>`. The census, its
+baseline and this enumeration are in two columns because they decide two
+questions, which is why they are one row and not two. The enumeration is on the
+held-out fence because it DEFINES that fence: a diff that edits the table must
+not be scored by the fence it widened. `tools/evolution_reward.py` and
+`tools/evolution_progress.py` were on none of the old lists, so a diff could
+edit the retention rule and no check named it.
+
+The enumeration's identity is `protocol_digest`: `sha256:<hex>` over the
+evaluator's tracked bytes, read from the scorer's own checkout. It is written
+into every scorecard and every controller verdict, and the controller refuses a
+stage record whose digest differs from its own. It proves identity, not
+correctness: who holds the expected value, and how it rotates, is the custody
+question in issue #2762.
 
 Refused is not failed. A candidate that has to change the census tool is making
 a semantic change to the scorer, and item 537's own list says a semantic change
@@ -377,6 +423,7 @@ fail-open shape, and most serious findings in this repository have it.
 | `seed-digest-reused` | the rotation ledger already holds this digest |
 | `rotation-ledger-corrupt` | the ledger holds a line that is not a digest |
 | `rotation-ledger-unavailable:...` | the ledger could not be read, created or written |
+| `protocol-digest-unavailable:...` | the evaluator's tracked bytes cannot be read, so the scorer cannot name the protocol it would score under |
 | `no-diff` | neither `--diff-base` nor `--diff-paths` |
 | `diff-unavailable:...` | `git diff` failed |
 | `diff-too-large:files:<n>><limit>` | more changed files than `MAX_DIFF_FILES` |
@@ -401,10 +448,14 @@ actually ran on something it could have got wrong.
 JSON, written by `--json` and rendered to stdout either way. It carries
 `verdict` (`clean` / `divergent` / `refused`), `refusal`, `grammar`, `size`,
 `rotation` (the policy string), `rotation_count` (the ledger index of this
-scored run, 1 for the first), `seed_digest`, `seed_source`, `draw_digest`,
-`fence`, `candidate_changed_files`, `liveness`, `zero_tolerance` (the case ids,
-by bucket) and `buckets` (counts). A refusal record carries the name and an
-empty score, never a partial one.
+scored run, 1 for the first), `protocol_digest`, `seed_digest`, `seed_source`,
+`draw_digest`, `fence`, `candidate_changed_files`, `liveness`,
+`zero_tolerance` (the case ids, by bucket) and `buckets` (counts). A refusal
+record carries the name and an empty score, never a partial one.
+
+`protocol_digest` is the evaluator identity from section 3.2. It is in every
+record, refusals included, so a record that names no protocol is visibly
+different from one that names this protocol.
 
 `seed_source` is `argv` or `env`, and it names where the seed FILE PATH came
 from, not where the seed came from: the seed itself exists only in the
@@ -669,7 +720,7 @@ work tree, one behind a symlink into that work tree, an oversized seed file, a
 corrupt rotation ledger, a seed file other users can read, a reused seed
 digest, a diff over the file limit, a diff over the line limit, a large diff
 that touches the fence keeping the fence refusal, the line count skipping the
-regenerated paths, `no-diff`, each of the six fenced paths, an engine that will
+regenerated paths, `no-diff`, each fenced path, an engine that will
 not build, an unreadable bypass allowance, a draw a tell separates, and both
 vacuity shapes; a refused run consumes no rotation and a second scored seed
 advances the count to 2; a scored verdict carries the seed digest and
@@ -681,6 +732,12 @@ is caught 50 times in 200 on the draw that ships and **is not caught at all** on
 a draw shaped the way slice 1's was; a gate whose refusal arm is gone is caught
 as a new `false-admit` family under an injected in-slice reference and is clean
 under a baselined one.
+
+The wire that adds the evaluator identity was verified on a staged checkout:
+one byte of `tools/evolution_progress.py` moves `protocol_digest`, a build
+artifact under `formal/` does not, every `EVALUATOR_PATHS` entry exists, and
+`tools/evolution_controller.py` refuses a stage record from another checkout
+with `PROTOCOL_MISMATCH` rather than reading it.
 
 Verified on the wiring: `tools/evolution_reward.py` fails the `held-out`
 component on an unset seed file, on a refusal, on a divergence and on a run that

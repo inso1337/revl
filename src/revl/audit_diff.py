@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from .cardinality import cardinality
 from .distribute import distributability
+from .inverse import inverse_class, inverse_rank
 from .resources import retention_surface
 
 
@@ -44,6 +45,11 @@ def audit_report(ir: dict) -> dict:
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
+         # issue #2692: the single derived inverse-provenance class, read off
+         # this declaration's own facts. Always present (never a missing field):
+         # an extern with no provenance fact reads `unknown`. Must match
+         # `__main__`'s entry key-for-key.
+         "inverse": inverse_class(ext),
          "backends": sorted((ext.get("bodies") or {}).keys()),
          # item 373: carry the reach so the drift gate can read it. Absent unless
          # declared — a bare emission's audit entry is byte-identical to today's.
@@ -524,6 +530,65 @@ def diff_backends(prev: dict, new: dict) -> dict:
             "backends_removed": sorted(removed)}
 
 
+def diff_inverses(prev: dict, new: dict) -> dict:
+    """Diff the derived inverse-provenance class of every extern present in BOTH
+    audits (issue #2692).
+
+    Each top-level `externs[]` entry carries `inverse`, one value of the closed
+    vocabulary in `inverse.py` (`declared`, `generated`, `compensation`,
+    `forward`, `irreversible`, `unknown`), and a `class` (the G4 effect class).
+    The diff keys on the extern name; both facts matter because the crossing
+    token `host:<component>:<name>` does not change when either moves.
+
+    A class that moves to a WEAKER recovery story (later in `inverse_rank`, e.g.
+    `declared -> compensation`, or `compensation -> irreversible`) is a weakened
+    inverse: the crossing that could be put back exactly can now only be offset,
+    or not recovered at all. It is the same dangerous direction as a reach
+    weakening and feeds the gate the same way. A move toward a stronger class is
+    a strengthening (safe). Only externs in both audits are compared: a brand-new
+    extern is already flagged by its `host:` crossing, and a removed one gave up
+    its reach entirely.
+
+    The rank alone misses the worst move: `unknown` is the weakest inverse
+    class, so a `pure` read or `local` write (both `unknown`) that becomes an
+    `emission` or `witnessed` effect would rank as a strengthening. That is the
+    dangerous direction (an effect appeared where there was none) and this diff
+    is the only place it shows, so a no-provenance crossing that becomes an
+    effectful one is weakened regardless of the rank. The reverse, an effectful
+    crossing becoming `pure`, still ranks as a weakening: giving up a reach is
+    safe, but the move is reviewable.
+
+    An extern whose entry on EITHER side has no `inverse` is skipped, not read
+    as `unknown`: a baseline captured before this field existed did not record a
+    class at all, and treating that absence as a class would report drift on a
+    crossing that did not change. Absence is not `unknown`; it is not
+    comparable.
+    """
+    prev_inv = {ext["name"]: (ext.get("class"), ext["inverse"])
+                for ext in prev.get("externs") or [] if "inverse" in ext}
+    new_inv = {ext["name"]: (ext.get("class"), ext["inverse"])
+               for ext in new.get("externs") or [] if "inverse" in ext}
+    weakened: list[str] = []
+    strengthened: list[str] = []
+    for name in prev_inv.keys() & new_inv.keys():
+        prev_cls, before = prev_inv[name]
+        new_cls, after = new_inv[name]
+        if before == after and prev_cls == new_cls:
+            continue
+        if before == "unknown" and new_cls in ("emission", "witnessed"):
+            weakened.append(f"inverse:{name}")
+        elif inverse_rank(after) < inverse_rank(before):
+            weakened.append(f"inverse:{name}")
+        elif inverse_rank(after) > inverse_rank(before):
+            strengthened.append(f"inverse:{name}")
+        # else: the rank did not move and only the effect class did (for
+        # example `pure` to `local`, both `unknown`). That is not an
+        # inverse-provenance change; the changelog completeness guard still
+        # surfaces the class leaf.
+    return {"inverse_weakened": sorted(weakened),
+            "inverse_strengthened": sorted(strengthened)}
+
+
 def diff_recovery(prev: dict, new: dict) -> dict:
     """Diff the `recovery_surface` between two audits (the CRITICAL: a dropped
     inverse turns a reversible effect irreversible - item 273's class change).
@@ -646,18 +711,24 @@ def diff_cardinality(prev: dict, new: dict) -> dict:
 
 def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
              accept_all: bool = False) -> dict:
-    """The gate decision. `unacknowledged` are the additions that fail.
+    """The gate decision. `unacknowledged` are the additions and the weakened
+    authority facts (a loosened reach, a weaker inverse class) that fail.
 
     exit-code contract: 0 iff `unacknowledged` is empty (a clean or fully
     acknowledged diff); nonzero otherwise.
     """
     accepted = accepted or set()
     delta = diff_crossings(prev, new)
+    # issue #2692: a WEAKER inverse provenance is the same dangerous direction
+    # as a reach weakening: the crossing still exists, but the exact inverse
+    # that could put it back is gone. Its `inverse:<name>` token is
+    # acknowledged through the same `--accept`/`--accept-all` path.
+    inverses = diff_inverses(prev, new)
     # item 373: a reach WEAKENING fails the gate the same way a new crossing
     # does — it is the authority axis loosening without a new token appearing.
     # Its `reach-weakened:<name>` token is acknowledged through the same
     # `--accept`/`--accept-all` path as an added crossing.
-    gated = delta["added"] + delta["reach_weakened"]
+    gated = delta["added"] + delta["reach_weakened"] + inverses["inverse_weakened"]
     if accept_all:
         unacknowledged: list[str] = []
     else:
@@ -668,6 +739,8 @@ def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
         "unchanged": delta["unchanged"],
         "reach_weakened": delta["reach_weakened"],
         "reach_tightened": delta["reach_tightened"],
+        "inverse_weakened": inverses["inverse_weakened"],
+        "inverse_strengthened": inverses["inverse_strengthened"],
         "acknowledged": sorted(c for c in gated
                                if accept_all or c in accepted),
         "unacknowledged": unacknowledged,
@@ -681,7 +754,10 @@ def render(result: dict, prev_label: str) -> str:
     added = result["added"]
     weakened = result.get("reach_weakened") or []
     tightened = result.get("reach_tightened") or []
-    if not added and not result["removed"] and not weakened and not tightened:
+    inverse_weakened = result.get("inverse_weakened") or []
+    inverse_strengthened = result.get("inverse_strengthened") or []
+    if not added and not result["removed"] and not weakened and not tightened \
+            and not inverse_weakened and not inverse_strengthened:
         return (f"authority-drift: clean — the G8 boundary surface is "
                 f"unchanged from {prev_label}.")
 
@@ -729,6 +805,32 @@ def render(result: dict, prev_label: str) -> str:
         lines.append(
             f"reach tightened (safe — a bound gained): {len(tightened)}")
         for token in tightened:
+            lines.append(f"  - {token}")
+
+    # issue #2692: an inverse provenance that WEAKENED (declared -> compensation,
+    # compensation -> irreversible, ...) is a recovery loss on a crossing that
+    # STAYS. It fails the gate like a reach weakening and is acknowledged
+    # through the same `--accept` token.
+    if inverse_weakened:
+        lines.append("")
+        lines.append(
+            f"inverse provenance WEAKENED (a crossing lost a stronger way "
+            f"back): {len(inverse_weakened)}")
+        for token in inverse_weakened:
+            mark = "  ~ " if token in acked else "  + "
+            suffix = "  (acknowledged)" if token in acked else ""
+            lines.append(f"{mark}{token}{suffix}")
+        if any(t in result["unacknowledged"] for t in inverse_weakened):
+            lines.append(
+                "A weakened inverse is a widening: acknowledge with "
+                "--accept <token> or --accept-all.")
+
+    if inverse_strengthened:
+        lines.append("")
+        lines.append(
+            f"inverse provenance strengthened (safe: a stronger way back): "
+            f"{len(inverse_strengthened)}")
+        for token in inverse_strengthened:
             lines.append(f"  - {token}")
 
     if result["removed"]:

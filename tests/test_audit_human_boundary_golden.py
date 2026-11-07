@@ -116,22 +116,29 @@ def test_host_code_line_is_the_golden(tmp_path, capsys):
 def test_json_boundary_externs_are_the_supported_surface(tmp_path, capsys):
     # The machine-readable equivalent of the golden line — the surface a consumer
     # should read INSTEAD of the prose (docs/interchange-format.md). Every field
-    # the human line folds into text is a documented key here: `class` (all four
-    # classifications), `capabilities` (the scoped token, present only when
-    # scoped), and `backends` (the tier).
+    # the human line folds into text is a documented key here: `class` (all five
+    # classifications), `inverse` (issue #2692's derived provenance class),
+    # `capabilities` (the scoped token, present only when scoped), and
+    # `backends` (the tier).
     doc = json.loads(_audit_stdout(tmp_path, capsys, "--json"))
     externs = doc["boundary"]["Worker"]["externs"]
     assert externs == [
-        {"name": "digest", "class": "pure", "backends": ["py"]},
-        {"name": "open_h", "class": "acquire", "backends": ["py"]},
-        {"name": "record", "class": "local", "backends": ["py"]},
-        {"name": "release_h", "class": "pure", "backends": ["py"]},
-        {"name": "send", "class": "emission", "backends": ["py"]},
-        {"name": "store", "class": "emission", "backends": ["py"],
-         "capabilities": ["db"]},
-        {"name": "touch", "class": "witnessed", "backends": ["py"]},
-        {"name": "write", "class": "witnessed", "backends": ["py"],
-         "capabilities": ["fs"]},
+        {"name": "digest", "class": "pure", "inverse": "unknown",
+         "backends": ["py"]},
+        {"name": "open_h", "class": "acquire", "inverse": "declared",
+         "backends": ["py"]},
+        {"name": "record", "class": "local", "inverse": "unknown",
+         "backends": ["py"]},
+        {"name": "release_h", "class": "pure", "inverse": "unknown",
+         "backends": ["py"]},
+        {"name": "send", "class": "emission", "inverse": "irreversible",
+         "backends": ["py"]},
+        {"name": "store", "class": "emission", "inverse": "irreversible",
+         "backends": ["py"], "capabilities": ["db"]},
+        {"name": "touch", "class": "witnessed", "inverse": "declared",
+         "backends": ["py"]},
+        {"name": "write", "class": "witnessed", "inverse": "declared",
+         "backends": ["py"], "capabilities": ["fs"]},
     ]
 
 

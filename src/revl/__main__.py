@@ -32,6 +32,7 @@ from .compiler import compile_files
 from .diagnostics import obligations, report
 from .errors import RevlError
 from .holes import render as render_holes
+from .inverse import inverse_class
 
 from .cli.document import (  # noqa: F401 — _wiring_documents re-exported
     _RESOLVES_A_COMPOSITION, _composition_document, _wiring_documents)
@@ -58,6 +59,7 @@ _run_branch = _deferred(".cli.change", "_run_branch")
 _run_canary = _deferred(".cli.change", "_run_canary")
 _run_compare = _deferred(".cli.change", "_run_compare")
 _run_estop = _deferred(".cli.change", "_run_estop")
+_run_migrate = _deferred(".cli.change", "_run_migrate")
 _run_plan = _deferred(".cli.change", "_run_plan")
 _run_quarantine = _deferred(".cli.change", "_run_quarantine")
 _run_recover = _deferred(".cli.change", "_run_recover")
@@ -455,7 +457,8 @@ def _runtime_ceiling_surface(wal_path: str) -> dict:
     from .wal import read_wal  # noqa: PLC0415 — only when a WAL was requested
 
     loaded = read_wal(wal_path)
-    outcomes = {"emission-complete", "emission-refused", "emission-failed"}
+    outcomes = {"emission-complete", "emitted-then-refused",
+                "emission-refused", "emission-failed"}
     records = []
     for entry in loaded["records"]:
         if not isinstance(entry, dict) or entry.get("record") not in outcomes:
@@ -571,6 +574,10 @@ def _run_audit(args, ir: dict) -> int:
     manifest = ir.get("manifest") or {}
     declared_externs = [
         {"name": ext["name"], "class": ext.get("class"),
+         # issue #2692: the derived inverse-provenance class. Always present,
+         # `unknown` included, so a consumer never reads "no fact" as "no field".
+         # Must match `audit_report`'s entry key-for-key.
+         "inverse": inverse_class(ext),
          # item 396: a ref-only extern has no `bodies` key but DOES cross on its
          # ref tier, so union the ref backends in — otherwise a ref-only extern
          # would audit as "no bodies" while emitting fine.
@@ -1469,6 +1476,22 @@ def _dispatch(args) -> int:
         from .bundle import run_bundle  # noqa: PLC0415 — lazy, pulls the compiler
         return run_bundle(args)
     if args.command == "verify":
+        anchor = getattr(args, "anchor", None)
+        if anchor:
+            if args.bundle:
+                print("error: give a bundle or --anchor FILE, not both",
+                      file=sys.stderr)
+                return 2
+            from .cli.observe import run_anchor_verify  # noqa: PLC0415 (lazy)
+            return run_anchor_verify(args)
+        if not args.bundle:
+            print("error: revl verify needs a bundle, or --anchor FILE",
+                  file=sys.stderr)
+            return 2
+        if getattr(args, "key", None) or getattr(args, "digest", None):
+            print("error: --key and --digest apply only with --anchor FILE",
+                  file=sys.stderr)
+            return 2
         from .bundle import run_verify  # noqa: PLC0415 — lazy
         return run_verify(args)
     if args.command == "deploy":
@@ -1575,6 +1598,10 @@ def _dispatch(args) -> int:
         return _run_contract(args)
     if args.command == "diff":
         return _run_diff(args)
+    # `revl migrate` reads its own three documents (two versions and the real
+    # consumer composition), so it is routed before the shared compile step.
+    if args.command == "migrate":
+        return _run_migrate(args)
     # `revl changelog` has its own two-input loader (like `diff`), so it is
     # routed before the shared single-source compile step.
     if args.command == "changelog":

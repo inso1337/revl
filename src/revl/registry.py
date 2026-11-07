@@ -59,8 +59,9 @@ from .errors import RevlError
 from .lower import _service_compatible, _service_equal, _service_from_ir
 from .parser import MethodDecl, ServiceDecl
 
-INDEX_VERSION = "2"          # "1": the per-entry `version` row (428 F12)
+INDEX_VERSION = "3"          # "1": the per-entry `version` row (428 F12)
 #                              "2": the per-entry `releases` row (item 49 phase 2)
+#                              "3": the per-entry `mediator` row (issue #2697)
 INDEX_FILENAME = "index.json"
 
 # A published component's version, declared by the publisher in a one-line
@@ -97,7 +98,14 @@ ENTRY_META_FILENAME = "meta.json"
 # refusal, not a shrug, because a key nothing regenerates into the row is exactly
 # the defect this file exists to close. Adding a field here is a deliberate act,
 # with an index-version bump behind it.
-ENTRY_META_FIELDS = ("description", "tags")
+#
+# `mediator` (issue #2697) names the ONE component that may be the mediator for a
+# raw capability in this entry's composition, and the capability it mediates.
+# Its value is verified against the compiled audit, never believed: the named
+# component must be the only component whose G8 reach carries that token
+# (`_mediator_problem`). It is a declaration, not a trust score - `resolve`
+# reads it to demand stronger evidence before a candidate displaces it.
+ENTRY_META_FIELDS = ("description", "tags", "mediator")
 
 # The frozen release history of one entry: `<entry>/releases/<version>/`, written
 # by `publish_release` and never rewritten (roadmap item 49 phase 2).
@@ -143,6 +151,9 @@ _VERSION_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 #   fault-sweep.json       fault.sweep_dossier            (item 30/125)
 #   inverse-roundtrip.json fault.roundtrip_dossier        (item 26)
 #   capabilities.json      __main__._boundary G8 surface  (docs/capabilities.md)
+#   ceilings.json          cardinality(ir)               (item 260, issue #2697)
+#   secret-sinks.json      _secrets_table(ir) + G8 reach  (item 256, issue #2697)
+#   compensation.json      _recovery_surface(ir)         (items 247/309, #2697)
 #   provenance.json        assembled source/build provenance (the reproducible
 #                          hashes the index records + the interchange toolchain)
 #
@@ -156,9 +167,18 @@ EVIDENCE_FAULT_SWEEP = "fault-sweep.json"
 EVIDENCE_INVERSE_ROUNDTRIP = "inverse-roundtrip.json"
 EVIDENCE_CAPABILITIES = "capabilities.json"
 EVIDENCE_PROVENANCE = "provenance.json"
+# Issue #2697: the three facets a reviewer needs beside the boundary - what each
+# crossing may repeat (ceilings), where a bound secret may go (secret sinks),
+# and how each reversible crossing is undone (compensation). Each is a
+# projection of a producer the audit already emits, assembled rather than
+# re-derived: `cardinality(ir)`, `_secrets_table(ir)` and `_recovery_surface(ir)`.
+EVIDENCE_CEILINGS = "ceilings.json"
+EVIDENCE_SECRET_SINKS = "secret-sinks.json"
+EVIDENCE_COMPENSATION = "compensation.json"
 EVIDENCE_FILES = (
     EVIDENCE_ATTESTATION, EVIDENCE_GAUNTLET, EVIDENCE_FAULT_SWEEP,
     EVIDENCE_INVERSE_ROUNDTRIP, EVIDENCE_CAPABILITIES, EVIDENCE_PROVENANCE,
+    EVIDENCE_CEILINGS, EVIDENCE_SECRET_SINKS, EVIDENCE_COMPENSATION,
 )
 
 
@@ -184,6 +204,11 @@ class RegistryEntry:
     source_hash: str                  # sha256 of `source` as it is ON DISK
     manifest_hash: str
     source_path: str                  # the real `component.rvl` this was read from
+    # The verified `meta.json` declaration (description/tags/mediator), derived
+    # from the file beside the source - not believed from the index row. A
+    # marked mediator names the one component that holds a raw capability and
+    # the capability it holds (issue #2697).
+    mediator: dict | None = None
     evidence_bundle: "EvidenceBundle" = None  # the item-293 evidence bundle
     # What `index.json` CLAIMED for this entry, and every place that claim
     # disagreed with the entry's own `component.rvl` when it was recompiled at
@@ -250,6 +275,10 @@ class EvidenceBundle:
     inverse_roundtrip: dict | None = None
     capabilities: dict | None = None
     provenance: dict | None = None
+    # issue #2697: the three reviewer-facing facets derived from the audit.
+    ceilings: dict | None = None
+    secret_sinks: dict | None = None
+    compensation: dict | None = None
     # knowledge slice 4 (issue #1762): the component's knowledge records, as
     # `{"kind": "revl.knowledge", "records": [...]}`, bound like a dossier
     knowledge: dict | None = None
@@ -262,6 +291,9 @@ class EvidenceBundle:
             ("fault-sweep", self.fault_sweep),
             ("inverse-roundtrip", self.inverse_roundtrip),
             ("capabilities", self.capabilities), ("provenance", self.provenance),
+            ("ceilings", self.ceilings),
+            ("secret-sinks", self.secret_sinks),
+            ("compensation", self.compensation),
         ):
             if value is not None:
                 names.append(name)
@@ -444,6 +476,15 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
         "publisher": publisher,
         "capabilities": "present" if bundle.capabilities is not None
                         else "unavailable",
+        # issue #2697: the reviewer facets are reported honestly like every other
+        # facet - present or unavailable - and stay out of `rank_key`: the issue
+        # adds them to the bundle so a consumer and the policy layer can read
+        # them, not a numeric trust score to be gamed (docs/registry.md §2).
+        "ceilings": "present" if bundle.ceilings is not None else "unavailable",
+        "secret-sinks": "present" if bundle.secret_sinks is not None
+                        else "unavailable",
+        "compensation": "present" if bundle.compensation is not None
+                        else "unavailable",
     }
     vouched = _vouched_facets(bundle, attestation)
     verified = {facet: facet in vouched for facet in _BOUND_FACETS}
@@ -489,6 +530,12 @@ _BOUND_FACETS = {
     "inverse-roundtrip": "inverse_roundtrip",
     "gauntlet": "gauntlet",
     "capabilities": "capabilities",
+    # issue #2697: signed entries vouch for the derived reviewer facets too, so a
+    # ceiling, a secret sink or a compensation class changed after signing breaks
+    # the attestation exactly as any other bound dossier does.
+    "ceilings": "ceilings",
+    "secret-sinks": "secret_sinks",
+    "compensation": "compensation",
     # knowledge slice 4 (issue #1762): a signed entry vouches for its records
     "knowledge": "knowledge",
 }
@@ -541,7 +588,7 @@ def binding_mismatch(att: dict | None, bundle: "EvidenceBundle") -> str | None:
 def _capabilities_of(boundary: dict) -> tuple[tuple[str, ...], int]:
     """The union of emission-capability labels a composition reaches, and the
     number of boundary crossings — the raw material for the least-authority
-    ranking (docs/registry.md §2.1). `*` (unscoped) is carried through so it can
+    ranking (docs/registry.md §2). `*` (unscoped) is carried through so it can
     rank a candidate last."""
     labels: set[str] = set()
     emissions = 0
@@ -640,17 +687,121 @@ def _entry_index_row(name: str, ir: dict, source: str, manifest: dict,
     return row
 
 
-def _entry_meta(entry_dir: Path) -> dict | None:
-    """The publisher-declared discoverability fields of one entry, from
-    `<entry>/meta.json`, or None when the entry declares none.
+def _reached_capability_tokens(stats: dict) -> set:
+    """The capability tokens one component's G8 surface reaches.
+
+    The `key.method` capability map covers emissions through a `req` target; a
+    directly emitted host extern carries its declared scope on the extern row
+    instead (item 247). A holder is a component that reaches the token either
+    way.
+    """
+    reached = {cap for scope in ((stats or {}).get("capabilities") or {}).values()
+               for cap in (scope or [])}
+    for ext in (stats or {}).get("externs") or []:
+        reached.update(ext.get("capabilities") or ())
+    return reached
+
+
+def _mediator_problem(value, boundary: dict | None, ir: dict | None = None
+                      ) -> str | None:
+    """Why a `mediator` declaration is unusable, or None when it is verified.
+
+    The declaration names the component and the raw capability token it alone
+    holds. With the compiled IR and its `boundary` (the G8 audit surface) the
+    claim is CHECKED, never believed:
+
+    * the capability must be a NAMED token, never `*` (the unnameable boundary a
+      bare emission has; marking it would be trivially true for every wrapper);
+    * the named component must hold it through a declared `requires` service
+      whose method declares it (the raw capability is a service scope the
+      mediator was wired to, not a reach it happens to have);
+    * none of the component's PROVIDED services may re-declare the token: a
+      wrapper that hands the raw token to its consumers is not a mediator;
+    * the named component must be the only component in the composition whose
+      G8 reach carries the token.
+
+    Without an IR only the shape is checked - the caller that has the IR must
+    pass it (`build_index` does), because a marking nothing verifies is the
+    same defect `meta.json` exists to close.
+    """
+    if not isinstance(value, dict):
+        return "mediator must be an object with `component` and `capability`"
+    unknown = sorted(set(value) - {"component", "capability"})
+    if unknown:
+        return (f"mediator declares {', '.join(unknown)}; the only keys are "
+                "`component` and `capability`")
+    component = value.get("component")
+    capability = value.get("capability")
+    if not isinstance(component, str) or not component:
+        return "mediator.component must be a non-empty component name"
+    if not isinstance(capability, str) or not capability:
+        return "mediator.capability must be a non-empty capability token"
+    if capability == "*":
+        return ("mediator.capability must name a capability; `*` is the "
+                "unnameable boundary a bare emission has and cannot be marked")
+    if boundary is None or ir is None:
+        return None
+    components = [c for c in (ir.get("components") or [])
+                  if c.get("name") == component]
+    if not components:
+        return (f"mediator names component `{component}`, which is not in this "
+                "composition")
+    declared = next(iter(components))
+    services = ir.get("services") or {}
+
+    def _services_declaring(names) -> list[str]:
+        out = []
+        for service in names:
+            methods = ((services.get(service) or {}).get("methods") or {})
+            for method in methods.values():
+                if capability in (method.get("capabilities") or []):
+                    out.append(service)
+                    break
+        return out
+
+    required = _services_declaring((declared.get("requires") or {}).values())
+    if not required:
+        return (f"mediator names component `{component}` and capability "
+                f"`{capability}`, but no service it requires declares "
+                f"`{capability}`; a mediator holds the raw capability through "
+                "a declared requirement")
+    exposed = _services_declaring((declared.get("provides") or {}).values())
+    if exposed:
+        return (f"mediator's component `{component}` re-declares `{capability}` "
+                f"on its provided service(s) {', '.join(f'`{s}`' for s in exposed)}; "
+                "a mediator must not hand the raw capability to its consumers")
+    holders: list[str] = []
+    for name, stats in sorted((boundary or {}).items()):
+        if capability in _reached_capability_tokens(stats):
+            holders.append(name)
+    if not holders:
+        return (f"mediator names component `{component}` and capability "
+                f"`{capability}`, but no component in this composition reaches "
+                f"`{capability}`")
+    if holders != [component]:
+        return (f"mediator names `{component}` as the sole holder of "
+                f"`{capability}`, but this composition reaches `{capability}` "
+                f"from {', '.join(f'`{h}`' for h in holders)}; a mediator is "
+                "the ONLY holder of its capability")
+    return None
+
+
+def _entry_meta(entry_dir: Path, *, ir: dict | None = None) -> dict | None:
+    """The publisher-declared metadata of one entry, from `<entry>/meta.json`,
+    or None when the entry declares none.
 
     Fails closed the way `_entry_version` does. A file that is present but
     unusable — not an object, an unrecognised key, a description that is not a
-    string, a tag list that is not a list of strings — is a REFUSAL, not a
-    shrug: this file is the only thing that puts `description`/`tags` under
-    `verify`, so a publisher who meant to describe a component and wrote
-    something the regenerator cannot copy must hear about it now rather than
-    ship an entry whose row nothing can reproduce.
+    string, a tag list that is not a list of strings, or a `mediator` whose
+    component does not hold its capability alone — is a REFUSAL, not a shrug:
+    this file is the only thing that puts those fields under `verify`, so a
+    publisher who meant to describe a component and wrote something the
+    regenerator cannot copy must hear about it now rather than ship an entry
+    whose row nothing can reproduce.
+
+    `ir` is the compiled entry. Pass it whenever it is available: only then is
+    the `mediator` claim CHECKED against the composition rather than merely
+    parsed (issue #2697).
     """
     path = entry_dir / ENTRY_META_FILENAME
     if not path.exists():
@@ -680,6 +831,12 @@ def _entry_meta(entry_dir: Path) -> dict | None:
     if "tags" in meta and (not isinstance(tags, list)
                            or not all(isinstance(t, str) for t in tags)):
         raise refuse("tags must be a list of strings")
+    if "mediator" in meta:
+        boundary = (_audit_document(ir).get("boundary")
+                    if ir is not None else None)
+        problem = _mediator_problem(meta["mediator"], boundary, ir)
+        if problem:
+            raise refuse(problem)
     return meta
 
 
@@ -743,6 +900,9 @@ def load_evidence_bundle(entry_dir: str | os.PathLike) -> EvidenceBundle:
         inverse_roundtrip=_read_json(ev / EVIDENCE_INVERSE_ROUNDTRIP),
         capabilities=_read_json(ev / EVIDENCE_CAPABILITIES),
         provenance=_read_json(ev / EVIDENCE_PROVENANCE),
+        ceilings=_read_json(ev / EVIDENCE_CEILINGS),
+        secret_sinks=_read_json(ev / EVIDENCE_SECRET_SINKS),
+        compensation=_read_json(ev / EVIDENCE_COMPENSATION),
         knowledge=load_knowledge(entry_dir),
     )
 
@@ -841,7 +1001,7 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
         rows[name] = _entry_index_row(name, ir, source, manifest, manifest_text,
                                       _entry_version(entry_dir),
                                       released_versions(entry_dir),
-                                      _entry_meta(entry_dir))
+                                      _entry_meta(entry_dir, ir=ir))
     index = {"indexVersion": INDEX_VERSION, "components": rows}
     if write:
         index_text = json.dumps(index, indent=2, sort_keys=True) + "\n"
@@ -850,11 +1010,12 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
 
 
 def _unhoused_meta(registry_dir: Path, committed_index: dict) -> list[str]:
-    """Entries whose committed row carries `description`/`tags` that no
-    `meta.json` beside the component accounts for.
+    """Entries whose committed row carries a publisher-declared field
+    (`description`/`tags`/`mediator`) that no `meta.json` beside the component
+    accounts for.
 
     This is the shape of a registry published by the pre-`meta.json` write path,
-    which patched those two keys into the row after the regenerator had run. It
+    which patched those keys into the row after the regenerator had run. It
     needs naming SEPARATELY, because the obvious response to a stale index —
     regenerate and commit — would silently DELETE fields nothing else records.
     """
@@ -896,7 +1057,10 @@ def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list
         return []
     committed_index = json.loads(_read(index_path))
     comps = _components_dir(registry_dir)
-    migrated: list[str] = []
+    # Validate everything BEFORE writing anything: a mediator lifted out of the
+    # committed index is an authority field, and a build_index that refuses it
+    # must not leave an unverified meta.json behind.
+    pending: list[tuple[str, Path, dict]] = []
     for name, row in sorted((committed_index.get("components") or {}).items()):
         if not isinstance(row, dict):
             continue
@@ -906,11 +1070,30 @@ def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list
         meta = {f: row[f] for f in ENTRY_META_FIELDS if f in row}
         if not meta:
             continue
-        migrated.append(name)
-        if write:
+        if "mediator" in meta:
+            source_path = entry_dir / "component.rvl"
+            try:
+                ir = compile_files([str(source_path)])
+            except RevlError as error:
+                raise RevlError(
+                    str(entry_dir / ENTRY_META_FILENAME), 0,
+                    f"{name}: cannot migrate {ENTRY_META_FILENAME}: component.rvl "
+                    f"does not compile ({error.message})") from None
+            problem = _mediator_problem(
+                meta["mediator"],
+                _audit_document(ir).get("boundary"), ir)
+            if problem:
+                raise RevlError(
+                    str(entry_dir / ENTRY_META_FILENAME), 0,
+                    f"{name}: refusing to migrate an unverified mediator: "
+                    f"{problem}")
+        pending.append((name, entry_dir, meta))
+    migrated = [name for name, _, _ in pending]
+    if write:
+        for _name, entry_dir, meta in pending:
             _write_meta(entry_dir, meta)
-    if migrated and write:
-        build_index(registry_dir)
+        if migrated:
+            build_index(registry_dir)
     return migrated
 
 
@@ -1438,9 +1621,35 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     # The new source was compiled as the entry will hold it by `release_facts`;
     # the meta that will survive the write is checked here, because it is the
     # one thing the dry run would read from disk and this publish does not
-    # always rewrite it.
+    # always rewrite it. In particular a `mediator` declaration survives a
+    # publish that restates only description/tags, and it is verified against
+    # the NEW source's audit before anything is written (issue #2697).
+    surviving_mediator = None
+    meta_path = entry_dir / ENTRY_META_FILENAME
     if description is None and tags is None:
-        _entry_meta(entry_dir)
+        existing_meta = _entry_meta(entry_dir)
+        surviving_mediator = (existing_meta or {}).get("mediator")
+    else:
+        # a publish that restates description/tags may be repairing a malformed
+        # meta.json (issue #2563), so read it leniently instead of validating it:
+        # a usable mediator is preserved and re-verified below; an unusable one
+        # is a refusal, never silently dropped.
+        try:
+            existing_meta = (json.loads(_read(meta_path))
+                             if meta_path.exists() else None)
+        except (json.JSONDecodeError, OSError):
+            existing_meta = None
+        if isinstance(existing_meta, dict):
+            surviving_mediator = existing_meta.get("mediator")
+    if surviving_mediator is not None:
+        surviving_ir = _compile_stored(entry_dir, source)
+        surviving_boundary = _audit_document(surviving_ir).get("boundary")
+        problem = _mediator_problem(surviving_mediator, surviving_boundary,
+                                    surviving_ir)
+        if problem:
+            raise RevlError(
+                str(meta_path), 0,
+                f"{name}: {ENTRY_META_FILENAME} {problem}")
     if _components_dir(registry_dir).is_dir():
         try:
             build_index(registry_dir, write=False, exclude=(name,))
@@ -1489,8 +1698,11 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     # that restates neither field leaves an existing meta.json alone rather than
     # erasing what the last release said about the component.
     if description is not None or tags is not None:
-        _write_meta(entry_dir, {"description": description or "",
-                                "tags": [str(t) for t in (tags or [])]})
+        new_meta = {"description": description or "",
+                    "tags": [str(t) for t in (tags or [])]}
+        if surviving_mediator is not None:
+            new_meta["mediator"] = surviving_mediator
+        _write_meta(entry_dir, new_meta)
     if dossier_text:
         (entry_dir / "dossier.json").write_text(dossier_text, encoding="utf-8")
     if knowledge is not None:
@@ -1575,10 +1787,11 @@ def _provenance_document(source: str, manifest: dict, manifest_text: str,
 # --------------------------------------------------------------- read-time verify
 
 # The index fields that carry AUTHORITY - what a resolve ranks and filters on.
-# Every one of them is derivable from `component.rvl` by the compiler, so every
-# one of them can be checked rather than believed.
+# Every one of them is derivable from `component.rvl` (or, for `mediator`, from
+# the `meta.json` beside it) by the current compiler, so every one of them can be
+# checked rather than believed.
 _AUTHORITY_FIELDS = ("provides", "requires", "services", "capabilities",
-                     "emissions", "sourceHash", "manifestHash")
+                     "emissions", "sourceHash", "manifestHash", "mediator")
 
 
 def _normalized_claim(fieldname: str, value):
@@ -1593,17 +1806,19 @@ def _normalized_claim(fieldname: str, value):
     return value or ""
 
 
-def _verified_facts(name: str, source_path: Path, source: str, row: dict,
-                    recorded_manifest_text: str, recorded_manifest: dict
+def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
+                    row: dict, recorded_manifest_text: str,
+                    recorded_manifest: dict
                     ) -> tuple[dict, dict, list[str]]:
     """Recompile one entry and return `(facts, manifest, problems)`.
 
     `facts` is the index row the current compiler DERIVES from the entry's own
-    `component.rvl` - the authority a resolve is entitled to act on. `problems`
-    names every field where the committed `index.json` claimed something else,
-    plus a `manifest.json` that is not byte-reproducible from the source. A
-    source that no longer compiles is itself a problem: nothing can vouch for
-    what the gate would refuse anyway.
+    `component.rvl` and `meta.json` - the authority a resolve is entitled to act
+    on. `problems` names every field where the committed `index.json` claimed
+    something else, plus a `manifest.json` that is not byte-reproducible from the
+    source. A source that no longer compiles, or a `meta.json` whose declaration
+    is unusable, is itself a problem: nothing can vouch for what the gate would
+    refuse anyway.
     """
     try:
         ir = compile_files([str(source_path)])
@@ -1613,9 +1828,17 @@ def _verified_facts(name: str, source_path: Path, source: str, row: dict,
             f"be verified: {error.message}"]
     manifest = _audit_document(ir)
     manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    facts = _entry_index_row(name, ir, source, manifest, manifest_text)
-
     problems: list[str] = []
+    try:
+        meta = _entry_meta(entry_dir, ir=ir)
+    except RevlError as error:
+        # a bad meta.json is a problem on this entry, not a crash for the whole
+        # registry: `build_index` refuses it, and a read path names it.
+        meta = None
+        problems.append(f"meta.json is unusable: {error.message}")
+    facts = _entry_index_row(name, ir, source, manifest, manifest_text,
+                             meta=meta)
+
     for fieldname in _AUTHORITY_FIELDS:
         claimed = _normalized_claim(fieldname, row.get(fieldname))
         actual = _normalized_claim(fieldname, facts.get(fieldname))
@@ -1694,8 +1917,8 @@ class Registry:
             problems: list[str] = []
             if verify_entries:
                 facts, manifest, problems = _verified_facts(
-                    name, source_path, source, row, recorded_manifest_text,
-                    manifest)
+                    entry_dir, name, source_path, source, row,
+                    recorded_manifest_text, manifest)
             else:
                 problems = [
                     "index rows were not cross-checked against component.rvl "
@@ -1715,6 +1938,7 @@ class Registry:
                 source_hash=_sha256(source),
                 manifest_hash=facts.get("manifestHash") or "",
                 source_path=str(source_path),
+                mediator=facts.get("mediator"),
                 evidence_bundle=load_evidence_bundle(entry_dir),
                 recorded_source_hash=row.get("sourceHash") or "",
                 index_problems=tuple(problems),
@@ -2359,6 +2583,37 @@ def resolve(registry, need, manifest: dict | None = None,
             continue
         graded.append((match, assessment))
 
+    # A marked mediator among the compatible candidates sets the bar an
+    # ordinary candidate must clear to displace it (issue #2697). The bar is a
+    # HARD rank term ahead of authority, not a tiebreak: least-authority alone
+    # would otherwise let a component with a narrower surface win over the
+    # mediator on a claim it never substantiated.
+    #
+    # WHICH mediator is protected matters. Inferring an incumbent from the
+    # authority ranking is attacker-selectable: a decoy marked mediator with a
+    # wider surface would become the protected one and the genuine mediator
+    # would be the candidate barred. Exactly one marked candidate is
+    # unambiguous and is protected. Several is an AMBIGUITY: no candidate is
+    # exempt, every candidate that lacks the bar is demoted, and the result
+    # reports the ambiguity instead of crowning one by authority.
+    mediator_pairs = [(m, a) for m, a in graded if m.entry.mediator is not None]
+    mediator_names = sorted({m.entry.name for m, _ in mediator_pairs})
+    mediator_ambiguous = len(mediator_names) > 1
+    protected_name = mediator_names[0] if len(mediator_names) == 1 else ""
+
+    def _replacement_bar(assessment: EvidenceAssessment) -> tuple[bool, str]:
+        """Whether a candidate clears the mediator-replacement bar:
+        a cryptographically valid attestation binding a passing fault sweep.
+        A valid attestation that does not bind the sweep does not vouch for it
+        (the item-290 trust root), so the sweep must be *verified* too."""
+        reasons: list[str] = []
+        if assessment.facets.get("attestation") != "valid":
+            reasons.append("no cryptographically valid attestation")
+        if not (assessment.facets.get("fault-sweep") == "full"
+                and assessment.verified.get("fault-sweep")):
+            reasons.append("no passing fault sweep bound by that attestation")
+        return (not reasons, ", ".join(reasons))
+
     # least authority, then fit (direct over adapted, shallow chain over deep),
     # then evidence quality, then a stable tiebreak.
     def _rank(pair: tuple) -> tuple:
@@ -2369,7 +2624,11 @@ def resolve(registry, need, manifest: dict | None = None,
             # errors-surface-as-`Err` conclusion no longer describes what the
             # consumer sees. Discount that class - and only that class.
             evidence = _discount_error_semantics(evidence)
-        return (match.authority_fit_key(), evidence,
+        displacement = 0
+        if (mediator_names and match.entry.name != protected_name
+                and not _replacement_bar(assessment)[0]):
+            displacement = 1
+        return (displacement, match.authority_fit_key(), evidence,
                 len(match.entry.source), match.entry.name)
 
     graded.sort(key=_rank)
@@ -2394,6 +2653,23 @@ def resolve(registry, need, manifest: dict | None = None,
         "trust set; an unverified claim ranks level with no claim at all"
         + ("" if key_bytes is not None else
            " (no signing key was supplied, so no attestation could be verified)"))
+    if mediator_ambiguous:
+        assumptions.append(
+            "several marked mediators are among the compatible candidates "
+            f"({', '.join(mediator_names)}): the bar cannot name one incumbent, "
+            "so NO candidate is exempt; every candidate without a "
+            "cryptographically valid attestation binding a passing fault sweep "
+            "is ranked below the ones that have it, and the ambiguity is "
+            "reported in `mediatorAmbiguity`")
+    elif protected_name:
+        assumptions.append(
+            "a trusted mediator is among the compatible candidates "
+            f"({protected_name}): a candidate that would replace it "
+            "ranks BELOW it unless it carries a cryptographically valid "
+            "attestation binding a passing fault sweep"
+            + ("" if key_bytes is not None else
+               " (no signing key was supplied, so no candidate could prove the "
+               "bar and the mediator keeps its place)"))
     if refused:
         assumptions.append(
             f"{len(refused)} entr{'y was' if len(refused) == 1 else 'ies were'} "
@@ -2459,6 +2735,33 @@ def resolve(registry, need, manifest: dict | None = None,
         if assessment.sweep_coverage is not None:
             candidate["evidence"]["faultSweepCoverage"] = list(
                 assessment.sweep_coverage)
+        if entry.mediator is not None:
+            # the marking that sets the bar is visible on the candidate itself.
+            candidate["mediator"] = entry.mediator
+        if mediator_names and entry.name != protected_name:
+            # every candidate other than the protected incumbent is a
+            # replacement: say the bar it had to clear and what it was missing
+            # (issue #2697). With several marked mediators, no candidate is
+            # exempt and every one carries the bar; the ambiguity is reported.
+            met, reason = _replacement_bar(assessment)
+            if not met:
+                bar = {
+                    "mediators": (mediator_names if mediator_ambiguous
+                                  else [protected_name]),
+                    "met": False,
+                    "required": ("a cryptographically valid attestation binding "
+                                 "a passing fault sweep"),
+                    "reason": reason,
+                }
+                if mediator_ambiguous:
+                    bar["ambiguous"] = True
+                candidate["replacementBar"] = bar
+                target = ("one of the marked mediators "
+                          f"{', '.join(mediator_names)}" if mediator_ambiguous
+                          else f"the trusted mediator {protected_name}")
+                candidate["why"] += (
+                    f"; it would replace {target}, but it carries {reason}, so "
+                    "it ranks below the candidates that clear the bar")
         if match.bridge is not None:
             candidate["adapter"] = _adapter_block(match)
             if match.bridge.merges:
@@ -2494,6 +2797,10 @@ def resolve(registry, need, manifest: dict | None = None,
         "candidates": candidates,
         "refused": refused,
     }
+    if mediator_ambiguous:
+        # No incumbent can be named without guessing; the answer reports the
+        # ambiguity rather than crowning one marked candidate (issue #2697).
+        result["mediatorAmbiguity"] = mediator_names
     if policy is not None:
         # item 290 §5: the prediction's OWN honesty block. `unpredicted` is the
         # reason an absent `wouldBeRefused` is not a clearance, so it rides in the
@@ -2539,4 +2846,5 @@ __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "release_changelog", "RELEASES_DIRNAME", "RELEASE_RECORD_FILENAME",
            "RELEASE_CHANGELOG_FILENAME", "BUMP_VERIFIED", "BUMP_UNVERIFIABLE",
            "BUMP_FIRST_RELEASE", "SCHEME_SEMVER", "SCHEME_OPAQUE", "SCHEMES",
-           "EVIDENCE_DIRNAME", "EVIDENCE_FILES"]
+           "EVIDENCE_DIRNAME", "EVIDENCE_FILES",
+           "EVIDENCE_CEILINGS", "EVIDENCE_SECRET_SINKS", "EVIDENCE_COMPENSATION"]

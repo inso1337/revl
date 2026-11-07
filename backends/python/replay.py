@@ -610,25 +610,27 @@ class Timeline:
     def emission_for(self, compensation: Any, crossing: Optional[str] = None
                      ) -> Optional[Step]:
         """The recorded emission a compensation being registered offsets, or
-        None. First by source adjacency, the rule `record_yield` has always
-        used (the registration sits on the line after the emission); then, for
-        a compensation an extern DECLARES, whose thunk lives with the extern
-        rather than beside the call, by the crossing's name: the newest
-        emission of that extern not yet paired with a compensation. None when
-        nothing matches: a crossing the recorder never saw (an emission in
-        expression position) is left unpaired rather than paired with a
-        neighbour, which would report the neighbour as offset."""
+        None. A named crossing is EXACT: the newest emission of that extern not
+        yet paired with a compensation, because source adjacency can reach an
+        unrelated unpaired emission on the line above (a compensation and its
+        fire share a line at the seam). Without a name, by source adjacency, the
+        rule `record_yield` has always used (the registration sits on the line
+        after the emission), which is what a site-spelled compensation whose
+        thunk lives beside the call gets. None when nothing matches: a crossing
+        the recorder never saw (an emission in expression position) is left
+        unpaired rather than paired with a neighbour, which would report the
+        neighbour as offset."""
+        if crossing is not None:
+            for step in reversed(self.steps):
+                if step.kind == KIND_EMISSION and step.compensation is None \
+                        and (step.detail or {}).get("key") == crossing:
+                    return step
+            return None
         file, lineno = _code_site(_unguarded(compensation))
         if lineno:
             adjacent = self._emission_sites.get((file, lineno - 1))
             if adjacent is not None and adjacent.compensation is None:
                 return adjacent
-        if crossing is None:
-            return None
-        for step in reversed(self.steps):
-            if step.kind == KIND_EMISSION and step.compensation is None \
-                    and (step.detail or {}).get("key") == crossing:
-                return step
         return None
 
     # -- recording ---------------------------------------------------------
@@ -1486,8 +1488,15 @@ def _crossing_ref(timeline: "Timeline", step: Step) -> dict:
 
 
 def _record_emission_outcome(ref: dict, outcome: str,
-                             error: Optional[BaseException] = None) -> None:
-    """Persist the outcome of a plain emission without changing its seq."""
+                             error: Optional[BaseException] = None,
+                             observed: Optional[dict] = None) -> None:
+    """Persist the outcome of a plain emission without changing its seq.
+
+    `observed` is the runtime meter's counts (`calls`, `bytes`, `elapsed`) for
+    a declared-ceiling crossing (issue #2688). It rides the record as `ceiling`,
+    next to the static spelling the audit document carries, so the WAL says
+    what the run actually spent. Absent for an undeclared crossing, so every
+    pre-#2688 record stays byte-identical."""
     timeline = ref.get("_timeline")
     step = ref.get("_step")
     wal = getattr(timeline, "_wal", None)
@@ -1496,7 +1505,14 @@ def _record_emission_outcome(ref: dict, outcome: str,
     detail = None
     if error is not None:
         detail = {"type": type(error).__name__, "message": _describe(str(error))}
-    wal.record_emission_outcome(step.wal_seq, outcome, detail=detail)
+        # A ceiling fault carries the token, kind, limit and observed count;
+        # name them individually so a reader does not parse the message.
+        for field in ("capability", "kind", "limit", "observed"):
+            value = getattr(error, field, None)
+            if value is not None:
+                detail[field] = value
+    wal.record_emission_outcome(step.wal_seq, outcome, detail=detail,
+                                ceiling=observed)
 
 
 def _call_within(ref: dict, fn: Callable, args: tuple, kwargs: dict) -> Any:
@@ -1634,10 +1650,11 @@ class _RecordingContext:
             object.__getattribute__(self, "_revl_services"))
 
     def _revl_record_extern_outcome(self, step: Optional[Step], outcome: str,
-                                    error: Optional[BaseException] = None) -> None:
+                                    error: Optional[BaseException] = None,
+                                    observed: Optional[dict] = None) -> None:
         timeline = object.__getattribute__(self, "_revl_timeline")
         _record_emission_outcome({"_timeline": timeline, "_step": step},
-                                 outcome, error)
+                                 outcome, error, observed=observed)
 
     def _revl_record_extern(self, name: str, args: tuple) -> Step:
         """Record a DIRECT free host-extern emission (`emit announce(msg)`, a
@@ -2428,13 +2445,22 @@ class WriteAheadLog:
                 raise ReplayError("write-ahead log fsync failed") from error
 
     def record_emission_outcome(self, seq: Optional[int], outcome: str,
-                                 *, detail: Optional[dict] = None) -> None:
-        """Record completion or failure for a previously journalled emission."""
+                                 *, detail: Optional[dict] = None,
+                                 ceiling: Optional[dict] = None) -> None:
+        """Record completion, failure or refusal for a previously journalled
+        emission.
+
+        `ceiling` is the runtime meter's observed counts (`{token: {calls,
+        bytes, elapsed}}`) for a declared-ceiling crossing (issue #2688), the
+        durable half of "the audit JSON shows the observed count". Absent for
+        an undeclared crossing, so its record is byte-identical."""
         if seq is None:
             return
         record = {"record": outcome, "seq": seq}
         if detail:
             record["error"] = detail
+        if ceiling:
+            record["ceiling"] = ceiling
         self._write(record)
 
     def append_step(self, step: "Step", component: str) -> dict:

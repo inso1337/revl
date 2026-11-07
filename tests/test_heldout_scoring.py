@@ -633,8 +633,8 @@ def test_a_change_to_a_fenced_file_selects_this_file(path=None):
     the classification. The test that does was never selected, so the change
     landed and main was red on a path no gate had run.
 
-    Derived on both sides: the selector reads `HELD_OUT_FENCE` out of the tool
-    by AST, and this holds every entry of the same tuple.
+    Derived on both sides: the selector reads the `held_out` view out of the
+    evaluator enumeration by AST, and this holds every entry of the same set.
     """
     spec = importlib.util.spec_from_file_location(
         "affected_tests_under_heldout", ROOT / "tools" / "affected_tests.py")

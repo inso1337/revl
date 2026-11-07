@@ -20,7 +20,11 @@
     "BEFORE the port and seen to fail."
   ],
   "go": {
-    "blind": {},
+    "blind": {
+      "The frontend lowers the `var` keyword to a `step` of `let` with `mutable=true`, so no corpus document can spell a `step=var` step. The reference's `_emit_method_body` renders both kinds (`s in (\"let\", \"var\")`), and `selfhost/emit_go.rvl` mirrors that arm for the provide-method slice, so the construct is mirrored rather than a port gap. It is reachable only from pre-lowered or hand-written IR; the live and combined documents this slice carries all bind through `step=let`.": [
+        "step=var"
+      ]
+    },
     "unported": {
       "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method opens a lexical scope (`uiScope`, `revlUiCross`). It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/ui_transaction/exec_test.go.": [
         "key=<activation>"
@@ -60,7 +64,6 @@
         "step=stream-iter",
         "step=timer",
         "step=unload",
-        "step=var",
         "subscribe=<true>"
       ],
       "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err` from either). A user variant can still declare its own case named `Ok`: backends/java/scenarios/runtime_values.rvl's `Outcome` does, and that document joined the go corpus with issue #106's fifth slice, so `name=Ok` left this list.": [
@@ -133,6 +136,12 @@
       "Existing witnessed-extern boundary: _emit_witnessed_step consults secret_witness when recording/redacting inverse witnesses. Extern/witness lowering is not ported; strict method_witnessed.rvl retains a representative divergence, not a claim that secrecy is unnecessary.": [
         "secret_witness=<true>"
       ],
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body in a `RevlUi` scope, each computer-use crossing through `RevlUi.cross`. emit_java.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @java bodies. The runtime proof is backends/java/test_ui_transaction_java_1369.py.": [
+        "key=<activation>"
+      ],
+      "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
+        "class=emission"
+      ],
       "Item 421 F6 added the Secret[T] runtime registry to the reference java backend (backends/java/emit.py), but the item-199 Path B self-host java emitter (selfhost/emit_java.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's _SECRET_MODE redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_java.rvl ports the registry.": [
         "secret=<true>",
         "secret_return=<true>"
@@ -163,12 +172,6 @@
         "stage=take",
         "step=stream-iter",
         "subscribe=<true>"
-      ],
-      "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
-        "class=emission"
-      ],
-      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body in a `RevlUi` scope, each computer-use crossing through `RevlUi.cross`. emit_java.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @java bodies. The runtime proof is backends/java/test_ui_transaction_java_1369.py.": [
-        "key=<activation>"
       ]
     }
   },
@@ -193,12 +196,12 @@
   },
   "rust": {
     "blind": {
+      "Named only in order to MARK a document loudly (issue #1592). An extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit`, every other position of a provide method, and a timer firing. selfhost/emit_rust.rvl ports the site-spelled compensation (item 391) but not the declared one: `declared_compensate_marker` reads `class=emission` only to emit `<<UNSUPPORTED-declared-compensate>>` for a document that declares one, so no emit_rust_corpus document can carry it. The runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+        "class=emission"
+      ],
       "Named only in order to REFUSE loudly. A witnessed-extern acquisition registers the extern's DECLARED inverse transactionally rather than the site-spelled bracket, and a `spawn` acquisition binds a live-instance handle over a runtime ABI this port does not assemble; both select an `<<UNSUPPORTED-*>>` marker instead (`<<DEFER-*>>` before issue #2367). Mirrored so the refusal is precise, not so the lowering is (issue 1153).": [
         "class=witnessed",
         "kind=spawn"
-      ],
-      "Named only in order to MARK a document loudly (issue #1592). An extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit`, every other position of a provide method, and a timer firing. selfhost/emit_rust.rvl ports the site-spelled compensation (item 391) but not the declared one: `declared_compensate_marker` reads `class=emission` only to emit `<<UNSUPPORTED-declared-compensate>>` for a document that declares one, so no emit_rust_corpus document can carry it. The runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
-        "class=emission"
       ],
       "Read only to TYPE a result, never rendered (item 391): `builtin_return_type` mirrors the reference's `_BUILTIN_SELF_RESULT` row, where a `set` result has its receiver's type. The port's builtin renderer still answers `set` with `<<UNSUPPORTED-BUILTIN:set>>`, so a corpus document that spelled it would diverge, and the method stays out of the corpus.": [
         "method=set"
@@ -213,17 +216,17 @@
         "method=slice",
         "method=to_int"
       ],
+      "The `advance` step, read ONLY to decide whether the clock/timer preamble rides along: a lifecycle test that drives the clock needs `revl_clock_advance`/`revl_clock_reset` even when no component arms a timer (item 112), so the preamble gate reads the step name. Nothing renders it. No corpus document can reach it while agreeing, for the same reason the lifecycle door above is unreachable: the port defers the in-file test section the step lives in, so a document declaring one diverges on the missing section rather than on this gate (issue 1153).": [
+        "step=advance"
+      ],
+      "The one entrance to the host-runtime gate the corpus cannot take. `emit_host_stubs` rides the R1 live-resource counter along for a lifecycle test as well as for a host object, an armed timer or a stream; the corpus reaches the gate through the host-`Map`, timer and stream doors, so the counter and the block selection ARE exercised. The lifecycle door is not reachable while agreeing, because the port defers the in-file test section that declares a lifecycle test (issue 1153).": [
+        "lifecycle=<true>"
+      ],
       "The read-only List-parameter borrow analysis (item 333) mirrors the reference escape walk's read-method set `(\"length\", \"at\")` so a candidate list threaded through such a read is not forced back to owned. `length` is exercised by the corpus; `at` is not a stdlib method at all (the surface is charAt/codepoint_at/index/..., there is no bare `at` in _BUILTIN_SIG), so no legal document can produce a `method=at` node. It is mirrored only to keep the port's read-set byte-identical to the reference's, and no byte ever depends on it.": [
         "method=at"
       ],
       "The reference emits record/list destructuring in _v3_let_pattern, including a temporary name derived from output position. The self-host emitter tracks let_pattern names for lexical analysis but deliberately has no matching statement renderer.": [
         "step=let_pattern"
-      ],
-      "The one entrance to the host-runtime gate the corpus cannot take. `emit_host_stubs` rides the R1 live-resource counter along for a lifecycle test as well as for a host object, an armed timer or a stream; the corpus reaches the gate through the host-`Map`, timer and stream doors, so the counter and the block selection ARE exercised. The lifecycle door is not reachable while agreeing, because the port defers the in-file test section that declares a lifecycle test (issue 1153).": [
-        "lifecycle=<true>"
-      ],
-      "The `advance` step, read ONLY to decide whether the clock/timer preamble rides along: a lifecycle test that drives the clock needs `revl_clock_advance`/`revl_clock_reset` even when no component arms a timer (item 112), so the preamble gate reads the step name. Nothing renders it. No corpus document can reach it while agreeing, for the same reason the lifecycle door above is unreachable: the port defers the in-file test section the step lives in, so a document declaring one diverges on the missing section rather than on this gate (issue 1153).": [
-        "step=advance"
       ]
     },
     "unported": {
@@ -242,7 +245,6 @@
         "name=remove"
       ],
       "These expression and destructuring forms are rejected before or inside the self-host pure-v3 renderer: unresolved holes, legacy format nodes, optional call/field chaining, record update, and list/record binding patterns all require lowering absent from the port.": [
-        "bind=_",
         "kind=hole",
         "kind=optcall",
         "kind=optfield",
@@ -285,6 +287,9 @@
   },
   "wasm": {
     "blind": {
+      "Issue #2201: the WASM reference refuses `/` by name \u2014 it yields `Float`, which this tier does not lower \u2014 and selfhost/emit_wasm.rvl mirrors that refusal in `render_bin`. No CORPUS document can reach either arm, because a corpus document is one the reference EMITS: `ratio` in tests/fixtures/emit_wasm_refusals/true_division.rvl is the one document in the tree that reaches them, the line-coverage gate drives both halves over it, and tests/test_selfhost_emit_wasm.py::test_a_true_division_the_reference_refuses_is_refused_by_name_here_too asserts the refusal's text on both sides. `%` stays covered by arith.rvl.": [
+        "op=/"
+      ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
         "op=??"
       ],
@@ -294,9 +299,6 @@
       "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR. Compatibility aliases remain in cmp_suffix, but canonical source equality already exercises ==/!=.": [
         "op=!==",
         "op===="
-      ],
-      "Issue #2201: the WASM reference refuses `/` by name \u2014 it yields `Float`, which this tier does not lower \u2014 and selfhost/emit_wasm.rvl mirrors that refusal in `render_bin`. No CORPUS document can reach either arm, because a corpus document is one the reference EMITS: `ratio` in tests/fixtures/emit_wasm_refusals/true_division.rvl is the one document in the tree that reaches them, the line-coverage gate drives both halves over it, and tests/test_selfhost_emit_wasm.py::test_a_true_division_the_reference_refuses_is_refused_by_name_here_too asserts the refusal's text on both sides. `%` stays covered by arith.rvl.": [
-        "op=/"
       ]
     },
     "unported": {
@@ -314,6 +316,12 @@
         "method=join",
         "method=split",
         "method=to_char"
+      ],
+      "Issue #1979 (with #1369 item 522 slice 3): `_refuse_ui_transaction_units` reads the computer-use transaction units the frontend computes and refuses the whole document by name \u2014 this tier's method-time compensation is component-instance state drained by `deactivate` (session granularity), never at the unit boundary the frontend computes \u2014 while skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself). No wasm corpus document can carry it: a computer-use document is REFUSED rather than emitted, which is exactly what tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl records. The runtime proof is tests/test_selfhost_emit_wasm.py::test_a_ui_transaction_unit_is_refused_by_name_on_both_sides.": [
+        "key=<activation>"
+      ],
+      "Issues #1511, #1592 and #1979: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from \u2014 an activation `emit` compiles it into the activation's static `entries` list, and a provide-method `emit` appends it to the RUNTIME `$__mc_*` accumulator (a method body runs once per request, so a fixed entry list cannot hold it), which `deactivate` drains newest-first on abort and never walks on commit. A declared `compensate` this tier still cannot register is refused by name. All of it is _ComponentEmitter (live component) emission, which the module-only selfhost port does not instantiate, so no emit_wasm_corpus document can carry it; the runtime proof is backends/wasm/test_declared_compensate_1979.py.": [
+        "class=emission"
       ],
       "Legacy component reference spelling consumed by _ComponentEmitter; canonical pure source references lower to kind=var. This syntax-census mismatch does not mean variable reads are unsupported.": [
         "kind=name"
@@ -366,12 +374,6 @@
       ],
       "The whole checked-division family is unported on this tier: selfhost/emit_wasm.rvl carries the $int_* arithmetic helper bodies but not the _builtin_expr arm that lowers checked_div_trunc/floor/euclid/mod into tagged Ok/Err cells, and no wasm corpus document spells a checked_* call. Only `checked_mod` shows up as a construct here because it is the one member the reference names by itself \u2014 it is the exception to the Int.MIN/-1 overflow Err the other three answer, since its own answer at that divisor is 0. The rest of the family reaches the reference through `method in _CHECKED_DIVS`, which is not a discriminant this census reads. A corpus case would need the tagged-union port first.": [
         "method=checked_mod"
-      ],
-      "Issues #1511, #1592 and #1979: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from \u2014 an activation `emit` compiles it into the activation's static `entries` list, and a provide-method `emit` appends it to the RUNTIME `$__mc_*` accumulator (a method body runs once per request, so a fixed entry list cannot hold it), which `deactivate` drains newest-first on abort and never walks on commit. A declared `compensate` this tier still cannot register is refused by name. All of it is _ComponentEmitter (live component) emission, which the module-only selfhost port does not instantiate, so no emit_wasm_corpus document can carry it; the runtime proof is backends/wasm/test_declared_compensate_1979.py.": [
-        "class=emission"
-      ],
-      "Issue #1979 (with #1369 item 522 slice 3): `_refuse_ui_transaction_units` reads the computer-use transaction units the frontend computes and refuses the whole document by name \u2014 this tier's method-time compensation is component-instance state drained by `deactivate` (session granularity), never at the unit boundary the frontend computes \u2014 while skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself). No wasm corpus document can carry it: a computer-use document is REFUSED rather than emitted, which is exactly what tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl records. The runtime proof is tests/test_selfhost_emit_wasm.py::test_a_ui_transaction_unit_is_refused_by_name_on_both_sides.": [
-        "key=<activation>"
       ]
     }
   }
