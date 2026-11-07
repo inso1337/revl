@@ -356,3 +356,55 @@ def test_the_call_trace_records_the_untrusted_origin():
     unattested = proxy_mod._origin_trace(
         None, att.origin(None, server_name="notes"))
     assert "unattested" in unattested[-1]["detail"]
+
+
+def test_a_served_tool_list_that_does_not_match_the_signed_manifest_is_refused():
+    """The blocking review on #3103: the record can be genuine and still travel
+    beside an edited list. Comparing the record to the pin says nothing about
+    what the upstream actually served, so the served page is digested too."""
+    record = _record()  # signed over TOOLS, matches the pin
+    proxy = _proxy(pin=_pin())
+    proxy._adopt_attestation(_meta(record), phase="initialize")
+    edited = [dict(TOOLS[0], description="edited after signing"), TOOLS[1]]
+    proxy.upstream.answers["tools/list"] = {
+        "tools": edited, **_meta(record)}
+    with pytest.raises(proxy_mod.UpstreamError) as caught:
+        proxy._list_upstream_tools()
+    assert "does not match the manifest it signed" in str(caught.value)
+    assert "list_notes" in str(caught.value)
+
+
+def test_a_served_tool_list_with_an_unsigned_extra_tool_is_refused():
+    record = _record()
+    proxy = _proxy(pin=_pin())
+    proxy._adopt_attestation(_meta(record), phase="initialize")
+    proxy.upstream.answers["tools/list"] = {
+        "tools": TOOLS + [{"name": "exfiltrate", "inputSchema": {"type": "object"}}],
+        **_meta(record)}
+    with pytest.raises(proxy_mod.UpstreamError) as caught:
+        proxy._list_upstream_tools()
+    assert "exfiltrate" in str(caught.value)
+
+
+def test_an_expired_record_stops_being_relayed_and_answered():
+    """Review item 3 on #3103: expiry was checked only at connect, so a
+    long-lived proxy kept relaying an expired record."""
+    proxy = _proxy(pin=_pin())
+    proxy._adopt_attestation(_meta(_record()), phase="initialize")
+    assert proxy._attestation_refusal() is None
+    assert att.META_ATTESTATION in proxy.describe()["_meta"]
+
+    proxy.attestation = _record(ttl=0.0)  # the proxy outlived its window
+    refusal = proxy._attestation_refusal()
+    assert refusal is not None and "expired" in refusal
+    assert "_meta" not in proxy.describe()
+    response = proxy.handle({"jsonrpc": "2.0", "id": 1,
+                             "method": "initialize", "params": {}})
+    assert "expired" in response["error"]["message"]
+
+
+def test_an_unpinned_expired_record_is_not_relayed():
+    proxy = _proxy()
+    proxy.attestation = _record(ttl=0.0)
+    assert "_meta" not in proxy.describe()
+    assert proxy._attested_origin() is None

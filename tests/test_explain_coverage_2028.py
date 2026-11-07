@@ -192,9 +192,10 @@ def test_an_emitted_code_names_the_rewrite_that_satisfies_it():
     run, not a roster of codes that do not include theirs. Every code that is
     answered for and is not already a guarantee code is one of these, the 26
     that answered "no diagnostic code" before #2028 plus every code a later
-    slice adds to the roster (`UNKNOWN_ARTIFACT` and `STALE_ARTIFACT`, #2852)."""
+    slice adds to the roster (`UNKNOWN_ARTIFACT` and `STALE_ARTIFACT`, #2852;
+    `MCP-ATTESTATION`, #2990)."""
     newly = sorted(COVERED - set(dg.GUARANTEES))
-    assert len(newly) == 28, newly
+    assert len(newly) == 29, newly
     for code in newly:
         if code == "REVL":
             continue        # the fallback: its guarantee is the honest "unknown"

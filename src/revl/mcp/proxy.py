@@ -403,6 +403,40 @@ class Proxy:
                     f"attestation named {previous.get('server_id')!r}")
         self.attestation = record
 
+    def _relayable_record(self) -> dict | None:
+        """The held record if it is still inside its window, else None.
+
+        A proxy outlives a record's TTL. A record that expired after connect
+        must stop being relayed, and a pinned proxy must stop answering, rather
+        than keep presenting a statement about a moment that has passed
+        (review item 3 on #3103)."""
+        record = self.attestation
+        if not isinstance(record, dict) or _attestation.record_expired(record):
+            return None
+        return record
+
+    def _attested_origin(self) -> dict | None:
+        """The record a result may name as an ATTESTED origin: only a pinned,
+        still-valid one. Without a pin the proxy has no trust anchor, so any
+        relayed record is provenance only and the label says unattested."""
+        return self._relayable_record() if self.pin is not None else None
+
+    def _attestation_refusal(self) -> str | None:
+        """Why a pinned proxy must refuse now, or None.
+
+        Re-verifies the held record under the pinned key on every use, so an
+        expired record (or one that could not be re-verified) stops answering
+        even though it verified at connect."""
+        if self.pin is None or not isinstance(self.attestation, dict):
+            return None
+        ok, reason = _attestation.verify_attestation(
+            self.attestation, bytes.fromhex(self.pin["public_key"]))
+        if ok:
+            return None
+        return (f"the upstream attestation is no longer valid: {reason}; the "
+                "proxy will not answer until the upstream re-attests (restart "
+                "or reconnect it)")
+
     def _list_upstream_tools(self) -> list:
         tools: list = []
         cursor = None
@@ -421,9 +455,43 @@ class Proxy:
                     "tools/list, and this server paginates it, so the pin "
                     "covers only the first page")
             self._adopt_attestation(result, phase="tools/list")
+            record = (result.get("_meta") or {}).get(
+                _attestation.META_ATTESTATION)
+            if isinstance(record, dict):
+                self._refuse_served_manifest(page if isinstance(page, list) else [],
+                                             record)
             if not cursor:
                 return tools
         raise UpstreamError("the upstream server's tools/list did not terminate")
+
+    @staticmethod
+    def _refuse_served_manifest(page: list, record: dict) -> None:
+        """The served tools must BE the tools the record signed.
+
+        Verifying the record against the pin says nothing about the list the
+        upstream returned next to it: a genuine record can travel beside an
+        edited description, a changed schema or an added tool. Compare the
+        served digests with the signed ones and refuse, naming the tools that
+        differ (blocking review on #3103).
+        """
+        signed = record.get("tools") or {}
+        try:
+            served = _attestation.tool_digests(page)
+        except _attestation.AttestationError as error:
+            if signed:
+                raise UpstreamError(
+                    "refused the upstream: it served a tool list that does not "
+                    f"match the manifest it signed ({error}); the signed tools "
+                    "are: " + ", ".join(sorted(signed))) from error
+            return
+        changed = sorted(
+            set(served) ^ set(signed)
+            | {name for name in set(served) & set(signed)
+               if served[name] != signed[name]})
+        if changed:
+            raise UpstreamError(
+                "refused the upstream: it served a tool list that does not "
+                "match the manifest it signed: " + ", ".join(changed))
 
     def _classify(self) -> tuple[list[dict], list[dict]]:
         classified = classify_imported_tools(
@@ -620,6 +688,9 @@ class Proxy:
             return _error_result(f"unknown tool: {name}")
         if name in self.refused:
             return _payload_result(self.server._session_error(self.refused[name]))
+        refusal = self._attestation_refusal()
+        if refusal is not None:
+            return _payload_result(self.server._session_error(refusal))
         if not isinstance(arguments, dict):
             return _error_result("`arguments` must be an object")
         # item 55: a proxied tool is a call on the proxied composition, so it
@@ -660,7 +731,7 @@ class Proxy:
         # the response itself, so a chained proxy relays B's origin and never
         # becomes the origin of B's answer.
         label = _attestation.origin(
-            self.attestation,
+            self._attested_origin(),
             server_name=(self.upstream_info or {}).get("name"))
         meta_out[_attestation.META_ORIGIN] = label
         # ...and in the call's trace, additively: the response label is what a
@@ -693,9 +764,9 @@ class Proxy:
         return {
             "ok": True,
             "upstream": self.upstream_info,
-            "attested": self.attestation is not None,
+            "attested": self._attested_origin() is not None,
             "origin": _attestation.origin(
-                self.attestation,
+                self._attested_origin(),
                 server_name=(self.upstream_info or {}).get("name")),
             "tools": [_verdict(t) | ({"refused": self.refused[t["name"]]}
                                      if t["name"] in self.refused else {})
@@ -770,11 +841,12 @@ class Proxy:
                 "it with revl_approve. revl_proxy_verdicts lists each tool's "
                 "class and why."),
         }
-        if self.attestation is not None:
+        record = self._relayable_record()
+        if record is not None:
             # the verified upstream record is RELAYED, not replaced: a client
             # pinning the upstream through this proxy still sees the record B
             # signed, and this proxy claims nothing about B it did not verify.
-            result["_meta"] = {_attestation.META_ATTESTATION: self.attestation}
+            result["_meta"] = {_attestation.META_ATTESTATION: record}
         return result
 
     def handle(self, message: dict) -> dict | None:
@@ -790,12 +862,18 @@ class Proxy:
         request_id = message.get("id")
         params = message.get("params") or {}
         if method == "initialize":
+            refusal = self._attestation_refusal()
+            if refusal is not None:
+                return _error(request_id, -32603, refusal)
             result = self.describe(params.get("protocolVersion"))
         elif method == "tools/list":
+            refusal = self._attestation_refusal()
+            if refusal is not None:
+                return _error(request_id, -32603, refusal)
             result = {"tools": self._advertised()}
-            if self.attestation is not None:
-                result["_meta"] = {
-                    _attestation.META_ATTESTATION: self.attestation}
+            record = self._relayable_record()
+            if record is not None:
+                result["_meta"] = {_attestation.META_ATTESTATION: record}
         elif method == "tools/call":
             name = params.get("name")
             if name in MANAGEMENT_VERBS:
@@ -817,7 +895,7 @@ class Proxy:
                 # answer too, so it carries the same untrusted origin label.
                 if isinstance(result, dict):
                     label = _attestation.origin(
-                        self.attestation,
+                        self._attested_origin(),
                         server_name=(self.upstream_info or {}).get("name"))
                     meta_out = dict(result.get("_meta") or {})
                     meta_out[_attestation.META_ORIGIN] = label

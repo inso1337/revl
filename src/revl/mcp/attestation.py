@@ -383,6 +383,23 @@ def verify_pin(record, pin: dict, *, now: datetime | None = None
                                   "manifest", "changed": []}
 
 
+def record_expired(record, *, now: datetime | None = None) -> bool:
+    """Whether a record's expiry window has closed.
+
+    Fail closed: a record a reader cannot date is treated as expired, because
+    an expiry a parser cannot read is an expiry no one can rely on. This is the
+    cheap re-check a long-lived holder runs on every use; `verify_attestation`
+    remains the full check (signature, kind, version and window).
+    """
+    if not isinstance(record, dict):
+        return True
+    try:
+        expires = _parse_iso(record.get("expires_at"), "expires_at")
+    except AttestationError:
+        return True
+    return expires <= (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+
 # ---------------------------------------------------------------- the origin
 
 def origin(record: dict | None = None, *, server_name: str | None = None

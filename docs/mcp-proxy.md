@@ -132,6 +132,21 @@ signs its own lies; the pin says the answer came from the server you chose, not
 that the server is honest. Tool annotations and `readOnlyHint` remain the
 server author's assertions and are gated exactly as before.
 
+A record can also be **replayed for its whole TTL**. `session` is chosen by the
+server and no client nonce is signed, so anyone who holds a record that was
+relayed can present it at the same address until it expires, and the pin will
+accept it. This proxy relays the record to every downstream client, and a log
+keeps a copy. A replayer cannot change the manifest (the signature covers it)
+and cannot produce a record for another manifest, but they can serve that
+manifest's tools and can answer with anything, because answers are not signed.
+Binding a client nonce is a follow-up; until then keep the TTL short and do not
+read a relayed record as proof that the responder holds the key now.
+
+The record's expiry is re-checked on every use, not only at connect: a
+long-lived proxy stops relaying a record that expired since, and a pinned proxy
+refuses `initialize`, `tools/list` and `tools/call` rather than keep presenting
+a statement about a moment that has passed.
+
 ### The answer is untrusted data
 
 Every proxied tool result carries the origin it came from and the fact that it

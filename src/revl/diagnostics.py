@@ -301,6 +301,21 @@ OTHER_CODES = {
         "fix": "point the client at the pinned checkout, or re-pin to the "
                "revision the message names",
     },
+    "MCP-ATTESTATION": {
+        "category": "identity",
+        "guarantee": "every MCP answer comes from the server identity the "
+                     "client pinned, over the tool manifest that identity "
+                     "signed",
+        "meaning": "the upstream presented no signed record, signed with "
+                   "another key, named another server or session, was outside "
+                   "its validity window, or served a tool list that is not the "
+                   "manifest its record signed, so the proxy cannot tie the "
+                   "answer to the identity the operator pinned",
+        "fix": "pin the server's current public key and tool manifest "
+               "(regenerate the pin with `revl mcp serve "
+               "--attestation-pin-out`), or restart and reconnect the "
+               "upstream so it attests again",
+    },
     "REVL": {
         "category": "unclassified",
         "guarantee": UNCLASSIFIED,
