@@ -324,10 +324,11 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
     assert data["tiers"] == [tg._short(tier) for tier in conformance.TIERS]
     assert {row["tier"] for row in data["rows"]} == set(data["tiers"])
     for row in data["rows"]:
-        statuses = {row[key]["status"] for key in
-                    ("emits", "executes", "durable_recovery", "selfhost_agreement")}
+        keys = ("emits", "executes", "durable_recovery",
+                "selfhost_agreement", "selfhost_compiles")
+        statuses = {row[key]["status"] for key in keys}
         assert statuses <= {tg.PROVED, tg.DIVERGENCE, tg.UNMEASURED}
-        for key in ("emits", "executes", "durable_recovery", "selfhost_agreement"):
+        for key in keys:
             if row[key]["status"] != tg.UNMEASURED:
                 assert row[key]["evidence"], (row["tier"], key)
 
@@ -344,6 +345,23 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
                        f"byte-identical; {frontier} frontier limits; {gaps} gaps")
     assert tiers["py"]["selfhost_agreement"]["detail"] == expected_shared
     assert len({row["selfhost_agreement"]["detail"] for row in data["rows"]}) == 1
+
+    # The issue #2899 column is per tier and comes from the measured ledger,
+    # not a literal typed here or repeated from the shared pipeline above.
+    import selfhost_matrix
+    ledger = selfhost_matrix.load()
+    for tier in data["tiers"]:
+        counts = selfhost_matrix.tier_counts(ledger, conformance.TIERS[
+            data["tiers"].index(tier)])
+        cell = tiers[tier]["selfhost_compiles"]
+        if counts is None:
+            assert cell["status"] == tg.UNMEASURED
+        else:
+            compiled, total = counts
+            assert cell["detail"] == f"{compiled}/{total} self-host files emit"
+            assert cell["status"] == (tg.PROVED if compiled == total
+                                      else tg.DIVERGENCE)
+    assert len({row["selfhost_compiles"]["detail"] for row in data["rows"]}) > 1
 
     # A measured emitter gap changes the cell, rather than leaving an authored
     # success status behind.

@@ -889,13 +889,19 @@ def support_matrix(*, report: dict | None = None,
     """Derive the adopter-facing evidence table from the checks that run it.
 
     Emit counts and the self-host agreement come from `tools/conformance.py`.
-    Compile/execution coverage comes from its validator registries and CI steps.
+    The per-tier self-host compile column comes from the measured ledger in
+    `tools/selfhost_matrix.py`. Compile/execution coverage comes from its
+    validator registries and CI steps.
     Durable recovery is discovered from crash-test modules and the CI test
     collection. Missing evidence is always `unmeasured`, never a positive cell.
     """
     import conformance  # noqa: PLC0415, tools/ is already on sys.path
+    import selfhost_matrix  # noqa: PLC0415, tools/ is already on sys.path
     from validate import EXECUTORS, VALIDATORS  # noqa: PLC0415
 
+    compile_ledger = selfhost_matrix.load()
+    compile_evidence = [selfhost_matrix.LEDGER.relative_to(ROOT).as_posix(),
+                        "tools/selfhost_matrix.py"]
     tests_root = tests_root or ROOT / "tests"
     if report is None:
         report = conformance.run()
@@ -995,6 +1001,21 @@ def support_matrix(*, report: dict | None = None,
             selfhost_detail = (f"shared revl measure: {exact}/{total} byte-identical; "
                                f"{frontier} frontier limits; {selfhost_gaps} gaps")
 
+        # The issue #2899 column: does this tier's own emitter compile the
+        # self-host sources? It is per tier, unlike the one shared `revl`
+        # pipeline above, which is why the two columns exist.
+        compile_counts = selfhost_matrix.tier_counts(compile_ledger, tier)
+        if compile_counts is None:
+            compile_status = UNMEASURED
+            compile_detail = "the self-host compile ledger does not measure this tier"
+            compile_used_evidence = []
+        else:
+            compiled, compile_total = compile_counts
+            compile_status = PROVED if compiled == compile_total else DIVERGENCE
+            noun = "file" if compile_total == 1 else "files"
+            compile_detail = f"{compiled}/{compile_total} self-host {noun} emit"
+            compile_used_evidence = compile_evidence
+
         rows.append({
             "tier": short,
             "emits": {"status": emit_status, "detail": emit_detail,
@@ -1008,6 +1029,9 @@ def support_matrix(*, report: dict | None = None,
                                    "detail": selfhost_detail,
                                    "evidence": ["tools/conformance.py"]
                                    if selfhost_row else []},
+            "selfhost_compiles": {"status": compile_status,
+                                  "detail": compile_detail,
+                                  "evidence": compile_used_evidence},
         })
 
     return {"tiers": [_short(tier) for tier in conformance.TIERS], "rows": rows}
@@ -1021,10 +1045,14 @@ def support_markdown(data: dict | None = None) -> str:
            "A `proved` cell names the check wired for that tier; `divergence` names a "
            "known gap; `unmeasured` means no matching check runs. The self-host "
            "agreement is one shared `revl` pipeline, so its measured count repeats "
-           "across the host-tier rows.",
+           "across the host-tier rows. The self-host compile column is per tier: it "
+           "counts the `selfhost/*.rvl` files that tier's own reference emitter "
+           "compiles, measured by `tools/selfhost_matrix.py` and committed in its "
+           "ledger; every non-emitting file is acknowledged there with an issue or a "
+           "recorded scope decision.",
            "",
-           "| tier | emits and compiles | executes | durable recovery | self-host agreement |",
-           "|---|---|---|---|---|"]
+           "| tier | emits and compiles | executes | durable recovery | self-host agreement | self-host compiles |",
+           "|---|---|---|---|---|---|"]
 
     def cell(value: dict) -> str:
         details = value["detail"]
@@ -1035,7 +1063,8 @@ def support_markdown(data: dict | None = None) -> str:
     for row in data["rows"]:
         out.append("| " + row["tier"] + " | " + " | ".join(
             cell(row[key]) for key in
-            ("emits", "executes", "durable_recovery", "selfhost_agreement")) + " |")
+            ("emits", "executes", "durable_recovery", "selfhost_agreement",
+             "selfhost_compiles")) + " |")
     return "\n".join(out)
 
 

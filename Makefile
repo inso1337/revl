@@ -126,6 +126,17 @@ matrix:
 matrix-check:
 	python3 tools/conformance.py --check-readme
 
+# Issue #2899: the per-tier support table's self-host compile column is
+# measured, not authored. The measurement is minutes long, so it is committed
+# as tools/selfhost_compile_matrix.json; --check refuses a ledger whose
+# self-host sources or tier emitters have moved, and a non-emitting cell with
+# no issue or recorded scope decision behind it.
+selfhost-tiers-measure:
+	python3 tools/selfhost_matrix.py --measure
+
+selfhost-tiers-check:
+	python3 tools/selfhost_matrix.py --check
+
 # The matrix's third question (issue #244): RUN the cases that have an answer
 # and check every tier computes the same one. `--validate` stops at compile
 # depth and cannot see a tier that compiles and then means something else.
