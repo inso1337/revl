@@ -29,19 +29,21 @@ component Assembler
     // §8.1 — fetch, admit against the current assembly *before vendoring*,
     // then (only on ok) vendor + pin. A truc that would not join is never
     // written to disk: commit_add gets "" and does nothing. Vendored text is
-    // admitted as an untrusted author; `thc` (--trust-host-code, this command
-    // only) admits a host body, and the lock row records which way it went.
+    // admitted as an untrusted author, its reach bounded to the `requires`
+    // keys its `[trucs]` entry grants (issue #2635); `thc` (--trust-host-code, this
+    // command only) admits a host body, and the lock row records which way it
+    // went.
     fn add(name, thc) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let reg = plan.registry_of(m)
       let row = emit index.row(reg, name)
       let entryJson = emit fetch.entry(reg, name)
-      let spec = plan.assemble_spec(m)
+      let spec = plan.add_spec(m, name)
       let g = emit ws.read_sources(".", spec)
-      let ordered = plan.ordered_with_candidate(g, name, entryJson)
+      let ordered = plan.ordered_with_candidate(g, m, name, entryJson)
       let v = emit gate.admit_all(ordered, lock, thc)
-      let r = plan.add_report(row, name, entryJson, v)
+      let r = plan.add_report(m, row, name, entryJson, v)
       emit ws.commit_add(".", plan.report_commit(r))
       emit ws.print(plan.report_msg(r))
       return plan.report_code(r)
@@ -57,7 +59,7 @@ component Assembler
       let spec = plan.assemble_spec(m)
       let g = emit ws.read_sources(".", spec)
       let d = plan.drift(lock, g)
-      let ordered = plan.ordered_sources(g)
+      let ordered = plan.ordered_sources(g, m)
       let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.assemble_report(d, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))
@@ -78,7 +80,7 @@ component Assembler
       let lock = emit ws.read("truc.lock")
       let spec = plan.rm_spec(m, name)
       let g = emit ws.read_sources(".", spec)
-      let ordered = plan.ordered_sources(g)
+      let ordered = plan.ordered_sources(g, m)
       let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.rm_report(m, name, v)
       emit ws.commit_rm(".", plan.report_commit(r))
@@ -99,7 +101,7 @@ component Assembler
       let g = emit ws.read_sources(".", spec)
       let d = plan.drift(lock, g)
       let vd = emit ws.vendored_drift(".")
-      let ordered = plan.ordered_sources(g)
+      let ordered = plan.ordered_sources(g, m)
       let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.check_report(d, vd, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))

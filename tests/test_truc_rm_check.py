@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from test_truc_add_assemble import _grant
+
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "registry"
 CORDIS_PY = ROOT / "backends" / "python" / ".venv" / "bin" / "python"
@@ -86,6 +88,7 @@ def _seeded(tmp_path: Path) -> Path:
     """A project with user_cache (requires `db`) + pg_database (provides `db`)
     already added — the compatible arrangement S1 assembles clean."""
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
     assert _truc(proj, "add", "pg_database").returncode == 0
     return proj
