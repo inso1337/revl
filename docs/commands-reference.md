@@ -1284,6 +1284,9 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   because that tier has no E-Stop seam. The halt report names every component
   left un-torn-down, one line each, and marks the residue it cannot enumerate
   UNKNOWN rather than omitting it.
+  Without `--placement`, a backend with no E-Stop seam (ts, wasm) refuses the
+  boot when a latch is named by this flag or by `REVL_ESTOP_LATCH`, rather than
+  running every crossing unwatched.
 - `--trace FILE` - write a causal lifecycle trace (JSONL); every transition
   carries the cause chain, queryable with `revl why` ([why-runtime.md](why-runtime.md)).
 - `--withdraw COMPONENT` - one-shot: boot, withdraw this live component while

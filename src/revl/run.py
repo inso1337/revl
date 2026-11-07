@@ -2809,6 +2809,28 @@ def _is_model_refusal(exc: BaseException) -> bool:
                             ProvisionRefused, ProviderError))
 
 
+def _estop_seam_problem(backend: str, flag_latch: str | None) -> str | None:
+    """Why a single-process run on `backend` must refuse an armed E-Stop, or
+    None when there is no latch or the tier honours it (issue #3200).
+
+    A latch counts as armed when it is named by `--estop-latch` or by the
+    ambient `REVL_ESTOP_LATCH`, whether or not a halt is already written to it:
+    the run is asking to be haltable, and a tier with no seam cannot be."""
+    from .estop import LATCH_ENV, TIERS_WITH_ESTOP  # noqa: PLC0415 - lazy
+    if backend in TIERS_WITH_ESTOP:
+        return None
+    if flag_latch:
+        return (f"--estop-latch needs a tier whose runtime checks the latch at "
+                f"its crossing seams; --backend {backend} has no E-Stop seam "
+                f"to honour it")
+    ambient = os.environ.get(LATCH_ENV)
+    if ambient:
+        return (f"{LATCH_ENV} names an E-Stop latch ({ambient}), but "
+                f"--backend {backend} has no E-Stop seam to honour it; unset "
+                f"it or run on a tier that checks the latch")
+    return None
+
+
 def _load_run_attestation(path, ir: dict) -> dict:
     """Issue #2730 slice 1: the trace header an `--attestation` file stands for.
 
@@ -2950,6 +2972,13 @@ def run_command(args, hold_once: bool = False) -> int:
         if not (getattr(args, "trace", None) or getattr(args, "withdraw", None)):
             print("note: --attestation writes the run header only to a causal "
                   "trace; add --trace FILE to record it", file=sys.stderr)
+    # issue #3200: a single-process run on a tier whose runtime does not read
+    # the latch at its crossing seams would boot and run every crossing with an
+    # E-Stop armed, so an operator halt would silently do nothing. Refuse the
+    # boot instead, for the flag and for the ambient latch alike.
+    problem = _estop_seam_problem(backend, getattr(args, "estop_latch", None))
+    if problem is not None:
+        return _fail(problem, lifecycle.CONFIG)
     try:
         config = _load_config(getattr(args, "config", None))
         env = _load_env(getattr(args, "env", None))
