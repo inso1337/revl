@@ -387,8 +387,9 @@ def test_moving_a_component_out_of_a_denied_realm_is_still_refused():
     carol = parse_profile(DENY_PROFILE).get("carol")
     sess = _FakeSession(compile_source(TWO_REALM), carol)
     labels = dict(op._changed_targets(sess.ir, compile_source(_move_b_to_tenant_c())))
-    # where it was and where it goes
-    assert labels == {"TenantBCache": frozenset({"TenantBCache", "tenant_b", "tenant_c"})}
+    # an allow is matched where it goes; a deny where it was AND where it goes
+    assert labels == {"TenantBCache": frozenset({"TenantBCache", "tenant_c"})}
+    assert labels["TenantBCache"].deny == frozenset({"TenantBCache", "tenant_b", "tenant_c"})
     d = decide(sess, "revl_swap", {"source": _move_b_to_tenant_c()})
     assert d.gated and not d.allowed
     assert "TenantBCache" in d.message
@@ -419,6 +420,20 @@ def test_a_move_that_stays_inside_the_allowed_realm_is_authorized():
     d = decide(sess, "revl_swap", {"source": moved})
     assert d.gated and d.allowed
     assert d.subjects == ("TenantACache",)
+
+
+@pytest.mark.parametrize("with_body_change", [True, False])
+def test_moving_an_allowed_component_out_of_the_allowed_realm_is_refused(
+        with_body_change):
+    # alice may swap on tenant_a*: moving TenantACache to tenant_b leaves her
+    # grant, and the realm it leaves must not count toward her allow
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    base = _swap_a() if with_body_change else TWO_REALM
+    moved = base.replace('realm("tenant_a")', 'realm("tenant_b")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and not d.allowed
+    assert "TenantACache" in d.message
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
