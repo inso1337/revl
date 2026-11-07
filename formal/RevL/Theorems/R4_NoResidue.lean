@@ -34,10 +34,11 @@ effect step is what appends its record and creates its referent. The log
 is the trace of the run, `w₁` is the world the run actually built, and
 `L` is not an input anyone chose.
 
-`RevL.Lemmas` documents the fragment's limits: five body forms, a
-`witnessed` step that appends its descriptor and mutates atomically
-(collapsing a real window the reference has), and no cascading abort,
-compensation drain or escrow.
+`RevL.Lemmas` documents the fragment's limits: six body forms (the
+`deferred` form is the queue step, not an effect step, so it does not
+enter these theorems), a `witnessed` step that appends its descriptor and
+mutates atomically (collapsing a real window the reference has), and no
+cascading abort, compensation drain or escrow.
 
 ## Scope
 

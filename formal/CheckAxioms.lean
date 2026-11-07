@@ -210,6 +210,10 @@ import RevL
 #print axioms RevL.A8.crash_cut_witness
 #print axioms RevL.A8.commit_witness
 #print axioms RevL.A8.mixed_disposition_admitted
+#print axioms RevL.A8.abort_drops_deferred
+#print axioms RevL.A8.commit_discharges_deferred
+#print axioms RevL.A8.deferred_abort_run
+#print axioms RevL.A8.deferred_commit_run
 #print axioms RevL.A8.revert_witness
 #print axioms RevL.A8.revert_witness_restores
 

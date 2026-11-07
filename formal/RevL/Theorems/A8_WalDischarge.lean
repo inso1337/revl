@@ -35,6 +35,13 @@ algebra and the small-step semantics live in the L1 farm
    `declared_idempotent_replay_free` is the other half: over the declared
    subset replay is free, because `DictWorld.apply_inverse` pops a
    referent and popping twice is popping once.
+5. **Deferred emissions are dropped or discharged**
+   (`abort_drops_deferred`, `commit_discharges_deferred`). The in-process
+   frame drops the session's deferral queue on abort with zero crossings,
+   and the commit fires each queued entry once, FIFO, leaving a
+   `flushed` record for each. This is issue #2740's first slice: the
+   recovery view already dropped a deferred emission with no
+   `commit-approved`; the in-process rule was the unstated half.
 
 ## What each theorem is worth, honestly
 
@@ -84,9 +91,14 @@ descriptor AFTER the forward extern returns `Ok`
 record leaves a mutation with no record at all. Every theorem here is
 relative to the durable log; a mutation that never reached the log is
 outside all of them. The `SemStep.witnessed` rule collapses that window
-into one step, so this model cannot express it. Durability itself is also
-a floor rather than a theorem: `WAFrom` orders the fence append before
-the apply, and that `fsync` reaches the platter is a host obligation.
+into one step, so this model cannot express it. Nor does
+`commit_discharges_deferred` model the roll-forward `flush-residue`
+window: it fires every queued entry, while the reference's flush is
+fallible and writes `flush-residue` for an entry that raised. Both
+windows are named as open in `formal/STATUS.md`'s A8 row. Durability
+itself is also a floor rather than a theorem: `WAFrom` orders the fence
+append before the apply, and that `fsync` reaches the platter is a host
+obligation.
 -/
 
 namespace RevL.A8
@@ -396,6 +408,138 @@ theorem mixed_disposition_admitted :
     outcome mixedAbort = .rolledBack
     ∧ rollbackReplay mixedAbort = [2]
     ∧ reported mixedAbort okAll = [] := by decide
+
+/-! ## The in-process deferral queue: abort drops it, commit fires it
+
+The recovery view already DROPS a deferred emission with no
+`commit-approved` record (`dispose`'s `.dropped` case). What was missing
+is the in-process statement the runtime actually performs
+(`backends/python/runtime.py`): `begin_abort` drops the session's
+deferral queue with zero crossings, and the commit's `_flush` fires each
+queued entry FIFO. `FrameStep.abort` and `FrameStep.commit` are those two
+verdicts, and the theorems below say what each does to the queue, the
+crossing list and the durable log. -/
+
+/-- **An abort drops the deferral queue and crosses nothing.** The abort
+step empties the queue, leaves the crossing list exactly as the body run
+left it, writes the `aborted` completion record and settles the verdict.
+Each queued emission is therefore owed nothing: `dispose` classifies its
+durable `deferred-emission` record as `.dropped`, which is the recovery
+view's own disposition. The fire surface is not touched at all. -/
+theorem abort_drops_deferred (f : Frame) (hv : f.verdict = none) :
+    FrameStep f (abortFrame f) ∧
+    (abortFrame f).queue = [] ∧
+    (abortFrame f).fired = f.fired ∧
+    (abortFrame f).config.log = f.config.log ++ [.aborted] ∧
+    (abortFrame f).verdict = some .abort ∧
+    (∀ s ∈ f.queue,
+      dispose (abortFrame f).config.log (fun _ => true) (.deferredEmission s)
+        = some (s, .dropped)) := by
+  refine ⟨abortStep f hv, rfl, rfl, rfl, rfl, fun _ _ => rfl⟩
+
+/-- **A commit fires the deferral queue, each entry once.** The commit
+step empties the queue, appends every entry to the crossing list in FIFO
+order, writes `commit-approved` BEFORE the fires and one `flushed` record
+per entry, and closes with the terminal marker. So "moved to discharged"
+is durable: each queued seq is in the crossing list and names its own
+`flushed` record. A fire that raised is the roll-forward `flush-residue`
+window this model still does not have. -/
+theorem commit_discharges_deferred (f : Frame)
+    (hb : f.config.body = .done) (hv : f.verdict = none) :
+    FrameStep f (commitFrame f) ∧
+    (commitFrame f).queue = [] ∧
+    (commitFrame f).fired = f.fired ++ f.queue ∧
+    (∀ s ∈ f.queue, s ∈ (commitFrame f).fired) ∧
+    (∀ s ∈ f.queue, Rec.flushed s ∈ (commitFrame f).config.log) ∧
+    Rec.commitApproved ∈ (commitFrame f).config.log ∧
+    Rec.activationComplete ∈ (commitFrame f).config.log ∧
+    (commitFrame f).verdict = some .commit ∧
+    (commitFrame f).config.log =
+      f.config.log ++ [.commitApproved] ++ f.queue.map Rec.flushed
+        ++ [.activationComplete] := by
+  refine ⟨commitStep f hb hv, rfl, rfl, ?_, ?_, ?_, ?_, rfl, rfl⟩
+  · intro s hs
+    exact List.mem_append.mpr (Or.inr hs)
+  · intro s hs
+    have hm : Rec.flushed s ∈ f.queue.map Rec.flushed :=
+      List.mem_map.mpr ⟨s, hs, rfl⟩
+    simp [commitFrame, hm]
+  · simp [commitFrame]
+  · simp [commitFrame]
+
+/-- A body that mutates seq 1, then defers seq 2, then hits L-Raise's
+failing step. -/
+def deferredAbortBody : Body := .witnessed 1 true (.deferred 2 .fail)
+
+/-- Its trace: the descriptor, then the enqueue record. -/
+def deferredAbortLog : Log :=
+  [.descriptor 1 .transactional true, .deferredEmission 2]
+
+/-- The frame the run starts in. -/
+def deferredAbortStart : Frame :=
+  ⟨⟨deferredAbortBody, [], []⟩, [], [], none⟩
+
+/-- The frame before the abort: queue `[2]`, nothing fired. -/
+def deferredAbortMid : Frame :=
+  ⟨⟨.fail, [1], deferredAbortLog⟩, [2], [], none⟩
+
+/-- The frame after the abort. -/
+def deferredAbortEnd : Frame :=
+  ⟨⟨.fail, [1], deferredAbortLog ++ [.aborted]⟩, [], [], some .abort⟩
+
+/-- **The abort witness.** A real `FrameSteps` run enqueues seq 2,
+reaches the failing step, and aborts with a NON-EMPTY queue. The queue is
+dropped, the crossing list stays empty, and the durable log reads back as
+an abort whose deferred emission is dropped rather than reported. -/
+theorem deferred_abort_run :
+    FrameSteps deferredAbortStart deferredAbortMid ∧
+    FrameStep deferredAbortMid deferredAbortEnd ∧
+    deferredAbortMid.queue = [2] ∧
+    deferredAbortEnd.queue = [] ∧
+    deferredAbortEnd.fired = [] ∧
+    outcome deferredAbortEnd.config.log = .rolledBack ∧
+    reported deferredAbortEnd.config.log okAll = [] := by
+  refine ⟨?_, abortStep deferredAbortMid rfl, rfl, rfl, rfl,
+    by decide, by decide⟩
+  exact FrameSteps.step (FrameStep.body SemStep.witnessed)
+    (FrameSteps.step FrameStep.defer FrameSteps.refl)
+
+/-- A body that defers seqs 2 and 4, in program order, then completes. -/
+def deferredCommitBody : Body := .deferred 2 (.deferred 4 .done)
+
+/-- Its trace: two enqueue records. -/
+def deferredCommitLog : Log := [.deferredEmission 2, .deferredEmission 4]
+
+/-- The frame the run starts in. -/
+def deferredCommitStart : Frame :=
+  ⟨⟨deferredCommitBody, [], []⟩, [], [], none⟩
+
+/-- The frame before the commit: queue `[2, 4]`, nothing fired. -/
+def deferredCommitMid : Frame :=
+  ⟨⟨.done, [], deferredCommitLog⟩, [2, 4], [], none⟩
+
+/-- The frame after the commit: FIFO fired, one `flushed` per entry. -/
+def deferredCommitEnd : Frame :=
+  ⟨⟨.done, [],
+     deferredCommitLog ++ [.commitApproved, .flushed 2, .flushed 4,
+                           .activationComplete]⟩,
+   [], [2, 4], some .commit⟩
+
+/-- **The commit witness.** A real `FrameSteps` run enqueues seqs 2 and 4
+and commits. Both fire in program order, the queue is empty afterwards,
+and the durable log carries a `flushed` record for each entry under the
+`commit-approved` decision point. Contrast `deferred_abort_run`: the same
+kind of queue, the opposite verdict. -/
+theorem deferred_commit_run :
+    FrameSteps deferredCommitStart deferredCommitMid ∧
+    FrameStep deferredCommitMid deferredCommitEnd ∧
+    deferredCommitMid.queue = [2, 4] ∧
+    deferredCommitEnd.queue = [] ∧
+    deferredCommitEnd.fired = [2, 4] ∧
+    outcome deferredCommitEnd.config.log = .rolledForward := by
+  refine ⟨?_, commitStep deferredCommitMid rfl rfl, rfl, rfl, rfl, by decide⟩
+  exact FrameSteps.step FrameStep.defer
+    (FrameSteps.step FrameStep.defer FrameSteps.refl)
 
 /-- A body of two witnessed mutations that hits the failing step. -/
 def revertBody : Body := .witnessed 1 true (.witnessed 2 true .fail)
