@@ -194,6 +194,47 @@ def _cap_covers(wide: str, narrow: str) -> bool:
         return False                    # unparseable -> only exact-string matches
 
 
+def _delegation_narrowed(capability: str) -> list:
+    """The parameters a delegation's grant spelling narrowed, for the chain link.
+
+    `fs.write(path="/tmp", size="1MB")` narrows on `path` and `size`; a bare
+    `fs.write` narrows on nothing. Reads the STORED canonical spelling (the one
+    relation, `cap_order.parse_stored_cap`), so the chain records exactly what the
+    ledger's grant declares and cannot drift from it. An unparseable spelling
+    yields an empty list rather than inventing a narrowing (fail closed on the
+    record, never on the use: the coverage check already refused or admitted)."""
+    try:
+        cap = cap_order.parse_stored_cap(capability)
+    except cap_order.CapError:
+        return []
+    return [name for name, _ in cap.params]
+
+
+def _delegation_covers(granted: str, use: str) -> bool:
+    """Does a delegation minted for `granted` authorize a use of `use`?
+
+    `use` is what a delegated method call reaches, spelled as the crossing's
+    semantic identity (`fs.write`) — the parameter narrowing is the LEASE's own
+    and is not re-stated by a method call whose path is an ordinary argument.
+    So an IDENTICAL stored spelling and an equal TOKEN both authorize; a wider or
+    different token does not. A narrower use (the caller spelling parameters too)
+    still has to be covered by the ordinary partial order.
+
+    Reading the token rather than only `covers` is deliberate: `covers` refuses a
+    bare `fs.write` under a granted `fs.write(path="/tmp")` because a bare token
+    TOPS the cone, and that is the right answer for a MINT (`_grant_covers`).
+    It is the wrong answer for a delegated USE, which cannot widen a grant it
+    never re-states: the grant's own boundaries (path included) are enforced by
+    the lease at the crossing, exactly as a 294 lease's are (design §8.3.1)."""
+    if _cap_covers(granted, use):
+        return True
+    try:
+        token = cap_order.parse_stored_cap(granted).token
+    except cap_order.CapError:
+        return False
+    return use == token
+
+
 # -- item 470 Slice 5: the class-(c) approval gate as an intent refinement ----
 #
 # `intent.refine` compares what was DECLARED against what is about to RUN. At
@@ -1660,6 +1701,11 @@ class Session:
         # gate already minted, and its disposer's own-requestId revoke rides here.
         self._owner.lease_acquire = self._runtime_lease_acquire
         self._owner.lease_revoke = self._runtime_lease_revoke
+        # item 442 (issue #2693): the delegated-use seam. A delegated crossing
+        # resolves the lease grant by requestId in THIS session's ledger and
+        # spends one of its uses for the receiving component; inert unless a
+        # composition mints and hands out a delegation.
+        self._owner.delegate_use = self._delegate_use
         runtime_mod.set_session_owner(self._owner)
 
     def _configure_owner_approvals(self, ir: dict) -> None:
@@ -8595,6 +8641,108 @@ class Session:
             wal.record_approval_consumed(grant["requestId"], use=use)
         return use
 
+    # -- item 442 (issue #2693): delegated use, attribution and revocation ---
+
+    def _delegate_use(self, request_id: str, subject: str,
+                      capability: str) -> int:
+        """Spend one use of standing grant `request_id` FOR a second party.
+
+        This is item 294's lease path with a SUBJECT: the delegation is a lookup
+        key into this session's own ledger, never a bearer token, so the use is
+        decided here from state the ledger already holds. `subject` is the
+        component performing the delegated crossing; `capability` names the
+        method it is calling (e.g. `fs.write`).
+
+        Consume-before-fire is unchanged (`_consume_grant`): the spend is durable
+        before the caller fires. Attribution is written once, on the FIRST
+        delegated use: `subject` becomes the party the authority was lent to and
+        `chain` gains the one link this depth-1 slice admits (`from` the grant's
+        holder, `to` the subject, `narrowed` the granted parameters). A second
+        distinct subject is refused: one grant is lent to one party at a time.
+
+        Revocation is evaluated at THIS crossing, exactly as a lease's is:
+        an expired grant, or one whose lender's generation was swapped out from
+        under it, is marked `revoked` here and refused, so the ledger row reads
+        retired and nothing bearing on the delegation outlives the lending
+        component. A lapsed lease is never resurrected; a later handover mints a
+        new grant, exactly as the design requires.
+        """
+        grant = next((g for g in self._grants
+                      if g.get("requestId") == request_id), None)
+        if grant is None:
+            raise SessionError(
+                f"no standing grant `{request_id}` in this session's ledger — a "
+                f"delegated reference is a lookup key into the receiver's own "
+                f"ledger and is never a bearer token (item 442, issue #2693)")
+        if grant.get("session") != self._session_id:
+            raise SessionError(
+                f"standing grant `{request_id}` was minted in another session — "
+                f"a delegated use is never replayable across a session "
+                f"boundary (item 442, issue #2693)")
+        if grant.get("revoked"):
+            raise SessionError(
+                f"standing grant `{request_id}` was revoked — the delegated "
+                f"reference it backed no longer authorizes any crossing "
+                f"(item 442, issue #2693)")
+        now = self._now_ms()
+        if self._expired(grant, now):
+            # a lapsed LENDER revokes the delegated handle, forward-only: no new
+            # obligation may be incurred through it, and the row says so.
+            grant["revoked"] = True
+            raise SessionError(
+                f"the lease behind standing grant `{request_id}` lapsed at "
+                f"{grant.get('expiresAt')}, so the delegated reference it backed "
+                f"is revoked and this crossing is refused (item 442, issue #2693)")
+        if not self._lender_generation_live(grant):
+            grant["revoked"] = True
+            raise SessionError(
+                f"the lender of standing grant `{request_id}` was swapped or "
+                f"unloaded, so every delegation it handed out is revoked "
+                f"(item 442, issue #2693)")
+        remaining = grant.get("remainingUses")
+        if remaining is not None and remaining <= 0:
+            raise SessionError(
+                f"standing grant `{request_id}` has no uses left — the delegated "
+                f"reference is exhausted and this crossing is refused "
+                f"(item 442, issue #2693)")
+        if not _delegation_covers(grant["capability"], capability):
+            raise SessionError(
+                f"standing grant `{request_id}` covers `{grant['capability']}`, "
+                f"not `{capability}` — a delegated reference authorizes only the "
+                f"surface it was minted for (item 442, issue #2693)")
+        lender = grant.get("component")
+        held_by = grant.get("subject")
+        if held_by is not None and held_by != subject:
+            raise SessionError(
+                f"standing grant `{request_id}` is already lent to `{held_by}`, "
+                f"so `{subject}` cannot use it — one delegation names one subject "
+                f"(item 442, issue #2693)")
+        if held_by is None:
+            grant["subject"] = subject
+            grant.setdefault("chain", []).append({
+                "from": lender, "to": subject,
+                "narrowed": _delegation_narrowed(grant["capability"])})
+        return self._consume_grant(grant)
+
+    def _lender_generation_live(self, grant: dict) -> bool:
+        """Whether the grant's LENDER still holds the generation it lent from.
+
+        The lease grant is bound to the lender's reach-closure candidate hash
+        (invariant 4). A swap that changes that closure recomputes a different
+        hash, so the delegation auto-revokes with no bookkeeping of its own —
+        the same generation-liveness trick the lease itself uses. A session with
+        no class map (no policy bound) keeps the binding inert, so a delegated
+        use is byte-identical to an ordinary lease spend there.
+        """
+        cm = self._class_map
+        if cm is None:
+            return True
+        lender = grant.get("component")
+        reach = getattr(cm, "_reach", {}).get(f"{lender}:activation")
+        closure = (reach["closureComponents"] if reach is not None
+                   else {lender})
+        return cm.candidate_hash(closure) == grant.get("candidateHash")
+
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
     def _glob_members(self, glob: str) -> frozenset[str]:
@@ -9208,6 +9356,15 @@ class Session:
             "consumed": False,
             "revoked": False,               # item 379: set by an early revoke
             "lease": is_lease,              # item 294: minted from an effect lease
+            # item 442 (issue #2693): the delegation record. `subject` is the
+            # party the authority was LENT to (None until a delegated use names
+            # one) and `chain` is who lent what to whom, shaped for depth from
+            # day one even though v1 writes exactly one link. The lender is
+            # `component` above, unchanged: a delegation SHARES authority, it
+            # never transfers it, so the lease holder stays the grant's component
+            # and the delegatee holds nothing once the call returns.
+            "subject": None,
+            "chain": [],
             # item 470 stage 1: the ceilings the mint spelling STATED, kept after
             # the erasure above so the grant is still a declaration at the
             # crossing. `calls` is here for the audit and is not re-compared
@@ -9669,7 +9826,17 @@ class Session:
                  # item 379: True when an operator retired the grant EARLY (as
                  # opposed to it lapsing on uses/TTL). Both leave it out of the
                  # live set; this bit distinguishes them for the audit.
-                 "revoked": g.get("revoked", False)}
+                 # item 442: a delegation whose lender lapsed or was swapped is
+                 # also marked here at the delegated crossing that discovers it,
+                 # so the row an operator reads says the handle is retired.
+                 "revoked": g.get("revoked", False),
+                 # item 442 (issue #2693): the delegation record an operator
+                 # reads. `subject` is the party the authority was lent to and
+                 # `chain` is who lent what to whom; both are None/[] until a
+                 # delegated use names a subject, so an ordinary lease's row is
+                 # unchanged in meaning.
+                 "subject": g.get("subject"),
+                 "chain": list(g.get("chain") or [])}
                 for g in self._grants],
             # item 251 Slice 3: the TIME AXIS. `promptsPerSessionSeries` is the
             # per-session prompt tally read from the WAL (deterministic, ordered by

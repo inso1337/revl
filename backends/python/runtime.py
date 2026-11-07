@@ -5714,6 +5714,12 @@ class SessionOwner:
         # holds for every existing composition.
         self.lease_acquire: Optional[Callable[..., Any]] = None
         self.lease_revoke: Optional[Callable[[str], Any]] = None
+        # item 442 (issue #2693): the delegated-use seam. Given the grant
+        # `requestId` a delegated reference names, the receiving component and the
+        # capability its method call reaches, the session checks the grant's
+        # liveness, attributes the use to that subject and spends one use. None
+        # (and inert) for a session whose composition never mints a delegation.
+        self.delegate_use: Optional[Callable[..., Any]] = None
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None
