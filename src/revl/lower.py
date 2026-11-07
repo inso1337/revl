@@ -14446,8 +14446,9 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
 # resolved. `formal/harness/diff_corpus.py` observes exactly that by
 # installing a log here for the duration of ONE `compile_files` call.
 #
-# None in production: every call site is one branch and never allocates, so an
-# unobserved run costs nothing and no behaviour depends on the log. The
+# None in production: every call site is one branch and a module-global
+# lookup, and nothing is allocated or mutated while the log stays None. No
+# behaviour depends on the log. The
 # entries are `("scope", component, label, (param, ...))` when a provide
 # method's scope opens (its declared parameters are seeded there) and
 # `("visit", component, label, ())` once per statement the walk dispatched.

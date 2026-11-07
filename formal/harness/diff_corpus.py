@@ -3586,10 +3586,20 @@ def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
 #
 #   G1W <file> <comp> <scope> <stmts> <params>
 #       One scope the shipped checker's lowering ACTUALLY visited, recorded
-#       while `compile_files` ran: the scope's label (`activation` or
-#       `<provide key>.<method>`), how many statements of it the walk
-#       dispatched, and the parameter names it seeded into the scope's own
-#       environment when it opened it.
+#       while `compile_files` ran, in the order the walk opened it: the
+#       scope's label (`activation` or `<provide key>.<method>`), how many of
+#       the scope's TOP-LEVEL statements the walk dispatched, and the
+#       parameter names it seeded into the scope's own environment when it
+#       opened it. The order is compared as recorded, not normalised: an
+#       admitted body's activation statements precede every `provide` block
+#       (the checker refuses an effect after a provide), so a different order
+#       is a failure rather than something to sort away.
+#
+#       Statements inside an `if`/`while`/`for` body are lowered by the
+#       scope's own recursion and are NOT counted a second time: the count is
+#       per scope, at the granularity of the flat `Stmt` list `Body.scopes`
+#       carries. That is the same subject the G9 row counts, and the
+#       limitation is stated in `RevL.G1Coverage`'s docstring.
 #
 #   G1C <file> <comp> <scope> coverage=ok|fail
 #       The oracle's OUTPUT, not an export row: `RevLOracle.accessCoverageRowB`
@@ -3687,22 +3697,20 @@ def _access_observation():
         lower._ACCESS_WALK = saved
 
 
-def _access_walk_order(observed: dict, body_order: list[str]) -> list:
-    """The walk's scopes for one component, in the BODY's order first, then
-    any scope the body does not have.
+def _access_walk_scopes(observed: dict) -> list:
+    """The walk's scopes for one component, in the ORDER the checker opened
+    them, as `(label, statement count, parameter names)` triples.
 
-    The lowering dispatches statements in source order, so a provide block
-    written before an activation statement would open its scope first while
-    `Body.scopes` always puts the activation first. Known labels are therefore
-    ordered by the parse (the comparison is scope by scope, and the parse is
-    the side that says what the order is); a label the body does not have is
-    kept AFTER them, in the walk's own order, so an extra scope stays visible
-    instead of being sorted away."""
-    known = [(label, observed[label]) for label in body_order
-             if label in observed]
-    extra = [(label, v) for label, v in observed.items()
-             if label not in body_order]
-    return [(label, v["stmts"], list(v["params"])) for label, v in known + extra]
+    The order is part of the comparison and is not normalised: a walk that
+    opened the provide scopes before the activation scope is a walk the model
+    refuses (its label list differs), and reordering it here would make the
+    printed `ok` something other than `coversAccessB` on the walk the checker
+    performed. On an admitted body the two orders coincide by construction:
+    the checker refuses an `effect`/`let-effect`/`timer` after a `provide`
+    block, so the activation statements come first, and `Body.scopes` puts the
+    activation first exactly when it has a statement."""
+    return [(label, v["stmts"], list(v["params"]))
+            for label, v in observed.items()]
 
 
 def g1coverage_rows(rel: str, prog) -> list[str]:
@@ -3735,6 +3743,12 @@ def g1coverage_rows(rel: str, prog) -> list[str]:
             # a component the parse does not carry (a `use`d module's or a
             # name this file never declared): not this row's subject
             continue
+        if kind == "scope":
+            _G1_COVERAGE_CENSUS["scope_opens"] = (
+                _G1_COVERAGE_CENSUS.get("scope_opens", 0) + 1)
+        elif scope == "activation":
+            _G1_COVERAGE_CENSUS["activation_visits"] = (
+                _G1_COVERAGE_CENSUS.get("activation_visits", 0) + 1)
         entry = walk.setdefault(comp, {})
         if kind == "scope":
             entry.setdefault(scope, {"stmts": 0, "params": list(params)})
@@ -3773,7 +3787,7 @@ def g1coverage_rows(rel: str, prog) -> list[str]:
             key, _, method = label.partition(".")
             rows.append("\t".join(["G1P", rel, comp, key, method, str(n),
                                    ",".join(params)]))
-        ordered = _access_walk_order(observed, [lb for lb, _n, _p in scopes])
+        ordered = _access_walk_scopes(observed)
         for label, n, params in ordered:
             rows.append("\t".join(["G1W", rel, comp, label, str(n),
                                    ",".join(params)]))
@@ -3866,6 +3880,24 @@ def g1coverage_coverage() -> list[str]:
             "`fail` row would be reporting a coverage failure that is really "
             "an instrument failure")
         return findings
+    any_activation = any(
+        any(lb == "activation" for lb, _n, _p in body)
+        for per_file in _G1_COVERAGE_ROWS.values()
+        for _c, body, _w in per_file)
+    any_provide = any(
+        any(lb != "activation" for lb, _n, _p in body)
+        for per_file in _G1_COVERAGE_ROWS.values()
+        for _c, body, _w in per_file)
+    if any_activation and not _G1_COVERAGE_CENSUS.get("activation_visits"):
+        findings.append(
+            "g1 coverage: components declare activation statements but the "
+            "`lower._note_access_visit` activation call site recorded none — "
+            "an instrument failure, not a walk that skipped them")
+    if any_provide and not _G1_COVERAGE_CENSUS.get("scope_opens"):
+        findings.append(
+            "g1 coverage: components declare provide scopes but the "
+            "`lower._note_access_scope` call site recorded none — an "
+            "instrument failure, not a walk that skipped them")
     acts = provs = params = 0
     drop_scope = bump = strip = extra = 0
     for rel, per_file in sorted(_G1_COVERAGE_ROWS.items()):
@@ -7911,6 +7943,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     _ALIGN_SAMPLES.clear()
     _G5_WITNESS.clear()
     _GC_COVERED.clear()
+    _G1_COVERED.clear()
     g5_resolved = g5_files_the_prog_resolves(tsv)
 
     def record(key: str, rel: str) -> None:
@@ -8270,10 +8303,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # parameter set than it declares) — G1's name resolution never visited
         # it, so its undeclared reads were never refused. That is fatal on its
         # own bucket. An UNOBSERVED walk takes the other bucket and never this
-        # one: `lower._note_access_visit` / `_note_access_scope` having moved
-        # or stopped firing is the harness going blind, and folding the two
-        # together would let a broken seam read as a checker regression.
-        # The AGREEMENT is again a second axis, not a bucket.
+        # one: when the parse gives a component scopes and the recorder
+        # captured none of it, the harness is blind for that whole component,
+        # and folding that into a coverage disagreement would let a fully
+        # broken seam read as a checker regression. The split is only
+        # component-level: a seam that stops firing for ONE call site while the
+        # other still records cannot be told apart from a checker that skipped
+        # that call site, so it lands here as a coverage disagreement; the
+        # ratchet's per-seam census names a wholly dead call site as an
+        # instrument failure. The AGREEMENT is again a second axis, not a
+        # bucket.
         if rel in _G1_UNOBSERVED:
             record("missed-G1-coverage-observation", rel)
         elif any(x == "fail" for k, x in v.g1cov.items() if k[0] == rel):
@@ -9036,6 +9075,7 @@ def main() -> int:
             ("g9", ref.g9, formal.g9),
             ("retain", ref.retain, formal.retain),
             ("g9_coverage", ref.gc, formal.gc),
+            ("g1_coverage", ref.g1cov, formal.g1cov),
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5),

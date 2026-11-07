@@ -51,7 +51,23 @@ for a walk to fail; what the harness adds is an independent observation and a
 ratchet (`g1coverage_coverage`) that must flip a verdict under each of four
 shortenings, so a constant-true row cannot pass the gate. The harness keeps a
 separate fatal bucket (`missed-G1-coverage-observation`) for a walk it failed
-to observe at all, so a moved seam cannot read as a checker regression.
+to observe at all, and its ratchet names a wholly dead call site as an
+instrument failure rather than as a checker regression.
+
+**Two limits of the observation, stated rather than smuggled.**
+
+* The count is of a scope's **top-level statements** — the list `Body.scopes`
+  carries, which is the flat `Stmt` list L0 can express. A statement inside an
+  `if`/`while`/`for` body is lowered by the scope's own recursion and is not
+  counted as a second statement. A lowering bug that skips a NESTED statement
+  is therefore outside this row (the G9 row has the same granularity); what
+  the row catches is a skipped scope or a skipped top-level statement, which
+  is the class of bug the activation-skip failure belonged to.
+* The walk's scopes are compared **in the order the checker opened them**, not
+  reordered into `Body.scopes` order. That is a real conjunct and not
+  decoration: on an admitted body the two orders coincide by construction
+  because the checker refuses an `effect`/`let-effect`/`timer` after a
+  `provide` block, so any other order is a walk the model refuses.
 
 ## The three conjuncts, and why each one is here
 
@@ -145,11 +161,6 @@ def scopeCounts (ss : List Scope) : List Nat := ss.map (fun s => s.stmts.length)
 /-- The scopes' declared parameter names, in order. -/
 def scopeParamNames (ss : List Scope) : List (List String) :=
   ss.map Scope.paramNames
-
-/-- A body's declared parameter names, by scope, read through
-`Body.scopeParams` — the projection the export and the oracle both carry. -/
-def Body.scopeParamNames (b : Body) : List (List String) :=
-  b.scopeParams.map fun lp => lp.2.map (·.name)
 
 /-! ## The deciders -/
 

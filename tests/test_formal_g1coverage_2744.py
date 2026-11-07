@@ -343,9 +343,11 @@ def _notes():
 
 
 def test_a_walk_that_skips_the_activation_scope_is_refused_by_the_row(harness):
-    """The mutation witness the issue asks for, on the REAL observation: make
-    the recorder drop every activation visit, re-export one file, and the
-    reference's own `G1C` verdict for the missing scope is `fail`."""
+    """The mutation witness the issue asks for: make the observed walk drop a
+    scope, re-export one file, and the reference's own `G1C` verdict refuses
+    the file. The mutation is applied to the recorder (the row's observation),
+    which is what the row's verdict is a function of; the seam itself is pinned
+    by `test_the_pinned_seams_are_where_the_row_says`."""
     rel = _notes()
     p = harness.REPO / rel
     with pytest.MonkeyPatch.context() as mp:
@@ -367,6 +369,34 @@ def test_a_walk_that_skips_the_activation_scope_is_refused_by_the_row(harness):
     assert any(scope == "activation" for _rel, _comp, scope in fails), fails
     assert not harness._G1_UNOBSERVED, \
         "the activation skip was filed as an observation failure instead"
+
+
+def test_a_walk_that_skips_a_provide_scope_is_refused_by_the_row(harness):
+    """The other scope kind: drop every visit of one provide method and the
+    reference refuses that method's scope (the file still records the other
+    scopes, so it is a coverage disagreement, never the observation bucket)."""
+    rel = _notes()
+    p = harness.REPO / rel
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(harness, "_G1_COVERAGE_ROWS", {})
+        mp.setattr(harness, "_G1_COVERAGE_CENSUS", {})
+        mp.setattr(harness, "_G1_UNOBSERVED", {})
+        real_open = harness.lower._note_access_scope
+        real_visit = harness.lower._note_access_visit
+        mp.setattr(harness.lower, "_note_access_scope",
+                   lambda component, scope, params: None
+                   if scope == "store.get" else real_open(component, scope,
+                                                          params))
+        mp.setattr(harness.lower, "_note_access_visit",
+                   lambda component, scope: None
+                   if scope == "store.get" else real_visit(component, scope))
+        prog = harness.Parser(p.read_text(encoding="utf-8"), str(p)).parse()
+        rows = harness.g1coverage_rows(rel, prog)
+        verdicts = harness.reference_from_tsv(rows)
+    fails = sorted(k for k, v in verdicts.g1cov.items() if v == "fail")
+    assert any(scope == "store.get" for _rel, _comp, scope in fails), fails
+    assert not harness._G1_UNOBSERVED, \
+        "a skipped provide scope was filed as an observation failure instead"
 
 
 # ----------------------------------------------------------- the Lean half
