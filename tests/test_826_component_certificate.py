@@ -486,8 +486,14 @@ def test_a_code_the_ledger_says_nothing_about_is_named_rather_than_dropped(tmp_p
 @pytest.mark.parametrize(
     "code,old,new,was,now",
     [
-        ("G1", "| **G1** declared access | partial |",
-         "| **G1** declared access | full |", C.PARTIAL, C.PROVED),
+        # The G1 row carries its stated coverage since issue #2744, so the
+        # promotion flips the head of the cell while leaving the rest of the
+        # row in place; the certificate must still follow that flip.
+        ("G1",
+         "| **G1** declared access | partial: the rule and the coverage of the "
+         "access walk are stated",
+         "| **G1** declared access | full: the rule and the coverage of the "
+         "access walk are stated", C.PARTIAL, C.PROVED),
         ("G9", "| full for the rule at the sink and the coverage of the walk;",
          "| rule proved; **coverage unproved and unstatable**;",
          C.PROVED, C.PARTIAL),
