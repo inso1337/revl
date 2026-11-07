@@ -12,11 +12,11 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  update  version
-contract  erase-report  retention-receipt  plan  apply  undo  canary
-promote  query  fmt  quarantine  analyze  test  mcp  gen-types  import
-export  sourcemap  serve  run  dev  recover  act  estop  slo  branch
-compare  replay  why  metrics  trace  profile  pool  attest  dash
-repair  bundle  emit  verify  deploy  deploy-admit  truc
+migrate  contract  erase-report  retention-receipt  plan  apply  undo
+canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
+import  export  sourcemap  serve  run  dev  recover  act  estop  slo
+branch  compare  replay  why  metrics  trace  profile  pool  attest
+dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -544,6 +544,60 @@ revl policy evaluate prod.policy app.rvl --json --component Billing
 revl policy evaluate local.policy app.rvl --recompute
 ```
 
+#### Graded outcomes
+
+The hard `requires evidence` rule is unchanged: every clause must hold or the
+gate refuses. A policy may also grade the same clauses without gating them,
+with a soft rule that names the operator's disposition:
+
+```
+component vendored-* requires evidence [attestation valid]
+component vendored-* review  on evidence [fault-sweep full] self-attested
+component vendored-* canary  on evidence [inverse-roundtrip pass] self-attested
+component vendored-* observe on evidence [gauntlet admissible] self-attested
+```
+
+A soft rule's failing clause never becomes a violation and never changes the
+gate; it contributes to the component's graded `outcome`. The operator declares
+only `observe`, `canary` and `review`, and each rule names its own facet and
+threshold, so nothing is defaulted. `admit` and `quarantine` are computed: every
+hard clause holding (with no soft failure) maps to `admit`; a hard failure maps
+to `quarantine` when the policy declares `quarantine required`, and otherwise to
+the gate's own `refuse`. When several soft clauses fail, the strictest outcome
+wins (`review` over `canary` over `observe`).
+
+The `--json` report carries an `outcome` object per component and one overall
+(worst) outcome. Each names the clause that decided it, except `admit`, where
+no clause decided anything and `decidedBy` is `null`. The overall outcome is the
+whole composition's worst even when `--component` narrows the report:
+
+```json
+"outcome": {
+  "name": "review",
+  "hard": false,
+  "decidedBy": {
+    "component": "CsvReader",
+    "rule": "component CsvReader review on evidence [fault-sweep full] self-attested",
+    "facet": "fault-sweep",
+    "threshold": "full",
+    "fact": "8/12 partial",
+    "standing": "self-attested"
+  }
+}
+```
+
+The exit status remains the gate's: a soft-only failure is a graded `review`,
+`canary` or `observe`, not a refusal, so it exits 0. The outcome's clause-level
+grading covers the evidence and register clauses. When a reach, approval or
+tenant rule refuses a component, that component's outcome is `refuse` with
+`hard: true`, and its `decidedBy` names the violation's `kind` and `token`
+instead of a clause. A document-global refusal such as the
+`requires idempotent-teardown` floor forces the overall outcome to `refuse` the
+same way, naming the recovery entry, so the outcome never reports `admit` while
+the gate refuses. `refused` remains the whole gate's answer. A policy with no
+evidence or register rules has no `outcome` section and evaluates exactly as
+before.
+
 ### `revl simulate`
 
 Simulate a change against a recorded run (roadmap item 468). `simulate` has
@@ -569,8 +623,9 @@ capability verdict is the gate's own: the diff calls the same
 predicate reads, the deny-lists and the closed allow-lists. The admission
 refuses a crossing on more legs than those two, and the diff reads none of the
 rest: the agent-sandbox allow-list, the taint-flow tier, the approval and
-declassify rules, the declaration-strength floors, the evidence bundle and the
-recovery surface all decide by facts a WAL does not carry. Every leg is named in
+declassify rules, the per-component pair rule, the declaration-strength floors,
+the evidence bundle and the recovery surface all decide by facts a WAL does not
+carry. Every leg is named in
 the report and in `--json`, and a recorded pair whose surface moves on one of
 them is reported undecided with the leg named, never as unchanged, so a widening
 on a leg this diff cannot read is not reported clean.
@@ -633,6 +688,20 @@ for review instead. A row is a may-retain, and an absent row is not a proof of
 non-retention. Declared inverses are excluded: teardown closing a handle is the
 contract working, not a hazard.
 
+`--json` also carries one derived `inverse` class per extern crossing, so a
+reviewer gets a single answer to "how can this be undone, and how far can the
+undo be trusted" instead of reading the recovery, approval and compensation
+documents separately. The closed vocabulary is `declared` (an exact inverse the
+author declared), `generated` (an exact inverse derived from trusted metadata;
+reserved, no current declaration produces one), `compensation` (a best-effort
+offset), `forward` (irreversible, recovered forward by a safe re-issue),
+`irreversible`, and `unknown`. `unknown` is a value, never a missing field. No
+class is inferred from a name or a shape: an inverse is accepted only from a
+declaration or from trusted metadata, and anything else is `unknown`. The
+meanings and the drift rule are in
+[interchange-format.md](interchange-format.md#the-inverse-class) and
+[audit-diff.md](audit-diff.md#inverse-provenance-drift).
+
 A `FILES` argument may be a MODULE or a single COMPOSITION document. A
 composition is RESOLVED before it is audited (roadmap item 439): its rows are
 compiled and the providers a `remote` row SYNTHESIZES are on the surface with
@@ -674,11 +743,14 @@ question.
   directory), the same root `revl composition` takes. Ignored for module
   arguments.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if
-  the new generation ADDS boundary crossings not in `PREV.json`
+  the new generation ADDS boundary crossings not in `PREV.json`, or if a
+  crossing's derived `inverse` class WEAKENS
   ([audit-diff.md](audit-diff.md)).
-- `--accept CROSSING` - acknowledge one added crossing so it no longer fails
-  `--diff` (the token printed after `+`); repeatable.
-- `--accept-all` - acknowledge every added crossing under `--diff`.
+- `--accept CROSSING` - acknowledge one added crossing, or one weakened
+  `inverse:<name>` token, so it no longer fails `--diff` (the token printed
+  after `+`); repeatable.
+- `--accept-all` - acknowledge every added crossing or weakened inverse under
+  `--diff`.
 - `--policy POLICY` - boundary-policy gate (roadmap item 33): evaluate a
   policy file over the audit graph and REFUSE admission (nonzero) if any
   component reaches a capability it may not ([boundary-policy.md](boundary-policy.md)).
@@ -755,6 +827,55 @@ compositions (roadmap item 123, [revl-diff.md](revl-diff.md)).
 
 ```bash
 revl diff before.ir.json after.rvl
+```
+
+### `revl migrate`
+
+Plan one component version change against the real consumers in a composition
+(issue #2685, first slice). Read-only: it joins the semantic diff, the derived
+semver bump, the consumer compatibility predicate and the declared state
+hand-off, and reports what a migration would require. It compiles the three
+inputs, admits nothing, swaps nothing and writes no file.
+
+- `OLD` - the old version of the component: a compiled composition document
+  (`revl compile -o`) or a `.rvl` source (required).
+- `NEW` - the new version, same accepted forms (required).
+- `--against COMPOSITION` - the compiled composition whose real consumers
+  decide compatibility (required). It must carry each consumer's required
+  service (`requires` as a `{key: service}` map), which a compiled composition
+  does; an `revl audit --json` report carries only key lists and is refused. It
+  must also still run the OLD version: a composition already compiled against
+  NEW is refused, because its consumers no longer pin the interface the plan
+  is asking about.
+- `--json` - machine-readable plan. Exit status is 0 whenever a plan is
+  produced; unreadable or insufficient inputs are nonzero. The classification
+  travels in the plan, so a CI gate can decide on `classification` without this
+  command taking a side.
+
+The plan reports the changed provisions, the derived bump, each real consumer,
+the authority delta and the state hand-off. Classification is read off those
+facts only:
+
+| classification | meaning |
+| --- | --- |
+| `refused` | a real consumer cannot move (its pinned shape broke) or the declared state hand-off cannot cross the swap |
+| `needs-approval` | the new version widens the measured authority surface (a new crossing or host backend, a weakened reach, a widened emission capability or emission ceiling, a dropped or weakened recovery), a consumer needs an authored adapter, or the successor drops the predecessor's state |
+| `needs-handoff` | the successor declares a compatible state hand-off; live state must cross the swap |
+| `needs-canary` | every real consumer can move, but the interface changed; exercise it on a canary slice first |
+| `safe` | no consumer work, no authority widening, no state crossing |
+
+Each consumer is `movable`, `needs-adapter` (an adapter is synthesizable, see
+`revl adapt`) or `blocked`, with the failing service difference when one
+exists. The adapter check uses the predicate's default opt-in map; an authored
+opt-in is supplied through `revl adapt --adapt`. The plan also reports whether
+the old version is removable (no consumer is still pinned to it) and whether a
+rollback is proven possible. `realm` is the empty string for the shared realm.
+A plan is not a gate: policy rules such as "refuse every widening" are a later
+slice.
+
+```bash
+revl migrate cache_v1.rvl cache_v2.rvl --against production.json
+revl migrate old.ir.json new.ir.json --against comp.json --json
 ```
 
 ### `revl version`
@@ -1592,6 +1713,13 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
 - `--formal DIR` - the formal package to read the evidence from, instead of the
   one found from the working directory or `REVL_FORMAL_DIR`. A directory with no
   `STATUS.md` is refused rather than silently searched past.
+- `--anchor` - anchor mode: sign a chain-neutral record over named sha256
+  digests to publish to an external log or timestamping service
+  ([revl-anchor.md](revl-anchor.md)). No gate runs, because an anchor records a
+  digest set and not a verdict.
+- `--digest NAME=DIGEST` - with `--anchor`: one named sha256 digest to commit
+  to, repeatable. A composition `TARGET` adds its canonical hash under the name
+  `composition`.
 - `--against COMPOSITION` - with `--verify` or `--verify-certificate`: the
   composition to re-hash and check the record against. Omit to check only the
   signature over the embedded hash.
@@ -2072,12 +2200,24 @@ Check a bundle: that each tier in it is present, well-formed and agrees with
 the manifest. Exits nonzero when a tier fails, so it is usable as a release
 gate.
 
-- `BUNDLE` - a bundle directory written by `revl bundle` (required).
-- `--json` - machine-readable tier-by-tier report.
+With `--anchor FILE`, check a chain-neutral anchor record written by
+`revl attest --anchor` instead ([revl-anchor.md](revl-anchor.md)): recheck its
+signature, recompute its anchor hash, and compare any digest the verifier holds.
+No network access is performed.
+
+- `BUNDLE` - a bundle directory written by `revl bundle`. Required unless
+  `--anchor` is given.
+- `--anchor FILE` - an anchor record to verify instead of a bundle.
+- `--key PATH` - with `--anchor`: the verifying key file, or the
+  `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY` environment variables.
+- `--digest NAME=DIGEST` - with `--anchor`: a digest the verifier holds; the
+  anchor may not omit it or commit to a different value. Repeatable.
+- `--json` - machine-readable tier-by-tier report, or the anchor verdict.
 
 ```bash
 revl verify app.revlbundle
 revl verify app.revlbundle --json    # CI: parse the per-tier verdict
+revl verify --anchor anchor.json --key ci-signer.key
 ```
 
 ### `revl deploy`

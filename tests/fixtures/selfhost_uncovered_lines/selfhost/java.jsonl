@@ -52,10 +52,6 @@
 
 ["function", "selfhost-emit-java-rvl-emit-setup-stmt-only", "emit_setup_stmt", 1, 1]
 
-["reason", "selfhost-emit-java-rvl-emitter-reserved-the-emitted", "selfhost/emit_java.rvl::emitter_reserved: The emitted Python definition has no Name-call sites: the Python backend inlines this constant-list helper at all production callers. The retained wrapper is dead, not an untested Java identifier rule."]
-
-["function", "selfhost-emit-java-rvl-emitter-reserved-the-emitted", "emitter_reserved", 1, 1]
-
 ["reason", "selfhost-emit-java-rvl-exact-method-the-python", "selfhost/emit_java.rvl::exact_method: The Python backend inlines production +/-/* dispatch; emitted exact_method calls exist only in the emitter's own in-file tests, which the oracle does not run. Production checked arithmetic output is covered."]
 
 ["function", "selfhost-emit-java-rvl-exact-method-the-python", "exact_method", 5, 5]

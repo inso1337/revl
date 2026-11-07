@@ -1,0 +1,18 @@
+// An untyped `[]` whose only other write is a `slice` of itself. The
+// frontend admits it, and the go reference REFUSES it by name: a `.slice` on a
+// receiver of unknown type fixes no element type, so nothing types the literal
+// and Go would reject the module (issue #2898).
+//
+// The write is neither another `[]`, nor a bare local, nor a self-concat whose
+// argument is a local, so the only-sized check fails on the write itself even
+// before the read of the receiver is considered; and the assignment's inferred
+// value type is empty (a builtin keyed on an unknown receiver), so it offers
+// no declared target either. This is the refusal a workaround around the
+// inference would otherwise let through as `[]any{}`.
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS.
+fn sliced() -> Int {
+  var out = []
+  out = out.slice(0, 1)
+  return out.length()
+}

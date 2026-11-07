@@ -76,10 +76,10 @@ def test_abort_step_is_lowered_and_unwound_not_refused():
     assert "frameForCtx(_fiber.ctx)?.abort()" in out
     # every live activation is marked BEFORE any teardown runs, so a teardown
     # that reaches a still-live component already sees it rejecting
-    mark = out.index("frameForCtx(_fiber.ctx)?.abort()")
+    mark = out.index("$revl_frameForCtx(_fiber.ctx)?.abort()")
     dispose = out.index("await _fiber.dispose()")
     clear = out.index("$revl_fibers.clear()")
-    residue = out.index("assertNoResidue($revl_root, $revl_baseline)")
+    residue = out.index("$revl_assertNoResidue($revl_root, $revl_baseline)")
     assert mark < dispose < clear < residue
     # ...and the unwind is LIFO and tolerates a throwing teardown, like py's step
     assert "Array.from($revl_fibers.values()).reverse()" in out

@@ -262,3 +262,11 @@ select = ["F"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    # Issue #2216: a test that is slow by NATURE rather than by repeating work
+    # a session could share. The fast lanes (the pre-commit hook,
+    # `pre-merge --affected`, CI's pull-request `root-suite-affected` job) set
+    # REVL_SKIP_SLOW=1 and tests/conftest.py deselects these; the full gate and
+    # the merge-queue matrix keep running them.
+    "slow: slow-by-nature test the affected/fast lanes deselect (issue #2216)",
+]

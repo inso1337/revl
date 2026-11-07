@@ -212,11 +212,12 @@ would list only the destination and a file moved out of the grant, the fence or
 the kernel would read as an allowed addition. It is checked against the same
 fence after the grant, so a directory glob that covers a judge file does not
 let a candidate edit it; the grant names the subject, the fence is the
-judge. The fence is
-`EVALUATOR_FENCE`: the reward's own two files, `tools/heldout_scoring.py`'s
-fence, and `tools/evolution_controller.py`'s. `tests/test_evolution_controller.py`
-holds it to those two lists so a fence added there cannot silently stop being
-forbidden in a declared scope.
+judge. The fence is `EVALUATOR_FENCE`, the `authority` and `held_out` views of
+the one `EVALUATOR_PATHS` enumeration in `src/revl/kernel_boundary.py` (issue
+#2802), imported rather than restated. `tests/test_evolution_controller.py`
+holds it to the controller's and the held-out scorer's views so an evaluator
+path added to the enumeration cannot silently stop being forbidden in a
+declared scope.
 
 The same grant is applied at the controller's `authority` precondition, so a
 proposal whose measured diff leaves it is refused with `OUTSIDE_ALLOW` before

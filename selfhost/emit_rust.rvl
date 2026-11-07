@@ -594,9 +594,19 @@ fn build_type_tables(types: Any) -> TypeTables {
   var tn: Map[Str, Str] = Map.empty()
   var ft: Map[Str, Str] = Map.empty()
   for (name of value_keys(types)) {
-    tn = tn.set(name, "1")
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
+    // `rust_type_t` renders an APPLIED generic variant (`Mb[Int]` -> `Mb<i64>`)
+    // from the table, so the variant's type parameters ride its entry as
+    // `g:T,U`; every other declared type keeps the "declared" marker "1".
+    var entry = "1"
+    let params = value_list(value_field(spec, "params"))
+    if (kind == "variant" && params.length() > 0) {
+      var pnames: List[Str] = []
+      for (p of params) { pnames = pnames.push(value_str(p)) }
+      entry = "g:".concat(pnames.join(","))
+    }
+    tn = tn.set(name, entry)
     if (kind == "record") {
       let fields = value_field(spec, "fields")
       for (f of value_keys(fields)) { ft = ft.set(`${name}.${f}`, value_str(value_field(fields, f))) }
@@ -674,6 +684,35 @@ fn list_element_type(t: Str) -> Str {
   return ""
 }
 
+// `_rust_phantom_params`: the type parameters of a generic variant that no case
+// payload names (`type Ph[T] = Aa | Bb`). rustc rejects an unused parameter
+// (E0392), so the enum grows a hidden case that carries it (issue #2471).
+fn phantom_params(spec: Any) -> List[Str] {
+  var used: List[Str] = []
+  for (case of value_list(value_field(spec, "cases"))) {
+    let payload = value_field(case, "payload")
+    if (!value_is_null(payload)) {
+      for (w of type_words(value_str(payload))) {
+        if (!list_contains(used, w)) { used = used.push(w) }
+      }
+    }
+  }
+  var out: List[Str] = []
+  for (p of value_list(value_field(spec, "params"))) {
+    if (!list_contains(used, value_str(p))) { out = out.push(value_str(p)) }
+  }
+  return out
+}
+
+// The type parameters a declared generic variant takes, read from the
+// type-name table's encoded entry (see `build_type_tables`); `[]` for every
+// other declared type and for an undeclared head.
+fn generic_variant_params(tnames: Map[Str, Str], head: Str) -> List[Str] {
+  let entry = map_get(tnames, head)
+  if (!entry.startsWith("g:")) { return [] }
+  return split_generic(entry.slice(2, entry.length()))
+}
+
 // `_is_list_type`: a declared `List[..]` surface type, the only shape the
 // read-only list-parameter borrow (below) lowers to a `&[..]` slice.
 fn is_list_type(t: Str) -> Bool {
@@ -706,6 +745,17 @@ fn rust_type_t(tv: Any, tnames: Map[Str, Str]) -> Str {
       if (head == "Result") {
         let ps = split_generic(inner)
         return `Result<${rust_type_t(ps[0], tnames)}, ${rust_type_t(ps[1], tnames)}>`
+      }
+      // issue #2471: an applied user generic variant is the enum's own
+      // instantiation, `Mb[Int]` -> `Mb<i64>`
+      let gparams = generic_variant_params(tnames, head)
+      if (gparams.length() > 0) {
+        let args = split_generic(inner)
+        if (args.length() == gparams.length()) {
+          var rendered: List[Str] = []
+          for (a of args) { rendered = rendered.push(rust_type_t(a, tnames)) }
+          return `${type_ident(head)}<${rendered.join(", ")}>`
+        }
       }
     }
   }
@@ -2429,11 +2479,15 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
       if (value_bool(value_field(node, "mutable"))) { kw = "let mut" }
       // `_v3_dead_let_annotation` (issue #2497): a `let` the body never reads
       // nor assigns again gives rustc no later use to infer from, so a bare
-      // `None` is typed `Option<Value>`. The reference refuses a payload-less
-      // case of a GENERIC variant there by name; this port lowers no generic
-      // variant yet (issue #2494, GENERIC_VARIANT_PORT_GAPS), its enum carries
-      // no type parameter to leave unbound.
-      if (!ctx.dz.has(raw) && value == "vec![]") {
+      // `None` is typed `Option<Value>`, and a payload-less case of a GENERIC
+      // variant is refused by name (issue #2494): rustc has no later read to
+      // infer the type argument from (E0282), and `Value` is no instantiation
+      // a later reader of the program would expect.
+      if (ctx.dz.has(raw) && node_kind(valnode) == "adt"
+          && generic_variant_params(ctx.tn, map_get(ctx.ca, value_str(value_field(valnode, "case")))).length() > 0
+          && map_get(ctx.cp, value_str(value_field(valnode, "case"))) == "n") {
+        out = out.push(`<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:${value_str(value_field(valnode, "case"))}>>`)
+      } else if (!ctx.dz.has(raw) && value == "vec![]") {
         // issue #2911: the reference refuses an empty `vec![]` nothing pins by
         // name rather than leave `Vec<_>` for rustc (E0282); this port answers
         // it by name too.
@@ -3105,19 +3159,50 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
       if (kind == "variant") {
         out = out.push("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
         out = out.push(`#[serde(tag = "$kind", content = "$value")]`)
-        out = out.push(`pub enum ${nm} {`)
+        // issue #2471: a generic variant declares its type parameters, and a
+        // payload naming one keeps it (`Jj(T)`), not the `Value` an unknown
+        // name falls back to
+        let params = value_list(value_field(spec, "params"))
+        // The payload scope is keyed by the RAW parameter names: `rust_type_t`
+        // looks a payload word up by its source spelling, and the reference's
+        // scope keys the raw names too, while only the declared `<..>` list is
+        // mangled. Keying the scope by the mangled names rendered a payload
+        // naming a reserved type (`type Mb[String] = Jj(String)`) as `Value`.
+        var raw_params: List[Str] = []
+        var pnames: List[Str] = []
+        for (p of params) {
+          raw_params = raw_params.push(value_str(p))
+          pnames = pnames.push(type_ident(value_str(p)))
+        }
+        var generics = ""
+        if (pnames.length() > 0) { generics = `<${pnames.join(", ")}>` }
+        out = out.push(`pub enum ${nm}${generics} {`)
+        let scope = with_tparams(tnames, raw_params)
         for (case of value_list(value_field(spec, "cases"))) {
           let cname = mangle(value_str(value_field(case, "name")))
           let payload = value_field(case, "payload")
           if (value_is_null(payload)) { out = out.push(`    ${cname},`) }
           else {
-            var rendered = rust_type_t(payload, tnames)
+            var rendered = rust_type_t(payload, scope)
             if (edge_is_boxed(boxed.cases, name, value_str(value_field(case, "name")))) {
               // A recursive variant payload is a `Box` indirection (E0072).
               rendered = `Box<${rendered}>`
             }
             out = out.push(`    ${cname}(${rendered}),`)
           }
+        }
+        let phantom = phantom_params(spec)
+        if (phantom.length() > 0) {
+          // issue #2471: a parameter no payload names (`type Ph[T] = Aa | Bb`)
+          // is rejected by rustc (E0392); a hidden case that carries it as
+          // PhantomData keeps `Ph::Aa` a plain unit case. No value ever holds
+          // it, serde skips it, and every emitted match already ends in
+          // `_ => unreachable!()`
+          var markers: List[Str] = []
+          for (p of phantom) { markers = markers.push(type_ident(p)) }
+          out = out.push("    #[doc(hidden)]")
+          out = out.push("    #[serde(skip)]")
+          out = out.push(`    __RevlPhantom(std::marker::PhantomData<fn() -> (${markers.join(", ")},)>),`)
         }
         out = out.push("}")
       } else {

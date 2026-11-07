@@ -176,6 +176,7 @@ def test_boundary_json_carries_the_canonical_token(tmp_path, capsys):
     doc = json.loads(capsys.readouterr().out)
     externs = doc["boundary"]["Kit"]["externs"]
     assert externs == [{"name": "do_get", "class": "emission",
+                        "inverse": "irreversible",
                         "capabilities": ["network.call(host=host)"],
                         "backends": ["py"]}]
 

@@ -175,12 +175,15 @@ def peer_runner(tmp_path, charter_record, *, identity=WORKER_ID,
 
 def honest_task(charter_record, *, peer_id=WORKER, task_id="t-1",
                 source=PURE_SOURCE, runner=pd.RUNNER_TEST_PY,
-                identity=None):
+                identity=None, policy_digest=None):
     body = pd.build_task(
         pool_id=charter_record["pool_id"],
         charter_digest=pp.canonical_digest(charter_record),
         peer_id=peer_id, task_id=task_id, artifact=source, runner=runner,
-        effect_class=EffectClass.PURE)
+        effect_class=EffectClass.PURE,
+        grant={"caps": sorted(ENTRY_CAPS), "budgets": {}},
+        policy_digest=(policy_digest if policy_digest is not None
+                       else pp.canonical_digest(charter_record)))
     return pd.sign_task(body, identity or OPERATOR_ID)
 
 
@@ -253,10 +256,23 @@ def test_a_task_crosses_a_socket_runs_on_the_peer_and_comes_back_verified(
     assert outcome["receipt"]["key_id"] == WORKER_ID.key_id
     assert outcome["attestation"]["key_id"] == ATTESTOR_ID.key_id
     assert outcome["counts_as_evidence"] is True
-    # And the ledger says it was delivered exactly once.
+    # The AUTHORITY the run happened under, on the receipt itself (issue
+    # #2720). The grant is the tier's, the policy digest is the charter the
+    # task pinned, the outcome is the run's, and the budget map is the peer's
+    # own claim rather than a measurement by this side.
+    receipt = outcome["receipt"]
+    assert receipt["version"] == pr.RECEIPT_VERSION
+    assert receipt["grant"] == {"caps": sorted(ENTRY_CAPS), "budgets": {}}
+    assert receipt["policy_digest"] == pp.canonical_digest(record)
+    assert receipt["outcome"] == pr.COMPLETED
+    assert receipt["budget_consumed"]["wall_seconds"] >= 0.0
+    # And the ledger says it was delivered exactly once, with the signed task
+    # the receipt answers kept beside it.
     ledger = pd.load_ledger(pool_dir)
     entry = ledger.tasks[outcome["task_id"]]
     assert entry["state"] == pd.STATE_DELIVERED
+    assert receipt["task_digest"] == pr.receipt_digest(entry["task"])
+    assert entry["task"]["grant"] == receipt["grant"]
     assert ledger.outstanding() == {}
 
 
@@ -563,11 +579,14 @@ def corpus(charter_record):
         ("a-task-id-that-is-a-path-traversal",
          honest_task(charter_record, task_id="../../escape"),
          pd.LINK_TASK_SHAPE),
+        ("a-policy-digest-that-is-not-this-charter",
+         honest_task(charter_record, task_id="t-12", policy_digest="9" * 64),
+         pd.LINK_POLICY_IDENTITY),
     ]
 
 
 def test_every_corpus_task_is_refused_on_its_own_link(tmp_path):
-    """Non-vacuity, both directions: 15 signed tasks, 15 refusals, and an
+    """Non-vacuity, both directions: 16 signed tasks, 16 refusals, and an
     honest control that differs only in being well formed is RUN."""
     _pool_dir, record, _roster, _directory = pool_on_disk(tmp_path)
     runner = peer_runner(tmp_path, record)
@@ -577,8 +596,8 @@ def test_every_corpus_task_is_refused_on_its_own_link(tmp_path):
         assert not answer["ok"], f"{name} was not refused: {answer}"
         assert answer["link"] == expected, f"{name}: {answer}"
         seen[name] = answer["link"]
-    assert len(seen) == 15
-    assert len(set(seen.values())) == 7
+    assert len(seen) == 16
+    assert len(set(seen.values())) == 8
 
     control = runner.handle(honest_task(record, task_id="control"))
     assert control["ok"], control
@@ -645,6 +664,24 @@ def test_the_peer_workspace_path_is_not_in_the_signed_result(tmp_path):
     blob = json.dumps(answer["result"])
     assert str(tmp_path) not in blob
     assert str(runner.workspace) not in blob
+
+
+def test_two_runs_of_the_same_work_produce_the_same_result_digest(tmp_path):
+    """The result record is hashed into ``result_digest``, so it must be
+    reproducible. The wall time is returned BESIDE the result and reported only
+    in the receipt's ``budget_consumed`` claim; a duration inside the record
+    would make every run of the same work a different result, which is exactly
+    the reproducibility property ``_scrub`` protects and a receipt cannot
+    satisfy while it is true."""
+    first, first_seconds = pd.execute(pd.RUNNER_TEST_PY, PURE_SOURCE,
+                                      tmp_path / "first")
+    second, second_seconds = pd.execute(pd.RUNNER_TEST_PY, PURE_SOURCE,
+                                        tmp_path / "second")
+
+    assert pr.result_digest(first) == pr.result_digest(second)
+    assert "wall_seconds" not in first
+    assert "wall_seconds" not in second
+    assert first_seconds >= 0.0 and second_seconds >= 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -678,22 +678,15 @@ def test_parse_allow_reads_the_cli_and_environment_shapes(reward, monkeypatch):
     assert reward.allow_from_env() == ()
 
 
-@pytest.mark.parametrize("path", (
-    "tools/evolution_reward.py",
-    "tests/test_evolution_reward.py",
-    "tools/evolution_controller.py",
-    "tests/test_evolution_controller.py",
-    "tools/heldout_scoring.py",
-    "tests/test_heldout_scoring.py",
-    "tools/gate_reference_census.py",
-    "tools/build_gate_crate.py",
-    "tests/test_selfhost_lower.py",
-    "tools/gate_reference_census_baseline.json",
-))
-def test_every_evaluator_fence_entry_exists_in_this_tree(reward, path):
-    """A fence entry that is a typo fences nothing at all."""
-    assert path in reward.EVALUATOR_FENCE
-    assert (ROOT / path).exists(), path
+def test_every_evaluator_fence_entry_exists_in_this_tree(reward):
+    """A fence entry that is a typo fences nothing at all, and saying so over
+    the whole imported tuple catches a new evaluator path as well as an old
+    one."""
+    assert reward.EVALUATOR_FENCE
+    assert set(reward.EVALUATOR_FENCE) >= set(reward.evaluator_fence("authority"))
+    assert set(reward.EVALUATOR_FENCE) >= set(reward.evaluator_fence("held_out"))
+    for path in reward.EVALUATOR_FENCE:
+        assert (ROOT / path).exists(), path
 
 
 _BASE_READERS = ("probe_no_new_false_admits", "probe_scope", "probe_tests",

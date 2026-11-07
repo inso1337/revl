@@ -293,6 +293,127 @@ def test_every_fenced_path_exists_in_this_tree(path):
     assert (ROOT / path).exists(), path
 
 
+def test_a_diff_that_changes_only_the_reward_is_refused(tmp_path):
+    """Issue #2802's acceptance: the scorecard assembler was on no list.
+
+    `tools/evolution_reward.py` holds `COMPONENTS` and the retention rule, so a
+    proposal that edits it and is then judged by it has not been judged. Before
+    issue #2802 this diff promoted.
+    """
+    tree = make_tree(tmp_path / "rewardfence",
+                     {"tools/evolution_reward.py": "changed\n"})
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "FENCE_TOUCHED"
+    assert "tools/evolution_reward.py" in verdict.by_name()["authority"].reason
+
+
+def test_the_controller_fence_is_a_view_of_the_evaluator_set():
+    """The fence is derived, not restated: a path added to `EVALUATOR_PATHS` and
+    tagged `authority` arrives here without a second list being edited. The AST
+    test in `tests/test_evaluator_protocol.py` holds the assignment itself, so
+    a literal copy of today's members does not pass either."""
+    from revl import kernel_boundary as kb  # noqa: PLC0415
+
+    assert tuple(ec.AUTHORITY_FENCE) == kb.evaluator_fence("authority")
+    assert set(ec.KERNEL_PATHS) == set(kb.KERNEL_PATHS)
+    for path in ("tools/evolution_reward.py", "tools/evolution_progress.py",
+                 "tests/test_evolution_reward.py",
+                 "tests/test_evolution_progress.py"):
+        assert path in ec.AUTHORITY_FENCE, path
+
+
+def test_the_verdict_carries_the_protocol_digest(clean_tree):
+    """Item 520's one verdict now binds the protocol that produced it."""
+    from revl import kernel_boundary as kb  # noqa: PLC0415
+
+    blob = run(proposal_record(clean_tree)).as_dict()
+    assert blob["protocol_digest"] == kb.protocol_digest(ROOT)
+    assert blob["protocol_digest"].startswith("sha256:")
+
+
+def test_a_controller_that_cannot_name_its_protocol_refuses(
+        clean_tree, monkeypatch):
+    """A broken checkout is a named refusal, not an import traceback, and not
+    a verdict that omits the identity it could not read."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("git is not available")
+
+    monkeypatch.setattr(ec, "protocol_digest", boom)
+    verdict = run(proposal_record(clean_tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "PROTOCOL_UNAVAILABLE"
+    assert verdict.measurements_read is False
+    assert verdict.as_dict()["protocol_digest"] is None
+
+
+def test_a_stage_record_from_another_protocol_is_refused(clean_tree):
+    """A record from a different evaluator is not evidence about this one."""
+    record = proposal_record(clean_tree)
+    record["stages"]["authority"]["protocol_digest"] = "sha256:" + "0" * 64
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "authority"
+    assert ec.own_protocol_digest() in verdict.by_name()["authority"].reason
+
+
+def test_a_stage_record_from_this_protocol_is_read(clean_tree):
+    """The control for the case above: the same digest this checkout computes
+    is not refused, so the check discriminates rather than refusing every
+    record that names a protocol."""
+    record = proposal_record(clean_tree)
+    record["stages"]["shadow"]["protocol_digest"] = ec.own_protocol_digest()
+    assert run(record).decision == "PROMOTE"
+
+
+def test_the_scorecard_adapter_carries_the_protocol_digest_through(clean_tree):
+    """`_normalise` rebuilds the observe record; it must not drop the field the
+    mismatch check reads, or a scorecard from another protocol would pass."""
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [], "components": [],
+        "protocol_digest": "sha256:" + "0" * 64,
+    }
+    verdict = run(record)
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "observe"
+
+
+def test_a_scorecard_whose_protocol_is_null_is_refused(clean_tree):
+    """A scorer that could not name its protocol is not a pass.
+
+    `evolution_reward.score()` writes `protocol_digest: null` when its own
+    checkout cannot be read (a missing git, a missing member). The adapter used
+    to treat that null like an ABSENT key, so the record was read and could
+    promote; the held-out scorer refuses the same situation, so one of the two
+    was failing open.
+    """
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [],
+        "components": [{"component": "tests"}],
+        "protocol_digest": None,
+    }
+    verdict = run(record)
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "observe"
+    assert "null" in verdict.by_name()["observe"].reason
+
+
+def test_a_scorecard_from_this_protocol_promotes(clean_tree):
+    """The control for the two cases above: a present digest equal to this
+    checkout's is read, so the adapter did not turn the check into a refusal of
+    every scorecard."""
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [],
+        "components": [{"component": "tests"}],
+        "protocol_digest": ec.own_protocol_digest(),
+    }
+    assert run(record).decision == "PROMOTE"
+
+
 # ----------------------------------------- the kernel (item 544, #1223)
 
 @pytest.mark.parametrize("path", [
@@ -443,10 +564,12 @@ def test_the_measured_stages_are_not_read_for_a_diff_outside_the_grant(
 
 
 def test_the_rewards_declared_scope_fence_covers_every_evaluator_fence():
-    """The reward refuses a declared scope that names an evaluator file. The
-    list is not imported, to keep the two tools independent, so this is the
-    check that a fence added to the held-out scorer or the controller cannot
-    silently stop being declared-in-scope forbidden."""
+    """Both modules take their fences from the one `EVALUATOR_PATHS`
+    enumeration (issue #2802), but from different views. The reward refuses a
+    declared scope that names an evaluator file, so its tuple must cover the
+    views the controller and the held-out scorer enforce: this is the check
+    that a view added to one cannot silently stop being declared-in-scope
+    forbidden."""
     import evolution_reward as er  # noqa: PLC0415
     import heldout_scoring  # noqa: PLC0415
 
