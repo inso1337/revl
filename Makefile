@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship demo-escape pre-merge pre-merge-affected formal roadmap-check roadmap-issue-state workflow-permissions runtime-seams vision-check
+.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship demo-escape pre-merge pre-merge-affected formal roadmap-check roadmap-issue-state workflow-permissions runtime-seams vision-check claims-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -94,6 +94,15 @@ roadmap-claims-check:
 vision-check:
 	python3 tools/check_vision_claims.py --self-test
 	python3 tools/check_vision_claims.py --check
+
+# issue #2846: a behaviour claim in a comment or doc is tied to a witness in
+# `claims.toml`. An unknown id, a missing witness (a deleted or renamed test,
+# generated block or claim) and a `.rvl` claim whose test witness the affected
+# selection would not run are named failures. `--self-test` plants each one
+# first; both lines run in the `lint` job.
+claims-check:
+	python3 tools/check_claims.py --self-test
+	python3 tools/check_claims.py --check
 
 # issue #191: the workflow permission gate. A job-level `permissions` block
 # REPLACES the workflow-level one rather than merging into it, and the release

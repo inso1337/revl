@@ -47,6 +47,11 @@ to the diagnostic; see docs/why-traces.md.
 
 ## The families
 
+The table below is generated from the compiler's own `GUARANTEES` registry and
+byte-compared by `tools/docgen.py`, so it cannot list a code the compiler does
+not carry.
+<!-- revl:claim guarantee-table-generated -->
+
 <!-- docgen:guarantees begin -->
 | code | guarantee | refused by |
 | ---- | --------- | ---------- |

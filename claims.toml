@@ -1,0 +1,21 @@
+# Behaviour claims whose sentence lives in a `.rvl` comment or a Markdown
+# document, tied to the artifact that makes each one true (issue #2846).
+#
+# The id is what `revl:claim <id>` names. The value is the witness:
+#
+#   test:<path>              every test in that file
+#   test:<path>::<test>      one pytest function; a parametrized node is
+#                            matched by its function, not its parameter
+#   docgen:<block>           a generated block in tools/docgen.py's BLOCKS
+#   claim:<id>               another claim here
+#
+# `python3 tools/check_claims.py --check` judges every annotation. For a `.rvl`
+# file a test witness must also be in that file's affected selection, so the
+# comment cannot cite a test that a change to the commented code would not run.
+
+[claims]
+json-canonical-bytes = "test:tests/test_json_cross_tier_bytes.py"
+g4-emission-widens-refused = "test:tests/test_frontend.py::test_rejection[g4_emission_widens_declared_capability.rvl]"
+g9-service-return-launders-refused = "test:tests/test_frontend.py::test_rejection[g9_service_return_launders_taint.rvl]"
+gsecret-service-return-discloses-refused = "test:tests/test_frontend.py::test_rejection[gsecret_service_return_discloses.rvl]"
+guarantee-table-generated = "docgen:guarantees"

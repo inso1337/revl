@@ -557,6 +557,17 @@ else
     note "vision claims   (--check)"
 fi
 
+# issue #2846: behaviour claims in comments and docs are tied to a witness in
+# `claims.toml`. An unknown id, a deleted or renamed witness and a `.rvl` claim
+# whose test witness the affected selection would not run are named failures;
+# the self-test plants each one, so a gate that stopped firing is a red here.
+if want gate docs; then
+    step "claims           (self-test)" "$PYTHON" tools/check_claims.py --self-test
+    step "claims           (--check)"   "$PYTHON" tools/check_claims.py --check
+else
+    note "claims           (--check)"
+fi
+
 # 5. Lint (the CI `lint` job): ruff at the pinned version. Prefer a ruff already
 #    on PATH; else fetch the pinned one with uvx; else loud-skip.
 if ! want gate ruff; then

@@ -354,6 +354,41 @@ A diagnostic is itself a deliverable ([DESIGN.md](DESIGN.md) §9): it must name
 its guarantee and state the fix, and it is written for the model that will read
 it. A rejection whose message is a bare "error" is not done.
 
+## Behaviour claims
+
+A comment or doc sentence that states what the code DOES ("this path reads no
+bytes after the first digest", "state crosses only through the handoff") can
+outlive the code it describes, because nothing connects the sentence to the
+artifact that makes it true. When the sentence is worth keeping honest, name
+the claim in a comment at the sentence:
+
+```text
+// revl:claim <id>              a .rvl line comment
+<!-- revl:claim <id> -->        a Markdown HTML comment
+```
+
+and register the id in `claims.toml` at the repository root:
+
+```toml
+[claims]
+json-canonical-bytes = "test:tests/test_json_cross_tier_bytes.py"
+```
+
+A witness is one of `test:<path>` (a test file), `test:<path>::<test>` (one
+pytest function; a parametrized node is matched by function), `docgen:<block>`
+(a generated block in `tools/docgen.py`) or `claim:<id>` (another claim, which
+is how a doc can rest on the same evidence as the code). `python3
+tools/check_claims.py --check` reports a named failure for an annotation with
+no id, an unknown id, a witness that was deleted or renamed, and a `.rvl` claim
+whose test witness the affected selection would not run when that file changes.
+`--list` prints every annotation beside its witness, and `--self-test` plants
+each failure in a synthetic tree. Claims are optional: a comment without an
+annotation is unaffected.
+
+The gate can prove the witness exists and runs. It cannot prove the sentence
+states what the code does: a passing test can be weaker than the comment. Keep
+the witness beside the sentence and review the sentence itself.
+
 ## Pull request descriptions
 
 Describe validation precisely:

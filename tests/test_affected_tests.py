@@ -108,6 +108,22 @@ def test_a_roadmap_edit_runs_the_claims_gate_s_own_test():
     assert "tests/test_roadmap_claims_gate.py" in r["pytest"]
 
 
+# --- behaviour claims (issue #2846) ---------------------------------------- #
+def test_the_behaviour_claims_files_select_their_own_tests():
+    """The registry and the gate have no `test_check_claims.py` for the generic
+    tools rule to find. The parser is selected by the `src/revl/**` import arm
+    instead, which is why it is not in the claims tuple."""
+    for changed in ("claims.toml", "tools/check_claims.py"):
+        r = sel(changed)
+        assert r["full"] is False, changed
+        assert "tests/test_claims.py" in r["pytest"], changed
+        assert "tests/test_claims_gate.py" in r["pytest"], changed
+        assert r["backends"] == [], changed
+    parser = sel("src/revl/claims.py")
+    assert parser["full"] is False
+    assert "tests/test_claims.py" in parser["pytest"]
+
+
 # --- unmapped / structural -> FULL (fail safe, never fail open) ------------ #
 def test_unmapped_file_is_full():
     assert sel("weird/random_thing.xyz")["full"] is True
