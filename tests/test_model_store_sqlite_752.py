@@ -179,9 +179,9 @@ def test_sqlite_create_lowers_its_row_write_to_a_revertible_effect_with_a_remove
 
 def test_sqlite_update_and_delete_lower_to_effects_with_exact_restore_inverses():
     """Issue #3001 on the fresh driver: `update` is an overwrite whose inverse
-    restores the previous row (`sq_restore`, never `sq_remove`), and `delete`
-    is a remove whose inverse re-inserts the removed row. Both carry the value
-    the read observed, so a missing key never registers an effect."""
+    is another plain UPDATE carrying the previous value, and `delete` is a
+    remove whose inverse re-inserts the removed row. Both carry the value the
+    read observed, so a missing key never registers an effect."""
     ir = compile_files([str(SQLITE)])
     update = _provide_method(ir, "SqliteStore", "store", "update")
     delete = _provide_method(ir, "SqliteStore", "store", "delete")
@@ -189,7 +189,7 @@ def test_sqlite_update_and_delete_lower_to_effects_with_exact_restore_inverses()
     del_effects = [s for s in delete["body"] if s.get("step") == "effect"]
     assert len(upd_effects) == 1 and len(del_effects) == 1
     assert upd_effects[0]["acquire"]["name"] == "sq_update"
-    assert upd_effects[0]["undo"]["name"] == "sq_restore"
+    assert upd_effects[0]["undo"]["name"] == "sq_update"
     assert del_effects[0]["acquire"]["name"] == "sq_delete"
     assert del_effects[0]["undo"]["name"] == "sq_restore"
 
@@ -198,19 +198,23 @@ def test_sqlite_table_and_column_identifiers_are_declared_and_validated():
     """Issue #3001: identifiers cannot be bound as parameters, so the driver
     declares the table/columns of its model and validates each one against a
     plain-SQL-name rule BEFORE it builds the schema from them. The declared
-    columns are exactly the `type Note` fields, so the model and the schema
-    cannot drift apart."""
+    columns are parsed from the host body and compared with the row type's
+    fields, so the schema and the model cannot silently drift apart."""
+    import ast
+    import re
+
     ir = compile_files([str(SQLITE)])
     open_extern = next(e for e in ir["externs"] if e["name"] == "sq_open")
     body = open_extern["bodies"]["py"]
-    # the declared model, pinned to the row type's fields
-    assert '"notes": ("id", "body")' in body
-    assert '"seq": ("n",)' in body
-    assert set(ir["types"]["Note"]["fields"]) == {"id", "body"}
+    match = re.search(r"declared = (\{[^\n]*\})\n", body)
+    assert match, "the driver declares no table/column identifiers"
+    declared = ast.literal_eval(match.group(1))
+    # the declared table's columns ARE the `type Note` fields
+    assert set(declared["notes"]) == set(ir["types"]["Note"]["fields"])
+    assert set(declared["notes"]) == {"id", "body"}
     # the validation itself, and its use in the schema statement
     assert "refused table or column identifier" in body
     assert "ident(" in body
-    assert "CREATE TABLE" in body
 
 
 def test_no_raw_sql_in_the_model_or_query_code():
@@ -231,7 +235,7 @@ def test_no_raw_sql_in_the_model_or_query_code():
         )]
     haystack = "\n".join(model_regions).lower()
     for tok in ("select ", "insert into", "delete from", "create table",
-                "query(", " sql:"):
+                "update notes", " where ", "drop table", "query(", " sql:"):
         assert tok not in haystack, f"raw SQL leaked into the model/query code: {tok!r}"
 
 
@@ -266,19 +270,41 @@ def test_the_sqlite_driver_runs_and_reverts_residue_free():
 
 
 @needs_runtime
+def test_an_invalid_table_identifier_is_refused_at_open(tmp_path):
+    """Behavioral teeth for the identifier check: rewrite the driver's declared
+    table to a name that is not a plain SQL identifier. The run must fail at
+    open with the refusal, rather than reaching statement text."""
+    src = SQLITE.read_text(encoding="utf-8").replace(
+        'declared = {"notes": ("id", "body"), "seq": ("n",)}',
+        'declared = {"notes; DROP TABLE notes": ("id", "body"), "seq": ("n",)}')
+    assert '"notes; DROP TABLE notes"' in src
+    path = tmp_path / "bad_identifier.rvl"
+    path.write_text(src, encoding="utf-8")
+    result = _revl_test(path)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "refused table or column identifier" in (result.stdout + result.stderr)
+
+
+@needs_runtime
 def test_a_value_that_looks_like_sql_is_bound_and_stored_verbatim(tmp_path):
     """Issue #3001: a VALUE is a bound `?` parameter, never statement text. A
-    body that looks like SQL round-trips byte for byte, and the notes table
-    still answers afterwards; had the value been interpolated, the DROP would
-    have run instead."""
+    body that looks like SQL round-trips byte for byte through create, update,
+    read and delete, and the notes table still answers afterwards; had any of
+    those values been interpolated, the DROP or DELETE would have run."""
     src = SQLITE.read_text(encoding="utf-8") + r'''
 lifecycle test "a hostile value is data, not SQL" {
   load SqliteStore
   let id = call store.create({ body: "x'); DROP TABLE notes; --" })
   let hit = call store.get(id)
   assert hit == Some({ id: "note-0", body: "x'); DROP TABLE notes; --" })
-  let all = call store.list()
-  assert all == [{ id: "note-0", body: "x'); DROP TABLE notes; --" }]
+  let edited = call store.update(id, { body: "y'); DELETE FROM notes; --" })
+  assert edited == Some({ id: "note-0", body: "y'); DELETE FROM notes; --" })
+  let reread = call store.get(id)
+  assert reread == Some({ id: "note-0", body: "y'); DELETE FROM notes; --" })
+  let removed = call store.delete(id)
+  assert removed == Some({ id: "note-0", body: "y'); DELETE FROM notes; --" })
+  let gone = call store.get(id)
+  assert gone == None
   unload SqliteStore
   assert no_residue
 }
@@ -313,11 +339,12 @@ lifecycle test "an undeclared update field is refused" {
 # inverse re-opens the file, it never deletes it), so an aborted write can be
 # OBSERVED after re-loading the store. This is the teeth for the injected-fault
 # reverts: the `:memory:` example proves the composition tears down clean, and
-# this proves each mutation's inverse actually ran. `sq_open` seeds one row
-# outside the activation's effects, so an aborted update or delete has a
-# pre-existing value whose restoration can be observed. {db} is a real temp
-# path and {remove_body} is the create inverse's body (broken in the negative
-# test).
+# this proves each mutation's inverse actually ran. The Python side seeds one
+# row into the file BEFORE the run, so an aborted update or delete has a
+# pre-existing value whose restoration is observable; seeding it in `sq_open`
+# instead would recreate the row on the post-abort load and make the delete
+# assertion vacuous. {db} is a real temp path and {remove_body} is the create
+# inverse's body (broken in the negative test).
 _TEETH_TEMPLATE = r'''
 type Note = {{ id: Str, body: Str }}
 type Draft = {{ body: Str }}
@@ -333,9 +360,6 @@ extern pure fn sq_open() -> Str = @py {{
     import sqlite3
     conn = sqlite3.connect("{db}")
     conn.execute("CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, body TEXT)")
-    # a row that exists BEFORE the activation: INSERT OR IGNORE keeps the
-    # restored value an aborted update/delete writes back.
-    conn.execute("INSERT OR IGNORE INTO notes (id, body) VALUES ('seed', 'original')")
     conn.commit(); conn.close()
     return "{db}"
 }}
@@ -398,7 +422,7 @@ component SqliteStore provides store: Store {{
       if (cur == None) {{ return None }}
       let old = match cur {{ Some(v) => v, None => {{ id: id, body: "" }} }}
       effect sq_update(id, draft.body)
-      undo sq_restore(id, old.body)
+      undo sq_update(id, old.body)
       return Some({{ id: id, body: draft.body }})
     }}
     fn delete(id) {{
@@ -451,11 +475,27 @@ _REMOVE_OK = ('conn.execute("DELETE FROM notes WHERE id = ?", (id,))\n'
 _REMOVE_BROKEN = 'conn.close()'  # the inverse does nothing — the write survives
 
 
+def _seed_db(path: Path) -> None:
+    """Create the file's `notes` table and one pre-existing row before the
+    activation. Seeding here rather than in `sq_open` means the post-abort
+    re-open cannot recreate the row, so an update or delete whose inverse did
+    not run fails its assertion."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT OR REPLACE INTO notes (id, body) VALUES ('seed', 'original')")
+    conn.commit()
+    conn.close()
+
+
 @needs_runtime
 def test_the_injected_fault_write_revert_is_observable(tmp_path):
-    """Positive teeth: create, update and delete each ABORT, then re-open the
-    store on the same file. The create's row is gone, and the update/delete
-    inverses restored the seeded row, because each inverse replayed."""
+    """Positive teeth: the Python side seeds a pre-existing row, then create,
+    update and delete each ABORT and the store is re-opened on the same file.
+    The create's row is gone, and the update/delete inverses restored the
+    seeded row. A no-op inverse fails the corresponding assertion."""
+    _seed_db(tmp_path / "notes.db")
     db = (tmp_path / "notes.db").as_posix()
     src = _TEETH_TEMPLATE.format(db=db, remove_body=_REMOVE_OK)
     path = tmp_path / "teeth_ok.rvl"
@@ -472,6 +512,7 @@ def test_a_broken_inverse_leaves_the_write_and_is_caught(tmp_path):
     """Negative teeth: break the inverse so the aborted create survives — the
     in-language `assert seen == None` then FAILS. An assertion that can only
     pass is not an assertion."""
+    _seed_db(tmp_path / "notes.db")
     db = (tmp_path / "notes.db").as_posix()
     src = _TEETH_TEMPLATE.format(db=db, remove_body=_REMOVE_BROKEN)
     path = tmp_path / "teeth_broken.rvl"

@@ -110,7 +110,10 @@ extern pure fn sq_close(conn: Conn) -> Unit = @py {
 
 // Mint the next primary key from a monotonic sqlite sequence (Minato autoInc):
 // an AUTOINCREMENT column only ever grows, so an id is never reused even after
-// its row is deleted.
+// its row is deleted. The tick is deliberately NOT a revertible effect: a
+// file-backed store must keep its sequence across activations so a key is never
+// reused, while the `:memory:` example still starts at 0 because the connection
+// closes. (The memory driver's sequence is activation state and drops with it.)
 extern pure fn sq_next_id(conn: Conn) -> Str = @py {
     cur = conn.execute("INSERT INTO seq DEFAULT VALUES")
     conn.commit()
@@ -197,9 +200,10 @@ component SqliteStore provides store: Store {
     }
 
     // UPDATE is an overwrite, so its inverse is the value the row held BEFORE
-    // the write, restored with `sq_restore` (never `sq_remove`, which would
-    // drop a row that existed). A missing key is a typed no-op: `None` in,
-    // `None` out, and no effect registered.
+    // the write, put back by another plain UPDATE (never `sq_remove`, which
+    // would drop a row that existed, and never `INSERT OR REPLACE`, which is
+    // delete+insert). A missing key is a typed no-op: `None` in, `None` out,
+    // and no effect registered.
     fn update(id, draft) {
       let cur = sq_get(db, id)
       if (cur == None) {
@@ -210,7 +214,7 @@ component SqliteStore provides store: Store {
         None => { id: id, body: "" },
       }
       effect sq_update(db, id, draft.body)
-      undo   sq_restore(db, id, old.body)
+      undo   sq_update(db, id, old.body)
       return Some({ id: id, body: draft.body })
     }
 

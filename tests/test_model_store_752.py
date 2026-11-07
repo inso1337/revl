@@ -97,7 +97,8 @@ def test_no_raw_sql_anywhere():
         line.split("//", 1)[0]
         for line in EXAMPLE.read_text(encoding="utf-8").splitlines())
     lowered = code.lower()
-    for sql_tok in ("query(sql", "insert into", "delete from", "select * from", " sql:"):
+    for sql_tok in ("query(sql", "insert into", "delete from", "select * from",
+                    "update notes", " where ", "drop table", " sql:"):
         assert sql_tok not in lowered, f"raw SQL leaked into the store: {sql_tok!r}"
     ir = compile_files([str(EXAMPLE)])
     assert "sql" not in json.dumps(ir).lower()
