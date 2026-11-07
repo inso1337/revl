@@ -1873,13 +1873,16 @@ say yes is scoped in the same profile grammar as who may commit. Class (a)
 (witnessed-revertible) and class (b) (deferred) crossings never reach here.
 
 The approval is also bound to who asked (issue #3216). Under an operator
-profile the ticket names its `proposer`, the operator whose call raised it, and
-the yes is minted for every operator that raised that hash since its last yes:
-the response lists them as `proposers`, and the `approval-granted` WAL record
-carries the same list. Only those operators' identical re-issue spends it.
-Another operator sending the byte-identical call gets its own ticket, which a
-separate yes answers. With no operator profile there is one identity, and the
-behaviour is unchanged.
+profile the ticket lists `proposers`: the operators whose call raised it and is
+still waiting for a yes. A yes is minted for ONE of them, named by the optional
+`proposer` argument, and only that operator's identical re-issue spends it. The
+response and the `approval-granted` WAL record carry it as `proposers`. A bare
+`hash` names the raiser when only one operator has raised that call; when two or
+more have, it is refused with the raisers listed, and each is approved on its own
+with `proposer`. Approving the same raiser again returns the yes already minted.
+Another operator sending the byte-identical call after a yes gets its own ticket.
+A quorum yes covers the operator who asked the question it answers. With no
+operator profile there is one identity, and the behaviour is unchanged.
 
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
