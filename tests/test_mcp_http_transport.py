@@ -423,6 +423,66 @@ def test_the_agent_cannot_approve_its_own_ticket_and_the_human_can(serving, fres
     assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
 
 
+def _shout(port, who, sink, msg):
+    return _payload(port, who, "revl_call",
+                    {"key": "ops", "method": "shout", "args": [sink, msg]})
+
+
+@needs_cordis
+def test_an_approval_is_spent_only_by_the_operator_who_raised_it(serving, fresh,
+                                                                 tmp_path):
+    """Issue #3216: the yes answers alice's ticket, so bob's byte-identical call
+    is a new question with its own ticket, and nothing fires on alice's yes."""
+    _load_shout(fresh)
+    port = _port(serving())
+    sink = str(tmp_path / "sink.log")
+    asked = _shout(port, "alice", sink, "a")
+    assert asked["approvalRequired"] is True
+    assert asked["ticket"]["proposer"] == "alice"
+    approved = _payload(port, "human", "revl_approve", {"hash": asked["ticket"]["hash"]})
+    assert approved["ok"] is True and approved["proposers"] == ["alice"]
+
+    by_bob = _shout(port, "bob", sink, "a")
+    assert by_bob.get("approvalRequired") is True, by_bob
+    assert by_bob["ticket"]["proposer"] == "bob"
+    assert by_bob["ticket"]["hash"] == asked["ticket"]["hash"], "the same question"
+    assert not os.path.exists(sink), "nothing fired on alice's yes"
+
+    fired = _shout(port, "alice", sink, "a")
+    assert fired["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+
+    # bob's own ticket is answerable, and that yes is his alone
+    for_bob = _payload(port, "human", "revl_approve",
+                       {"hash": by_bob["ticket"]["hash"]})
+    assert for_bob["ok"] is True and for_bob["proposers"] == ["bob"]
+    assert _shout(port, "alice", sink, "a").get("approvalRequired") is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+    assert _shout(port, "bob", sink, "a")["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\nannounce:a\n"
+    assert _shout(port, "bob", sink, "a").get("approvalRequired") is True, \
+        "single use"
+    granted = [r for r in _wal(fresh) if r.get("record") == "approval-granted"]
+    assert [r.get("proposers") for r in granted] == [["alice"], ["bob"]]
+
+
+@needs_cordis
+def test_another_operators_different_call_leaves_the_approval_standing(
+        serving, fresh, tmp_path):
+    _load_shout(fresh)
+    port = _port(serving())
+    sink = str(tmp_path / "sink.log")
+    asked = _shout(port, "alice", sink, "a")
+    assert _payload(port, "human", "revl_approve",
+                    {"hash": asked["ticket"]["hash"]})["ok"] is True
+    other = _shout(port, "bob", sink, "b")
+    assert other.get("approvalRequired") is True
+    assert other["ticket"]["hash"] != asked["ticket"]["hash"]
+    assert not os.path.exists(sink)
+    assert _shout(port, "alice", sink, "a")["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+
+
 def _quorum_run(port_or_none, session, tmp_path, *, over_http):
     """alice proposes, bob and carol answer. Over HTTP each on its own
     authenticated request; on stdio each by the session's own binding."""

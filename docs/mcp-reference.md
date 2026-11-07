@@ -1872,6 +1872,15 @@ grant, so n prompts become one. Gated by the `approve` operator verb: who may
 say yes is scoped in the same profile grammar as who may commit. Class (a)
 (witnessed-revertible) and class (b) (deferred) crossings never reach here.
 
+The approval is also bound to who asked (issue #3216). Under an operator
+profile the ticket names its `proposer`, the operator whose call raised it, and
+the yes is minted for every operator that raised that hash since its last yes:
+the response lists them as `proposers`, and the `approval-granted` WAL record
+carries the same list. Only those operators' identical re-issue spends it.
+Another operator sending the byte-identical call gets its own ticket, which a
+separate yes answers. With no operator profile there is one identity, and the
+behaviour is unchanged.
+
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
 `revl audit`'s cardinality analysis
