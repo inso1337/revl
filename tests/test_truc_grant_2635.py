@@ -58,6 +58,65 @@ component CacheKit requires db: Database provides cache: Cache {
 }
 """
 
+#: Two ambient providers of the same service under different keys, so a
+#: candidate can require either key and still join the composition.
+TWO_KEYS_ENTRY = """
+service Database { fn ping() -> Bool }
+
+component Db provides db: Database {
+  provide db {
+    fn ping() = true
+  }
+}
+
+component Db2 provides db2: Database {
+  provide db2 {
+    fn ping() = false
+  }
+}
+"""
+
+#: One row, two components: `CacheKit` reaches `Database` under the granted
+#: key `db`; `CacheBorrower` reaches the same SERVICE under the ungranted key
+#: `db2`. The key-precise half of the allowlist must refuse the sibling
+#: (issue #1926), not let the granted key cover it.
+CACHE_TWO_COMPONENTS = """
+service Cache { fn get(k: Str) -> Opt[Str] }
+service Other { fn go() -> Bool }
+
+component CacheKit requires db: Database provides cache: Cache {
+  provide cache {
+    fn get(k) = if (db.ping()) { Some(k) } else { None }
+  }
+}
+
+component CacheBorrower requires db2: Database provides other: Other {
+  provide other {
+    fn go() = db2.ping()
+  }
+}
+"""
+
+#: A row that PROVIDES what it requires under the same key: the requirement
+#: binds to the row's own provision, which is internal wiring, not an outward
+#: reach, so it needs no grant.
+SELF_WIRED = """
+service Kv { fn get(k: Str) -> Opt[Str] }
+service Reader { fn read(k: Str) -> Opt[Str] }
+
+component KitStore provides kv: Kv {
+  provide kv {
+    fn get(k) = Some(k)
+  }
+}
+
+component KitReader requires kv: Kv provides reader: Reader {
+  provide reader {
+    fn read(k) = kv.get(k)
+  }
+}
+"""
+
 
 def _ordered(grant: list[str], name: str = "cache") -> str:
     """The two rows the gate admits: the project's own provider, then the
@@ -110,6 +169,35 @@ def test_a_row_that_requires_nothing_needs_no_grant():
     assert verdict["ok"] is True, verdict["diagnostic"]
 
 
+def test_one_granted_key_does_not_cover_a_siblings_key():
+    """A grant is key-precise (issue #1926): a second component compiled from
+    the same row cannot borrow the granted key just because its ungranted key
+    binds the same service."""
+    ordered = json.dumps([
+        {"path": "/project/src/main.rvl", "source": TWO_KEYS_ENTRY,
+         "name": "", "grant": []},
+        {"path": "/__truc_candidate__/tools/component.rvl",
+         "source": CACHE_TWO_COMPONENTS, "name": "tools", "grant": ["db"]},
+    ])
+    verdict = json.loads(_host.admit_all(ordered))
+    assert verdict["ok"] is False, verdict
+    assert "CacheBorrower" in verdict["diagnostic"]
+    assert "db2" in verdict["diagnostic"]
+
+
+def test_a_row_that_provides_what_it_requires_needs_no_grant():
+    """The own-binding exemption is internal wiring: a requirement that binds
+    to the row's own provision under the same key is not an outward reach."""
+    ordered = json.dumps([
+        {"path": "/project/src/main.rvl", "source": ENTRY_SOURCE,
+         "name": "", "grant": []},
+        {"path": "/__truc_candidate__/self/component.rvl",
+         "source": SELF_WIRED, "name": "self", "grant": []},
+    ])
+    verdict = json.loads(_host.admit_all(ordered))
+    assert verdict["ok"] is True, verdict["diagnostic"]
+
+
 # ================================================================ CLI half
 
 def _truc(project: Path, *args: str) -> subprocess.CompletedProcess:
@@ -140,6 +228,18 @@ def _project(tmp_path: Path, entry: str) -> Path:
 def _lock_row(proj: Path) -> dict:
     lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     return next(r for r in lock["trucs"] if r["name"] == REQUIRING)
+
+
+def test_a_grant_that_is_not_a_list_is_refused_by_name(tmp_path):
+    """A falsey non-list (`grant = "db"`) is a malformed declaration, not "no
+    grant": refuse it with the entry named instead of silently granting
+    nothing."""
+    proj = _project(tmp_path,
+                    f'{REQUIRING} = {{ registry = "local", grant = "db" }}')
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host.toml_manifest(str(proj))
+    assert REQUIRING in str(raised.value)
+    assert "grant" in str(raised.value)
 
 
 @pytest.mark.skipif(not CORDIS_PY.exists(),
@@ -209,3 +309,20 @@ def test_cli_assemble_refuses_a_grant_removed_after_add(tmp_path):
     assert r.returncode == 1, r.stdout
     assert "not in the granted set" in r.stdout
     assert "db" in r.stdout
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed "
+                           "(run `sh backends/python/setup.sh`)")
+def test_cli_declaring_two_grants_before_either_add_does_not_deadlock(tmp_path):
+    """Declaring each row (the documented flow) before adding either must not
+    make each add refuse the other declared-but-unvendored sibling."""
+    proj = _project(
+        tmp_path,
+        f'{REQUIRING} = {{ registry = "local", grant = ["db"] }}\n'
+        'pg_database = { registry = "local" }')
+
+    r = _truc(proj, "add", REQUIRING)
+    assert r.returncode == 0, r.stdout + r.stderr
+    r = _truc(proj, "add", "pg_database")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _truc(proj, "assemble").returncode == 0

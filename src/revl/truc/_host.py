@@ -380,7 +380,9 @@ def toml_manifest(project_dir: str) -> str:
                 f"truc {tname!r} in truc.toml is not a table: write it as "
                 f'`{tname} = {{ registry = "local", grant = [...] }}` under '
                 "[trucs]")
-        grant = t.get("grant") or []
+        grant = t.get("grant", [])
+        if grant is None:
+            grant = []
         if (not isinstance(grant, list)
                 or not all(isinstance(s, str) for s in grant)):
             raise TrucNameRefusal(
@@ -413,8 +415,15 @@ def read_sources(project_dir: str, spec_json: str) -> str:
     loop is host-side because a provide method cannot iterate. The decision of
     *which* names to read was made by the pure planner and arrives in `spec`.
     Returns `{sources: {abspath: text}, vendored: [{name, path, source}]}`.
+
+    `skip_missing` is set by `add`: an operator declares a row's `[trucs]`
+    entry (with its grant) before the first add, so a declared sibling may
+    have no vendored file yet and add must gather only what is on disk. Every
+    other verb reads every declared row and a missing one is a refusal by
+    name, not a traceback (issue #2635).
     """
     spec = json.loads(spec_json)
+    skip_missing = bool(spec.get("skip_missing"))
     entry = []
     for e in spec.get("entry") or []:
         ap = os.path.abspath(e)
@@ -425,6 +434,8 @@ def read_sources(project_dir: str, spec_json: str) -> str:
         _check_name(name)
         ap = os.path.abspath(os.path.join(project_dir, "trucs", name, "component.rvl"))
         if not os.path.exists(ap):
+            if skip_missing:
+                continue
             # Reachable since issue #2635: the `[trucs]` entry carries the
             # row's grant and is declared BEFORE the add vendors it, so a
             # declared-but-unvendored truc is a normal intermediate state. It
@@ -570,25 +581,46 @@ def _admit_row(item: dict, running: dict | None, flag: bool,
     return ir, basis
 
 
+def _is_grant_refusal(error: Exception) -> bool:
+    """Whether a refusal is the reach bound.
+
+    `check_allowlist` stamps the ungranted-service refusal `R2`, and the
+    key-precise half (`_refuse_ungranted_key`, issue #1926) does too. The
+    message is a fallback for a multi-error carrier whose primary `code` is
+    another refusal."""
+    text = str(error)
+    return (getattr(error, "code", None) == "R2"
+            or "not in the granted set" in text
+            or "no grant names" in text)
+
+
+def _grant_hint() -> str:
+    """The operator's fix for a reach-bound refusal: the `[trucs]` grant."""
+    return ("this vendored row's reach is bounded to the `requires` keys its "
+            "`[trucs]` entry grants; add the key named above to that entry's "
+            "`grant` list in truc.toml and re-run")
+
+
 def _refusal_text(item: dict, running: dict | None, error: Exception) -> str:
     """The gate's diagnostic, plus the way out when the row refused only
-    because it is vendored: it admits with the profile lifted."""
+    because it is vendored: it admits with the profile lifted. A reach refusal
+    names its own fix (the `[trucs]` grant) and does not advertise
+    --trust-host-code, which cannot widen the grant."""
     from revl.errors import RevlError  # noqa: PLC0415
 
     text = str(error)
     if not item.get("name"):
         return text
-    if "not in the granted set" in text:
-        # The reach bound refused it. Naming --trust-host-code as the way out
-        # would misdirect: the operator's fix is the entry's grant (issue
-        # #2635), and the flag trusts the row's host code, not a wider reach.
-        return (f"{text}\nthis vendored row's reach is bounded to the `requires` "
-                f"keys its `[trucs]` entry grants; add the key named above to "
-                f"that entry's `grant` list in truc.toml and re-run")
+    if _is_grant_refusal(error):
+        return f"{text}\n{_grant_hint()}"
     try:
         ir = _compile_row(item, running)
         _enforce_grant(ir, item)
-    except RevlError:
+    except RevlError as lifted:
+        # The host-code lift admits the body but the grant still refuses it:
+        # name both problems now, instead of after a --trust-host-code retry.
+        if _is_grant_refusal(lifted):
+            return f"{text}\n{_grant_hint()}"
         return text
     return (f"{text}\nvendored text is admitted as an untrusted author, and "
             f'"{item["name"]}" admits only with that profile lifted: it '

@@ -20,7 +20,11 @@ use "../externs.rvl" { json_parse, json_stringify, sha256_hex, host_wiring }
 // service (issue #2635).
 type Truc      = { name: Str, registry: Str, grant: List[Str] }
 type Manifest  = { name: Str, registry: Str, entry: List[Str], trucs: List[Truc] }
-type Spec      = { entry: List[Str], trucs: List[Str] }
+// `skip_missing` lets `add` gather the rows that are actually vendored: an
+// operator declares the `[trucs]` entry (with its grant) before the first add,
+// so at add time a declared sibling may have no vendored file yet. Every other
+// verb reads every declared row and refuses a missing one by name.
+type Spec      = { entry: List[Str], trucs: List[Str], skip_missing: Bool }
 type EntryFile = { path: Str, source: Str }
 type Vendored  = { name: Str, path: Str, source: Str }
 type Gathered  = { entry: List[EntryFile], vendored: List[Vendored] }
@@ -90,7 +94,7 @@ fn plan_assemble_spec(mj: Str) -> Str {
     names = names.push(t.name)
   }
   let fixed = names
-  let s: Spec = { entry: m.entry, trucs: fixed }
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: false }
   return json_stringify(s)
 }
 
@@ -99,6 +103,9 @@ fn plan_assemble_spec(mj: Str) -> Str {
 // `ordered_with_candidate`, and its `[trucs]` entry may already be declared
 // (that is where its grant lives) while nothing is vendored under `trucs/`
 // yet — so including it here would ask for a file the add has not written.
+// Siblings declared ahead of their own add are skipped for the same reason
+// (`skip_missing`): without that, declaring two grants before adding either
+// would make each add refuse the other and no order would work.
 fn plan_add_spec(mj: Str, name: Str) -> Str {
   let m: Manifest = json_parse(mj)
   var names: List[Str] = []
@@ -108,7 +115,7 @@ fn plan_add_spec(mj: Str, name: Str) -> Str {
     }
   }
   let fixed = names
-  let s: Spec = { entry: m.entry, trucs: fixed }
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: true }
   return json_stringify(s)
 }
 
@@ -125,7 +132,7 @@ fn plan_rm_spec(mj: Str, name: Str) -> Str {
     }
   }
   let fixed = names
-  let s: Spec = { entry: m.entry, trucs: fixed }
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: false }
   return json_stringify(s)
 }
 
