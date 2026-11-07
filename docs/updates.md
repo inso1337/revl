@@ -101,6 +101,11 @@ The operator surface is `revl mcp serve --update --update-repo OWNER/NAME`
 (the repository, channel, token environment, staging home and an API mirror
 are all operator flags; a caller cannot name them). Four verbs:
 
+The consent flags are operator grants too: `revl_update_apply` honours one
+only when the server was started with `--update-allow-consent NAME`, so the
+caller that asks for an apply cannot also grant itself a downgrade, an
+incompatible release or a widening.
+
 1. `revl_update_check` reads the feed and compares identities. Nothing is
    fetched or compiled. The release version is compared with the release the
    running composition was updated to (`runningRelease`), never with the
@@ -119,17 +124,19 @@ are all operator flags; a caller cannot name them). Four verbs:
 3. `revl_update_apply` with that `planHash` refuses if the running generation
    or composition moved (the plan is bound to both), refuses if the staged
    bytes changed after they were admitted (the plan is bound to their digest),
-   requires `acknowledgeWidening` when the release widens any authority axis
-   (crossings, reach, capability scopes, host backends, recovery inverses,
-   registers or emission cardinality), swaps the release in and verifies the
-   successor serves the running keys. A successor that does not is reverted
-   automatically. The swap compiles the bytes apply hashed, written to a
-   fresh private directory under the update home, so a write to the staging
+   requires both the operator's `--update-allow-consent acknowledgeWidening`
+   grant and the caller's `acknowledgeWidening` when the release widens any
+   authority axis (crossings, reach, capability scopes, host backends, recovery
+   inverses, registers or emission cardinality), swaps the release in and
+   verifies the successor serves the running keys. A successor that does not is
+   reverted automatically. The swap compiles the bytes apply hashed, written to
+   a fresh private directory under the update home, so a write to the staging
    after the check cannot reach the running composition. The swap copies only
    the release's `.rvl` source files.
 
    Each departure from a plain upgrade needs its own consent on the planning
-   call, and the plan answer reports them under `consents`:
+   call, and the plan answer reports the caller's consents under `consents`
+   and the grants under `operatorConsents`:
 
    | argument | consents to |
    | --- | --- |
@@ -139,6 +146,13 @@ are all operator flags; a caller cannot name them). Four verbs:
    | `acceptNotLive` | a release whose manifest says `live: false` (`UPDATE_NOT_LIVE` otherwise) |
    | `acceptIncompatible` | a release whose declared gate, language or Python requirements this host does not meet (`UPDATE_INCOMPATIBLE` otherwise); the running gate still admits or refuses it |
 
+   Every consent except `force` is honoured only under the operator's
+   `--update-allow-consent NAME` grant. A caller that passes an ungranted
+   consent is refused with `UPDATE_CONSENT_NOT_GRANTED` where that consent
+   would have lifted the refusal, so a consent flag unlocks nothing a caller
+   grants itself. `force` needs no grant: it re-plans the release the
+   composition already runs and opts into nothing else.
+
    The plan answer reports `live` and `restartRequired`.
 4. `revl_update_rollback` returns to the generation before the last applied
    release, through the same admitted undo `revl_undo` runs (the same
@@ -147,6 +161,17 @@ are all operator flags; a caller cannot name them). Four verbs:
    `UPDATE_NOTHING_APPLIED`, and it is `UPDATE_ROLLBACK_STALE` when a later
    generation than the one the apply started is running: going back would
    also discard that change, so `revl_undo` is the tool for it.
+
+   Each apply writes the bytes it swaps into a fresh directory under
+   `<home>/applied`, and its journal record names that directory. After an
+   apply and after a rollback, the directories this server session's
+   unconsumed applies can still roll back to are kept and the rest are
+   removed: the update home keeps the release chain this session can undo,
+   not every release ever applied. The retained set is bounded like the undo
+   history itself, so a long-lived session does not keep one directory per
+   release ever applied. A directory whose swap was refused or reverted is
+   removed at once, and servers sharing one update home serialize the
+   materialise, swap and prune through a lock file in that home.
 
 A release with no manifest (tag fallback) is never applied unless the
 operator explicitly enabled `--update-trust-tags`: it has no declared sha256,

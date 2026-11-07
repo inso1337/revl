@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from .._run_backends import KNOWN_BACKENDS, RUNNABLE_BACKENDS
+from .._update_consents import UPDATE_OPERATOR_CONSENTS
 from ..tiers import tier_metavar, tier_type
 
 # The backends `revl bundle` can emit (the emitter package names under
@@ -1350,6 +1351,14 @@ def build_parser() -> argparse.ArgumentParser:
                                 "fallback) as applicable; such a release has no "
                                 "declared sha256 and is never applied "
                                 "automatically")
+    mcp_serve.add_argument("--update-allow-consent", action="append", default=[],
+                           choices=UPDATE_OPERATOR_CONSENTS, metavar="NAME",
+                           help="honour this consent flag from "
+                                "revl_update_apply, repeated for each: "
+                                + ", ".join(UPDATE_OPERATOR_CONSENTS) +
+                                ". Without a grant the caller passing the flag "
+                                "is refused (UPDATE_CONSENT_NOT_GRANTED); "
+                                "force needs none")
     mcp_serve.add_argument("--update-replacing", action="append", default=[],
                            metavar="COMPONENT",
                            help="a provider the release takes over, repeated "

@@ -2498,15 +2498,22 @@ With no `planHash` it stages the newest release, compiles and admits it
 against the running manifest, plans the swap and returns a server-side
 `planHash`; nothing is mutated. With `planHash` it refuses a stale plan
 (another generation or composition is running, or the staged bytes changed
-after admission), requires `acknowledgeWidening` when the release widens any
-authority axis, swaps the release in, and verifies the successor serves the
+after admission), requires both the operator's
+`--update-allow-consent acknowledgeWidening` grant and the caller's
+`acknowledgeWidening` when the release widens any authority axis, swaps the
+release in, and verifies the successor serves the
 running keys. A successor that does not is reverted automatically and the
 answer says so. A release declaring `live: false` is refused for a running
-composition unless `force` is passed; the plan answer reports `live` and
-`restartRequired`.
+composition unless `acceptNotLive` is passed; the plan answer reports `live`
+and `restartRequired`.
 
 - Inputs: `planHash` (the plan to apply), `force` (plan even when already up
-  to date), `acknowledgeWidening` (accept the reported widening).
+  to date), `allowDowngrade`, `acceptUnknownVersion`, `acceptIncompatible`,
+  `acceptNotLive` (consent to each departure from a plain upgrade) and
+  `acknowledgeWidening` (accept the reported widening). Every consent except
+  `force` is honoured only when the server was started with
+  `--update-allow-consent NAME` for it; a caller that passes an ungranted
+  consent is refused with `UPDATE_CONSENT_NOT_GRANTED`.
 
 ### `revl_update_status`
 
