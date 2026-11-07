@@ -14435,6 +14435,43 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
     env.type_env[safe] = POISON
 
 
+# ------------------------------------------- the access walk's observation (G1)
+#
+# THE SEAM THE FORMAL G1 COVERAGE ROW PINS (issue #2744). G1 is enforced by
+# name resolution DURING lowering (`_lower_postfix`), so the checker has no
+# separate walk function to wrap the way the G9 row wraps
+# `taint._walk_component_methods`. The obligation the coverage theorem states
+# is about the walk that lowering IS: every scope a component body induces is
+# opened and every statement of it is lowered, and therefore has its names
+# resolved. `formal/harness/diff_corpus.py` observes exactly that by
+# installing a log here for the duration of ONE `compile_files` call.
+#
+# None in production: every call site is one branch and never allocates, so an
+# unobserved run costs nothing and no behaviour depends on the log. The
+# entries are `("scope", component, label, (param, ...))` when a provide
+# method's scope opens (its declared parameters are seeded there) and
+# `("visit", component, label, ())` once per statement the walk dispatched.
+# The harness is the only reader; a renamed or moved call site leaves the log
+# short, which the coverage row reports as its own blind spot rather than as
+# the checker having skipped a statement.
+_ACCESS_WALK: "list[tuple[str, str, str, tuple[str, ...]]] | None" = None
+
+
+def _note_access_scope(component: str, scope: str,
+                       params: list[str]) -> None:
+    """Record that the walk opened one scope of one component body."""
+    log = _ACCESS_WALK
+    if log is not None:
+        log.append(("scope", component, scope, tuple(params)))
+
+
+def _note_access_visit(component: str, scope: str) -> None:
+    """Record that the walk dispatched one statement of one scope."""
+    log = _ACCESS_WALK
+    if log is not None:
+        log.append(("visit", component, scope, ()))
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
@@ -14850,6 +14887,12 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # this pass has to bound (item 485)
     check_list_index_bounds(comp.body, filename)
     for stmt in comp.body:
+        # the G1 coverage observation (issue #2744): the walk VISITS this
+        # activation statement here, before any branch decides what it lowers
+        # to. A provide block is its own scope and is recorded by
+        # `_lower_provide`, not as an activation statement.
+        if not isinstance(stmt, ProvideStmt):
+            _note_access_visit(comp.name, "activation")
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state
             # hand-off of a stateful provider. A prelude declaration — it names
@@ -15685,7 +15728,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 raise RevlError(filename, getattr(ms, "line", method.line),
                                 "unexpected statement in method control-flow body")
 
+        # the G1 coverage observation (issue #2744): the walk opens this
+        # provide method's scope with exactly the parameters it seeds into the
+        # method's environment, then visits each of its statements.
+        _note_access_scope(comp.name, f"{stmt.key}.{method.name}",
+                           list(env.params))
         for mstmt in method.body:
+            _note_access_visit(comp.name, f"{stmt.key}.{method.name}")
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
             verified_here = getattr(mstmt, "verified", False)
