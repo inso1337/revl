@@ -78,12 +78,22 @@
       "expectedCode": "G5"
     },
     {
+      "id": "wrong-lifo-order",
+      "group": "project",
+      "kind": "wrong-lifo-order",
+      "saga": "checkout",
+      "file": "sagas/wrong_lifo_order.rvl",
+      "description": "The author hand-orders the teardown in the inverses of two inventory holds, releasing the first before the second. The checker refuses a hand-written bracket teardown that crosses a boundary (G5), so the wrong order cannot run; the derived LIFO order is the only order the language accepts.",
+      "expected": "compile",
+      "expectedCode": "G5"
+    },
+    {
       "id": "emission-with-undo",
       "group": "project",
       "kind": "emission-with-undo",
       "saga": "checkout",
       "file": "sagas/emission_with_undo.rvl",
-      "description": "The call site gives an irreversible settlement an `undo` instead of a `compensate`.",
+      "description": "The call site gives an irreversible settlement an `undo` instead of a `compensate`; the parser refuses the `undo` keyword there, so this is a parse refusal, not a G6 reversibility check.",
       "expected": "compile",
       "expectedCode": "G6"
     },

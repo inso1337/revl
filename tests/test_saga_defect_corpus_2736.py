@@ -83,8 +83,9 @@ def test_every_row_has_its_own_saga():
 def test_the_rows_cover_the_defect_classes_the_issue_names():
     kinds = {row["kind"] for row in ROWS}
     assert {"missing-undo", "unmarked-emission", "dependency-cycle",
-            "manual-teardown", "failing-inverse", "failing-compensation",
-            "missing-compensate", "wrong-inverse-target"} <= kinds
+            "manual-teardown", "wrong-lifo-order", "failing-inverse",
+            "failing-compensation", "missing-compensate",
+            "wrong-inverse-target"} <= kinds
 
 
 def test_every_compile_row_records_its_refusal_code():
@@ -115,6 +116,45 @@ def test_each_runtime_row_compiles_cleanly(row):
 
 def test_the_results_table_covers_every_row():
     assert set(_committed_verdicts()) == {row["id"] for row in ROWS}
+
+
+# The paper sentences that quote the corpus totals. A measured number in prose
+# is a claim that can drift, so each is pinned to the committed measurement by
+# line: the tuple names which totals the line states, in the order
+# `_committed_totals` returns them. A line move or a wording edit that keeps the
+# numbers is a test change, not a paper change; that is deliberate, because the
+# pins are what make the prose checkable at all.
+PAPER_TOTALS = {
+    "docs/research/papers/P01-typed-revertible-effects.md": {
+        7: ("rows",),
+        17: ("rows", "compile", "fault-test", "missed"),
+        68: ("rows", "compile", "fault-test", "missed"),
+        75: ("rows", "compile", "fault-test", "missed"),
+        87: ("rows",),
+    },
+    "docs/research/papers/P16-testing-recovery-claims-sweep-roundtrip.md": {
+        7: ("rows", "fault-test", "missed"),
+        73: ("rows", "fault-test", "missed"),
+    },
+}
+
+
+def test_the_paper_totals_are_the_measured_totals():
+    measured = dict(zip(("rows", "compile", "fault-test", "missed"),
+                        _committed_totals()))
+    drift = []
+    for relative, pinned in PAPER_TOTALS.items():
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        for line_no, keys in pinned.items():
+            if line_no > len(lines):
+                drift.append(f"{relative}:{line_no} is past the end of the paper")
+                continue
+            line = lines[line_no - 1]
+            for key in keys:
+                if str(measured[key]) not in line:
+                    drift.append(
+                        f"{relative}:{line_no} does not state {key}={measured[key]}")
+    assert not drift, "\n".join(drift)
 
 
 # ------------------------------------------------------------- measurement

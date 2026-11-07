@@ -1,7 +1,7 @@
 // emission_with_undo - an emission is given an inverse instead of a compensation
 //
 // Seeded defect: the settlement is irreversible by declaration, but the call site tries `emit ... undo`; revl has no inverse slot on an emission, only `compensate`.
-// Expected catch: compile (G6)
+// Expected catch: compile (parse refusal; the parser reports G6)
 // Corpus index: bench/saga_defects/defects.json (issue #2736)
 
 service Inventory {
