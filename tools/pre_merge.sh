@@ -528,6 +528,15 @@ if want gate conformance; then
 else
     note "conformance matrix (--check-readme)"
 fi
+# Issue #2899: the per-tier support table's self-host emit column is a measured
+# ledger. It is cheap to check (the digest hashes the sources, it does not
+# re-measure), so the local pre-merge gate must not let a stale ledger through
+# to CI alone.
+if want gate conformance; then
+    step "self-host emit ledger (--check)"    "$PYTHON" tools/selfhost_matrix.py --check
+else
+    note "self-host emit ledger (--check)"
+fi
 if want gate site-wheel; then
     step "site wheel deploy contract"        "$PYTHON" tools/check_site_wheel.py
 else

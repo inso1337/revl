@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Whether each reference emitter can compile the self-host sources (issue #2899).
+"""Whether each reference emitter can emit the self-host sources (issue #2899).
 
     python3 tools/selfhost_matrix.py --measure   # re-measure, write the ledger
     python3 tools/selfhost_matrix.py --check     # the cheap staleness and acknowledgement gate
@@ -47,6 +47,12 @@ The digest deliberately does not cover `src/revl/`: a frontend change does not
 change what an emitter does with a given IR, and the tiers' own suites cover
 the frontend. A change that DOES move this table through the frontend is caught
 by the next `--measure`.
+
+WHAT --CHECK CANNOT SEE. The digest covers the measurement's INPUTS, not its
+cells, so a hand-edited ledger whose digest still matches is indistinguishable
+from a measured one, and the frontend exclusion above is the one fail-silent
+path. Coverage and acknowledgement are gated; truth is not, and a cell that
+looks wrong is settled by running `--measure` again.
 """
 
 from __future__ import annotations
@@ -73,18 +79,19 @@ def tiers() -> tuple[str, ...]:
     return tuple(conformance.TIERS)
 
 
-def sources() -> list[Path]:
-    return sorted((ROOT / "selfhost").glob("*.rvl"))
+def sources(root: Path | None = None) -> list[Path]:
+    return sorted((root or ROOT).glob("selfhost/*.rvl"))
 
 
-def digest() -> str:
+def digest(root: Path | None = None) -> str:
     """A fingerprint of everything a measurement reads: corpus and emitters."""
+    base = root or ROOT
     hasher = hashlib.sha256()
-    paths = (sources()
-             + sorted((ROOT / "stdlib").glob("*.rvl"))
-             + sorted((ROOT / "backends").glob("*/emit.py")))
+    paths = (sources(base)
+             + sorted(base.glob("stdlib/*.rvl"))
+             + sorted(base.glob("backends/*/emit.py")))
     for path in paths:
-        hasher.update(path.relative_to(ROOT).as_posix().encode("utf-8"))
+        hasher.update(path.relative_to(base).as_posix().encode("utf-8"))
         hasher.update(b"\0")
         hasher.update(path.read_bytes())
         hasher.update(b"\0")
@@ -179,8 +186,8 @@ def problems(data: dict | None = None, gaps: list[dict] | None = None,
     expected = digest() if expected_digest is None else expected_digest
     if data.get("digest") != expected:
         found.append(
-            f"{LEDGER.name} was measured against different self-host sources or "
-            "tier emitters; run `python3 tools/selfhost_matrix.py --measure`")
+            f"{LEDGER.name} was measured against different self-host, stdlib or "
+            "tier emitter sources; run `python3 tools/selfhost_matrix.py --measure`")
     measured = cells_of(data)
     acknowledged: dict[str, dict] = {}
     for entry in gaps:
@@ -192,15 +199,17 @@ def problems(data: dict | None = None, gaps: list[dict] | None = None,
         else:
             acknowledged[cell] = entry
     for cell in sorted(set(measured) - set(acknowledged)):
-        if measured[cell] != OK:
+        # FRONTEND is not a fact about a tier: the measurement did not run, so
+        # there is nothing to file against that emitter.
+        if measured[cell] not in (OK, FRONTEND):
             found.append(
                 f"{cell} is {measured[cell]} with no acknowledgement in "
                 f"{GAPS.name}; file an issue or record it out of scope")
     for cell in sorted(set(acknowledged) - set(measured)):
         found.append(f"{cell} is acknowledged but not measured")
     for cell, entry in sorted(acknowledged.items()):
-        if measured.get(cell) == OK:
-            found.append(f"{cell} emits now, so its acknowledgement is stale")
+        if measured.get(cell) in (OK, FRONTEND):
+            found.append(f"{cell} needs no acknowledgement now, so its entry is stale")
         issue = entry.get("issue")
         out_of_scope = str(entry.get("out_of_scope", "")).strip()
         if not isinstance(issue, int) and not out_of_scope:

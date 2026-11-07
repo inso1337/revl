@@ -325,7 +325,7 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
     assert {row["tier"] for row in data["rows"]} == set(data["tiers"])
     for row in data["rows"]:
         keys = ("emits", "executes", "durable_recovery",
-                "selfhost_agreement", "selfhost_compiles")
+                "selfhost_agreement", "selfhost_emits")
         statuses = {row[key]["status"] for key in keys}
         assert statuses <= {tg.PROVED, tg.DIVERGENCE, tg.UNMEASURED}
         for key in keys:
@@ -353,15 +353,33 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
     for tier in data["tiers"]:
         counts = selfhost_matrix.tier_counts(ledger, conformance.TIERS[
             data["tiers"].index(tier)])
-        cell = tiers[tier]["selfhost_compiles"]
+        cell = tiers[tier]["selfhost_emits"]
         if counts is None:
             assert cell["status"] == tg.UNMEASURED
         else:
-            compiled, total = counts
-            assert cell["detail"] == f"{compiled}/{total} self-host files emit"
-            assert cell["status"] == (tg.PROVED if compiled == total
+            emitted, total = counts
+            noun = "file" if total == 1 else "files"
+            assert cell["detail"] == f"{emitted}/{total} self-host {noun} emit"
+            assert cell["status"] == (tg.PROVED if emitted == total
                                       else tg.DIVERGENCE)
-    assert len({row["selfhost_compiles"]["detail"] for row in data["rows"]}) > 1
+    assert len({row["selfhost_emits"]["detail"] for row in data["rows"]}) > 1
+
+    # A ledger with an unmeasured (frontend-refused) cell makes the tier
+    # `unmeasured`, not a partial count. This is the branch a green ledger
+    # never reaches on its own.
+    import copy as _copy
+    changed = _copy.deepcopy(ledger)
+    tier = conformance.TIERS[0]
+    short = tg._short(tier)
+    changed["cells"][changed["files"][0]][tier] = {
+        "kind": selfhost_matrix.FRONTEND, "message": "planted"}
+    monkeypatch.setattr(selfhost_matrix, "load", lambda: changed)
+    unmeasured = tg.support_matrix(report=report, selfhost=selfhost,
+                                   tests_root=tests_root, ci_text=ci_text)
+    cell = next(row for row in unmeasured["rows"] if row["tier"] == short)[
+        "selfhost_emits"]
+    assert cell["status"] == tg.UNMEASURED
+    assert "does not measure this tier" in cell["detail"]
 
     # A measured emitter gap changes the cell, rather than leaving an authored
     # success status behind.

@@ -2,7 +2,7 @@
  "gaps": [
   {
    "cell": "checker.rvl::go",
-   "reason": "record literal with fields ['name', 'ty'] \u2014 no unique record has exactly those fields is ambiguous",
+   "reason": "record literal fields ['name', 'ty'] matches no unique record",
    "issue": 3144
   },
   {
@@ -222,7 +222,7 @@
   },
   {
    "cell": "parser.rvl::go",
-   "reason": "record literal with fields ['e', 'i'] \u2014 no unique record has exactly those fields is ambiguous",
+   "reason": "record literal fields ['e', 'i'] matches no unique record",
    "issue": 3144
   },
   {
