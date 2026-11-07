@@ -26,12 +26,22 @@
 // is opened, its schema created, and closed on teardown through ordinary `@py`
 // externs, the same mechanism stdlib/fs.rvl's witnessed externs use.
 //
+// VALUES are always BOUND parameters (`?` + a tuple); a value never becomes
+// statement text. IDENTIFIERS (table and column names) cannot be bound, so the
+// driver validates every identifier it names against the DECLARED model before
+// it builds the schema from them: an identifier outside the declaration, or
+// one that is not a plain SQL name, is refused at open rather than
+// interpolated (see `sq_open`).
+//
 // Every persistence MUTATION is still lowered as a revertible `effect` whose
-// derived inverse is the natural CRUD counterpart: `create` (an INSERT) carries
-// `undo` DELETE, so a row written during activation is removed in LIFO order on
-// teardown or ABORT — residue-free, on the new driver. The `abort` lifecycle
-// test below injects a fault after a write and asserts the composition reverts
-// with nothing left behind.
+// inverse is the EXACT CRUD counterpart: `create` (an INSERT) undoes to DELETE;
+// `update` (an overwrite) restores the value the row held BEFORE the write;
+// `delete` (a DELETE) re-inserts the row it removed. A row written, edited or
+// removed during activation therefore reverts in LIFO order on teardown or
+// ABORT — residue-free, on the new driver. The `abort` lifecycle tests below
+// inject a fault after each kind of write and assert the composition reverts
+// with nothing left behind; the file-backed teeth test in the suite observes
+// that the inverses actually ran, not merely that teardown reported clean.
 
 // The declared model: one row type, keyed by a store-assigned `id`. Identical
 // to examples/model_store.rvl — the model does not change across the swap.
@@ -48,20 +58,47 @@ service Store {
   fn get(id: Str) -> Opt[Note]
   fn list() -> List[Note]
   emission[store] fn create(draft: Draft) -> Str
+  emission[store] fn update(id: Str, draft: Draft) -> Opt[Note]
+  emission[store] fn delete(id: Str) -> Opt[Note]
 }
 
 // ---------------------------------------------------------------- the driver
 
 // The sqlite driver's host boundary. Every SQL string lives HERE, inside the
 // driver's `@py` bodies (Minato keeps SQL inside its `sqlite` driver package,
-// never in the model). `sq_open` is an `acquire` extern: it opens the embedded
-// database and returns the live connection handle, whose site-declared inverse
-// closes it, so the resource is released on teardown.
+// never in the model). `sq_open` is an `acquire` extern: it validates the
+// declared identifiers, opens the embedded database and returns the live
+// connection handle, whose site-declared inverse closes it, so the resource is
+// released on teardown.
 extern acquire fn sq_open() -> Conn undo sq_close(result) = @py {
+    import re
     import sqlite3
+
+    # A bound parameter protects a VALUE. An identifier (a table or column
+    # name) cannot be bound, so a driver must validate it against the DECLARED
+    # model before it can reach statement text. The declaration below is this
+    # driver's model: table `notes` with columns `id`/`body` (the `type Note`
+    # fields) and the `seq` table `create` draws keys from. An identifier
+    # outside that declaration, or one that is not a plain SQL name, is refused
+    # here rather than interpolated.
+    declared = {"notes": ("id", "body"), "seq": ("n",)}
+    plain = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+    def ident(name):
+        if not plain.match(name):
+            raise ValueError("refused table or column identifier: " + repr(name))
+        return name
+
+    for table, columns in declared.items():
+        for name in (table,) + tuple(columns):
+            ident(name)
+
     conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT)")
-    conn.execute("CREATE TABLE seq (n INTEGER PRIMARY KEY AUTOINCREMENT)")
+    conn.execute("CREATE TABLE " + ident("notes") + " ("
+                 + ident("id") + " TEXT PRIMARY KEY, "
+                 + ident("body") + " TEXT)")
+    conn.execute("CREATE TABLE " + ident("seq") + " ("
+                 + ident("n") + " INTEGER PRIMARY KEY AUTOINCREMENT)")
     conn.commit()
     return conn
 }
@@ -110,6 +147,31 @@ extern pure fn sq_remove(conn: Conn, id: Str) -> Unit = @py {
     return
 }
 
+// The typed UPDATE: one row, by key, with the new body. The changed value is a
+// BOUND parameter; the statement text carries only the declared identifiers.
+extern pure fn sq_update(conn: Conn, id: Str, body: Str) -> Unit = @py {
+    conn.execute("UPDATE notes SET body = ? WHERE id = ?", (body, id))
+    conn.commit()
+    return
+}
+
+// Restore a row EXACTLY (insert, or overwrite the row already there): the
+// inverse of `update` (put the previous body back) and of `delete` (put the
+// removed row back). Its value is bound, never interpolated.
+extern pure fn sq_restore(conn: Conn, id: Str, body: Str) -> Unit = @py {
+    conn.execute("INSERT OR REPLACE INTO notes (id, body) VALUES (?, ?)", (id, body))
+    conn.commit()
+    return
+}
+
+// The typed DELETE: one row, by key. Its inverse is `sq_restore`, with the
+// value the read observed before the delete.
+extern pure fn sq_delete(conn: Conn, id: Str) -> Unit = @py {
+    conn.execute("DELETE FROM notes WHERE id = ?", (id,))
+    conn.commit()
+    return
+}
+
 // The sqlite driver. It provides the SAME `Store` service `MemoryStore` does,
 // so the swap touches neither the model nor consumer query code. The embedded
 // connection is acquired for the component's life and closed on teardown.
@@ -133,14 +195,49 @@ component SqliteStore provides store: Store {
       undo sq_remove(db, id)
       return id
     }
+
+    // UPDATE is an overwrite, so its inverse is the value the row held BEFORE
+    // the write, restored with `sq_restore` (never `sq_remove`, which would
+    // drop a row that existed). A missing key is a typed no-op: `None` in,
+    // `None` out, and no effect registered.
+    fn update(id, draft) {
+      let cur = sq_get(db, id)
+      if (cur == None) {
+        return None
+      }
+      let old = match cur {
+        Some(v) => v,
+        None => { id: id, body: "" },
+      }
+      effect sq_update(db, id, draft.body)
+      undo   sq_restore(db, id, old.body)
+      return Some({ id: id, body: draft.body })
+    }
+
+    // DELETE removes the row and carries its prior value as the inverse, so a
+    // row removed during activation is re-inserted in LIFO order on
+    // teardown/abort. A missing key is a typed no-op and registers no effect.
+    fn delete(id) {
+      let cur = sq_get(db, id)
+      if (cur == None) {
+        return None
+      }
+      let old = match cur {
+        Some(v) => v,
+        None => { id: id, body: "" },
+      }
+      effect sq_delete(db, id)
+      undo   sq_restore(db, id, old.body)
+      return cur
+    }
   }
 }
 
 // ---------------------------------------------------------------- lifecycle
 
-// The three assertions below have query bodies IDENTICAL to
+// The first five assertions below have query bodies IDENTICAL to
 // examples/model_store.rvl's; only the `load`/`unload` target changed. That is
-// the whole memory -> sqlite swap.
+// the whole memory -> sqlite swap: the model and the query code do not move.
 
 lifecycle test "a created row is readable under its store-assigned key, and reverts residue-free" {
   load SqliteStore
@@ -177,13 +274,56 @@ lifecycle test "a reloaded store starts empty" {
   assert no_residue
 }
 
-// The injected fault: write a row, then ABORT mid-activation. The `create`
-// effect's derived inverse (the DELETE) replays LIFO before the connection is
-// closed, so the composition reverts residue-free on the sqlite driver — the
+lifecycle test "update overwrites the row and delete removes it, and both revert residue-free" {
+  load SqliteStore
+  let id = call store.create({ body: "first" })
+  let edited = call store.update(id, { body: "second" })
+  assert edited == Some({ id: "note-0", body: "second" })
+  let hit = call store.get(id)
+  assert hit == Some({ id: "note-0", body: "second" })
+  let removed = call store.delete(id)
+  assert removed == Some({ id: "note-0", body: "second" })
+  let gone = call store.get(id)
+  assert gone == None
+  unload SqliteStore
+  assert no_residue
+}
+
+lifecycle test "update and delete of an absent key are typed no-ops" {
+  load SqliteStore
+  let edited = call store.update("note-0", { body: "x" })
+  assert edited == None
+  let removed = call store.delete("note-0")
+  assert removed == None
+  let all = call store.list()
+  assert all == []
+  unload SqliteStore
+  assert no_residue
+}
+
+// The injected fault after each kind of write: a create, an overwrite and a
+// delete each register their inverse before the ABORT, so teardown replays
+// them LIFO and the composition reverts residue-free on the sqlite driver. The
 // same recovery story the memory driver gives, now over a real embedded store.
 lifecycle test "an aborted write reverts residue-free on the sqlite driver" {
   load SqliteStore
   call store.create({ body: "doomed" })
+  abort
+  assert no_residue
+}
+
+lifecycle test "an aborted update reverts residue-free on the sqlite driver" {
+  load SqliteStore
+  let id = call store.create({ body: "first" })
+  call store.update(id, { body: "second" })
+  abort
+  assert no_residue
+}
+
+lifecycle test "an aborted delete reverts residue-free on the sqlite driver" {
+  load SqliteStore
+  let id = call store.create({ body: "kept" })
+  call store.delete(id)
   abort
   assert no_residue
 }
