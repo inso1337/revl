@@ -209,14 +209,14 @@ Three summary readings of that map:
 | `RevL.G9.authority_refusal_is_not_universal` | G9 — anti-tautology (item 418) | **proved** | `propext` | one flow, admitted at a disclosure sink and refused at an authority sink |
 | `RevL.G9.sink_rules_are_distinct` | G9 — anti-tautology (item 418) | **proved** | `propext` | the four `Admits` rules separated pairwise; not one predicate four times |
 | `RevL.G9.secret_refusal_is_load_bearing` | item 256 — anti-tautology (418) | **proved** | `propext` | the algebra CAN clear a `secret`; `taint.py`'s two refusals are what stop it |
-| `RevL.G9.secret_noninterference` | G9 — semantic non-interference (issue #2738) | **proved** | `propext` | two declassifier-free executions of one admitted flow that agree on the public input and differ only in the hidden component end with the same public projection and label |
-| `RevL.G9.execution_labels_match_the_flow` | G9 — semantic non-interference (issue #2738) | **proved** | none | the value semantics computes the label transition `Flow` states, so the two-run statement is about an admitted flow rather than a bare step list |
-| `RevL.G9.public_changes_require_a_declassifier` | G9 — semantic non-interference (issue #2738) | **proved** | `propext` | a different public projection needs a `.declassify` step on the path; the declassification exception is exact |
-| `RevL.G9.declassifier_changes_only_its_origin` | G9 — semantic non-interference (issue #2738) | **proved** | `propext` | a `.declassify` publishes the hidden component and its label effect is exactly `applyD`; every origin it does not clear survives |
-| `RevL.G9.endorse_gate_preserves_foreign_origins` | G9 — semantic non-interference (issue #2738) | **proved** | `propext` | an `endorse[o]` gate cannot remove any origin other than `o`, the invariant item 249 declares it for |
-| `RevL.G9.noninterference_witness` | G9 — semantic non-interference (issue #2738), non-vacuity | **proved** | `propext` | a real declassifier-free flow over two values that differ only in the hidden component, with equal public output |
-| `RevL.G9.declassify_breaks_noninterference` | G9 — semantic non-interference (issue #2738), non-vacuity | **proved** | `propext` | an admitted `endorse[confidential]` publishes the hidden component, so the public outputs differ, and the foreign `web` origin survives |
-| `RevL.G9.noDeclassify_of_declassifiersOf_eq_nil` | G9 — semantic non-interference (issue #2738) | **proved** | `propext` | `declassifiersOf st = []` implies no step is a declassifier, the bridge from the audit surface to the value semantics |
+| `RevL.G9.secret_noninterference` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | two declassifier-free executions of one step list that agree on the public projection and label and differ only in the hidden component end with the same public projection and label |
+| `RevL.G9.execution_labels_match_the_flow` | G9: semantic non-interference (issue #2738) | **proved** | none | the value semantics computes the label transition `Flow` states; the label half is tied to `Flow`, the public half is `exec`'s own property |
+| `RevL.G9.public_changes_require_a_declassifier` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | a different public projection needs a `.declassify` step on the path; the declassification exception is exact |
+| `RevL.G9.declassifier_changes_only_its_origin` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | a `.declassify` publishes the hidden component and its label effect is exactly `applyD`; every origin it does not clear survives |
+| `RevL.G9.endorse_gate_preserves_foreign_origins` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | an `endorse[o]` gate cannot remove any origin other than `o`, the invariant item 249 declares it for |
+| `RevL.G9.noninterference_witness` | G9: semantic non-interference (issue #2738), non-vacuity | **proved** | `propext` | a real declassifier-free step list over two values that differ only in the hidden component, with equal public output |
+| `RevL.G9.declassify_breaks_noninterference` | G9: semantic non-interference (issue #2738), non-vacuity | **proved** | `propext` | an admitted `endorse[confidential]` publishes the hidden component, so the public outputs differ, and the foreign `web` origin survives |
+| `RevL.G9.noDeclassify_of_declassifiersOf_eq_nil` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | `declassifiersOf st = []` implies no step is a declassifier, the bridge from the audit surface to the value semantics |
 | `RevL.G9Coverage.coversB_iff` | G9 — path coverage (issue #2108) | **proved** | `propext` | `coversB` is exactly the three projections being equal out to the LONGER list, so a walk that drops, shortens, re-seeds or pads a scope flips the Bool |
 | `RevL.G9Coverage.coversBodyB_iff` | G9 — path coverage (issue #2108) | **proved** | `propext` | `coversBodyB_iff` is `coversB_iff` at the body's own scopes: the printed `coverage` verdict is this Bool, so the oracle cannot print `ok` for a walk the theorem refuses |
 | `RevL.G9Coverage.coversB_self` | G9 — path coverage (issue #2108) | **proved** | `propext` | a scope list covers itself — the base case every refusal witness is measured against, so those are not satisfied by a `coversB` that always returned `false` |
@@ -708,11 +708,13 @@ value with exactly `Flow`'s label transition. No step reads `hidden`
 except `.declassify`, which publishes it.
 
 `RevL.G9.secret_noninterference` is the two-run statement: two executions
-of one admitted flow that agree on the public input and on the entry
-label, and differ only in the hidden component, end with the same public
-projection and label, provided no declassifier sits on the path.
-`execution_labels_match_the_flow` pins the value semantics to `Flow`, so
-the theorem is about an admitted flow rather than an arbitrary step list.
+of the same step list that agree on the public projection and on the
+input label, and differ only in the hidden component, end with the same
+public projection and label, provided no declassifier sits on the path.
+This is a property of the value semantics, not a consequence of the G9
+flow rules: no step writes `pub` from any input except `.declassify`, and
+the flow rules constrain labels rather than computation.
+`execution_labels_match_the_flow` is the separate label bridge to `Flow`.
 
 The declassification exception is not a hole.
 `public_changes_require_a_declassifier` proves that a different public
@@ -723,8 +725,8 @@ origin it does not clear survives); and
 `endorse_gate_preserves_foreign_origins` is the `endorse[o]` gate's
 invariant. The witnesses
 `noninterference_witness` and `declassify_breaks_noninterference` are
-registered non-vacuity evidence: a real declassifier-free flow over two
-values differing only in `hidden`, and the same shape with an admitted
+registered non-vacuity evidence: a real declassifier-free step list over
+two values differing only in `hidden`, and the same shape with an admitted
 `endorse[confidential]` where the public outputs differ and the foreign
 `web` origin survives.
 
@@ -2236,16 +2238,18 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    What is proved is the flow *rule* at the sink, the *coverage* of the
    checker's walk (issue #2108), and, since issue #2738, the two-run
    statement `RevL.G9.secret_noninterference` over the little value
-   semantics in `RevL.Lemmas.TaintLemmas`: two executions of an admitted
-   declassifier-free flow that agree on the public input and differ only
-   in the hidden component end with the same public projection. That is a
-   property of the model, not of the language: the declassification
-   exception is a theorem (`public_changes_require_a_declassifier`), the
-   endorse gate's invariant is a theorem
-   (`endorse_gate_preserves_foreign_origins`), and the model says nothing
-   about the Python checker (the differential oracle decides the rule on
-   the corpus) or about the interprocedural fixed point that discovers
-   which paths exist. See *G9* below.
+   semantics in `RevL.Lemmas.TaintLemmas`: two declassifier-free
+   executions of the same step list that agree on the public projection
+   and differ only in the hidden component end with the same public
+   projection. That is a property of the value semantics, not a
+   consequence of the flow rules: no step writes `pub` from any input
+   except `.declassify`, and the flow rules constrain labels rather than
+   computation. The declassification exception is a theorem
+   (`public_changes_require_a_declassifier`), the endorse gate's
+   invariant is a theorem (`endorse_gate_preserves_foreign_origins`), and
+   the model says nothing about the Python checker (the differential
+   oracle decides the rule on the corpus) or about the interprocedural
+   fixed point that discovers which paths exist. See *G9* below.
 4. **WAL commit/abort discharge. Done**, as R4 and A8 in the table above.
 
    This needed an operational semantics, which roadmap item 418 correctly

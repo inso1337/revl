@@ -468,8 +468,8 @@ structure Val where
   deriving Repr, DecidableEq
 
 /-- One step of the value semantics. The label transition is exactly
-`Flow`'s; no step reads `hidden` except an admitted declassifier, which
-publishes it as the public projection. -/
+`Flow`'s; no step reads `hidden` except `.declassify`, which publishes it
+as the public projection. Admission is `Flow`'s job, not this function's. -/
 def stepVal : Step → Val → Val
   | .source o, v => { v with label := o :: v.label }
   | .join m, v => { v with label := join m v.label }
@@ -521,9 +521,25 @@ theorem exec_pub_eq_of_noDeclassify (st : List Step) (v : Val)
     (exec st v).pub = v.pub := by
   simpa using congrArg Val.pub (exec_eq_of_noDeclassify st v h)
 
+/-- Two executions of one step list have equal labels when their inputs
+have equal labels, whatever their payloads: the label transition of
+`exec` is a function of the input label and the steps alone. This is the
+label half of `RevL.G9.secret_noninterference` and it needs no `Flow`. -/
+theorem exec_label_congr (st : List Step) {v₁ v₂ : Val}
+    (h : v₁.label = v₂.label) :
+    (exec st v₁).label = (exec st v₂).label := by
+  induction st generalizing v₁ v₂ with
+  | nil => exact h
+  | cons s st ih =>
+    cases s with
+    | source o => exact ih (by simp [stepVal, h])
+    | join m => exact ih (by simp [stepVal, h])
+    | propagate => exact ih h
+    | declassify d => exact ih (by simp [stepVal, h])
+
 /-- The value semantics computes the label transition `Flow` states. This
-is the bridge that makes `RevL.G9.secret_noninterference` a statement
-about an ADMITTED flow rather than about an arbitrary step list. -/
+ties the label half to `Flow`; it does not make `Flow` responsible for the
+public projection, which is `exec`'s own property. -/
 theorem exec_label_eq_of_flow {P : Profile} {G : Grants}
     {ℓin : Label} {st : List Step} {ℓout : Label}
     (hf : Flow P G ℓin st ℓout) :

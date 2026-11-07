@@ -121,7 +121,7 @@ RevL.G9.secret_rules_not_vacuous	concrete	-	confidential downgrades, secret neve
 RevL.G9.authority_refusal_is_not_universal	concrete	-	one flow, admitted at a disclosure sink and refused at an authority sink
 RevL.G9.sink_rules_are_distinct	concrete	-	the four Admits rules separated pairwise
 RevL.G9.secret_refusal_is_load_bearing	concrete	-	the algebra can clear a secret, so taint.py's two refusals carry the theorem
-RevL.G9.secret_noninterference	instance	RevL.G9.noninterference_witness	the witness applies the theorem to a real declassifier-free flow over two values that differ only in the hidden component
+RevL.G9.secret_noninterference	instance	RevL.G9.noninterference_witness	the witness applies the theorem to a real declassifier-free step list over two values that differ only in the hidden component
 RevL.G9.execution_labels_match_the_flow	instance	RevL.G9.noninterference_witness	the witness flow's label transition is the one the value semantics computes
 RevL.G9.public_changes_require_a_declassifier	instance	RevL.G9.noninterference_witness,RevL.G9.declassify_breaks_noninterference	the declassifier-free flow takes the left disjunct and the admitted endorse the right one, so neither branch is dead
 RevL.G9.declassifier_changes_only_its_origin	instance	RevL.G9.declassify_breaks_noninterference	the witness endorses confidential, publishes the hidden component and leaves the foreign web origin on the label
