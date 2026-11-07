@@ -488,9 +488,15 @@ _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
 #: that name first, so a user binding of one of these spellings made the
 #: assignment target the wrong variable (a go build type error). `_f`, `i`,
 #: `_i` and `_j` stay unreserved: their shadows are never read as a user value.
+#: issue #3095 adds the component activation/provide-impl scaffolding a
+#: `let-effect` bind shares scope with: `ctx` is the activation's
+#: `*stc.Context` and the impl's own field, `cfg` the config struct, the rest
+#: are the emitted frames, method receiver and apply results.
 _EMITTER_RESERVED = {
     "revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
     "_svc", "_err", "_r", "_ok",
+    "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+    "_revlUi", "_revlApplyInv", "_revlApplyErr",
 }
 
 
@@ -533,7 +539,18 @@ def _safe_local(name: str) -> str:
 
 
 def _bind_field(name: str) -> str:
-    return _lower_camel(name)
+    """The Go spelling of a component `let-effect` bind.
+
+    `_lower_camel` drops the trailing underscores the frontend's `_safe_name`
+    added to keep binders apart, so the raw binder `ctx` and the escaped one
+    `ctx_` both spelled `ctx`, and `ctx` is also the activation's context
+    parameter and the provide impl's own field. Preserve the trailing rung and
+    escape the component scaffolding through `_safe_local`'s ladder; a bind
+    that lands on no reserved name is unchanged, so ordinary output is
+    byte-identical (issue #3095).
+    """
+    return _safe_local(_lower_camel(str(name))
+                       + "_" * (len(str(name)) - len(str(name).rstrip("_"))))
 
 
 def _req_field(name: str) -> str:

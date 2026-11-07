@@ -9595,8 +9595,7 @@ def _emit_component(
         for local in env.reqs:
             out.append(f"        this.{env.req_fields[local]} = {env.req_fields[local]};")
         for b in _binds(component):
-            field = _ident(b, "binding")
-            out.append(f"        this.{field} = {field};")
+            out.append(f"        this.{_ident(b, 'binding')} = {_ident(b, 'binding')};")
         out.append("    }")
         provide = next(
             (s for s in component.get("body") or []
