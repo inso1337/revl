@@ -161,6 +161,22 @@ pub fn pushed_from(xs: List[Int]) -> Int {
   return out.length()
 }
 
+// a match arm binder shadows the outer list: the match is typed from the arm
+// bodies with the binder in scope, the Int payload (issue #3075)
+pub fn binder_shadow(o: Opt[Int]) -> Int {
+  var out = []
+  let n = match o { Some(out) => out, None => 0 }
+  return out.length() + n
+}
+
+// a `let _` binds nothing and consumes no key; the blank identifier is never
+// an unused local, so no `_ = _` follows it (issue #3074)
+pub fn blank(s: Str) -> Int {
+  var out = []
+  let _ = s
+  return out.length() + s.length()
+}
+
 test "the untyped empty lists build and run" {
   assert dup(["b", "a"]).join("|") == "b|a"
   assert bag(["x"]).items.join("|") == "x"
@@ -178,4 +194,6 @@ test "the untyped empty lists build and run" {
   assert joined() == 0
   assert arrow_shadow() == 1
   assert pushed_from([1]) == 2
+  assert binder_shadow(Some(4)) == 4 && binder_shadow(None) == 0
+  assert blank("ab") == 2
 }
