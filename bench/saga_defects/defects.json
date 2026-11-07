@@ -78,16 +78,6 @@
       "expectedCode": "G5"
     },
     {
-      "id": "wrong-lifo-order",
-      "group": "project",
-      "kind": "wrong-lifo-order",
-      "saga": "checkout",
-      "file": "sagas/wrong_lifo_order.rvl",
-      "description": "The author hand-orders the teardown in the inverses of two inventory holds, releasing the first before the second. The checker refuses a hand-written bracket teardown that crosses a boundary (G5), so the wrong order cannot run; the derived LIFO order is the only order the language accepts.",
-      "expected": "compile",
-      "expectedCode": "G5"
-    },
-    {
       "id": "emission-with-undo",
       "group": "project",
       "kind": "emission-with-undo",
@@ -150,10 +140,10 @@
     {
       "id": "wrong-release-sku",
       "group": "project",
-      "kind": "wrong-inverse-target",
+      "kind": "wrong-lifo-order",
       "saga": "checkout",
       "file": "sagas/wrong_release_sku.rvl",
-      "description": "The two inventory holds release each other's sku. The provider is Map-backed in this saga, so the sweep's host-residue check sees the key an undo did not reverse.",
+      "description": "The two inventory holds release each other's sku: the first hold's undo releases the second hold's key and the second's releases the first's. The derived order is mechanically LIFO, but the hand-written inverse targets are swapped, so the first hold's own key survives its step. The provider is Map-backed, so the sweep's host-residue check sees the un-reversed write.",
       "expected": "fault-test",
       "component": "Checkout"
     },

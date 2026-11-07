@@ -23,23 +23,22 @@ Failure model: One failure is injected after a top-level step of the saga compon
 | `emit-plain-method` | project | emit-plain-method | compile | **compile** | G4: `emit` on `inventory.reserve`, which is not declared `emission` |
 | `undo-not-release` | project | undo-not-release | compile | **compile** | G4: the `undo` of `let spill = effect Map.new(...)` must release THAT handle: write `undo spill.drop()` |
 | `manual-teardown` | project | manual-teardown | compile | **compile** | G5: the `undo` of this bracket calls `notify`, a fn that reaches an emission `send` (through notify -> send) — a bracket inverse runs in teardown and may not cross a boundary (G5) |
-| `wrong-lifo-order` | project | wrong-lifo-order | compile | **compile** | G5: the `undo` of this bracket calls `teardown_pair`, a fn that reaches an emission `audit` (through teardown_pair -> audit) — a bracket inverse runs in teardown and may not cross a boundary (G5) |
 | `emission-with-undo` | project | emission-with-undo | compile | **compile** | G6: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `provide`), found 'undo' |
 | `dependency-cycle` | project | dependency-cycle | compile | **compile** | G3: dependency cycle: OrderBook -> InvoiceBook -> OrderBook (G3) |
 | `failing-inverse` | project | failing-inverse | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `fail_refund` of `Checkout` raised (RuntimeError: refund service down) |
 | `failing-compensation` | project | failing-compensation | fault-test | **fault-test** | residue recorded by the teardown: compensation-residue — the inverse `erase_receipt` of `Checkout` raised (RuntimeError: receipt store down) |
 | `missing-compensate` | project | missing-compensate | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `wrong-refund-order` | project | wrong-inverse-target | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
-| `wrong-release-sku` | project | wrong-inverse-target | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#18 key 'sku-1' held absent before the first bracketed `insert` of it and 1 when it unloaded: an undo did not reverse its write) |
+| `wrong-release-sku` | project | wrong-lifo-order | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#18 key 'sku-1' held absent before the first bracketed `insert` of it and 1 when it unloaded: an undo did not reverse its write) |
 | `partial-refund` | project | partial-inverse | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `noop-compensation` | project | noop-compensation | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `double-release` | project | double-release | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 
-**17 rows: 9 refused at compile, 3 caught by a fault test, 5 missed by both (12/17 caught).**
+**16 rows: 8 refused at compile, 3 caught by a fault test, 5 missed by both (11/16 caught).**
 
 | catch point | rows |
 |---|---|
-| refused at compile time | 9 |
+| refused at compile time | 8 |
 | caught only by a fault test | 3 |
 | missed by both | 5 |
 

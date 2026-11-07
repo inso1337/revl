@@ -130,7 +130,9 @@ PAPER_TOTALS = {
         17: ("rows", "compile", "fault-test", "missed"),
         68: ("rows", "compile", "fault-test", "missed"),
         75: ("rows", "compile", "fault-test", "missed"),
+        76: ("rows",),
         87: ("rows",),
+        97: ("rows",),
     },
     "docs/research/papers/P16-testing-recovery-claims-sweep-roundtrip.md": {
         7: ("rows", "fault-test", "missed"),
@@ -151,9 +153,10 @@ def test_the_paper_totals_are_the_measured_totals():
                 continue
             line = lines[line_no - 1]
             for key in keys:
-                if str(measured[key]) not in line:
+                number = str(measured[key])
+                if re.search(rf"(?<!\d){number}(?!\d)", line) is None:
                     drift.append(
-                        f"{relative}:{line_no} does not state {key}={measured[key]}")
+                        f"{relative}:{line_no} does not state {key}={number}")
     assert not drift, "\n".join(drift)
 
 

@@ -44,7 +44,7 @@ The fault sweep executes the py reference tier, so it needs the cordis-py
 runtime at the pin in `backends/python/setup.sh`:
 
 ```sh
-sh backends/python/setup.sh          # or a lane venv with the pinned cordis-py
+sh backends/python/setup.sh          # or a virtual environment with the pinned cordis-py
 python3 bench/saga_defects/run.py     # measure and print
 python3 bench/saga_defects/run.py --write   # measure and refresh the table
 python3 bench/saga_defects/run.py --list    # rows only, no measurement
@@ -86,7 +86,11 @@ saga and stating in the row what now catches it.
   than hide it.
 - **G3 here is component dependency acyclicity**, not a check on the order of
   steps inside a saga. The `dependency-cycle` row is a composition-level
-  defect; the ordering rows are scored on their own.
+  defect. The wrong-order row is `wrong-release-sku`: its two holds release
+  each other's sku, the derived LIFO order is mechanically correct, and the
+  sweep catches the swapped targets on the Map-backed provider. A hand-written
+  teardown that would order the releases itself is refused at G5
+  (`manual-teardown`).
 
 ## Adding a row
 
