@@ -18,6 +18,9 @@ closed. The no-crossing control keeps the refusals from being satisfiable by
 refusing everything.
 """
 
+import inspect
+import re
+
 import pytest
 
 from revl import audit_diff
@@ -163,8 +166,116 @@ def test_an_unclaimed_token_kind_fails_closed_on_every_axis(monkeypatch):
         "zzz:foo"]
 
 
-def test_every_crossing_kind_the_cases_produce_has_a_bucket():
-    """The table is complete for every kind this file can make `crossings`
-    emit, plus the two it already had."""
-    kinds = {"host", "emit"} | {c[0] for c in CASES}
-    assert kinds <= set(canary._CROSSING_BUCKET)
+def _token_prefixes_in_crossings_source() -> set:
+    """The token kinds `audit_diff.crossings` can emit, read from its own
+    source: every `out.add(f"<kind>:...")` it makes. An `out.add` written in
+    any other shape is a kind this reader cannot name, so it is counted and
+    the caller fails rather than skipping it."""
+    src = inspect.getsource(audit_diff.crossings)
+    kinds = re.findall(r'out\.add\(f"(\w+):', src)
+    assert len(kinds) == src.count("out.add("), (
+        "audit_diff.crossings adds a token this test cannot read the kind of")
+    return set(kinds)
+
+
+def test_every_crossing_kind_audit_diff_emits_has_a_bucket():
+    """The table is complete for every kind `audit_diff.crossings` can emit,
+    read from `crossings` itself rather than from a list in this file, so a
+    kind added there later reds here until it is mapped."""
+    emitted = _token_prefixes_in_crossings_source()
+    produced = {t.partition(":")[0]
+                for src in {c[1] for c in CASES} | {c[2] for c in CASES}
+                for t in crossings(audit_report(_ir(src)))}
+    # the control: the source reader names every kind the real compositions
+    # in this file make `crossings` produce, so it is reading the right code
+    assert produced and produced <= emitted, (produced, emitted)
+    assert emitted <= set(canary._CROSSING_BUCKET), (
+        emitted - set(canary._CROSSING_BUCKET))
+
+
+# --------------------------------------------------------------------------
+# A tightened `env:` bound promotes; every other bound change still refuses.
+# The bound is fingerprinted into the token, so a tightening arrives as one
+# added and one removed token for the same field. Read alone the added token
+# is a widening, and canary has no accept path, so before the pairing a
+# hardened contract could never be promoted.
+
+
+def _boot_field(name: str, bound: str, typ: str = "Str") -> str:
+    body = f"config.{name}" if typ == "Str" else '"constant"'
+    return ("service Env { fn data_root() -> Str }\n"
+            "boot component HarnessBoot provides env: Env {\n"
+            '  isolate env in realm("tenant_a")\n'
+            f"  config {{ {name}: {typ}{bound} }}\n"
+            f"  provide env {{ fn data_root() = {body} }}\n"
+            "}\n")
+
+
+#: (id, running bound, candidate bound): each candidate admits a subset
+TIGHTENINGS = [
+    ("unbounded-to-under", "", ' under "./d"'),
+    ("under-to-descendant", ' under "./.harness-data"',
+     ' under "./.harness-data/sub"'),
+    ("in-to-subset", ' in ["a", "b"]', ' in ["a"]'),
+]
+
+#: (id, running source, candidate source, the added token that must refuse)
+WIDENINGS = [
+    ("loosened-under", _boot_field("data_dir", ' under "./.harness-data/sub"'),
+     _boot_field("data_dir", ' under "./.harness-data"'),
+     "env:data_dir:under=./.harness-data"),
+    ("sibling-path", _boot_field("data_dir", ' under "/a/b"'),
+     _boot_field("data_dir", ' under "/a/bc"'), "env:data_dir:under=/a/bc"),
+    ("dotdot-escape", _boot_field("data_dir", ' under "./d"'),
+     _boot_field("data_dir", ' under "./d/../e"'),
+     "env:data_dir:under=./d/../e"),
+    ("different-field", _boot_field("data_dir", ""),
+     _boot_field("other_dir", ' under "./d"'), "env:other_dir:under=./d"),
+    ("in-superset", _boot_field("data_dir", ' in ["a"]'),
+     _boot_field("data_dir", ' in ["a", "b"]'), "env:data_dir:in=a|b"),
+    ("under-to-in", _boot_field("data_dir", ' under "./d"'),
+     _boot_field("data_dir", ' in ["./d/x"]'), "env:data_dir:in=./d/x"),
+    ("under-to-unbounded", _boot_field("data_dir", ' under "./d"'),
+     _boot_field("data_dir", ""), "env:data_dir:*"),
+    # the bound narrows but another part of the row moves with it
+    ("int-to-float", _boot_field("n", " in [1, 2]", "Int"),
+     _boot_field("n", " in [1]", "Float"), "env:n:in=1"),
+    ("int-to-bool", _boot_field("n", " in [1, 0]", "Int"),
+     _boot_field("n", " in [1]", "Bool"), "env:n:in=1"),
+    ("secret-to-plain", _boot_field("data_dir", ' under "./d"', "Secret[Str]"),
+     _boot_field("data_dir", ' under "./d/x"'), "env:data_dir:under=./d/x"),
+]
+
+
+@pytest.mark.parametrize("running,candidate", [t[1:] for t in TIGHTENINGS],
+                         ids=[t[0] for t in TIGHTENINGS])
+def test_a_tightened_env_bound_promotes(running, candidate):
+    running = _boot_field("data_dir", running)
+    candidate = _boot_field("data_dir", candidate)
+    prev, new = audit_report(_ir(running)), audit_report(_ir(candidate))
+    # non-vacuity: the pair does change the field's token
+    added = sorted(crossings(new) - crossings(prev))
+    removed = sorted(crossings(prev) - crossings(new))
+    assert len(added) == 1 and added[0].startswith("env:data_dir:")
+    assert len(removed) == 1 and removed[0].startswith("env:data_dir:")
+    verdict = canary.judge_authority(_ir(running), _ir(candidate))
+    assert verdict["ok"] is True, verdict
+    assert verdict["moved"] == []
+    report = canary.run_canary(_ir(running), candidate_source=candidate,
+                               realm="tenant_a", over_the_transport=False)
+    assert report["ok"] and report["admitted"], report.get("reason")
+    assert report["authority"]["ok"] is True
+    assert report["recommendation"] == "promote"
+
+
+@pytest.mark.parametrize("running,candidate,token", [w[1:] for w in WIDENINGS],
+                         ids=[w[0] for w in WIDENINGS])
+def test_an_env_bound_change_not_provably_narrower_refuses(running, candidate,
+                                                           token):
+    prev, new = audit_report(_ir(running)), audit_report(_ir(candidate))
+    assert token in crossings(new) - crossings(prev)
+    verdict = canary.judge_authority(_ir(running), _ir(candidate))
+    assert verdict["ok"] is False
+    assert verdict["widened"] is True
+    assert verdict["moved"] == ["capability"]
+    assert verdict["diff"]["capability"] == [token]

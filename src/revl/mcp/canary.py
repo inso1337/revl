@@ -454,6 +454,91 @@ def _crossing_buckets(added) -> dict:
     return out
 
 
+def _env_bound_narrower(old, new) -> bool:
+    """Whether every value the `new` contract bound admits, the `old` one
+    admitted too, so the field's authority only shrank (issue #3206).
+
+    Three shapes are provable and nothing else is, so anything else (a bound
+    of another kind, `under` to `in`, `in` to `under`, a bound removed) reads
+    as not narrower, which keeps the token an added widening:
+
+      * `*` (unbounded) to any bound: an unbounded field admits every value;
+      * `under=p` to `under=q`: `q` is admitted by `p` under the same lexical
+        check the boot preflight applies to an injected value
+        (`run._under_violation`: path SEGMENTS, never a string prefix, so
+        `/a/bc` is not inside `/a/b`, and a `..` segment is refused). Anything
+        inside `q` is then inside `p`;
+      * `in=S` to `in=S'`: every value of `S'` is in `S`, by the same
+        membership test the preflight makes.
+    """
+    if not new:
+        return False
+    if not old:
+        return True
+    kind = old.get("kind")
+    if kind != new.get("kind"):
+        return False
+    if kind == "under":
+        from ..run import _under_violation  # noqa: PLC0415 - the one enforcer
+        p, q = old.get("prefix"), new.get("prefix")
+        return (isinstance(p, str) and bool(p)
+                and _under_violation(q, p) is None)
+    if kind == "in":
+        old_values = old.get("values") or []
+        new_values = new.get("values") or []
+        return bool(new_values) and all(v in old_values for v in new_values)
+    return False
+
+
+def _env_narrowed(prev: dict, new: dict, delta: dict) -> set:
+    """The added `env:` tokens that only tightened a field's bound.
+
+    `audit_diff.crossings` fingerprints a contract field's bound into its
+    token, so a tightened bound shows up as one added `env:N:B'` paired with
+    one removed `env:N:B`. Read alone the added token is a widening, and
+    canary has no accept path, so hardening a bound could never promote. Each
+    added token is paired with the field's row on both sides (the structured
+    bound, not a re-parse of the token, whose `in=` join cannot carry a value
+    holding `|`), and dropped from the added set only when exactly one row
+    names the field on each side, the two rows agree on everything but the
+    bound (type, secrecy, requiredness), the old token is among the removed
+    ones, and `_env_bound_narrower` proves the new bound narrower. Anything else
+    stays an added widening.
+    """
+    from ..audit_diff import _bound_token  # noqa: PLC0415 - read-only reuse
+
+    def _rows(audit):
+        out: dict = {}
+        for row in (audit.get("env") or {}).get("fields") or []:
+            out.setdefault(row.get("name"), []).append(row)
+        return out
+
+    removed = set(delta.get("removed") or [])
+    prev_rows, new_rows = _rows(prev), _rows(new)
+    narrowed = set()
+    for token in delta.get("added") or []:
+        if not (isinstance(token, str) and token.startswith("env:")):
+            continue
+        name = token.split(":", 2)[1]
+        before, after = prev_rows.get(name) or [], new_rows.get(name) or []
+        if len(before) != 1 or len(after) != 1:
+            continue
+        # the bound is the ONLY thing allowed to move: a type change (`Int`
+        # to `Float` or `Bool` widens what passes the same `in` test) or a
+        # field ceasing to be a `Secret` rides in the same token otherwise
+        if ({k: v for k, v in before[0].items() if k != "bound"}
+                != {k: v for k, v in after[0].items() if k != "bound"}):
+            continue
+        old_bound, new_bound = before[0].get("bound"), after[0].get("bound")
+        if token != f"env:{name}:{_bound_token(new_bound)}":
+            continue
+        if f"env:{name}:{_bound_token(old_bound)}" not in removed:
+            continue
+        if _env_bound_narrower(old_bound, new_bound):
+            narrowed.add(token)
+    return narrowed
+
+
 def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     """The authority diff between two generations, per
     `promotion_barrier.AUTHORITY_AXES`.
@@ -463,24 +548,27 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     `placement.swap_admission` rather than writing a second admission check.
     The buckets map onto the axes as follows:
 
-      capability   a new `host:` crossing, a new `secret:` binding, a new or
-                   loosened `env:` contract, a widened per-emission
-                   capability scope, or a host body appearing on a backend
-                   it was not on
+      capability   a new `host:` crossing, a new `secret:` binding, a new
+                   `env:` contract field or one whose bound is not provably
+                   narrower, a widened per-emission capability scope, or a
+                   host body appearing on a backend it was not on
       taint        a new `emit:` crossing, which is a new boundary edge out,
                    a new `taint:` crossing (an untrusted origin newly
                    reaching an emission), or a new `declassify:` (an added
                    `endorse`)
-
-    An added crossing token of a kind none of these claims is counted on
-    every axis, so a token kind added to `audit_diff.crossings` later fails
-    closed until it is mapped (issue #3206).
       realm        a reach bound that loosened or moved (`confined(T)` to
                    `unconfined`, or to a different bound)
       budget       a per-capability emission ceiling that widened, including
                    a bounded count becoming `unbounded`
       retention    a new declared position where a resource handle leaves
                    revl's sight (`resources.retention_surface`)
+
+    An added crossing token of a kind none of these claims is counted on
+    every axis, so a token kind added to `audit_diff.crossings` later fails
+    closed until it is mapped (issue #3206). A tightened `env:` bound is not
+    an addition: `_env_narrowed` pairs it with the token it replaced and drops
+    it when the new bound is provably narrower, so hardening a contract still
+    promotes.
 
     All five axes of `promotion_barrier.AUTHORITY_AXES` are measured, and the
     return says which: an axis this function could not compare would be named
@@ -494,7 +582,8 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
 
     prev, new = audit_report(running_ir), audit_report(candidate_ir)
     delta = diff_crossings(prev, new)
-    buckets = _crossing_buckets(delta["added"])
+    narrowed = _env_narrowed(prev, new, delta)
+    buckets = _crossing_buckets(t for t in delta["added"] if t not in narrowed)
     buckets.update({
         "reach_weakened": list(delta["reach_weakened"]),
         "scope_widened": list(diff_capability_scopes(prev, new)["scope_widened"]),
