@@ -183,7 +183,7 @@ class RevlPipeline:
         return session, session.admit(source, granted=self.composition.granted)
 
     def _run(self, source: str, runtime: Any, env: Any) -> tuple[Any, dict, str]:
-        session, verdict = self._admit(source)
+        _session, verdict = self._admit(source)
         if not verdict.admitted:
             return verdict, {}, ""
         bridge.install(runtime, env)
@@ -249,7 +249,7 @@ class RevlPipeline:
                 final_text = text.strip()
                 break
             stats["steps"] += 1
-            verdict, run, result = self._run(source, runtime, env)
+            verdict, run, _ = self._run(source, runtime, env)
             repairs = 0
             while not verdict.admitted and repairs < self.max_repairs:
                 repairs += 1
@@ -275,7 +275,7 @@ class RevlPipeline:
                 if source is None:
                     final_text = text.strip()
                     break
-                verdict, run, result = self._run(source, runtime, env)
+                verdict, run, _ = self._run(source, runtime, env)
             if source is None:
                 break
             if not verdict.admitted:
