@@ -20,7 +20,7 @@ from .analysis import (
     compute_hover,
 )
 from .document import Position
-from .fixgen import Fix, fix_code, generate_fix
+from .fixgen import Fix, Repair, fix_code, generate_fix, generate_repairs
 from .server import LspServer, serve
 
 __all__ = [
@@ -32,6 +32,8 @@ __all__ = [
     "compute_definition",
     "compute_code_actions",
     "Fix",
+    "Repair",
     "fix_code",
     "generate_fix",
+    "generate_repairs",
 ]

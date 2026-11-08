@@ -74,7 +74,8 @@
         "known",
         "meaning",
         "message",
-        "ok"
+        "ok",
+        "repairs"
       ],
       "note": "The `explain` result envelope, produced by `diagnostics.explain` and re-spelled field by field by the CLI renderer. A field added to the producer and not read by the renderer is invisible."
     },
