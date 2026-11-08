@@ -72,6 +72,27 @@ def make_tree(root: Path, changed: dict) -> Path:
     return root
 
 
+def make_policy_tree(root: Path, before: str, after: str,
+                     path: str = "boundary.policy") -> Path:
+    """A git tree whose one changed document is a policy with known base text.
+
+    `make_tree` writes `base` into every file's base commit, which is fine for
+    a source diff and useless for a policy classification: the base text is what
+    the classifier compares against.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q", "-b", "main")
+    (root / path).parent.mkdir(parents=True, exist_ok=True)
+    (root / path).write_text(before)
+    (root / "README.md").write_text("base\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    (root / path).write_text(after)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "candidate")
+    return root
+
+
 EMPTY_DIFF = {axis: [] for axis in ec.AUTHORITY_AXES}
 
 
@@ -758,3 +779,90 @@ def test_the_verdict_json_shows_that_measurements_were_not_read(
     measured = {s["component"]: s for s in verdict["stages"]}
     for stage in ec.MEASURED:
         assert measured[stage]["code"] == "NOT_REACHED"
+
+
+# ------------------------------- the change classifier (issue #2752, item 540)
+
+_POLICY_BASE = (
+    "wasm components confined\n"
+    "wasm component limits fuel = 1000, memory = 64MiB, wall = 10s\n"
+    "capability net requires approval ttl 5m\n"
+)
+
+
+def _without_approval(policy: str) -> str:
+    return "\n".join(line for line in policy.splitlines()
+                     if "requires approval" not in line) + "\n"
+
+
+def test_the_classifier_calls_a_threshold_change_safe_adaptive():
+    """The first of the two classes: a threshold moves, no approval does."""
+    result = ec.classify_policy_change(
+        _POLICY_BASE, _POLICY_BASE.replace("fuel = 1000", "fuel = 5000"))
+    assert result.kind == ec.SAFE_ADAPTIVE
+    assert result.kind != ec.AUTHORITY_EVOLVING
+    assert "4" in result.surface
+
+
+def test_the_classifier_calls_a_dropped_approval_rule_authority_evolving():
+    """The second class: the rule the operator wrote is gone."""
+    result = ec.classify_policy_change(_POLICY_BASE, _without_approval(_POLICY_BASE))
+    assert result.kind == ec.AUTHORITY_EVOLVING
+    assert "4" in result.surface
+    assert "net" in result.reason
+
+
+def test_a_candidate_that_removes_an_approval_requirement_is_refused(tmp_path):
+    """Issue #2752's exit test: a NAMED refusal on the diff.
+
+    Before this slice the change moved the deploy chain's `policy` facet and a
+    model record's `policy_digest`, and both are detection by a verifier who
+    already holds the old value. Nothing refused it before activation.
+    """
+    tree = make_policy_tree(tmp_path / "approval", _POLICY_BASE,
+                            _without_approval(_POLICY_BASE))
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "APPROVAL_WEAKENED"
+    assert verdict.measurements_read is False
+    assert verdict.refusing_stage == "authority"
+    reason = verdict.by_name()["authority"].reason
+    assert "surface 4" in reason.lower()
+    assert "net requires approval" in reason
+
+
+def test_a_candidate_that_only_moves_a_threshold_promotes(tmp_path):
+    """The classifier is not a refusal for every policy edit: a safe-adaptive
+    change on the same document promotes on identical evidence."""
+    tree = make_policy_tree(
+        tmp_path / "threshold", _POLICY_BASE,
+        _POLICY_BASE.replace("fuel = 1000", "fuel = 5000"))
+    assert run(proposal_record(tree)).decision == "PROMOTE"
+
+
+def test_a_longer_approval_ttl_is_authority_evolving():
+    result = ec.classify_policy_change(
+        _POLICY_BASE, _POLICY_BASE.replace("ttl 5m", "ttl 5h"))
+    assert result.kind == ec.AUTHORITY_EVOLVING
+    assert "ttl" in result.reason
+
+
+def test_adding_an_approval_rule_is_safe_adaptive():
+    result = ec.classify_policy_change(
+        _POLICY_BASE, _POLICY_BASE + "capability pay requires approval\n")
+    assert result.kind == ec.SAFE_ADAPTIVE
+
+
+def test_a_candidate_that_edits_the_policy_module_is_refused(tmp_path):
+    """The parser that gives the classifier its vocabulary is an authority.
+
+    `src/revl/policy.py` is in neither `KERNEL_PATHS` nor `RULESET_MODULES`,
+    which is the design note's finding for surface 4: a candidate could change
+    what `requires approval` means without touching a policy document. The
+    classifier refuses it on the diff.
+    """
+    tree = make_tree(tmp_path / "policymodule", {"src/revl/policy.py": "changed\n"})
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "APPROVAL_WEAKENED"
+    assert "policy.py" in verdict.by_name()["authority"].reason
