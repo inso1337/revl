@@ -606,7 +606,21 @@ run`, and `--config` the config it ran with. Recover then:
    have any. Each such key is listed in `binding.refused` (`key`,
    `component`, `crossings`), and every call through it is declined by name
    (`would-reactivate`). A second recover with nothing open boots nothing.
-4. **Replays the open discharge descriptors through the runtime's own abort
+4. **Hands the runtime only the calls the composition declares as
+   inverses** (issue #3149). The digest check binds the log to a
+   composition, not a line to a function, and the runtime resolves a call's
+   `method` to any callable the emitted module binds. So recover reads the
+   declared set off the IR: every call in an `undo` position (registered as a
+   `transactional` entry) and every call in a `compensate` position
+   (registered as a `compensation`), at a step or on an extern, plus the
+   runtime's own `Stream.close` for a durable cursor. A descriptor whose
+   `(receiver, method)` is not in that set, for example one naming the
+   forward emission it was meant to undo, is `unresolved` and never called.
+   So is a descriptor whose `entry` is not the one its call is declared as
+   (a compensation recorded as a transactional inverse, or the reverse). A
+   legacy boundary inverse is checked by name only: it is a transactional
+   entry by construction.
+5. **Replays the open discharge descriptors through the runtime's own abort
    path** (`runtime.replay_descriptors`): witnessed inverses newest first with
    their fences, then compensations newest first under the Phase-2 budget.
    The runtime appends an `aborted` record naming every seq that ran, which
@@ -621,7 +635,7 @@ The verdict carries `"world": "real"` and a `binding` object (`composition`,
 | `settled` | `settledByReplay`: an earlier replay already settled it, nothing re-run |
 | `failed` | residue (`restore-residue` or `compensation-residue`, outcome `failed`) |
 | `fenced` | residue (`fenced-residue`): an earlier attempt spent the at-most-once fence |
-| `unresolved` | residue (`unresolved-residue`): the call names no host body in this binding |
+| `unresolved` | residue (`unresolved-residue`): the call names no host body in this binding, or names one the composition does not declare as an inverse or compensation of that entry kind (step 4) |
 | `stranded` | residue (`stranded-residue`): an E-Stop is in force, nothing ran |
 | `would-reactivate` | residue (`reactivation-residue`): reaching the receiver needs a provider whose activation crosses (`binding.refused`); not attempted, and no fence is spent |
 

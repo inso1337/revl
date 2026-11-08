@@ -132,7 +132,8 @@ class _PlacementBinding:
                 for entry, path in recorded}
 
     def _world(self, path: str, plan: tuple, keys: set):
-        from .recover_binding import CompositionWorld, _provider_closure  # noqa: PLC0415
+        from .recover_binding import (CompositionWorld, _provider_closure,  # noqa: PLC0415
+                                      declared_inverses)
         _wal, foreign, _grants, foreign_handles = plan
         refused = {k: v for k, v in self.refused.items() if k in keys}
         return CompositionWorld(
@@ -141,7 +142,8 @@ class _PlacementBinding:
             services={k: v for k, v in self.services.items() if k in keys},
             booted=_provider_closure(self.ir, keys - set(refused)),
             provider_session=None, cleanup=[], foreign=foreign,
-            foreign_handles=foreign_handles, refused=refused)
+            foreign_handles=foreign_handles, refused=refused,
+            declared=declared_inverses(self.ir))
 
     def close(self) -> None:
         session, self.session = self.session, None
