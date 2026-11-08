@@ -96,6 +96,7 @@ def _key(record: dict) -> tuple:
         record["task"],
         record["condition"],
         record["injection_task"],
+        record.get("attack"),
     )
 
 
