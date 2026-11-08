@@ -2285,7 +2285,21 @@ class _FlowChecker:
         if kind in ("bin", "interp", "template", "concat"):
             return self._union_children(node, env)
 
-        # everything else (record/list/field/index/if/match/arrow/...) is walked
+        # `arrow`: a parameter SHADOWS an outer binding of the same name for the
+        # body, so the capture join reads the body against an env that seeds the
+        # parameters clean. Without this, `(t: Str) => t` over a tainted outer
+        # `t` is read as CAPTURING it, and the closure is tainted by a value its
+        # body never reads. The over-approximation predates the callee-value
+        # join, but it only produced a refusal when `any_sink` was true; now
+        # that the join runs for every unnameable indirect call, seeding the
+        # parameters is what keeps a shadowing closure clean.
+        if kind == "arrow":
+            inner = dict(env)
+            for pname in _param_names(node.get("params") or []):
+                inner[pname] = CLEAN
+            return self._union_children(node, inner)
+
+        # everything else (record/list/field/index/if/match/...) is walked
         # with a union fallback: taint only ever *disappears* at a literal or a
         # declassifier, never by falling through an unmodelled node. This is the
         # no-false-clean invariant (Decision 2 propagation, residual risk 3).
@@ -2411,7 +2425,7 @@ class _FlowChecker:
             # arrow MINTED by a fn (`fn mk(d) -> (Str) -> Str { return (x) => d
             # }`) carries the same join out through `mk`'s return — so reading
             # the binding here covers both shapes with one join, and stays exact
-            # for a closure that captured nothing.
+            # for a closure whose captured values are clean.
             result = _join(result, env.get(callee, CLEAN))
             if result.dirty:
                 result = Taint(result.origins, result.via + (f"{callee}()",))

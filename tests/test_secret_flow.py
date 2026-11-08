@@ -170,6 +170,17 @@ def test_a_closure_over_a_clean_value_is_admitted_at_a_log():
         "      let x = emit logit(f(\"z\"))"), "flow.rvl")
 
 
+def test_a_closure_parameter_shadowing_a_tainted_binding_is_clean():
+    """A parameter SHADOWS an outer binding of the same name, so the body reads
+    the parameter and not the captured token. The capture join seeds the arrow's
+    parameters clean; without that seed, the closure is tainted by a value its
+    body never reads and the program is refused."""
+    compile_source(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (t: Str) => t\n"
+        "      let x = emit logit(f(\"z\"))"), "flow.rvl")
+
+
 def test_refused_at_an_mcp_tool_return():
     """The value a `provide` method returns crosses the service / MCP bridge to a
     client that never declared a `Secret[T]` receiver — refused at the return."""

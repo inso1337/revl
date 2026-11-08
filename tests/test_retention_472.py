@@ -128,6 +128,18 @@ def test_a_retained_value_carried_out_of_a_closure_is_refused():
     assert "load() -> f() -> sink" in err.message, err.message
 
 
+def test_a_live_retained_value_carried_out_of_a_closure_compiles():
+    """The control that keeps the closure join exact: a value whose policy has
+    NOT expired is admitted at the same persistence sink, including when a
+    closure carries it there."""
+    src = FUTURE + FLOW.format(cap="db.insert").replace(
+        "      let row = load(k)\n      let n = emit sink(row)",
+        "      let row = load(k)\n"
+        "      let f = (a: Str) => row\n"
+        "      let n = emit sink(f(\"z\"))")
+    compile_source(src, "retain.rvl")
+
+
 def test_a_declared_persistence_sink_parameter_is_refused_on_the_declaration():
     """The declaration half: a crossing that DECLARES it persists a retained
     value is refused off the declaration alone, with no call site needed."""
