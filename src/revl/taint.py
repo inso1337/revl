@@ -247,6 +247,43 @@ def top_qualifier(type_name: str | None) -> str | None:
     return None
 
 
+def _holds_qualifier(type_name: str | None, wanted: str) -> bool:
+    """True if a `wanted` qualifier head sits anywhere the value itself
+    reaches: the outermost head, or a container argument (`Result`, `Opt`,
+    `List`, `Map`, a tuple, a generic). A function type's arguments are not
+    descended, for the reason :func:`mentions_secret` gives."""
+    if not type_name:
+        return False
+    if top_qualifier(type_name) == wanted:
+        return True
+    if is_function_type(type_name):
+        return False
+    _head, args = parse_type(type_name)
+    return any(_holds_qualifier(a, wanted) for a in args)
+
+
+def source_qualifier(type_name: str | None) -> str | None:
+    """The qualifier a declared RETURN mints a taint source from: `Untrusted`
+    or `Secret`, or None.
+
+    The outermost head decides when it is a qualifier. Otherwise the qualifier
+    is read wherever it sits in a container (issue #3192): a crossing declared
+    `-> Result[Secret[Str], Str]` (the only spelling a fallible lease has) or
+    `-> Opt[Untrusted[Str]]` hands back the very bytes the unwrapped spelling
+    does, so the value it returns carries the same origin, and a `match` or `?`
+    that unwraps it carries the origin on to the payload. The whole returned
+    value carries it, the `Err` payload included: the walk has no per-variant
+    taint, and over-approximating is the sound direction. When a type holds
+    both, `Untrusted` is minted, as the outermost spelling's `elif` does."""
+    top = top_qualifier(type_name)
+    if top is not None:
+        return top if top in ("Untrusted", "Secret") else None
+    for wanted in ("Untrusted", "Secret"):
+        if _holds_qualifier(type_name, wanted):
+            return wanted
+    return None
+
+
 def _mentions_trusted(type_name: str | None) -> bool:
     """True if a `Trusted[...]` head appears anywhere in the type. This is how a
     checked-parser declassifier is recognised even when it wraps its result, e.g.
@@ -305,12 +342,10 @@ def mentions_secret(type_name: str | None) -> bool:
     also silently promote whole containers of ordinary callbacks, which is
     exactly the over-redaction `SecretIndex` is careful to bound.
 
-    Deliberately WIDER than what the static refusal walk mints (see
-    `CONFIDENTIAL_ORIGIN` below): a stamp only tells a runtime "these bytes are
-    confidential once they leave the process", so widening it can over-redact a
-    durable record at worst. Minting the origin more widely would newly REFUSE
-    programs that compile today, which is a language change and not this
-    module's business."""
+    The static refusal walk mints its source from the same positions (see
+    :func:`source_qualifier`, issue #3192): a declared return that hands the
+    secret back inside a container is a `confidential` source as well as a
+    stamped one, so the stamp and the flow refusal agree on the value."""
     if not type_name:
         return False
     head, args = parse_type(type_name)
@@ -768,9 +803,10 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     # externs: an `Untrusted[T]` return is a taint source; a `Trusted[T]` param
     # is a sink; both are stripped to their base type.
     for ext in getattr(program, "externs", ()):
-        if top_qualifier(ext.returns) == "Untrusted":
+        ret_qual = source_qualifier(ext.returns)
+        if ret_qual == "Untrusted":
             model.sources[ext.name] = _origin_of(ext.capabilities)
-        elif top_qualifier(ext.returns) == "Secret":
+        elif ret_qual == "Secret":
             # item 256 Slice 3: a `Secret[T]` return mints the `confidential`
             # origin where the value enters the value world (§7a) — the payment
             # token an emission hands back. DISJOINT from `secret`: the bound-key
@@ -1024,12 +1060,15 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # silently discarded and the operation read as public to every sink
             # downstream of it. Where the unit DOES implement the operation the
             # body already answers (see `provided_here`), with a finer origin.
-            # Kept on the OUTERMOST qualifier, exactly as the extern source mint
-            # is: the wider `mentions_secret` spelling marks a confidential
-            # WITNESS position, it does not mint a source (see there).
+            # Read with `source_qualifier`, exactly as the extern source mint
+            # is: a qualifier inside a container (`Result[Secret[T], E]`,
+            # `Opt[Untrusted[T]]`) mints the same origin as the outermost
+            # spelling (issue #3192).
             if method.name not in model.sources \
                     and method.name not in provided_here:
-                ret_qual = top_qualifier(method.returns)
+                ret_qual = source_qualifier(method.returns)
+                if ret_qual is None:
+                    ret_qual = top_qualifier(method.returns)
                 if ret_qual == "Untrusted":
                     model.sources[method.name] = _origin_of(
                         getattr(method, "capabilities", None))
