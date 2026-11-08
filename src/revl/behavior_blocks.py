@@ -40,6 +40,7 @@ from .parser import parse_text
 
 BEGIN = "// revl:behavior begin"
 END = "// revl:behavior end"
+_MARKER_PREFIX = "// revl:behavior"
 _DIGEST_PREFIX = "// digest: sha256:"
 
 
@@ -78,19 +79,35 @@ def _indent(line: str) -> str:
     return line[:len(line) - len(line.lstrip())]
 
 
-def _without_provenance(node):
-    """Drop the IR's source-POSITION keys before hashing.
+def _without_provenance(node, *, top: bool = False):
+    """Drop the IR's source-POSITION facts before hashing.
 
     A spawn node, a break/continue step, a lease and a hole each carry the
-    `line` they came from. Inserting this very block above a component moves
-    every later line, so a digest that included them would stale the block the
-    moment it was written, and regenerate forever. `file` is the same kind of
-    fact (the spelling a module was reached under), not part of the behavior
-    the block describes.
+    `line` they came from, and a hole carries the `file` it was read from.
+    Inserting this very block above a component moves every later line, so a
+    digest that included those facts would stale the block the moment it was
+    written and regenerate forever.
+
+    The drop is by SHAPE, not by key name. `requires`, `provides`, `isolate`
+    and `routes` are maps keyed by user-chosen capability keys, so a component
+    may legitimately declare `requires source: Db`; dropping every key named
+    `source`, `line` or `file` at every depth would erase that entry and let a
+    real behavior change hash identically. Only the component's own top-level
+    `source` path, an integer-valued `line` (every positional `line` is an int,
+    while a capability map's value is a service or realm string) and a `file`
+    on a `kind: hole` node are provenance.
     """
     if isinstance(node, dict):
-        return {key: _without_provenance(value) for key, value in node.items()
-                if key not in ("line", "file", "source")}
+        payload = {}
+        for key, value in node.items():
+            if top and key == "source":
+                continue
+            if key == "line" and isinstance(value, int):
+                continue
+            if key == "file" and node.get("kind") == "hole":
+                continue
+            payload[key] = _without_provenance(value)
+        return payload
     if isinstance(node, list):
         return [_without_provenance(value) for value in node]
     return node
@@ -99,14 +116,14 @@ def _without_provenance(node):
 def _digest(component: dict, template: bool) -> str:
     """The sha256 of the component's lowered behavior, position-independent.
 
-    The `source` path and every `line`/`file` provenance field are dropped, so
-    a move of the file, a reformat that keeps the IR, or the insertion of the
-    block itself does not change the digest; a change to the component's
+    The component's `source` path and every source-position field are dropped,
+    so a move of the file, a reformat that keeps the IR, or the insertion of
+    the block itself does not change the digest; a change to the component's
     lowered behavior does. The template flag participates because which
     manifest list a component sits in is a fact of the composition, not of its
     body.
     """
-    payload = _without_provenance(component)
+    payload = _without_provenance(component, top=True)
     payload["__template__"] = bool(template)
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False)
@@ -223,12 +240,33 @@ def _comment_run(lines: list[str], decl_index: int) -> tuple[int, int] | None:
     return index + 1, run_end
 
 
-def _blocks_in(lines: list[str], run: tuple[int, int]) -> tuple[list[int], list[int]]:
+def _is_marker(line: str) -> bool:
+    """Whether a line claims to be a managed-block marker.
+
+    Matches the exact markers AND a marker that gained trailing text (for
+    example `// revl:behavior begin (managed)`): such a line is a malformed
+    marker this tool owns, not ordinary prose, so it is refused rather than
+    silently ignored and duplicated by the next `gen`.
+    """
+    stripped = line.strip()
+    return stripped in (BEGIN, END) or stripped.startswith(_MARKER_PREFIX + " ")
+
+
+def _markers_in(lines: list[str], run: tuple[int, int]) -> tuple[list[int], list[int], list[int]]:
+    """The exact BEGIN lines, exact END lines and all marker-like lines."""
     start, end = run
-    return (
-        [i for i in range(start, end + 1) if lines[i].strip() == BEGIN],
-        [i for i in range(start, end + 1) if lines[i].strip() == END],
-    )
+    begins: list[int] = []
+    ends: list[int] = []
+    markers: list[int] = []
+    for index in range(start, end + 1):
+        stripped = lines[index].strip()
+        if stripped == BEGIN:
+            begins.append(index)
+        elif stripped == END:
+            ends.append(index)
+        if _is_marker(lines[index]):
+            markers.append(index)
+    return begins, ends, markers
 
 
 def _block_span(lines: list[str], decl_index: int, path: str) -> tuple[int, int] | None:
@@ -237,17 +275,19 @@ def _block_span(lines: list[str], decl_index: int, path: str) -> tuple[int, int]
 
     The block must be the LAST thing in the contiguous `//` comment run above
     the declaration: its `end` marker is the line immediately above the
-    component (a blank line breaks the run). Markers elsewhere in the run make
-    the block malformed rather than silently ignored, because a hand-edited
-    marker pair is exactly the drift this checks for.
+    component (a blank line breaks the run). Markers elsewhere in the run, or a
+    marker with trailing text, make the block malformed rather than silently
+    ignored, because a hand-edited marker is exactly the drift this checks
+    for.
     """
     run = _comment_run(lines, decl_index)
     if run is None:
         return None
-    begins, ends = _blocks_in(lines, run)
-    if not begins and not ends:
+    begins, ends, markers = _markers_in(lines, run)
+    if not markers:
         return None
-    if len(begins) == 1 and len(ends) == 1 and ends[0] == run[1] and begins[0] < ends[0]:
+    if (len(begins) == 1 and len(ends) == 1 and len(markers) == 2
+            and ends[0] == run[1] and begins[0] < ends[0]):
         return begins[0], ends[0]
     raise BehaviorBlockError(
         path, decl_index + 1,
@@ -332,12 +372,12 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
             problems.append(error)
             run = _comment_run(lines, decl_index)
             if run is not None:
-                begins, _ends = _blocks_in(lines, run)
-                owned.update(begins)
+                _begins, _ends, markers = _markers_in(lines, run)
+                owned.update(markers)
             continue
         if span is None:
             continue
-        owned.add(span[0])
+        owned.update(span)
         indent = _indent(lines[decl_index])
         facts = derive(component, template=component["name"] in templates,
                        surface=surfaces.get(component["name"]))
@@ -359,9 +399,10 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
                 "behavior block does not match the facts derived from the IR "
                 f"(regenerate with `revl docs gen {path}`)"))
     for index, line in enumerate(lines):
-        if line.strip() == BEGIN and index not in owned:
+        if _is_marker(line) and index not in owned:
             problems.append(BehaviorBlockError(
                 path, index + 1,
-                "behavior block is not directly above a component declaration "
-                f"(remove it or regenerate with `revl docs gen {path}`)"))
+                "behavior block marker is not directly above a component "
+                f"declaration (remove it or regenerate with "
+                f"`revl docs gen {path}`)"))
     return problems

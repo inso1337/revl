@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from revl.__main__ import main
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +83,26 @@ component Pinger provides ping: Ping {
       emit fetch("x")
       return 0
     }
+  }
+}
+"""
+
+PROVENANCE_NAMED_KEY = """\
+service Db {
+  fn get() -> Int
+}
+
+service Cache {
+  fn get() -> Int
+}
+
+service Own {
+  fn value() -> Int
+}
+
+component Store requires %(key)s: Db provides own: Own {
+  provide own {
+    fn value() -> Int = %(key)s.get()
   }
 }
 """
@@ -219,6 +241,28 @@ def test_check_refuses_a_hand_edited_fact_line(tmp_path, capsys):
     assert "does not match the facts derived from the IR" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("key", ["source", "line", "file"])
+def test_a_capability_key_named_like_provenance_still_stales_the_block(
+        tmp_path, capsys, key):
+    """The digest must not erase a semantic map entry keyed `source`/`line`/`file`."""
+    path = _write(tmp_path, PROVENANCE_NAMED_KEY % {"key": key}, "named_key.rvl")
+    assert main(["docs", "gen", str(path)]) == 0
+    text = path.read_text(encoding="utf-8")
+    before = _digest(_block(text.split("\n"), "Store"))
+
+    changed = text.replace(f"requires {key}: Db", f"requires {key}: Cache")
+    assert changed != text
+    path.write_text(changed, encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["docs", "check", str(path)]) == 1
+    assert "outdated" in capsys.readouterr().err
+    assert main(["docs", "gen", str(path)]) == 0
+    assert main(["docs", "check", str(path)]) == 0
+    after = _digest(_block(path.read_text(encoding="utf-8").split("\n"), "Store"))
+    assert after != before
+
+
 def test_check_is_quiet_for_a_component_with_no_block(tmp_path, capsys):
     path = _write(tmp_path, COMPONENT)
     capsys.readouterr()
@@ -278,6 +322,26 @@ def test_check_refuses_an_orphaned_block_in_a_file_with_no_component(tmp_path, c
 
     assert main(["docs", "check", str(path)]) == 1
     assert "not directly above a component declaration" in capsys.readouterr().err
+
+
+def test_check_refuses_a_stray_end_marker(tmp_path, capsys):
+    path = _write(tmp_path, COMPONENT + "\n// revl:behavior end\n")
+
+    assert main(["docs", "check", str(path)]) == 1
+    assert "not directly above a component declaration" in capsys.readouterr().err
+
+
+def test_check_refuses_a_marker_with_trailing_text(tmp_path, capsys):
+    path = _write(tmp_path, COMPONENT)
+    assert main(["docs", "gen", str(path)]) == 0
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("// revl:behavior begin",
+                                 "// revl:behavior begin (managed)", 1),
+                    encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["docs", "check", str(path)]) == 1
+    assert "pair directly above the component" in capsys.readouterr().err
 
 
 def test_realms_are_rendered_from_the_ir(tmp_path):
