@@ -73,6 +73,7 @@ import contextlib
 import importlib.util
 import random
 import re
+import signal
 import sys
 import time
 import types
@@ -4348,7 +4349,34 @@ component C provides ops: Ops {
 # statement grammar ported the reference's `type_` rule (issue #2396).
 PARSE_REFUSED_PROGRAMS = [
     ("issue 2396: a return arrow with no type", "fn f() -> { }"),
+    ("issue 2469: a config field type that is a structural record",
+     "component C { config { h: { a: List[{ c: Int, b: (Str) -> Str }] } } }"),
 ]
+
+
+# There is no pytest-timeout in this environment, and the gate is pure emitted
+# Python, so a SIGALRM interrupts a regressed infinite loop and fails the test
+# instead of hanging the suite. Issue 2469 is the reason this exists: a config
+# field's unread type (-1) used to rewind the field walk into the block it was
+# reading, forever.
+@contextlib.contextmanager
+def _bounded(seconds: int):
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def fire(signum, frame):
+        raise AssertionError(
+            f"the self-host gate did not return within {seconds}s (issue 2469: "
+            "an unread config field type must be refused, not re-walked)")
+
+    old = signal.signal(signal.SIGALRM, fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 @pytest.mark.parametrize("case", PARSE_REFUSED_PROGRAMS,
@@ -4358,7 +4386,8 @@ def test_parse_refused_programs_agree(admit, case):
     ref_tag, ref_msg = _ref(src)
     assert ref_tag == "OUT:" + ref_msg, \
         f"corpus bug: the reference does not refuse {name} at parse time"
-    assert admit(src) == "BAD|" + ref_msg
+    with _bounded(20):
+        assert admit(src) == "BAD|" + ref_msg
 
 
 @pytest.mark.parametrize("binding", ["let", "var"])
