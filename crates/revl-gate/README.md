@@ -188,7 +188,7 @@ the drift gate.
 
 * Reference keywords the self-host does not lex: (none at this generation)
 * Reference stdlib builtins the self-host does not lower as builtins:
-  (none at this generation)
+  `.checked_add()`, `.checked_mul()`, `.checked_sub()`
 
 ## The manifest arm (issue #346)
 

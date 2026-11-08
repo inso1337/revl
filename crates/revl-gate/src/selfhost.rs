@@ -23256,7 +23256,7 @@ fn tk_no_call() -> CallN {
 }
 
 fn tk_stdlib_surface() -> String {
-    return ((((String::from("charAt, charCodeAt, checked_div_euclid, checked_div_floor, ").revl_concat("checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, ")).revl_concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")).revl_concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")).revl_concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")).revl_concat("str, to_char, to_int, to_int32, to_str");
+    return (((((String::from("charAt, charCodeAt, checked_add, checked_div_euclid, ").revl_concat("checked_div_floor, checked_div_trunc, checked_mod, checked_mul, ")).revl_concat("checked_sub, codepoint_at, concat, div_euclid, div_floor, ")).revl_concat("div_trunc, endsWith, field, has, indexOf, is_alnum, is_alpha, ")).revl_concat("is_digit, is_space, join, keys, length, list, lookup, mod, push, ")).revl_concat("remove, repeat, set, size, slice, split, startsWith, str, ")).revl_concat("to_char, to_int, to_int32, to_str");
 }
 
 fn tk_divides_by(m: &str) -> bool {

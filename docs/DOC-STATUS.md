@@ -52,7 +52,7 @@ regenerated rather than edited.
 | README.md | needs-work | 0 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 76 |  |
+| arithmetic.md | needs-work | 75 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 0 |  |
 | audit-diff.md | needs-work | 14 |  |
@@ -165,7 +165,7 @@ regenerated rather than edited.
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 88 | yes |
+| stdlib-2.0.md | current | 89 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 13 |  |
