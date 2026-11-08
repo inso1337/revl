@@ -1,0 +1,36 @@
+{
+  "schema": "AGENTDOJO-1",
+  "started": "2026-11-08T21:24:02+00:00",
+  "suite": "banking",
+  "agentdojo": "0.1.35",
+  "arms": [
+    "baseline",
+    "revl"
+  ],
+  "models": [
+    "flint-bench:latest",
+    "ornith-revl:latest"
+  ],
+  "pins": {
+    "flint-bench:latest": "e4090fb1bab5c5dfd77e3c2765d3a6024e229d3d66f6d0ca3227a1fbe89b2625",
+    "ornith-revl:latest": "2b98245daf4f4ca22ddf3f7accb22e5569656168ac257708f65de76418417e29"
+  },
+  "runs": 2,
+  "temperature": 0.0,
+  "max_steps": 3,
+  "max_tokens": 2048,
+  "tasks": [
+    "user_task_0",
+    "user_task_1"
+  ],
+  "injection_tasks": [
+    "injection_task_0"
+  ],
+  "conditions": [
+    "benign",
+    "attack"
+  ],
+  "command": "bench/agentdojo/run.py --suite banking --arms baseline,revl --models flint-bench:latest,ornith-revl:latest --runs 2 --tasks user_task_0,user_task_1 --conditions benign,attack --injection-tasks injection_task_0 --label pilot-banking --max-steps 3 --max-tokens 2048 --resume",
+  "finished": "2026-11-08T22:02:32+00:00",
+  "records": 32
+}
