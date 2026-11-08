@@ -340,6 +340,39 @@ def _run_policy(args) -> int:
     return 1 if result["refused"] else 0
 
 
+def _run_simulate_swap(args) -> int:
+    """`revl simulate swap OLD NEW --history RUN.wal` (issue #2713) — re-run a
+    recorded history against a changed component.
+
+    Slice 1 is the preflight: read the history, name every fact that keeps it
+    from being re-runnable (a torn or unfinished recording, a crossing with no
+    recorded outcome, no `determinism` record, a parameterized method whose
+    arguments are not on the record, a component outside the pure subset), and
+    run nothing while one is missing. Slice 2 runs only when the preflight is
+    clean: OLD must reproduce every recorded outcome, NEW is executed for each
+    recorded call, and the first returned value that moved is named and stops
+    the run. The execution is offline against a stub host, so no effect fires
+    and the recording is untouched.
+
+    Exit 0 when the history is replayable, OLD reproduces every step and NEW
+    changes nothing; 1 when the preflight names a missing fact or the first
+    difference is found (including a value OLD could not reproduce); 2 on a
+    usage, read or compile error."""
+    from .simulate_swap import SwapError, ok, render, swap
+
+    try:
+        document = swap(args.old, args.new, args.history,
+                        component=getattr(args, "component", None))
+    except SwapError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(document, indent=2))
+    else:
+        print(render(document))
+    return 0 if ok(document) else 1
+
+
 def _run_simulate(args) -> int:
     """`revl simulate policy-diff OLD NEW --history RUN.wal` (item 468 / issue
     #820) — the bounded preview a policy change over recorded history opens.
@@ -366,6 +399,8 @@ def _run_simulate(args) -> int:
     one, or could not read the history whole (a torn tail, or a recording that
     never reached its `activation-complete` record) does not report the change
     clean; 2 on a usage, parse or read error."""
+    if args.simulate_command == "swap":
+        return _run_simulate_swap(args)
     from .policy import PolicyError, component_realms, load_policy
     from .policy_diff import PolicyDiffError, diff, load_history, render, widened
 
