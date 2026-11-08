@@ -431,6 +431,7 @@ def emit_unactivated(ir: dict, config: dict, cleanup: list) -> tuple:
     the driver's own plug seam (extern config, bound secrets) and NOT
     activated. Forgetting the module is pushed onto ``cleanup``."""
     from .mcp.session import SessionError, _backend  # noqa: PLC0415
+    from .refusal import refusals  # noqa: PLC0415
     from .run import _Driver  # noqa: PLC0415
 
     try:
@@ -438,7 +439,13 @@ def emit_unactivated(ir: dict, config: dict, cleanup: list) -> tuple:
     except SessionError as error:
         raise RecoveryError(str(error)) from None
     driver = _Driver(ir, config, emit, runtime, Context, FiberState)
-    module = driver._emit_module(ir)
+    try:
+        module = driver._emit_module(ir)
+    except refusals(emit) as refusal:
+        # the emitter's own refusal is an answer (issue #1406), not a crash:
+        # `revl recover` reports a RecoveryError, an emitter fault stays loud
+        raise RecoveryError(
+            f"the py emitter refused this composition: {refusal}") from None
     name = module.__name__
 
     def _forget_module() -> None:
