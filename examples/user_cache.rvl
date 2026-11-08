@@ -15,6 +15,14 @@ service Cache {
   emission[db] fn put(key: Str, value: Str)
 }
 
+// revl:behavior begin
+// kind: component
+// effects: 1 reversible effect, 0 emissions
+// capabilities: none
+// realms: shared
+// externs: Pool.open
+// digest: sha256:7eb0c85eab290aa743d056d24407fb5efe9d2eb1b232d53ca85945e241497bcf
+// revl:behavior end
 component PgDatabase provides db: Database {
   config { url: Str, pool_size: Int = 10 }
 
@@ -27,6 +35,14 @@ component PgDatabase provides db: Database {
   }
 }
 
+// revl:behavior begin
+// kind: component
+// effects: 2 reversible effects, 1 emission
+// capabilities: db
+// realms: shared
+// externs: Map.new
+// digest: sha256:a3d2827ffb2b439ab7a9de74d7688fc1259006fdcf1fb43d98e895792fb52019
+// revl:behavior end
 component UserCache requires db: Database provides cache: Cache {
   let store = effect Map.new() undo store.drop()
 

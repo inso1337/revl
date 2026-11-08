@@ -14,8 +14,8 @@ compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  update  version
 migrate  contract  erase-report  retention-receipt  plan  apply  undo
 canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
-import  export  sourcemap  serve  run  dev  recover  act  estop  slo
-branch  compare  replay  why  metrics  trace  profile  pool  attest
+docs  import  export  sourcemap  serve  run  dev  recover  act  estop
+slo  branch  compare  replay  why  metrics  trace  profile  pool  attest
 dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -2485,6 +2485,47 @@ refuses the generated file once the model no longer has that digest
   model relative to this file's directory, so the model must be there or below.
 - `--json-diagnostics` - on rejection, print a structured diagnostic instead of
   the human rendering.
+
+### `revl docs`
+
+Keep the derived part of a component's behavior comment honest. `revl docs
+gen FILES` writes or refreshes a managed comment block directly above each
+component and template declared in `FILES`, and `revl docs check FILES` refuses
+a block that no longer matches the IR (issue #2856). Both take the same file
+list `revl compile` takes, because a component file alone may not declare the
+services it requires; the composition is compiled once and each block is
+written back to the file that declares its component.
+
+The block carries the facts that can be derived from the lowered IR rather
+than reviewed by hand: the effect summary, the capability tokens its emission
+call sites and reached externs name, the realm placement (`isolate`/`routes`),
+the extern surface (declared externs reached transitively plus direct host
+calls) and the sha256 of the IR it was derived from. Source positions are
+excluded from the digest, so moving or reformatting the file does not stale
+the block while a change to the component's lowered behavior does.
+
+```revl
+// the consumer: requires the `db` key, provides the `cache` key ...
+// revl:behavior begin
+// kind: component
+// effects: 2 reversible effects, 1 emission
+// capabilities: db
+// realms: shared
+// externs: Map.new
+// digest: sha256:5f0c...
+// revl:behavior end
+component UserCache requires db: Database provides cache: Cache { ... }
+```
+
+Prose outside the markers is never touched. Adoption is incremental: a
+component with no block is not an error, and it becomes managed the first time
+`revl docs gen` writes a block for it. A block above no component is refused,
+and so is a malformed marker pair. A stale block exits 1 naming the file, the
+line, the committed digest and the current one; regenerate it with
+`revl docs gen` instead of editing the derived lines by hand.
+
+- `gen` - write or refresh the block above every component and template.
+- `check` - exit 1 on a stale, hand-edited, malformed or orphaned block.
 
 ### `revl import`
 
