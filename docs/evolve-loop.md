@@ -258,6 +258,33 @@ attempt history.
   `candidate_digest` and the original brief.
 - **bounded rounds**: a failed round ends the run and keeps the last retained
   component; `budget` and `max_rounds` are validated and fixed before the run.
+- **probe ordering**: a candidate with a newly refused row is deferred and is
+  never offered to the Gate; a clean row only orders, so a clean probe with a
+  refusing Gate is still refused (`tests/test_2806_counterfactual_probe.py`).
+
+## Probe ordering (item 2806, Slice 2)
+
+A counterfactual probe (`revl replay WAL --under POLICY --probe --candidate F`,
+item 467) gives the loop one row per candidate: how many recorded crossings that
+candidate would newly refuse, the first dangerous crossing, and the bounds the
+record carries. The probe is evidence only, so the loop uses it in one direction:
+
+- `probe_order(candidates, probe)` calls `probe(candidate)` once per candidate and
+  returns `{"ordered", "deferred", "rows"}`, keyed by `candidate_digest`. A
+  candidate whose row names a first dangerous crossing, or whose `newlyRefused`
+  is above zero, is deferred; every other candidate keeps its relative order. An
+  absent or not-answerable row is not adverse: silence must not become a
+  deferral.
+- `evolve_ordered(candidates, probe, ...)` is the loop that consumes it. Deferred
+  candidates are not offered to the Gate; every ordered candidate goes through
+  `evolve` unchanged, so the Gate is the only admission. A clean probe row never
+  admits a candidate, and a clean row with a refusing Gate is still refused.
+- The module does not import `revl.counterfactual`: the caller supplies the
+  `probe` callable, so a live WAL read stays at the edge and `evolve_loop` keeps
+  its gate-only dependency.
+
+Slice 3 (a two-arm continue-versus-reset experiment from a fork point) waits on
+the live replay executor in issue 2749 and the re-run seam in issue 2713.
 
 ## Harness coordination
 

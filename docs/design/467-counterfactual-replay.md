@@ -166,6 +166,33 @@ the design of the WAL; the second is a filed gap in it.
   bound saying that is a gap in its own reach rather than a finding that they are
   satisfied.
 
+## The probe summary (item 2806, Slice 1)
+
+The counterfactual answers one candidate at a time. The evolve loop needs to
+compare candidates, so `revl replay WAL --under POLICY --probe --candidate F...
+[--candidate F...]` projects the same run into a probe report: one ROW PER
+CANDIDATE with
+
+- `candidate`: the SHA-256 of the candidate's source texts keyed by path, so a
+  row names the exact files it was handed, texts and paths together;
+- `recordedCrossings` and `regraded`: how many crossings the record holds and how
+  many the alternate policy decided for this candidate;
+- `newlyRefused` and `newlyAllowed`: the refused and permitted halves of that
+  regraded set. A refusal is genuinely NEW: the record shows the crossing was
+  made, so it is a boundary the recording crossed and this candidate would not.
+  A permitted verdict is NOT new authority; it is the unchanged allowance the
+  record already shows, and the row keeps it under the item's name only as the
+  other half of the split;
+- `firstDangerousCrossing`, `admission`, `answerable` and `bounds`: copied from
+  the counterfactual row so the loop can see the same facts and the same gaps.
+
+`probe` runs no new execution. Every row is one `replay_under` and nothing else,
+so the WAL stays byte-identical and the runtime tier is never imported. The
+report is ORDERING EVIDENCE and grants nothing: its exit status does not read
+the admission, a clean row cannot admit a candidate, and Slice 2's `evolve` hook
+only moves a candidate with an adverse row to the deferred list. The gate stays
+the only admission.
+
 ## What was left out, and why
 
 - **The live half.** Nothing here re-executes a branch, substitutes a model, or

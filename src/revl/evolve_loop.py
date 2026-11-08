@@ -429,6 +429,95 @@ def evolve(
     return result
 
 
+# --------------------------------------------------------------------------
+# Probe ordering (roadmap item 2806, Slice 2).
+#
+# A counterfactual probe regrades a recording against a candidate edit
+# (`revl replay WAL --under POLICY --candidate FILE --probe`, item 467). It is
+# EVIDENCE, not an admission: contrasts between runs are noisy and share the
+# proposer's biases, so a probe may order candidates and may never admit one.
+# This hook is that one direction and only that one.
+#
+#   * a candidate whose row names a first dangerous crossing, or whose row
+#     newly refuses a recorded crossing, is DEFERRED: it goes to the back of
+#     the order and `evolve_ordered` does not offer it to the Gate;
+#   * a candidate with a clean row, or with no row at all (not answerable),
+#     keeps its place and is admitted by the Gate and nothing else;
+#   * a clean row never admits. `probe_order` never calls the Gate, and
+#     `evolve_ordered` sends every ordered candidate through `evolve`, whose
+#     only admission is the Gate's verdict.
+#
+# The rows are the counterfactual probe report's rows. This module does not
+# import `revl.counterfactual`: the caller supplies the `probe` callable, so
+# the loop takes a row-shaped value and a live WAL read stays at the edge.
+# --------------------------------------------------------------------------
+
+
+def probe_row_is_adverse(row: Optional[dict]) -> bool:
+    """Whether one probe row defers its candidate.
+
+    Adverse means the recorded run crossed a boundary this candidate would not
+    be permitted to cross: a first dangerous crossing, or any newly refused
+    recorded crossing. A row that is absent or not answerable is NOT adverse;
+    it carries no evidence either way and ordering must not turn silence into a
+    deferral."""
+    if not row:
+        return False
+    if row.get("firstDangerousCrossing"):
+        return True
+    return int(row.get("newlyRefused") or 0) > 0
+
+
+def probe_order(candidates: list[Candidate],
+                probe: Callable[[Candidate], Optional[dict]]) -> dict:
+    """Order candidates by their probe rows, deferring the adverse ones.
+
+    One `probe(candidate)` call per candidate, in the order given, so the
+    caller can batch a probe report over the same compositions. A candidate
+    with an adverse row is moved to `deferred`; every other candidate keeps its
+    original relative order in `ordered`. The candidate's own identity is
+    `candidate_digest`, the same hash an `Attempt` and a packet use, and it
+    keys `rows`.
+
+    This function never admits and never calls the Gate: it returns an ordering.
+    `evolve_ordered` is the loop that consumes it."""
+    if not isinstance(candidates, list):
+        raise TypeError("probe_order takes a list of candidates")
+    ordered: list[Candidate] = []
+    deferred: list[Candidate] = []
+    rows: dict[str, Optional[dict]] = {}
+    for candidate in candidates:
+        row = probe(candidate)
+        rows[candidate_digest(candidate)] = row
+        (deferred if probe_row_is_adverse(row) else ordered).append(candidate)
+    return {"ordered": ordered, "deferred": deferred, "rows": rows}
+
+
+def evolve_ordered(
+    candidates: list[Candidate],
+    probe: Callable[[Candidate], Optional[dict]],
+    proposer: Optional[Proposer] = None,
+    budget: int = 3,
+    admit: Callable[[str, str], str] = admit_structured,
+    brief: str = "",
+) -> EvolveResult:
+    """Probe, order, then run the Gate's loop over the ordered candidates.
+
+    A candidate with an adverse probe row is deferred and is not offered to the
+    Gate. Every other candidate goes through `evolve` unchanged, so the Gate is
+    the only thing that can admit it; a clean probe row is never an admission.
+    Returns the first admitted result, or the last attempted result when none
+    admits, or an empty giving-up result when every candidate was deferred."""
+    order = probe_order(candidates, probe)
+    last = EvolveResult(admitted=False)
+    for candidate in order["ordered"]:
+        last = evolve(candidate, proposer=proposer, budget=budget, admit=admit,
+                      brief=brief)
+        if last.admitted:
+            return last
+    return last
+
+
 def rounds(
     candidate: Candidate,
     brief: str,

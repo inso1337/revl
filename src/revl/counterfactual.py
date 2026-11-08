@@ -44,6 +44,8 @@ hold. The report says so on every run, in :data:`BOUNDS`.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 from .errors import RevlError
@@ -460,6 +462,135 @@ def replay_under(wal_path: str, policy_path: str,
     }
 
 
+#: The probe row's stable keys, one row per candidate. The loop reads a row as
+#: ORDERING evidence only; nothing in this module reads it as an admission.
+PROBE_ROW_FIELDS = (
+    "candidate", "files", "recordedCrossings", "regraded", "newlyRefused",
+    "newlyAllowed", "firstDangerousCrossing", "admission", "answerable",
+    "bounds",
+)
+
+
+def candidate_hash(files: list) -> str:
+    """The content hash of one candidate composition: its source texts keyed by
+    path, sorted, compact JSON, UTF-8. Two compositions that differ anywhere in
+    their source, or in which path a file sits at, hash differently.
+
+    Reading the sources is a read. It is the only thing the probe adds to the
+    counterfactual run, and it keeps the candidate's own paths in the hash so
+    the row is reproducible from the files a caller actually handed over.
+    """
+    sources = {}
+    for path in files:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                sources[str(path)] = handle.read()
+        except OSError as error:
+            raise CounterfactualError(
+                f"cannot read candidate source {path}: {error}") from None
+    text = json.dumps(sources, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
+    """One probe row: what this candidate would have done to the recording.
+
+    This is `replay_under` projected onto the facts the loop orders candidates
+    by, so it is one read of the WAL and one static compile, exactly like the
+    counterfactual it summarizes. `regraded` is the number of recorded
+    crossings the alternate policy decided for this candidate (permitted plus
+    refused); `newlyRefused` and `newlyAllowed` split that set.
+
+    "Newly refused" is meaningful: the record shows the crossing WAS made, so a
+    recomputed refusal is a boundary the recording crossed and this candidate
+    would not. "Newly allowed" is the other half of the same split and is NOT
+    evidence of new authority: the record already shows the crossing was made,
+    so a permitted verdict is an unchanged allowance. The pair is kept under the
+    names the item gives it, and the bounds say what the record cannot answer.
+    """
+    files = list(candidate)
+    doc = replay_under(wal_path, policy_path, candidate=files)
+    permitted = sum(1 for c in doc["crossings"] if c["verdict"] == "permitted")
+    refused = sum(1 for c in doc["crossings"] if c["verdict"] == "refused")
+    row = {
+        "candidate": candidate_hash(files),
+        "files": files,
+        "recordedCrossings": doc["recordedCrossings"],
+        "regraded": permitted + refused,
+        "newlyRefused": refused,
+        "newlyAllowed": permitted,
+        "firstDangerousCrossing": doc["firstDangerousCrossing"],
+        "admission": doc["admission"],
+        "answerable": doc["answerable"],
+        "bounds": doc["bounds"],
+    }
+    return {key: row[key] for key in PROBE_ROW_FIELDS}
+
+
+def probe(wal_path: str, policy_path: str, candidates: list) -> dict:
+    """The probe report: ONE ROW PER CANDIDATE, evidence only.
+
+    `candidates` is a list of compositions (each a list of source paths), so a
+    caller can compare competing edits against the same recording in one
+    report. The report grants nothing: it carries no admission of its own
+    and a good row cannot make a candidate admitted. The gate's verdict on the
+    candidate is the `admission` field of the row, copied from the
+    counterfactual, and it is the boundary-policy leg only (see `BOUNDS`).
+
+    Fires nothing and writes nothing: every row is a `replay_under` run, whose
+    zero live effect authority is pinned by
+    `tests/test_467_counterfactual_replay.py`.
+    """
+    if not candidates:
+        raise CounterfactualError(
+            "a probe needs at least one candidate composition")
+    rows = [probe_row(wal_path, policy_path, files) for files in candidates]
+    return {
+        "kind": "revl.counterfactual-probe",
+        "schemaVersion": "1.0",
+        "wal": wal_path,
+        "policy": policy_path,
+        "recordedCrossings": rows[0]["recordedCrossings"],
+        "rows": rows,
+    }
+
+
+def render_probe(doc: dict) -> str:
+    """The probe report, in the plain-line style `render` uses: the recording,
+    then one block per candidate with its row facts and bounds."""
+    lines = [f"counterfactual probe (item 467): {doc['wal']}"
+             f" under {doc['policy']}"]
+    if not doc["rows"]:
+        lines.append("  no candidate was probed")
+        return "\n".join(lines)
+    lines.append(f"  recorded crossings: {doc['recordedCrossings']}"
+                 f" (from the WAL, in recorded order)")
+    for row in doc["rows"]:
+        lines.append("")
+        lines.append(f"  candidate {row['candidate'][:16]}  "
+                     f"({', '.join(row['files'])})")
+        lines.append(f"      recorded crossings regraded: {row['regraded']}")
+        lines.append(f"      newly refused: {row['newlyRefused']}"
+                     f"   newly allowed: {row['newlyAllowed']}")
+        dangerous = row["firstDangerousCrossing"]
+        if dangerous is None:
+            lines.append("      first dangerous crossing: none")
+        else:
+            lines.append(f"      FIRST DANGEROUS CROSSING: "
+                         f"{dangerous['component']}#{dangerous['seq']}  "
+                         f"{dangerous['label']}")
+        admission = row["admission"]
+        if admission is None:
+            lines.append("      candidate admitted: not answerable without a "
+                         "candidate")
+        else:
+            lines.append("      candidate admitted: "
+                         + ("yes" if admission["admitted"] else "no"))
+        lines.append("      bounds: " + ", ".join(row["bounds"]))
+    return "\n".join(lines)
+
+
 def _has_realm_rules(policy: Policy) -> bool:
     return any(rule.scope == "realm" for rule in policy.rules)
 
@@ -539,7 +670,8 @@ def render(doc: dict) -> str:
 
 
 __all__ = [
-    "BOUNDS", "REACH_VIOLATION_KINDS", "WAL_KIND_EMISSION", "WAL_RECORD_EFFECT",
-    "CounterfactualError", "RecordedCrossing", "recorded_crossings",
-    "render", "replay_under",
+    "BOUNDS", "PROBE_ROW_FIELDS", "REACH_VIOLATION_KINDS", "WAL_KIND_EMISSION",
+    "WAL_RECORD_EFFECT", "CounterfactualError", "RecordedCrossing",
+    "candidate_hash", "probe", "probe_row", "recorded_crossings", "render",
+    "render_probe", "replay_under",
 ]
