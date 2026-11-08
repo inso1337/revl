@@ -112,3 +112,34 @@ def test_the_policy_sees_a_web_tainted_send_in_the_compensate_slot():
 
 def test_a_clean_compensate_send_gives_no_violation():
     assert _violations('emit s.send("y") compensate s.send("z")') == []
+
+
+_RECEIVERS = (
+    'extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] = @py { return a }\n'
+    'extern emission[note] fn note(m: Str) -> Int = @py { return 0 }\n'
+    "service V { emission[vault.keep] fn keep(x: Secret[Str]) -> Int }\n"
+    "service S { emission[net] fn send(b: Str) -> Str }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent requires v: V, s: S provides ops: Ops {\n"
+    "  provide ops {\n    fn go(u: Str) {\n"
+    "      let t = emit charge(u)\n"
+)
+
+
+def _receiver_code(comp: str) -> str | None:
+    return _code(_RECEIVERS + f'      emit note("x") compensate {comp}\n'
+                 "      return 0\n    }\n  }\n}\n")
+
+
+def test_an_inner_crossing_in_the_compensate_slot_gets_its_own_receiver_check():
+    """The outer call declares a `Secret[T]` receiver; the inner `s.send`
+    does not, so the confidential value it carries is refused there."""
+    assert _receiver_code("v.keep(s.send(t))") == "G-SECRET-FLOW"
+
+
+def test_a_declared_secret_receiver_in_the_compensate_slot_is_admitted():
+    assert _receiver_code("v.keep(t)") is None
+
+
+def test_a_confidential_value_to_an_undeclared_compensate_receiver_is_refused():
+    assert _receiver_code("s.send(t)") == "G-SECRET-FLOW"

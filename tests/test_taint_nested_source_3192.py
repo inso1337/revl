@@ -115,3 +115,79 @@ def test_a_nested_secret_service_return_from_another_unit_is_refused():
         f"      let t = {_RESULT_UNWRAP}\n"
         "      emit logit(t)", requires="requires v: Vault ")
     assert _code(src) == "G-SECRET-FLOW"
+
+
+def test_both_qualifiers_on_one_return_mint_both_origins():
+    """`Result[Untrusted[Str], Secret[Str]]`: the Ok payload is refused at a
+    shell sink and the Err payload at a log."""
+    decl = ("extern emission[web] fn fetch(u: Str) -> "
+            "Result[Untrusted[Str], Secret[Str]] = @py { return None }")
+    to_log = _agent(decl, "      let r = emit fetch(u)\n"
+                    "      let x = match r { Ok(v) => 0, Err(e) => emit logit(e) }")
+    to_shell = _agent(decl, "      let r = emit fetch(u)\n"
+                      "      let x = match r { Ok(v) => emit run(v), Err(e) => 0 }")
+    assert _code(to_log) == "G-SECRET-FLOW"
+    # the whole value carries both origins, so the Ok payload meets the
+    # disclosure rule at the extern call before the G9 sink check reports
+    assert _code(to_shell) in ("G9", "G-SECRET-FLOW")
+
+
+# -- across a manifest: the services IR stamp carries the nested qualifier ----
+
+_PROVIDER = (
+    "extern emission[web] fn wget(u: Str) -> Result[Untrusted[Str], Str] "
+    "= @py { return None }\n"
+    "service Web { emission[web, wget] fn get(u: Str) -> "
+    "Result[Untrusted[Str], Str] }\n"
+    "service Vault { emission[vault.read] fn read(k: Str) -> "
+    "Opt[Secret[Str]] }\n"
+    "component Prov provides web: Web, vault: Vault {\n"
+    "  provide web { fn get(u) = emit wget(u) }\n"
+    # a provider may not hand a confidential value across the bridge, so this
+    # one returns nothing; the declaration alone is what the IR stamps
+    "  provide vault { fn read(k) = None }\n"
+    "}\n"
+)
+
+
+def _manifest() -> dict:
+    import os
+
+    from revl.compiler import compile_files
+    path = os.path.abspath("base_web_3192.rvl")
+    return compile_files([path], sources={path: _PROVIDER})
+
+
+def _turn_code(body: str) -> str | None:
+    turn = (_SINKS + "service Turn { emission fn go(a: Str) -> Int }\n"
+            "component T requires web: Web, vault: Vault provides turn: Turn {\n"
+            "  provide turn {\n    fn go(a: Str) {\n" + body
+            + "\n      return 0\n    }\n  }\n}\n")
+    try:
+        compile_source(turn, "turn.rvl", manifest=_manifest())
+    except RevlError as err:
+        return getattr(err, "code", None)
+    return None
+
+
+def test_the_services_ir_stamps_a_nested_return_qualifier():
+    services = _manifest()["services"]
+    assert services["Web"]["methods"]["get"]["returns_qualifier"] == "Untrusted"
+    assert services["Vault"]["methods"]["read"]["returns_qualifier"] == "Secret"
+
+
+def test_a_nested_untrusted_return_through_a_manifest_is_refused():
+    assert _turn_code("      let r = emit web.get(a)\n"
+                      f"      let t = {_RESULT_UNWRAP}\n"
+                      "      emit run(t)") == "G9"
+
+
+def test_a_nested_secret_return_through_a_manifest_is_refused():
+    assert _turn_code("      let r = emit vault.read(a)\n"
+                      f"      let t = {_OPT_UNWRAP}\n"
+                      "      emit logit(t)") == "G-SECRET-FLOW"
+
+
+def test_a_clean_value_through_the_manifest_still_compiles():
+    assert _turn_code("      let r = emit web.get(a)\n"
+                      '      emit run("ls")') is None

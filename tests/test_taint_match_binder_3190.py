@@ -155,3 +155,22 @@ def test_a_secret_through_a_destructuring_is_refused():
                  '      let rec = { a: t, b: "ls" }\n'
                  "      emit logit(pick(rec))", extra=_PICK_RECORD)
     assert _code(src) == "G-SECRET-FLOW"
+
+
+# -- `try`: it desugars to a match, so its binder carries the taint too ------
+
+_FIRST = ("fn first(r: Result[Str, Str]) -> Result[Str, Str] {\n"
+          "  let v = try r\n  return Ok(v)\n}\n")
+
+
+def test_a_try_unwrap_carries_the_taint():
+    src = _agent("      let p = emit fetch(u)\n"
+                 "      let r = match first(Ok(p)) { Ok(v) => emit run(v),"
+                 " Err(e) => 0 }", extra=_FIRST)
+    assert _code(src) == "G9"
+
+
+def test_a_try_unwrap_of_a_clean_value_still_compiles():
+    src = _agent('      let r = match first(Ok("ls")) { Ok(v) => emit run(v),'
+                 " Err(e) => 0 }", extra=_FIRST)
+    assert _code(src) is None

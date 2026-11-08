@@ -262,9 +262,20 @@ def _holds_qualifier(type_name: str | None, wanted: str) -> bool:
     return any(_holds_qualifier(a, wanted) for a in args)
 
 
+def source_qualifiers(type_name: str | None) -> tuple:
+    """Every qualifier a declared RETURN mints a taint source from, in the
+    order `Untrusted`, `Secret`: empty, one, or both. See
+    :func:`source_qualifier` for the positions read."""
+    top = top_qualifier(type_name)
+    if top is not None and top not in ("Untrusted", "Secret"):
+        return ()
+    return tuple(q for q in ("Untrusted", "Secret")
+                 if _holds_qualifier(type_name, q))
+
+
 def source_qualifier(type_name: str | None) -> str | None:
-    """The qualifier a declared RETURN mints a taint source from: `Untrusted`
-    or `Secret`, or None.
+    """The PRIMARY qualifier a declared RETURN mints a taint source from:
+    `Untrusted` or `Secret`, or None.
 
     The outermost head decides when it is a qualifier. Otherwise the qualifier
     is read wherever it sits in a container (issue #3192): a crossing declared
@@ -274,14 +285,29 @@ def source_qualifier(type_name: str | None) -> str | None:
     that unwraps it carries the origin on to the payload. The whole returned
     value carries it, the `Err` payload included: the walk has no per-variant
     taint, and over-approximating is the sound direction. When a type holds
-    both, `Untrusted` is minted, as the outermost spelling's `elif` does."""
+    both (`Result[Untrusted[T], Secret[E]]`) the primary is the outermost
+    qualifier when there is one, else `Untrusted`, and the mint adds the other
+    origin beside it (`_also_origins`, `TaintModel.source_also`), so the value
+    is refused at an authority sink and at a disclosure sink alike."""
     top = top_qualifier(type_name)
-    if top is not None:
-        return top if top in ("Untrusted", "Secret") else None
-    for wanted in ("Untrusted", "Secret"):
-        if _holds_qualifier(type_name, wanted):
-            return wanted
-    return None
+    if top in ("Untrusted", "Secret"):
+        return top
+    quals = source_qualifiers(type_name)
+    return quals[0] if quals else None
+
+
+def _also_origins(type_name: str | None, capabilities) -> frozenset:
+    """The origins a declared return mints BESIDE its primary one: the
+    origin of each qualifier :func:`source_qualifiers` finds that is not
+    :func:`source_qualifier`'s (issue #3192)."""
+    primary = source_qualifier(type_name)
+    also = set()
+    for qual in source_qualifiers(type_name):
+        if qual == primary:
+            continue
+        also.add(_origin_of(capabilities) if qual == "Untrusted"
+                 else CONFIDENTIAL_ORIGIN)
+    return frozenset(also)
 
 
 def _mentions_trusted(type_name: str | None) -> bool:
@@ -487,6 +513,10 @@ class TaintModel:
 
     # extern name -> the coarse origin its return mints (declared `Untrusted[T]`)
     sources: dict[str, str] = field(default_factory=dict)
+    # origins a source mints BESIDE its `sources` entry, for a declared return
+    # that holds both an `Untrusted[...]` and a `Secret[...]` (issue #3192).
+    # Read where `_taint_of_call` mints a source.
+    source_also: dict[str, frozenset] = field(default_factory=dict)
     # callable name -> {param_index: base_type} for params declared `Trusted[T]`
     sinks: dict[str, dict[int, str | None]] = field(default_factory=dict)
     # callable name -> {param_index: origin} for params declared `Untrusted[T]`
@@ -813,6 +843,9 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # override at the bottom of this loop can still stamp `secret` for a
             # bound emission cap, but the two never collapse onto one token.
             model.sources[ext.name] = CONFIDENTIAL_ORIGIN
+        _also = _also_origins(ext.returns, ext.capabilities)
+        if _also:
+            model.source_also[ext.name] = _also
         # The stamp the IR carries into the runtime (item 421 F6). `ext.returns`
         # is stripped a few lines below, so this attribute is the only surviving
         # record that the RETURN position is confidential (the return-side
@@ -1029,8 +1062,10 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # composition`), and without them it read the operation as clean.
             method.trusted_params = frozenset(trusted_indices)
             method.untrusted_params = frozenset(untrusted_indices)
-            _ret = top_qualifier(method.returns)
-            method.returns_qualifier = _ret if _ret in ("Untrusted", "Secret") else None
+            # Read with `source_qualifier` (issue #3192), so a manifest consumer
+            # mints from `Result[Untrusted[T], E]` / `Opt[Secret[T]]` exactly
+            # as a unit holding the declaration does.
+            method.returns_qualifier = source_qualifier(method.returns)
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
             # derived sink under strict mode, exactly as an extern is — a granted
             # tool surface annotates nothing yet still refuses untrusted input.
@@ -1074,7 +1109,11 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                         getattr(method, "capabilities", None))
                 elif ret_qual == "Secret":
                     model.sources[method.name] = CONFIDENTIAL_ORIGIN
-                elif ret_qual == "Retained":
+                _also = _also_origins(method.returns,
+                                      getattr(method, "capabilities", None))
+                if _also:
+                    model.source_also[method.name] = _also
+                if ret_qual == "Retained":
                     # item 472: the interface-only carrier of a retained value.
                     # Same rule, same position as the two above.
                     _rpol = _retention_policy_for(
@@ -1620,6 +1659,10 @@ class _FlowChecker:
         # receiver is ADMITTED, while one crossing to an undeclared receiver (an
         # LLM prompt, an un-approved realm, a plain service op) is refused (§7b).
         self._emit_secret_receivers: set = set()
+        # while a `compensate` slot is walked: every call in it, as
+        # (callee, node, argument taints), so each crossing in the slot gets
+        # the emission-crossing checks, not only the outermost (issue #3180).
+        self._call_log: list | None = None
 
     # -- callee-name extraction across the two IR dialects ---------------------
     @staticmethod
@@ -2423,6 +2466,8 @@ class _FlowChecker:
         # lands on one. Resolved against the DIRECT callee (a required-service op
         # or extern named at this call site), never a runtime label.
         self._emit_secret_receivers = self.model.secret_receivers.get(callee, set())
+        if self._call_log is not None:
+            self._call_log.append((callee, node, arg_taints))
 
         # Slice B4: an indirect call `g(x)` where `g` names a known callable
         # (`let g = upper`) carries that callable's signature/sink; resolve it.
@@ -2583,7 +2628,8 @@ class _FlowChecker:
         # a taint source (declared `Untrusted[T]` return): mint its origin
         if callee in self.model.sources:
             origin = self.model.sources[callee]
-            return Taint(frozenset({origin}), (f"{callee}()",))
+            also = self.model.source_also.get(callee, frozenset())
+            return Taint(frozenset({origin}) | also, (f"{callee}()",))
 
         # the scoped `endorse[<origin>]` declassifier (Slice C): the downgrade is
         # granted only where the enclosing declaration declared the slot, its
@@ -2763,9 +2809,7 @@ class _FlowChecker:
                 # approval floor in `lower.py` (`_compensate_crossings`) reads.
                 compensate = stmt.get("compensate")
                 if compensate is not None:
-                    self._emit_args = None
-                    self._emit_secret_receivers = set()
-                    self._emit_crossing(self.taint_of(compensate, env), stmt)
+                    self._compensate_crossings(compensate, stmt, env)
             return
         # any other statement shape: walk every child so nested calls (and their
         # sink checks) are visited, and any nested block threads the same env.
@@ -2779,6 +2823,48 @@ class _FlowChecker:
                     self._stmt(value, env)
                 else:
                     self.taint_of(value, env)
+
+    def _compensate_crossings(self, compensate, stmt: dict, env: dict) -> None:
+        """The `compensate` slot of an `emit` step (issue #3180). The slot is
+        walked once with `taint_of`, which checks every sink in it; the whole
+        slot's taint then crosses as one emission (the reach edges and the
+        bound-key rule), and EACH crossing call inside it (an extern, or an
+        operation called on a receiver) gets the emission-crossing rules for
+        its own arguments and its own declared `Secret[T]` receivers. A
+        compensation is a bare host call that may nest other crossings, so
+        the outermost call's receivers do not admit an inner call's
+        argument."""
+        self._call_log = []
+        try:
+            whole = self.taint_of(compensate, env)
+            calls = self._call_log
+        finally:
+            self._call_log = None
+        self._emit_args = None
+        self._emit_secret_receivers = set()
+        self._emit_crossing(whole, stmt)
+        for callee, node, arg_taints in calls:
+            if not self._is_crossing_call(callee, node):
+                continue
+            self._emit_args = arg_taints
+            self._emit_secret_receivers = self.model.secret_receivers.get(
+                callee, set())
+            self._emit_crossing(CLEAN, stmt)
+
+    def _is_crossing_call(self, callee: str, node) -> bool:
+        """Whether a call node in a `compensate` slot crosses the boundary:
+        a host extern, or an operation called on a receiver that is not a
+        component state world. A pure fn or a builtin constructor does not."""
+        if not isinstance(node, dict):
+            return False
+        if node.get("kind") == "fn":
+            return callee in self.model.extern_names
+        target = node.get("target")
+        if node.get("kind") == "call" and isinstance(target, dict) \
+                and isinstance(node.get("method"), str):
+            tname = target.get("id") or target.get("name")
+            return tname not in (self.state_names or ())
+        return False
 
     def _emit_crossing(self, result: Taint, stmt: dict) -> None:
         """The crossing checks of one `emit` call: the forward call, or the
