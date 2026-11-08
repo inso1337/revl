@@ -1,6 +1,7 @@
 # A formalism for parallel fan-out (issue 2741)
 
-**Status: decision note, no implementation in this slice.**
+**Status: decision note and the first theorem; the differential row and the
+P09 update follow.**
 
 Parallel fan-out is checked by the compiler (`src/revl/parallel.py`) and run by
 the Python runtime (`backends/python/runtime.py`, `_revl_parallel`), but the Lean
@@ -14,8 +15,9 @@ It supplies the idempotence instance; it says nothing about interleaving.
 
 This note compares the candidate formalisms against the three questions in the
 issue, names the one chosen, records what was tried, and fixes the shape of the
-first theorem so that switching the choice costs one new lemma file and one
-oracle row, not a rewrite of G7 or A8.
+first theorem so that switching the choice costs one new theorem file and one
+oracle row, not a rewrite of G7 or A8. The theorem itself is in
+`formal/RevL/Theorems/G10_ParallelEmissions.lean`.
 
 ## What the choice must be able to say
 
@@ -215,12 +217,15 @@ The differential row, built in the follow-up slice, has the same shape as G7's:
 - No byte-identical `accumulated`. The theorem is effect-equivalence and the
   P09 retraction is unchanged.
 - No claim that the Python fan-out and the model agree yet. That is the
-  differential row, and until it exists this note is a design decision, not a
-  verified result.
+  differential row; until it exists the decision and the Lean theorem are not an
+  agreement claim about the runtime.
 
 ## Follow-up slices
 
-1. The L1 farm and the L2 theorem in this note, with its non-vacuity witnesses
-   and registry rows.
-2. The differential row and its mutation, driving `_revl_parallel`.
-3. The P09 update that cites the theorem and narrows its "no Lean" caveat.
+1. The differential row and its mutation, driving `_revl_parallel`.
+2. The P09 update that cites the theorem and narrows its "no Lean" caveat.
+
+The theorem and its non-vacuity witnesses are in this slice, registered in
+the formal gate as `RevL.Fanout.two_effect_group_effect_equiv`,
+`RevL.Fanout.compensation_only_when_allowed`, and the concrete witnesses the
+registry cites.

@@ -558,3 +558,18 @@ import RevL
 #print axioms RevL.A5.fixtures_decided
 #print axioms RevL.A5.a5_not_vacuous
 #print axioms RevL.A5.witness_bites
+
+-- Issue #2741: the two-effect parallel fan-out group. The interleaving
+-- extension is `RevL.Fanout.ParStep`/`ParSteps` over the sequential
+-- `SemStep`, so G7 and A8 do not move; the effect trace is the group's, and
+-- the gate is the emitter's admission rule (`_group_eligible`).
+#print axioms RevL.Fanout.two_effect_group_effect_equiv
+#print axioms RevL.Fanout.compensation_only_when_allowed
+#print axioms RevL.Fanout.clean_members_admitted
+#print axioms RevL.Fanout.fault_members_admitted
+#print axioms RevL.Fanout.fault_group_registers_the_fired_compensation
+#print axioms RevL.Fanout.fault_group_plan_order_is_not_the_witness
+#print axioms RevL.Fanout.fault_group_reverse_order_is_the_witness
+#print axioms RevL.Fanout.clean_group_plan_order_is_the_witness
+#print axioms RevL.Fanout.non_idempotent_forward_breaks_the_gate
+#print axioms RevL.Fanout.non_idempotent_compensation_breaks_the_gate

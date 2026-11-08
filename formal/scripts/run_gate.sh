@@ -457,6 +457,16 @@ python3 scripts/axioms_gate.py \
   RevLOracle.discharged_not_reissued \
   RevLOracle.fenced_not_reissued \
   RevLOracle.declared_idempotent_reissued \
+  RevL.Fanout.two_effect_group_effect_equiv \
+  RevL.Fanout.compensation_only_when_allowed \
+  RevL.Fanout.clean_members_admitted \
+  RevL.Fanout.fault_members_admitted \
+  RevL.Fanout.fault_group_registers_the_fired_compensation \
+  RevL.Fanout.fault_group_plan_order_is_not_the_witness \
+  RevL.Fanout.fault_group_reverse_order_is_the_witness \
+  RevL.Fanout.clean_group_plan_order_is_the_witness \
+  RevL.Fanout.non_idempotent_forward_breaks_the_gate \
+  RevL.Fanout.non_idempotent_compensation_breaks_the_gate \
   RevLOracle.reportedSeqLabels_nil_iff_clean \
   RevLOracle.a9RowB_iff \
   RevLOracle.parseStep_stepName \
