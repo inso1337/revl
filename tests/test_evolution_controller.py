@@ -72,13 +72,13 @@ def make_tree(root: Path, changed: dict) -> Path:
     return root
 
 
-def make_policy_tree(root: Path, before: str, after: str,
+def make_policy_tree(root: Path, before: str, after: str | None,
                      path: str = "boundary.policy") -> Path:
     """A git tree whose one changed document is a policy with known base text.
 
     `make_tree` writes `base` into every file's base commit, which is fine for
     a source diff and useless for a policy classification: the base text is what
-    the classifier compares against.
+    the classifier compares against. `after=None` deletes the document.
     """
     root.mkdir(parents=True, exist_ok=True)
     _git(root, "init", "-q", "-b", "main")
@@ -87,7 +87,10 @@ def make_policy_tree(root: Path, before: str, after: str,
     (root / "README.md").write_text("base\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "base")
-    (root / path).write_text(after)
+    if after is None:
+        (root / path).unlink()
+    else:
+        (root / path).write_text(after)
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "candidate")
     return root
@@ -866,3 +869,84 @@ def test_a_candidate_that_edits_the_policy_module_is_refused(tmp_path):
     assert verdict.decision == "REFUSE"
     assert verdict.code == "APPROVAL_WEAKENED"
     assert "policy.py" in verdict.by_name()["authority"].reason
+
+
+def test_a_deleted_policy_document_is_refused(tmp_path):
+    """A deleted document keeps nothing: the whole rule set went with it."""
+    tree = make_policy_tree(tmp_path / "deleted", _POLICY_BASE, None)
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "APPROVAL_WEAKENED"
+    assert "boundary.policy" in verdict.by_name()["authority"].reason
+
+
+def test_a_renamed_policy_that_drops_a_rule_is_refused(tmp_path):
+    """`git diff --name-only` detects a rename and reports only the new path.
+
+    Left on, that hides the old path from the classifier: the candidate looks
+    like an added policy and the dropped rule is never seen. The measured diff
+    is read with `--no-renames`, so a rename is a delete plus an add and the
+    deleted document is classified.
+    """
+    root = tmp_path / "renamed"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    (root / "boundary.policy").write_text("capability net requires approval\n")
+    (root / "README.md").write_text("base\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    _git(root, "mv", "boundary.policy", "net.policy")
+    (root / "net.policy").write_text("# the approval requirement is gone\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "candidate")
+    verdict = run(proposal_record(root))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "APPROVAL_WEAKENED"
+    assert "boundary.policy" in verdict.by_name()["authority"].reason
+
+
+def test_a_removed_approval_rule_in_a_json_policy_is_refused(tmp_path):
+    """The policy file has a JSON form, and the classifier reads it too."""
+    tree = make_policy_tree(
+        tmp_path / "json",
+        '{"approvals": [{"capability": "net", "require": 2, '
+        '"of": ["alice", "bob"]}]}\n',
+        "{}\n", path="boundary.json")
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "APPROVAL_WEAKENED"
+    assert "boundary.json" in verdict.by_name()["authority"].reason
+
+
+def test_a_lower_quorum_is_authority_evolving():
+    base = ("capability net requires approval require 2 of {alice, bob}\n")
+    after = ("capability net requires approval require 1 of {alice, bob}\n")
+    result = ec.classify_policy_change(base, after)
+    assert result.kind == ec.AUTHORITY_EVOLVING
+    assert "require 2" in result.reason
+
+
+def test_a_changed_approver_set_is_authority_evolving():
+    base = ("capability net requires approval require 2 of {alice, bob}\n")
+    after = ("capability net requires approval require 2 of {alice, carol}\n")
+    assert ec.classify_policy_change(base, after).kind == ec.AUTHORITY_EVOLVING
+
+
+def test_reordering_the_same_approvers_is_safe_adaptive():
+    """`{a, b}` and `{b, a}` name the same quorum; order carries no meaning."""
+    base = ("capability net requires approval require 2 of {alice, bob}\n")
+    after = ("capability net requires approval require 2 of {bob, alice}\n")
+    assert ec.classify_policy_change(base, after).kind == ec.SAFE_ADAPTIVE
+
+
+def test_reordering_duplicate_patterns_is_authority_evolving():
+    """`approval_rule_for` returns the FIRST covering rule, so moving a weaker
+    rule ahead of a stronger one weakens the effective approval even though the
+    stronger rule is still in the file."""
+    base = ("capability net requires approval require 2 of {alice, bob}\n"
+            "capability net requires approval\n")
+    after = ("capability net requires approval\n"
+             "capability net requires approval require 2 of {alice, bob}\n")
+    result = ec.classify_policy_change(base, after)
+    assert result.kind == ec.AUTHORITY_EVOLVING
+    assert "require 2" in result.reason

@@ -425,8 +425,11 @@ Issue #2752's first slice refuses it on the diff. The authority stage of the
 evolution controller (`tools/evolution_controller.py`) classifies every changed
 document that parses as a boundary policy, and refuses with `APPROVAL_WEAKENED`
 before activation when a `requires approval` rule is dropped or weakened: a rule
-whose pattern disappeared, a longer TTL, a lower quorum, a changed approver set,
-or a document that carried approval rules and no longer parses. A change to
+whose pattern disappeared, one moved behind a weaker rule for the same pattern,
+a longer TTL, a lower quorum, a changed approver set, or a document that carried
+approval rules and no longer parses or was deleted. The measured diff is read
+with renames disabled, so a renamed policy is a deletion plus an addition and
+its old rules are classified rather than hidden. A change to
 `src/revl/policy.py`, the parser that defines what an approval rule is, is
 refused the same way; that path was the design note's other finding. A change
 the classifier cannot prove at least as strong (a pattern change, for instance)

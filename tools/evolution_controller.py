@@ -149,6 +149,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -470,7 +471,8 @@ def measured_diff(proposal: Proposal):
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", proposal.base])
+    ok, out = _git(tree, ["diff", "--name-only", "--no-renames",
+                          proposal.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -563,22 +565,43 @@ def _policy_text(raw):
     return None if "\0" in text else text
 
 
+#: `_base_policy_text` answers three different things and they must not collapse
+#: into one `None`: a path absent at the base commits an ADDED document (safe),
+#: while a document that is present but cannot be read has UNKNOWN rules and a
+#: candidate that rewrites it into a rule-free policy must not be read as the
+#: harmless add. This is the fail-closed distinction the classifier needs.
+_ABSENT = object()
+_UNREADABLE = object()
+
+
 def _base_policy_text(tree: Path, base: str, path: str):
-    """The text of `path` at `base`, or None when absent or too large."""
+    """`path` at `base`: its text, `_ABSENT`, or `_UNREADABLE`.
+
+    The three cases are kept apart on purpose. An absent path is a document the
+    candidate added, which drops nothing. A present path that is too large,
+    binary or unreadable is a document whose approval rules cannot be shown
+    preserved, so `classify_change` fails closed on it rather than treating it
+    as an add.
+    """
+    ok, _ = _git(tree, ["cat-file", "-e", f"{base}:{path}"])
+    if not ok:
+        return _ABSENT
     ok, out = _git(tree, ["cat-file", "-s", f"{base}:{path}"])
     if not ok:
-        return None
+        return _UNREADABLE
     try:
         size = int(out.strip())
     except ValueError:
-        return None
+        return _UNREADABLE
     if size > POLICY_DOCUMENT_LIMIT:
-        return None
+        return _UNREADABLE
     try:
         ok, blob = _git(tree, ["show", f"{base}:{path}"])
     except UnicodeDecodeError:
-        return None
-    return blob if ok and "\0" not in blob else None
+        return _UNREADABLE
+    if not ok or "\0" in blob:
+        return _UNREADABLE
+    return blob
 
 
 def _tree_policy_text(tree: Path, path: str):
@@ -635,9 +658,40 @@ def _preserves_approval(rule, candidate) -> bool:
         return False
     if candidate.require < rule.require:
         return False
-    if candidate.approvers != rule.approvers:
+    if tuple(sorted(candidate.approvers)) != tuple(sorted(rule.approvers)):
         return False
     return True
+
+
+def _effective_approval(pattern, rules):
+    """The rule the policy actually applies to `pattern`, or None.
+
+    `Policy.approval_rule_for` returns the FIRST rule that covers a token, so a
+    candidate that reorders equal-pattern rules can make the effective rule
+    weaker while every old rule still has a stronger counterpart later in the
+    list. This walks the candidate rules in order and returns the first that
+    could cover the base pattern; `classify_policy_change` requires THAT rule to
+    preserve the base one. A different earlier pattern is therefore fenced when
+    it could shadow the rule, which is the conservative direction.
+    """
+    for candidate in rules:
+        if fnmatchcase(pattern, candidate.pattern):
+            return candidate
+    return None
+
+
+def _kept(rule, new_policy) -> bool:
+    """Whether `new_policy` keeps `rule` at the strength it had.
+
+    A missing policy (deleted, unreadable or unparsable document) keeps
+    nothing. Otherwise the EFFECTIVE rule for the pattern decides, not any rule
+    that happens to appear later in the list: `Policy.approval_rule_for` stops
+    at the first cover, so order is part of the strength.
+    """
+    if new_policy is None:
+        return False
+    candidate = _effective_approval(rule.pattern, new_policy.approval_rules)
+    return candidate is not None and _preserves_approval(rule, candidate)
 
 
 def classify_policy_change(before, after, *, source="<policy>") -> Classification:
@@ -672,9 +726,7 @@ def classify_policy_change(before, after, *, source="<policy>") -> Classificatio
             (f"{source}: added",))
 
     weakened = [rule for rule in old_policy.approval_rules
-                if new_policy is None
-                or not any(_preserves_approval(rule, candidate)
-                           for candidate in new_policy.approval_rules)]
+                if not _kept(rule, new_policy)]
     if not weakened:
         return Classification(
             SAFE_ADAPTIVE, SURFACE_APPROVAL,
@@ -714,12 +766,29 @@ def classify_change(tree: Path, base: str, changed) -> list:
             continue
         before = _base_policy_text(tree, base, path)
         after = _tree_policy_text(tree, path)
-        old_policy = _parse_policy_document(before) if before is not None else None
+        before_text = before if isinstance(before, str) else None
+        old_policy = (_parse_policy_document(before_text)
+                      if before_text is not None else None)
         new_policy = _parse_policy_document(after) if after is not None else None
+        if before is _UNREADABLE:
+            # A document present at the base whose rules cannot be read is
+            # unknown authority, not an added policy. A candidate that rewrites
+            # it must not be read as having dropped nothing.
+            if new_policy is not None:
+                classified.append((path, Classification(
+                    AUTHORITY_EVOLVING, SURFACE_APPROVAL,
+                    f"{path} is present at {base} but could not be read as a "
+                    f"policy, and the candidate rewrites it into one; the "
+                    f"approval rules the old document may have carried cannot "
+                    f"be shown preserved. Surface " + SURFACE_APPROVAL
+                    + " is refused on the diff; a fenced change is routed to a "
+                      "human",
+                    (f"{path}: unreadable at {base}",))))
+            continue
         if old_policy is None and new_policy is None:
             continue
         classified.append(
-            (path, classify_policy_change(before, after, source=path)))
+            (path, classify_policy_change(before_text, after, source=path)))
     return classified
 
 
