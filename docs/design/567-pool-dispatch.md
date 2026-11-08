@@ -222,7 +222,12 @@ gap to fail in.
 
 Newline-delimited JSON over TCP, loopback by default, one task per connection,
 with a bounded read so a far side that never sends a newline cannot make the
-near side grow without limit.
+near side grow without limit. The read is bounded in time too: a whole frame
+has a deadline measured from `accept` on the peer and from the start of the
+exchange on the operator, so a far side that drips a byte before every expiry
+cannot renew the wait, and the peer reads frames on a per-connection thread so
+one held frame does not stop it accepting another. Running the task itself
+stays serial: the peer has one workspace and one result per task.
 
 A non-loopback bind is refused unless `--allow-remote` is passed, because the
 channel carries no transport security. Every record on it is signed, so nothing
