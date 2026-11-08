@@ -2844,7 +2844,8 @@ class _FlowChecker:
         self._emit_secret_receivers = set()
         self._emit_crossing(whole, stmt)
         for callee, node, arg_taints in calls:
-            if not self._is_crossing_call(callee, node):
+            if node is not compensate \
+                    and not self._is_crossing_call(callee, node):
                 continue
             self._emit_args = arg_taints
             self._emit_secret_receivers = self.model.secret_receivers.get(
@@ -2852,9 +2853,18 @@ class _FlowChecker:
             self._emit_crossing(CLEAN, stmt)
 
     def _is_crossing_call(self, callee: str, node) -> bool:
-        """Whether a call node in a `compensate` slot crosses the boundary:
-        a host extern, or an operation called on a receiver that is not a
-        component state world. A pure fn or a builtin constructor does not."""
+        """Whether a call node nested in a `compensate` slot crosses the
+        boundary: a host extern, or an operation called on a required
+        receiver (a `target`) that is not a component state world. A pure fn
+        or a builtin constructor does not, and neither does a call off a
+        spawn handle, which the forward call of an `emit` step admits with a
+        `Secret[T]` argument too. The slot's outermost call is judged
+        whatever it names, as the forward call of the step is.
+
+        Reads the lowered call node's fields, as `lower._is_emission_call`
+        does; the two answer different questions (that one needs the
+        lowering `Env`, this one the `TaintModel`), so neither imports the
+        other (see tests/fixtures/vocabulary_mirror_ledger.json)."""
         if not isinstance(node, dict):
             return False
         if node.get("kind") == "fn":
