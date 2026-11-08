@@ -22,8 +22,9 @@ type      := 'Str'|'Int'|'Float'|'Bool'|'Bytes'|'Unit'
 -- no null/undefined: absence is Opt[T]. Float is IEEE754 (NaN != NaN).
 
 --- pure expressions & functions (stratum 1: TS subset, verbatim syntax) ---
-fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] block
+fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] [derives] block
 endorse   := 'endorse' '[' IDENT (',' IDENT)* ']'     -- taint classes the body may declassify
+derives   := 'derives' IDENT 'of' IDENT
 block     := '{' stmt* '}'
 stmt      := let | var | assign(var-only) | 'if' '(' expr ')' block ['else' block]
              | 'for' '(' IDENT 'of' expr ')' block | 'while' '(' expr ')' block
@@ -120,7 +121,7 @@ label     := [(IDENT | '.') '::'] '@' IDENT
 
 --- host blocks (extern; typed boundary, opaque verbatim body) ---
 extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' type)* ')'
-             ['->' type] ['undo' expr] ['compensate' expr]
+             ['->' type] [derives] ['undo' expr] ['compensate' expr]
              ['config' '{' (IDENT ':' type ['=' literal])* '}']
              ('=' '@'('ts'|'py'|'rs'|'go'|'java'|'wasm') '{' <verbatim host code> '}')+
 -- classification is mandatory: pure (no effect), acquire (needs undo over the
