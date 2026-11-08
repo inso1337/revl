@@ -292,6 +292,24 @@ OTHER_CODES = {
         "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint "
                "one, or pass the text as `source`",
     },
+    "STALE_REPAIR": {
+        "category": "session",
+        "guarantee": "a repair id names a repair minted in the current unit of "
+                     "work",
+        "meaning": "the id was minted before a load, swap, rollback or undo "
+                   "moved the session's unit, so the candidate it repairs no "
+                   "longer belongs to this one",
+        "fix": "re-run `revl_check` to mint a repair for the current unit",
+    },
+    "UNKNOWN_REPAIR": {
+        "category": "usage",
+        "guarantee": "a repair id names a repair the session actually holds",
+        "meaning": "the id names no repair this session minted: no refusing "
+                   "`revl_check` issued it, or it has been dropped to keep the "
+                   "store bounded",
+        "fix": "re-run `revl_check` and pass the `repairId` its refusal "
+               "returns",
+    },
     "MCP-IDENTITY": {
         "category": "identity",
         "guarantee": "every answer comes from the revision the client pinned",
@@ -713,7 +731,10 @@ def report(error: RevlError, *, sources: dict[str, str] | None = None,
     Issue #2684: a G4 missing-undo record's `repairs` list gains a `fix_code`
     on the repair the fixgen engine can verify. The engine applies a candidate
     edit and re-checks the patched source ("verified or nothing"), so a repair
-    that does not resolve the refusal is never offered as code.
+    that does not resolve the refusal is never offered as code. Issue #2855
+    extends the same verified edit to every record whose code has a generator
+    (`fixgen.APPLYABLE`), as `record["fix_code"]`, so the MCP apply-repair verb
+    applies the refusal's own repair rather than synthesizing a second one.
 
     The check is the caller's, not this module's, and both arguments are
     required to run it:
@@ -746,44 +767,62 @@ def report(error: RevlError, *, sources: dict[str, str] | None = None,
 
 def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
                          sources: dict[str, str] | None, verifier) -> None:
-    """Verify the mechanical repair a G4 record lists, in place (issue #2684).
+    """Verify the mechanical repair each record lists, in place.
 
-    Only the `site-undo` repair has a generator: it is the one whose edit is
-    determined by the refused call (spell the declared inverse, or the host
-    family's release, on the bound handle). Every other repair is prose a
-    person or a model enacts, and is listed without a `fix_code` rather than
-    given an edit the engine could not verify. The ranged diagnostic the
-    generator reads is synthesized from the record, so this path never
-    recompiles the candidate to find its own diagnostic."""
+    Issue #2684: a G4 missing-undo repair's `site-undo` entry is the one whose
+    edit is determined by the refused call (spell the declared inverse, or the
+    host family's release, on the bound handle), and its `fix_code` rides on
+    that repair entry.
+
+    Issue #2855: every record whose code has a generator in
+    `fixgen.APPLYABLE` (T2, A9, REVL, G4) gets the same verified edit as
+    `record["fix_code"]`, so the MCP apply-repair verb can apply the refusal's
+    repair without a second synthesis. It is the SAME engine and the SAME
+    verify gate the LSP code action uses: a candidate that does not resolve the
+    refusal is dropped, and a record with no generator is listed without an
+    edit rather than given one the engine could not verify.
+
+    The ranged diagnostic the G4 generator reads is synthesized from the
+    record; every other code goes through `fix_code`'s own re-computation of
+    the ranged diagnostic, so the engine sees the token the refusal pointed
+    at. `verify` carries the caller's authoring profile and in-memory modules
+    into the patched compile."""
     if not sources or verifier is None:
         return
+    from .lsp import fixgen  # noqa: PLC0415 - analysis imports this module
+
     for record, one in zip(records, errors):
-        repairs = record.get("repairs")
-        if not repairs or not any(r.get("kind") == "site-undo" for r in repairs):
-            continue
         text = _compiled_text(one, sources)
         if text is None:
             continue
-        diagnostic = {
-            "code": record["code"],
-            "message": record["message"],
-            "range": {"start": {"line": record["line"] - 1, "character": 0},
-                      "end": {"line": record["line"] - 1, "character": 0}},
-        }
-        from .lsp import fixgen  # noqa: PLC0415
 
         def verify(patched: str, refusal: RevlError = one):
             return verifier(patched, refusal)
 
-        fix = fixgen.fix_code(record, text, one.filename,
-                              diagnostic=diagnostic, verify=verify)
-        if not fix.get("ok"):
+        repairs = record.get("repairs") or []
+        site_undo = next((repair for repair in repairs
+                          if repair.get("kind") == "site-undo"), None)
+        if site_undo is not None:
+            diagnostic = {
+                "code": record["code"],
+                "message": record["message"],
+                "range": {"start": {"line": record["line"] - 1,
+                                    "character": 0},
+                          "end": {"line": record["line"] - 1,
+                                  "character": 0}},
+            }
+            fix = fixgen.fix_code(record, text, one.filename,
+                                  diagnostic=diagnostic, verify=verify)
+            if fix.get("ok"):
+                site_undo["fix_code"] = {"title": fix["title"],
+                                         "edits": fix["edits"]}
             continue
-        for repair in repairs:
-            if repair.get("kind") == "site-undo":
-                repair["fix_code"] = {"title": fix["title"],
-                                      "edits": fix["edits"]}
-                break
+        if record.get("code") not in fixgen.APPLYABLE:
+            continue
+        fix = fixgen.fix_code(record, text, one.filename, verify=verify)
+        if fix.get("ok"):
+            record["fix_code"] = {"title": fix["title"],
+                                  "edits": fix["edits"]}
 
 
 def _compiled_text(error: RevlError, sources: dict[str, str]) -> str | None:

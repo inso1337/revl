@@ -82,7 +82,8 @@ _STORES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 #: The trims, in the order they are applied when the block is over `CAP`.
 #: Names go before the action: `next` is the last thing an answer may lose.
 _TRIM_ORDER = ("next.arguments", "components", "pending.replacing",
-               "last.repair", "last.location", "source", "last")
+               "last.repair", "last.location", "source", "last.repairId",
+               "last")
 
 
 # ------------------------------------------------------------------ recording
@@ -150,6 +151,12 @@ def _refusal(verb: str, payload: dict) -> dict:
     repair = diagnostic.get("fix") or diagnostic.get("hint")
     if repair:
         entry["repair"] = repair
+    # issue #2855: a refusal whose class has a verified mechanical edit mints
+    # the id that applies it, so the brief carries the one call that would
+    # apply it without the caller re-sending the candidate.
+    repair_id = payload.get("repairId")
+    if repair_id:
+        entry["repairId"] = _clip(repair_id, 80)
     action = payload.get("next")
     if action:
         # preference order: the first call the refusal offers is the one it

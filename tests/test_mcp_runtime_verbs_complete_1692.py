@@ -48,6 +48,7 @@ TIMELINE = {"components": [{"component": "C", "steps": []}]}
 PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_check": ({"source": SOURCE}, None),
     "revl_admit": ({"manifest": {}, "source": SOURCE}, None),
+    "revl_apply_repair": ({"repairId": "x"}, None),
     "revl_plan": ({"source": SOURCE}, None),
     "revl_affected_tests": ({"paths": ["docs/mcp-reference.md"]}, None),
     "revl_ship": ({"source": SOURCE, "manifest": {}, "apply": True},

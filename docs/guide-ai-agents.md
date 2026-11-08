@@ -321,6 +321,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_brief` | between loop steps: one compact answer with what is loaded and at which generation, the last refusal (code, `file:line`, repair) or check verdict, any pending proposal or draft, and the one call to make next, capped at 1200 characters and derived from session state so it cannot drift from `revl_state` | [mcp-reference.md](mcp-reference.md#revl_brief) |
 | `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
 | `revl_check` | does this compile? structured diagnostics (code, guarantee, and the `fix` rewrite) **and open holes' `fillSpec`** if not; with no candidate it checks the composition the session holds | [mcp-reference.md](mcp-reference.md#revl_check) |
+| `revl_apply_repair` | take the `repairId` a refusal returned and get the repaired candidate plus its re-check in one call, instead of reconstructing the edit by hand | [fix-code.md](fix-code.md) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
 | `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |

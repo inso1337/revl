@@ -45,6 +45,11 @@ DISCOVERY = "revl_verbs"
 #: * `revl_source` and `revl_change`, listed once they exist (#1741's stack);
 #:   a name with no verb behind it is skipped, not listed;
 #: * the way to everything else, `revl_verbs`.
+#:
+#: The apply-repair verb of issue #2855 is deliberately NOT a core member: the
+#: tier is capped, and the refusal that mints a repair names the call in `next`
+#: (`{"tool": "revl_apply_repair", "arguments": {"repairId": ...}}`), so the
+#: caller that needs it is the one that was told it exists.
 CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
         "revl_check", "revl_admit", "revl_plan", "revl_explain",
         "revl_load", "revl_call", "revl_swap",
@@ -53,12 +58,13 @@ CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
 
 #: `{topic: (what it is for, verbs)}`, in docs/mcp-reference.md's order.
 TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "author": ("check, admit, plan, select tests and ship a candidate; the loop's "
-               "compact next-step answer; grammar, scaffold, format and explain", (
-        "revl_brief", "revl_check", "revl_admit", "revl_plan",
-        "revl_affected_tests", "revl_ship", "revl_deploy", "revl_audit",
-        "revl_tools", "revl_grammar", "revl_scaffold", "revl_fmt",
-        "revl_explain", "revl_idiom")),
+    "author": ("check, admit, plan, select tests and ship a candidate; apply "
+               "a refusal's repair; the loop's compact next-step answer; "
+               "grammar, scaffold, format and explain", (
+        "revl_brief", "revl_check", "revl_apply_repair", "revl_admit",
+        "revl_plan", "revl_affected_tests", "revl_ship", "revl_deploy",
+        "revl_audit", "revl_tools", "revl_grammar", "revl_scaffold",
+        "revl_fmt", "revl_explain", "revl_idiom")),
     "update": ("check the operator's release feed and apply a verified release "
                "to the running composition through the admission gate", (
         "revl_update_check", "revl_update_apply", "revl_update_status",
