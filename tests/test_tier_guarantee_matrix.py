@@ -368,12 +368,13 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
     # `unmeasured`, not a partial count. This is the branch a green ledger
     # never reaches on its own.
     import copy as _copy
-    changed = _copy.deepcopy(ledger)
+    unmeasured_ledger = _copy.deepcopy(ledger)
     tier = conformance.TIERS[0]
     short = tg._short(tier)
-    changed["cells"][changed["files"][0]][tier] = {
+    unmeasured_ledger["cells"][unmeasured_ledger["files"][0]][tier] = {
         "kind": selfhost_matrix.FRONTEND, "message": "planted"}
-    monkeypatch.setattr(selfhost_matrix, "load", lambda: changed)
+    monkeypatch.setattr(selfhost_matrix, "load",
+                        lambda: unmeasured_ledger)
     unmeasured = tg.support_matrix(report=report, selfhost=selfhost,
                                    tests_root=tests_root, ci_text=ci_text)
     cell = next(row for row in unmeasured["rows"] if row["tier"] == short)[

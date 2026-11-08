@@ -1007,15 +1007,17 @@ def support_matrix(*, report: dict | None = None,
         # emitter run only; a tier toolchain build is not part of this measure.
         emit_counts = selfhost_matrix.tier_counts(emit_ledger, tier)
         if emit_counts is None:
-            emit_status = UNMEASURED
-            emit_detail = "the self-host emit ledger does not measure this tier"
-            emit_used_evidence = []
+            selfhost_emit_status = UNMEASURED
+            selfhost_emit_detail = ("the self-host emit ledger does not measure "
+                                    "this tier")
+            selfhost_emit_evidence = []
         else:
             emitted, emit_total = emit_counts
-            emit_status = PROVED if emitted == emit_total else DIVERGENCE
+            selfhost_emit_status = (PROVED if emitted == emit_total
+                                    else DIVERGENCE)
             noun = "file" if emit_total == 1 else "files"
-            emit_detail = f"{emitted}/{emit_total} self-host {noun} emit"
-            emit_used_evidence = emit_evidence
+            selfhost_emit_detail = (f"{emitted}/{emit_total} self-host {noun} emit")
+            selfhost_emit_evidence = emit_evidence
 
         rows.append({
             "tier": short,
@@ -1030,9 +1032,9 @@ def support_matrix(*, report: dict | None = None,
                                    "detail": selfhost_detail,
                                    "evidence": ["tools/conformance.py"]
                                    if selfhost_row else []},
-            "selfhost_emits": {"status": emit_status,
-                               "detail": emit_detail,
-                               "evidence": emit_used_evidence},
+            "selfhost_emits": {"status": selfhost_emit_status,
+                               "detail": selfhost_emit_detail,
+                               "evidence": selfhost_emit_evidence},
         })
 
     return {"tiers": [_short(tier) for tier in conformance.TIERS], "rows": rows}
