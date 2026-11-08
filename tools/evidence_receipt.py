@@ -49,9 +49,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-# A count in the terminal summary line, e.g. "3 passed", "1 error" (issue
-# #2642's reader uses the same rule; kept here so this tool stays a script
-# with no import of another tool).
+# A count in the terminal summary line, e.g. "3 passed", "1 error" (same rule
+# as tools/affected_pytest_receipt.py; that tool's `_KINDS` map is not copied
+# here, see `parse_summary`, because a redeclared closed vocabulary is what the
+# mirror gate (issue #1285) reports).
 _COUNT = re.compile(
     r"(?<![\w.])(\d+) "
     r"(passed|failed|error|errors|skipped|xfailed|xpassed|deselected)\b"
@@ -60,17 +61,6 @@ _SUMMARY = re.compile(
     r"^(?P<body>.+?)\s+in\s+\d+(?:\.\d+)?s(?:\s+\([^)]*\))?$"
 )
 _NO_TESTS = re.compile(r"\bno tests ran\b")
-
-_KINDS = {
-    "passed": "passed",
-    "failed": "failed",
-    "error": "errors",
-    "errors": "errors",
-    "skipped": "skipped",
-    "xfailed": "xfailed",
-    "xpassed": "xpassed",
-    "deselected": "deselected",
-}
 
 # The pytest flags a receipt run always adds: `-q` for the one-line summary the
 # receipt quotes, and no cache so the base export and the head tree are left
@@ -142,7 +132,9 @@ def parse_summary(output: str) -> Counts:
             return Counts(found=True, no_tests=True, summary_line=line)
         found: dict[str, int] = {}
         for number, kind in _COUNT.findall(body):
-            key = _KINDS[kind]
+            # Every summary word is already a Counts field name except the
+            # singular "error"; no map is needed to rename the rest.
+            key = "errors" if kind == "error" else kind
             found[key] = found.get(key, 0) + int(number)
         if found:
             return Counts(found=True, summary_line=line, **found)
@@ -160,6 +152,12 @@ def _git(repo: Path, *args: str) -> str:
             f"git {' '.join(args)} failed in {repo}: "
             + (detail[-1] if detail else f"exit {proc.returncode}"))
     return proc.stdout
+
+
+def _git_ok(repo: Path, *args: str) -> bool:
+    """True when git accepts the query. A presence probe, not a read."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True).returncode == 0
 
 
 def _git_archive(repo: Path, sha: str) -> bytes:
@@ -233,10 +231,7 @@ def _overlay_paths(repo: Path, base: str, head: str,
         explicit.add(node.split("::", 1)[0])
     present = []
     for path in sorted(changed_tests | explicit):
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "cat-file", "-e", f"{head}:{path}"],
-            capture_output=True)
-        if proc.returncode != 0:
+        if not _git_ok(repo, "cat-file", "-e", f"{head}:{path}"):
             if path in explicit:
                 raise Refused(
                     f"{path} is not in {head[:12]}; commit it before asking "
