@@ -1434,6 +1434,7 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                         f"the receipt was refused on {check.link}: "
                         f"{check.reason}",
                         task_id=check.task_id, receipt_link=check.link,
+                        attestation_verdict=attestation.get("verdict", ""),
                         check=check.as_dict())
     return {"ok": True, "task_id": check.task_id,
             "receipt_digest": check.digest,
@@ -1559,7 +1560,8 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
         charter_record, roster = peer_pool.load_pool(pool_dir)
         directory = peer_pool.load_directory(pool_dir)
         ledger = load_ledger(pool_dir)
-        outcome = _record_answer(ledger, charter_record=charter_record,
+        outcome = _record_answer(ledger, roster=roster,
+                                 charter_record=charter_record,
                                  directory=directory, peer_id=peer_id,
                                  task_id=task_id, member=member,
                                  answer=answer,
@@ -1572,13 +1574,56 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
     return outcome
 
 
-def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
+#: Refusal links that are a member breaking its terms, rather than a malformed
+#: record handed in by somebody else. A receipt for another artifact and an
+#: attestation that rejects a result are the two events `peer_pool`'s closed
+#: violation list names and this settlement path can observe; offer drift and
+#: unanswered probes are observed outside a delivery and get their records from
+#: their own detection sites.
+def _violation_for_receipt_refusal(receipt_link: str,
+                                   attestation_verdict: str) -> str:
+    if receipt_link == pool_receipt.LINK_RECEIPT_ARTIFACT:
+        return peer_pool.VIOLATION_RECEIPT_ARTIFACT
+    if (receipt_link == pool_receipt.LINK_ATTESTATION_AUTHORITY
+            and attestation_verdict
+            and attestation_verdict != pool_receipt.ADMITTED):
+        return peer_pool.VIOLATION_ATTESTATION_REJECTED
+    return ""
+
+
+def _record_refusal_violation(roster: peer_pool.Roster, peer_id: str,
+                              verdict: Mapping[str, Any]) -> None:
+    """Record one violation for a refused answer, in the roster's ledger.
+
+    RECORD ONLY: the member row is not touched and nothing here can move a tier
+    or a grant. A peer that is no longer a member by the time the answer
+    settles is not recorded against, because a violation is a record about a
+    member and the ledger already holds the refused delivery."""
+    kind = _violation_for_receipt_refusal(
+        str(verdict.get("receipt_link", "")),
+        str(verdict.get("attestation_verdict", "")))
+    if not kind or peer_id not in roster.members:
+        return
+    peer_pool.record_violation(
+        roster, peer_id, kind, detail=str(verdict.get("reason", "")),
+        link=str(verdict.get("receipt_link", "")))
+
+
+def _record_answer(ledger: "DeliveryLedger", *, roster: peer_pool.Roster,
+                   charter_record, directory,
                    peer_id: str, task_id: str, member: peer_pool.Membership,
                    answer: Mapping[str, Any],
                    attesting_identity: peer_identity.PeerIdentity,
                    network_exposed: bool = False,
                    task: Optional[Mapping[str, Any]] = None) -> dict:
-    """Decide what the answer means and write it into ``ledger``."""
+    """Decide what the answer means and write it into ``ledger``.
+
+    A refused receipt that names one of the closed violation kinds is also
+    recorded against the member in the ROSTER (issue #2722): the refusal was
+    already refused and is already in the delivery ledger, and this is the
+    member-level record an operator reads in `pool status`. It changes no
+    authority; the entry stays a record until a charter policy says otherwise.
+    """
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
         if link != LINK_PEER_UNREACHABLE:
@@ -1593,6 +1638,7 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
                               attesting_identity=attesting_identity,
                               network_exposed=network_exposed, task=task)
     if not verdict.get("ok"):
+        _record_refusal_violation(roster, peer_id, verdict)
         ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
                       reason=str(verdict.get("reason", "")))
         return dict(verdict, task_id=task_id)
