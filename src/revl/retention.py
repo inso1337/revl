@@ -60,10 +60,12 @@ THE DERIVATIVE RELATION IS NOW DECLARED IN SOURCE (issue #2695)
 `derives <class> of <param>` on a `fn` or an `extern` says the callable's result
 is a derivative of the named `Retained[T, <policy>]` parameter and carries that
 same policy. The checker validates it at the DECLARATION (the parameter is
-retained, the class is in the closed vocabulary, the policy covers it), mints the
-result's retention origin from it, and the persistence refusal follows the value
-with the derivation named. `declared_derivatives` enumerates the clauses so a
-receipt can list them as rows.
+retained, the class is in the closed vocabulary, the policy covers it), ADDS the
+result's retention origin to the provenance the result already carries (the 249
+dimension is orthogonal, so a declared derivative that is also untrusted or
+secret keeps that origin and its own refusal), and the persistence refusal
+follows the value with the derivation named. `declared_derivatives` enumerates
+the clauses so a receipt can list them as rows.
 
 It is still a DECLARATION and never an inference: a derivative computed inside a
 host body is described only by the crossing that declares it, and one made where

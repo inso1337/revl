@@ -495,12 +495,16 @@ one of the CLOSED vocabulary (`summary`, `index`, `embedding`, `backup`,
 does not cover is refused there rather than reported as `not-covered` when a
 receipt is issued (the second acceptance criterion of #2695). On success the
 result is a derivative under the SAME policy: the checker mints a declaration
-origin for it, the flow walk carries it to every durable-storage sink, and the
-persistence refusal names the sink AND the declaration (`the value is a declared
-embedding derivative of text, made by embed`). `retention.declared_derivatives`
-enumerates the clauses, so a receipt can list the declared derivative as a row.
-A callable whose return already carries `Retained[T, <policy>]` may not also
-declare a derivation; the two would be two claims about one result.
+origin for it and ADDS it to whatever provenance or confidentiality the result
+already carries (retention is orthogonal to the 249 provenance dimension, so a
+declared derivative that is also `Untrusted` is still refused by G9, and a
+`Secret` one still refuses disclosure); the flow walk carries the added origin
+to every durable-storage sink, and the persistence refusal names the sink AND
+the declaration (`the value is a declared embedding derivative of text, made by
+embed`). `retention.declared_derivatives` enumerates the clauses, so a receipt
+can list the declared derivative as a row. A callable whose return already
+carries `Retained[T, <policy>]` may not also declare a derivation; the two would
+be two different policies claimed about one result.
 
 What the clause does NOT do is infer, measure or prove. It describes a relation
 the author asserts at a crossing revl can see; a derivative computed inside a

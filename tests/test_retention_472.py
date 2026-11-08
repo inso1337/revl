@@ -410,6 +410,94 @@ def test_the_derivation_declaration_does_not_move_the_ir():
         compile_source(without, "retain.rvl")
 
 
+# The clause ADDS a retention origin; it must never REPLACE the provenance a
+# return qualifier, a body flow or a declassifier already put on the result.
+# An implementation that REPLACES the result's origin set admits the first
+# three programs below, which is the laundering defect these pin; the fourth
+# pins that a declassifier's clean result also carries the added origin.
+
+def _derive_body(calls: str) -> str:
+    return ('service Ops { emission fn go(k: Str) -> Int }\n'
+            'component C provides ops: Ops {\n'
+            '  provide ops {\n'
+            '    fn go(k) {\n'
+            '      let row = load(k)\n' + calls +
+            '    }\n'
+            '  }\n'
+            '}\n')
+
+
+AUTHORITY_SINK = ('extern emission[shell] fn run(cmd: Trusted[Str]) -> Int '
+                  '= @py { return 0 }\n')
+
+
+def test_a_derivation_never_replaces_an_untrusted_return():
+    """`-> Untrusted[Str] derives embedding of x` still yields the untrusted
+    origin, so the authority sink refuses (G9). A replacing origin would admit
+    it, which is the hole this pins."""
+    src = DERIVE_FUTURE + DERIVE_SOURCES + AUTHORITY_SINK + (
+        'extern pure fn embed(x: Retained[Str, customer_pii]) -> Untrusted[Str] '
+        'derives embedding of x = @py { return x }\n') + _derive_body(
+        '      let v = embed(row)\n'
+        '      let n = emit run(v)\n'
+        '      return n\n')
+    err = _refuses(src)
+    assert err.code == "G9", err.message
+
+
+def test_a_derivation_never_replaces_a_secret_return():
+    """`-> Secret[Str] derives ...` still yields `confidential`, so handing the
+    result to an ordinary extern is refused as a disclosure (G-SECRET-FLOW)."""
+    src = DERIVE_FUTURE + DERIVE_SOURCES + (
+        'extern pure fn embed(x: Retained[Str, customer_pii]) -> Secret[Str] '
+        'derives embedding of x = @py { return x }\n'
+        'extern pure fn logit(s: Str) -> Str = @py { return s }\n') + _derive_body(
+        '      let s = embed(row)\n'
+        '      let x = logit(s)\n'
+        '      return 0\n')
+    err = _refuses(src)
+    assert err.code == "G-SECRET-FLOW", err.message
+
+
+def test_a_derivation_never_launders_an_untrusted_body_flow():
+    """The untrusted origin can enter through a SECOND parameter, so validation
+    of the return type alone cannot save the rule: the derivation origin has to
+    JOIN the signature propagation, not stand in for it."""
+    src = DERIVE_FUTURE + DERIVE_SOURCES + AUTHORITY_SINK + (
+        'extern emission[web.fetch] fn fetch(u: Str) -> Untrusted[Str] '
+        '= @py { return u }\n'
+        'fn embed(x: Retained[Str, customer_pii], u: Untrusted[Str]) -> Str '
+        'derives embedding of x { return u }\n') + _derive_body(
+        '      let u = emit fetch(k)\n'
+        '      let v = embed(row, u)\n'
+        '      let n = emit run(v)\n'
+        '      return n\n')
+    err = _refuses(src)
+    assert err.code == "G9", err.message
+
+
+def test_a_derived_result_survives_a_declassifier_as_a_retained_value():
+    """A `verified fn` returning `Trusted[Str]` still declassifies its argument
+    (the authority sink admits it), and the derivation origin is ADDED to the
+    clean result rather than turning the fn into a retention source that would
+    pre-empt the declassifier. The retained result is refused at the
+    persistence sink, naming the derivation."""
+    src = DERIVE_PAST + DERIVE_SOURCES + AUTHORITY_SINK + (
+        'extern emission[web.fetch] fn fetch(u: Str) -> Untrusted[Str] '
+        '= @py { return u }\n'
+        'verified fn clean(x: Retained[Str, customer_pii], u: Untrusted[Str]) '
+        '-> Trusted[Str] derives embedding of x { return u }\n') + _derive_body(
+        '      let u = emit fetch(k)\n'
+        '      let t = clean(row, u)\n'
+        '      let n = emit run(t)\n'
+        '      let m = emit db_put(t)\n'
+        '      return n\n')
+    err = _refuses(src)
+    assert err.code == "G-RETAIN", err.message
+    assert "declared `embedding` derivative of `x`, made by `clean`" \
+        in err.message, err.message
+
+
 def test_the_receipt_lists_a_declared_derivative_as_a_row():
     """The third acceptance criterion: the receipt a fixture's declaration
     enumerates names the derivative, covered by the policy that reaches it."""

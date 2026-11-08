@@ -957,15 +957,19 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             model.model_crossings[ext.name] = _model_cap
         # issue #2695: the `derives <class> of <param>` clause, validated BEFORE
         # the parameter sweep strips the `Retained[T, <policy>]` spelling off the
-        # source parameter. The crossing's RESULT is the derivative: it carries
-        # `Derivation.origin`, a retention origin under the source parameter's
-        # policy with the declaration appended, so the persistence refusal
-        # follows the value at every sink and names the derivation there.
+        # source parameter. The crossing's RESULT is the derivative: the call
+        # site ADDS `Derivation.origin` (a retention origin under the source
+        # parameter's policy, with the declaration appended) to whatever
+        # provenance the result already carries, so the persistence refusal
+        # follows the value at every sink and names the derivation there. It is
+        # deliberately NOT put in `model.sources`: that map REPLACES a result's
+        # origin set, which would drop the `Untrusted`/`Secret`/`Trusted`
+        # provenance a return qualifier minted for the same callable and launder
+        # G9 / G-SECRET-FLOW (retention is orthogonal, not exclusive).
         _derivation = _derivation_of(ext, model.retention_policies,
                                      program.filename)
         if _derivation is not None:
             model.derivations[ext.name] = _derivation
-            model.sources[ext.name] = _derivation.origin
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -1020,16 +1024,16 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             model.declared_endorse[fn.name] = frozenset(endorse_origins)
         # issue #2695: the `derives <class> of <param>` clause, read before the
         # parameter sweep strips the `Retained[T, <policy>]` spelling off the
-        # source parameter. A plain `fn`'s result is the derivative, so a call
-        # to it yields `Derivation.origin` even where the body's own flow would
-        # not carry the retention fact to the return (a body that reads the
-        # record through an opaque host call, say). The declaration, not the
-        # body, is what makes the result retained.
+        # source parameter. A call to the fn ADDS `Derivation.origin` to the
+        # result the body's own signature minted, so a result the flow would not
+        # otherwise carry the retention fact to (a body that reads the record
+        # through an opaque host call, say) is still retained, and a body that
+        # DOES carry untrusted provenance keeps it: the derivation adds a
+        # retention fact, it never replaces another one.
         _derivation = _derivation_of(fn, model.retention_policies,
                                      program.filename)
         if _derivation is not None:
             model.derivations[fn.name] = _derivation
-            model.sources[fn.name] = _derivation.origin
         params = []
         for i, p in enumerate(fn.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -2509,6 +2513,27 @@ class _FlowChecker:
                 and name not in self.model.declassifiers
                 and name != "endorse")
 
+    def _with_derivation(self, callee: str, result: Taint) -> Taint:
+        """Add the origin a DECLARED derivation's result carries (issue #2695).
+
+        ADDED to whatever the callee's return qualifier, signature, declared
+        source or declassifier already minted, never in place of it: a derivation
+        says the value was MADE FROM a retained one, and says nothing about the
+        provenance or confidentiality the value also carries. Replacing the
+        origin set here would launder G9 and G-SECRET-FLOW for any callable that
+        combines `derives` with another qualifier, which is the defect this
+        helper exists to prevent.
+
+        A derivation callable is always a nameable callable, so the resolution
+        above (`callee = resolved`) has already happened wherever this is
+        reached; an unnameable indirect call is a different rule and never a
+        derivation.
+        """
+        derivation = self.model.derivations.get(callee)
+        if derivation is None:
+            return result
+        return _join(result, Taint({derivation.origin}, (f"{callee}()",)))
+
     def _taint_of_call(self, callee: str, args, env: dict, node,
                        indirect: bool = False) -> Taint:
         arg_taints = [self.taint_of(a, env) for a in args]
@@ -2680,7 +2705,8 @@ class _FlowChecker:
         # a taint source (declared `Untrusted[T]` return): mint its origin
         if callee in self.model.sources:
             origin = self.model.sources[callee]
-            return Taint(frozenset({origin}), (f"{callee}()",))
+            return self._with_derivation(
+                callee, Taint(frozenset({origin}), (f"{callee}()",)))
 
         # the scoped `endorse[<origin>]` declassifier (Slice C): the downgrade is
         # granted only where the enclosing declaration declared the slot, its
@@ -2705,7 +2731,7 @@ class _FlowChecker:
                                             index, at, node)
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
-            return CLEAN
+            return self._with_derivation(callee, CLEAN)
 
         # a callable with an inferred signature (a top-level fn or a provide
         # method): propagate precisely — the result carries the taint of exactly
@@ -2728,9 +2754,7 @@ class _FlowChecker:
                     origins = origins | contributed
                     if not via:
                         via = arg_taints[index].via + (f"{callee}()",)
-            if origins:
-                return Taint(origins, via)
-            return CLEAN
+            return self._with_derivation(callee, Taint(origins, via))
 
         # item 256 (4a.2 kind 2): a plain (non-declared-sink, non-source) extern
         # call is a host crossing. A `secret`-carrying argument to it is refused -
@@ -2760,7 +2784,7 @@ class _FlowChecker:
             result = _join(result, t)
         if result.dirty:
             result = Taint(result.origins, result.via + (f"{callee}()",))
-        return result
+        return self._with_derivation(callee, result)
 
     # -- statement / block walk ------------------------------------------------
     def run(self, body, env: dict) -> None:
