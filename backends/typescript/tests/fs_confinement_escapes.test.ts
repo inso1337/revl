@@ -420,3 +420,38 @@ it('the swapper worker module is present', () => {
   expect(fs.existsSync(fileURLToPath(
     new URL('./fs_confinement_swapper.ts', import.meta.url)))).toBe(true)
 })
+
+// ===========================================================================
+// #3184: the EOUTSIDE refusal carries the caller's own path, never a fact about
+// what lives outside the root (existence by case folding, symlink targets)
+// ===========================================================================
+
+describe('#3184: an outside path is refused with the caller\'s own spelling', () => {
+  it('the guard and fsLexists/fsIsDir answer in one form for an existing and a missing outside path', () => {
+    const alias = path.join(base, 'alias')
+    fs.symlinkSync(outside, alias)
+    const existing = path.join(alias, 'canary.txt')
+    const missing = path.join(alias, 'no_such_file.txt')
+    for (const given of [existing, missing]) {
+      let caught: unknown
+      try { resolveWithin(given) } catch (e) { caught = e }
+      expect(caught).toBeInstanceOf(FsOpError)
+      const err = caught as FsOpError
+      expect(err.code).toBe('EOUTSIDE')
+      expect(err.path).toBe(given)
+      expect(err.path).not.toContain(outside)
+      for (const r of [host.fsLexists(given), host.fsIsDir(given)]) {
+        expect(r.kind).toBe('Err')
+        if (r.kind !== 'Err') return
+        expect(r.value.code).toBe('EOUTSIDE')
+        expect(r.value.message).toBe('path escapes the session workspace root')
+        expect(r.value.path).toBe(given)
+      }
+    }
+  })
+
+  it('an inside path still resolves to its real path', () => {
+    fs.writeFileSync(inWs('here.txt'), 'x\n')
+    expect(resolveWithin('here.txt')).toBe(inWs('here.txt'))
+  })
+})
