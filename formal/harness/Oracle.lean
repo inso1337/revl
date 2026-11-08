@@ -23,6 +23,7 @@ import RevL.Theorems.G4Inverse
 import RevL.Theorems.G4_WitnessedSiteUndo
 import RevL.Theorems.A5_CompensationAccompaniesEmission
 import RevL.Theorems.G9Coverage
+import RevL.Theorems.Cardinality
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -304,6 +305,18 @@ Fact rows in (tab-separated, one fact per line):
                                              `every … in` iteration — the four
                                              forms `lower._dispatch_action`
                                              refuses after a provision
+  CT <file> <comp> <token> <node> <nil|cross|seq|branch|loop> <a> <b>
+                                             one node of one capability's
+                                             crossing command. `seq`/`branch`
+                                             name their two children, `loop`
+                                             carries its iteration ceiling in
+                                             `a` and its body in `b`, and
+                                             `nil`/`cross` carry `-` in both
+                                             (item 260, issue #2743)
+  CR <file> <comp> <token> <root> <bound>    a crossing command's root node
+                                             and the FINITE number
+                                             `src/revl/cardinality.py`
+                                             reports for that capability
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -2967,6 +2980,133 @@ def gcVerdicts (p : String) (rs : G9CoverageRows) : String := Id.run do
 
 end G9Coverage
 
+/-! ## Deciding the emission cardinality bound (item 260, issue #2743)
+
+The `CARD` row compares the number `RevL.Cardinality.bound` gives for a
+crossing command against the number `src/revl/cardinality.py` reports. The
+command arrives as `CT` nodes (one per node of the shape: a sequence, a
+branch, a bounded loop, a crossing, or nothing) and a `CR` claim (the root
+node and the checker's finite bound). `buildCardCmd` rebuilds the command,
+`cardRowB` decides `bound cmd = reported`, and `cardRowB_iff` proves the
+printed Bool is exactly that statement — not a private restatement of it.
+The reference side (`diff_corpus._card_fold`) folds the same nodes
+independently, so a drift in either the model or the shipped analysis shows
+up as a `CARD … fail` or as a reference/formal mismatch. -/
+
+section CardinalityBound
+
+/-- One `CT` row: one node of one capability's exported crossing command. -/
+structure CTRow where
+  path : String
+  comp : String
+  token : String
+  id : Nat
+  kind : String
+  a : String
+  b : String
+
+def parseCT (f : List String) : Option CTRow :=
+  match f with
+  | ["CT", path, comp, token, id, kind, a, b] =>
+      id.toNat?.map fun n => ⟨path, comp, token, n, kind, a, b⟩
+  | _ => none
+
+/-- One `CR` row: a command's root node and the finite number the checker
+reported for that capability. -/
+structure CRRow where
+  path : String
+  comp : String
+  token : String
+  root : Nat
+  bound : Nat
+
+def parseCR (f : List String) : Option CRRow :=
+  match f with
+  | ["CR", path, comp, token, root, bound] =>
+      (root.toNat?).bind fun r => (bound.toNat?).map fun b =>
+        ⟨path, comp, token, r, b⟩
+  | _ => none
+
+/-- Rebuild the crossing command from its nodes. The fuel is the node count
+plus one, so a duplicated or cyclic table is a `none` (and therefore a
+`fail`) rather than a hang. -/
+def buildCardCmd (nodes : List CTRow) (root : Nat) :
+    Option RevL.Cardinality.Cmd :=
+  let rec go (fuel : Nat) (id : Nat) : Option RevL.Cardinality.Cmd :=
+    match fuel with
+    | 0 => none
+    | fuel + 1 =>
+      match nodes.find? (fun r => r.id == id) with
+      | none => none
+      | some r =>
+        match r.kind with
+        | "nil" => some .nil
+        | "cross" => some .cross
+        | "seq" =>
+          match r.a.toNat?, r.b.toNat? with
+          | some la, some rb =>
+            match go fuel la, go fuel rb with
+            | some left, some right => some (.seq left right)
+            | _, _ => none
+          | _, _ => none
+        | "branch" =>
+          match r.a.toNat?, r.b.toNat? with
+          | some la, some rb =>
+            match go fuel la, go fuel rb with
+            | some left, some right => some (.branch left right)
+            | _, _ => none
+          | _, _ => none
+        | "loop" =>
+          match r.a.toNat?, r.b.toNat? with
+          | some count, some bodyId =>
+            match go fuel bodyId with
+            | some body => some (.loop count body)
+            | none => none
+          | _, _ => none
+        | _ => none
+  go (nodes.length + 1) root
+
+/-- **The cardinality row's decider**: does the model's `bound` over the
+rebuilt command equal the number the checker reported? -/
+def cardRowB (nodes : List CTRow) (root bound : Nat) : Bool :=
+  match buildCardCmd nodes root with
+  | none => false
+  | some cmd => decide (RevL.Cardinality.bound cmd = bound)
+
+/-- **`cardRowB` is exactly the model's statement**: the Bool is `true`
+exactly when some rebuilt command has `bound` equal to the reported number.
+A decider that returned a constant would fail one side of this. -/
+theorem cardRowB_iff (nodes : List CTRow) (root bound : Nat) :
+    cardRowB nodes root bound = true ↔
+      ∃ cmd, buildCardCmd nodes root = some cmd ∧
+        RevL.Cardinality.bound cmd = bound := by
+  unfold cardRowB
+  cases buildCardCmd nodes root with
+  | none => simp
+  | some cmd => simp [decide_eq_true_eq]
+
+/-- The `CT` nodes and `CR` claims of one export. -/
+structure CardRows where
+  nodes : List CTRow
+  claims : List CRRow
+
+def parseCardRows (fields : List (List String)) : CardRows :=
+  { nodes := fields.filterMap parseCT
+    claims := fields.filterMap parseCR }
+
+/-- One `CARD` row per `CR` claim in the file, so a failed capability is
+NAMED rather than hidden in a file-level verdict. -/
+def cardVerdicts (p : String) (rs : CardRows) : String := Id.run do
+  let mut out := ""
+  for c in rs.claims.filter (fun r => r.path == p) do
+    let nodes := rs.nodes.filter (fun r => r.path == p
+                              && r.comp == c.comp && r.token == c.token)
+    let v := if cardRowB nodes c.root c.bound then "ok" else "fail"
+    out := out ++ s!"CARD\t{p}\t{c.comp}\t{c.token}\tcard={v}\n"
+  return out
+
+end CardinalityBound
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | [inPath, outPath] =>
@@ -3011,6 +3151,7 @@ def main (args : List String) : IO UInt32 := do
     let crows := parseCouncilRows fields
     let g9rows := parseG9Rows fields
     let gcrow := parseG9CoverageRows fields
+    let cardrows := parseCardRows fields
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
     let swrows := parseSWRows fields
@@ -3199,6 +3340,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ g9Verdicts p g9rows
       -- GC verdicts (G9 path coverage of a component body, issue #2108)
       out := out ++ gcVerdicts p gcrow
+      -- CARD verdicts (emission cardinality bound, item 260, issue #2743)
+      out := out ++ cardVerdicts p cardrows
       -- RETAIN verdicts (G-RETAIN on the corpus, issue #1811 group 3)
       out := out ++ gretainVerdicts p retainrows
       -- INV verdicts (the G4 inverse rule on the corpus, issue #2097)
@@ -3388,3 +3531,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.a5RowB_iff
 #print axioms RevLOracle.a5RowBAll_iff
 #print axioms RevLOracle.gcRowB_iff
+#print axioms RevLOracle.cardRowB_iff
