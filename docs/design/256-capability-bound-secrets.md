@@ -682,6 +682,12 @@ refused (a new code, G-SECRET-FLOW):
 - **an LLM prompt**: an argument to a `model.*` emission;
 - **an MCP tool return**: the value a `provide` method returns across the MCP
   bridge;
+- **the error text of a failed activation**: a `fail` step's message is
+  recorded on the FAILED fiber, returned by `revl_load` / `revl_state`
+  (`components[].error.message`) and printed in the run trace; the runtime also
+  funnels the built message through `confidential.redact_text` as a backstop,
+  and a host error that quotes a registered secret is scrubbed at the same two
+  sinks (issues #3141 / #3142);
 - **an un-approved realm crossing**: a spawn/realm boundary without an approval
   edge;
 - **any capability-boundary crossing without explicit declaration**: an `emit`
