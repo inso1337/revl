@@ -2365,11 +2365,12 @@ The two-effect fan-out group is stated in
 `SemStep` (`ParStep`/`ParSteps`), so G7 and A8 do not move. The design decision
 is `docs/design/2741-parallel-fanout-formalism.md`.
 
-- `RevL.Fanout.two_effect_group_effect_equiv`: under the emitter gate, the
-  parallel trace equals a sequential order; the fault case's witness is the
-  order with the failed member last.
+- `RevL.Fanout.two_effect_group_effect_equiv`: under the gate's two idempotence
+  conjuncts, the parallel trace equals a sequential order; the fault case's
+  witness is the order with the failed member last.
 - `RevL.Fanout.compensation_only_when_allowed`: a parallel compensation token
-  names a member that fired, and under the gate its compensation is idempotent.
+  names a member that fired, and under the gate's two idempotence conjuncts its
+  compensation is idempotent.
 - The non-vacuity evidence: `RevL.Fanout.clean_members_admitted`,
   `RevL.Fanout.fault_members_admitted`,
   `RevL.Fanout.fault_group_registers_the_fired_compensation`,
@@ -2379,5 +2380,6 @@ is `docs/design/2741-parallel-fanout-formalism.md`.
   `RevL.Fanout.non_idempotent_forward_breaks_the_gate`,
   `RevL.Fanout.non_idempotent_compensation_breaks_the_gate`.
 
-The differential row over the Python fan-out's fault schedules and the P09
-update are follow-ups; this section records the Lean slice only.
+The differential row over the Python fan-out's fault schedules and the
+refinement from the effect trace to `ParStep`/`ParSteps` are follow-ups; the P09
+update is in this slice.

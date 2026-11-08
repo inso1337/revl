@@ -559,10 +559,10 @@ import RevL
 #print axioms RevL.A5.a5_not_vacuous
 #print axioms RevL.A5.witness_bites
 
--- Issue #2741: the two-effect parallel fan-out group. The interleaving
--- extension is `RevL.Fanout.ParStep`/`ParSteps` over the sequential
--- `SemStep`, so G7 and A8 do not move; the effect trace is the group's, and
--- the gate is the emitter's admission rule (`_group_eligible`).
+-- Issue #2741: the two-effect parallel fan-out group. `ParStep`/`ParSteps`
+-- is the interleaving extension over the sequential `SemStep`, so G7 and A8
+-- do not move. The theorem below is over the effect trace abstraction; the
+-- gate it assumes is the two idempotence conjuncts of `_group_eligible`.
 #print axioms RevL.Fanout.two_effect_group_effect_equiv
 #print axioms RevL.Fanout.compensation_only_when_allowed
 #print axioms RevL.Fanout.clean_members_admitted

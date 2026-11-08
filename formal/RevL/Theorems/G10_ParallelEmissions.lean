@@ -5,18 +5,23 @@ RevL.Theorems.G10_ParallelEmissions: the two-effect parallel fan-out group (issu
 
 `docs/design/2741-parallel-fanout-formalism.md` chooses an interleaving
 extension of the sequential small-step relation. This L2 file carries the
-extension relation over `SemStep`, the two-member group, the gate
-`backends/python/emit.py`'s `_group_eligible` applies, and the observable
-effect trace a run leaves, together with the effect-equivalence theorem.
+extension relation `ParStep`/`ParSteps` over `SemStep`, and the first
+theorem, which is stated over an abstract effect trace: the two-member
+group, the two idempotence conjuncts of the emitter gate, and the forward and
+compensation tokens the join produces.
+
+The trace is the abstraction the runtime's join has: the join is a function
+of the branch results, not the interleaving relation itself. `ParStep` and
+`ParSteps` state the interleaving the note chooses; a refinement from that
+relation to the trace is a follow-up, not a claim of this file.
 
 The model is deliberately smaller than the runtime:
 * a member has ONE forward effect step and an optional compensation;
 * duplicate delivery is the worst case the gate exists for (a retry after a
   fault, or an external dispose mid-group), and idempotence collapses it;
-* the group is the interleaving of its members, so a failed member
-  (`Body.fail`, which is stuck in `SemStep`) does not stop the other member
-  from taking its step. That is the fault case P09 withdraws byte-identity
-  for.
+* a failed member contributes no forward token, and the other member's
+  forward token is still in the trace, which is the fault case P09
+  withdraws byte-identity for.
 
 Nothing here edits `SemStep`, the G7 teardown stack or the A8 WAL run.
 -/
@@ -38,28 +43,6 @@ inductive ParStep : (Config × Config) → (Config × Config) → Prop where
 inductive ParSteps : (Config × Config) → (Config × Config) → Prop where
   | refl : ∀ {g}, ParSteps g g
   | step : ∀ {g h k}, ParStep g h → ParSteps h k → ParSteps g k
-
-/-- The first coordinate of a group run is a sequential run under
-`SemStep`. -/
-theorem ParSteps.left {g g' : Config × Config} (h : ParSteps g g') :
-    SemSteps g.1 g'.1 := by
-  induction h with
-  | refl => exact .refl
-  | step hs _ ih =>
-    cases hs with
-    | left hstep => exact .step hstep ih
-    | right _ => exact ih
-
-/-- The second coordinate of a group run is a sequential run under
-`SemStep`. -/
-theorem ParSteps.right {g g' : Config × Config} (h : ParSteps g g') :
-    SemSteps g.2 g'.2 := by
-  induction h with
-  | refl => exact .refl
-  | step hs _ ih =>
-    cases hs with
-    | left _ => exact ih
-    | right hstep => exact .step hstep ih
 
 /-! ## Observable effects -/
 
@@ -85,14 +68,14 @@ def addComp (idem : Bool) (s : Seq) (t : Trace) : Trace :=
   if idem then (if Eff.comp s ∈ t then t else Eff.comp s :: t)
   else Eff.comp s :: t
 
-theorem addFwd_idem (s : Seq) (t : Trace) :
+private theorem addFwd_idem (s : Seq) (t : Trace) :
     addFwd true s (addFwd true s t) = addFwd true s t := by
   unfold addFwd
   by_cases h : Eff.fwd s ∈ t
   · simp [h]
   · simp [h]
 
-theorem addComp_idem (s : Seq) (t : Trace) :
+private theorem addComp_idem (s : Seq) (t : Trace) :
     addComp true s (addComp true s t) = addComp true s t := by
   unfold addComp
   by_cases h : Eff.comp s ∈ t
@@ -101,7 +84,7 @@ theorem addComp_idem (s : Seq) (t : Trace) :
 
 /-- A compensation token never enters a forward append, whatever the
 idempotence flag: the two effect constructors are disjoint. -/
-theorem comp_mem_addFwd (idem : Bool) (x : Seq) (t : Trace) (s : Seq) :
+private theorem comp_mem_addFwd (idem : Bool) (x : Seq) (t : Trace) (s : Seq) :
     Eff.comp s ∈ addFwd idem x t ↔ Eff.comp s ∈ t := by
   unfold addFwd
   by_cases hi : idem
@@ -111,7 +94,7 @@ theorem comp_mem_addFwd (idem : Bool) (x : Seq) (t : Trace) (s : Seq) :
 
 /-- A compensation token enters a compensation append exactly when it is
 the member's token or was already present, whatever the idempotence flag. -/
-theorem comp_mem_addComp (idem : Bool) (x : Seq) (t : Trace) (s : Seq) :
+private theorem comp_mem_addComp (idem : Bool) (x : Seq) (t : Trace) (s : Seq) :
     Eff.comp s ∈ addComp idem x t ↔ s = x ∨ Eff.comp s ∈ t := by
   unfold addComp
   by_cases hi : idem
@@ -154,16 +137,18 @@ structure Member where
   compIdem : Bool := false
   deriving DecidableEq, Repr
 
-/-- The emitter's admission gate: idempotent forward delivery, and a
-compensation that is idempotent or absent. -/
+/-- The two idempotence conjuncts of the emitter's admission gate
+(`_group_eligible`): idempotent forward delivery, and a compensation that
+is idempotent or absent. The async, shape and on-task-record conjuncts are
+not modelled. -/
 def Member.admitted (m : Member) : Prop :=
   m.forwardIdem = true ∧ (m.hasComp = false ∨ m.compIdem = true)
 
-theorem admitted_forward {m : Member} (h : m.admitted) :
+private theorem admitted_forward {m : Member} (h : m.admitted) :
     m.forwardIdem = true := h.1
 
 /-- Under the gate, a present compensation is declared idempotent. -/
-theorem admitted_comp_idem {m : Member} (h : m.admitted)
+private theorem admitted_comp_idem {m : Member} (h : m.admitted)
     (hc : m.hasComp = true) : m.compIdem = true := by
   rcases h.2 with hA | hI
   · rw [hc] at hA; exact Bool.noConfusion hA
@@ -219,18 +204,6 @@ def seqTrace (first : Bool) (m1 m2 : Member) : Trace :=
 
 /-! ## The two-effect group theorem -/
 
-/-- Under the gate a firing member's compensation attempt may be read with
-its idempotence fixed to true, once the member is known to fire. -/
-theorem compTrace_fire_admitted {m : Member} (h : m.admitted)
-    (hm : m.mode = .fire) (t : Trace) :
-    m.compTrace t = (if m.hasComp then addComp true m.seq t else t) := by
-  unfold Member.compTrace
-  rw [hm]
-  by_cases hc : m.hasComp
-  · rw [admitted_comp_idem h hc]
-    simp [Mode.isFire, hc]
-  · simp [Mode.isFire, hc]
-
 /-- **The two-effect group is effect-equivalent to some sequential order,
 under the gate.** For an admitted two-member group, the parallel trace (with
 the duplicate delivery a retry can produce) equals the sequential trace of
@@ -274,7 +247,7 @@ theorem two_effect_group_effect_equiv (m1 m2 : Member)
 one.** This is the trace-level half of "compensation runs only when
 allowed": the join's compensation set is built from the branch results of
 members that fired, never from a failed or unfired member. -/
-theorem par_comp_token_is_a_registered_member (m1 m2 : Member) (s : Seq)
+private theorem par_comp_token_is_a_registered_member (m1 m2 : Member) (s : Seq)
     (h : Eff.comp s ∈ parTrace m1 m2) :
     (m1.mode = .fire ∧ m1.hasComp = true ∧ s = m1.seq) ∨
       (m2.mode = .fire ∧ m2.hasComp = true ∧ s = m2.seq) := by
@@ -286,7 +259,7 @@ theorem par_comp_token_is_a_registered_member (m1 m2 : Member) (s : Seq)
     cases hc1 : m1.hasComp
     · simp [parTrace, anyFault, firePack, compPack, Member.fireTrace,
         Member.compTrace, hm1, hm2, hc1, Mode.isFire, Mode.isFault,
-        comp_mem_addFwd, comp_mem_addComp] at h ⊢
+        comp_mem_addFwd] at h ⊢
     · simp [parTrace, anyFault, firePack, compPack, Member.fireTrace,
         Member.compTrace, hm1, hm2, hc1, Mode.isFire, Mode.isFault,
         comp_mem_addFwd, comp_mem_addComp] at h ⊢
@@ -295,7 +268,7 @@ theorem par_comp_token_is_a_registered_member (m1 m2 : Member) (s : Seq)
     cases hc2 : m2.hasComp
     · simp [parTrace, anyFault, firePack, compPack, Member.fireTrace,
         Member.compTrace, hm1, hm2, hc2, Mode.isFire, Mode.isFault,
-        comp_mem_addFwd, comp_mem_addComp] at h ⊢
+        comp_mem_addFwd] at h ⊢
     · simp [parTrace, anyFault, firePack, compPack, Member.fireTrace,
         Member.compTrace, hm1, hm2, hc2, Mode.isFire, Mode.isFault,
         comp_mem_addFwd, comp_mem_addComp] at h ⊢

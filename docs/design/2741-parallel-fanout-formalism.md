@@ -1,7 +1,7 @@
 # A formalism for parallel fan-out (issue 2741)
 
 **Status: decision note and the first theorem; the differential row and the
-P09 update follow.**
+refinement of the trace theorem to `ParSteps` follow.**
 
 Parallel fan-out is checked by the compiler (`src/revl/parallel.py`) and run by
 the Python runtime (`backends/python/runtime.py`, `_revl_parallel`), but the Lean
@@ -17,7 +17,9 @@ This note compares the candidate formalisms against the three questions in the
 issue, names the one chosen, records what was tried, and fixes the shape of the
 first theorem so that switching the choice costs one new theorem file and one
 oracle row, not a rewrite of G7 or A8. The theorem itself is in
-`formal/RevL/Theorems/G10_ParallelEmissions.lean`.
+`formal/RevL/Theorems/G10_ParallelEmissions.lean`. It is a trace-level
+statement: `ParStep`/`ParSteps` states the interleaving the note chooses, and the
+refinement from that relation to the trace is a follow-up.
 
 ## What the choice must be able to say
 
@@ -79,15 +81,17 @@ compensations are registered.
 
 Q1: yes. A member that faults is a configuration whose body is `Body.fail`, which
 is stuck. The other member can still step, so the fired set is not a prefix of
-the plan order; it is exactly the set of members that stepped. The join,
-modelled as a relation rather than as a function, states the compensation set
-over that fired set.
+the plan order; it is exactly the set of members that stepped. The join is a
+function of the branch results in the runtime and in the trace model below; the
+`ParStep`/`ParSteps` relation states the interleaving itself, and the refinement
+from that relation to the trace is a follow-up. The compensation set is stated
+over the fired set.
 
 Q2: yes. `SemStep` is untouched. The new relation is defined as `SemStep` on one
 coordinate of a product of `Config`s, so the existing five forms, G7's teardown
-stack and A8's WAL run keep their statements. The new farm is L1, imports only
-L0 and the WAL farm, and the new theorem file is L2, exactly the layering the
-gate enforces.
+stack and A8's WAL run keep their statements. The theorem file is L2 and imports
+the WAL farm (L1) and L0; no L1 farm is added, because an L1 farm may not import
+another L1 farm, and the layering gate enforces that.
 
 Q3: yes. The steps are the same forward effect steps the runtime performs, and
 the join is the same settle the runtime's emitted join performs. A row can
@@ -115,8 +119,10 @@ reusable, and not oracle-shaped.
 ### D. A hybrid process-algebra surface over an interleaving core
 
 Two formalisms to keep in sync: a term language for composition and a
-small-step core underneath. It doubles the proof surface and the review surface
-for no statement the two required ones need. **Rejected.**
+small-step core underneath. Q1: only through the process-algebra surface, which
+repeats A's translation. Q2: no, it keeps a second semantics to sync. Q3: no,
+the surface adds a translation with no row. It doubles the proof surface and the
+review surface for no statement the two required ones need. **Rejected.**
 
 ## The chosen statements
 
@@ -126,11 +132,12 @@ forward effect step and an optional compensation, admitted by the gate.
 - A member is `fire(seq, forwardIdem, compensation?)` or `fail`. `forwardIdem`
   is the declaration the gate reads; a compensation is present or absent, and
   `compIdem` is present only when the compensation is declared idempotent.
-- The gate admits a member when its forward delivery is declared idempotent and
-  its compensation is idempotent or absent. This is
-  `_group_eligible`'s compensation conjunct
+- The gate's two idempotence conjuncts admit a member when its forward delivery
+  is declared idempotent and its compensation is idempotent or absent. This is
+  the idempotence half of `_group_eligible`
   (`backends/python/emit.py:2193`, `_compensation_idempotent_or_absent`,
-  `:2174`) stated as a predicate, not a new rule.
+  `:2174`) stated as a predicate, not a new rule. The async, shape and
+  on-task-record conjuncts are not modelled.
 - Observable effects are a trace of tokens: a forward token or a compensation
   token. The model takes duplicate delivery as the worst case the gate exists
   for: a fan-out may attempt a member's forward more than once (a retry after a
@@ -176,8 +183,8 @@ The non-vacuity evidence is part of the theorem's slice, in the same shape as
 - The G7 teardown model was checked for direct reuse. G7 says which registered
   entries replay under a verdict. It says nothing about when a group member's
   forward step happens, and its stack is per activation, not per group member.
-  The fan-out needs a per-member step relation, which is why the new farm is
-  additive.
+  The fan-out needs a per-member step relation, which is why the new theorem file
+  is additive.
 - A process algebra was drafted as the natural first choice and rejected on Q2:
   it is a second semantics with no bridge to `SemStep`, and bisimulation proves
   more than the required statements.
@@ -185,7 +192,7 @@ The non-vacuity evidence is part of the theorem's slice, in the same shape as
   projection to runtime events, and that projection is an unproved mapping, not
   an oracle row.
 - The smallest group was chosen for the first theorem, so a rejection of this
-  note discards only the new lemma file and the new row.
+  note discards only the new theorem file and the new row.
 
 ## The oracle row this decision implies
 
@@ -208,7 +215,8 @@ The differential row, built in the follow-up slice, has the same shape as G7's:
 
 - No true parallelism. The runtime is one cordis event loop with cooperative
   `await` interleavings (`backends/python/runtime.py`, the pool-job-semantics
-  block); the model is an interleaving of steps, not a preemptive schedule.
+  block); the model is a trace over interleaved member effects, not a preemptive
+  schedule.
 - No divert-aware cancellation. P09's open question 3 is untouched: a mid-group
   divert is not modelled, only a failed member at the join.
 - No general n-member theorem. The first theorem is the two-effect group; the
@@ -219,13 +227,15 @@ The differential row, built in the follow-up slice, has the same shape as G7's:
 - No claim that the Python fan-out and the model agree yet. That is the
   differential row; until it exists the decision and the Lean theorem are not an
   agreement claim about the runtime.
+- No refinement from the `ParStep`/`ParSteps` relation to the effect trace. The
+  relation is stated, and the theorem is over the trace abstraction; the bridge
+  is a follow-up.
 
 ## Follow-up slices
 
 1. The differential row and its mutation, driving `_revl_parallel`.
-2. The P09 update that cites the theorem and narrows its "no Lean" caveat.
+2. The refinement from the `ParStep`/`ParSteps` relation to the effect trace,
+   which is what would connect the theorem to a `SemStep` run.
 
-The theorem and its non-vacuity witnesses are in this slice, registered in
-the formal gate as `RevL.Fanout.two_effect_group_effect_equiv`,
-`RevL.Fanout.compensation_only_when_allowed`, and the concrete witnesses the
-registry cites.
+The theorem, its non-vacuity witnesses and the P09 update are in this slice.
+The ten `RevL.Fanout.*` claims are registered in the formal gate.
