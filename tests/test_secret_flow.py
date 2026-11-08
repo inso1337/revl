@@ -112,6 +112,37 @@ def test_refused_at_an_undeclared_receiver_across_a_capability_crossing():
     assert "emission crossing" in err.message
 
 
+@pytest.mark.parametrize("crossing", [
+    "let r = emit snk.out(t)",
+    "let r = 1 + (emit snk.out(t))",
+    'let r = u == "a" ? emit snk.out(t) : 0',
+])
+def test_refused_at_a_value_form_capability_crossing(crossing):
+    """Issue #3122: an undeclared receiver reached through the VALUE form of the
+    emission. Lowering erases the `emit` marker on a call written as a value, and
+    the receiver check used to live only in the statement-emit arm, so a binding,
+    a nested expression and a ternary arm all compiled with the secret handed to
+    a plain `Str` receiver."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      " + crossing,
+        extra="service Sink { emission fn out(s: Str) -> Int }\n",
+        reqs="requires snk: Sink "))
+    assert "emission crossing" in err.message
+
+
+def test_refused_at_a_value_form_crossing_through_a_service_typed_local():
+    """Issue #3122, the service-typed receiver spelling: a call through a value
+    of service type is the same operation crossing, so its value form checks the
+    receiver too. The lowered node names no service, so the walk resolves the
+    operation by name, the same keying the declared receivers use."""
+    err = _refuses(_agent(
+        "      let s = emit charge(u)\n      let r = emit t.out(s)",
+        extra="service Sink { emission fn out(x: Str) -> Int }\n",
+        sig="fn go(t: Sink, u: Str) -> Int", params="t, u",
+        reqs="requires snk: Sink "))
+    assert "emission crossing" in err.message
+
+
 def test_refused_at_an_unnameable_first_class_callable():
     """What cannot be named cannot be shown to declare a `Secret[T]` receiver, so
     a confidential argument to it is an undeclared disclosure crossing."""
@@ -133,6 +164,17 @@ def test_declared_secret_service_operation_parameter_admits_the_crossing():
         extra="service Vault { emission fn store(x: Secret[Str]) -> Int }\n",
         reqs="requires vault: Vault ")
     compile_source(src, "admit.rvl")  # compiles — the receiver declared it
+
+
+def test_declared_secret_receiver_admits_a_value_form_crossing():
+    """The value form admits exactly what the statement form admits: a
+    `Secret[T]` parameter on the required operation is a declared receiver,
+    whether the emission is written as a statement or bound to a name."""
+    src = _agent(
+        "      let t = emit charge(u)\n      let r = emit vault.store(t)",
+        extra="service Vault { emission fn store(x: Secret[Str]) -> Int }\n",
+        reqs="requires vault: Vault ")
+    compile_source(src, "admit_value.rvl")  # compiles — the receiver declared it
 
 
 def test_declared_secret_extern_parameter_admits_the_crossing():
@@ -263,6 +305,22 @@ def test_a8_bound_key_is_refused_at_a_secret_service_receiver_via_emit():
         + "  provide ops {\n"
         + "    fn go(u) {\n      let s = emit complete(u)\n"
         + "      emit vault.store(s)\n      return 0\n    }\n  }\n}\n")
+    assert _code_of(src) == "G-SECRET"
+
+
+def test_a8_bound_key_is_refused_at_a_value_form_service_receiver():
+    """Issue #3122, the bound-key half: the same crossing written as a value
+    (`let r = emit snk.out(t)`) must refuse the provider key exactly as the
+    statement form does. A plain `Str` receiver is an undeclared one."""
+    src = (
+        _BOUND_PRELUDE
+        + "service Sink { emission fn out(s: Str) -> Int }\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent requires snk: Sink provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u) {\n"
+        + "      let t = emit complete(u)\n"
+        + "      let r = emit snk.out(t)\n"
+        + "      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET"
 
 
@@ -434,6 +492,82 @@ def test_a_config_free_program_keeps_an_inert_walk():
     ir = compile_source(src, "plain.rvl")
     comp = {c["name"]: c for c in ir["components"]}["Keeper"]
     assert "taint" not in comp
+
+
+# ===========================================================================
+# 6a. The spawn config hand-off is a receiver too (issue #3132).
+# ===========================================================================
+#
+# `spawn Child with { v: t }` hands the value to the child's config field, which
+# is the receiving side of a component-boundary crossing. A field declared
+# `Secret[T]` is a declared receiver; a plain field is an undeclared one, so a
+# `confidential` or `secret` value handed to it must be refused at the hand-off
+# rather than laundered into the child's ordinary data.
+
+_SPAWN_SINK = (
+    "service Sink { emission fn put(v: Str) -> Int }\n")
+
+
+def _spawner(field: str) -> str:
+    """A `Child` whose only config field is `field`, spawned with a `Secret[T]`
+    value in it, plus the untouched provider body the plain-field shape needs."""
+    return (
+        _PRELUDE
+        + _SPAWN_SINK
+        + "component Child provides s: Sink {\n"
+        + "  config { v: " + field + ' = "" }\n'
+        + "  provide s { fn put(x: Str) { return 0 } }\n"
+        + "}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit charge(u)\n"
+        + "      let w = effect spawn Child with { v: t } undo w.dispose()\n"
+        + "      return 0\n    }\n  }\n}\n")
+
+
+def test_a_spawn_config_hand_off_refuses_a_confidential_value_in_a_plain_field():
+    """Issue #3132: a plain `Str` config field is an undeclared receiver, so the
+    payment token is refused at the hand-off. Before the fix it compiled and the
+    child could log `config.v` as ordinary data."""
+    err = _refuses(_spawner("Str"))
+    assert "spawn config" in err.message
+    assert "config.v" in err.message
+
+
+def _bound_spawner(field: str) -> str:
+    return (
+        _BOUND_PRELUDE
+        + "service Sink { emission fn put(v: Str) -> Int }\n"
+        + "component Child provides s: Sink {\n"
+        + "  config { v: " + field + ' = "" }\n'
+        + "  provide s { fn put(x: Str) { return 0 } }\n"
+        + "}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit complete(u)\n"
+        + "      let w = effect spawn Child with { v: t } undo w.dispose()\n"
+        + "      return 0\n    }\n  }\n}\n")
+
+
+def test_a_spawn_config_hand_off_refuses_the_bound_key():
+    """The bound-key half of issue #3132: a provider key reflected into a spawn
+    config field is refused with G-SECRET at the hand-off, not logged by the
+    child as a plain `Str`."""
+    assert _code_of(_bound_spawner("Str")) == "G-SECRET"
+
+
+def test_a_spawn_config_hand_off_refuses_the_bound_key_at_a_secret_field():
+    """A8 disjointness on the hand-off: a `Secret[Str]` config field is a
+    declared receiver for `confidential`, never for the `secret` bound key."""
+    assert _code_of(_bound_spawner("Secret[Str]")) == "G-SECRET"
+
+
+def test_a_spawn_config_hand_off_admits_a_declared_secret_field():
+    """The false-positive control: a field declared `Secret[Str]` IS a declared
+    receiver, so the same hand-off compiles when the child never discloses it."""
+    assert _code_of(_spawner("Secret[Str]")) is None
 
 
 # ===========================================================================
