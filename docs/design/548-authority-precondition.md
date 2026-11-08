@@ -179,8 +179,8 @@ reuses `placement.swap_admission`:
 
 | axis | source |
 | --- | --- |
-| `capability` | a new `host:` crossing, a widened per-emission capability scope, or a host body appearing on a backend it was not on |
-| `taint` | a new `emit:` crossing, a new boundary edge out |
+| `capability` | a new `host:` crossing, a new `secret:` binding, a new or loosened `env:` contract, a widened per-emission capability scope, or a host body appearing on a backend it was not on |
+| `taint` | a new `emit:` crossing (a new boundary edge out), a new `taint:` crossing (an untrusted origin newly reaching an emission), or a new `declassify:` (an added `endorse`) |
 | `realm` | a reach bound that loosened or moved |
 | `budget` | a per-capability emission ceiling that widened, including a bounded count becoming `unbounded` |
 | `retention` | a new declared position where a resource handle leaves revl's sight |
@@ -188,6 +188,11 @@ reuses `placement.swap_admission`:
 `audit_diff` reports the retention surface and compares no two of them, so the
 retention row is an additions-only read of `resources.retention_surface` in
 the direction every other bucket takes. All five axes are measured.
+
+Every crossing kind `audit_diff.crossings` emits has a bucket, and an
+added crossing token whose prefix no bucket claims is counted on every
+axis, so a token kind added later fails closed until it is mapped
+(issue #3206).
 
 `judge_authority` reads the CANONICAL axis set rather than the keys the diff
 happens to carry, so an axis that stopped being produced is read as moved. A

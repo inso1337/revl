@@ -360,7 +360,11 @@ _BUCKET_AXIS = {
     "host_added": "capability",
     "scope_widened": "capability",
     "backends_added": "capability",
+    "secret_added": "capability",
+    "env_added": "capability",
     "emit_added": "taint",
+    "taint_added": "taint",
+    "declassify_added": "taint",
     "reach_weakened": "realm",
     "cardinality_widened": "budget",
     "retention_added": "retention",
@@ -376,6 +380,34 @@ if _UNKNOWN_AXES:
     raise RuntimeError(
         "canary: drift bucket(s) labelled with an axis "
         f"`promotion_barrier.AUTHORITY_AXES` does not carry: {_UNKNOWN_AXES}")
+
+#: Which drift bucket each `audit_diff.crossings` token kind lands in, keyed
+#: by the token's prefix (issue #3206). Every kind `crossings` emits is
+#: claimed here, because a kind no bucket claimed was dropped before this
+#: table existed: a newly routed `taint:`, a new `declassify:`, a new
+#: `secret:` binding and a new or loosened `env:` contract all read as "no
+#: widening" while `revl audit --diff` reported one on the same pair.
+_CROSSING_BUCKET = {
+    "host": "host_added",
+    "emit": "emit_added",
+    "taint": "taint_added",
+    "declassify": "declassify_added",
+    "secret": "secret_added",
+    "env": "env_added",
+}
+
+#: An added crossing token whose prefix `_CROSSING_BUCKET` does not claim. A
+#: future token kind carries some authority nobody mapped, and which axis it
+#: belongs to is exactly what is unknown, so it is counted on EVERY axis
+#: rather than on a guessed neighbour or on none. That reads as moved
+#: everywhere, which is the fail-closed direction.
+_UNCLAIMED_BUCKET = "unclaimed_added"
+
+_UNBUCKETED = sorted(set(_CROSSING_BUCKET.values()) - set(_BUCKET_AXIS))
+if _UNBUCKETED:
+    raise RuntimeError(
+        "canary: crossing bucket(s) with no authority axis: "
+        f"{_UNBUCKETED}")
 
 _AXIS_OF_BUCKET = {
     axis: tuple(b for b, a in _BUCKET_AXIS.items() if a == axis)
@@ -407,6 +439,21 @@ def _retention_added(prev: dict, new: dict) -> list:
     return sorted(_tokens(new) - _tokens(prev))
 
 
+def _crossing_buckets(added) -> dict:
+    """The added crossing tokens, sorted into their drift buckets by prefix.
+
+    Every bucket `_CROSSING_BUCKET` names is present, empty or not, and a token
+    whose prefix none of them claims goes to `_UNCLAIMED_BUCKET` instead of
+    being dropped (issue #3206).
+    """
+    out = {bucket: [] for bucket in _CROSSING_BUCKET.values()}
+    out[_UNCLAIMED_BUCKET] = []
+    for token in sorted(added):
+        prefix = token.partition(":")[0] if isinstance(token, str) else None
+        out[_CROSSING_BUCKET.get(prefix, _UNCLAIMED_BUCKET)].append(token)
+    return out
+
+
 def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     """The authority diff between two generations, per
     `promotion_barrier.AUTHORITY_AXES`.
@@ -416,9 +463,18 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     `placement.swap_admission` rather than writing a second admission check.
     The buckets map onto the axes as follows:
 
-      capability   a new `host:` crossing, a widened per-emission capability
-                   scope, or a host body appearing on a backend it was not on
-      taint        a new `emit:` crossing, which is a new boundary edge out
+      capability   a new `host:` crossing, a new `secret:` binding, a new or
+                   loosened `env:` contract, a widened per-emission
+                   capability scope, or a host body appearing on a backend
+                   it was not on
+      taint        a new `emit:` crossing, which is a new boundary edge out,
+                   a new `taint:` crossing (an untrusted origin newly
+                   reaching an emission), or a new `declassify:` (an added
+                   `endorse`)
+
+    An added crossing token of a kind none of these claims is counted on
+    every axis, so a token kind added to `audit_diff.crossings` later fails
+    closed until it is mapped (issue #3206).
       realm        a reach bound that loosened or moved (`confined(T)` to
                    `unconfined`, or to a different bound)
       budget       a per-capability emission ceiling that widened, including
@@ -438,17 +494,18 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
 
     prev, new = audit_report(running_ir), audit_report(candidate_ir)
     delta = diff_crossings(prev, new)
-    buckets = {
-        "host_added": sorted(c for c in delta["added"] if c.startswith("host:")),
-        "emit_added": sorted(c for c in delta["added"] if c.startswith("emit:")),
+    buckets = _crossing_buckets(delta["added"])
+    buckets.update({
         "reach_weakened": list(delta["reach_weakened"]),
         "scope_widened": list(diff_capability_scopes(prev, new)["scope_widened"]),
         "backends_added": list(diff_backends(prev, new)["backends_added"]),
         "cardinality_widened": list(
             diff_cardinality(prev, new)["cardinality_widened"]),
         "retention_added": _retention_added(prev, new),
-    }
-    diff = {axis: sorted(t for bucket in names for t in buckets[bucket])
+    })
+    unclaimed = buckets[_UNCLAIMED_BUCKET]
+    diff = {axis: sorted([t for bucket in names for t in buckets[bucket]]
+                         + unclaimed)
             for axis, names in _AXIS_OF_BUCKET.items()}
     unmeasured = sorted(set(AUTHORITY_AXES) - set(diff))
     return {"diff": diff, "unmeasured": unmeasured, "buckets": buckets,
