@@ -19,8 +19,8 @@ These tests hold the issue's acceptance:
   readable through the same handler;
 * `revl_source` keeps its current behaviour and error for a missing symbol
   **when other arguments are given**, and stays in `CORE` — this is a branch
-  in an existing handler, not a new tier entry, so the cap of 14 that
-  #2073/#2042 protect is untouched.
+  in an existing handler, not a new tier entry, so the tier's bound (15 since
+  #2625 promoted `revl_export`) is untouched.
 
 The first test is the falsifier: it fails if the stdlib branch is disabled.
 """
@@ -298,10 +298,10 @@ def test_a_loaded_composition_is_read_from_its_own_source(repo_root):
 def test_revl_source_stays_in_the_core_tier(nothing_loaded):
     """Acceptance 3: `revl_source` is already in `CORE` and already means
     "read a declaration", so the stdlib index is a branch in an existing
-    handler rather than a new tier entry — the cap of 14 that #2073/#2042
-    protect is untouched."""
+    handler rather than a new tier entry — the tier's bound (#2625 raised it to
+    15 when `revl_export` joined) is untouched."""
     assert "revl_source" in disclosure.CORE
-    assert len(disclosure.CORE) == 14, disclosure.CORE
+    assert len(disclosure.CORE) == 15, disclosure.CORE
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
 
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

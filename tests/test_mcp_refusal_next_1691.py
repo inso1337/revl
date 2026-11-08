@@ -200,9 +200,9 @@ def test_a_files_loaded_edit_lands_without_a_remedy(tmp_path):
                                             "replacement": "fn size() = 7"}]})
     assert edited["ok"] is True and edited["swapped"] is True, edited
     # no load or swap remedy; the held edit is not on disk, so the only `next`
-    # is the disk note's export call (issue #2537)
-    assert edited["next"] == {"tool": "revl_verbs",
-                              "arguments": {"name": "revl_export", "args": {}},
+    # is the disk note's export call, direct since #2625 (issue #2537)
+    assert edited["next"] == {"tool": "revl_export",
+                              "arguments": {},
                               "ready": True}
     assert _call("revl_call", {"key": "cache", "method": "size",
                                "args": []})["result"] == 7

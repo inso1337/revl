@@ -92,7 +92,7 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
-| the held-source note on a refused or failed answer: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit of a loaded composition | `revl_verbs {name: "revl_export", args: {}}`, `ready` (`revl_export` is not a listed verb) |
+| the held-source note on a refused or failed answer: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit of a loaded composition | `revl_export {}`, `ready` |
 
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
@@ -429,14 +429,15 @@ or not an approval policy is on.
 `tools/list` advertises the core tier by default (issue #1697): the authoring
 loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
 `revl_query_withdraw`, `revl_check`, `revl_admit`, `revl_plan` before a swap,
-and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
-`revl_verbs`. That is about a quarter of the full list's schema size, which
-matters on every cold start. Every verb `initialize` names is in the core tier,
-and a test holds the two together. Every other verb is still served and
-**callable** by name without being listed, but whether a client emits a call for
-a name it was not shown depends on the client. `revl_verbs` is itself a listed
-tool and takes `name` and `args`, so a call through it *is* the call it names
-(see below), and it reaches the verb for every client. A client that wants
+and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`),
+`revl_export` (the verb that writes the held source out, promoted on measurement
+in issue #2625), and `revl_verbs`. That is about a quarter of the full list's
+schema size, which matters on every cold start. Every verb `initialize` names is
+in the core tier, and a test holds the two together. Every other verb is still
+served and **callable** by name without being listed, but whether a client emits
+a call for a name it was not shown depends on the client. `revl_verbs` is itself
+a listed tool and takes `name` and `args`, so a call through it *is* the call it
+names (see below), and it reaches the verb for every client. A client that wants
 the whole list up front starts the
 server with `revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1` - that
 costs about 22,800 extra cold-start tokens, where the hatch costs about a
@@ -460,7 +461,9 @@ verb directly. A verb that is not in the core tier is therefore one listed tool
 away, which is what issue #2073 is about: a function-calling model emits a call
 for a tool it was *shown*, so a schema returned as text is a document, not a
 tool. `revl_export` - the verb that writes the held source out, and so the one
-that prevents a silent no-op in an agent loop - is reachable this way.
+that prevents a silent no-op in an agent loop - was the measured case, and
+issue #2625 put it in the tier itself: a listed tool is reached without a prompt
+teaching the hatch.
 
 A hatch that cannot name the verb it means refuses by name rather than
 answering the lookup: an unknown `name`, a missing `args`, or an `args` that is
@@ -1285,9 +1288,9 @@ disagreeing until `revl_export` runs. The verbs of the change loop
 `"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
 file whose held text differs from the bytes on disk. When `inSync` is false on
 a success, the answer also carries a `note` naming `revl_export`. Any answer
-that carries that note also carries a `next` that calls it through the
-`revl_verbs` hatch, `revl_verbs {name: "revl_export", args: {}}` (issue #2537;
-`revl_export` is not a listed verb), unless the running composition is already
+that carries that note also carries a `next` that calls the listed verb
+directly, `revl_export {}` (issue #2537; direct since #2625 listed the verb),
+unless the running composition is already
 on disk and only an open edit buffer differs, when an export would write
 nothing. It is a
 sibling of `sessionState`, never a field of it: `sessionState.dirty` means a

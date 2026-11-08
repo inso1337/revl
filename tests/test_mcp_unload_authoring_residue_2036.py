@@ -157,10 +157,9 @@ def test_the_refusal_offers_revl_export_not_the_unusable_undo(tree):
     _load(tree)
     _change(tree)
     refused = _call("revl_unload", {})
-    # revl_export is outside the listed tier, so the call goes through the
-    # hatch (issue #2537)
-    assert refused["next"] == {"tool": "revl_verbs",
-                               "arguments": {"name": "revl_export", "args": {}},
+    # revl_export is a listed verb, so the call is direct (#2537, #2625)
+    assert refused["next"] == {"tool": "revl_export",
+                               "arguments": {},
                                "ready": True}
     assert "revl_export" in refused["diagnostics"][0]["message"]
     assert "undo" not in refused
