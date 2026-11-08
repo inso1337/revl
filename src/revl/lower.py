@@ -12670,7 +12670,7 @@ def _refuse_builtin_type_value(name: str, env: "Env", filename: str,
         hint = ("a bracket inverse releases the handle its bracket bound: "
                 "`let h = effect Map.new() undo h.drop()`. A builtin method "
                 "computes a new value and releases nothing, so it is never an "
-                "inverse (docs/rejections.md#g4--inverse-or-emit)")
+                "inverse (docs/rejections.md#g4-inverse-or-emit)")
     else:
         hint = ("a builtin method is called on a value of the type "
                 "(`xs.<method>()`), never on the type, and a builtin type is "
