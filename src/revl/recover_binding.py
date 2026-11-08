@@ -81,40 +81,21 @@ _RUNTIME_INVERSES = {("Stream", "close"): frozenset({"transactional"})}
 _ENTRY_OF_KEY = {"undo": "transactional", "compensate": "compensation"}
 
 
-def _inverse_name(node: Any) -> Optional[tuple]:
-    """``(receiver, method)`` the WAL descriptor of the inverse ``node``
-    records, by the emitter's own rule (`emit._named_call_kwarg`): the
-    required-service key and method for a call through one, ``None`` and the
-    name for an extern or module fn. ``None`` for a shape that names no call."""
-    if not isinstance(node, dict):
-        return None
-    kind = node.get("kind")
-    if kind == "call" and isinstance(node.get("target"), dict):
-        if node["target"].get("kind") != "req":
-            return None
-        receiver, method = node["target"].get("name"), node.get("method")
-    elif kind == "call" and isinstance(node.get("callee"), dict) \
-            and node["callee"].get("kind") == "var":
-        receiver, method = None, node["callee"].get("name")
-    elif kind == "fn":
-        receiver, method = None, node.get("name")
-    else:
-        return None
-    return (receiver, method) if isinstance(method, str) else None
-
-
 def declared_inverses(ir: dict) -> dict:
     """``{(receiver, method): entries}``: every call the composition declares
     as an inverse (`undo`) or a compensation (`compensate`), at a step or on an
     extern, with the descriptor `entry` each is registered as (issue #3149).
     This is the whole set of calls a discharge descriptor may name: a WAL line
     naming anything else was not written by this composition's runtime."""
+    from ._paths import python_backend_emitter  # noqa: PLC0415
+    # the emitter's own rule for the (receiver, method) a descriptor records
+    named = python_backend_emitter().named_call_target
     declared = {name: set(entries) for name, entries in _RUNTIME_INVERSES.items()}
 
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                name = _inverse_name(value) if key in _ENTRY_OF_KEY else None
+                name = named(value) if key in _ENTRY_OF_KEY else None
                 if name is not None:
                     declared.setdefault(name, set()).add(_ENTRY_OF_KEY[key])
                 walk(value)
