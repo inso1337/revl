@@ -707,10 +707,20 @@ back, as it would the same composition run in one process. A crash between the
 index's `committed` and a process's marker is completed by recover: it stamps
 that process's `activation-complete` from the index (`commitStamped` in the
 verdict), so the process rolls forward with the others instead of back alone.
+That stamp is taken on the index's word: a process WAL records nothing when
+its process comes UP (the conductor reads `[name] UP` off the process's
+output), so recover cannot yet confirm the commit from the process WALs
+themselves (issue #3193). Keep the index and its process WALs where only the
+operator can write.
 
 `revl recover --wal FILE` on an index recovers the whole run:
 
-1. **Finds every process WAL the index names.** A missing one is residue named
+1. **Finds every process WAL the index names, and only there.** An entry's
+   `wal` must be exactly the name the run wrote, `INDEX.<process>`, a plain
+   file name next to the index. An entry naming anything else (a path with a
+   separator, `..`, an absolute path, another process's name) is refused by
+   name before any WAL is read or stamped, by `revl recover` and `revl estop`
+   alike (issue #3193). A missing one is residue named
    by its process (`missing-wal`): recover cannot tell what it crossed. An
    empty one was created by the conductor and never opened by its process,
    which crossed nothing.

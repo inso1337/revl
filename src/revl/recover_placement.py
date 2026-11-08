@@ -266,9 +266,10 @@ def recover_index(index_path: str, index: dict, *,
         ir, digest = compile_composition(composition)
         _check_roster(entries, ir, composition)
     order = _consumers_first(entries, ir)
+    # every entry is checked before any WAL is stamped (issue #3193)
+    paths = [process_wal_path(index_path, entry) for entry in order]
     results = []
-    for entry in order:
-        path = process_wal_path(index_path, entry)
+    for entry, path in zip(order, paths):
         results.append({"process": entry["name"],
                         "components": entry["components"], "wal": path,
                         **_process_state(path, entry, index["committed"])})
