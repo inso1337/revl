@@ -7,7 +7,8 @@ forward emission extern with arguments of the editor's choosing: the header,
 and so the composition digest check, is untouched by such an edit. The binding
 now hands the runtime only a descriptor whose `(receiver, method)` the
 composition's IR declares in an `undo` or `compensate` position, with the
-`entry` it is registered as. Anything else is `unresolved` residue, not called.
+`entry` it is registered as. Anything else is residue (`undeclared`), not
+called.
 
 The unit tests drive `CompositionWorld` with a stub runtime and need nothing
 installed; the end-to-end ones crash a real run and recover it in a fresh
@@ -139,8 +140,8 @@ def test_a_descriptor_naming_a_forward_extern_is_unresolved_and_not_handed_over(
         _descriptor(5, "compensation", None, "withdraw", ["T1"]),
     ])
     assert runtime.handed == [1, 4]
-    assert outcome == {1: "ran", 2: "unresolved", 3: "unresolved", 4: "ran",
-                       5: "unresolved"}
+    assert outcome == {1: "ran", 2: "undeclared", 3: "undeclared", 4: "ran",
+                       5: "undeclared"}
 
 
 def test_a_descriptor_whose_entry_and_method_disagree_is_refused(ir):
@@ -152,7 +153,7 @@ def test_a_descriptor_whose_entry_and_method_disagree_is_refused(ir):
         _descriptor(4, "transactional", None, "back", [{"at": "x"}]),
     ])
     assert runtime.handed == [4]
-    assert outcome == {1: "unresolved", 2: "unresolved", 3: "unresolved", 4: "ran"}
+    assert outcome == {1: "undeclared", 2: "undeclared", 3: "undeclared", 4: "ran"}
 
 
 def test_a_legacy_boundary_inverse_is_checked_by_name_only(ir):
@@ -234,7 +235,9 @@ def test_a_forged_descriptor_naming_the_forward_send_is_never_called(crashed):
     [refused] = [r for r in report["residue"]["outstanding"]
                  if r["referent"] == "send('FORGED-PAYMENT-999')"]
     assert (refused["kind"], refused["error"]["type"]) == (
-        "unresolved-residue", "unresolved")
+        "unresolved-residue", "undeclared")
+    assert "not declared as an inverse or compensation of this entry kind" \
+        in refused["error"]["message"]
     assert report["residue"]["clean"] is False
 
 

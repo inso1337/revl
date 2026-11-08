@@ -69,12 +69,23 @@ def entry_problem(index_path: str, entry: object) -> Optional[str]:
 def process_wal_path(index_path: str, entry: dict) -> str:
     """The absolute path of one process's WAL, from its index entry. Raises
     :class:`PlacementIndexError` for an entry that does not name its own
-    process WAL (:func:`entry_problem`)."""
+    process WAL (:func:`entry_problem`), and for a process WAL that is a
+    symbolic link or does not resolve to a file in the index's own directory:
+    the run never writes one, and following it would read and stamp a file
+    outside that directory (issue #3193)."""
     problem = entry_problem(index_path, entry)
     if problem is not None:
         raise PlacementIndexError(f"{index_path}: {problem}")
     directory = os.path.dirname(os.path.abspath(index_path))
-    return os.path.join(directory, entry["wal"])
+    path = os.path.join(directory, entry["wal"])
+    if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) \
+            != os.path.realpath(directory):
+        raise PlacementIndexError(
+            f"{index_path}: process {entry['name']!r}: its WAL {path} is a "
+            f"symbolic link, or resolves outside the index's directory; a "
+            f"placement run writes each process WAL as a plain file next to "
+            f"the index. Refusing to read or stamp it.")
+    return path
 
 
 def wal_problem(processes: dict, backends: dict, sandboxes: dict) -> Optional[str]:

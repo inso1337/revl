@@ -123,3 +123,49 @@ def test_no_process_wal_is_stamped_when_any_entry_is_refused(tmp_path):
     with pytest.raises(PlacementIndexError):
         recover_index(str(index), {"processes": entries, "run": 1, "committed": True})
     assert good.read_text(encoding="utf-8") == before
+
+
+def _linked(tmp_path: Path, how: str) -> tuple:
+    """``(index, outside)``: an index whose entry is the name the run writes,
+    `run.wal.agent`, but on disk that name is a symbolic link out of the
+    index's directory, directly or through a symlinked directory."""
+    outside = tmp_path / "elsewhere" / "o.wal"
+    _write(outside, [HEADER])
+    index = _index(tmp_path, "agent", "run.wal.agent")
+    link = index.parent / "run.wal.agent"
+    if how == "file":
+        link.symlink_to(Path("..") / "elsewhere" / "o.wal")
+    else:
+        (index.parent / "sub").symlink_to(Path("..") / "elsewhere",
+                                          target_is_directory=True)
+        link.symlink_to(Path("sub") / "o.wal")
+    return index, outside
+
+
+@pytest.mark.parametrize("how", ["file", "directory"])
+def test_a_process_wal_that_is_a_symlink_out_of_the_directory_is_never_stamped(tmp_path, how):
+    from revl.cli.change import _estop_outstanding  # noqa: PLC0415
+    index, outside = _linked(tmp_path, how)
+    before = outside.read_text(encoding="utf-8")
+
+    with pytest.raises(PlacementIndexError, match="symbolic link"):
+        placement_wal.process_wal_path(str(index),
+                                       {"name": "agent", "wal": "run.wal.agent"})
+    proc = _revl(["recover", "--wal", str(index), "--json"], tmp_path)
+    assert proc.returncode == 1, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert "symbolic link" in proc.stderr
+    assert outside.read_text(encoding="utf-8") == before
+    estop = _estop_outstanding(str(index))
+    assert estop["known"] is False and "symbolic link" in estop["note"]
+
+
+def test_an_index_reached_through_a_symlinked_directory_is_still_read(tmp_path):
+    """The index and its process WALs move as one: a symlink to the directory
+    that holds both is not an escape."""
+    index = _index(tmp_path, "agent", "run.wal.agent")
+    _write(index.parent / "run.wal.agent", [HEADER])
+    (tmp_path / "alias").symlink_to(index.parent, target_is_directory=True)
+    aliased = tmp_path / "alias" / "run.wal"
+    path = placement_wal.process_wal_path(str(aliased),
+                                          {"name": "agent", "wal": "run.wal.agent"})
+    assert os.path.samefile(path, index.parent / "run.wal.agent")

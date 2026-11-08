@@ -72,7 +72,7 @@ def _open_calls(records: list) -> dict:
 
 #: The inverses the runtime registers itself, which no IR node spells: a
 #: durable-cursor subscription closes through `Stream.close(cursor)`
-#: (runtime `_DurableCursor.descriptor`), replayed as a transactional entry.
+#: (runtime `_DurableClose.descriptor`), replayed as a transactional entry.
 _RUNTIME_INVERSES = {("Stream", "close"): frozenset({"transactional"})}
 
 #: The IR keys that hold a registered inverse, and the descriptor `entry` the
@@ -313,7 +313,7 @@ class CompositionWorld(World):
         # never handed over
         for descriptor in [d for d in mine if undeclared_call(self.declared, d)]:
             mine.remove(descriptor)
-            outcome[descriptor.get("seq")] = "unresolved"
+            outcome[descriptor.get("seq")] = "undeclared"
         if mine:
             outcome.update(self.runtime.replay_descriptors(
                 self.module, self.wal_path, mine, services=self.services))

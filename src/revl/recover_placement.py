@@ -75,7 +75,14 @@ def _stamp_commit(path: str, entry: dict) -> None:
     stamped its own marker. Stamp it, so recover rolls it forward."""
     record = {"record": "activation-complete", "generation": 1,
               "components": entry["components"], "stampedBy": "placement-index"}
-    with open(path, "a", encoding="utf-8") as handle:
+    # O_NOFOLLOW: `process_wal_path` refused a symbolic link; one swapped in
+    # since is not followed either (issue #3193)
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RecoveryError(f"{path}: cannot stamp the recorded commit: {error}") from None
+    with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
