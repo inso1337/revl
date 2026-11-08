@@ -112,6 +112,22 @@ def test_the_refusal_names_the_policy_and_the_deadline_it_missed():
     assert "2020-01-01T00:00:00Z" in err.hint
 
 
+def test_a_retained_value_carried_out_of_a_closure_is_refused():
+    """Issue #3110: a closure CAPTURE is a carrier for `Retained[T, P]` too.
+    `f("z")` carries a clean literal, but the callee VALUE holds the retained
+    origin; the callee value's taint joins for every indirect call, INDEPENDENT
+    of `any_sink` (this program declares no `Trusted[T]` sink)."""
+    src = PAST + FLOW.format(cap="db.insert").replace(
+        "      let row = load(k)\n      let n = emit sink(row)",
+        "      let row = load(k)\n"
+        "      let f = (a: Str) => row\n"
+        "      let n = emit sink(f(\"z\"))")
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "may not be written to durable storage" in err.message
+    assert "load() -> f() -> sink" in err.message, err.message
+
+
 def test_a_declared_persistence_sink_parameter_is_refused_on_the_declaration():
     """The declaration half: a crossing that DECLARES it persists a retained
     value is refused off the declaration alone, with no call site needed."""

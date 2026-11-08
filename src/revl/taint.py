@@ -2379,30 +2379,39 @@ class _FlowChecker:
                         "an unnameable callable",
                         "a first-class function value revl cannot name",
                         index, at, node)
-        # Slice B4: an indirect call the checker cannot name is over-approximate —
-        # every argument position is a sink (what cannot be named cannot be proven
-        # safe), but only when the program has a sink at all, so a sink-free program
-        # is unaffected. This mirrors G4's `*` for a first-class dispatch.
-        if indirect and self.any_sink and self._is_unnameable(resolved):
-            kind = "an unnameable call (a first-class function value)"
-            for index, at in enumerate(arg_taints):
-                if _authority_dirty(at):
-                    self._on_sink("an unnamed callable", kind, index, at, node,
-                                  ("a first-class function value",))
+        # Slice B4: an indirect call the checker cannot name is over-approximate.
+        # When the program has a sink at all, every argument position is a sink
+        # too (what cannot be named cannot be proven safe); this mirrors G4's `*`
+        # for a first-class dispatch. A sink-free program keeps the argument
+        # over-approximation off.
+        if indirect and self._is_unnameable(resolved):
+            if self.any_sink:
+                kind = "an unnameable call (a first-class function value)"
+                for index, at in enumerate(arg_taints):
+                    if _authority_dirty(at):
+                        self._on_sink("an unnamed callable", kind, index, at,
+                                      node, ("a first-class function value",))
             result = CLEAN
             for t in arg_taints:
                 result = _join(result, t)
-            # ... AND the callee VALUE's own taint. A closure carries what it
-            # CAPTURED, and the capture is not an argument: `let f = (x) => d`
-            # over an `Untrusted[Str]` `d`, then `f("z")`, produced `d`'s value
-            # from clean arguments alone, so `emit run(f("z"))` reached a
-            # `Trusted[Str]` shell sink with no declassification (G9). The
-            # binding already holds the join of the arrow's free names
-            # (`_union_children` walks an arrow body), and an arrow MINTED by a
-            # fn (`fn mk(d) -> (Str) -> Str { return (x) => d }`) carries the
-            # same join out through `mk`'s return — so reading the binding here
-            # covers both shapes with one join, and stays exact for a closure
-            # that captured nothing.
+            # ... AND the callee VALUE's own taint, INDEPENDENT of `any_sink`. A
+            # closure carries what it CAPTURED, and the capture is not an
+            # argument: `let f = (x) => d` over an `Untrusted[Str]` `d`, then
+            # `f("z")`, produced `d`'s value from clean arguments alone, so
+            # `emit run(f("z"))` reached a `Trusted[Str]` shell sink with no
+            # declassification (G9). The same carrier also hid a `Secret[T]`, a
+            # capability-bound provider key and a `Retained[T, P]` value from a
+            # sink-free program: the join used to sit inside the `any_sink`
+            # branch, so a program whose only taint was `confidential`/`secret`
+            # judged the call from its arguments alone. G-SECRET, G-SECRET-FLOW
+            # and G-RETAIN are flow guarantees about the value, not about the
+            # presence of an unrelated `Trusted[T]` declaration, so the callee
+            # value joins here always. The binding already holds the join of the
+            # arrow's free names (`_union_children` walks an arrow body), and an
+            # arrow MINTED by a fn (`fn mk(d) -> (Str) -> Str { return (x) => d
+            # }`) carries the same join out through `mk`'s return — so reading
+            # the binding here covers both shapes with one join, and stays exact
+            # for a closure that captured nothing.
             result = _join(result, env.get(callee, CLEAN))
             if result.dirty:
                 result = Taint(result.origins, result.via + (f"{callee}()",))

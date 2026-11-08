@@ -112,6 +112,35 @@ def test_kind3_unnameable_indirect_callable_refuses_a_secret():
     assert "first-class" in err.message
 
 
+def test_kind2_closure_capture_of_a_bound_key_refuses():
+    """Issue #3110: a bound key CAPTURED by a closure is still the key.
+    `f("z")` carries a clean literal, but the callee VALUE holds the minted
+    `secret` origin. The join is independent of `any_sink`, so a program with no
+    `Trusted[T]` sink refuses too."""
+    err = _refuses(_agent(
+        "      let s = emit complete(u)\n"
+        "      let f = (a: Str) => s\n"
+        "      let x = emit host_sink(f(\"z\"))",
+        extra="extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
+    assert "extern" in err.message
+
+
+def test_kind4_closure_capture_at_the_provide_return_refuses():
+    """The return half of the same carrier: a captured bound key returned as
+    `f("q")` crosses the service / MCP bridge."""
+    src = (
+        _PRELUDE
+        + "service Ops { emission fn go(u: Str) -> Str }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u) {\n"
+        + "      let s = emit complete(u)\n"
+        + "      let f = (a: Str) => s\n"
+        + "      return f(\"q\")\n"
+        + "    }\n  }\n}\n")
+    err = _refuses(src)
+    assert "provide-method return" in err.message
+
+
 def test_kind4_provide_method_return_refuses_a_secret():
     """The provide-method return across the service / MCP bridge: a method that
     returns a `secret`-carrying value hands the key across the boundary."""
