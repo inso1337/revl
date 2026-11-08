@@ -83,9 +83,8 @@ def test_every_row_has_its_own_saga():
 def test_the_rows_cover_the_defect_classes_the_issue_names():
     kinds = {row["kind"] for row in ROWS}
     assert {"missing-undo", "unmarked-emission", "dependency-cycle",
-            "manual-teardown", "wrong-lifo-order", "failing-inverse",
-            "failing-compensation", "missing-compensate",
-            "wrong-inverse-target"} <= kinds
+            "manual-teardown", "failing-inverse", "failing-compensation",
+            "missing-compensate", "wrong-inverse-target"} <= kinds
 
 
 def test_every_compile_row_records_its_refusal_code():

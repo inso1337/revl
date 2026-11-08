@@ -140,7 +140,7 @@
     {
       "id": "wrong-release-sku",
       "group": "project",
-      "kind": "wrong-lifo-order",
+      "kind": "wrong-inverse-target",
       "saga": "checkout",
       "file": "sagas/wrong_release_sku.rvl",
       "description": "The two inventory holds release each other's sku: the first hold's undo releases the second hold's key and the second's releases the first's. The derived order is mechanically LIFO, but the hand-written inverse targets are swapped, so the first hold's own key survives its step. The provider is Map-backed, so the sweep's host-residue check sees the un-reversed write.",

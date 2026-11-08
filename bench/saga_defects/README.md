@@ -86,11 +86,12 @@ saga and stating in the row what now catches it.
   than hide it.
 - **G3 here is component dependency acyclicity**, not a check on the order of
   steps inside a saga. The `dependency-cycle` row is a composition-level
-  defect. The wrong-order row is `wrong-release-sku`: its two holds release
-  each other's sku, the derived LIFO order is mechanically correct, and the
-  sweep catches the swapped targets on the Map-backed provider. A hand-written
-  teardown that would order the releases itself is refused at G5
-  (`manual-teardown`).
+  defect. A wrong LIFO order cannot be written in revl source: teardown order
+  is derived from source order, and the only author control is the target of
+  each inverse. The nearest expressible defect is a swapped inverse target
+  (`wrong-release-sku`, `wrong-refund-order`), which is why both carry the
+  `wrong-inverse-target` kind. A hand-written teardown that would impose an
+  order itself is refused at G5 (`manual-teardown`).
 
 ## Adding a row
 

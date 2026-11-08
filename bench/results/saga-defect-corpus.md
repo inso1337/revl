@@ -29,7 +29,7 @@ Failure model: One failure is injected after a top-level step of the saga compon
 | `failing-compensation` | project | failing-compensation | fault-test | **fault-test** | residue recorded by the teardown: compensation-residue — the inverse `erase_receipt` of `Checkout` raised (RuntimeError: receipt store down) |
 | `missing-compensate` | project | missing-compensate | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `wrong-refund-order` | project | wrong-inverse-target | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
-| `wrong-release-sku` | project | wrong-lifo-order | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#18 key 'sku-1' held absent before the first bracketed `insert` of it and 1 when it unloaded: an undo did not reverse its write) |
+| `wrong-release-sku` | project | wrong-inverse-target | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#18 key 'sku-1' held absent before the first bracketed `insert` of it and 1 when it unloaded: an undo did not reverse its write) |
 | `partial-refund` | project | partial-inverse | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `noop-compensation` | project | noop-compensation | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `double-release` | project | double-release | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
