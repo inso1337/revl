@@ -157,9 +157,9 @@ The candidate record is a JSON object. Exactly three keys are read:
 Every other key is IGNORED and reported by name under `prose_ignored`, so a
 reader of the scorecard can see that the candidate's narrative was present and
 was not consulted. The held-out seed is NOT a record key: it arrives in
-`REVL_HELDOUT_SEED`, because a candidate that could name its own seed would
-choose the draw it is judged on. Exit status is 0 only when the trajectory is
-retained.
+`REVL_HELDOUT_SEED_FILE`, the path to an owner-only file outside the candidate
+tree, because a candidate that could name its own seed would choose the draw it
+is judged on. Exit status is 0 only when the trajectory is retained.
 """
 
 from __future__ import annotations
@@ -223,11 +223,12 @@ COMPONENTS = (
 # `selfhost/lower.rvl` rather than drawing.
 HELDOUT_DRAW = 200
 
-# The environment variable the seed arrives in. It is NOT a field on the
+# The environment variable the seed FILE arrives in. It is NOT a field on the
 # candidate record: `RECORD_KEYS` is the whitelist that keeps a candidate from
 # reaching a probe, and a candidate that could name its own seed would choose
-# the draw it is judged on.
-HELDOUT_SEED_ENV = "REVL_HELDOUT_SEED"
+# the draw it is judged on. A value here is a path outside the candidate tree,
+# owner-readable only; the scorer checks both properties and refuses otherwise.
+HELDOUT_SEED_FILE_ENV = "REVL_HELDOUT_SEED_FILE"
 
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
 # of the candidate's change, which is the half of the item's "can only shrink in
@@ -516,18 +517,23 @@ def probe_held_out(candidate: Candidate) -> Verdict:
 
     The seed comes from the environment and NOT from the candidate record. A
     candidate that could name its own seed would choose the draw it is judged
-    on, which is the fail-open shape this component exists to close. An absent
-    seed is a failed component rather than a skipped one: a promotion pipeline
-    that silently drops this check when nobody configured a seed has exactly
-    the property item 537 was opened about.
+    on, which is the fail-open shape this component exists to close. The value
+    is a path to an owner-only seed file outside the candidate tree, and the
+    scorer refuses a path inside a work tree, a file other users can read, and
+    a digest a previous scored run already consumed. One seed file is one
+    scored promotion: a clean or a divergent score consumes its digest, so the
+    next candidate needs a rotated seed file. An absent seed is a failed
+    component rather than a skipped one: a promotion pipeline that silently
+    drops this check when nobody configured a seed has exactly the property
+    item 537 was opened about.
     """
     name = "held-out"
-    seed = os.environ.get(HELDOUT_SEED_ENV, "")
-    if not seed:
+    seed_file = os.environ.get(HELDOUT_SEED_FILE_ENV, "")
+    if not seed_file:
         return failed(
             name,
-            f"no held-out seed: {HELDOUT_SEED_ENV} is unset, so the candidate "
-            "was not scored on anything it could not read")
+            f"no held-out seed file: {HELDOUT_SEED_FILE_ENV} is unset, so the "
+            "candidate was not scored on anything it could not read")
 
     with tempfile.TemporaryDirectory() as scratch:
         # The record is written OUTSIDE the candidate tree on purpose. Writing

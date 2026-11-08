@@ -350,6 +350,72 @@ def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+# Two shapes whose Go did not build on either side; each document's own `test`
+# block is run by `go test`, so both the build and the values are checked.
+_BUILD_REGRESSIONS = {
+    # issue #3074: a `let _` / `var _` emitted a trailing `_ = _`, and the
+    # `:=` form `_ := v` declares no new variable.
+    "blank_binding": ("""
+fn skipped() -> Int {
+  let _ = 1
+  return 0
+}
+
+fn skipped_var() -> Int {
+  var _ = 2
+  return 0
+}
+
+fn skipped_str(s: Str) -> Int {
+  let _ = s
+  return s.length()
+}
+
+test "a blank binding declares nothing" {
+  assert skipped() == 0
+  assert skipped_var() == 0
+  assert skipped_str("abc") == 3
+}
+""", ["\tvar _ int64 = 1", "\t_ = s"], ["_ = _", "_ := "]),
+    # issue #3075: a match arm binder that shadows an untyped empty list typed
+    # the match from the outer list (`n := func() []any`).
+    "binder_shadows_list": ("""
+fn g(o: Opt[Int]) -> Int {
+  var out = []
+  let n = match o { Some(out) => out, None => 0 }
+  return out.length() + n
+}
+
+test "the binder is the Int payload" {
+  assert g(Some(4)) == 4
+  assert g(None) == 0
+}
+""", ["\tn := func() int64 {"], ["func() []any"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BUILD_REGRESSIONS))
+def test_a_build_regression_agrees_and_builds(emitted, reference, tmp_path, case):
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    source, present, absent = _BUILD_REGRESSIONS[case]
+    ir = compile_source(source)
+    want = reference.emit(ir)
+    assert emitted["emit_go_src"](ir) == want
+    for text in present:
+        assert text in want, text
+    for text in absent:
+        assert text not in want, text
+    path = tmp_path / "emitted_test.go"
+    path.write_text(want)
+    result = subprocess.run(
+        [go, "test", str(path)], capture_output=True, text=True,
+        env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("side", ["reference", "selfhost"])
 def test_match_edges_runtime(emitted, reference, tmp_path, side):
     go = shutil.which("go")

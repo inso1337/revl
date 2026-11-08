@@ -8434,6 +8434,26 @@ def _go_v3_match_result(node, ctx: _V3GoCtx, expected, scrut_node,
     return "\n".join(lines)
 
 
+def _v3_infer_arm_body(arm, scrut_t, ctx: _V3GoCtx):
+    """The surface type of a match arm's body with the arm's binder in scope.
+
+    A binder shadows any outer binding of its name, so it is typed as the
+    arm's payload (the whole scrutinee for a wildcard) and, when that is
+    unknown, as nothing, never as the outer binding (issue #3075)."""
+    bind = arm.get("bind")
+    if not bind or bind == "_":
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    bound = scrut_t if arm.get("pattern") == "_" else arm.get("payload_type")
+    outer = ctx.var_types
+    ctx.var_types = {k: v for k, v in outer.items() if k != bind}
+    if bound is not None:
+        ctx.var_types[bind] = bound
+    try:
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    finally:
+        ctx.var_types = outer
+
+
 def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     scrut_node = node.get("scrutinee")
     scrutinee = _go_v3_expr(scrut_node, ctx)
@@ -8442,7 +8462,7 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     exp_t = _go_v3_type(expected, ctx.types) if expected else None
     if not exp_t:
         for arm in arms:
-            exp_t = _go_v3_type(_go_v3_infer_type(arm.get("body"), ctx), ctx.types)
+            exp_t = _go_v3_type(_v3_infer_arm_body(arm, st, ctx), ctx.types)
             if exp_t:
                 break
     exp_t = exp_t or "any"
@@ -9085,9 +9105,14 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             # but pinning the declared type is still correct and keeps a bare
             # `None` / `Err(..)` binding well-typed.
             out.append(f"{pad}var {name} {go_t} = {value}")
+        elif name == "_":
+            # the blank identifier declares nothing: `_ := v` is no new
+            # variable, and `_ = _` reads `_` as a value (issue #3074)
+            out.append(f"{pad}_ = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
-        out.append(f"{pad}_ = {name}")
+        if name != "_":
+            out.append(f"{pad}_ = {name}")
     elif step == "assign":
         raw = node.get("name")
         name = _v3_ident(raw, "binding")
