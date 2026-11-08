@@ -36,12 +36,15 @@ algebra and the small-step semantics live in the L1 farm
    subset replay is free, because `DictWorld.apply_inverse` pops a
    referent and popping twice is popping once.
 5. **Deferred emissions are dropped or discharged**
-   (`abort_drops_deferred`, `commit_discharges_deferred`). The in-process
-   frame drops the session's deferral queue on abort with zero crossings,
-   and the commit fires each queued entry once, FIFO, leaving a
-   `flushed` record for each. This is issue #2740's first slice: the
-   recovery view already dropped a deferred emission with no
-   `commit-approved`; the in-process rule was the unstated half.
+   (`abort_drops_deferred`, `abort_run_drops_deferred`,
+   `commit_discharges_deferred`, `commit_run_queue_empty`). The abort
+   step, and every run that settles on abort, drops the session's
+   deferral queue with zero crossings; the commit step, and every run
+   that settles on commit, fires each queued entry once, FIFO, leaving a
+   `flushed` record for each. The statements are inversions of the step
+   relation, not a fold of a result function. This is issue #2740's
+   first slice: the recovery view already dropped a deferred emission
+   with no `commit-approved`; the in-process rule was the unstated half.
 
 ## What each theorem is worth, honestly
 
@@ -417,55 +420,119 @@ is the in-process statement the runtime actually performs
 (`backends/python/runtime.py`): `begin_abort` drops the session's
 deferral queue with zero crossings, and the commit's `_flush` fires each
 queued entry FIFO. `FrameStep.abort` and `FrameStep.commit` are those two
-verdicts, and the theorems below say what each does to the queue, the
-crossing list and the durable log. -/
+verdicts. The theorems below are INVERSIONS of the step relation: from an
+arbitrary step that settled on a verdict, what the queue and the crossing
+list must be. They do not unfold a result function written to match the
+conclusion.
 
-/-- **An abort drops the deferral queue and crosses nothing.** The abort
-step empties the queue, leaves the crossing list exactly as the body run
-left it, writes the `aborted` completion record and settles the verdict.
-Each queued emission is therefore owed nothing: `dispose` classifies its
-durable `deferred-emission` record as `.dropped`, which is the recovery
-view's own disposition. The fire surface is not touched at all. -/
-theorem abort_drops_deferred (f : Frame) (hv : f.verdict = none) :
-    FrameStep f (abortFrame f) ∧
-    (abortFrame f).queue = [] ∧
-    (abortFrame f).fired = f.fired ∧
-    (abortFrame f).config.log = f.config.log ++ [.aborted] ∧
-    (abortFrame f).verdict = some .abort ∧
-    (∀ s ∈ f.queue,
-      dispose (abortFrame f).config.log (fun _ => true) (.deferredEmission s)
-        = some (s, .dropped)) := by
-  refine ⟨abortStep f hv, rfl, rfl, rfl, rfl, fun _ _ => rfl⟩
+Two facts about the model are used throughout. A settled frame takes no
+step (every `FrameStep` constructor requires verdict `none`), so a run
+that reaches a verdict stops there; and only the commit step appends to
+the crossing list, so a run that settles on abort can only have dropped
+its queue. -/
 
-/-- **A commit fires the deferral queue, each entry once.** The commit
-step empties the queue, appends every entry to the crossing list in FIFO
-order, writes `commit-approved` BEFORE the fires and one `flushed` record
-per entry, and closes with the terminal marker. So "moved to discharged"
-is durable: each queued seq is in the crossing list and names its own
-`flushed` record. A fire that raised is the roll-forward `flush-residue`
-window this model still does not have. -/
-theorem commit_discharges_deferred (f : Frame)
-    (hb : f.config.body = .done) (hv : f.verdict = none) :
-    FrameStep f (commitFrame f) ∧
-    (commitFrame f).queue = [] ∧
-    (commitFrame f).fired = f.fired ++ f.queue ∧
-    (∀ s ∈ f.queue, s ∈ (commitFrame f).fired) ∧
-    (∀ s ∈ f.queue, Rec.flushed s ∈ (commitFrame f).config.log) ∧
-    Rec.commitApproved ∈ (commitFrame f).config.log ∧
-    Rec.activationComplete ∈ (commitFrame f).config.log ∧
-    (commitFrame f).verdict = some .commit ∧
-    (commitFrame f).config.log =
-      f.config.log ++ [.commitApproved] ++ f.queue.map Rec.flushed
+/-- A settled frame takes no step: every `FrameStep` constructor is
+defined from a frame whose verdict is `none`. -/
+theorem frameStep_settled_impossible {f f' : Frame} (h : FrameStep f f')
+    {v : SessionVerdict} (hv : f.verdict = some v) : False := by
+  cases h <;> cases hv
+
+/-- A run from a settled frame moves nowhere: no `FrameStep` starts at a
+frame whose verdict has been decided. -/
+theorem frameSteps_settled_eq {f f' : Frame} (h : FrameSteps f f')
+    {v : SessionVerdict} (hv : f.verdict = some v) : f' = f := by
+  induction h with
+  | refl => rfl
+  | @step a b c hs _ _ =>
+    exact False.elim (frameStep_settled_impossible hs hv)
+
+/-- **An abort step drops the deferral queue and crosses nothing.** Any
+step that settles on abort has emptied the queue, left the crossing list
+exactly as the body run left it, and written the `aborted` completion
+record. It cannot have been a commit, and no other step settles a
+verdict. -/
+theorem abort_drops_deferred {f f' : Frame} (h : FrameStep f f')
+    (hv : f'.verdict = some .abort) :
+    f'.queue = [] ∧
+    f'.fired = f.fired ∧
+    f'.config.log = f.config.log ++ [.aborted] := by
+  cases h with
+  | body _ => simp at hv
+  | defer => simp at hv
+  | commit => simp at hv
+  | abort => exact ⟨rfl, rfl, rfl⟩
+
+/-- **Every abort a run settles fires nothing.** A `FrameSteps` run that
+ends on the abort verdict, from an unsettled frame, leaves the queue empty
+and the crossing list exactly as the run found it. The run cannot contain
+a commit: a commit settles the verdict, and nothing moves a settled
+frame. -/
+theorem abort_run_drops_deferred {f f' : Frame} (h : FrameSteps f f')
+    (h0 : f.verdict = none) (hv : f'.verdict = some .abort) :
+    f'.queue = [] ∧ f'.fired = f.fired := by
+  induction h with
+  | refl => simp [h0] at hv
+  | step hs hrest ih =>
+    cases hs with
+    | body _ => exact ih rfl hv
+    | defer => exact ih rfl hv
+    | commit =>
+      have hc := frameSteps_settled_eq hrest (v := .commit) rfl
+      rw [hc] at hv
+      simp at hv
+    | abort =>
+      have hc := frameSteps_settled_eq hrest (v := .abort) rfl
+      subst hc
+      exact ⟨rfl, rfl⟩
+
+/-- **A commit step fires the deferral queue, each entry once.** Any step
+that settles on commit has emptied the queue, appended every entry to the
+crossing list in FIFO order, and written `commit-approved` BEFORE the
+fires, one `flushed` record per entry, and the terminal marker after them.
+So "moved to discharged" is durable: each queued seq is in the crossing
+list and names its own `flushed` record. A fire that raised is the
+roll-forward `flush-residue` window this model still does not have. -/
+theorem commit_discharges_deferred {f f' : Frame} (h : FrameStep f f')
+    (hv : f'.verdict = some .commit) :
+    f'.queue = [] ∧
+    f'.fired = f.fired ++ f.queue ∧
+    (∀ s ∈ f.queue, s ∈ f'.fired) ∧
+    (∀ s ∈ f.queue, Rec.flushed s ∈ f'.config.log) ∧
+    f'.config.log =
+      f.config.log ++ [.commitApproved] ++ List.map Rec.flushed f.queue
         ++ [.activationComplete] := by
-  refine ⟨commitStep f hb hv, rfl, rfl, ?_, ?_, ?_, ?_, rfl, rfl⟩
-  · intro s hs
-    exact List.mem_append.mpr (Or.inr hs)
-  · intro s hs
-    have hm : Rec.flushed s ∈ f.queue.map Rec.flushed :=
-      List.mem_map.mpr ⟨s, hs, rfl⟩
-    simp [commitFrame, hm]
-  · simp [commitFrame]
-  · simp [commitFrame]
+  cases h with
+  | body _ => simp at hv
+  | defer => simp at hv
+  | abort => simp at hv
+  | @commit w L q fs =>
+    refine ⟨rfl, rfl, ?_, ?_, rfl⟩
+    · intro s hs
+      exact List.mem_append.mpr (Or.inr hs)
+    · intro s hs
+      have hm : Rec.flushed s ∈ List.map Rec.flushed q :=
+        List.mem_map.mpr ⟨s, hs, rfl⟩
+      simp [hm]
+
+/-- **Every commit a run settles leaves the deferral queue empty.** The
+run cannot have aborted first; a commit is the only step that settles on
+this verdict, and no step follows a settled frame. -/
+theorem commit_run_queue_empty {f f' : Frame} (h : FrameSteps f f')
+    (h0 : f.verdict = none) (hv : f'.verdict = some .commit) :
+    f'.queue = [] := by
+  induction h with
+  | refl => simp [h0] at hv
+  | step hs hrest ih =>
+    cases hs with
+    | body _ => exact ih rfl hv
+    | defer => exact ih rfl hv
+    | abort =>
+      have hc := frameSteps_settled_eq hrest (v := .abort) rfl
+      rw [hc] at hv
+      simp at hv
+    | commit =>
+      have hc := frameSteps_settled_eq hrest (v := .commit) rfl
+      simp [hc]
 
 /-- A body that mutates seq 1, then defers seq 2, then hits L-Raise's
 failing step. -/
@@ -488,21 +555,21 @@ def deferredAbortEnd : Frame :=
   ⟨⟨.fail, [1], deferredAbortLog ++ [.aborted]⟩, [], [], some .abort⟩
 
 /-- **The abort witness.** A real `FrameSteps` run enqueues seq 2,
-reaches the failing step, and aborts with a NON-EMPTY queue. The queue is
-dropped, the crossing list stays empty, and the durable log reads back as
-an abort whose deferred emission is dropped rather than reported. -/
+reaches the failing step, and settles on abort with a NON-EMPTY queue.
+The queue is dropped, the crossing list stays empty, and the durable log
+carries the enqueue record and the `aborted` completion record. -/
 theorem deferred_abort_run :
-    FrameSteps deferredAbortStart deferredAbortMid ∧
+    FrameSteps deferredAbortStart deferredAbortEnd ∧
     FrameStep deferredAbortMid deferredAbortEnd ∧
     deferredAbortMid.queue = [2] ∧
     deferredAbortEnd.queue = [] ∧
     deferredAbortEnd.fired = [] ∧
     outcome deferredAbortEnd.config.log = .rolledBack ∧
     reported deferredAbortEnd.config.log okAll = [] := by
-  refine ⟨?_, abortStep deferredAbortMid rfl, rfl, rfl, rfl,
-    by decide, by decide⟩
+  refine ⟨?_, FrameStep.abort, rfl, rfl, rfl, by decide, by decide⟩
   exact FrameSteps.step (FrameStep.body SemStep.witnessed)
-    (FrameSteps.step FrameStep.defer FrameSteps.refl)
+    (FrameSteps.step FrameStep.defer
+      (FrameSteps.step FrameStep.abort FrameSteps.refl))
 
 /-- A body that defers seqs 2 and 4, in program order, then completes. -/
 def deferredCommitBody : Body := .deferred 2 (.deferred 4 .done)
@@ -526,20 +593,21 @@ def deferredCommitEnd : Frame :=
    [], [2, 4], some .commit⟩
 
 /-- **The commit witness.** A real `FrameSteps` run enqueues seqs 2 and 4
-and commits. Both fire in program order, the queue is empty afterwards,
-and the durable log carries a `flushed` record for each entry under the
-`commit-approved` decision point. Contrast `deferred_abort_run`: the same
-kind of queue, the opposite verdict. -/
+and settles on commit. Both fire in program order, the queue is empty
+afterwards, and the durable log carries a `flushed` record for each entry
+under the `commit-approved` decision point. Contrast `deferred_abort_run`:
+the same kind of queue, the opposite verdict. -/
 theorem deferred_commit_run :
-    FrameSteps deferredCommitStart deferredCommitMid ∧
+    FrameSteps deferredCommitStart deferredCommitEnd ∧
     FrameStep deferredCommitMid deferredCommitEnd ∧
     deferredCommitMid.queue = [2, 4] ∧
     deferredCommitEnd.queue = [] ∧
     deferredCommitEnd.fired = [2, 4] ∧
     outcome deferredCommitEnd.config.log = .rolledForward := by
-  refine ⟨?_, commitStep deferredCommitMid rfl rfl, rfl, rfl, rfl, by decide⟩
+  refine ⟨?_, FrameStep.commit, rfl, rfl, rfl, by decide⟩
   exact FrameSteps.step FrameStep.defer
-    (FrameSteps.step FrameStep.defer FrameSteps.refl)
+    (FrameSteps.step FrameStep.defer
+      (FrameSteps.step FrameStep.commit FrameSteps.refl))
 
 /-- A body of two witnessed mutations that hits the failing step. -/
 def revertBody : Body := .witnessed 1 true (.witnessed 2 true .fail)

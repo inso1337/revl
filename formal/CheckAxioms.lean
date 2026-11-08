@@ -211,7 +211,9 @@ import RevL
 #print axioms RevL.A8.commit_witness
 #print axioms RevL.A8.mixed_disposition_admitted
 #print axioms RevL.A8.abort_drops_deferred
+#print axioms RevL.A8.abort_run_drops_deferred
 #print axioms RevL.A8.commit_discharges_deferred
+#print axioms RevL.A8.commit_run_queue_empty
 #print axioms RevL.A8.deferred_abort_run
 #print axioms RevL.A8.deferred_commit_run
 #print axioms RevL.A8.revert_witness

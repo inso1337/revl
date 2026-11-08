@@ -701,9 +701,9 @@ step and the two session verdicts; its body steps are these same
 ### Fidelity, stated honestly
 
 * Six body forms against revl's roughly twenty. This is the fragment the
-  WAL guarantees are about — a step either touches nothing, mutates with
+  WAL guarantees are about: a step either touches nothing, mutates with
   a declared inverse, crosses the boundary one-way, or enqueues a
-  class-(b) deferred emission — and it is not a model of the language.
+  class-(b) deferred emission, and it is not a model of the language.
 * A `witnessed` step appends its descriptor and creates its referent in
   ONE step. The reference logs the descriptor after the forward extern
   returns `Ok` (`backends/python/emit.py`), so the real runtime has a
@@ -831,39 +831,6 @@ inductive FrameStep : Frame → Frame → Prop where
 inductive FrameSteps : Frame → Frame → Prop where
   | refl : ∀ {f}, FrameSteps f f
   | step : ∀ {a b c}, FrameStep a b → FrameSteps b c → FrameSteps a c
-
-/-- The frame the abort step settles: the queue dropped (never fired), the
-`aborted` completion record written, body, world and crossings untouched. -/
-def abortFrame (f : Frame) : Frame :=
-  ⟨⟨f.config.body, f.config.world, f.config.log ++ [.aborted]⟩, [],
-   f.fired, some .abort⟩
-
-/-- The frame the commit step settles: the queue flushed FIFO into the
-crossing list, one `flushed` record per entry, `commit-approved` before the
-fires and the terminal marker after them. -/
-def commitFrame (f : Frame) : Frame :=
-  ⟨⟨.done, f.config.world,
-     f.config.log ++ [.commitApproved] ++ f.queue.map Rec.flushed
-       ++ [.activationComplete]⟩,
-   [], f.fired ++ f.queue, some .commit⟩
-
-/-- The abort step, as the transition the constructor performs. -/
-theorem abortStep (f : Frame) (hv : f.verdict = none) :
-    FrameStep f (abortFrame f) := by
-  obtain ⟨⟨b, w, L⟩, q, fs, v⟩ := f
-  simp only at hv
-  subst hv
-  exact FrameStep.abort
-
-/-- The commit step, as the transition the constructor performs. -/
-theorem commitStep (f : Frame) (hb : f.config.body = .done)
-    (hv : f.verdict = none) :
-    FrameStep f (commitFrame f) := by
-  obtain ⟨⟨b, w, L⟩, q, fs, v⟩ := f
-  simp only at hb hv
-  subst hb
-  subst hv
-  exact FrameStep.commit
 
 /-! ### Reading the accumulated log -/
 
