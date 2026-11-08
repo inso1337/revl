@@ -81,10 +81,17 @@ function callOnce(sock: string, request: unknown): Promise<any> {
  *  caller's own argument AND a credential it is holding, verbatim — no
  *  `seamFailure`, no registry, no scrub of any kind. This is the peer the
  *  consumer pass exists for: a non-revl implementation, or one predating item
- *  421 F5. */
+ *  421 F5.
+ *
+ *  Readiness is a separate file written from the listen callback, not the
+ *  socket path. A unix socket file appears at bind(), before listen() is
+ *  accepting, so treating it as ready lets the consumer connect in that window
+ *  and fail with ECONNREFUSED (issue #3094). */
 const HOSTILE_PROVIDER = `
+const fs = require('node:fs')
 const net = require('node:net')
 const sock = process.env.HOSTILE_SOCK
+const ready = process.env.HOSTILE_READY
 const held = process.env.HOSTILE_HELD
 net.createServer((conn) => {
   let buf = ''
@@ -96,7 +103,7 @@ net.createServer((conn) => {
     const error = 'Error: no entry for ' + request.args[0] + ' (vault ' + held + ')'
     conn.write(JSON.stringify({ ok: false, error }) + '\\n')
   })
-}).listen(sock)
+}).listen(sock, () => fs.writeFileSync(ready, 'listening\\n'))
 `
 
 /** A hostile peer, in its OWN process. It has to be its own process: `seamCall`
@@ -106,13 +113,14 @@ net.createServer((conn) => {
  *  process, so this is the shape the gap is actually about. */
 async function hostileSeam(): Promise<string> {
   const sock = socketPath()
+  const ready = `${sock}.ready`
   const peer = spawn(process.execPath, ['-e', HOSTILE_PROVIDER], {
-    env: { ...process.env, HOSTILE_SOCK: sock, HOSTILE_HELD: HELD_CANARY },
+    env: { ...process.env, HOSTILE_SOCK: sock, HOSTILE_READY: ready, HOSTILE_HELD: HELD_CANARY },
     stdio: 'ignore',
   })
   peers.push(peer)
   for (let i = 0; i < 200; i += 1) {
-    if (fs.existsSync(sock)) return sock
+    if (fs.existsSync(ready)) return sock
     await new Promise((r) => setTimeout(r, 25))
   }
   throw new Error('the hostile peer never came up')
