@@ -1404,6 +1404,8 @@ def serve(runner: PeerRunner, *, host: str = "127.0.0.1", port: int = 0,
         if on_listen is not None:
             on_listen(bound[0], bound[1])
         while True:
+            if event_errors:
+                raise event_errors[0]
             conn, _peer = server.accept()
             # From accept, not from the first byte: a connection that says
             # nothing must not hold the worker for the task timeout, and one
@@ -1430,8 +1432,6 @@ def serve(runner: PeerRunner, *, host: str = "127.0.0.1", port: int = 0,
             if once:
                 worker.join()
                 break
-            if event_errors:
-                raise event_errors[0]
         if event_errors:
             raise event_errors[0]
     return served
