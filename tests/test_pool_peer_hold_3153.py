@@ -19,6 +19,8 @@ These are the regressions:
    renewing it on every byte.
 3. ``send_task`` and ``pool_health._exchange`` return at their timeout, not at
    the number of bytes times the per-``recv`` timeout.
+4. A permit taken for a held frame is given back when that frame's deadline
+   fires, so a burst of held connections cannot leave the cap full.
 
 Every test here fails on the tree before the fix: the probe gets no answer
 inside its window, the holder outlives the deadline window, and the dripping
@@ -113,6 +115,19 @@ def drip_server(*, gap=0.4, count=8):
     return port, thread, finished
 
 
+def read_answer(conn):
+    """One newline-terminated answer, however the far side segments it."""
+    chunks: list[bytes] = []
+    while True:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if b"\n" in chunk:
+            break
+    return b"".join(chunks).split(b"\n", 1)[0]
+
+
 def test_a_holder_mid_frame_does_not_stop_the_peer_answering_a_probe(
         tmp_path, monkeypatch):
     """The issue's part B. The holder is still connected, mid-frame, when a
@@ -129,7 +144,7 @@ def test_a_holder_mid_frame_does_not_stop_the_peer_answering_a_probe(
         with socket.create_connection(("127.0.0.1", port), timeout=5) as waiter:
             waiter.sendall(json.dumps(probe, sort_keys=True).encode() + b"\n")
             waiter.settimeout(2.0)
-            answer = json.loads(waiter.recv(65536).split(b"\n", 1)[0])
+            answer = json.loads(read_answer(waiter))
         # The holder is still mid-frame: the answer did not wait for it.
         holder.settimeout(0.2)
         with pytest.raises(socket.timeout):
@@ -169,6 +184,32 @@ def test_a_holder_is_dropped_at_the_frame_deadline(tmp_path, monkeypatch,
             break
     assert dropped, ("the holder outlived the frame deadline: "
                      f"{time.monotonic() - started:.2f}s")
+
+
+def test_a_full_cap_is_released_at_the_frame_deadline(tmp_path, monkeypatch):
+    """A permit taken for a held frame is given back when that frame's
+    deadline fires. With the cap set low, fill it, let every held frame
+    expire, then prove a signed probe is still answered. A leaked permit
+    would make the probe the over-cap connection, closed unanswered."""
+    monkeypatch.setattr(pd, "MAX_PENDING_FRAMES", 4, raising=False)
+    port = start_peer(tmp_path, monkeypatch, frame_deadline=0.5)
+    held = []
+    try:
+        for _ in range(4):
+            held.append(socket.create_connection(("127.0.0.1", port),
+                                                 timeout=5))
+        time.sleep(1.0)             # every held frame's deadline has fired
+        probe = a_signed_probe()
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as waiter:
+            waiter.sendall(json.dumps(probe, sort_keys=True).encode() + b"\n")
+            waiter.settimeout(2.0)
+            answer = json.loads(read_answer(waiter))
+    finally:
+        for conn in held:
+            conn.close()
+
+    assert answer["ok"], answer
+    assert answer["heartbeat"]["nonce"] == probe["nonce"], answer
 
 
 @pytest.mark.parametrize(
