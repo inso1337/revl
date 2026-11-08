@@ -232,7 +232,10 @@ Only the two responses that narrow authority are carried out:
   narrowed, because a read-only hold must not strand cleanup. The runtime must
   be pointed at the exact latch path with `arm_read_only_latch` or the ambient
   `REVL_READ_ONLY_LATCH`; the actuator reports which tiers honour it, and this
-  slice wires the py reference runtime only.
+  slice wires the py reference runtime only. The record distinguishes `armed`
+  (the latch is on disk) from `applied` (a named tier's runtime reads it), so a
+  host that has not pointed the runtime at the path is never told the narrowing
+  is enforced.
 * `suspend` arms the item-443 E-Stop latch beside the WAL (`<wal>.estop`, via
   `estop.latch_path` / `estop.read_latch`), so the runtime, the conductor and
   `revl estop --report` observe it with no reader change, and the per-tier

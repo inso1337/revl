@@ -304,10 +304,15 @@ def test_a_narrowing_response_never_arms_the_other_latch(tmp_path):
     (tool / "tool.py").write_bytes(b"tool:checker@2\n")
 
     read_only = drift_monitor.run_pass(
-        document, wal_path=w, control={"onDrift": drift.RESPONSE_READ_ONLY}
+        document,
+        wal_path=w,
+        control={"onDrift": drift.RESPONSE_READ_ONLY},
+        tier="py",
     )
     assert read_only["response"] == drift.RESPONSE_READ_ONLY
     assert read_only["applied"] is True
+    assert read_only["actuation"]["armed"] is True
+    assert read_only["actuation"]["enforced"] is True
     assert Path(w + ".read-only").exists()
     assert not Path(w + ".estop").exists()
     assert drift_monitor.read_read_only(w + ".read-only")["readOnly"] is True
@@ -510,6 +515,8 @@ def test_a_torn_header_is_replaced_before_the_record_is_appended(tmp_path):
     loaded = wal.read_wal(str(w))
     assert loaded["torn"] is False
     assert loaded["header"]["walVersion"] == wal.WAL_VERSION
+    assert loaded["header"]["generation"] == 1
+    assert loaded["header"]["guarantee"] == wal.WAL_GUARANTEE
     assert len(drift.drift_records(loaded["records"])) == 1
 
 
@@ -542,3 +549,67 @@ def test_a_read_only_hold_refuses_a_direct_effectful_seam(tmp_path, monkeypatch)
         deferred.fire()
     assert fired == []
     assert deferred.fired is False, "a refused deferred crossing stays owed"
+
+
+def test_the_header_comes_from_the_one_shared_builder():
+    header = wal.header_record(3)
+    assert header == {
+        "record": "header",
+        "walVersion": wal.WAL_VERSION,
+        "generation": 3,
+        "guarantee": wal.WAL_GUARANTEE,
+    }
+    with pytest.raises(ValueError):
+        wal.header_record(0)
+
+
+def test_read_only_is_armed_but_not_applied_without_a_named_tier(tmp_path):
+    document, tool, _policy = _document(tmp_path)
+    w = str(tmp_path / "run.wal")
+    (tool / "tool.py").write_bytes(b"tool:checker@2\n")
+
+    result = drift_monitor.run_pass(
+        document, wal_path=w, control={"onDrift": drift.RESPONSE_READ_ONLY}
+    )
+    assert result["applied"] is False
+    assert result["unapplied"] is True
+    assert result["actuation"]["armed"] is True
+    assert result["actuation"]["enforced"] is False
+    assert "armed, not enforced" in "\n".join(drift_monitor.render(result))
+
+    # The file is still armed: a host that points its runtime at it later sees
+    # the narrowing without needing a second pass.
+    assert drift_monitor.read_read_only(w + ".read-only")["readOnly"] is True
+
+
+def test_every_wired_effectful_seam_refuses_under_read_only(tmp_path, monkeypatch):
+    latch = tmp_path / "run.read-only"
+    drift_monitor.arm_read_only(str(latch), reason="seam coverage")
+    monkeypatch.setenv(drift_monitor.READ_ONLY_LATCH_ENV, str(latch))
+    py_runtime.arm_read_only_latch(None)
+
+    frame = py_runtime.Frame(object(), "svc")
+
+    @py_runtime.estop_gated("svc.gated")
+    def gated():
+        return "ran"
+
+    seams = {
+        "extern_emit": lambda: py_runtime.extern_emit(
+            object(), "svc.send", lambda: "ran", ()
+        ),
+        "let-effect": lambda: frame.acquire("step", lambda: 1, lambda v: None),
+        "deferred emit": lambda: frame.enqueue_deferred(
+            "svc", "send", [], lambda: None
+        ),
+        "approval crossing": lambda: frame.approval_crossing(
+            {"passthrough": True}, "cap", lambda: "ran"
+        ),
+        "deferred fire": lambda: py_runtime._Deferred(
+            "svc", "send", [], lambda: None
+        ).fire(),
+        "estop_gated": gated,
+    }
+    for label, call in seams.items():
+        with pytest.raises(py_runtime.ReadOnlyRefused):
+            call()

@@ -373,7 +373,7 @@ def _write_latch(path: str, record: dict) -> None:
         handle.flush()
         try:
             os.fsync(handle.fileno())
-        except (OSError, ValueError):  # pragma: no cover — exotic file objects
+        except (OSError, ValueError):  # pragma: no cover (exotic file objects)
             pass
 
 
@@ -536,16 +536,30 @@ def apply_response(
         armed = arm_read_only(
             latch, reason=reason, at=at, generation=generation, detail=detail
         )
-        in_force = bool(armed.get("armed") or armed.get("alreadyArmed"))
+        is_armed = bool(armed.get("armed") or armed.get("alreadyArmed"))
+        enforced = bool(tier in TIERS_WITH_READ_ONLY) if tier else False
         return {
             "response": response,
-            "applied": in_force,
+            # The latch is ARMED whether or not a runtime watches this path.
+            # `applied` is the stronger claim: the named tier's runtime reads
+            # the latch. A host that has not pointed the runtime at it (no
+            # REVL_READ_ONLY_LATCH) has narrowed nothing yet.
+            "armed": is_armed,
+            "enforced": enforced,
+            "applied": is_armed and enforced,
             "actuator": "read-only",
             "latch": latch,
             "reason": (
                 armed.get("reason")
-                if not in_force
-                else "every new effectful crossing refuses; reads still proceed"
+                if not is_armed
+                else (
+                    "the read-only latch is armed and the named tier reads it; "
+                    "every new effectful crossing refuses, reads still proceed"
+                    if enforced
+                    else "the read-only latch is armed, but this pass named no "
+                    "tier that reads it; a host must point its runtime at "
+                    "REVL_READ_ONLY_LATCH before the narrowing is enforced"
+                )
             ),
             "honors": sorted(TIERS_WITH_READ_ONLY),
             "honored": (tier in TIERS_WITH_READ_ONLY if tier else None),
@@ -570,6 +584,10 @@ def apply_response(
         in_force = bool(armed.get("armed") or armed.get("alreadyHalted"))
         return {
             "response": response,
+            "armed": in_force,
+            "enforced": bool(
+                tier and estop.tier_estop_status(tier) == estop.ESTOP_HONORING
+            ),
             "applied": in_force,
             "actuator": "suspend",
             "latch": latch,
@@ -602,12 +620,12 @@ def _generation(path: str) -> int:
     try:
         header = wal.read_wal(path)["header"]
     except FileNotFoundError:
-        return 0
-    generation = header.get("generation") if isinstance(header, dict) else 0
-    return generation if isinstance(generation, int) else 0
+        return 1
+    generation = header.get("generation") if isinstance(header, dict) else 1
+    return generation if isinstance(generation, int) and generation >= 1 else 1
 
 
-def append_record(path: str, record: dict, *, generation: int = 0) -> None:
+def append_record(path: str, record: dict, *, generation: int = 1) -> None:
     """Append one record to the drift WAL, sealing a torn tail first (§535).
 
     The header is written only when this call creates the file, so a WAL that
@@ -626,25 +644,18 @@ def append_record(path: str, record: dict, *, generation: int = 0) -> None:
     fresh = not os.path.exists(path) or os.path.getsize(path) == 0
     with open(path, "a", encoding="utf-8") as handle:
         if fresh:
+            # The header comes from the one shared builder, so the monitor does
+            # not carry a second copy of the WAL schema or its guarantee. The
+            # monitor's own claim lives in `record["monitor"]`, not in the
+            # header, which is the sentence recovery is allowed to claim.
             handle.write(
-                json.dumps(
-                    {
-                        "record": "header",
-                        "walVersion": wal.WAL_VERSION,
-                        "generation": generation,
-                        "guarantee": MONITOR_GUARANTEE,
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
+                json.dumps(wal.header_record(generation), sort_keys=True) + "\n"
             )
-        else:
-            wal.seal_torn_tail(path)
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
         try:
             os.fsync(handle.fileno())
-        except (OSError, ValueError):  # pragma: no cover — exotic file objects
+        except (OSError, ValueError):  # pragma: no cover (exotic file objects)
             pass
 
 
@@ -699,6 +710,12 @@ def run_pass(
     report = drift.detect(manifest, reading["live"])
     if generation is None:
         generation = _generation(wal_path)
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        generation = 1
     stamp = _iso(at)
 
     control = control if control is not None else document.get("control")
@@ -801,7 +818,12 @@ def render(result) -> list:
         lines.append(f"  {row['status']}: {row['subject']} ({row['reason']})")
     actuation = result.get("actuation")
     if actuation is not None:
-        state = "in force" if actuation.get("applied") else "NOT in force"
+        if actuation.get("applied"):
+            state = "in force"
+        elif actuation.get("armed"):
+            state = "armed, not enforced"
+        else:
+            state = "NOT in force"
         lines.append(
             f"actuation: {actuation.get('response')} {state} "
             f"({actuation.get('reason')})"

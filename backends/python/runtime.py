@@ -3427,7 +3427,7 @@ class ReadOnlyRefused(RuntimeError):
     def __init__(self, where: str, record: Optional[dict] = None) -> None:
         hold = record or {}
         super().__init__(
-            f"READ-ONLY engaged — `{where}` was refused. "
+            f"READ-ONLY engaged: `{where}` was refused. "
             f"reason: {hold.get('reason', 'drift control: read-only')}; "
             f"operator: {hold.get('operator', 'unknown')}. The composition may "
             "still read; a fresh admission or an operator clearing the latch is "
