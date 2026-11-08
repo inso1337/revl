@@ -213,6 +213,7 @@ CORPUS = [
     "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
     "branch_edges.rvl",
     "destructuring.rvl",
+    "module_keyword_names.rvl",  # module fn `class_` -> `class__` and a local of that name (#3179)
     "property_edges.rvl",
     "component_edges.rvl",
     "cas_runtime.rvl",
@@ -706,7 +707,13 @@ def test_local_helper_rename_is_a_recorded_port_divergence(emitted, reference):
     like the `EMITTER_RESERVED` rename it also defers, and no CORPUS document
     binds such a name. This pins the divergence so it cannot widen unseen:
     when the port learns the rule this test fails, and the document joins the
-    CORPUS instead."""
+    CORPUS instead. In the whole-tree survey
+    (`tools/selfhost_differential_survey.py --tiers ts`) the rule moves three
+    documents from agreement to divergence, each a local the reference now
+    renames: tests/fixtures/emit_go_corpus/accumulator_hygiene.rvl
+    (`_revlSB0` -> `_revlSB0_`), tests/fixtures/emit_go_corpus/inference.rvl
+    and tests/fixtures/emit_wasm_corpus/scratch_names.rvl (`record` ->
+    `record_`)."""
     from revl import compile_source
     ir = compile_source(
         "pub fn add(a: Int, b: Int) -> Int {\n"

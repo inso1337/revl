@@ -538,11 +538,17 @@ _LOCAL_ROLES = frozenset({
 # helpers are covered by `_TS_HELPER_PREFIX_RE` and `TS_HELPER_NAMES`;
 # backends/typescript/test_local_helper_shadow_ts.py emits a corpus and asserts
 # every module-scope binding of the output is in this family, so a new helper
-# or import cannot be added without it.
+# or import cannot be added without it. vitest's `it` is the one import left
+# out: it is only ever called around a `test` block at module scope, never
+# from inside a body, so a local `it` cannot shadow it (see the `expect` note
+# in src/revl/lower.py).
 _TS_IMPORTED_NAMES = frozenset({
     "host", "Frame", "record", "uiCrossing", "uiCrossingAsync", "realmLabel",
-    "spawn", "Context", "expect", "it", "AsyncLocalStorage",
+    "spawn", "Context", "expect", "AsyncLocalStorage",
 })
+
+# Module-scope names a local cannot shadow (see `_TS_IMPORTED_NAMES`).
+_TS_UNSHADOWABLE_IMPORTS = frozenset({"it"})
 
 # Every emitted helper is spelled `revl<Upper>...`, `REVL_...`, `_revl...` or
 # `_REVL_...`, so any user local of that shape is renamed (the issue's

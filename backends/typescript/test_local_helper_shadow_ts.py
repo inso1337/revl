@@ -256,7 +256,8 @@ def test_every_emitted_module_scope_binding_is_reserved_for_locals():
             seen.add(name)
             if "$" in name or name in user or name.rstrip("_") in user:
                 continue
-            if EMIT._reserved_for_locals(name) or name in EMIT.EMITTER_RESERVED:
+            if (EMIT._reserved_for_locals(name) or name in EMIT.EMITTER_RESERVED
+                    or name in EMIT._TS_UNSHADOWABLE_IMPORTS):
                 continue
             uncovered[name] = str(path)
     # the reader saw real helpers and imports (a scan that saw nothing proves nothing)
