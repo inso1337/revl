@@ -2280,6 +2280,13 @@ class _FlowChecker:
                 self._check_sinks(f"{child}#config", arg_taints, node)
             return self._union_children(node, env)
 
+        # a `match`: each arm's binder is the scrutinee's payload, so it carries
+        # the scrutinee's taint into the arm body (issue #3190). Without this the
+        # binder read as an unbound name, CLEAN, and a sink called inside the
+        # arm saw the unwrapped value as trusted.
+        if kind == "match":
+            return self._taint_of_match(node, env)
+
         # binary op / interpolation: the union join — a trusted prefix does not
         # launder an untrusted suffix (Decision 2, concatenation).
         if kind in ("bin", "interp", "template", "concat"):
@@ -2290,6 +2297,32 @@ class _FlowChecker:
         # declassifier, never by falling through an unmodelled node. This is the
         # no-false-clean invariant (Decision 2 propagation, residual risk 3).
         return self._union_children(node, env)
+
+    def _taint_of_match(self, node: dict, env: dict) -> Taint:
+        """A `match` expression. Each arm body is walked with its binder bound
+        to the scrutinee's taint, the counterpart of the `for` loop binder in
+        `_loop`. The binder takes the scrutinee's `fields` when it has them (a
+        record payload of `Some`/`Ok`/`Err` keeps its per-field taint), so a
+        clean field of a partly-untrusted record stays clean inside the arm.
+        Which arm runs is not known statically, so every binder gets the whole
+        scrutinee taint, the `Err` arm of an `Ok`-built value included.
+
+        The match VALUE still joins the scrutinee, as the union fallback did:
+        the arm the scrutinee selects is itself a flow from it."""
+        scrutinee = self.taint_of(node.get("scrutinee"), env)
+        result = scrutinee
+        for arm in node.get("arms") or []:
+            if not isinstance(arm, dict):
+                result = _join(result, self.taint_of(arm, env))
+                continue
+            result = _join(result, self.taint_of(arm.get("pattern"), env))
+            arm_env = env
+            bind = arm.get("bind")
+            if isinstance(bind, str) and bind:
+                arm_env = dict(env)
+                arm_env[bind] = scrutinee
+            result = _join(result, self.taint_of(arm.get("body"), arm_env))
+        return result
 
     def _union_children(self, node: dict, env: dict) -> Taint:
         result = CLEAN
@@ -2590,7 +2623,13 @@ class _FlowChecker:
         for t in arg_taints:
             result = _join(result, t)
         if result.dirty:
-            result = Taint(result.origins, result.via + (f"{callee}()",))
+            # a one-payload builtin wrapper keeps its payload's record shape, so
+            # the binder a `match` arm unwraps it into is field-granular too.
+            fields = (result.fields
+                      if callee in _PAYLOAD_WRAPPERS and len(arg_taints) == 1
+                      else {})
+            result = Taint(result.origins, result.via + (f"{callee}()",),
+                           fields)
         return result
 
     # -- statement / block walk ------------------------------------------------
@@ -2621,6 +2660,25 @@ class _FlowChecker:
             value = stmt.get("value")
             env[stmt["name"]] = self.taint_of(value, env)
             self._note_fn_ref(stmt.get("name"), value)
+            return
+        if step == "let_pattern":
+            # a destructuring `let`: each name is a part of the value, so it
+            # carries the value's taint (issue #3190, the `let` sibling of the
+            # match binder). A record pattern reads each field's own taint when
+            # the record shape is known, exactly as a field read does; a list
+            # pattern binds elements and the rest, each the whole list's taint.
+            value = self.taint_of(stmt.get("value"), env)
+            whole = Taint(value.origins, value.via)
+            record = stmt.get("pattern") == "record"
+            for name in stmt.get("names") or []:
+                if isinstance(name, str):
+                    env[name] = (value.fields[name]
+                                 if record and name in value.fields else whole)
+                    self.fn_refs.pop(name, None)
+            rest = stmt.get("rest")
+            if isinstance(rest, str):
+                env[rest] = whole
+                self.fn_refs.pop(rest, None)
             return
         if step in ("while", "for"):
             self._loop(stmt, env)
@@ -2883,6 +2941,10 @@ def _callables(fns, components, filename: str):
 # constructor / builtin callables that may appear as a bare callee but are not a
 # user fn — nameable, so never over-approximated as an unnameable indirect call.
 _BUILTIN_CALLABLE_NAMES = frozenset({"Ok", "Err", "Some", "None", "endorse"})
+
+# the builtin constructors that wrap exactly one payload: their value carries the
+# payload's per-field taint through to the binder of a `match` arm.
+_PAYLOAD_WRAPPERS = frozenset({"Ok", "Err", "Some"})
 
 
 def _known_callables(program, fns, components, model: TaintModel) -> frozenset:
