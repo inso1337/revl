@@ -699,6 +699,27 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_ts_src"](ir)
 
 
+def test_local_helper_rename_is_a_recorded_port_divergence(emitted, reference):
+    """Issue #3179: the reference renames a function-local name that would
+    shadow an emitted helper or JS global (`backends/typescript/emit.py::
+    _mangle_local`); the port's `ident` is still the JS-keyword ladder only,
+    like the `EMITTER_RESERVED` rename it also defers, and no CORPUS document
+    binds such a name. This pins the divergence so it cannot widen unseen:
+    when the port learns the rule this test fails, and the document joins the
+    CORPUS instead."""
+    from revl import compile_source
+    ir = compile_source(
+        "pub fn add(a: Int, b: Int) -> Int {\n"
+        "  let revlI64 = (x: Int) => 7\n"
+        "  return a + b\n"
+        "}\n")
+    want = reference.emit(ir)
+    got = emitted["emit_ts_src"](ir)
+    assert "const revlI64_ = " in want and "const revlI64 = " not in want
+    assert "const revlI64 = " in got
+    assert got.replace("const revlI64 = ", "const revlI64_ = ") == want
+
+
 def test_a_host_identifier_collision_is_refused_by_name(reference):
     """`tests/fixtures/emit_ts_refusals/host_identifier_collision.rvl`: a
     namespaced key and the unqualified key that already spells its mangled

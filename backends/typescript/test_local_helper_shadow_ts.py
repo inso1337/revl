@@ -102,25 +102,74 @@ CASES = [
 ]
 
 
+# A local beside a module fn whose name ends in `_` (review of #3179): the
+# local spelled exactly like the module name must keep the module read's
+# spelling, and an escaped local must not land on the module name.
+MODULE_TRAILING_SOURCE = """\
+fn undefined_(x: Int) -> Int = x + 100
+pub fn main(a: Int) -> Int {
+  let undefined_ = a
+  return undefined_ + 1
+}
+fn revlFoo_(x: Int) -> Int = x + 100
+pub fn beside(a: Int) -> Int {
+  let revlFoo = a
+  return revlFoo_(a) + revlFoo
+}
+pub fn same(a: Int) -> Int {
+  let revlFoo_ = a
+  return revlFoo_ + 1
+}
+pub fn pair(x: Int) -> Int {
+  let x_ = x + 10
+  return x * 100 + x_
+}
+"""
+
+MODULE_TRAILING_CASES = [
+    ("let named like module fn undefined_", "M.main(1n)", "2"),
+    ("escaped revlFoo beside fn revlFoo_", "M.beside(1n)", "102"),
+    ("let named like module fn revlFoo_", "M.same(1n)", "2"),
+    ("x and x_", "M.pair(1n)", "111"),
+]
+
+
 def _emit(src: str = SOURCE, runtime_import: str = "../runtime.ts") -> str:
     return EMIT.emit(compile_source(src), runtime_import=runtime_import)
 
 
-@needs_node
-def test_shadowing_locals_keep_the_checked_semantics(tmp_path):
-    (tmp_path / "m.ts").write_text(_emit(runtime_import=str(BACKEND / "runtime.ts")),
-                                   encoding="utf-8")
+def _run(tmp_path, src: str, cases: list) -> None:
+    (tmp_path / "m.ts").write_text(_emit(src, str(BACKEND / "runtime.ts")), encoding="utf-8")
     lines = ["import * as M from './m.ts'",
              "const t = (f: () => unknown) => { try { console.log(String(f())) }"
              " catch (e) { console.log('throws:' + (e as Error).message) } }"]
-    lines += [f"t(() => {call})" for _, call, _ in CASES]
+    lines += [f"t(() => {call})" for _, call, _ in cases]
     (tmp_path / "h.ts").write_text("\n".join(lines) + "\n", encoding="utf-8")
     proc = subprocess.run(["node", "h.ts"], capture_output=True, text=True, cwd=str(tmp_path))
     assert proc.returncode == 0, proc.stderr
     got = proc.stdout.splitlines()
-    assert len(got) == len(CASES), proc.stdout
-    wrong = [(label, want, seen) for (label, _, want), seen in zip(CASES, got) if seen != want]
+    assert len(got) == len(cases), proc.stdout
+    wrong = [(label, want, seen) for (label, _, want), seen in zip(cases, got) if seen != want]
     assert wrong == []
+
+
+@needs_node
+def test_shadowing_locals_keep_the_checked_semantics(tmp_path):
+    _run(tmp_path, SOURCE, CASES)
+
+
+@needs_node
+def test_locals_beside_module_names_ending_in_underscore(tmp_path):
+    _run(tmp_path, MODULE_TRAILING_SOURCE, MODULE_TRAILING_CASES)
+
+
+def test_an_escaped_local_never_spells_a_module_name():
+    out = _emit(MODULE_TRAILING_SOURCE)
+    assert "const undefined_ = a" in out
+    assert "return revlI64(undefined_ + 1n)" in out
+    assert "const revlFoo_ = a" in out
+    assert re.search(r"const revlFoo_+ = a\n\s+return revlI64\(revlFoo_\(a\) \+ revlFoo_{2,}\)",
+                     out) is not None
 
 
 def test_locals_are_renamed_and_ordinary_names_are_not():

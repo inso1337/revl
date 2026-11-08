@@ -550,11 +550,26 @@ _TS_IMPORTED_NAMES = frozenset({
 _TS_HELPER_PREFIX_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
 
 # The user's module-level value names of the document being emitted (fns,
-# externs, components, ADT cases), set by `emit`. A local named like one of
-# them keeps its spelling, because a read of that name cannot tell the local
-# from the module binding (`_v3_var` resolves a module name first); the module
-# binding's own collision with a helper or global is issue #3127.
-_MODULE_NAMES: ContextVar[frozenset] = ContextVar("_MODULE_NAMES", default=frozenset())
+# externs, components, ADT cases) and the rung `_mangle_local` escapes by, set
+# by `emit`. A local named EXACTLY like one of them takes the spelling the
+# module name's own read takes, because a read of that name cannot tell the
+# local from the module binding (`_v3_var` resolves a module name first); the
+# module binding's own collision with a helper or global is issue #3127.
+_MODULE_NAMES: ContextVar[tuple] = ContextVar("_MODULE_NAMES", default=(frozenset(), 1))
+
+
+def _module_scope(module: frozenset, cases: frozenset = frozenset()) -> tuple:
+    """`(module, rung)` for `_MODULE_NAMES`. An escaped local gains `rung`
+    trailing `_`, one more than any module name or its emitted spelling ends
+    with, so an escaped local never lands on a module binding the same
+    function may read. `rung` is 1 unless a module name ends in `_`, so a
+    document whose module names do not is unaffected."""
+    # every spelling a module name can be emitted under: a read, and an ADT
+    # case's declaration (which also escapes `JS_GLOBAL_RESERVED`)
+    spelled = set(module) | {_mangle(n, EMITTER_RESERVED) for n in module} | {
+        _mangle(n, EMITTER_RESERVED | JS_GLOBAL_RESERVED) for n in cases}
+    tail = max((len(n) - len(n.rstrip("_")) for n in spelled), default=0)
+    return (module, tail + 1)
 
 
 def _reserved_for_locals(root: str) -> bool:
@@ -567,16 +582,21 @@ def _reserved_for_locals(root: str) -> bool:
 
 def _mangle_local(name: str, extra: frozenset) -> str:
     """`_mangle`'s injective ladder over the local family: JS keywords,
-    `extra`, `EMITTER_RESERVED` and `_reserved_for_locals`, minus the
-    document's own module-level names (see `_MODULE_NAMES`). The family is
-    fixed for one emit, so the ladder stays injective, and a declaration and
-    every read of it agree because both go through here."""
-    module = _MODULE_NAMES.get()
+    `extra`, `EMITTER_RESERVED` and `_reserved_for_locals`. A name that IS one
+    of the document's module-level names takes exactly the module read's
+    spelling (see `_MODULE_NAMES`). Any other escaped name gains the
+    document's `rung` of `_`, which no module spelling reaches. The family and
+    the rung are fixed for one emit, so the map stays injective (a uniform
+    suffix over a ladder is), and a declaration and every read of it agree
+    because both go through here."""
+    module, rung = _MODULE_NAMES.get()
+    if name in module:
+        return _mangle(name, extra | EMITTER_RESERVED)
     root = name
     while root:
         if (root in JS_RESERVED or root in extra or root in EMITTER_RESERVED
-                or (root not in module and _reserved_for_locals(root))):
-            return name + "_"
+                or _reserved_for_locals(root)):
+            return name + "_" * rung
         if not root.endswith("_"):
             break
         root = root[:-1]
@@ -6469,15 +6489,19 @@ TS_HELPER_NAMES: frozenset = frozenset(
 )
 
 
+def _case_names(ir: dict) -> frozenset:
+    return frozenset(
+        c.get("name") for spec in (ir.get("types") or {}).values()
+        if isinstance(spec, dict) and spec.get("kind") == "variant"
+        for c in spec.get("cases") or []
+        if isinstance(c, dict) and isinstance(c.get("name"), str))
+
+
 def _module_value_names(ir: dict) -> frozenset:
     """The user's module-level value names of *ir* (see `_MODULE_NAMES`)."""
     names = {n.get("name") for key in ("functions", "externs", "components")
              for n in ir.get(key) or [] if isinstance(n, dict)}
-    for spec in (ir.get("types") or {}).values():
-        if isinstance(spec, dict) and spec.get("kind") == "variant":
-            names.update(c.get("name") for c in spec.get("cases") or []
-                         if isinstance(c, dict))
-    return frozenset(n for n in names if isinstance(n, str))
+    return frozenset(n for n in names if isinstance(n, str)) | _case_names(ir)
 
 
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
@@ -6512,7 +6536,7 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
     # The unified `_Ctx` carrying the document type context is built inside
     # each _emit_* pass and threaded into every body (component and 2.0),
     # replacing the former module-global context stack.
-    token = _MODULE_NAMES.set(_module_value_names(ir))
+    token = _MODULE_NAMES.set(_module_scope(_module_value_names(ir), _case_names(ir)))
     try:
         if version in (1, 2):
             return _emit_v1(ir, runtime_import=runtime_import)
