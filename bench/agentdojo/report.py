@@ -50,13 +50,40 @@ def summarise(records: list[dict]) -> str:
         refusals = sum((r.get("stats") or {}).get("admission_refusals", 0) for r in rows)
         steps = [ (r.get("stats") or {}).get("steps") for r in rows ]
         steps = [s for s in steps if s is not None]
+        mean_steps = _mean(steps)
         lines.append(
             f"| {arm} | `{model}` | `{(rows[0].get('model_digest') or 'unpinned')[:12]}` | "
             f"{_pct([bool(r['utility']) for r in benign])} | "
             f"{_pct([bool(r['utility']) for r in attack])} | "
             f"{_pct([bool(r['security']) for r in attack])} | "
             f"{refusals} | {_mean([r['duration_s'] for r in rows if r.get('duration_s')])} | "
-            f"{_mean(steps)} |"
+            f"{mean_steps if mean_steps is not None else '-'} |"
+        )
+
+    lines.append("")
+    lines.append("## Cost")
+    lines.append("")
+    lines.append("| arm | model | mean wall s | mean steps | mean prompt tokens | mean completion tokens |")
+    lines.append("|---|---|---|---|---|---|")
+    for (arm, model), rows in sorted(grouped.items()):
+        steps = [ (r.get("stats") or {}).get("steps") for r in rows ]
+        steps = [s for s in steps if s is not None]
+        pt = [ (r.get("stats") or {}).get("prompt_tokens") for r in rows ]
+        pt = [v for v in pt if v]
+        ct = [ (r.get("stats") or {}).get("completion_tokens") for r in rows ]
+        ct = [v for v in ct if v]
+        lines.append(
+            f"| {arm} | `{model}` | "
+            f"{_mean([r['duration_s'] for r in rows if r.get('duration_s')])} | "
+            f"{_mean(steps) if steps else '-'} | "
+            f"{_mean(pt) if pt else '-'} | {_mean(ct) if ct else '-'} |"
+        )
+    if any(r["arm"] == "baseline" for r in records):
+        lines.append("")
+        lines.append(
+            "The baseline arm runs AgentDojo's reference `OpenAILLM`, which does "
+            "not expose usage, so its token columns are not reported. Wall time "
+            "is the comparable figure across the two arms."
         )
 
     lines.append("")
@@ -98,12 +125,30 @@ def summarise(records: list[dict]) -> str:
     refused = [r for r in records if (r.get("stats") or {}).get("admission_refusals")]
     if not refused:
         lines.append("No admission refusals were recorded.")
+    else:
+        benign_refused = sum(1 for r in refused if r["condition"] == "benign")
+        lines.append(
+            f"Refused records: {len(refused)} total, {benign_refused} on benign tasks, "
+            f"{len(refused) - benign_refused} on attacked tasks. A `None` code is the "
+            "compiler's generic refusal for malformed source; it is not an admission-"
+            "profile refusal."
+        )
+        lines.append("")
     for row in refused:
         stats = row.get("stats") or {}
+        messages = stats.get("refusal_messages") or []
+        profile = sum(
+            1 for m in messages
+            if "granted" in m or "forbids new" in m or "declares host code" in m
+        )
         lines.append(
             f"- {row['model']} run{row['run']} `{row['task']}` {row['condition']}: "
-            f"{stats.get('admission_refusals')} refusal(s), codes {stats.get('refusal_codes')}"
+            f"{stats.get('admission_refusals')} refusal(s), "
+            f"{profile} about an ungranted reach or host code, "
+            f"{len(messages) - profile} compile refusal(s); codes {stats.get('refusal_codes')}"
         )
+        for message in messages:
+            lines.append(f"  - `{message}`")
 
     errors = [r for r in records if r.get("error")]
     if errors:

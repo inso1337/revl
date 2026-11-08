@@ -85,6 +85,11 @@ def _load_revl() -> dict[str, Any]:
     return _REVL_IMPORTED
 
 
+def _public(message: str) -> str:
+    """A refusal message without the admitting checkout's absolute path."""
+    return message.replace(os.getcwd(), "<checkout>")
+
+
 def _fenced_code(text: str) -> str | None:
     match = re.search(r"```(?:revl)?[ \t]*\n(.*?)```", text, re.DOTALL)
     if match:
@@ -249,8 +254,8 @@ class RevlPipeline:
             while not verdict.admitted and repairs < self.max_repairs:
                 repairs += 1
                 stats["admission_refusals"] += 1
-                stats["refusal_codes"].append(verdict.code)
-                stats["refusal_messages"].append(str(verdict.message)[:400])
+                stats["refusal_codes"].append(verdict.code or "compile")
+                stats["refusal_messages"].append(_public(str(verdict.message))[:400])
                 chat.append({"role": "assistant", "content": text})
                 chat.append(
                     {

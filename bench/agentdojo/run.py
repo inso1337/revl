@@ -28,6 +28,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -44,6 +45,19 @@ SCHEMA = "AGENTDOJO-1"
 
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+
+
+def _git_commit() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except Exception:
+        return None
 
 
 def _client(base_url: str) -> object:
@@ -151,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         "started": _now(),
         "suite": args.suite,
         "agentdojo": getattr(agentdojo, "__version__", "0.1.35"),
+        "git_commit": _git_commit(),
         "arms": arms,
         "models": models,
         "pins": pins,
@@ -164,8 +179,6 @@ def main(argv: list[str] | None = None) -> int:
         "command": " ".join(sys.argv),
     }
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-
-    from agentdojo.agent_pipeline import OpenAILLM  # noqa: F401  (import cost once)
 
     import importlib.util
 
@@ -234,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
                                     error = None
                                 except Exception as exc:  # noqa: BLE001
                                     utility = security = None
-                                    error = f"{type(exc).__name__}: {exc}"
+                                    error = f"{type(exc).__name__}: {exc}".replace(
+                                        os.getcwd(), "<checkout>"
+                                    )
                                     traceback.print_exc()
                                 stats = dict(getattr(pipeline, "stats", {}) or {})
                                 record(
@@ -264,7 +279,9 @@ def main(argv: list[str] | None = None) -> int:
                                     error = None
                                 except Exception as exc:  # noqa: BLE001
                                     utility = security = None
-                                    error = f"{type(exc).__name__}: {exc}"
+                                    error = f"{type(exc).__name__}: {exc}".replace(
+                                        os.getcwd(), "<checkout>"
+                                    )
                                     traceback.print_exc()
                                 stats = dict(getattr(pipeline, "stats", {}) or {})
                                 record(

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import enum
 import types as _types
+import typing
 from typing import Any, get_args, get_origin
 
 # The revl types the bridge can lower without a lossy encoding. A parameter the
@@ -52,7 +53,7 @@ def revl_type(annotation: Any) -> str:
     # `str | None` / `Optional[str]`: the tool's own default decides the value
     # when a caller omits it, but the revl call site still has to name the
     # argument, so the declaration keeps it with an Opt.
-    if origin is _types.UnionType or origin is getattr(__import__("typing"), "Union"):
+    if origin is _types.UnionType or origin is typing.Union:
         members = [a for a in args if a is not type(None)]
         if len(members) == 1 and len(args) == 2:
             return f"Opt[{revl_type(members[0])}]"
@@ -78,7 +79,7 @@ def extern_name(tool_name: str) -> str:
 
 def _optional(annotation: Any) -> bool:
     origin = get_origin(annotation)
-    if origin is not _types.UnionType and origin is not __import__("typing").Union:
+    if origin is not _types.UnionType and origin is not typing.Union:
         return False
     members = [a for a in get_args(annotation) if a is not type(None)]
     return len(members) == 1 and len(get_args(annotation)) == 2
