@@ -236,6 +236,32 @@ def test_the_probe_refuses_a_malformed_question(tmp_path):
     assert "--probe is the summary of the --under counterfactual" in err
 
 
+def test_one_candidate_can_still_be_several_files(tmp_path):
+    """`--candidate a.rvl b.rvl` was one composition with several files before
+    `--candidate` became repeatable; it must stay one composition. The CLI
+    collects a list of compositions, so one occurrence with two paths is a
+    single row."""
+    fx = _fixtures(tmp_path)
+    head, body = NARROW.split("component Agent", 1)
+    services = tmp_path / "services.rvl"
+    services.write_text(head, encoding="utf-8")
+    component = tmp_path / "component.rvl"
+    component.write_text("component Agent" + body, encoding="utf-8")
+
+    doc = probe(fx["wal"], fx["policy"], [[str(services), str(component)]])
+    assert len(doc["rows"]) == 1
+    assert doc["rows"][0]["files"] == [str(services), str(component)]
+    assert doc["rows"][0]["newlyRefused"] == 0
+
+    code, out, _ = _run_cli([
+        "replay", fx["wal"], "--under", fx["policy"],
+        "--candidate", str(services), str(component), "--probe", "--json"])
+    assert code == 0
+    rows = json.loads(out)["rows"]
+    assert len(rows) == 1
+    assert rows[0]["files"] == [str(services), str(component)]
+
+
 # ---------------------------------------------------------------------------
 # Slice 2: the evolve hook orders candidates and cannot admit one.
 # ---------------------------------------------------------------------------
@@ -292,6 +318,22 @@ def test_the_loop_hook_cannot_admit_a_clean_probe_through_a_refusing_gate():
     assert result.admitted is False
     assert len(admits) == 1
     assert result.attempts[0].admitted is False
+
+
+def test_a_clean_probe_and_an_accepting_gate_are_admitted():
+    """The positive control: a clean row does not block a candidate the Gate
+    admits, so an evolve_ordered that always gives up cannot pass."""
+    clean = _candidate("clean")
+
+    def accepting_gate(sources_json, manifest):
+        return json.dumps({"ok": True})
+
+    result = evolve_ordered(
+        [clean], lambda candidate: _row(), budget=1, admit=accepting_gate,
+        proposer=lambda packet: packet.candidate)
+
+    assert result.admitted is True
+    assert result.final_candidate == clean
 
 
 def test_a_deferred_candidate_is_never_offered_to_the_gate():

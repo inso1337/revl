@@ -502,12 +502,16 @@ def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
     crossings the alternate policy decided for this candidate (permitted plus
     refused); `newlyRefused` and `newlyAllowed` split that set.
 
-    "Newly refused" is meaningful: the record shows the crossing WAS made, so a
-    recomputed refusal is a boundary the recording crossed and this candidate
-    would not. "Newly allowed" is the other half of the same split and is NOT
-    evidence of new authority: the record already shows the crossing was made,
-    so a permitted verdict is an unchanged allowance. The pair is kept under the
-    names the item gives it, and the bounds say what the record cannot answer.
+    Both counts are the alternate policy's verdict over the CANDIDATE's declared
+    reach at a recorded crossing label, not a comparison with the scope the
+    recording ran under: the WAL carries no declared scope and no admit decision.
+    `newlyRefused` therefore counts a boundary the run crossed and this candidate
+    would now be refused at, which may be a token the recording never carried (a
+    widening) as well as one it did. `newlyAllowed` is the permitted half and is
+    not a claim that authority is unchanged either: a permitted crossing may have
+    been covered by an approval edge the record does not hold (`BOUNDS`
+    `recordedAuthority`). The pair is kept under the names the item gives it and
+    the bounds say what the record cannot answer.
     """
     files = list(candidate)
     doc = replay_under(wal_path, policy_path, candidate=files)

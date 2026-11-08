@@ -178,11 +178,12 @@ CANDIDATE with
 - `recordedCrossings` and `regraded`: how many crossings the record holds and how
   many the alternate policy decided for this candidate;
 - `newlyRefused` and `newlyAllowed`: the refused and permitted halves of that
-  regraded set. A refusal is genuinely NEW: the record shows the crossing was
-  made, so it is a boundary the recording crossed and this candidate would not.
-  A permitted verdict is NOT new authority; it is the unchanged allowance the
-  record already shows, and the row keeps it under the item's name only as the
-  other half of the split;
+  regraded set, read over the CANDIDATE's declared reach at each recorded
+  crossing label. The record carries neither the scope the run declared nor its
+  admit decision, so a refusal may be a widened token the recording never
+  carried as well as one it did, and a permitted crossing may have been covered
+  by an approval edge the record does not hold. The names are the item's; the
+  row does not claim an old-versus-new delta the record cannot support;
 - `firstDangerousCrossing`, `admission`, `answerable` and `bounds`: copied from
   the counterfactual row so the loop can see the same facts and the same gaps.
 

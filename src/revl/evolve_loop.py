@@ -439,8 +439,8 @@ def evolve(
 # This hook is that one direction and only that one.
 #
 #   * a candidate whose row names a first dangerous crossing, or whose row
-#     newly refuses a recorded crossing, is DEFERRED: it goes to the back of
-#     the order and `evolve_ordered` does not offer it to the Gate;
+#     newly refuses a recorded crossing, is DEFERRED: `probe_order` returns it
+#     in `deferred` and `evolve_ordered` does not offer it to the Gate;
 #   * a candidate with a clean row, or with no row at all (not answerable),
 #     keeps its place and is admitted by the Gate and nothing else;
 #   * a clean row never admits. `probe_order` never calls the Gate, and
@@ -474,10 +474,10 @@ def probe_order(candidates: list[Candidate],
 
     One `probe(candidate)` call per candidate, in the order given, so the
     caller can batch a probe report over the same compositions. A candidate
-    with an adverse row is moved to `deferred`; every other candidate keeps its
-    original relative order in `ordered`. The candidate's own identity is
-    `candidate_digest`, the same hash an `Attempt` and a packet use, and it
-    keys `rows`.
+    with an adverse row is returned in `deferred`; every other candidate keeps
+    its original relative order in `ordered`. The candidate's own identity is
+    `candidate_digest`, the same hash a `ProposerPacket` records as its
+    candidate digest, and it keys `rows`.
 
     This function never admits and never calls the Gate: it returns an ordering.
     `evolve_ordered` is the loop that consumes it."""
@@ -507,7 +507,9 @@ def evolve_ordered(
     Gate. Every other candidate goes through `evolve` unchanged, so the Gate is
     the only thing that can admit it; a clean probe row is never an admission.
     Returns the first admitted result, or the last attempted result when none
-    admits, or an empty giving-up result when every candidate was deferred."""
+    admits, or an empty giving-up result when every candidate was deferred. The
+    deferred list is the caller's to re-probe or drop: this loop never offers
+    it to the Gate, and `probe_order` returns it for a later decision."""
     order = probe_order(candidates, probe)
     last = EvolveResult(admitted=False)
     for candidate in order["ordered"]:
