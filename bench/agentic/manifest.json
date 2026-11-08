@@ -1,0 +1,84 @@
+{
+  "_comment": "Provenance for the six bench_agentic drivers. Each entry records the file as it was found before it was tracked (source), the sha256 of that file, and the sha256 of the tracked copy. Cite the name and sha256 beside any number published from a driver. body_sha256 is the sha256 of the source with the module docstring token removed (tokenizer based, so it does not change with the interpreter version): source_body_sha256 == tracked_body_sha256 proves an edit touched only the docstring.",
+  "family": "bench_agentic",
+  "variants": [
+    {
+      "name": "bench_agentic.py",
+      "generation": 1,
+      "tracked_path": "bench/agentic/gen1/bench_agentic.py",
+      "source": "bench10_out scratch directory (untracked)",
+      "predecessor": null,
+      "tool_result_cap": 6000,
+      "edit": "none",
+      "source_sha256": "7c99e7cdbcf8f4cd4f5dc16bc21df80f1d2d102cfeeef6973554c0a645f464a6",
+      "tracked_sha256": "7c99e7cdbcf8f4cd4f5dc16bc21df80f1d2d102cfeeef6973554c0a645f464a6",
+      "source_body_sha256": "2445c792946987975d136a0f4a6f0611c8f74dd57b522f49c6a5bf390304ce3c",
+      "tracked_body_sha256": "2445c792946987975d136a0f4a6f0611c8f74dd57b522f49c6a5bf390304ce3c"
+    },
+    {
+      "name": "bench_agentic2.py",
+      "generation": 2,
+      "tracked_path": "bench/agentic/gen2/bench_agentic2.py",
+      "source": "bench10_out scratch directory (untracked)",
+      "predecessor": "bench_agentic.py",
+      "tool_result_cap": 6000,
+      "edit": "none",
+      "source_sha256": "1e33d68308d2192f0705b86335098d92e493270ba3e7e2ea134dd60c48ebf6e1",
+      "tracked_sha256": "1e33d68308d2192f0705b86335098d92e493270ba3e7e2ea134dd60c48ebf6e1",
+      "source_body_sha256": "d7b0caf6afcb23fcff97cbdad2c8fb39ccc95fb8fc601cad6d76d28d3c4900a1",
+      "tracked_body_sha256": "d7b0caf6afcb23fcff97cbdad2c8fb39ccc95fb8fc601cad6d76d28d3c4900a1"
+    },
+    {
+      "name": "bench_agentic2_cap.py",
+      "generation": 2,
+      "tracked_path": "bench/agentic/gen2/bench_agentic2_cap.py",
+      "source": "bench10_out scratch directory (untracked)",
+      "predecessor": "bench_agentic2.py",
+      "tool_result_cap": 24000,
+      "edit": "module docstring identity and usage lines only",
+      "source_sha256": "bb6625413f20c6e03d9b6cdab254552219880d5a39a054164d64c06cc54f580d",
+      "tracked_sha256": "35a9542efd7d3168313b2242f4a19a9cea88f0213afff2145ea36239d3dd6a5e",
+      "source_body_sha256": "1e26a17f4ec99fd4ec3b5698a341f3b73c7547f1a71826edc01ea3a348442728",
+      "tracked_body_sha256": "1e26a17f4ec99fd4ec3b5698a341f3b73c7547f1a71826edc01ea3a348442728"
+    },
+    {
+      "name": "bench_agentic2_cap6.py",
+      "generation": 2,
+      "tracked_path": "bench/agentic/gen2/bench_agentic2_cap6.py",
+      "source": "bench10_out scratch directory (untracked)",
+      "predecessor": "bench_agentic2.py",
+      "tool_result_cap": 6000,
+      "edit": "module docstring identity and usage lines only",
+      "source_sha256": "14b6b5b08ebaaabb82e3c2a417635995cdfedd31a73706f4038803464fee3770",
+      "tracked_sha256": "df68220d96b0bf060202fc95932ac7a94df372c5b22aba7cde6edadd2094a1a9",
+      "source_body_sha256": "4b8141f5c2cd41d33ef2e1ee25f7bf52e7c75c7a20f1b89c73336a7ce749857d",
+      "tracked_body_sha256": "4b8141f5c2cd41d33ef2e1ee25f7bf52e7c75c7a20f1b89c73336a7ce749857d"
+    },
+    {
+      "name": "bench_agentic2_cap2.py",
+      "generation": 2,
+      "tracked_path": "bench/agentic/gen2/bench_agentic2_cap2.py",
+      "source": "revl-lanes/bench-agentic/daily (untracked)",
+      "predecessor": "bench_agentic2_cap.py",
+      "tool_result_cap": "BENCH_CAP (default 24000)",
+      "edit": "module docstring identity and usage lines only",
+      "source_sha256": "fc76a9aa96f3c70168140f39ceb5e2c8a83c69fa825601a87a6aa932911150c9",
+      "tracked_sha256": "225216c06284e68a7a0d5d7f664e823dbb7d0e28e3dfbdc3c677eb860dce7881",
+      "source_body_sha256": "1d36024c6108478afda3f7e994b40458d1cba0553b51de7274d994ee8ce02f12",
+      "tracked_body_sha256": "1d36024c6108478afda3f7e994b40458d1cba0553b51de7274d994ee8ce02f12"
+    },
+    {
+      "name": "bench_agentic3.py",
+      "generation": 3,
+      "tracked_path": "bench/agentic/gen3/bench_agentic3.py",
+      "source": "revl-lanes/bench-agentic (untracked)",
+      "predecessor": "bench_agentic2_cap2.py",
+      "tool_result_cap": "BENCH_CAP (default 24000)",
+      "edit": "none",
+      "source_sha256": "a1e71a435599ff2aa430b633af7ad59f84dff13682c1a3864d7e3bfcd5d80dd1",
+      "tracked_sha256": "a1e71a435599ff2aa430b633af7ad59f84dff13682c1a3864d7e3bfcd5d80dd1",
+      "source_body_sha256": "e89733cd6122c009eb32ad0b3c2d0b645845237aae5ed887f7a671fae24ba846",
+      "tracked_body_sha256": "e89733cd6122c009eb32ad0b3c2d0b645845237aae5ed887f7a671fae24ba846"
+    }
+  ]
+}
