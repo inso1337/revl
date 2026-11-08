@@ -57,6 +57,14 @@ not carry them today, so this command reads a `determinism` record (see
 (`seedsAndClock`). A recorder that writes that record is what will make a real
 run re-runnable; until then the fact is reported as missing, which is the
 honest state of the capability.
+
+The record is a precondition on the HISTORY, not an input the pure executor
+reads: the subset has no clock and no RNG reach (a call to either is outside
+it), so no replayed step can consume the seed or the readings. It is required
+because the soundness rule is stated over the history, and because a future
+executor for a host-dependent component is what would have to consume it. The
+report says this in its `notAnswerable` section rather than implying a
+connection the execution does not have.
 """
 
 from __future__ import annotations
@@ -257,6 +265,13 @@ def _pure_expression(node, functions: dict, seen: frozenset) -> Optional[str]:
         return f"expression kind `{kind}` is not in the pure subset"
     if kind == "fn":
         name = node.get("name")
+        # The ARGUMENTS are evaluated in the caller's scope and are exactly
+        # where an impure call can hide: checking only the callee body would
+        # let `inc(host_call())` through with the host call unchecked.
+        for child in _children(node):
+            reason = _pure_expression(child, functions, seen)
+            if reason is not None:
+                return reason
         callee = functions.get(name)
         if callee is None:
             return f"call to undeclared function `{name}`"
@@ -425,7 +440,16 @@ def _execute(ir: dict, component: str, receiver: str, method: str):
         except Exception as error:
             raise SwapError(
                 f"activating {component!r} offline raised: {error}") from None
-        service = context.get(receiver)
+        try:
+            service = context.get(receiver)
+        except KeyError:
+            # The recorded crossing names a key this version does not provide
+            # (a rename or a removal on the NEW side). That is a step that could
+            # not be re-run, not a crash: the caller reports it and exits 1.
+            raise SwapError(
+                f"{component!r} provides no key {receiver!r}: the recorded "
+                "crossing names a provision this version does not make") \
+                from None
         target = getattr(service, method, None)
         if target is None:
             raise SwapError(
@@ -479,6 +503,7 @@ def preflight(old_ir: dict, new_ir: dict, wal: dict,
         set(new_component.get("provides") or ())
 
     records = wal.get("records") or ()
+    run_complete = any(r.get("record") == "run-complete" for r in records)
     crossings = recorded_crossings(records)
     ours = [c for c in crossings if c.get("receiver") in provided]
     missing = []
@@ -495,6 +520,15 @@ def preflight(old_ir: dict, new_ir: dict, wal: dict,
             "fact": "complete",
             "why": "the history carries no `activation-complete` record, so it "
                    "holds an activation prefix rather than a finished run",
+        })
+    elif not run_complete:
+        missing.append({
+            "fact": "complete",
+            "why": "the history carries `activation-complete` but no "
+                   "`run-complete`, so the run never shut down cleanly: a "
+                   "steady-state kill leaves the post-activation crossings it "
+                   "had not yet accounted for orphaned, and there is no torn "
+                   "tail to mark it. The recorded order is a prefix",
         })
 
     unanswered = [c for c in ours if not c["complete"]]
@@ -516,8 +550,10 @@ def preflight(old_ir: dict, new_ir: dict, wal: dict,
         missing.append({
             "fact": "seedsAndClock",
             "why": "the history carries no `determinism` record, so the seed and "
-                   "clock readings a value diff rests on were never captured; a "
-                   "diff over them would be a guess",
+                   "clock readings the soundness rule names were never "
+                   "captured: this command will not call the history replayable "
+                   "without them rather than assume a determinism it did not "
+                   "record",
         })
     else:
         absent = [key for key in ("seed", "clock")
@@ -757,6 +793,12 @@ def swap(old: str, new: str, history: str,
              "why": "the re-run dispatches nothing. A component whose body "
                     "would require a host response is refused (`purity`) "
                     "rather than executed against a live world"},
+            {"axis": "determinism use",
+             "why": "the determinism record is a preflight precondition, not an "
+                    "input the pure executor reads: the subset has no clock and "
+                    "no RNG, so no replayed step consumes the seed or the "
+                    "readings. A future executor for a host-dependent component "
+                    "is what would have to consume them"},
         ],
     }
 

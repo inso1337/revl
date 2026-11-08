@@ -68,6 +68,26 @@ component CounterC provides counter: Counter {
 
 SAME_AS_OLD = OLD
 
+NEW_WITH_TALLY = """service Counter {
+  fn value() -> Int
+  fn other() -> Int
+}
+
+service Tally {
+  fn value() -> Int
+}
+
+component CounterC provides counter: Counter, tally: Tally {
+  provide counter {
+    fn value() -> Int = 0
+    fn other() -> Int = 5
+  }
+  provide tally {
+    fn value() -> Int = 0
+  }
+}
+"""
+
 IMPURE = """service Store {
   fn get(k: Str) -> Int
 }
@@ -117,7 +137,7 @@ def _write(tmp_path, name, text):
 
 
 def _wal(tmp_path, crossings, *, determinism=True, complete=True,
-         finished=True, name="run.wal"):
+         finished=True, run_complete=True, name="run.wal"):
     """One WAL with an admission decision and the named fenced crossings.
 
     `crossings` is a list of `(receiver, method, outcome)`; `complete=False`
@@ -141,6 +161,8 @@ def _wal(tmp_path, crossings, *, determinism=True, complete=True,
         wal.record_determinism(seed=7, clock={"start": 1, "end": 2})
     if finished:
         wal.commit_activation(components=["CounterC"])
+        if run_complete:
+            wal.commit_run()
     wal.close()
     return path
 
@@ -212,6 +234,17 @@ def test_a_torn_tail_is_refused(tmp_path):
     assert document["steps"] == []
 
 
+def test_a_history_without_a_run_complete_marker_is_refused(tmp_path):
+    # activation finished, so `complete` alone would call this whole; the
+    # missing shutdown marker is the steady-state kill whose crossings are a
+    # prefix and whose absence has no torn tail to give it away.
+    document, _history = _swap(tmp_path, run_complete=False)
+
+    assert document["replayable"] is False
+    assert "complete" in _facts(document)
+    assert document["steps"] == []
+
+
 def test_a_history_with_no_crossing_into_the_component_is_refused(tmp_path):
     document, _history = _swap(tmp_path,
                                crossings=[("elsewhere", "value", 0)])
@@ -252,6 +285,58 @@ def test_an_async_component_is_refused_by_the_purity_gate(tmp_path):
     entry = next(m for m in document["missing"] if m["fact"] == "purity")
     assert any("async" in reason for reason in entry["old"])
     assert document["steps"] == []
+
+
+def test_an_impure_call_in_argument_position_is_refused_by_the_pure_walk():
+    # the callee is pure, so checking only its body would let the impure
+    # ARGUMENT through; the walk has to descend into the arguments too.
+    functions = {
+        "inc": {"name": "inc", "body": [
+            {"step": "return", "expr": {"kind": "var", "name": "x"}}]},
+    }
+    impure = {
+        "kind": "fn", "name": "inc",
+        "args": [{"kind": "call",
+                  "target": {"kind": "req", "name": "host"},
+                  "method": "get", "args": []}],
+    }
+    pure = {"kind": "fn", "name": "inc",
+            "args": [{"kind": "lit", "value": 1}]}
+
+    reason = simulate_swap._pure_expression(impure, functions, frozenset())
+    assert reason is not None
+    assert "`call`" in reason
+    assert simulate_swap._pure_expression(pure, functions, frozenset()) is None
+
+
+def test_a_refused_history_is_not_executed(tmp_path, monkeypatch):
+    old_path = _write(tmp_path, "old.rvl", OLD)
+    new_path = _write(tmp_path, "new.rvl", NEW)
+    history = _wal(tmp_path, [("counter", "value", 0)], complete=False)
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("a refused history must not be executed")
+
+    monkeypatch.setattr(simulate_swap, "_execute", spy)
+    document = simulate_swap.swap(old_path, new_path, history)
+
+    assert document["replayable"] is False
+    assert calls == []
+
+
+def test_a_refused_history_is_not_written(tmp_path):
+    old_path = _write(tmp_path, "old.rvl", OLD)
+    new_path = _write(tmp_path, "new.rvl", NEW)
+    history = _wal(tmp_path, [("counter", "value", 0)], determinism=False)
+    before = Path(history).read_bytes()
+    files_before = sorted(p.name for p in tmp_path.iterdir())
+
+    simulate_swap.swap(old_path, new_path, history)
+
+    assert Path(history).read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == files_before
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +388,20 @@ def test_an_outcome_old_cannot_reproduce_is_reported_not_hidden(tmp_path):
     assert first["kind"] == "not-reproducible"
     assert first["recorded"] == 9
     assert first["value"] == 0
+    assert simulate_swap.ok(document) is False
+
+
+def test_a_key_new_adds_is_reported_not_raised(tmp_path):
+    # the receiver is in the OLD|NEW union, so the preflight is replayable; OLD
+    # cannot make the call, and that must be a reported step, not a traceback.
+    document, _history = _swap(
+        tmp_path, old=OLD, new=NEW_WITH_TALLY,
+        crossings=[("tally", "value", 0)])
+
+    first = document["firstDifference"]
+    assert first is not None
+    assert first["kind"] == "not-reproducible"
+    assert "provides no key" in first["reason"]
     assert simulate_swap.ok(document) is False
 
 

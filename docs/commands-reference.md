@@ -693,23 +693,29 @@ The command runs in two slices, and the first is a preflight that runs nothing:
 when any of the following is missing it names the fact, prints how to read the
 refusal, and exits non-zero without executing a step.
 
-- `complete` - the history is whole. A torn tail (the crash itself) or a
-  recording with no `activation-complete` record is refused, because a value
-  diff over a prefix of the run cannot report the steps it never saw.
+- `complete` - the history is whole. A torn tail (the crash itself), a recording
+  with no `activation-complete` record, or one that finished activation but
+  carries no `run-complete` shutdown marker is refused: the last is a
+  steady-state kill whose post-activation crossings were never accounted, and
+  it leaves no torn tail to mark it. A value diff over a prefix cannot report
+  the steps it never saw.
 - `hostResponses` - every recorded crossing into the swapped component carries
   its recorded outcome. The WAL journals a fenced crossing's `begin` before it
   dispatches and its `complete` with the returned value after, so a `begin`
   with no `complete` is a call whose value is not on the record. The refusal
   names the exact crossing (decision, ordinal, receiver, method), never a count.
 - `seedsAndClock` - the history carries a `determinism` record with a seed and
-  the clock readings. A value diff that assumed a determinism the record does
-  not establish would be a guess. No recorder in this tree writes that record
-  yet, which is why the preflight currently refuses a WAL a live run wrote; the
-  fact is reported as missing rather than assumed, and a recorder that writes it
-  is what will make such a history re-runnable.
+  the clock readings. The record is a precondition on the history, not a value
+  this executor reads: the pure subset has no clock or RNG reach, so no
+  replayed step can consume it. It is required because the soundness rule is
+  stated over the history, and a recorder that writes it is what will make a
+  WAL a live run wrote re-runnable; that producer is the next slice.
 - `callArgs` - a recorded method takes no parameters. The journal records the
   receiver and the method, not the arguments, so a parameterized method cannot
   be re-run from the record; the refusal names the method and its parameters.
+- `recordedSteps` - the history records at least one crossing into the swapped
+  component. A history with no such crossing has no recorded call to re-run;
+  the command refuses rather than reporting an empty diff as a clean change.
 - `purity` - the swapped component is inside the subset this command can
   execute offline: it requires no service, carries no config, its activation
   body is nothing but `provide` steps, and every provided method body is a
