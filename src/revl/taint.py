@@ -2754,56 +2754,18 @@ class _FlowChecker:
                     "half of a Result included, which is marshalled BY VALUE "
                     "like any other return)", None, result, stmt)
             if step == "emit":
-                # the taint crossing the boundary here (Decision 5): the emission's
-                # return AND the arguments it carries outward — a value-passing send
-                # returns clean but still exfiltrates its tainted argument.
-                outbound = result
-                for at in (self._emit_args or ()):
-                    outbound = _join(outbound, at)
-                real = {o for o in outbound.origins if _param_index(o) is None}
-                # item 256 (4a.2 kind 1): the emit arm. A `secret`-carrying value
-                # crossing an emission is refused here rather than merely recorded -
-                # this is the model-prompt / outbound-send crossing. The 4b
-                # same-capability re-emission never reaches this arm: the bound key
-                # is a host-scope local handed straight to the provider call inside
-                # the extern body (never a revl value), and a re-entry into the
-                # bound extern returns via `model.sources` before any emit records
-                # its argument. So a `secret` reaching the emit arm is always an
-                # exfiltration to a crossing that is not the bound body itself.
-                if (SECRET_ORIGIN in real and self.enforce and not self.infer):
-                    self._refuse_secret("this emission",
-                                        "an emission crossing", None,
-                                        outbound, stmt)
-                # item 256 Slice 3 (§7b): the emission crossing for a `Secret[T]`
-                # value - an LLM prompt (an argument to a `model.*` emission), an
-                # un-approved realm crossing, or a capability-boundary crossing
-                # whose receiver did not declare `Secret[T]`. A `confidential`
-                # argument landing on a declared `Secret[T]` receiver position is
-                # ADMITTED (that is the ONE crossing that does not refuse); every
-                # other unadmitted `confidential` value crossing here is refused.
-                if self.enforce and not self.infer:
-                    receivers = self._emit_secret_receivers or set()
-                    unadmitted = CLEAN
-                    for i, at in enumerate(self._emit_args or ()):
-                        if i not in receivers and _carries_confidential(at):
-                            unadmitted = _join(unadmitted, at)
-                    if CONFIDENTIAL_ORIGIN in unadmitted.origins:
-                        self._refuse_confidential(
-                            "this emission",
-                            "an emission crossing (an LLM prompt / a capability "
-                            "boundary without a declared `Secret[T]` receiver)",
-                            None, unadmitted, stmt)
-                if real:
-                    # An *absolute-refusal* sink already raised above; what remains
-                    # is the policy-gated tier (e.g. web-taint into `send.*`) —
-                    # recorded, so `audit --diff` sees the exfiltration edge widen.
-                    self.reaches |= real
-                    # Slice D (D2): if this tainted send is approval-covered
-                    # (`with a`), remember the scope so `<origin>-taint may not
-                    # reach <cap> without approval` admits the approved flow.
-                    approval = stmt.get("approval")
-                    if isinstance(approval, dict) and approval.get("capability"):
-                        self.reach_approvals.add(approval["capability"])
+                self._emit_crossing(result, stmt)
+                # the step's `compensate` slot is a crossing too: it runs on an
+                # abort, as a bare host call, with the values it captured
+                # (issue #3180). Walked through the same sink and crossing
+                # checks as the forward call, and its real origins reach the
+                # same edges. The step's own `with` edge covers it, as the
+                # approval floor in `lower.py` (`_compensate_crossings`) reads.
+                compensate = stmt.get("compensate")
+                if compensate is not None:
+                    self._emit_args = None
+                    self._emit_secret_receivers = set()
+                    self._emit_crossing(self.taint_of(compensate, env), stmt)
             return
         # any other statement shape: walk every child so nested calls (and their
         # sink checks) are visited, and any nested block threads the same env.
@@ -2817,6 +2779,63 @@ class _FlowChecker:
                     self._stmt(value, env)
                 else:
                     self.taint_of(value, env)
+
+    def _emit_crossing(self, result: Taint, stmt: dict) -> None:
+        """The crossing checks of one `emit` call: the forward call, or the
+        call in the step's `compensate` slot. `result` is the call's taint;
+        `self._emit_args` and `self._emit_secret_receivers` hold the
+        outermost call's argument taints and declared `Secret[T]` receiver
+        positions, as `_taint_of_call` left them."""
+        # the taint crossing the boundary here (Decision 5): the emission's
+        # return AND the arguments it carries outward — a value-passing send
+        # returns clean but still exfiltrates its tainted argument.
+        outbound = result
+        for at in (self._emit_args or ()):
+            outbound = _join(outbound, at)
+        real = {o for o in outbound.origins if _param_index(o) is None}
+        # item 256 (4a.2 kind 1): the emit arm. A `secret`-carrying value
+        # crossing an emission is refused here rather than merely recorded -
+        # this is the model-prompt / outbound-send crossing. The 4b
+        # same-capability re-emission never reaches this arm: the bound key
+        # is a host-scope local handed straight to the provider call inside
+        # the extern body (never a revl value), and a re-entry into the
+        # bound extern returns via `model.sources` before any emit records
+        # its argument. So a `secret` reaching the emit arm is always an
+        # exfiltration to a crossing that is not the bound body itself.
+        if (SECRET_ORIGIN in real and self.enforce and not self.infer):
+            self._refuse_secret("this emission",
+                                "an emission crossing", None,
+                                outbound, stmt)
+        # item 256 Slice 3 (§7b): the emission crossing for a `Secret[T]`
+        # value - an LLM prompt (an argument to a `model.*` emission), an
+        # un-approved realm crossing, or a capability-boundary crossing
+        # whose receiver did not declare `Secret[T]`. A `confidential`
+        # argument landing on a declared `Secret[T]` receiver position is
+        # ADMITTED (that is the ONE crossing that does not refuse); every
+        # other unadmitted `confidential` value crossing here is refused.
+        if self.enforce and not self.infer:
+            receivers = self._emit_secret_receivers or set()
+            unadmitted = CLEAN
+            for i, at in enumerate(self._emit_args or ()):
+                if i not in receivers and _carries_confidential(at):
+                    unadmitted = _join(unadmitted, at)
+            if CONFIDENTIAL_ORIGIN in unadmitted.origins:
+                self._refuse_confidential(
+                    "this emission",
+                    "an emission crossing (an LLM prompt / a capability "
+                    "boundary without a declared `Secret[T]` receiver)",
+                    None, unadmitted, stmt)
+        if real:
+            # An *absolute-refusal* sink already raised above; what remains
+            # is the policy-gated tier (e.g. web-taint into `send.*`) —
+            # recorded, so `audit --diff` sees the exfiltration edge widen.
+            self.reaches |= real
+            # Slice D (D2): if this tainted send is approval-covered
+            # (`with a`), remember the scope so `<origin>-taint may not
+            # reach <cap> without approval` admits the approved flow.
+            approval = stmt.get("approval")
+            if isinstance(approval, dict) and approval.get("capability"):
+                self.reach_approvals.add(approval["capability"])
 
     def _note_fn_ref(self, name, value) -> None:
         """Record `let <name> = <var:known-callable>` (Slice B4), so a later

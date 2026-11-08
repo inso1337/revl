@@ -255,10 +255,18 @@ For a value `v` with taint `t(v)`, a set of origin labels:
   are tainted. This replaces the landed whole-record union fallback for the
   shapes the checker models; the union fallback *remains* as the safety net
   for any unmodelled node, preserving no-false-clean;
+- **pattern binders**: a `match` arm's binder carries the scrutinee's taint
+  into the arm body (a record payload of `Some`/`Ok`/`Err` keeps its
+  per-field taint), and the names a destructuring `let` binds carry the
+  value's taint, field by field for a record pattern (issue #3190);
 - **calls**: taint flows argument to result and argument to interior sink
-  along the call graph, via inferred per-callable signatures (below);
+  along the call graph, via inferred per-callable signatures (below). The
+  call in an `emit` step's `compensate` slot is checked like the forward
+  call: same sinks, same crossing rules, same reach edges (issue #3180);
 - **boundary returns**: an `Untrusted[T]`-declared return mints its origin
-  (landed); Slice D adds derived minting;
+  (landed); Slice D adds derived minting. The qualifier is read wherever it
+  sits in a container, so `Result[Untrusted[T], E]` and `Opt[Secret[T]]` mint
+  as the bare spelling does, on the whole returned value (issue #3192);
 - **declassifiers** are the only edges where taint decreases (landed rule,
   hardened in C).
 
