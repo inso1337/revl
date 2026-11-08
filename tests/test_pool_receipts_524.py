@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from revl import peer_identity as pi  # noqa: E402
 from revl import peer_offer, peer_pool as pp, pool_receipt as pr  # noqa: E402
+from revl import pool_dispatch as pd  # noqa: E402
 from revl.attest import key_id  # noqa: E402
 from revl.peer_offer import Attestation, PeerOffer, ResourceOffer  # noqa: E402
 
@@ -45,6 +46,11 @@ GOOD_ARTIFACT = "d" * 64
 OTHER_ARTIFACT = "e" * 64
 POOL_CEILING = ('fs.read(path="/data")',)
 ENTRY_CAPS = ('fs.read(path="/data/in")',)
+
+#: The operator that signs a TASK (issue #2720). The charter above is signed
+#: with the symmetric ``OP_KEY``; a task is an asymmetric record, so the task
+#: fixtures need a key pair like every other signed task.
+OPERATOR_ID = pi.identity_from_seed("operator", b"seed/operator/524-receipts")
 
 #: The two peers of the exit test. `worker` runs the task; `admitter` is the
 #: second member, and it is a member rather than a bystander because the exit
@@ -139,22 +145,67 @@ def joined_pool():
     return record, roster, directory
 
 
+def bound_task(record, *, task_id="task-1", grant=None, policy_digest=None):
+    """A signed 1.1 task: the operator's decision about this unit of work.
+
+    ``artifact`` is empty on purpose. These fixtures exercise the AUTHORITY
+    binding of a receipt, which `check_receipt` compares against the task's
+    grant and policy digest, not the artifact bytes (dispatch tests run those
+    through a real runner). The record is a real task shape and really signed,
+    so the digest the receipt echoes is the digest of this record."""
+    grant = grant if grant is not None else {
+        "caps": sorted(ENTRY_CAPS), "budgets": {}}
+    policy = (policy_digest if policy_digest is not None
+              else pp.canonical_digest(record))
+    body = {
+        "kind": pd.TASK_KIND, "version": pd.TASK_VERSION,
+        "pool_id": record["pool_id"],
+        "charter_digest": pp.canonical_digest(record),
+        "peer_id": WORKER, "task_id": task_id,
+        "artifact_digest": GOOD_ARTIFACT, "artifact": "",
+        "runner": pd.RUNNER_TEST_PY, "effect_class": "pure",
+        "issued_at": pp._iso(pp._utc_now()),
+        "grant": grant, "policy_digest": policy,
+    }
+    return pd.sign_task(body, OPERATOR_ID)
+
+
 def honest_receipt(record, *, task_id="task-1", result=RESULT,
-                   identity=WORKER_ID, artifact=GOOD_ARTIFACT, at=None):
-    return pr.issue_receipt(pool_id=record["pool_id"], task_id=task_id,
-                            artifact_digest=artifact, result=result,
-                            identity=identity, at=at)
+                   identity=WORKER_ID, artifact=GOOD_ARTIFACT, at=None,
+                   task=None, grant=None, policy_digest=None,
+                   outcome=pr.COMPLETED, budget_consumed=None):
+    task = task if task is not None else bound_task(
+        record, task_id=task_id, grant=grant, policy_digest=policy_digest)
+    return pr.issue_receipt(
+        pool_id=record["pool_id"], task_id=task_id,
+        artifact_digest=artifact, result=result, identity=identity, at=at,
+        task_digest=pr.receipt_digest(task), grant=task["grant"],
+        policy_digest=task["policy_digest"], outcome=outcome,
+        budget_consumed=budget_consumed)
+
+
+def receipt_and_task(record, **kwargs):
+    task = kwargs.pop("task", None)
+    if task is None:
+        task = bound_task(record, task_id=kwargs.get("task_id", "task-1"),
+                          grant=kwargs.get("grant"),
+                          policy_digest=kwargs.get("policy_digest"))
+    return honest_receipt(record, task=task, **kwargs), task
 
 
 def honest_pair(record, **kwargs):
-    receipt = honest_receipt(record, **kwargs)
-    return receipt, pr.attest_receipt(receipt, identity=ATTESTOR_ID)
+    receipt, task = receipt_and_task(record, **kwargs)
+    return receipt, pr.attest_receipt(receipt, identity=ATTESTOR_ID), task
 
 
 def signed_body(body, identity, domain):
     """A receipt assembled member by member, so a test can put something in it
     that `issue_receipt` would not."""
     return pi.sign_record(domain, body, identity)
+
+
+def task_of(pair):
+    return pair[2] if isinstance(pair, (tuple, list)) and len(pair) == 3 else None
 
 
 def check(pair, record, roster, directory, **kwargs):
@@ -164,7 +215,8 @@ def check(pair, record, roster, directory, **kwargs):
         pair[0], pair[1], pool_id=charter.pool_id, peer_id=member.peer_id,
         artifact_digest=member.artifact_digest,
         admitted_at=member.admitted_at,
-        attest_key_ids=charter.attest_key_ids, directory=directory, **kwargs)
+        attest_key_ids=charter.attest_key_ids, directory=directory,
+        task=task_of(pair), **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -277,16 +329,16 @@ def corpus(record, roster):
     def tampered():
         """An honest receipt whose result is swapped after signing. The point
         of signing a digest rather than a description."""
-        receipt, attestation = honest_pair(record)
+        receipt, attestation, task = honest_pair(record)
         forged = {**receipt, "result_digest": pr.result_digest({"rows": 99})}
-        return forged, attestation
+        return forged, attestation, task
 
     def wrong_artifact():
         return honest_pair(record, artifact=OTHER_ARTIFACT)
 
     def wrong_pool():
         receipt = signed_body(
-            {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION,
+            {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION_V1,
              "pool_id": "some-other-pool", "peer_id": WORKER,
              "task_id": "task-1", "artifact_digest": GOOD_ARTIFACT,
              "result_digest": pr.result_digest(RESULT),
@@ -307,7 +359,7 @@ def corpus(record, roster):
         than on the arithmetic, which is the distinction the two links keep
         apart."""
         receipt = signed_body(
-            {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION,
+            {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION_V1,
              "pool_id": pool_id, "peer_id": ADMITTER, "task_id": "task-1",
              "artifact_digest": GOOD_ARTIFACT,
              "result_digest": pr.result_digest(RESULT),
@@ -322,30 +374,31 @@ def corpus(record, roster):
         return honest_pair(record, at=before)
 
     def self_attested():
-        receipt = honest_receipt(record)
-        return receipt, pr.attest_receipt(receipt, identity=WORKER_ID)
+        receipt, task = receipt_and_task(record)
+        return receipt, pr.attest_receipt(receipt, identity=WORKER_ID), task
 
     def unauthorised_attestor():
         """Attested by a peer whose key IS pinned and is not named by the
         charter as attesting authority."""
-        receipt = honest_receipt(record)
-        return receipt, pr.attest_receipt(receipt, identity=ADMITTER_ID)
+        receipt, task = receipt_and_task(record)
+        return receipt, pr.attest_receipt(receipt, identity=ADMITTER_ID), task
 
     def forged_attestation():
-        receipt = honest_receipt(record)
+        receipt, task = receipt_and_task(record)
         attestation = pr.attest_receipt(receipt, identity=INTRUDER_ID)
-        return receipt, {**attestation, "attestor": ATTESTOR}
+        return receipt, {**attestation, "attestor": ATTESTOR}, task
 
     def swapped_attestation():
         """A real attestation over a DIFFERENT receipt, moved onto this one."""
-        receipt = honest_receipt(record, task_id="task-1")
-        other = honest_receipt(record, task_id="task-2")
-        return receipt, pr.attest_receipt(other, identity=ATTESTOR_ID)
+        receipt, task = receipt_and_task(record, task_id="task-1")
+        other, _other_task = receipt_and_task(record, task_id="task-2")
+        return receipt, pr.attest_receipt(other, identity=ATTESTOR_ID), task
 
     def refused_verdict():
-        receipt = honest_receipt(record)
-        return receipt, pr.attest_receipt(receipt, identity=ATTESTOR_ID,
-                                          verdict="refused")
+        receipt, task = receipt_and_task(record)
+        return (receipt,
+                pr.attest_receipt(receipt, identity=ATTESTOR_ID,
+                                  verdict="refused"), task)
 
     def shapeless():
         return {"kind": "not-a-receipt"}, {"kind": "not-an-attestation"}
@@ -401,6 +454,48 @@ def test_every_forged_receipt_is_refused_on_its_named_link():
         admitted_at=roster.members[WORKER].admitted_at,
         attest_key_ids=(ATTESTOR_ID.key_id,), directory=directory)
     seen.update(r.link for r in replayed.rejected)
+
+    # The authority-binding links (issue #2720), each reached from a
+    # well-formed signed record that differs from the honest one in exactly
+    # the binding it names. They run BEFORE the revocation below, so the
+    # attribution checks pass and the specific binding is what refuses.
+    task = bound_task(record, task_id="task-grant")
+    wider = pr.issue_receipt(
+        pool_id=record["pool_id"], task_id="task-grant",
+        artifact_digest=GOOD_ARTIFACT, result=RESULT, identity=WORKER_ID,
+        task_digest=pr.receipt_digest(task),
+        grant={"caps": sorted(POOL_CEILING), "budgets": {}},
+        policy_digest=task["policy_digest"], outcome=pr.COMPLETED,
+        budget_consumed={})
+    seen.add(check((wider, pr.attest_receipt(wider, identity=ATTESTOR_ID),
+                    task), record, roster, directory).link)
+
+    policy_task = bound_task(record, task_id="task-policy",
+                             policy_digest="9" * 64)
+    other_policy = pr.issue_receipt(
+        pool_id=record["pool_id"], task_id="task-policy",
+        artifact_digest=GOOD_ARTIFACT, result=RESULT, identity=WORKER_ID,
+        task_digest=pr.receipt_digest(policy_task), grant=policy_task["grant"],
+        policy_digest="8" * 64, outcome=pr.COMPLETED, budget_consumed={})
+    seen.add(check((other_policy,
+                    pr.attest_receipt(other_policy, identity=ATTESTOR_ID),
+                    policy_task), record, roster, directory).link)
+
+    no_task = honest_receipt(record, task=bound_task(record,
+                                                     task_id="task-lone"))
+    seen.add(check((no_task, pr.attest_receipt(no_task,
+                                               identity=ATTESTOR_ID)),
+                   record, roster, directory).link)
+
+    old = pr.issue_receipt(pool_id=record["pool_id"], task_id="task-old",
+                           artifact_digest=GOOD_ARTIFACT, result=RESULT,
+                           identity=WORKER_ID)
+    old_pairs = [(old, pr.attest_receipt(old, identity=ATTESTOR_ID))]
+    seen.update(r.link for r in pr.count_evidence(
+        old_pairs, pool_id=record["pool_id"], peer_id=WORKER,
+        artifact_digest=GOOD_ARTIFACT,
+        admitted_at=roster.members[WORKER].admitted_at,
+        attest_key_ids=(ATTESTOR_ID.key_id,), directory=directory).rejected)
 
     directory.revoke(WORKER, WORKER_ID.key_id, reason="host seized")
     seen.add(check(pair, record, roster, directory).link)

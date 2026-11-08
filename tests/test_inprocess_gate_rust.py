@@ -179,12 +179,18 @@ def _cargo(subcommand: str, target_dir: Path, *extra: str) -> subprocess.Complet
 
 
 @pytest.fixture(scope="module")
-def report(tmp_path_factory) -> dict:
+def report(cargo_target_dir) -> dict:
     """Build the harness in release (a debug build's timings would be a
     fiction), run it once, and return its whole JSON report - candidates, their
     exact source bytes, verdicts, order-independence, fail-closed probes and the
-    cost distribution."""
-    target = tmp_path_factory.mktemp("inprocess_gate_rust_target")
+    cost distribution.
+
+    The build lands in the session's shared `cargo_target_dir` (issue #2216),
+    which keeps it out of the checkout and lets the debug builds in the same
+    session share the directory. Cargo keeps `release/` and `debug/` apart, so
+    the timings still come from a release build.
+    """
+    target = cargo_target_dir
     built = _cargo("build", target, "--release")
     assert built.returncode == 0, (
         "the rust in-process gate harness failed to build against "

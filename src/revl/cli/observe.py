@@ -313,11 +313,31 @@ def _run_attest(args) -> int:
     from .. import attest as _attest  # noqa: PLC0415
     from ..composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
 
+    # Only the anchor paths at `_run_anchor` and `run_anchor_verify` read
+    # `args.digest`. In sign mode a silently dropped digest would produce a
+    # signed record that omits a commitment the operator asked for, so the
+    # option is refused before any key is resolved.
+    if getattr(args, "digest", None) and not getattr(args, "anchor", False):
+        print("error: --digest applies only with --anchor", file=sys.stderr)
+        return 2
+
+    if not getattr(args, "anchor", False) and not args.target:
+        if args.verify or getattr(args, "verify_certificate", False):
+            print("error: this mode needs a record to check as TARGET",
+                  file=sys.stderr)
+        else:
+            print("error: attest needs a composition TARGET (or --anchor with "
+                  "at least one --digest)", file=sys.stderr)
+        return 2
+
     try:
         key = _attest.resolve_key(args.key)
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+
+    if getattr(args, "anchor", False):
+        return _run_anchor(args, key, load_composition)
 
     if getattr(args, "certificate", False) or getattr(args, "verify_certificate", False):
         if args.verify:
@@ -379,6 +399,109 @@ def _run_attest(args) -> int:
     else:
         print(_attest.render_attestation(att))
     return 0
+
+
+def _run_anchor(args, key: bytes, load_composition) -> int:
+    """`revl attest --anchor [COMPOSITION] --digest NAME=DIGEST ...`: sign a
+    chain-neutral record over a set of existing sha256 digests (issue #2723,
+    docs/revl-anchor.md).
+
+    The digests are supplied by name; a COMPOSITION target is a convenience
+    that adds its canonical hash under the name `composition`. No gate runs:
+    an anchor records that a set of digests existed and was signed, not that a
+    composition was admitted, and `revl attest` without `--anchor` remains the
+    verb for that claim."""
+    from .. import anchor as _anchor  # noqa: PLC0415
+    from .. import attest as _attest  # noqa: PLC0415
+    import os  # noqa: PLC0415 (lazy: localized to this handler)
+
+    if (args.verify or args.against or getattr(args, "certificate", False)
+            or getattr(args, "verify_certificate", False)):
+        print("error: --anchor signs a new anchor record; it cannot be "
+              "combined with --verify, --against, --certificate or "
+              "--verify-certificate", file=sys.stderr)
+        return 1
+
+    digests: dict[str, str] = {}
+    try:
+        for spec in args.digest or []:
+            name, value = _anchor.parse_digest_arg(spec)
+            if name in digests:
+                raise RevlError("<anchor>", 0,
+                                f"digest {name!r} is given more than once")
+            digests[name] = value
+        if args.target:
+            if "composition" in digests:
+                raise RevlError(
+                    "<anchor>", 0,
+                    "the composition TARGET supplies the 'composition' "
+                    "digest; drop the explicit --digest composition=...")
+            try:
+                ir = load_composition(args.target)
+            except RevlError as error:
+                print(f"error: cannot load composition {args.target}: {error}",
+                      file=sys.stderr)
+                return 1
+            digests["composition"] = _attest.canonical_hash(ir)
+        if not digests:
+            print("error: --anchor needs at least one --digest NAME=DIGEST, "
+                  "or a composition TARGET", file=sys.stderr)
+            return 1
+        signer = args.signer or os.environ.get(_attest.SIGNER_ENV)
+        document = _anchor.make_anchor(digests, key, signer=signer)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(document, indent=2))
+    else:
+        print(_anchor.render_anchor(document))
+    return 0
+
+
+def run_anchor_verify(args) -> int:
+    """`revl verify --anchor FILE [--key ...] [--digest NAME=DIGEST ...]`:
+    check an anchor record offline (issue #2723, docs/revl-anchor.md).
+
+    Exit 2 means the record or key could not be read; exit 1 means it was read
+    and is invalid. A `--digest NAME=DIGEST` the verifier holds is compared
+    with the anchored set, so the check can tie the record to artifacts in the
+    verifier's hands rather than only to itself."""
+    from .. import anchor as _anchor  # noqa: PLC0415
+    from .. import attest as _attest  # noqa: PLC0415
+
+    try:
+        key = _attest.resolve_key(args.key)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        document = _anchor.load_anchor(args.anchor)
+    except RevlError as error:
+        print(f"revl verify: cannot verify: {error.message}", file=sys.stderr)
+        return 2
+    expected: dict[str, str] = {}
+    try:
+        for spec in args.digest or []:
+            name, value = _anchor.parse_digest_arg(spec)
+            if name in expected:
+                raise RevlError("<anchor>", 0,
+                                f"digest {name!r} is given more than once")
+            expected[name] = value
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    ok, reason = _anchor.verify_anchor(document, key,
+                                       expected=expected or None)
+    if args.json:
+        print(json.dumps({"valid": ok, "reason": reason,
+                          "anchor_hash": document.get("anchor_hash"),
+                          "digests": document.get("digests")}, indent=2))
+    else:
+        print(_anchor.render_verify(ok, reason, document))
+    return 0 if ok else 1
 
 
 def _run_certificate(args, key: bytes, load_composition) -> int:

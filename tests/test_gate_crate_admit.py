@@ -346,17 +346,22 @@ def _cargo(subcommand: str, cwd: Path, *extra: str) -> subprocess.CompletedProce
 
 
 @pytest.fixture(scope="module")
-def consumer(tmp_path_factory) -> Path:
-    """A built standalone binary whose only dependency is `crates/revl-gate`."""
+def consumer(tmp_path_factory, cargo_target_dir) -> Path:
+    """A built standalone binary whose only dependency is `crates/revl-gate`.
+
+    The build lands in the session's shared `cargo_target_dir` (issue #2216),
+    so the crate's own `cargo test` below reuses this build's dependency
+    artifacts instead of compiling cordis-rs and serde a second time.
+    """
     work = tmp_path_factory.mktemp("revl_gate_consumer")
     (work / "src").mkdir()
     (work / "src" / "main.rs").write_text(CONSUMER_MAIN, encoding="utf-8")
     (work / "Cargo.toml").write_text(_consumer_cargo_toml(CRATE), encoding="utf-8")
-    built = _cargo("build", work)
+    built = _cargo("build", work, "--target-dir", str(cargo_target_dir))
     assert built.returncode == 0, (
         "the standalone consumer crate failed to build against crates/revl-gate:\n"
         + (built.stderr or built.stdout or "")[-4000:])
-    binary = work / "target" / "debug" / "revl_gate_consumer"
+    binary = cargo_target_dir / "debug" / "revl_gate_consumer"
     assert binary.exists(), f"consumer binary not found at {binary}"
     return binary
 
@@ -1770,12 +1775,12 @@ def test_the_consumer_reads_the_frontier_the_crate_was_generated_with(consumer):
 # 36.5s with a cold target directory at load average 4; a loaded machine
 # multiplies that past the hook's 60s default.
 @pytest.mark.timeout(600)
-def test_the_crate_ships_its_own_cargo_tests(consumer):
+def test_the_crate_ships_its_own_cargo_tests(consumer, cargo_target_dir):
     """`cargo test` inside the crate is the no-Python half of the evidence: the
     self-host's own in-file `test` blocks run natively there, alongside the
     shim's fail-closed assertions. Driven here so a red in the crate's suite is
     a red in this repo's suite."""
-    tested = _cargo("test", CRATE)
+    tested = _cargo("test", CRATE, "--target-dir", str(cargo_target_dir))
     assert tested.returncode == 0, (
         "cargo test failed inside crates/revl-gate:\n"
         + (tested.stderr or tested.stdout or "")[-4000:])

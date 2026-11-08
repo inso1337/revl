@@ -53,8 +53,8 @@ host bootstrap it needs are [composition-bootstrap.md](composition-bootstrap.md)
 | `schema_version` | `MAJOR.MINOR` of this format (see the promise below). |
 | `kind` | the constant `"revl.interchange"`, so a consumer can identify the document. |
 | `manifest` | the static composition: `components` (each with `inject` = **requires** and `provides`, plus optional `isolate` / `intercept`), `loadOrder` (providers first; teardown is the exact reverse), and optional `templates` (runtime spawn targets). |
-| `boundary` | the **reaches** half, per component: `emissions` (irreversible call sites), `capabilities` (the scope each emission's declaration carries — `["*"]` means it promises nothing), `compensated` (how many of the `emissions` labels carry a compensating undo, counted over distinct labels so it can never exceed `emissions`; a label compensated at more than one site counts once), optional `compensatedHostEmissions` (emitting host externs compensated, which cross the boundary but carry no `key.method` label and so are absent from both `emissions` and `compensated`; the key is absent when there are none), `awaits`, and `externs` (host code reached transitively; each entry carries `name`, `class`, optional `capabilities`, and `backends`; see [the boundary extern entry](#the-boundary-extern-entry) below; a first-class dispatch is shown as name `"*"`). |
-| `externs` | every declared host-code extern — the trust surface a proof cannot cover. Each entry carries `name`, `class`, and `backends` (the tiers it has a body for), plus, **only when declared**, `reach` (item 373 — what a confined crossing is bounded to: `{"kind": "confined", "target": "<param>"}`) and `deferred` (item 484 — `true` for an `emission` declared `deferred`). A **deferred** emission is the one crossing whose timing differs: its host call does NOT fire at the call site; it is held and flushed at the commit prompt, and an abort drops the queue. An immediate emission carries no `deferred` key, so its entry is byte-identical to before the field existed. |
+| `boundary` | the **reaches** half, per component: `emissions` (irreversible call sites), `capabilities` (the scope each emission's declaration carries: `["*"]` means it promises nothing), `compensated` (how many of the `emissions` labels carry a compensating undo, counted over distinct labels so it can never exceed `emissions`; a label compensated at more than one site counts once), optional `compensatedHostEmissions` (emitting host externs compensated, which cross the boundary but carry no `key.method` label and so are absent from both `emissions` and `compensated`; the key is absent when there are none), `awaits`, and `externs` (host code reached transitively; each entry carries `name`, `class`, `inverse`, optional `capabilities`, and `backends`; see [the boundary extern entry](#the-boundary-extern-entry) below; a first-class dispatch is shown as name `"*"`). |
+| `externs` | every declared host-code extern: the trust surface a proof cannot cover. Each entry carries `name`, `class`, `inverse` (the derived inverse-provenance class, see [the inverse class](#the-inverse-class)), and `backends` (the tiers it has a body for), plus, **only when declared**, `reach` (item 373: what a confined crossing is bounded to: `{"kind": "confined", "target": "<param>"}`) and `deferred` (item 484: `true` for an `emission` declared `deferred`). A **deferred** emission is the one crossing whose timing differs: its host call does NOT fire at the call site; it is held and flushed at the commit prompt, and an abort drops the queue. An immediate emission carries no `deferred` key, so its entry is byte-identical to before the field existed. |
 | `distributability` | per service, whether it may cross a process seam (`transport-safe` / `address-space-bound`) and why (interop-bridge §4). |
 | `retention` | optional (item 308 F10). The report-only retention surface: one row per resource-carrying parameter of a non-inverse extern or of a service method — every declared position at which a resource handle leaves revl's sight. Present only when there is one, so a handle-free composition omits the key. Each row is a MAY-retain: it does not prove a host body keeps the handle, and an absent row does not prove one does not. A declared inverse is excluded (teardown closing a handle is the contract working). |
 | `runtime_ceilings` | optional, present only with `revl audit --json --wal FILE`. It identifies the supplied WAL, reports whether its activation completed or its tail is torn, and copies each budgeted emission outcome's `record`, `seq`, and `ceiling` map. `seq` points back to the exact WAL outcome record; the map carries the observed calls, bytes, and elapsed values. |
@@ -79,6 +79,7 @@ what the human render prints on its `host code:` line, and it carries:
 | --- | --- |
 | `name` | the extern's name, or `"*"` for a first-class dispatch (a reach through a value whose target is not statically nameable). |
 | `class` | the G4 classification, one of the five boundary classes: `"pure"` (no observable effect), `"acquire"` (takes a resource that must be released), `"emission"` (an irreversible crossing out of the system), `"witnessed"` (a reversible host mutation that names its inverse), or `"local"` (a durable write to local state, which crosses no boundary and so asks no owner — item 2146). `"first-class dispatch"` is the pseudo-class for a `"*"` entry. May be `null` when the class is not known. |
+| `inverse` | the derived inverse-provenance class of this crossing, one value of the closed vocabulary in [the inverse class](#the-inverse-class) below. This version emits it on **every** entry; `unknown` is a value, never the way this version renders a missing field. A document captured before the field existed has no `inverse`, and that absence is not `unknown` (the two are not comparable). |
 | `capabilities` | the declared capability scope of a scoped `emission[...]` / `witnessed[...]` extern, as a sorted token list (e.g. `["fs"]`). **This token, not the name, is what a `capability <glob>` policy rule keys on.** Absent for an unscoped extern, whose token is its own name. A token carrying resource parameters (`fs.write(path="/data")`) appears with its parameters; a capability's own DECLARED dimensions (issue #1938, design 294) appear here too, which is additive to the schema and not to an existing token's bytes. |
 | `backends` | the backend tiers this extern has a body for (sorted), e.g. `["py"]`. |
 
@@ -91,13 +92,48 @@ host code: … write [fs] (witnessed, py)
 is exactly this JSON entry:
 
 ```json
-{ "name": "write", "class": "witnessed", "capabilities": ["fs"], "backends": ["py"] }
+{ "name": "write", "class": "witnessed", "inverse": "declared", "capabilities": ["fs"], "backends": ["py"] }
 ```
 
 The `capabilities` and `backends` fields carry the `[fs]` token and the `py`
-tier the render folds into that one line. A consumer that needs to know a
-crossing's classification, its declared capability, or its tier reads these
-fields, never the prose.
+tier the render folds into that one line, and `inverse` answers how this
+crossing can be undone. A consumer that needs to know a crossing's
+classification, its declared capability, its tier, or its inverse provenance
+reads these fields, never the prose.
+
+### The inverse class
+
+Issue #2692: `inverse` is the one derived answer to "how do we know this
+crossing can be undone, and how far can the undo be trusted?". It replaces the
+scattered facts a reviewer used to read one document at a time (the
+crash-recovery register, the approval classes, a `compensate` offset, the
+emission rule, `undo_idempotent`) with a single closed vocabulary carried on
+every extern entry:
+
+| `inverse` | meaning | read from |
+| --- | --- | --- |
+| `declared` | an exact inverse the author declared | an `acquire`/`witnessed` extern's `undo` slot |
+| `generated` | an exact inverse derived from trusted metadata | reserved: no current declaration produces one |
+| `compensation` | a best-effort offset, not a restoration | a `compensate` slot on an `emission` |
+| `forward` | irreversible, but recoverable forward by re-issuing the crossing, where the declaration carries an idempotency register | a `deferred` emission with `idempotent` or `idempotent(key: ...)`. The register carried beside the class says how strong the claim is: `read`/`keyed` are free to re-issue, `declared` is fenced and operator-gated |
+| `irreversible` | an emission with no inverse, offset or forward claim | the emission rule (`docs/backend-ir-v3.md`) |
+| `unknown` | no provenance fact at all | anything else: a `pure` read or a `local` write (both are forbidden a slot), a class `null`, or the `"*"` first-class dispatch |
+
+The class is **derived, never inferred from a name or a shape.** Pairing an
+`open` with a `close`, or matching two verbs by spelling, is not evidence; an
+inverse is accepted only from a declaration (the `undo` slot) or from trusted
+metadata, and anything else is `unknown`. Whether an `unknown` crossing may run
+is a separate policy decision made later, with this field in hand; this slice
+adds no refusal.
+
+`unknown` is a first-class value, not an omission: every entry this version
+emits carries the field. The vocabulary is closed, so a consumer may switch on it
+and must treat a value it does not recognise as `unknown`. A change of class
+between two generations is authority drift: `revl audit --diff` reports a weaker
+class as a weakening and fails the gate unless acknowledged
+([audit-diff.md](audit-diff.md#inverse-provenance-drift)). Externs from a
+document captured before the field existed are not comparable and are skipped by
+that diff, never read as `unknown`.
 
 ## The human render is not a stability contract
 

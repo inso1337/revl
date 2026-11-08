@@ -102,6 +102,10 @@
 
 ["function", "issue-1920-call-acquired-binds-and-service-trait-names", "type_ident", 1, 1]
 
+["reason", "issue-2494-generic-variant-port-residues", "issue #2494's generic-variant port residue on the rust tier: `generic_variant_params`' non-generic early return, for an applied type whose head is a declared non-generic type (a generic record, or an unknown applied name). The reference lowers such a type to `Value`, so a corpus document spelling one cannot also agree byte-for-byte; generic_variant.rvl holds the generic-variant branch."]
+
+["function", "issue-2494-generic-variant-port-residues", "generic_variant_params", 1, 1]
+
 ["reason", "issue-2495-generic-call-residuals", "issue #2495: a generic function (a Rust generic with the bounds its body needs, `fn id<T: Clone>(x: T) -> T`) and the calls that bind its type parameters from their arguments are mirrored by selfhost/emit_rust.rvl and held by the corpus document generic_fn.rvl (tests/fixtures/emit_rust_corpus). What remains: the mention guard of `v3_generic_call` (an argument whose own type names a type parameter, a generic function calling another with its `T`) and the fall-through of `v3_unify` for a parameter that is neither a type parameter nor a matching type-argument list; a call is unified only where a `let`, a `+` or an arm asks its type."]
 
 ["function", "issue-2495-generic-call-residuals", "v3_generic_call", 1, 1]
@@ -226,4 +230,4 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "split_fn_ret", 2, 2]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 3, 3]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 2, 2]

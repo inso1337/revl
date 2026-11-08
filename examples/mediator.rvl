@@ -1,0 +1,55 @@
+// A trusted mediator: one component holds a raw capability and gives everyone
+// else a narrow wrapper (docs/mediator.md).
+//
+// `FsMediator` is the only component wired to the raw `fs` boundary, and the
+// only one whose G8 surface names it. Its `append` method takes a path that
+// must stay under the directory it serves; the raw `fs.write` crossing exists
+// only in this component's body. The consumer is wired to `writer:
+// AppendWriter` and reaches the wrapper's boundary - never `fs`.
+//
+// The wrapper declares a bare `emission` (`emission fn append`), the
+// destination-unnamed promise item 561 names by the service it sits on. That is
+// what lets the mediator implement it by crossing `fs`, and what keeps `fs` out
+// of the consumer's declared reach: a wrapper that named `fs` in its own
+// declaration would hand the consumer the raw token too.
+//
+// `revl audit examples/mediator.rvl` shows the asymmetry:
+//   FsMediator     boundary: emissions: fs.write [fs]
+//   NotesConsumer  boundary: emissions: writer.append [*]
+//
+// The registry can mark such a component with `meta.json`'s `mediator` facet,
+// so replacing it is held to a stronger evidence bar (docs/registry.md §1.5).
+
+service FileStore {
+  emission[fs] fn write(path: Str, data: Str) -> Int
+}
+
+service AppendWriter {
+  emission fn append(path_under_dir: Str, data: Str) -> Int
+}
+
+service Notes {
+  emission fn save(data: Str) -> Int
+}
+
+// The mediator: the only holder of `fs`.
+component FsMediator requires fs: FileStore provides writer: AppendWriter {
+  provide writer {
+    fn append(path_under_dir, data) -> Int {
+      // The wrapper owns the narrowing: a caller may only name a path under
+      // the directory this mediator serves, and the raw write happens here.
+      emit fs.write(path_under_dir, data)
+      return 0
+    }
+  }
+}
+
+// The consumer: wired to the narrow service, never to `fs`.
+component NotesConsumer requires writer: AppendWriter provides notes: Notes {
+  provide notes {
+    fn save(data) -> Int {
+      emit writer.append("notes/daily.log", data)
+      return 0
+    }
+  }
+}

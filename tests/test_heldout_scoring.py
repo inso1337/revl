@@ -9,7 +9,10 @@ convention:
 
   * the draw is not a file           -- `test_a_scoring_run_writes_nothing...`
   * the seed is not in the tree      -- `test_a_seed_that_is_in_the_tree...`
+  * the seed file has custody        -- `test_a_seed_file_inside_the_work_tree...`
+  * a seed is consumed once          -- `test_a_reused_seed_digest...`
   * the diff cannot reach the scorer -- `test_a_diff_that_reaches_the_fence...`
+  * the diff is bounded              -- `test_a_diff_over_the_file_limit...`
   * every unknown refuses            -- the four `..._refuses` cases
   * the gate can actually fail       -- `test_a_certifier_that_admits...`
   * the draw is not vacuous          -- `test_a_draw_that_reaches_no...`
@@ -23,6 +26,7 @@ draw never reached the guard REFUSES instead of reporting clean.
 from __future__ import annotations
 
 import ast
+import contextlib
 import functools
 import hashlib
 import importlib.util
@@ -31,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -147,9 +152,8 @@ def test_a_draw_whose_inside_half_is_refused_is_itself_refused(
     the draw is not the set it claims to be. Mutating the reference into one
     that refuses everything is the cheapest way to produce that shape.
     """
-    record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
-        changed=["src/revl/lower.py"], census=census, engine=engine,
+    record, status = _run(
+        census=census, engine=engine,
         reference=lambda src: ("OUT:mutated reference", "mutated"))
     assert status == heldout.REFUSED
     assert record["refusal"] == "draw-inside-refused-by-reference"
@@ -165,10 +169,8 @@ def test_a_scoring_run_writes_nothing_into_the_tree(engine, census, reference):
     somewhere nobody thought to check.
     """
     before = _porcelain()
-    record, _status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
-        changed=["src/revl/lower.py"], census=census, engine=engine,
-        reference=reference)
+    record, _status = _run(
+        census=census, engine=engine, reference=reference)
     assert record["verdict"] == "clean"
     assert _porcelain() == before
 
@@ -192,15 +194,42 @@ def _porcelain():
 
 # ------------------------------------------------------- the failure direction
 
+def _write_seed(directory, content=TEST_SEED):
+    """A seed file the tool will accept: owner-only, outside every checkout."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "heldout.seed"
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path
+
+
+@contextlib.contextmanager
+def _seed_file(content=TEST_SEED):
+    """A disposable seed file (and its rotation ledger) outside the tree."""
+    with tempfile.TemporaryDirectory() as scratch:
+        yield _write_seed(scratch, content)
+
+
 def _run(**kw):
-    base = dict(argv_seed=TEST_SEED, env={}, count=DRAW,
-                changed=["src/revl/lower.py"])
-    base.update(kw)
-    return heldout.run(**base)
+    """Run with a freshly written seed file unless the test names one.
+
+    `seed_content` sets the value written to that default file. `seed_file`
+    is passed through untouched, including `None` for the no-seed case; the
+    rotation ledger is always derived from the seed path, as production does.
+    """
+    env = kw.pop("env", {})
+    kw.setdefault("count", DRAW)
+    kw.setdefault("changed", ["src/revl/lower.py"])
+    if "seed_file" in kw:
+        return heldout.run(env=env, **kw)
+    content = kw.pop("seed_content", TEST_SEED)
+    with _seed_file(content) as path:
+        return heldout.run(seed_file=path, env=env, **kw)
 
 
 def test_a_missing_seed_refuses_and_scores_nothing():
-    record, status = _run(argv_seed="", env={})
+    record, status = _run(seed_file=None, env={})
     assert status == heldout.REFUSED
     assert record["verdict"] == "refused"
     assert record["refusal"] == "no-seed"
@@ -208,10 +237,302 @@ def test_a_missing_seed_refuses_and_scores_nothing():
 
 
 def test_a_short_seed_refuses():
-    record, status = _run(argv_seed="abc")
+    record, status = _run(seed_content="abc")
     assert status == heldout.REFUSED
     assert record["refusal"] == "seed-too-short"
 
+
+def test_a_seed_file_inside_the_work_tree_refuses():
+    """Enforcement 2's location half, on a path that already exists.
+
+    The tracked scorer is the fixture: the question is where the seed file
+    sits, not what it holds, so testing it needs no write into the tree.
+    """
+    record, status = _run(seed_file=ROOT / "tools" / "heldout_scoring.py")
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "seed-file-in-tree"
+    assert record["buckets"] == {}
+
+
+def test_a_seed_file_inside_another_work_tree_refuses(tmp_path):
+    """Any checkout, not only the one being scored.
+
+    A seed parked in a sibling clone is still readable by a candidate that can
+    read that clone, so the location rule is about work trees in general.
+    """
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(other)],
+                   check=True, capture_output=True, timeout=120)
+    inside = _write_seed(other)
+    record, status = _run(seed_file=inside)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "seed-file-in-tree"
+
+
+def test_a_symlink_into_another_work_tree_refuses(tmp_path):
+    """Resolving the link is the difference between a path and a spelling.
+
+    The check probes the target's ancestors, so a seed parked in a sibling
+    checkout behind a link outside it is still refused.
+    """
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(other)],
+                   check=True, capture_output=True, timeout=120)
+    inside = _write_seed(other)
+    link = tmp_path / "link.seed"
+    link.symlink_to(inside)
+    record, status = _run(seed_file=link)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "seed-file-in-tree"
+
+
+def test_a_seed_file_that_another_user_can_read_refuses(tmp_path):
+    """Owner-only means no group and no other bits, not merely "not in git"."""
+    path = _write_seed(tmp_path)
+    os.chmod(path, 0o644)
+    record, status = _run(seed_file=path)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "seed-file-readable-by-others"
+
+
+def test_an_oversized_seed_file_refuses(tmp_path):
+    path = _write_seed(tmp_path, "x" * (heldout.MAX_SEED_FILE_BYTES + 1))
+    record, status = _run(seed_file=path)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "seed-file-too-large"
+
+
+def test_a_missing_seed_file_refuses(tmp_path):
+    record, status = _run(seed_file=tmp_path / "absent.seed")
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "seed-file-missing"
+
+
+def test_a_corrupt_rotation_ledger_refuses(tmp_path):
+    """A history the tool cannot read cannot answer the reuse question."""
+    seed = _write_seed(tmp_path)
+    heldout.rotation_ledger_path(seed).write_text(
+        "not-a-digest\n", encoding="utf-8")
+    record, status = _run(seed_file=seed)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == "rotation-ledger-corrupt"
+
+
+def test_a_fixture_seed_file_is_the_control_for_the_location_refusals():
+    """The refusal is discriminating, not unconditional."""
+    with _seed_file() as path:
+        record, status = heldout.run(
+            seed_file=path, env={}, count=DRAW,
+            changed=["src/revl/lower.py"], census=_BrokenCensus())
+    assert status == heldout.REFUSED
+    assert record["refusal"].startswith("engine-unavailable:")
+
+
+def test_the_seed_reaches_the_verdict_only_as_a_digest(
+        engine, census, reference):
+    seed = hashlib.sha256(b"heldout custody digest fixture").hexdigest()
+    with _seed_file(seed) as path:
+        record, status = heldout.run(
+            seed_file=path, env={}, count=DRAW,
+            changed=["src/revl/lower.py"], census=census, engine=engine,
+            reference=reference)
+    assert status == heldout.OK
+    assert record["seed_digest"] == heldout.seed_digest(seed)
+    assert seed not in json.dumps(record)
+    assert record["rotation_count"] == 1
+
+
+def test_a_reused_seed_digest_refuses(engine, census, reference, tmp_path):
+    """Rotation: a scored run consumes its digest and cannot be replayed."""
+    seed = _write_seed(tmp_path)
+    first, status = _run(seed_file=seed, census=census, engine=engine,
+                         reference=reference)
+    assert status == heldout.OK
+    assert first["rotation_count"] == 1
+    ledger = heldout.rotation_ledger_path(seed)
+    assert ledger.read_text(encoding="utf-8").splitlines() == [
+        heldout.seed_digest(TEST_SEED)]
+
+    second, status = _run(seed_file=seed)
+    assert status == heldout.REFUSED
+    assert second["refusal"] == "seed-digest-reused"
+    assert ledger.read_text(encoding="utf-8").splitlines() == [
+        heldout.seed_digest(TEST_SEED)]
+
+
+def test_a_refused_run_does_not_consume_the_seed(engine, census, reference,
+                                                 tmp_path):
+    """A refusal produced no score, so there is no rotation to record."""
+    seed = _write_seed(tmp_path)
+    record, status = _run(seed_file=seed, census=_BrokenCensus())
+    assert status == heldout.REFUSED
+    assert record["refusal"].startswith("engine-unavailable:")
+    assert not heldout.rotation_ledger_path(seed).exists()
+
+    record, status = _run(seed_file=seed, census=census, engine=engine,
+                          reference=reference)
+    assert status == heldout.OK
+    assert record["rotation_count"] == 1
+
+
+def test_the_rotation_count_advances_when_the_seed_file_is_rewritten(
+        engine, census, reference, tmp_path):
+    """One seed file rewritten in place is the documented rotation model.
+
+    The ledger belongs to the path, not to the value, so rewriting the same
+    file adds the next digest to the same history and the count advances.
+    """
+    seed = _write_seed(
+        tmp_path, hashlib.sha256(b"heldout rotation fixture one").hexdigest())
+    first, status = _run(seed_file=seed, census=census, engine=engine,
+                         reference=reference)
+    assert status == heldout.OK
+
+    _write_seed(
+        tmp_path, hashlib.sha256(b"heldout rotation fixture two").hexdigest())
+    second, status = _run(seed_file=seed, census=census, engine=engine,
+                          reference=reference)
+    assert status == heldout.OK
+    assert (first["rotation_count"], second["rotation_count"]) == (1, 2)
+    assert first["seed_digest"] != second["seed_digest"]
+
+
+def test_a_diff_over_the_file_limit_refuses_with_the_limit_named():
+    changed = ["src/revl/generated_%d.py" % index
+               for index in range(heldout.MAX_DIFF_FILES + 1)]
+    record, status = _run(changed=changed)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == (
+        "diff-too-large:files:" + str(len(changed))
+        + ">" + str(heldout.MAX_DIFF_FILES))
+
+
+def test_a_diff_over_the_line_limit_refuses_with_the_limit_named():
+    too_many = heldout.MAX_DIFF_LINES + 1
+    record, status = _run(diff_lines=too_many)
+    assert status == heldout.REFUSED
+    assert record["refusal"] == (
+        "diff-too-large:lines:" + str(too_many)
+        + ">" + str(heldout.MAX_DIFF_LINES))
+
+
+def test_a_large_diff_that_reaches_the_fence_keeps_the_fence_refusal():
+    """The fence is checked first, so CI's warning path wins over the size error.
+
+    A diff that edits the scorer is a semantic change routed to review whatever
+    its size, and CI treats `diff-reaches-fence` as a warning while an
+    unclassified `diff-too-large` would be an error.
+    """
+    changed = (["src/revl/generated_%d.py" % index
+                for index in range(heldout.MAX_DIFF_FILES)]
+               + ["tools/heldout_scoring.py"])
+    record, _status = _run(
+        changed=changed, diff_lines=heldout.MAX_DIFF_LINES + 1)
+    assert record["refusal"] == "diff-reaches-fence:tools/heldout_scoring.py"
+
+
+def test_regenerated_paths_are_named_and_a_source_is_not_one():
+    for path in ("crates/revl-gate/src/selfhost.rs",
+                 "tests/fixtures/corpus_provenance.json",
+                 "docs/census-artifact/cases/example.json",
+                 "tests/fixtures/census_crate_reproduction/x.json"):
+        assert heldout.is_regenerated(path), path
+    for path in ("selfhost/lower.rvl", "src/revl/lower.py",
+                 "tests/test_heldout_scoring.py"):
+        assert not heldout.is_regenerated(path), path
+
+
+def test_diff_lines_from_base_counts_added_plus_removed(tmp_path):
+    """The number the line limit compares against, from a real git diff."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo)] + list(args), check=True,
+                       capture_output=True, text=True, timeout=120)
+
+    git("init", "--quiet")
+    (repo / "f.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    git("add", "f.txt")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qm", "base")
+    (repo / "f.txt").write_text("a\nB\nc\nd\n", encoding="utf-8")
+    git("add", "f.txt")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qm", "change")
+    assert heldout.diff_lines_from_base(repo, "HEAD~1") == 3
+
+
+def test_the_line_count_ignores_regenerated_paths(tmp_path):
+    """A regenerated artifact's churn is not the candidate's edit."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(repo)] + list(args), check=True,
+                       capture_output=True, text=True, timeout=120)
+
+    generated = (repo / "tests" / "fixtures" /
+                 "census_crate_reproduction" / "record.json")
+    generated.parent.mkdir(parents=True)
+    normal = repo / "src" / "normal.py"
+    normal.parent.mkdir()
+    git("init", "--quiet")
+    generated.write_text("{}\n" * 3000, encoding="utf-8")
+    normal.write_text("a\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qm", "base")
+    generated.write_text("{}\n" * 6000, encoding="utf-8")
+    normal.write_text("a\nb\nc\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qm", "change")
+    # 3000 generated lines are excluded; the normal file added two.
+    assert heldout.diff_lines_from_base(repo, "HEAD~1") == 2
+
+
+def test_ci_treats_the_size_refusal_as_a_warning_like_the_fence():
+    """Pinned: a `diff-too-large` refusal must not red the held-out job.
+
+    A batch push can still cross the file bound even with regenerated paths
+    left out of the line count, and the job's contract is that a refusal to
+    score is a warning, not a failure.
+    """
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    start = text.index("  held-out:")
+    end = text.index("  # Issue #1572", start)
+    job = text[start:end]
+    assert 'if [ "$status" = "2" ]' in job
+    warning = job[:job.index('echo "::error title=held-out scoring refused')]
+    assert "diff-reaches-fence:*" in warning
+    assert "diff-too-large:*" in warning
+
+
+
+def test_main_passes_the_git_diff_line_count_to_the_run(
+        monkeypatch, tmp_path):
+    """`--diff-base` feeds the line count, not only the changed-file list."""
+    seen = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return heldout.refusal_record("no-diff"), heldout.REFUSED
+
+    monkeypatch.setattr(heldout, "run", fake_run)
+    monkeypatch.setattr(
+        heldout, "changed_from_base",
+        lambda root, base: ["src/revl/lower.py"])
+    monkeypatch.setattr(heldout, "diff_lines_from_base", lambda root, base: 1234)
+    seed = _write_seed(tmp_path)
+    status = heldout.main(
+        ["--seed-file", str(seed), "--diff-base", "origin/main"])
+    assert status == heldout.REFUSED
+    assert seen["changed"] == ["src/revl/lower.py"]
+    assert seen["diff_lines"] == 1234
 
 def test_the_fixture_seed_is_itself_absent_from_the_tree():
     """The suite eats its own cooking.
@@ -234,11 +555,11 @@ def test_a_seed_that_is_in_the_tree_refuses():
     """
     in_tree = "gate_reference_census.py"
     assert len(in_tree) >= heldout.MIN_SEED_CHARS
-    record, status = _run(argv_seed=in_tree)
+    record, status = _run(seed_content=in_tree)
     assert status == heldout.REFUSED
     assert record["refusal"] == "seed-in-tree"
 
-    control, _ = _run(argv_seed=TEST_SEED, census=_BrokenCensus())
+    control, _ = _run(census=_BrokenCensus())
     assert control["refusal"] != "seed-in-tree"
 
 
@@ -278,8 +599,7 @@ def test_a_diff_that_reaches_the_fence_refuses(path):
 def test_a_diff_that_stays_off_the_fence_is_scored(engine, census, reference):
     """The control for the case above: the fence refuses the scorer's own
     paths and nothing else, so an ordinary compiler change is still judged."""
-    record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
+    record, status = _run(
         changed=["src/revl/lower.py", "selfhost/lower.rvl",
                  "crates/revl-gate/src/lib.rs", "docs/v2.0-roadmap.md"],
         census=census, engine=engine, reference=reference)
@@ -313,8 +633,8 @@ def test_a_change_to_a_fenced_file_selects_this_file(path=None):
     the classification. The test that does was never selected, so the change
     landed and main was red on a path no gate had run.
 
-    Derived on both sides: the selector reads `HELD_OUT_FENCE` out of the tool
-    by AST, and this holds every entry of the same tuple.
+    Derived on both sides: the selector reads the `held_out` view out of the
+    evaluator enumeration by AST, and this holds every entry of the same set.
     """
     spec = importlib.util.spec_from_file_location(
         "affected_tests_under_heldout", ROOT / "tools" / "affected_tests.py")
@@ -364,8 +684,7 @@ def test_a_certifier_that_admits_everything_is_caught_by_the_draw(
     original = engine._certify
     engine._certify = lambda src: True
     try:
-        record, status = heldout.run(
-            argv_seed=TEST_SEED, env={}, count=DRAW,
+        record, status = _run(
             changed=["src/revl/lower.py"], census=census, engine=engine,
             reference=reference)
     finally:
@@ -390,8 +709,7 @@ def test_a_draw_that_reaches_no_admission_arm_refuses(
     original = engine._certify
     engine._certify = lambda src: False
     try:
-        record, status = heldout.run(
-            argv_seed=TEST_SEED, env={}, count=DRAW,
+        record, status = _run(
             changed=["src/revl/lower.py"], census=census, engine=engine,
             reference=reference)
     finally:
@@ -460,15 +778,20 @@ def test_the_whole_import_closure_of_a_scoring_run_is_classified():
 
 
 _CLOSURE_PROBE = r'''
-import importlib.util, json, os, sys, warnings
+import importlib.util, json, os, sys, tempfile, warnings
 warnings.filterwarnings("ignore")
 ROOT = %s
 SEED = %s
+scratch = tempfile.TemporaryDirectory()
+SEED_FILE = os.path.join(scratch.name, "heldout.seed")
+with open(SEED_FILE, "w", encoding="utf-8") as handle:
+    handle.write(SEED)
+os.chmod(SEED_FILE, 0o600)
 spec = importlib.util.spec_from_file_location(
     "heldout_probe", os.path.join(ROOT, "tools", "heldout_scoring.py"))
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
-record, status = mod.run(argv_seed=SEED, env={}, count=20,
+record, status = mod.run(seed_file=SEED_FILE, env={}, count=20,
                          changed=["src/revl/lower.py"])
 real = os.path.realpath(ROOT) + os.sep
 files = set()
@@ -871,8 +1194,7 @@ def test_a_gate_that_stops_refusing_is_caught_as_a_new_bypass_family(
     The control is the case below, identical but for a tag the baseline
     already allows, which is clean on the same seed and the same draw.
     """
-    record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
+    record, status = _run(
         changed=["src/revl/lower.py"], census=census,
         engine=_NoRefusalGate(engine),
         reference=_in_slice(reference, "T9NEW"))
@@ -900,8 +1222,7 @@ def test_the_bypass_direction_is_not_reachable_on_this_grammar(
     in a design doc, because an empty bucket and an unreachable one look
     identical in a report and this repository has confused them before.
     """
-    record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
+    record, status = _run(
         changed=["src/revl/lower.py"], census=census, engine=engine,
         reference=reference)
     assert status == heldout.OK
@@ -938,9 +1259,8 @@ def test_a_family_already_in_the_baseline_is_reported_and_is_not_a_finding(
     root = staged_baseline(tmp_path / "allowed",
                            {"false-admit/" + allowed: [STAGED_KEYED_PROGRAM]})
     assert heldout.bypass_allowance(root) == {allowed}
-    record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW, root=root,
-        changed=["src/revl/lower.py"], census=census,
+    record, status = _run(
+        root=root, changed=["src/revl/lower.py"], census=census,
         engine=_NoRefusalGate(engine),
         reference=_in_slice(reference, allowed))
 
@@ -1035,8 +1355,7 @@ def test_a_draw_a_tell_separates_is_refused_rather_than_scored(
     monkeypatch.setattr(
         heldout, "draw",
         lambda seed, count: _replant_slice1_names(_real_draw(seed, count)))
-    record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
+    record, status = _run(
         changed=["src/revl/lower.py"], census=census, engine=engine,
         reference=reference)
     assert status == heldout.REFUSED

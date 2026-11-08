@@ -10,6 +10,8 @@
 
 ["reason", "generated-python-inlines-these-tiny-rvl-helpers-into", "Generated Python inlines these tiny RVL helpers into emitter call sites; their substituted bodies execute while the retained definitions do not. Any residual named calls occur only in the RVL file's own unit-test functions, which are outside the corpus emitter entry point."]
 
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "empty_acc", 1, 1]
+
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "flags_or", 1, 1]
 
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "has_bind", 1, 1]
@@ -32,11 +34,11 @@
 
 ["function", "has-any-word-tests-the-neighbours-of-an", "is_word_char", 1, 1]
 
-["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path (`_emit_v3_combined`), first five slices, and the issue #1834 match inference (the first typed arm, with its binding in scope, and an interface-typed temp for a scrutinee that is not a bare name). The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the component beside a lifecycle test in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected)."]
+["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path (`_emit_v3_combined`), first five slices, and the issue #1834 match inference (the first typed arm, with its binding in scope, and an interface-typed temp for a scrutinee that is not a bare name). The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the component beside a lifecycle test in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected). Issue #2494 adds the named refusal return in `comp_expr_bare` for an unpinned generic-variant construction; a provide-method document that spells one is refused by the reference, so it cannot be a byte-agreement corpus document, and the pure-tier refusal fixture reaches the pure-path twin only."]
 
 ["function", "issue-106-go-combined-path", "call_head_ok", 1, 1]
 
-["function", "issue-106-go-combined-path", "comp_expr_bare", 3, 3]
+["function", "issue-106-go-combined-path", "comp_expr_bare", 4, 4]
 
 ["function", "issue-106-go-combined-path", "comp_expr_ok", 1, 1]
 
@@ -50,11 +52,17 @@
 
 ["function", "issue-1631-the-arity-guard-in-v3-fill", "fill_erased", 1, 1]
 
-["reason", "issue-2495-generic-call-residuals", "issue #2495: a generic function (a Go type-parameter list, `func id[T any](x T) T`) and the calls that bind its type parameters from their arguments are mirrored by selfhost/emit_go.rvl and held by the corpus document generic_fn.rvl (tests/fixtures/emit_go_corpus). What remains: the mention guard of `go_generic_call` (an argument whose own type names a type parameter, a generic function calling another with its `T`), the nested-bracket and comma arms of `split_generic_args` (no generic parameter in the corpus takes a two-argument or nested type), and the empty-mapping pass-through of `v3_subst` (a call that binds nothing)."]
+["reason", "issue-2494-generic-variant-port-residues", "issue #2494's generic-variant port residues in the component tier and the helper fallbacks: `list_elem`'s all-items-unbound fallback, `variant_type_args`' guard for a non-instantiated type, `comp_case_type`'s monomorphic branch (the helper is only called for an applied generic variant), and the instantiation branch of `comp_infer_match`, which the component-tier corpus document does not place a generic-variant match in an inferred position for. The unpinned-construction refusal itself IS reached: tests/fixtures/emit_go_refusals/unpinned_generic_variant.rvl drives `render_construct`'s refusal on the pure tier; its component-tier twin in `comp_expr_bare` is unreachable because a provide-method document spelling one is refused by the reference (see `issue-106-go-combined-path`)."]
+
+["function", "issue-2494-generic-variant-port-residues", "comp_case_type", 1, 1]
+
+["function", "issue-2494-generic-variant-port-residues", "comp_infer_match", 2, 2]
+
+["function", "issue-2494-generic-variant-port-residues", "variant_type_args", 1, 1]
+
+["reason", "issue-2495-generic-call-residuals", "issue #2495: a generic function (a Go type-parameter list, `func id[T any](x T) T`) and the calls that bind its type parameters from their arguments are mirrored by selfhost/emit_go.rvl and held by the corpus document generic_fn.rvl (tests/fixtures/emit_go_corpus). What remains: the mention guard of `go_generic_call` (an argument whose own type names a type parameter, a generic function calling another with its `T`), and the empty-mapping pass-through of `v3_subst` (a call that binds nothing)."]
 
 ["function", "issue-2495-generic-call-residuals", "go_generic_call", 1, 1]
-
-["function", "issue-2495-generic-call-residuals", "split_generic_args", 4, 4]
 
 ["function", "issue-2495-generic-call-residuals", "v3_subst", 1, 1]
 
@@ -122,7 +130,7 @@
 
 ["reason", "remaining-branches-handle-null-malformed-unresolved-inferenc", "Remaining branches handle null/malformed/unresolved inference, missing List element/index type, nonreference callees, an unknown left + operand, unknown operators/conditional branches, ambiguous records and unresolved constructors. The late Float % fallback is frontend-rejected; supported Int32 complement and Float arithmetic are covered."]
 
-["function", "remaining-branches-handle-null-malformed-unresolved-inferenc", "infer_type", 10, 10]
+["function", "remaining-branches-handle-null-malformed-unresolved-inferenc", "infer_type", 9, 9]
 
 ["reason", "remaining-branches-mark-a-component-style-call-with", "Remaining branches mark a component-style call with no callee and read the payload type of a user constructor in call shape; the frontend lowers user constructors as `adt`, and a component call only appears in a document already refused by its component marker."]
 
@@ -155,10 +163,6 @@
 ["function", "remaining-guards-mark-a-missing-go-body-the", "has_extra_linebreak", 1, 1]
 
 ["function", "remaining-guards-mark-a-missing-go-body-the", "is_extra_linebreak", 3, 3]
-
-["reason", "remaining-id-lookup-is-compatibility-with-older-reference", "Remaining id lookup is compatibility with older reference-node encoding; canonical v3 source references carry name."]
-
-["function", "remaining-id-lookup-is-compatibility-with-older-reference", "ref_name", 1, 1]
 
 ["reason", "remaining-marker-rejects-an-unsupported-unary-operator-canon", "Remaining marker rejects an unsupported unary operator; canonical negation/not/Int32 complement lowering is implemented."]
 
