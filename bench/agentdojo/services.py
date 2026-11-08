@@ -26,9 +26,9 @@ import types as _types
 import typing
 from typing import Any, get_args, get_origin
 
-# The revl types the bridge can lower without a lossy encoding. A parameter the
-# suite declares with any other annotation is a port bug, not something to
-# paper over with Str: a silently-stringified argument would make the tool call
+# The revl types the bridge can lower directly. Any other annotation travels as
+# a JSON string, marked in the generated extern so the bridge decodes it before
+# the suite sees it; a silently-stringified argument would make the tool call
 # disagree with the baseline arm.
 _SCALARS = {
     str: "Str",

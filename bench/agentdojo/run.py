@@ -82,10 +82,10 @@ def _pins(base_url: str, models: list[str]) -> dict[str, str | None]:
 
 def _load_agentdojo():
     import agentdojo
-    from agentdojo.attacks.important_instructions_attacks import ImportantInstructionsAttack
+    from agentdojo.attacks import load_attack
     from agentdojo.task_suite.load_suites import get_suite
 
-    return agentdojo, ImportantInstructionsAttack, get_suite
+    return agentdojo, load_attack, get_suite
 
 
 def _key(record: dict) -> tuple:
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     records_path = outdir / "records.jsonl"
     meta_path = outdir / "meta.json"
 
-    _, Attack, get_suite = _load_agentdojo()
+    _, load_attack, get_suite = _load_agentdojo()
     import agentdojo
 
     suite = get_suite("v1.2", args.suite)
@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
                                     error=error,
                                 )
                                 continue
-                            attack = Attack(suite, pipeline)
+                            attack = load_attack(args.attack, suite, pipeline)
                             for injection_task in injection_tasks:
                                 injections = attack.attack(user_task, injection_task)
                                 started = time.time()
