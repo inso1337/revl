@@ -6916,6 +6916,40 @@ def test_oracle_b_handoff_state_compatibility(admit_ambient, name, running,
     assert got == _ref_ambient(incoming, running, replacing=replacing), name
 
 
+#: A hand-off whose state type is a NOMINAL record: the spelling is the same on
+#: both sides and only the declaration behind the name differs. The reference
+#: resolves each spelling against its own version's declarations
+#: (`admission._handoff_compatible`); the wire carries the running spelling
+#: alone, so the gate has no running declaration to resolve it against.
+_H_NOMINAL_OLD = _h_comp("Store", "St", extra="type St = { a: Int }\n")
+_H_NOMINAL_NEW = _h_comp("Store", "St", extra="type St = { a: Int, b: Int }\n")
+
+
+def test_handoff_nominal_record_unchanged_agrees(admit_ambient):
+    """The control for the divergence below: the same record on both sides
+    admits on the gate and on the reference."""
+    assert _gate_ambient(admit_ambient, _H_NOMINAL_OLD, _H_NOMINAL_OLD,
+                         replacing=("Store",)) == ""
+    assert _ref_ambient(_H_NOMINAL_OLD, _H_NOMINAL_OLD,
+                        replacing=("Store",)) == ""
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN DIVERGENCE: the self-host gate compares hand-off SPELLINGS "
+           "only. `C=k:T` carries the running spelling and no declaration, so "
+           "a nominal record whose declaration changed under the same name "
+           "admits here while the reference refuses it. Closing it needs the "
+           "running declarations on the wire (a new row kind) and the "
+           "incoming declarations read off the text.")
+def test_handoff_nominal_record_changed_is_refused_like_the_reference(
+        admit_ambient):
+    ref = _ref_ambient(_H_NOMINAL_NEW, _H_NOMINAL_OLD, replacing=("Store",))
+    assert ref.startswith("G2|state hand-off on `db` differs"), ref
+    assert _gate_ambient(admit_ambient, _H_NOMINAL_NEW, _H_NOMINAL_OLD,
+                         replacing=("Store",)) == ref
+
+
 def test_manifest_wire_renders_the_handoff_row():
     """`C=k:T` rides with its component, after that component's requirement and
     route rows and ahead of the service block: it is a per-component COMPOSITION

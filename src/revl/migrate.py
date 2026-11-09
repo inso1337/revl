@@ -435,7 +435,8 @@ def handoffs(old_ir: dict, new_ir: dict) -> list[dict]:
                 f"the new version declares no hand-off on `{key}`: the "
                 f"successor starts cold and the predecessor's state is "
                 f"dropped")
-        elif _handoff_compatible(accepted.get("type"), exported.get("type")):
+        elif _handoff_compatible(accepted.get("type"), exported.get("type"),
+                                 new_ir.get("types"), old_ir.get("types")):
             entry["verdict"] = "compatible"
             entry["reason"] = (
                 f"`{accepted.get('type')}` accepts the state `"

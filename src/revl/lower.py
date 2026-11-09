@@ -9522,7 +9522,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # a §5-compatible shape — else the swap would drop the predecessor's state.
     # No-op unless the ambient carries running hand-offs (a swap against a
     # stateful running provider), so a fresh compile is unaffected.
-    _collect(_admit_handoff_replacement, program, live_components, ambient)
+    _collect(_admit_handoff_replacement, program, live_components, ambient,
+             types=types)
 
     # withdrawn-provision admission (roadmap item 186 / issue #86): a
     # replacement that drops a provision a RETAINED running component still

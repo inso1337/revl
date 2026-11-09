@@ -1698,6 +1698,11 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             # replacement must accept, so dropped entries stay in — the gate
             # compares the replacement's *accepted* shape against them.
             "handoffs": _running_handoffs(manifest),
+            # the declared-type table those hand-off spellings are written
+            # against: a nominal name in `handoffs` means what the RUNNING
+            # version declared it to be, which the replacement's own table
+            # cannot say. Absent for a manifest that carries none.
+            "handoff_types": manifest.get("types") or {},
             # item 186 / issue #86: what this admission WITHDRAWS from the
             # running composition — `replacing=` plus every running component
             # the candidate redeclares by name. `components` above is the

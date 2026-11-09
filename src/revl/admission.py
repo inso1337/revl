@@ -9,6 +9,7 @@ import surface is unchanged.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .errors import RevlError
@@ -435,16 +436,156 @@ def _drift_error(program: Program, new: ServiceDecl, drift: _Drift,
 # with a §5-shaped why-trace naming the offending key and the two shapes.
 
 
-def _handoff_compatible(accepted: str | None, exported: str | None) -> bool:
+_IDENT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b(?!\s*:)")
+
+
+def _spelling_names(spelling: str | None) -> set[str]:
+    """Every name a written type spells: heads, arguments, function parts. A
+    name followed by `:` is a field label, not a type."""
+    return set(_IDENT.findall(spelling or ""))
+
+
+def _decl_refs(spec: dict) -> list[str]:
+    """The type spellings one declaration is written in terms of."""
+    if spec.get("kind") == "variant":
+        return [c.get("payload") for c in spec.get("cases") or []
+                if c.get("payload")]
+    return [t for t in (spec.get("fields") or {}).values() if t]
+
+
+def _decl_key(spec: dict | None) -> tuple | None:
+    """The declaration's content, order-free for fields (the record relation
+    is by field SET) and ordered for cases."""
+    if not isinstance(spec, dict):
+        return None
+    params = tuple(spec.get("params") or ())
+    if spec.get("kind") == "variant":
+        return ("variant", params, tuple(
+            (c.get("name"), c.get("payload")) for c in spec.get("cases") or []))
+    return ("record", params, tuple(sorted((spec.get("fields") or {}).items())))
+
+
+def _decl_differs(name: str, mine: dict, theirs: dict,
+                  seen: set[str] | None = None) -> bool:
+    """Does `name` mean something different on the two sides: declared on one
+    only, declared differently, or declared alike over a declaration it uses
+    that differs? A name declared on NEITHER side is an opaque nominal and
+    means itself. `seen` makes a recursive type terminate (a revisit adds no
+    difference the first visit did not already find)."""
+    seen = set() if seen is None else seen
+    if name in seen:
+        return False
+    seen.add(name)
+    a, b = mine.get(name), theirs.get(name)
+    if a is None and b is None:
+        return False
+    if _decl_key(a) != _decl_key(b):
+        return True
+    params = set(a.get("params") or ())
+    return any(_decl_differs(ref, mine, theirs, seen)
+               for t in _decl_refs(a) for ref in _spelling_names(t) - params)
+
+
+def _changed_names(accepted: str | None, exported: str | None,
+                   accepted_types: dict | None,
+                   exported_types: dict | None) -> list[str]:
+    """The nominal names both spellings mention whose meaning differs between
+    the successor's declarations and the predecessor's, sorted."""
+    mine, theirs = accepted_types or {}, exported_types or {}
+    shared = _spelling_names(accepted) & _spelling_names(exported)
+    return sorted(n for n in shared if _decl_differs(n, mine, theirs))
+
+
+def _own_differences(names: list[str], mine: dict, theirs: dict) -> list[str]:
+    """The declarations, among `names` and everything they reach, that differ
+    on their own: the ones worth showing, since a name whose body is spelled
+    the same but reaches a changed one differs only through it."""
+    out: set[str] = set()
+    todo, seen = list(names), set()
+    while todo:
+        n = todo.pop()
+        if n in seen or (n not in mine and n not in theirs):
+            continue
+        seen.add(n)
+        if _decl_key(mine.get(n)) != _decl_key(theirs.get(n)):
+            out.add(n)
+        for side in (mine, theirs):
+            spec = side.get(n)
+            if spec:
+                params = set(spec.get("params") or ())
+                todo += [r for t in _decl_refs(spec)
+                         for r in _spelling_names(t) - params]
+    return sorted(out)
+
+
+def _render_decl(name: str, spec: dict | None) -> str:
+    """One declaration as backticked text, or the fact that it has none."""
+    if not isinstance(spec, dict):
+        return f"`{name}` is not declared"
+    params = list(spec.get("params") or ())
+    head = f"{name}[{', '.join(params)}]" if params else name
+    if spec.get("kind") == "variant":
+        cases = " | ".join(
+            f"{c['name']}({c['payload']})" if c.get("payload") else c["name"]
+            for c in spec.get("cases") or [])
+        return f"`{head} = {cases}`"
+    fields = ", ".join(f"{k}: {v}" for k, v in (spec.get("fields") or {}).items())
+    return f"`{head} = {{{fields}}}`"
+
+
+def _handoff_detail(accepted: str | None, exported: str | None,
+                    accepted_types: dict | None,
+                    exported_types: dict | None) -> tuple[str, str]:
+    """What each spelling means where the two versions disagree about it, as
+    a suffix for the refusal text (`""` when the spellings carry the whole
+    difference, which is every case that spells a nominal the same way and
+    declares it alike)."""
+    mine, theirs = accepted_types or {}, exported_types or {}
+    shown = _own_differences(
+        _changed_names(accepted, exported, mine, theirs), mine, theirs)
+    if not shown:
+        return "", ""
+    return tuple(  # type: ignore[return-value]
+        " (" + "; ".join(_render_decl(n, side.get(n)) for n in shown) + ")"
+        for side in (mine, theirs))
+
+
+def _handoff_compatible(accepted: str | None, exported: str | None,
+                        accepted_types: dict | None = None,
+                        exported_types: dict | None = None) -> bool:
     """May the predecessor's *exported* state (`exported`) be accepted at the
     successor's *accepted* shape? Value-flow is old -> new, so this is the same
     covariant `compatible(expected, actual)` §5 uses at a return position —
-    the accepted type must admit everything the exported type produces."""
+    the accepted type must admit everything the exported type produces.
+
+    A nominal name is only a NAME: `St` in the running version and `St` in the
+    replacement may be two different records, and `compatible` takes `expected
+    == actual` for the same name without consulting any declaration. The two
+    declared-type tables are the predecessor's and the successor's own, which
+    one table cannot stand in for, so a name both spellings mention whose
+    declaration (or anything it reaches) differs between the versions is
+    renamed per side before the comparison. The two sides then differ as
+    opaque nominals, which `compatible` refuses, exactly as it refuses two
+    differently named records. With no table on either side nothing is
+    renamed and this is `compatible(accepted, exported)` unchanged."""
+    changed = _changed_names(accepted, exported, accepted_types, exported_types)
+    if changed:
+        accepted = _tag_names(accepted, changed, "@successor")
+        exported = _tag_names(exported, changed, "@predecessor")
     return compatible(accepted, exported)
 
 
+def _tag_names(spelling: str | None, names: list[str], tag: str) -> str | None:
+    if spelling is None:
+        return None
+    wanted = set(names)
+    return _IDENT.sub(lambda m: m.group(0) + tag if m.group(0) in wanted
+                      else m.group(0), spelling)
+
+
 def _admit_handoff_replacement(program: Program, components: list[dict],
-                               ambient: dict) -> None:
+                               ambient: dict,
+                               types: dict | None = None) -> None:
     """Gate every state hand-off a candidate provider *accepts* against the
     predecessor it replaces (§5/item 53).
 
@@ -456,7 +597,11 @@ def _admit_handoff_replacement(program: Program, components: list[dict],
     but nothing running exported — or a running export the successor does not
     accept — is not a conflict: the first starts cold, the second opts out of
     inheriting (a stateless successor of a stateful provider is a valid, if
-    lossy, choice the author made explicit)."""
+    lossy, choice the author made explicit).
+
+    `types` is the candidate's declared-type table and
+    `ambient["handoff_types"]` the running version's: each spelling means what
+    ITS version's declarations say (see `_handoff_compatible`)."""
     running = ambient.get("handoffs") or {}
     if not running:
         return
@@ -470,34 +615,40 @@ def _admit_handoff_replacement(program: Program, components: list[dict],
             continue  # nothing running exported this key's state — a cold key
         accepted = h.get("type")
         exported = old.get("type")
-        if _handoff_compatible(accepted, exported):
+        running_types = ambient.get("handoff_types")
+        if _handoff_compatible(accepted, exported, types, running_types):
             continue
         line = next((c.line for c in program.components
                      if c.name == comp.get("name")), 0)
-        raise _handoff_error(program, comp, key, accepted, exported, old, line)
+        detail = _handoff_detail(accepted, exported, types, running_types)
+        raise _handoff_error(program, comp, key, accepted, exported, old, line,
+                             detail)
 
 
 def _handoff_error(program: Program, comp: dict, key: str,
                    accepted: str | None, exported: str | None,
-                   old: dict, line: int = 0) -> RevlError:
+                   old: dict, line: int = 0,
+                   detail: tuple[str, str] = ("", "")) -> RevlError:
+    accepted_at, exported_at = detail
     old_name = old.get("component") or "the running provider"
     new_name = comp.get("name") or "the replacement"
     # the phrase "differs from the running manifest" routes this through
     # diagnostics.classify to the same (G2, "admission") bucket every other
     # admission refusal carries — a swap refused, nothing changed.
     message = (f"state hand-off on `{key}` differs from the running manifest: "
-               f"`{new_name}` accepts `{accepted}`, but `{old_name}` exports "
-               f"`{exported}` — the successor cannot hold the predecessor's "
-               f"state, and dropping it on the swap would be residue")
+               f"`{new_name}` accepts `{accepted}`{accepted_at}, but "
+               f"`{old_name}` exports `{exported}`{exported_at} — the successor "
+               f"cannot hold the predecessor's state, and dropping it on the "
+               f"swap would be residue")
     hint = ("a successor's `handoff` type must accept everything the running "
             "provider's `handoff` exports (state compatibility, the §5 relation "
             "pointed at state — docs/state-handoff.md); widen the accepted type "
             "or migrate the shape explicitly")
     steps = [
         TraceStep(f"{new_name}.{key}", "accept", program.filename, line,
-                  f"accepts state `{accepted}`"),
+                  f"accepts state `{accepted}`{accepted_at}"),
         TraceStep(f"{old_name}.{key}", "export", None, None,
-                  f"running provider exports state `{exported}`"),
+                  f"running provider exports state `{exported}`{exported_at}"),
     ]
     why = WhyTrace(kind="state-handoff-drift", subject=key, shape=SET, steps=steps)
     return RevlError(program.filename, line, message, hint=hint, why=why)
