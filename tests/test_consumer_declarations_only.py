@@ -3,8 +3,8 @@
 The shape is `examples/mediator.rvl` split into modules: `svc.rvl` holds the
 services, `consumer.rvl` holds `NotesConsumer` (requires `writer:
 AppendWriter`), and `mediator.rvl` holds `FsMediator`, the provider, in
-variants. Every module is an in-memory source under an empty directory, so a
-module left out of `sources` is absent, not read from disk.
+variants. Every module is an in-memory source, and `_compile` makes any read
+from disk raise, so a module left out of `sources` is absent.
 
 What holds today, pinned as regressions (they pass on the base they were
 written on, so none of them was red first):
@@ -13,16 +13,19 @@ written on, so none of them was red first):
 - (b) the consumer component's IR is byte-equal whether the provider is
   absent, valid, or has a different valid body;
 - (c) a provider with a broken body in a module the consumer does not `use`
-  leaves the consumer compile green;
-- (d) a provider with a broken body in the SAME module as the services the
-  consumer `use`s also leaves it green: components are never imported (the
+  leaves the consumer compile green: that module is never loaded;
+- (d) a provider whose body fails to check (a requirement it does not declare)
+  in the SAME module as the services the consumer `use`s also leaves it green:
+  components are never imported, and so never lowered or checked (the
   root-module merge in `compiler._compile_files`), so `use { names }` does not
   carry `FsMediator` in. The `nope` refusal appears only when that module is
   itself a root of the compile, where its components are the composition.
 
-Not pinned here: the used module is still parsed whole, so a syntax error in a
-component body there breaks the importer. Compiling against export metadata
-alone, with the dependency's source gone, is an open design question.
+Not pinned here: the used module is still parsed and resolved whole (syntax,
+`asset` files, refs, host body files), so a syntax error or a missing asset in
+a component body there breaks the importer. Compiling against service
+declarations alone, with the dependency's source gone, is an open design
+question.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from pathlib import Path
 import pytest
 
 from revl import compile_files
+from revl import compiler as _compiler
 from revl.errors import RevlError
 
 _SERVICES = """\
@@ -80,6 +84,13 @@ _NOPE = "`nope` is not a declared requirement of FsMediator"
 
 def _provider(body: str) -> str:
     return 'use "svc.rvl" { FileStore, AppendWriter }\n\n' + _MEDIATOR % body
+
+
+@pytest.fixture(autouse=True)
+def _no_disk(monkeypatch):
+    def _boom(abs_path: str) -> str:
+        raise AssertionError(f"read {abs_path} from disk")
+    monkeypatch.setattr(_compiler, "_read_module_text", _boom)
 
 
 def _compile(tmp_path: Path, roots: list[str], modules: dict[str, str]) -> dict:
@@ -132,7 +143,7 @@ def test_b_consumer_ir_is_identical_across_provider_bodies(tmp_path):
     assert set(valid["services"]) - set(absent["services"]) == {"FileStore"}
 
 
-def test_c_broken_provider_in_an_unused_module_leaves_the_consumer_green(tmp_path):
+def test_c_broken_provider_in_a_module_never_used_is_never_loaded(tmp_path):
     # The body is really broken: as a root, the provider module is refused.
     with pytest.raises(RevlError, match=_NOPE):
         _compile(tmp_path, ["mediator.rvl"],
