@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "digest": "91b998ba27f92e2bdf21f822c9f3a315ac52be7d43581bc994985d7dbbc3be66",
+ "digest": "017dc3a11daf7dd0025a88537cee724131b890a6cb112ee6c3d9cc27f3edd212",
  "tiers": [
   "python",
   "typescript",
@@ -53,7 +53,7 @@
   "compile.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 3574859
+    "bytes": 3575561
    },
    "typescript": {
     "kind": "refused",
@@ -79,7 +79,7 @@
   "emit_go.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 305479
+    "bytes": 306177
    },
    "typescript": {
     "kind": "refused",
