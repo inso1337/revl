@@ -1022,8 +1022,11 @@ def _apply_plan(arguments: dict) -> dict:
                     reverted = False
                 if not reverted:
                     # the session runs the updated generation, so its on-disk
-                    # source is kept even though no apply record names it
+                    # source is kept and the version gate records the release
                     kept = True
+                    server.SESSION.record_applied_release(
+                        _applied_release(plan, before_generation,
+                                         after_generation))
                 journal.append("auto-revert", planHash=plan_hash,
                                release=plan["release"], reverted=reverted,
                                sessionId=_SESSION_ID,

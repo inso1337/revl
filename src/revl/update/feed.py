@@ -75,7 +75,8 @@ class ResolvedRelease:
             report["channel"] = self.manifest.channel
             report["artifacts"] = [artifact.as_dict()
                                    for artifact in self.manifest.artifacts]
-        report["signed"] = self.signature is not None
+        report["signed"] = bool(self.signature
+                                and self.signature.get("status") == "valid")
         if self.signature is not None:
             report["signature"] = self.signature
         if self.unsigned_accepted:
