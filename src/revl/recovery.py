@@ -27,6 +27,14 @@ The WAL's terminal ``activation-complete`` marker is the whole decision:
   newest-first (LIFO, exactly as an L-Raise teardown would), then states a
   checked verdict with a residue proof.
 
+The marker is scoped to the OPENING it belongs to (issue #3147). A WAL appended
+to by a later run (``--wal PATH`` reuses the file, #641/#642) starts that run
+with a ``generation`` record, and the prior run's marker or ``commit-approved``
+proves only that the PRIOR run finished. Recovery decides by the latest
+opening's own marker and rolls back every opening that never committed; a
+committed opening's effects are never inverted. A single-opening WAL reads
+exactly as it always did.
+
 Why boundary state is the real cargo (the honest analysis)
 ----------------------------------------------------------
 After a crash the process memory is gone. An inverse that closes over an
@@ -294,6 +302,18 @@ def _referent_key(record: dict, world: World) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _scoped_wal(wal: dict, records: list) -> dict:
+    """A copy of ``wal`` whose record list is the subset a decision acts on.
+
+    ``recover`` decides and acts per OPENING (issue #3147): the latest opening's
+    marker picks roll-forward vs roll-back, and a roll-back walks only the
+    openings that never committed. The header, ``torn`` and the caller map are
+    kept unchanged; only ``records`` is narrowed, so every helper that walks the
+    record list sees exactly the interval it is recovering and nothing from an
+    opening whose writes were already committed or already recovered."""
+    return {**wal, "records": records}
+
+
 def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
             reissue: Optional[str] = None,
@@ -330,7 +350,8 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     call's crossing (`within.process`), and is counted with it when the caller's
     WAL holds it (:func:`_split_nested`). ``None`` for a single-process WAL.
     """
-    from .wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
+    from .wal import (  # noqa: PLC0415 — tier-agnostic core, lazy
+        interval_committed, opening_intervals, read_wal)
 
     try:
         wal = read_wal(wal_path)
@@ -356,20 +377,35 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # does NOT re-admit it as a callable continuation. The branch (its own
         # distinct WAL) recovers independently to its own fork point.
         return _with_world(_fork_retired(wal, frozen), world, tally)
-    approved = next((r for r in records
+    # issue #3147: one WAL file can hold more than one OPENING (a later run
+    # reusing the same `--wal` path, or a --watch reload). Every later opening
+    # starts at its own `generation` record, and the prior opening's
+    # `activation-complete` / `commit-approved` prove only that THAT opening
+    # finished. Recover the latest opening by its OWN marker, and roll back
+    # every opening that never committed; a committed opening's effects are
+    # committed work and are never inverted. A single-opening WAL yields one
+    # interval, so every pre-#3147 report is byte-identical.
+    intervals = opening_intervals(records)
+    latest = intervals[-1]
+    approved = next((r for r in latest
                      if r.get("record") == "commit-approved"), None)
-    if wal["complete"]:
-        report = _roll_forward(wal, session=session, snapshot=snapshot)
+    if any(r.get("record") == "activation-complete" for r in latest):
+        report = _roll_forward(_scoped_wal(wal, latest),
+                               session=session, snapshot=snapshot)
     elif approved is not None:
         # item 245, Decision 3, the approved-to-discharged window: a crash after
         # `commit-approved` and before `activation-complete` is a COMMITTED
         # session. The durable approval, not the discharge record, is the commit
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
-        report = _roll_forward_window(wal_path, wal, approved,
-                                      world=bound(), reissue=reissue)
+        report = _roll_forward_window(wal_path, _scoped_wal(wal, latest),
+                                      approved, world=bound(), reissue=reissue)
     else:
-        report = _roll_back(wal, world=bound(), wal_path=wal_path)
+        open_records = [record for interval in intervals
+                        if not interval_committed(interval)
+                        for record in interval]
+        report = _roll_back(_scoped_wal(wal, open_records),
+                            world=bound(), wal_path=wal_path)
 
     # design 460 §5: the forward-recovery scan runs in BOTH branches — an
     # admission can be owed under either verdict, because the session's activation

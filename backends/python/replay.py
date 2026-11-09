@@ -3225,10 +3225,12 @@ class WriteAheadLog:
     def read(path: str) -> dict:
         """Load a WAL from disk into ``{header, records, complete, torn}``.
 
-        ``complete`` is whether the terminal ``activation-complete`` marker is
-        present.  A trailing half-written line (a genuine ``kill -9`` can leave
-        one) is tolerated and reported as ``torn`` rather than crashing the
-        recovery that exists to handle exactly that.
+        ``complete`` is whether the LATEST opening's ``activation-complete``
+        marker is present: a later run reusing the file writes a ``generation``
+        record and owns its own marker, so a prior opening's marker must not read
+        as this one's (issue #3147).  A trailing half-written line (a genuine
+        ``kill -9`` can leave one) is tolerated and reported as ``torn`` rather
+        than crashing the recovery that exists to handle exactly that.
 
         Two integrity gates run first (item 413), fail-closed via
         :class:`WALIntegrityError`: a header ``walVersion`` outside
@@ -3276,6 +3278,14 @@ class WriteAheadLog:
                     )
             elif kind == "activation-complete":
                 complete = True
+                records.append(entry)
+            elif kind == "generation":
+                # issue #3147: a later opening writes this record and then owns
+                # its own terminal marker. Reset, so a reused file's
+                # `activation-complete` (an EARLIER opening's) is not read as the
+                # latest opening's; a crash mid-activation must not borrow the
+                # prior run's completion.
+                complete = False
                 records.append(entry)
             else:
                 records.append(entry)
