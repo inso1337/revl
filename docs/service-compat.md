@@ -81,6 +81,29 @@ running component can break, and the change is admitted **however it drifts**.
 This is the honest strengthening the manifest makes possible: a change that
 breaks the interface is refused only when there is actually something to break.
 
+### The declared types behind a signature
+
+A signature spells a record or variant by name, and `compatible` takes one name
+on both sides to be one type. The running manifest fixes what each name meant
+when its consumers and providers were checked, so the gate also resolves every
+name a **running** service's signature reaches (parameters and returns, through
+`Map`, `List`, `Opt` and other records) against the running manifest's `types`
+and against the candidate's. A name whose declaration, or anything it reaches,
+differs between the two is a `signature` drift: `Rec` gaining, losing or
+retyping a field, a `Secret[Str]` field becoming `Str`, a variant changing a
+case. This runs for every service a running component provides or consumes,
+**whether or not the candidate redeclares it**, so a type-only edit is checked
+too. A service nothing running touches, and a type no touched service reaches,
+are not checked. A field reorder is not a change (fields compare as a set).
+
+It is deliberately strict, as the state hand-off check is (it shares the
+declaration comparison): declarations are compared for identity, so a harmless
+widening of a record is refused and has to be migrated explicitly. A name the
+candidate does not declare keeps the running meaning. A running manifest with
+no `types` cannot prove any name the candidate declares unchanged, so those are
+refused. `revl migrate` applies the same comparison per consumer (a changed
+record reads as a reshaped provision and the consumer is not `movable`).
+
 ## Consumer/provider identification, and the conservative fallback
 
 The composition manifest is `cordisc`-shaped: each component entry carries
@@ -129,6 +152,9 @@ would silently cross the boundary (G4/G8)
   genuine identity elsewhere (`plan`, capability round-trip tests). Two
   declarations of one service in a single compilation remain a **duplicate**,
   never a compatible swap.
+* `admission._admit_service_types` / `admission._service_type_drift` — the
+  declared-types check above, called from `check_and_lower` right after the
+  candidate's types are lowered; `migrate` reuses `_service_type_drift`.
 * `compiler._provision_services` / the `provision_services` ambient field —
   the key → service map the touchers read.
 
