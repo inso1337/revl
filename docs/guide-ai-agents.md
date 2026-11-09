@@ -331,6 +331,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_update_rollback` | return to the generation before the last applied release through the admitted undo | [updates.md](updates.md) |
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
+| `revl_context` | before writing a component: the service declarations it must provide and may require, with no bodies, a clause and a hash per service | [context.md](context.md) |
 | `revl_idiom` | the minimal admitted example of one construct (every hole's fillSpec carries its own) | [mcp-reference.md](mcp-reference.md#revl_idiom) |
 | `revl_act` | one call per action through the approval gate: its class, and executed (a), deferred to commit (b) or ticketed (c), with a receipt the commit manifest lists | [mcp-reference.md](mcp-reference.md#revl_act) |
 | `revl_counterfactual` | replace, insert or drop one action of the `revl_act` log and see how the gate's decisions would differ, with nothing run | [mcp-reference.md](mcp-reference.md#revl_counterfactual) |

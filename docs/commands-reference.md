@@ -10,13 +10,14 @@ The verb set, in the order the parser declares it:
 
 <!-- docgen:cli-verbs begin -->
 ```text
-compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
-layer  audit  goal  policy  simulate  diff  changelog  update  version
-migrate  contract  erase-report  retention-receipt  plan  apply  undo
-canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
-import  export  sourcemap  serve  run  dev  recover  act  estop  slo
-branch  compare  replay  why  metrics  trace  profile  pool  attest
-dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
+compile  explain  context  grammar  idiom  adapt  doctor  scaffold
+composition  layer  audit  goal  policy  simulate  diff  changelog
+update  version  migrate  contract  erase-report  retention-receipt
+plan  apply  undo  canary  promote  query  fmt  quarantine  analyze
+test  mcp  gen-types  import  export  sourcemap  serve  run  dev
+recover  act  estop  slo  branch  compare  replay  why  metrics  trace
+profile  pool  attest  dash  repair  bundle  emit  verify  deploy
+deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -242,6 +243,29 @@ Every idiom compiles, admits for an untrusted author, and, with its internal
 revl idiom                      # the list
 revl idiom emission-method      # one idiom, as text
 revl idiom effect-undo --json
+```
+
+### `revl context`
+
+The service declarations a component must provide and may require, cut
+verbatim from the source with no provider body, so an agent grounds on
+signatures instead of reading the composition. Builds from the parse: a
+component whose body does not check yet still gets its pack. Each service
+carries the clause to write, its providers, the `use` line when it lives in a
+non-root module, and a hash that moves on a signature edit and never on a doc
+edit ([context.md](context.md)).
+
+- `FILES` - the composition's `.rvl` files, required.
+- `--component NAME` - ground this component. Without it, every service the
+  files load. An unknown name exits 1 and lists the components.
+- `--budget TOKENS` - shrink the pack to fit: docs off, then collapse, from the
+  last service backwards. Every service stays named; `fits: false` when even
+  the collapsed pack is over.
+- `--json` - the rows, the pack, and its token size beside the raw files.
+
+```bash
+revl context examples/mediator.rvl --component NotesConsumer
+revl context examples/app/notes.rvl --component NotesConsole --budget 200 --json
 ```
 
 ### `revl grammar`

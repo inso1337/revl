@@ -271,6 +271,8 @@ def test_initialize_and_tools_list(all_mcp_tools):
                           "revl_history_lifetime",
                           # tiered disclosure: the discovery verb (issue #1697)
                           "revl_verbs",
+                          # declarations-only grounding (docs/context.md)
+                          "revl_context",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
                           "revl_replay_forward", "revl_replay_bisect",
