@@ -60,7 +60,13 @@ the hardware's own fields:
   the hardware REPORTED (MRTD for a TD, the launch measurement for a SEV-SNP
   guest), because ``report_data`` binds what the workload said and the register
   is what the platform measured. Without that comparison an enclave running
-  anything at all could bind a body naming a permitted measurement.
+  anything at all could bind a body naming a permitted measurement;
+* the other hardware facts a policy names are compared too: a TD's runtime
+  registers (RTMR0..3, which hold the kernel, root file system and application),
+  its TCB floors and its quoting enclave's identity, and a SEV-SNP guest's TCB.
+  MRTD is only a TD's INITIAL build, so a TDX quote presented to a requirement
+  that states no :class:`TdxPolicy` is REFUSED rather than admitted on MRTD
+  alone; ``TdxPolicy(accept_mrtd_only=True)`` is the explicit narrower choice.
 
 One honest limit, stated rather than papered over: ``bundle`` is a LABEL, and no
 hardware format measures it. What the hardware proves is the MEASUREMENT, and the
@@ -139,6 +145,7 @@ from .tee_quote import (
     DevMacRoot,
     HardwareRoot,
     QuoteFormatError,
+    QuoteVerdict,
     RootError,
     build_sev_snp_report,
     build_tdx_quote,
@@ -219,6 +226,19 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # least 16 bytes is accepted and compared by exact string equality.
 _MEASUREMENT_RE = re.compile(r"(?:[0-9a-f]{2}){16,}")
 _KEY_ID_RE = re.compile(r"[0-9a-f]{16}")
+# A TDX runtime measurement register is 48 bytes, like MRTD, and a permitted
+# runtime measurement is the whole RTMR0..3 quadruple.
+_RTMR_RE = re.compile(r"[0-9a-f]{96}")
+# A TDX TEE_TCB_SVN is 16 one-byte component SVNs, hex-encoded.
+_TCB_SVN_RE = re.compile(r"[0-9a-f]{32}")
+# A quoting enclave's MR_SIGNER / MR_ENCLAVE is an SGX measurement: 32 bytes.
+_QE_IDENTITY_RE = re.compile(r"[0-9a-f]{64}")
+
+# The SEV-SNP TCB version's SVN components, as AMD packs them: bootloader (byte
+# 0), TEE (byte 1), SNP (byte 3) and microcode (byte 4). Every other bit is
+# reserved, and masking them out means a set reserved bit cannot inflate a TCB
+# past a floor.
+SEV_TCB_VERSION_MASK = 0x000000FFFF00FFFF
 
 
 class TeeError(ValueError):
@@ -329,6 +349,102 @@ def _key_bytes(key: Any) -> bytes:
 
 
 @dataclass(frozen=True)
+class TdxPolicy:
+    """What a placement demands of a TDX quote beyond its MRTD, as checkable facts.
+
+    ``measurements`` on a :class:`TeeRequirement` can only express MRTD, the TD's
+    initial measurement, and MRTD does not cover the kernel, root file system or
+    application the TD loaded afterwards. ``runtime_measurements`` is the set of
+    permitted quadruples ``(RTMR0, RTMR1, RTMR2, RTMR3)``, each a 48-byte hex
+    register, so a requirement admits only the boot chains the operator approved.
+    ``accept_mrtd_only=True`` is the explicit acknowledgement that the runtime
+    registers are NOT compared: it cannot be combined with a permitted set, and a
+    policy that names neither is refused because it would accept a TDX quote on
+    MRTD alone without saying so.
+
+    ``min_tee_tcb_svn`` (16 bytes, hex) and ``min_qe_svn``/``min_pce_svn`` are
+    floors the platform must meet: every component of the TEE TCB SVN must be at
+    least the named one, and the quoting-enclave and PCE SVNs must be at least
+    theirs. ``qe_mr_signers``/``qe_mr_enclaves``, when non-empty, are the
+    permitted quoting-enclave identities; the QE Report's MR_SIGNER and
+    MR_ENCLAVE must be members. Each floor and set is optional, and absent means
+    the operator stated no demand for that fact.
+    """
+
+    runtime_measurements: frozenset[tuple[str, str, str, str]] = frozenset()
+    accept_mrtd_only: bool = False
+    min_tee_tcb_svn: str = ""
+    min_qe_svn: int = 0
+    min_pce_svn: int = 0
+    qe_mr_signers: frozenset[str] = frozenset()
+    qe_mr_enclaves: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.accept_mrtd_only, bool):
+            raise TeeError(
+                f"accept_mrtd_only must be a boolean, got {self.accept_mrtd_only!r}")
+        try:
+            runtime = frozenset(tuple(entry) for entry in self.runtime_measurements)
+        except TypeError as error:
+            raise TeeError(
+                f"runtime_measurements must be an iterable of RTMR quadruples, got "
+                f"{self.runtime_measurements!r}") from error
+        if runtime and self.accept_mrtd_only:
+            raise TeeError(
+                "a TDX policy that names permitted runtime measurements and also "
+                "accepts MRTD alone is contradictory: either compare the runtime "
+                "registers or say explicitly that they are not compared")
+        if not runtime and not self.accept_mrtd_only:
+            raise TeeError(
+                "a TDX policy with no permitted runtime measurement accepts a TD "
+                "whose runtime registers (the kernel, root file system and "
+                "application) were never compared; name the permitted RTMRs or say "
+                "accept_mrtd_only=True")
+        for entry in runtime:
+            if len(entry) != 4:
+                raise TeeError(
+                    f"permitted runtime measurement {entry!r} must have four RTMR "
+                    f"values (RTMR0 through RTMR3), got {len(entry)}")
+            for register, value in enumerate(entry):
+                if not isinstance(value, str) or not _RTMR_RE.fullmatch(value):
+                    raise TeeError(
+                        f"permitted runtime measurement {entry!r} RTMR{register} "
+                        f"must be a 48-byte lowercase hex register (96 hex digits), "
+                        f"got {value!r}")
+        object.__setattr__(self, "runtime_measurements", runtime)
+        if not isinstance(self.min_tee_tcb_svn, str):
+            raise TeeError(
+                f"min_tee_tcb_svn must be a 16-byte hex TCB SVN or the empty "
+                f"string, got {self.min_tee_tcb_svn!r}")
+        if self.min_tee_tcb_svn and not _TCB_SVN_RE.fullmatch(self.min_tee_tcb_svn):
+            raise TeeError(
+                f"min_tee_tcb_svn must be a 16-byte lowercase hex TCB SVN (32 hex "
+                f"digits), got {self.min_tee_tcb_svn!r}")
+        for name in ("min_qe_svn", "min_pce_svn"):
+            value = getattr(self, name)
+            if (not isinstance(value, int) or isinstance(value, bool)
+                    or not 0 <= value <= 0xFFFF):
+                raise TeeError(
+                    f"{name} must be an integer SVN in the quote header's 16-bit "
+                    f"range, got {value!r}")
+        for name in ("qe_mr_signers", "qe_mr_enclaves"):
+            spelled = getattr(self, name)
+            if isinstance(spelled, str) or not isinstance(
+                    spelled, (frozenset, set, tuple, list)):
+                raise TeeError(
+                    f"{name} must be an iterable of 32-byte hex quoting-enclave "
+                    f"identities, got {spelled!r}")
+            values = []
+            for value in spelled:
+                if not isinstance(value, str) or not _QE_IDENTITY_RE.fullmatch(value):
+                    raise TeeError(
+                        f"{name} entries must be 32-byte lowercase hex SGX "
+                        f"measurements (64 hex digits), got {value!r}")
+                values.append(value)
+            object.__setattr__(self, name, frozenset(values))
+
+
+@dataclass(frozen=True)
 class TeeRequirement:
     """What a placement DEMANDS of an attested worker, as checkable facts.
 
@@ -341,6 +457,13 @@ class TeeRequirement:
     required posture, and ``forbidden`` is the only value this item defines:
     anything else asks for no requirement. ``max_age_s`` bounds how old a proof
     may be at the moment it is checked.
+
+    ``tdx`` states what this placement demands of a TDX quote beyond its MRTD
+    (:class:`TdxPolicy`). A requirement with ``tdx=None`` proves no TDX runtime
+    fact, so :func:`tee_admits` refuses a TDX quote rather than admitting it on
+    MRTD alone. ``sev_min_tcb`` is the minimum SEV-SNP TCB version a report must
+    carry; its SVN components are compared, so firmware older than the floor is
+    refused.
     """
 
     bundle: str
@@ -349,6 +472,8 @@ class TeeRequirement:
     regions: frozenset[str]
     outbound_network: str = OUTBOUND_FORBIDDEN
     max_age_s: float = DEFAULT_MAX_AGE_S
+    tdx: Optional[TdxPolicy] = None
+    sev_min_tcb: Optional[int] = None
 
     def __post_init__(self) -> None:
         _require_sha256(self.bundle, "the approved bundle")
@@ -381,6 +506,17 @@ class TeeRequirement:
                 f"max_age_s must be a positive number of seconds, got "
                 f"{self.max_age_s!r}; an unbounded age admits a proof of any "
                 f"past run")
+        if self.tdx is not None and not isinstance(self.tdx, TdxPolicy):
+            raise TeeError(
+                f"tdx must be a TdxPolicy or absent, got "
+                f"{type(self.tdx).__name__}")
+        if self.sev_min_tcb is not None:
+            if (not isinstance(self.sev_min_tcb, int)
+                    or isinstance(self.sev_min_tcb, bool)
+                    or not 0 <= self.sev_min_tcb < 1 << 64):
+                raise TeeError(
+                    f"sev_min_tcb must be an unsigned 64-bit TCB version, got "
+                    f"{self.sev_min_tcb!r}")
 
 
 # --------------------------------------------------------------------------
@@ -729,14 +865,25 @@ def verify_evidence(record: Mapping, attester_key: Optional[bytes] = None, *,
     fails the MAC here (domain separation) rather than being read as enclave
     evidence. This function checks the record's OWN consistency; whether it
     satisfies a placement is :func:`tee_admits`."""
+    ok, reason, _ = _verify_evidence(record, attester_key, root=root, now=now)
+    return ok, reason
+
+
+def _verify_evidence(record: Mapping, attester_key: Optional[bytes] = None, *,
+                     root: Optional[AttestationRoot] = None,
+                     now: Optional[datetime] = None
+                     ) -> tuple[bool, str, Optional[QuoteVerdict]]:
+    """The body of :func:`verify_evidence`, plus the hardware verdict a placement
+    policy reads. The verdict is ``None`` on the MAC path and on every refusal,
+    so a caller comparing hardware facts can only compare an ACCEPTED quote's."""
     if not isinstance(record, Mapping):
-        return False, "enclave evidence is not an object"
+        return False, "enclave evidence is not an object", None
     try:
         resolved, problem = _resolve_root(root, attester_key)
     except RootError as error:
-        return False, f"the attestation root is unusable: {error}"
+        return False, f"the attestation root is unusable: {error}", None
     if resolved is None:
-        return False, problem
+        return False, problem, None
     declared = record.get("sign_alg")
     if isinstance(resolved, HardwareRoot):
         if declared not in QUOTE_SIGN_ALGS:
@@ -744,33 +891,35 @@ def verify_evidence(record: Mapping, attester_key: Optional[bytes] = None, *,
                 f"a hardware attestation root decides a hardware quote, but this "
                 f"evidence declares sign_alg {declared!r}; a symmetric-MAC record "
                 f"is not evidence against a hostile peer and is refused here "
-                f"rather than verified with the wrong primitive")
+                f"rather than verified with the wrong primitive"), None
         return _verify_quote_evidence(record, resolved, declared, now)
     if declared not in (SIGN_ALG, None):
         return False, (
             f"this evidence declares sign_alg {declared!r}, which needs a hardware "
             f"attestation root; the development symmetric-MAC verifier cannot "
-            f"decide a quote {DEV_ROOT_NOTE}")
+            f"decide a quote {DEV_ROOT_NOTE}"), None
     key = resolved.key  # type: ignore[union-attr]
     given = record.get(SIGNATURE_FIELD)
     if not isinstance(given, str):
-        return False, "enclave evidence carries no attestation signature"
+        return False, "enclave evidence carries no attestation signature", None
     try:
         expected = _sign(record, key, EVIDENCE_SIGN_DOMAIN)
     except NotCanonicalizable as error:
-        return False, f"enclave evidence cannot be verified: {error}"
+        return False, f"enclave evidence cannot be verified: {error}", None
     if not hmac.compare_digest(expected, given):
         return False, ("attestation signature mismatch: wrong attester key, or the "
-                       "evidence was tampered with after it was issued")
+                       "evidence was tampered with after it was issued"), None
     envelope = _validate_evidence(record, SIGN_ALG)
     if envelope:
-        return False, envelope
-    return True, f"valid: enclave evidence is authentic and well formed {DEV_ROOT_NOTE}"
+        return False, envelope, None
+    return (True, f"valid: enclave evidence is authentic and well formed "
+                  f"{DEV_ROOT_NOTE}", None)
 
 
 def _verify_quote_evidence(record: Mapping, root: HardwareRoot, sign_alg: str,
-                           now: Optional[datetime]) -> tuple[bool, str]:
-    """The hardware half of :func:`verify_evidence`.
+                           now: Optional[datetime]
+                           ) -> tuple[bool, str, Optional[QuoteVerdict]]:
+    """The hardware half of :func:`verify_evidence`, with the verdict.
 
     Every step refuses rather than raises. The order matters: the quote's own
     chain to the pinned root is proven before anything the record says is read as
@@ -781,38 +930,167 @@ def _verify_quote_evidence(record: Mapping, root: HardwareRoot, sign_alg: str,
         return False, (
             f"the evidence declares the hardware format {sign_alg!r} but carries "
             f"no {QUOTE_FIELD!r}, so there is nothing for the attestation root to "
-            f"verify")
+            f"verify"), None
     try:
         blob = bytes.fromhex(raw)
     except ValueError:
-        return False, f"the evidence's {QUOTE_FIELD!r} member is not hex"
+        return False, f"the evidence's {QUOTE_FIELD!r} member is not hex", None
     try:
         expect = evidence_report_data(record)
     except TeeError as error:
-        return False, f"enclave evidence cannot be verified: {error}"
+        return False, f"enclave evidence cannot be verified: {error}", None
     endorsement = record.get(ENDORSEMENT_FIELD)
     if endorsement is not None and not isinstance(endorsement, Mapping):
         return False, (f"the evidence's {ENDORSEMENT_FIELD!r} member is not an "
-                       f"object")
+                       f"object"), None
     try:
         verdict = verify_quote(
             blob, sign_alg=sign_alg, root=root, expect_report_data=expect,
             platform_key_id=record.get("key_id"), endorsement=endorsement, now=now)
     except QuoteFormatError as error:
-        return False, f"the attestation root refused the quote: {error}"
+        return False, f"the attestation root refused the quote: {error}", None
     if not verdict.ok:
-        return False, f"the attestation root refused the quote: {verdict.reason}"
+        return False, f"the attestation root refused the quote: {verdict.reason}", None
     envelope = _validate_evidence(record, sign_alg)
     if envelope:
-        return False, envelope
+        return False, envelope, None
     if record["measurement"] != verdict.measurement:
         return False, (
             f"the evidence states measurement {record['measurement']}, but the "
             f"quote's own measurement register reads {verdict.measurement}: the "
             f"enclave that signed this quote is not the enclave the evidence "
-            f"describes")
+            f"describes"), None
     return True, (f"valid: {verdict.reason}, and the evidence's claims are the "
-                  f"claims that quote binds")
+                  f"claims that quote binds"), verdict
+
+
+def _tdx_policy_refusal(verdict: QuoteVerdict, policy: TdxPolicy) -> str:
+    """Compare a TDX quote's runtime registers, TCB and quoting enclave against
+    the policy. The quote already reached the pinned root, so these facts are the
+    platform's own; the policy decides whether they are the permitted ones."""
+    if policy.runtime_measurements:
+        reported = tuple(verdict.runtime_measurements)
+        if reported not in policy.runtime_measurements:
+            return (
+                f"the TD's runtime registers (RTMR0..3) read "
+                f"{', '.join(reported)}, which is not a permitted runtime "
+                f"measurement {sorted(policy.runtime_measurements)}: MRTD covers "
+                f"the TD's initial build and does not prove the kernel, root file "
+                f"system or application it loaded afterwards")
+    if policy.min_tee_tcb_svn:
+        floor = bytes.fromhex(policy.min_tee_tcb_svn)
+        reported = bytes.fromhex(verdict.tee_tcb_svn)
+        below = [index for index in range(len(floor))
+                 if reported[index] < floor[index]]
+        if below:
+            index = below[0]
+            return (
+                f"the TD's tee_tcb_svn is {verdict.tee_tcb_svn}, below the "
+                f"requirement's minimum {policy.min_tee_tcb_svn}: component "
+                f"{index} is {reported[index]:02x} where the floor is "
+                f"{floor[index]:02x}, so the TDX module is older than the operator "
+                f"permits")
+    if verdict.qe_svn < policy.min_qe_svn:
+        return (
+            f"the quote's qe_svn is {verdict.qe_svn}, below the requirement's "
+            f"minimum {policy.min_qe_svn}: the quoting enclave is older than the "
+            f"operator permits")
+    if verdict.pce_svn < policy.min_pce_svn:
+        return (
+            f"the quote's pce_svn is {verdict.pce_svn}, below the requirement's "
+            f"minimum {policy.min_pce_svn}: the PCE is older than the operator "
+            f"permits")
+    if policy.qe_mr_signers and verdict.qe_mr_signer not in policy.qe_mr_signers:
+        return (
+            f"the quoting enclave's mr_signer is {verdict.qe_mr_signer}, not one of "
+            f"the permitted {sorted(policy.qe_mr_signers)}: the quote came from a "
+            f"quoting enclave the operator did not pin")
+    if policy.qe_mr_enclaves and verdict.qe_mr_enclave not in policy.qe_mr_enclaves:
+        return (
+            f"the quoting enclave's mr_enclave is {verdict.qe_mr_enclave}, not one "
+            f"of the permitted {sorted(policy.qe_mr_enclaves)}: the quote came from "
+            f"a quoting enclave build the operator did not pin")
+    return ""
+
+
+def _sev_tcb_refusal(verdict: QuoteVerdict, floor: int) -> str:
+    """Compare the SEV-SNP report's TCB version against a floor, component by
+    component, so a high SVN in one byte cannot offset a low one in another. Only
+    the bootloader, TEE, SNP and microcode bytes are compared, so a set reserved
+    bit cannot inflate it past the floor."""
+    floor_svn = floor & SEV_TCB_VERSION_MASK
+    for name, value in (("reported_tcb", verdict.sev_reported_tcb),
+                        ("current_tcb", verdict.sev_current_tcb)):
+        reported_svn = value & SEV_TCB_VERSION_MASK
+        below = [
+            byte for byte in range(8)
+            if ((reported_svn >> (8 * byte)) & 0xFF
+                < (floor_svn >> (8 * byte)) & 0xFF)
+        ]
+        if below:
+            byte = below[0]
+            reported_byte = (reported_svn >> (8 * byte)) & 0xFF
+            floor_byte = (floor_svn >> (8 * byte)) & 0xFF
+            return (
+                f"the SEV-SNP report's {name} is 0x{value:016x}, below the "
+                f"requirement's minimum TCB 0x{floor:016x}: component byte {byte} "
+                f"is 0x{reported_byte:02x} where the floor is 0x{floor_byte:02x}, "
+                f"so the platform's firmware is older than the operator permits")
+    return ""
+
+
+def _hardware_policy_refusal(verdict: Optional[QuoteVerdict],
+                             requirement: TeeRequirement) -> str:
+    """Refuse a placement whose hardware-fact policy this evidence cannot meet:
+    a stated demand is unmet, or the evidence is of a format that does not carry
+    the demanded facts at all. An empty string means every stated policy holds."""
+    policy = requirement.tdx
+    hardware = verdict is not None
+    is_tdx = hardware and verdict.format == SIGN_ALG_TDX
+    is_sev = hardware and verdict.format == SIGN_ALG_SEV_SNP
+    tdx_facts = policy is not None and bool(
+        policy.runtime_measurements or policy.min_tee_tcb_svn
+        or policy.min_qe_svn or policy.min_pce_svn
+        or policy.qe_mr_signers or policy.qe_mr_enclaves)
+    if policy is not None:
+        if not hardware and tdx_facts:
+            return (
+                "the requirement states a TDX runtime-register, TCB or "
+                "quoting-enclave policy, but the evidence is a symmetric-MAC "
+                "record: nothing hardware-rooted was checked, so it carries no "
+                "register, TCB or quoting enclave to compare")
+        if is_sev and tdx_facts:
+            return (
+                "the requirement states a TDX runtime-register, TCB or "
+                "quoting-enclave policy, but the evidence is a SEV-SNP report, "
+                "which carries none of those fields: the demand cannot be met by "
+                "this format")
+        if is_tdx:
+            problem = _tdx_policy_refusal(verdict, policy)
+            if problem:
+                return problem
+    elif is_tdx:
+        return (
+            "the evidence is a TDX quote, but the requirement states no TDX "
+            "policy: MRTD is the TD's initial build and does not cover the kernel, "
+            "root file system or application in its runtime registers (RTMR0..3), "
+            "so the placement refuses rather than accepting on MRTD alone; name "
+            "the permitted runtime measurements in TdxPolicy, or say "
+            "accept_mrtd_only=True to accept the narrower claim")
+    if requirement.sev_min_tcb is not None:
+        if not hardware:
+            return (
+                "the requirement states a SEV-SNP TCB floor, but the evidence is a "
+                "symmetric-MAC record: nothing hardware-rooted was checked, so it "
+                "carries no TCB to compare")
+        if not is_sev:
+            return (
+                "the requirement states a SEV-SNP TCB floor, but the evidence is a "
+                "TDX quote, which carries no SEV-SNP TCB")
+        problem = _sev_tcb_refusal(verdict, requirement.sev_min_tcb)
+        if problem:
+            return problem
+    return ""
 
 
 def tee_admits(record: Mapping, requirement: TeeRequirement, *,
@@ -842,12 +1120,16 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
     3. **the peer** the evidence names, which must be the peer being placed;
     4. **the bundle** the enclave runs, which must be the approved one;
     5. **the measurement**, which must be in the permitted set;
-    6. **the region**, which must be in the permitted set;
-    7. **the network posture**, which must equal the requirement's;
-    8. **the challenge**, which the evidence must answer;
-    9. **freshness** — not issued beyond the clock skew, not expired, and not
-       older than ``max_age_s``;
-    10. **replay** — the challenge must not have been consumed for this peer.
+    6. **the hardware facts** a TDX or SEV-SNP policy names (the runtime
+       registers, the TCB floors and the quoting-enclave identity), which must
+       equal or fall within what the policy permits, and a TDX quote is refused
+       outright when the requirement states no TDX policy;
+    7. **the region**, which must be in the permitted set;
+    8. **the network posture**, which must equal the requirement's;
+    9. **the challenge**, which the evidence must answer;
+    10. **freshness** — not issued beyond the clock skew, not expired, and not
+        older than ``max_age_s``;
+    11. **replay** — the challenge must not have been consumed for this peer.
 
     ``replay_ledger`` is the caller's ledger of ``(nonce, peer_id)`` pairs. It is
     required (a proof with no ledger cannot be checked for replay, so it is
@@ -891,7 +1173,7 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
             "the evidence names the peer's own offer key as the platform that "
             "signed its quote, so the chain terminates inside the peer: an "
             "attestation root is a key the peer does not hold")
-    ok, reason = verify_evidence(record, attester_key, root=root, now=now)
+    ok, reason, verdict = _verify_evidence(record, attester_key, root=root, now=now)
     if not ok:
         return False, reason
 
@@ -905,6 +1187,13 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
         return False, (f"the enclave measurement {record['measurement']} is not in "
                        f"the requirement's permitted set "
                        f"{sorted(requirement.measurements)}")
+    # The measurement above is what the record STATES and the quote's register
+    # agrees with; a TDX or SEV-SNP policy goes on to compare the other hardware
+    # facts the quote carries, and to refuse a TDX quote the requirement says
+    # nothing about rather than admitting it on MRTD alone.
+    hardware_problem = _hardware_policy_refusal(verdict, requirement)
+    if hardware_problem:
+        return False, hardware_problem
     if record["region"] not in requirement.regions:
         return False, (f"the enclave sits in region {record['region']!r}, which is not "
                        f"in the requirement's permitted set "

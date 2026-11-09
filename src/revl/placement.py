@@ -80,7 +80,7 @@ from .errors import RevlError
 from .peer_offer import PlacementSlot, offer_admission, offer_eligible
 from .refusal import refusals
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
-from .tee_attestation import TeeError, TeeRequirement
+from .tee_attestation import TeeError, TeeRequirement, TdxPolicy
 from .typecheck import FN_HEAD, parse_type
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
@@ -853,6 +853,20 @@ def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> b
 #     max_age_s = 120                    # optional: the proof's freshness window
 #     nonce = "<challenge>"              # optional: else one is minted here
 #
+# A TDX quote is refused unless the table states what it demands of the quote
+# beyond MRTD (the runtime registers, TCB and quoting enclave); the keys below
+# spell that demand, and `accept_mrtd_only` is the explicit narrower choice.
+# `sev_min_tcb` is the SEV-SNP TCB floor, on the same terms:
+#
+#     runtime_measurements = [["<rtmr0>", "<rtmr1>", "<rtmr2>", "<rtmr3>"]]
+#     accept_mrtd_only = true            # only when the registers are not compared
+#     min_tee_tcb_svn = "<32 hex>"       # optional TDX TCB floor
+#     min_qe_svn = 3                     # optional quoting-enclave SVN floor
+#     min_pce_svn = 3                    # optional PCE SVN floor
+#     qe_mr_signers = ["<64 hex>"]       # optional permitted QE signers
+#     qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
+#     sev_min_tcb = 0x0100000000000000   # optional SEV-SNP TCB floor
+#
 # This surface PARSES into the `TeeRequirement` that `tee_attestation.py` already
 # defines and is checked by the `tee_admits` it already has: there is no second
 # implementation of "attested" here, only a second way to spell the demand, so
@@ -869,7 +883,14 @@ TEE_REQUIREMENT_WORDS = (TEE_WORD_ATTESTED,)
 #: Every key `[processes.<p>.attest]` knows. An unknown one is refused by name,
 #: so a typo cannot silently drop a demand (`DEPLOY_KEYS`, item 118).
 ATTEST_KEYS = ("requires", "bundle", "measurements", "region", "regions",
-               "outbound_network", "max_age_s", "nonce")
+               "outbound_network", "max_age_s", "nonce",
+               "runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
+               "min_qe_svn", "min_pce_svn", "qe_mr_signers", "qe_mr_enclaves",
+               "sev_min_tcb")
+#: The subset of keys that spells a :class:`~revl.tee_attestation.TdxPolicy`;
+#: a table carrying any of them states one.
+_ATTEST_TDX_KEYS = ("runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
+                    "min_qe_svn", "min_pce_svn", "qe_mr_signers", "qe_mr_enclaves")
 #: `region` and `regions` are the singular and plural of ONE fact, so a table
 #: carrying both is ambiguous and refused rather than resolved by a rule.
 _ATTEST_REGION_KEYS = ("region", "regions")
@@ -886,6 +907,47 @@ def _attest_text_list(raw: dict, process: str, key: str) -> tuple[list[str] | No
         return None, (f"process {process!r} [attest]: every `{key}` entry must be "
                       f"a string, got {bad!r}")
     return list(spelled), None
+
+
+def _attest_bool(raw: dict, process: str, key: str) -> tuple[bool, str | None]:
+    """`[processes.<p>.attest].<key>` as a boolean, or a diagnostic."""
+    spelled = raw.get(key)
+    if not isinstance(spelled, bool):
+        return False, (f"process {process!r} [attest]: `{key}` must be a boolean, "
+                       f"got {spelled!r}")
+    return spelled, None
+
+
+def _attest_int(raw: dict, process: str, key: str) -> tuple[int | None, str | None]:
+    """`[processes.<p>.attest].<key>` as an integer, or a diagnostic. A TOML
+    integer is not a boolean here even though Python's `bool` is an `int`."""
+    spelled = raw.get(key)
+    if not isinstance(spelled, int) or isinstance(spelled, bool):
+        return None, (f"process {process!r} [attest]: `{key}` must be an integer, "
+                      f"got {spelled!r}")
+    return spelled, None
+
+
+def _attest_rtmrs(raw: dict, process: str
+                  ) -> tuple[list[tuple[str, str, str, str]] | None, str | None]:
+    """`runtime_measurements` as a list of four-value register quadruples."""
+    spelled = raw.get("runtime_measurements")
+    if not isinstance(spelled, (list, tuple)):
+        return None, (f"process {process!r} [attest]: `runtime_measurements` must "
+                      f"be a list of RTMR quadruples, got {spelled!r}")
+    entries: list[tuple[str, str, str, str]] = []
+    for index, entry in enumerate(spelled):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+            return None, (
+                f"process {process!r} [attest]: `runtime_measurements` entry "
+                f"{index} must be a list of exactly four register values (RTMR0 "
+                f"through RTMR3), got {entry!r}")
+        if any(not isinstance(value, str) for value in entry):
+            return None, (
+                f"process {process!r} [attest]: every `runtime_measurements` entry "
+                f"must be a list of strings, got {entry!r}")
+        entries.append((entry[0], entry[1], entry[2], entry[3]))
+    return entries, None
 
 
 def parse_tee_requirement(placement: dict, process: str, *,
@@ -963,6 +1025,48 @@ def parse_tee_requirement(placement: dict, process: str, *,
     if problem:
         return None, problem
 
+    tdx: TdxPolicy | None = None
+    if any(key in raw for key in _ATTEST_TDX_KEYS):
+        tdx_fields: dict = {}
+        if "runtime_measurements" in raw:
+            entries, problem = _attest_rtmrs(raw, process)
+            if problem:
+                return None, problem
+            tdx_fields["runtime_measurements"] = frozenset(entries)
+        if "accept_mrtd_only" in raw:
+            accept, problem = _attest_bool(raw, process, "accept_mrtd_only")
+            if problem:
+                return None, problem
+            tdx_fields["accept_mrtd_only"] = accept
+        if "min_tee_tcb_svn" in raw:
+            floor = raw["min_tee_tcb_svn"]
+            if not isinstance(floor, str):
+                return None, (f"process {process!r} [attest]: `min_tee_tcb_svn` "
+                              f"must be a hex string, got {floor!r}")
+            tdx_fields["min_tee_tcb_svn"] = floor
+        for key in ("min_qe_svn", "min_pce_svn"):
+            if key in raw:
+                floor, problem = _attest_int(raw, process, key)
+                if problem:
+                    return None, problem
+                tdx_fields[key] = floor
+        for key in ("qe_mr_signers", "qe_mr_enclaves"):
+            if key in raw:
+                values, problem = _attest_text_list(raw, process, key)
+                if problem:
+                    return None, problem
+                tdx_fields[key] = frozenset(values)
+        try:
+            tdx = TdxPolicy(**tdx_fields)
+        except TeeError as error:
+            return None, f"process {process!r} [attest]: {error}"
+
+    sev_min_tcb: int | None = None
+    if "sev_min_tcb" in raw:
+        sev_min_tcb, problem = _attest_int(raw, process, "sev_min_tcb")
+        if problem:
+            return None, problem
+
     challenge = raw.get("nonce")
     if challenge is None:
         challenge = nonce if nonce is not None else secrets.token_urlsafe(32)
@@ -973,6 +1077,7 @@ def parse_tee_requirement(placement: dict, process: str, *,
                                      measurements=frozenset(measurements),
                                      nonce=challenge,
                                      regions=frozenset(regions),
+                                     tdx=tdx, sev_min_tcb=sev_min_tcb,
                                      **optional)
     except TeeError as error:
         return None, f"process {process!r} [attest]: {error}"
@@ -997,6 +1102,27 @@ def render_tee_requirement(requirement: TeeRequirement, *,
         lines.append("regions = [" + ", ".join(json.dumps(r) for r in regions) + "]")
     lines.append(f"outbound_network = {json.dumps(requirement.outbound_network)}")
     lines.append(f"max_age_s = {requirement.max_age_s!r}")
+    if requirement.tdx is not None:
+        policy = requirement.tdx
+        if policy.runtime_measurements:
+            lines.append("runtime_measurements = [" + ", ".join(
+                "[" + ", ".join(json.dumps(value) for value in entry) + "]"
+                for entry in sorted(policy.runtime_measurements)) + "]")
+        if policy.accept_mrtd_only:
+            lines.append("accept_mrtd_only = true")
+        if policy.min_tee_tcb_svn:
+            lines.append(f"min_tee_tcb_svn = {json.dumps(policy.min_tee_tcb_svn)}")
+        if policy.min_qe_svn:
+            lines.append(f"min_qe_svn = {policy.min_qe_svn!r}")
+        if policy.min_pce_svn:
+            lines.append(f"min_pce_svn = {policy.min_pce_svn!r}")
+        for name in ("qe_mr_signers", "qe_mr_enclaves"):
+            values = getattr(policy, name)
+            if values:
+                lines.append(f"{name} = [" + ", ".join(
+                    json.dumps(value) for value in sorted(values)) + "]")
+    if requirement.sev_min_tcb is not None:
+        lines.append(f"sev_min_tcb = {requirement.sev_min_tcb!r}")
     lines.append(f"nonce = {json.dumps(requirement.nonce)}")
     return "\n".join(lines) + "\n"
 
