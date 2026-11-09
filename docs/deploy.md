@@ -116,6 +116,42 @@ trust = deploy.TrustStore(keys={key_id: verify_key}, backend="python",
                           require_gauntlet=True, require_conformance=True)
 ```
 
+### Setting the receiver's rules on the far host
+
+`TrustStore` is the receiver's, so the far host sets these rules on its OWN
+command line, never in a request (design S2.4). `revl deploy-admit` accepts one
+flag per rule, and all of them are opt-in:
+
+| flag | `TrustStore` field | refuses |
+| --- | --- | --- |
+| `--max-age SECONDS` | `evidence_ttl_seconds` | `evidence-stale` when the signed timestamp is more than SECONDS old |
+| `--not-before INSTANT` | `not_before` | `evidence-stale` when the attestation predates INSTANT (a unix timestamp or an ISO-8601 instant), typically the last deploy this host accepted |
+| `--capability-ceiling NAME` | `capability_ceiling` | `capability-ceiling` when the staged composition reaches a capability outside the repeated names |
+| `--revoked-key KEY_ID` | `revoked` | `signer-untrusted` when the signer's key is listed; repeatable, so one signer is revoked while the other key files stay in force |
+| `--recheck-source` | `recheck_source` | `source-or-ir-hash` unless the host's own frontend admits the staged source and reproduces the staged IR |
+
+A runner that names none of them keeps Slice 1's behaviour: the rules default
+to off, and an unconfigured host still admits what a trusted key signed. Behind
+`via = ssh`, the same flags reach the far runner through the deploy map's
+`extra_args` (the allowlist there is exactly the runner's own flags):
+
+```toml
+[processes.worker.deploy]
+via             = "ssh"
+host            = "deploy@edge"
+known_hosts     = "/etc/revl/known_hosts"
+host_key        = "/etc/revl/edge-receipt.key"
+remote_bundle   = "/srv/revl/app.revlbundle"
+extra_args      = ["--key", "/etc/revl/deploy/trust.key",
+                   "--max-age", "604800",
+                   "--not-before", "2026-01-01T00:00:00+00:00"]
+```
+
+The local `revl deploy --bundle` check (`admit_bundle_chain`) is the conductor
+verifying a bundle on its own disk; it takes the keys, the backend and the two
+`--require-*` floors, and none of the receiver-side rules above. Those belong to
+the host that will run the bytes, which is the `revl deploy-admit` runner.
+
 ### The ceiling is measured off the IR, not off `policy.json`
 
 `policy.json` is a **projection**: `build_bundle` derives it from the IR with
