@@ -153,11 +153,11 @@ contract:
 
 * **The declaration is emitted.** A component that declares a `handoff` carries
   `handoff: {key, type}` on its emitted component object, and the emitter
-  records each stateful acquisition of that component (`Map.new`, `Pool.open`)
-  on its activation `Frame` in acquisition order — the ts analog of py's
-  `frame._resources`. Both are additive: a component with no `handoff` emits
-  byte-identically to before.
-* **Capture before teardown, check the whole cohort, then apply.**
+  records each bound `Map`/`Pool` acquisition of that component (`Map.new`,
+  `Pool.open`) on its activation `Frame` in acquisition order — the ts analog
+  of py's `frame._resources`. Both are additive: a component with no `handoff`
+  emits byte-identically to before.
+* **Capture before teardown, check the whole vector, then apply.**
   `swapProvider` snapshots the live predecessor's vector, disposes it, loads
   the successor, checks the successor's fresh vector (same length, same type at
   each position) and only then seats each snapshot through the resource's
@@ -172,8 +172,12 @@ contract:
 
 Admission is the same compiler-side gate
 (`admission._handoff_compatible`), run on the candidate against the running
-manifest; the ts runtime vector check is the same defence in depth as the py
-session's.
+manifest. The ts tier has no MCP session engine and no trusted-proposal path,
+so the caller contract is that the successor was admitted against the running
+manifest, as for any emitted module. The runtime check is structural (vector
+length and each resource's host class), the same defence in depth py's session
+performs, but it does not re-prove the declared §5 type relation: a same-class
+retype is admission's to refuse.
 
 ## Files
 
@@ -192,5 +196,7 @@ session's.
   `MapHandle.__revl_state__`/`__revl_restore__`);
 * tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime),
   `tests/test_state_handoff_exec.py` (the warm start and the rollback, on
-  cordis-py) and `backends/typescript/tests/handoff_swap.test.ts` (the warm
-  start, the opt-out and the rollback, executed on cordis-ts).
+  cordis-py), `backends/typescript/tests/handoff_swap.test.ts` (the warm
+  start, the opt-out, the realm cases and the rollback, executed on cordis-ts)
+  and `backends/typescript/test_handoff_ts.py` (the emitted declaration and
+  tracking, inert emission, admission refusal and acceptance).

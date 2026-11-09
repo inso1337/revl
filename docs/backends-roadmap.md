@@ -20,7 +20,7 @@ The through-line across every past wave: **a claim with no gate behind it** — 
 Ownership dictates fix path: **wasm and py are first-party** (change directly); **rs/ts/java are upstream** (fork → fix → PR, with sign-off before any external push). See the runtime-ownership memory.
 
 > ## ✅ Backend roadmap complete
-> Every tier does **spawn**, the **instance accessor** (`s.<key>`), and **hot-swap**; state migration is the py reference's live-instance channel plus **provider state hand-off** (`handoff`, item 53) on both py and ts; **wasm-to-zero** landed (19→7 genuine boundaries); **cordis-go** is a full sixth tier at 0 conformance gaps. The only remaining backend item is **C / C++ / Zig**, which is *not* revl-side work — it is blocked on those Cordis runtimes existing (runtime-authoring, the user's domain, like cordis-wasm). revl's side starts the moment one runs.
+> Every tier does **spawn**, the **instance accessor** (`s.<key>`), and **hot-swap**; the live-instance state channel is the py reference's, and **provider state hand-off** (`handoff`, item 53) now runs on both py and ts; **wasm-to-zero** landed (19→7 genuine boundaries); **cordis-go** is a full sixth tier at 0 conformance gaps. The only remaining backend item is **C / C++ / Zig**, which is *not* revl-side work — it is blocked on those Cordis runtimes existing (runtime-authoring, the user's domain, like cordis-wasm). revl's side starts the moment one runs.
 
 ---
 

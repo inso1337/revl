@@ -31,6 +31,7 @@ import { Cache, CacheV2 } from './generated/handoff_swap.ts'
 import {
   captureProviderState,
   Frame,
+  liveResources,
   MapHandle,
   plug,
   resetHost,
@@ -192,7 +193,11 @@ function placedCache(
     handoff: { key: 'cache', type: 'Map[Str, Str]' },
     apply(ctx: Context) {
       const frame = new Frame(ctx, name)
+      // Mirror the emitter: one Map tracked on the frame, its drop a cordis
+      // effect disposer (registered before the provide, so the provision is
+      // withdrawn before the Map is dropped), reclaiming it on dispose.
       const m = frame.track(new MapHandle())
+      ctx.effect(() => () => m.drop())
       ctx.effect(() => ctx.provide('cache', {
         get: (k: string) => m.get(k),
         put: (k: string, v: string) => { m.insert(k, v) },
@@ -247,5 +252,107 @@ describe('state hand-off and realm placement', () => {
 
     await successor.dispose()
     await flush()
+  })
+})
+
+describe('the swap gate refuses a successor that cannot hold the vector', () => {
+  /** A component that declares a hand-off but acquires no tracked resource
+   *  (a conditional acquisition, or state the emitter cannot see). */
+  const EmptyStateCache: HandoffComponent = {
+    name: 'EmptyStateCache',
+    inject: [],
+    provide: ['cache'],
+    handoff: { key: 'cache', type: 'Map[Str, Str]' },
+    apply(ctx: Context) {
+      ctx.effect(() => ctx.provide('cache', {
+        get: (_k: string) => undefined,
+        put: (_k: string, _v: string) => {},
+        version: () => 1n,
+      }))
+    },
+  }
+
+  it('refuses a successor that invents state when the predecessor held none', async () => {
+    const ctx = new Context()
+    const fiber = await plug(ctx, EmptyStateCache)
+    await flush()
+    expect(liveResources.size).toBe(0)
+
+    const inventing = placedCache('Inventing', undefined, 2n)
+    await expect(swapProvider(ctx, {
+      from: EmptyStateCache,
+      fiber,
+      to: inventing,
+    })).rejects.toBeInstanceOf(StateIncompatible)
+
+    // the predecessor is serving again, and the rejected successor's Map was
+    // dropped by the rollback (no leaked half-swap)
+    expect(ctx.cache.version()).toBe(1n)
+    expect(liveResources.size).toBe(0)
+  })
+
+  it('refuses a successor whose vector holds a retyped resource', async () => {
+    const ctx = new Context()
+    const running = placedCache('Original', undefined, 1n)
+    const fiber = await plug(ctx, running)
+    await flush()
+    fiber.ctx.cache.put('alice', '42')
+    expect(liveResources.size).toBe(1)
+
+    // same vector LENGTH, a different host class at position 0
+    const retyped: HandoffComponent = {
+      name: 'RetypedCache',
+      inject: [],
+      provide: ['cache'],
+      handoff: { key: 'cache', type: 'Map[Str, Str]' },
+      apply(ctx: Context) {
+        const frame = new Frame(ctx, 'RetypedCache')
+        frame.track({})
+        ctx.effect(() => ctx.provide('cache', {
+          get: (_k: string) => undefined,
+          put: (_k: string, _v: string) => {},
+          version: () => 9n,
+        }))
+      },
+    }
+
+    await expect(swapProvider(ctx, {
+      from: running,
+      fiber,
+      to: retyped,
+    })).rejects.toBeInstanceOf(StateIncompatible)
+
+    // rolled back onto the predecessor, entries intact
+    expect(ctx.cache.version()).toBe(1n)
+    expect(ctx.cache.get('alice')).toBe('42')
+    expect(liveResources.size).toBe(1)
+  })
+
+  it('rolls back a successor left PENDING on an unmet inject', async () => {
+    const ctx = new Context()
+    const running = placedCache('Serving', undefined, 1n)
+    const fiber = await plug(ctx, running)
+    await flush()
+    fiber.ctx.cache.put('alice', '42')
+
+    const pending: HandoffComponent = {
+      name: 'PendingCache',
+      inject: ['missing_service'],
+      provide: ['cache'],
+      handoff: { key: 'cache', type: 'Map[Str, Str]' },
+      apply(_ctx: Context) { /* never runs: the inject is unmet */ },
+    }
+
+    await expect(swapProvider(ctx, {
+      from: running,
+      fiber,
+      to: pending,
+    })).rejects.toBeInstanceOf(SwapRejected)
+
+    // `await fiber` resolves on a PENDING successor; the health gate caught
+    // it and the rollback brought the predecessor back with its state
+    expect(ctx.cache.version()).toBe(1n)
+    expect(ctx.cache.get('alice')).toBe('42')
+    expect(liveResources.size).toBe(1)
   })
 })

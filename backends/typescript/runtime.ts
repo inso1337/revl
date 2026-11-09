@@ -2026,17 +2026,23 @@ export class Frame {
 //   1. capture, while the predecessor is still live and its world still
 //      exists — the ts analog of py's `frame._resources`, the vector
 //      `Frame.track` accumulated in acquisition order;
-//   2. check the whole successor cohort, then apply — one incompatible
-//      resource rejects with nothing half-written;
+//   2. check the whole vector, then apply — one incompatible resource
+//      rejects with nothing half-written;
 //   3. on any failure past the teardown, roll the whole swap back: dispose the
 //      half-loaded successor, reload the predecessor and re-seat its captured
 //      state, so the composition is exactly as if the swap had never been
 //      attempted.
 //
-// Admission (`compile_source` with the running manifest) has already proved
-// the DECLARED shapes §5-compatible (`admission._handoff_compatible`); the
-// resource-vector check here is defence in depth for a provider whose runtime
-// shape diverges from its declaration, exactly as in the py session.
+// Admission (`compile_source` with the running manifest) proves the DECLARED
+// shapes §5-compatible (`admission._handoff_compatible`) before a candidate
+// module exists. This tier has no MCP session engine and no trusted-proposal
+// path, so the caller contract is the same one every emit has: the successor
+// was admitted against the running manifest. The runtime check here is
+// STRUCTURAL — vector length and each resource's host class — which is the
+// same defence in depth py's session performs, but it cannot re-prove the §5
+// type relation by itself. A same-class retype (a `Map[Str, Str]` successor
+// accepting `Map[Str, Int]`) is admission's to refuse; a host that loads a
+// successor it did not admit is outside this check.
 
 export interface HandoffDecl {
   /** The provided key whose state crosses. */
@@ -2143,14 +2149,12 @@ function checkProviderState(
   }
 }
 
-/** Check, then seat each captured state in the successor. Returns how many
+/** Seat an already-checked captured vector in the successor. Returns how many
  *  resources actually carried state across (the honest count py reports). */
-function restoreProviderState(
-  key: string,
+function applyProviderState(
   resources: any[],
   captured: CapturedResource[],
 ): number {
-  checkProviderState(key, resources, captured)
   let migrated = 0
   for (let pos = 0; pos < resources.length; pos++) {
     const state = captured[pos].state
@@ -2179,8 +2183,9 @@ export interface ProviderSwapResult {
   /** The loaded successor fiber (also a thenable while activating). */
   fiber: Fiber & PromiseLike<Fiber>
   /** The hand-off block, keyed by provided key. Absent when nothing crossed:
-   *  no declared hand-off, a successor that opted out (cold start), or an
-   *  empty state vector. */
+   *  no declared hand-off, or a successor that opted out or sits in another
+   *  realm (cold start). Present with `resources: 0` when both sides declared
+   *  the hand-off and only type-pinned resources crossed. */
   handoff?: Record<string, HandoffEntry>
 }
 
@@ -2192,7 +2197,6 @@ export async function swapProvider(
   ctx: Context,
   swap: ProviderSwap,
 ): Promise<ProviderSwapResult> {
-  const captured = captureProviderState(swap.fiber)
   const accepts = swap.to.handoff
   // State crosses only when both sides declare a hand-off on the SAME
   // provided key AND the same placement. A successor that declares none opts
@@ -2206,6 +2210,19 @@ export async function swapProvider(
     ? accepts.key
     : null
 
+  // Capture BEFORE teardown, while the predecessor's world still exists. A
+  // resource that cannot answer its state protocol refuses the swap here,
+  // with nothing torn down and the predecessor still serving.
+  let captured: CapturedResource[]
+  try {
+    captured = captureProviderState(swap.fiber)
+  } catch (error) {
+    throw new SwapRejected(
+      `swap of ${JSON.stringify(swap.to.name ?? '?')}: the predecessor's ` +
+      `state could not be captured (${describeError(error)}); nothing was ` +
+      `torn down and it is still serving`)
+  }
+
   await swap.fiber.dispose()
 
   let successor: (Fiber & PromiseLike<Fiber>) | null = null
@@ -2215,9 +2232,24 @@ export async function swapProvider(
     // isolated before its fiber exists, exactly as at boot.
     successor = plug(ctx, swap.to, swap.toConfig)
     await successor
-    if (key !== null && captured.length > 0) {
+    // Post-activation health gate: `await fiber` resolves for a candidate left
+    // PENDING on an unmet inject (cordis keeps no error for it), which would
+    // otherwise install a successor that provides nothing over a torn-down
+    // predecessor. A non-ACTIVE successor is rolled back like a failed load.
+    if (fiberStateName(successor.state) !== 'ACTIVE') {
+      throw new SwapRejected(
+        `the successor of ${JSON.stringify(swap.to.name ?? '?')} did not ` +
+        `activate (fiber state ${fiberStateName(successor.state)})`)
+    }
+    if (key !== null) {
+      // Check the whole vector first, then apply: a successor that invents or
+      // drops a resource, or retypes one, rejects with nothing half-written.
+      // A predecessor that declared a hand-off but acquired no tracked
+      // resource still checks an empty vector, so a successor cannot invent
+      // state it never inherited.
       const resources = frameForCtx(successor.ctx)?.resources ?? []
-      migrated = restoreProviderState(key, resources, captured)
+      checkProviderState(key, resources, captured)
+      if (captured.length > 0) migrated = applyProviderState(resources, captured)
     }
   } catch (error) {
     try {
@@ -2236,7 +2268,7 @@ export async function swapProvider(
   }
   // A key both sides declared is reported even when only a type-pinned
   // resource crossed (`resources: 0`, as py reports a Pool-only vector).
-  const handoff = key !== null && captured.length > 0
+  const handoff = key !== null
     ? { [key]: { component: swap.to.name ?? '', migrated: true, resources: migrated } }
     : undefined
   return { fiber: successor, handoff }
@@ -2282,10 +2314,13 @@ async function rollBackProviderSwap(
   }
   const reloaded = plug(ctx, swap.from, swap.fromConfig)
   await reloaded
-  if (captured.length > 0) {
-    const resources = frameForCtx(reloaded.ctx)?.resources ?? []
-    restoreProviderState(swap.from.handoff?.key ?? '?', resources, captured)
-  }
+  const frameKey = swap.from.handoff?.key ?? '?'
+  const resources = frameForCtx(reloaded.ctx)?.resources ?? []
+  // The predecessor is the code that captured the vector, so this cannot
+  // reject in practice; it is checked so a reload that came up with a different
+  // shape is a loud rollback failure rather than a silent loss.
+  checkProviderState(frameKey, resources, captured)
+  if (captured.length > 0) applyProviderState(resources, captured)
 }
 
 // ---------------------------------------------------------------------------
