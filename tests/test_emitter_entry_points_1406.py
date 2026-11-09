@@ -374,6 +374,7 @@ ENTRY_POINTS = {
     "revl/gate.py": "reports",
     "revl/mcp/session.py": "reports",
     "revl/placement.py": "reports",
+    "revl/recover_binding.py": "reports",
     "revl/run.py": "reports",
     "revl/run_java.py": "reports",
     "revl/run_wasm.py": "reports",
@@ -945,3 +946,51 @@ def test_revl_test_answers_a_refusal_the_way_its_five_sibling_tiers_do(tmp_path)
     assert "Traceback" not in combined
     assert "[py] fail: emitter refused:" in combined
     assert PY_REFUSAL in combined
+
+
+def test_recover_binding_answers_an_emitter_refusal_as_a_recovery_error(ir):
+    """`revl recover --composition` loads the composition's emitted module. A
+    tier refusal there is an answer: `cli/change.py` reports a RecoveryError, and
+    the placement path (`_recover_placement`) let a raw `EmitError` traceback
+    through before."""
+    from revl.recover_binding import emit_unactivated
+    from revl.recovery import RecoveryError
+
+    class RefusingDriver:
+        emit = _refusing("the py tier cannot lower this")
+
+        def __init__(self, *args):
+            pass
+
+        def _emit_module(self, ir):
+            raise self.emit.EmitError("the py tier cannot lower this")
+
+    backend = (RefusingDriver.emit, object(), object(), object())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("revl.mcp.session._backend", lambda: backend)
+        patch.setattr("revl.run._Driver", RefusingDriver)
+        with pytest.raises(RecoveryError, match="the py tier cannot lower this"):
+            emit_unactivated(ir, {}, [])
+
+
+def test_recover_binding_lets_an_emitter_fault_through(ir):
+    """The control: an emitter bug, and a bare ValueError, stay loud."""
+    from revl.recover_binding import emit_unactivated
+
+    for error in (AttributeError("'NoneType' object has no attribute 'get'"),
+                  ValueError("an emitter bug that is a ValueError")):
+        class FaultingDriver:
+            emit = _refusing()
+
+            def __init__(self, *args):
+                pass
+
+            def _emit_module(self, ir, error=error):
+                raise error
+
+        backend = (FaultingDriver.emit, object(), object(), object())
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("revl.mcp.session._backend", lambda: backend)
+            patch.setattr("revl.run._Driver", FaultingDriver)
+            with pytest.raises(type(error)):
+                emit_unactivated(ir, {}, [])

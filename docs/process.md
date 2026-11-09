@@ -420,6 +420,13 @@ job-level `permissions` block **replaces** the workflow-level one rather than
 merging into it, `contents` was `none` and `actions/checkout` could not have
 read the tag it publishes (issue #191, fixed in PR #190).
 
+`check-version` also classifies the tag before anything irreversible happens.
+`tools/release_channel.py` answers `stable` or `prerelease` for the version, and
+the `publish` job runs only when that answer is `stable`. A pre-release tag such
+as `v2.0.0rc1` still runs the tagged commit's CI, but it cannot upload: PyPI has
+no delete, so an unreadable or unrecognized version has to skip the upload
+rather than be published because nobody classified it.
+
 Three things cover it now, and none is a substitute for the others.
 
 `tools/check_workflow_permissions.py` runs in `lint` on every PR. It resolves

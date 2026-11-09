@@ -390,7 +390,12 @@ The target set is computed **before** the action runs, from the session's IR:
   removed, or whose IR entry differs (modulo provenance) from the running
   composition. So "may swap within tenant_a" permits changing a `tenant_a`
   component in a multi-realm composition, and refuses changing a `tenant_b`
-  one. A no-op or server-side re-admit targets the whole composition.
+  one. An allow is matched against the realms the candidate puts a changed
+  component in. A `may not` is matched against those and the realms the
+  running composition puts it in, so a swap that moves a component out of a
+  realm is still selected by a `may not` rule on the realm it leaves, and the
+  realm it leaves never counts toward an allow. A no-op or server-side
+  re-admit targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
 * **restore** — every component named in the snapshot manifest.
 * **unload / edit / snapshot / undo / rollback** — the whole running
