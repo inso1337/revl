@@ -192,6 +192,60 @@ def test_an_imported_extern_of_a_used_module_still_gets_its_body_file(tmp_path):
     assert "x.upper()" in helper["bodies"]["py"]
 
 
+def test_an_interpolated_asset_in_a_component_counts_as_the_components(tmp_path):
+    svc = _SERVICE + _PROVIDER % (
+        'let label = `at ${(asset "./missing.txt").path}`')
+    for names in ("Notes", "Notes, Note"):
+        ir = _consumer(tmp_path, svc, names=names)
+        assert [c["name"] for c in ir["components"]] == ["NotesUser"]
+    with pytest.raises(RevlError, match=_CASES["asset"][1]):
+        _compile(tmp_path, ["svc.rvl"], {"svc.rvl": svc})
+
+
+_HELPERS = "pub " + _HELPER % '@py file "missing_body.py"'
+
+
+def test_what_a_module_used_for_a_service_imports_is_not_read_either(tmp_path):
+    # svc.rvl is outside the declaration closure, and so is what it `use`s.
+    modules = {"svc.rvl": 'use "helpers.rvl" { helper }\n\n' + _SERVICE
+               + _PROVIDER % "let seen = helper(note.text)",
+               "helpers.rvl": _HELPERS, "consumer.rvl": _CONSUMER % "Notes"}
+    ir = _compile(tmp_path, ["consumer.rvl"], modules)
+    assert [c["name"] for c in ir["components"]] == ["NotesUser"]
+    assert not ir.get("externs")
+
+    # Naming a pure declaration of svc.rvl brings both modules in.
+    modules["consumer.rvl"] = _CONSUMER % "Notes, Note"
+    with pytest.raises(RevlError, match=_CASES["body-file"][1]):
+        _compile(tmp_path, ["consumer.rvl"], modules)
+
+
+def test_a_used_module_keeps_the_origin_its_load_saw(tmp_path, monkeypatch):
+    # `foo.rvl` is first reached relatively, from `bar.rvl`: user origin, so
+    # its `@py` body may not import a backend module. The root then names the
+    # same file through the search path, which records an install root for
+    # it. The body file is resolved after both, under the origin of the load.
+    entry = tmp_path / "entry" / "stdlib"
+    entry.mkdir(parents=True)
+    (entry / "hx.py").write_text("import runtime\nreturn x\n", encoding="utf-8")
+    (entry / "foo.rvl").write_text(
+        'pub extern pure fn hx(x: Str) -> Str\n    = @py file "hx.py"\n'
+        'pub fn banner() -> Str { return hx("a") }\n', encoding="utf-8")
+    (entry / "bar.rvl").write_text(
+        'use "./foo.rvl" { banner }\n'
+        "pub fn bar() -> Str { return banner() }\n", encoding="utf-8")
+    root = tmp_path / "app" / "root.rvl"
+    root.parent.mkdir()
+    root.write_text(
+        'use "stdlib/bar.rvl" { bar }\nuse "stdlib/foo.rvl" { banner }\n'
+        "pub fn both() -> Str { return bar() + banner() }\n", encoding="utf-8")
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path / "entry"))
+
+    with pytest.raises(RevlError, match="user-origin @py body for extern `hx` "
+                                        "imports backend module `runtime`"):
+        compile_files([str(root)])
+
+
 def test_a_syntax_error_in_a_used_module_still_breaks_the_importer(tmp_path):
     broken = _SERVICE + _PROVIDER % "let seen = ("
     with pytest.raises(RevlError) as refused:

@@ -26,6 +26,7 @@ from . import gen_types as _gen_types
 from .holes import refuse_admission
 from .hostfile import _contained
 from .hostfile import program_has_body_file as _program_has_body_file
+from .hostfile import program_has_body_file as _program_has_body_file
 from .hostfile import resolve_body_files as _resolve_body_files
 from .hostref import program_has_asset as _program_has_asset
 from .hostref import program_has_ref as _program_has_ref
@@ -253,8 +254,11 @@ class _LoadedModule:
     aliases: dict[str, "_LoadedModule"] = field(default_factory=dict)
     pure_dependencies: set[int] = field(default_factory=set)
     # Whether the files this module names (host-body files, host-module refs,
-    # assets) are still unresolved: `_ModuleLoader.defer_used_resources`.
+    # assets) are still unresolved: `_ModuleLoader.defer_used_resources`. Its
+    # origin (item 410) is the one its load saw, kept here because a later
+    # `use` of the same file through the search path records an install root.
     resources_pending: bool = False
+    install_root: str | None = None
 
 
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -736,17 +740,25 @@ class _ModuleLoader:
                 # use the refusal itself as a file-existence oracle.
                 _check_no_asset([authored], root_profile)
             pending = self.defer_used_resources and not is_root
+            install_root = None
             if not pending:
                 self._resolve_resources(abs_path, program)
-            elif _py_host_bodies(program):
+            else:
+                py_bodies = _py_host_bodies(program)
+                if (py_bodies or _program_has_body_file(program)
+                        or _program_has_ref(program)
+                        or _program_has_asset(program)):
+                    install_root = self._origin_install_root(abs_path)
                 # The inline `@py` bodies are in hand without reading a file,
                 # so their import rule holds for every loaded module, as it
                 # did; a body in a file is checked once the file is resolved.
-                _check_user_py_body_imports(
-                    program, self._origin_install_root(abs_path) is not None
-                    or _contained(abs_path, self.stdlib_real()))
+                if py_bodies:
+                    _check_user_py_body_imports(
+                        program, install_root is not None
+                        or _contained(abs_path, self.stdlib_real()))
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program,
-                                   resources_pending=pending)
+                                   resources_pending=pending,
+                                   install_root=install_root)
             for fn in program.fn_decls:
                 if fn.public:
                     module.public_fns[fn.name] = fn
@@ -780,10 +792,11 @@ class _ModuleLoader:
             raise
 
     def _resolve_resources(self, abs_path: str, program: Program,
-                           component_assets: bool = True) -> None:
+                           deferred: _LoadedModule | None = None) -> None:
         """Resolve the files `program` names (host-body files, host-module
         refs, assets), then check its `@py` bodies. At load for a root, and
-        for every module unless `defer_used_resources` is on."""
+        for every module unless `defer_used_resources` is on; later, through
+        `resolve_pending`, for a `deferred` one."""
         is_virtual = self._sources.get(abs_path) is not None
         # item 396: resolve external host-body files under the jail,
         # replacing each HostBodyFile node with a spliced HostBody. A
@@ -808,9 +821,12 @@ class _ModuleLoader:
         # `@py` body, so a module with none of them does not ask, and one
         # with any asks once: nothing below records a new origin.
         py_bodies = _py_host_bodies(program)
-        install_root = (self._origin_install_root(abs_path)
-                        if py_bodies or _program_has_ref(program)
-                        or _program_has_asset(program) else None)
+        if deferred is not None:
+            install_root = deferred.install_root  # the origin its load saw
+        else:
+            install_root = (self._origin_install_root(abs_path)
+                            if py_bodies or _program_has_ref(program)
+                            or _program_has_asset(program) else None)
         _resolve_refs(program, os.path.dirname(abs_path),
                       self._root_dirs(), self._sources, is_virtual,
                       install_root=install_root)
@@ -820,10 +836,10 @@ class _ModuleLoader:
         # literal carrying the root-relative path and the sha256 of the
         # file's bytes; an asset that does not exist, is not a regular
         # file, or escapes the jail is a compile refusal here.
-        # A used module's components are never imported, so the assets
-        # written inside them (`component_assets=False`) are left alone.
+        # A deferred module's components are never imported, so the assets
+        # written inside them are left alone.
         assets = program.assets
-        if not component_assets and assets and program.components:
+        if deferred is not None and assets and program.components:
             inside = {id(node) for node in _nodes_of_kind(
                 program.components, (_ast.ExprAsset,))}
             assets = [node for node in assets if id(node) not in inside]
@@ -843,8 +859,7 @@ class _ModuleLoader:
         do the assets written inside them."""
         if not module.resources_pending:
             return
-        self._resolve_resources(module.path, module.program,
-                                component_assets=False)
+        self._resolve_resources(module.path, module.program, deferred=module)
         module.resources_pending = False
 
     def _import_named(self, importer: _LoadedModule, used: _LoadedModule,

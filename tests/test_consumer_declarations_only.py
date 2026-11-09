@@ -22,10 +22,11 @@ written on, so none of them was red first):
   itself a root of the compile, where its components are the composition.
 
 Not pinned here: the used module is still parsed whole, so a syntax error in
-a component body there breaks the importer. The files only its components need
-(`asset` files, host body files, refs) are not read:
-`tests/test_used_module_resources.py`. Compiling against service declarations
-alone, with the dependency's source gone, is an open design question.
+a component body there breaks the importer. The `asset` files its components
+name are not read, and for a module used only for a service neither are its
+externs' host body files and refs: `tests/test_used_module_resources.py`.
+Compiling against service declarations alone, with the dependency's source
+gone, is an open design question.
 """
 
 from __future__ import annotations
