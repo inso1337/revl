@@ -55,7 +55,7 @@ regenerated rather than edited.
 | arithmetic.md | needs-work | 6 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 0 |  |
-| audit-diff.md | needs-work | 13 |  |
+| audit-diff.md | needs-work | 12 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
 | backend-go-v3.md | needs-work | 14 | yes |
