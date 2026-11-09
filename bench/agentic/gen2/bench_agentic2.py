@@ -267,12 +267,12 @@ def run_file_tool(root: Path, name, args):
         p = (root / args.get("path", "")).resolve()
         if not str(p).startswith(str(root.resolve())):
             return "refused: outside root"
-        return p.read_text() if p.exists() else f"not found: {args.get('path')}"
+        return p.read_text(encoding="utf-8") if p.exists() else f"not found: {args.get('path')}"
     if name == "write_file":
         p = (root / args.get("path", "")).resolve()
         if not str(p).startswith(str(root.resolve())):
             return "refused: outside root"
-        p.write_text(args.get("content", ""))
+        p.write_text(args.get("content", ""), encoding="utf-8")
         return f"wrote {len(args.get('content',''))} bytes to {args.get('path')}"
     if name == "grep":
         pat = re.compile(args.get("pattern", ""), re.I)
@@ -290,7 +290,7 @@ def run_file_tool(root: Path, name, args):
         for f in files:
             if f.is_file():
                 try:
-                    for i, line in enumerate(f.read_text().splitlines(), 1):
+                    for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                         if pat.search(line):
                             hits.append(f"{f.relative_to(root_r)}:{i}: {line.strip()[:120]}")
                 except Exception:
@@ -334,7 +334,7 @@ SYS_PREFLIGHT = SYS_BASE + (
 
 
 def score_withdraw(root: Path, final_text, usage, order):
-    final = (root / "tenants.rvl").read_text() if (root / "tenants.rvl").exists() else ""
+    final = (root / "tenants.rvl").read_text(encoding="utf-8") if (root / "tenants.rvl").exists() else ""
     named_breaks = all(b in final_text for b in TRUTH["breaks"])
     named_cause = (any(k in final_text for k in TRUTH["lost_keys"])
                    or any(o in final_text for o in TRUTH["orphaned"]))
@@ -518,7 +518,7 @@ def _provenance(arm_prompt: str | None = None):
 
 
 def score_author(root: Path, final_text, usage, order, mcp_state, arm_prompt=None):
-    final = (root / "plain.rvl").read_text() if (root / "plain.rvl").exists() else ""
+    final = (root / "plain.rvl").read_text(encoding="utf-8") if (root / "plain.rvl").exists() else ""
     code = re.sub(r"//[^\n]*", "", final)
     has_component = "component AuditLog" in code
     has_service = bool(re.search(r"service\s+Audit\b", code))
@@ -670,7 +670,7 @@ async def run_arm(exp, arm, workdir, max_turns, verbose):
             system = SYS_BASE.format(path=str(target))
         task = TASK_WITHDRAW
     else:
-        (root / "plain.rvl").write_text(BASE_PLAIN)
+        (root / "plain.rvl").write_text(BASE_PLAIN, encoding="utf-8")
         target = root / "plain.rvl"
         sys_template = SYS_SCAFFOLD if arm == "gen-scaffold" else SYS_AUTHOR
         system = sys_template.format(path=str(target))
@@ -849,7 +849,7 @@ def main():
                 print("    -> " + json.dumps({k: v for k, v in res.items()
                                               if k not in ("final_text", "transcript", "call_log", "call_detail")}))
 
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r) + "\n")
     print(f"\nwrote {args.out}")

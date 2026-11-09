@@ -32,22 +32,25 @@ was recovered from, the sha256 of the file as found (`source_sha256`), the
 sha256 of the tracked copy (`tracked_sha256`), the tool-result cap, and the
 variant it was forked from.
 
-It also records a `body_sha256` pair. That hash is over the source with the
-module docstring token removed, so `source_body_sha256 == tracked_body_sha256`
-proves that the only edit made to a moved file is its docstring. The tokenizer
-is used rather than an AST dump because an AST dump's text changes between
-Python versions.
+It also records a `body_sha256` pair. That hash is over the file with the
+module docstring token removed; the tokenizer is used rather than an AST dump
+because an AST dump's text changes between Python versions. The pair records
+the source body and the tracked body, and the two differ because every tracked
+driver carries the encoding edit below.
 
-Three variants were edited: their docstrings named `bench_agentic2.py` and now
-name themselves, and their usage lines follow. For the other three, `edit:
-none` and a tracked hash equal to the source hash record an unchanged copy;
-`cmp` confirmed that when the copies were made. The source files are not in
-this repository, so a reader can check the tracked hash here, but the source
-hash only against a copy of the original.
+Each moved file carries at most two mechanical edits, listed in `edit`: three
+capped variants had their docstring identity and usage lines corrected, and all
+six name explicit UTF-8 encodings on text-mode reads, writes and open calls.
+The encoding edit does not change benchmark behaviour: on macOS and Linux the
+platform default was already UTF-8, and on Windows it now matches. The
+repository's encoding guards (issues #2639 and #2648) reject the platform
+default anywhere in the tree. Nothing else was rewritten; the source files are
+untracked and not in this repository, so a reader can check the tracked hash
+here, and the source hash only against a copy of the original.
 
 `tests/test_bench_agentic_drivers.py` enforces the record: the six-variant
-inventory, the tracked hashes, the docstring identity, and the body hashes,
-which are pinned in the test and not only in the manifest. A body edit
+inventory, the tracked hashes, the docstring identity, and the tracked body
+hashes, which are pinned in the test and not only in the manifest. A body edit
 therefore fails even if the manifest is refreshed with it, and a future copy
 that keeps another driver's docstring fails too. `generation`, `predecessor`
 and `tool_result_cap` are records of the code, not machine-checked values; the
@@ -82,9 +85,9 @@ the separate interpreter that serves the MCP server (`cordis-py`), and
     BENCH_BASE_URL=<url> BENCH_API_KEY=<key> BENCH_MODEL=<model> \
     python3 bench/agentic/gen3/bench_agentic3.py --exp both --reps 1
 
-They were moved as they were found, not rewritten: they write workdirs and
-result rows beside themselves, and they assume the fixtures and trees the spec
-names. The preserved defaults are the author's trees (`REVL_REPO` defaults to
+They were moved as they were found, apart from the docstring identity and
+encoding edits above: they write workdirs and result rows beside themselves,
+and they assume the fixtures and trees the spec names. The preserved defaults are the author's trees (`REVL_REPO` defaults to
 `/Users/inso/Projects/revl`, gen3's `--arm-src` to a `/tmp` path from an older
 run), so override them on another machine. The scrub lists name environment
 variables, including `KIRA_API_KEY`, and carry no value. A run drives a real
@@ -92,10 +95,11 @@ model, so check the endpoint and budget first; nothing here is run by CI.
 
 ## Edits to a published driver
 
-A tracked driver may be edited only in its module docstring while it is a
-preserved artifact, which is what the three identity fixes did. A behaviour
-change makes it a new variant under the generation that introduces it, with a
-new name and a new manifest entry; a published driver is not edited in place.
-The body hashes pinned in the test are what makes that rule enforceable: a
-change outside the docstring fails even when the manifest is refreshed with it,
-because changing the pin is a visible edit to the test.
+A preserved driver may be edited only in its module docstring, its usage
+lines, or an argument a repository guard requires, which is what the identity
+and encoding fixes are. A behaviour change makes it a new variant under the
+generation that introduces it, with a new name and a new manifest entry; a
+tracked driver is not edited in place. The tracked body hashes pinned in the
+test are what makes that rule enforceable: a change outside those edits fails
+even when the manifest is refreshed with it, because changing the pin is a
+visible edit to the test.

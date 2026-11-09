@@ -109,6 +109,10 @@ BENCH_DEPENDENT_TESTS = (
     # `bench/results/answer-ledger.md`, and the module checks that the
     # committed table reproduces, so a bench change must re-run it.
     "tests/test_answer_ledger_2859.py",
+    # Issue #2621: reads the tracked drivers and their manifest under
+    # bench/agentic/, and pins their hashes and docstring identity, so a bench
+    # change must re-run it.
+    "tests/test_bench_agentic_drivers.py",
     # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
     # loaders and checks they leave one `revl` in the process.
     "tests/test_bench_compiler_reload_keeps_one_revl.py",

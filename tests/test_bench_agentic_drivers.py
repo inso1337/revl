@@ -8,11 +8,12 @@ the properties that make them traceable, not to the numbers they produce:
   * every driver under `bench/agentic/` is named in the manifest, and every
     manifest entry is a driver in that tree;
   * each tracked file still hashes to its recorded `tracked_sha256`;
-  * the source with the module docstring token removed still hashes to the
-    recorded body sha, and the source body sha equals it, so an edit outside
-    the docstring cannot pass as a moved file;
-  * the body hashes are pinned here, outside the manifest, so a body edit fails
-    even if the manifest is refreshed with it;
+  * the source with the module docstring token removed still hashes to its
+    recorded body sha, and the tracked copy to its own; the recorded edits are
+    the docstring identity lines and explicit UTF-8 encodings, which do not
+    change benchmark behaviour;
+  * the tracked body hashes are pinned here, outside the manifest, so a body
+    edit fails even if the manifest is refreshed with it;
   * each driver's docstring opens with its own filename, the identity a copied
     variant used to lose;
   * an `edit: none` entry records the tracked hash as equal to the source hash.
@@ -41,21 +42,21 @@ EXPECTED = {
     "bench_agentic3.py",
 }
 
-# The record's trust anchor. These are the body hashes as captured, kept out of
+# The record's trust anchor. These are the tracked body hashes, kept out of
 # manifest.json so that refreshing the manifest is not enough to change one:
 # a body edit fails here until the test itself is edited and reviewed.
 FROZEN_BODY_SHA256 = {
-    "bench_agentic.py": "2445c792946987975d136a0f4a6f0611c8f74dd57b522f49c6a5bf390304ce3c",
-    "bench_agentic2.py": "d7b0caf6afcb23fcff97cbdad2c8fb39ccc95fb8fc601cad6d76d28d3c4900a1",
-    "bench_agentic2_cap.py": "1e26a17f4ec99fd4ec3b5698a341f3b73c7547f1a71826edc01ea3a348442728",
-    "bench_agentic2_cap6.py": "4b8141f5c2cd41d33ef2e1ee25f7bf52e7c75c7a20f1b89c73336a7ce749857d",
-    "bench_agentic2_cap2.py": "1d36024c6108478afda3f7e994b40458d1cba0553b51de7274d994ee8ce02f12",
-    "bench_agentic3.py": "e89733cd6122c009eb32ad0b3c2d0b645845237aae5ed887f7a671fae24ba846",
+    "bench_agentic.py": "2727550b325d467809d4c98f7aab03f3eb18f8c278fd9dd1a3ec05bc4d54b46b",
+    "bench_agentic2.py": "7c35b98908461875d8b0191f16c058f874aa05dd525b31580feb66e7954fd0bf",
+    "bench_agentic2_cap.py": "4931cfa414f625beee870e07a3812dd0e16ba53109599641c94b4a18f9de87e4",
+    "bench_agentic2_cap6.py": "0d9146dfcb59015ae5df8c3653ce7005c8eab09d41122f4523363e3df1617168",
+    "bench_agentic2_cap2.py": "1da9a92567e12ff5f7cf588bdb2e765613bf8de4043ded6c73fad921350428ab",
+    "bench_agentic3.py": "9fe01ceb9603855ac87412c32a108bad99662e03e9d00bcf57c95d69fd85b1f2",
 }
 
 
 def _variants():
-    return json.loads(MANIFEST.read_text())["variants"]
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))["variants"]
 
 
 def _sha(data: bytes) -> str:
@@ -121,25 +122,23 @@ def test_tracked_copy_matches_its_recorded_hash():
 
 def test_docstring_identity_cannot_drift():
     for variant in _variants():
-        text = (ROOT / variant["tracked_path"]).read_text()
+        text = (ROOT / variant["tracked_path"]).read_text(encoding="utf-8")
         first = _first_docstring_line(text)
         assert first.startswith(variant["name"] + " "), (variant["name"], first)
 
 
 def test_body_hashes_are_frozen():
     for variant in _variants():
-        frozen = FROZEN_BODY_SHA256[variant["name"]]
-        assert variant["source_body_sha256"] == frozen, variant["name"]
-        assert variant["tracked_body_sha256"] == frozen, variant["name"]
+        assert variant["tracked_body_sha256"] == FROZEN_BODY_SHA256[variant["name"]], variant["name"]
 
 
-def test_an_edit_is_docstring_only():
+def test_recorded_edits_match_the_hashes():
     for variant in _variants():
-        text = (ROOT / variant["tracked_path"]).read_text()
+        text = (ROOT / variant["tracked_path"]).read_text(encoding="utf-8")
         assert _body_sha(text) == variant["tracked_body_sha256"], variant["name"]
-        assert variant["source_body_sha256"] == variant["tracked_body_sha256"], variant["name"]
         if variant["edit"] == "none":
             assert variant["source_sha256"] == variant["tracked_sha256"], variant["name"]
+            assert variant["source_body_sha256"] == variant["tracked_body_sha256"], variant["name"]
         else:
             assert variant["source_sha256"] != variant["tracked_sha256"], variant["name"]
 

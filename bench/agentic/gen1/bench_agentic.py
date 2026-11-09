@@ -239,12 +239,12 @@ def run_file_tool(root: Path, name, args):
         p = (root / args.get("path", "")).resolve()
         if not str(p).startswith(str(root.resolve())):
             return "refused: outside root"
-        return p.read_text() if p.exists() else f"not found: {args.get('path')}"
+        return p.read_text(encoding="utf-8") if p.exists() else f"not found: {args.get('path')}"
     if name == "write_file":
         p = (root / args.get("path", "")).resolve()
         if not str(p).startswith(str(root.resolve())):
             return "refused: outside root"
-        p.write_text(args.get("content", ""))
+        p.write_text(args.get("content", ""), encoding="utf-8")
         return f"wrote {len(args.get('content',''))} bytes to {args.get('path')}"
     if name == "grep":
         pat = re.compile(args.get("pattern", ""), re.I)
@@ -252,7 +252,7 @@ def run_file_tool(root: Path, name, args):
         for f in root.rglob("*"):
             if f.is_file():
                 try:
-                    for i, line in enumerate(f.read_text().splitlines(), 1):
+                    for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                         if pat.search(line):
                             hits.append(f"{f.relative_to(root)}:{i}: {line.strip()[:120]}")
                 except Exception:
@@ -269,7 +269,7 @@ def score(root: Path, transcript, final_text, tool_calls, usage):
     final = ""
     rvl = root / "tenants.rvl"
     if rvl.exists():
-        final = rvl.read_text()
+        final = rvl.read_text(encoding="utf-8")
 
     # did the agent name the complete break set?
     named_breaks = all(b in final_text for b in TRUTH["breaks"])
@@ -360,7 +360,7 @@ async def run_arm(arm, workdir, max_turns, verbose):
     root = Path(workdir)
     root.mkdir(parents=True, exist_ok=True)
     shutil.copy(SOURCE_RVL, root / "tenants.rvl")
-    ORIGINAL_SOURCE = (root / "tenants.rvl").read_text()
+    ORIGINAL_SOURCE = (root / "tenants.rvl").read_text(encoding="utf-8")
 
     transcript = []
     tool_calls = 0
@@ -475,7 +475,7 @@ def main():
         results.append(res)
         print(f"    -> {json.dumps({k: v for k, v in res.items() if k != 'final_text'})}")
 
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r) + "\n")
     print(f"\nwrote {args.out}")
