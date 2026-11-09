@@ -13,6 +13,10 @@ This file is the gate for the part of the contract that is written down in
     single node lookup, `_uiStorage`'s optional
     `process.getBuiltinModule('node:async_hooks')`, is a call, not an import,
     and falls back to the stack in a page.
+  * `test_the_strip_step_rewrites_the_import_graph_only` owns the strip step:
+    it edits module-specifier nodes, not text that looks like one, and it
+    resolves each relative specifier against its inputs (the emitted default
+    `../runtime.ts` becomes the flat `./runtime.js`) or fails naming the file.
   * `test_an_emitted_module_runs_in_a_browser_engine` is the bite: it emits a
     document with a top-level `fn` and a component that provides a service,
     strips the emitted module and `runtime.ts` to JavaScript with
@@ -133,9 +137,15 @@ def _emitter():
 
 
 def _chrome():
-    """The browser engine, or None. `REVL_CHROME` wins over discovery."""
+    """The browser engine, or None.
+
+    When `REVL_CHROME` is set it names the engine and discovery is skipped, so
+    a bad path fails the gate instead of silently running another engine.
+    """
     named = os.environ.get("REVL_CHROME")
-    candidates = [named] if named else []
+    if named:
+        return named if Path(named).exists() else None
+    candidates = []
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
         found = shutil.which(name)
         if found:
@@ -150,26 +160,32 @@ def _chrome():
     return None
 
 
-def _toolchain_reason():
+def _node_typescript_reason():
     if shutil.which("node") is None:
         return "needs node on PATH"
     if not _TYPESCRIPT.exists():
         return "needs backends/typescript/node_modules (`cd backends/typescript && npm ci`)"
+    return None
+
+
+def _browser_reason():
+    reason = _node_typescript_reason()
+    if reason is not None:
+        return reason
     if _chrome() is None:
         return ("needs a browser engine: set REVL_CHROME, or install Google Chrome "
                 "or Chromium")
     return None
 
 
-def _require_toolchain():
-    reason = _toolchain_reason()
+def _require(reason):
     if reason is None:
         return
     if os.environ.get("REVL_BROWSER_REQUIRED") == "1":
         pytest.fail(
             f"the ts browser gate cannot run: {reason}. "
-            "REVL_BROWSER_REQUIRED=1 makes a missing engine a failure, not a "
-            "hollow green")
+            "REVL_BROWSER_REQUIRED=1 makes a missing prerequisite a failure, "
+            "not a hollow green")
     pytest.skip(reason)
 
 
@@ -230,17 +246,62 @@ def test_the_runtime_imports_no_node_builtin():
         "browser target section of docs/ts-runtime-contract.md")
 
 
+def test_the_strip_step_rewrites_the_import_graph_only(tmp_path):
+    """The step edits module specifiers, not text that looks like one.
+
+    A regex over the emitted JavaScript also rewrote `from './dep.ts'` inside a
+    string literal, which is a program's data. It also has to resolve each
+    relative specifier against `inputs`, because outputs are flat in
+    `<out-dir>`: the default emitted module imports `../runtime.ts`, and the
+    page can only load `./runtime.js` beside the module.
+    """
+    _require(_node_typescript_reason())
+    (tmp_path / "dep.ts").write_text("export const x = 1\n", encoding="utf-8")
+    (tmp_path / "module.ts").write_text(
+        "import { x } from './dep.ts'\n"
+        "export const text = \"from './dep.ts' and import('./dep.ts')\"\n"
+        "export const value = x\n", encoding="utf-8")
+    out = tmp_path / "out"
+    run = subprocess.run(
+        ["node", str(_STRIP), str(out), str(tmp_path / "module.ts"), str(tmp_path / "dep.ts")],
+        cwd=_HERE, capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, run.stderr
+    assert (out / "dep.js").exists(), "the step did not write the second input"
+    module_js = (out / "module.js").read_text(encoding="utf-8")
+    assert "./dep.js" in module_js, module_js
+    assert module_js.count("./dep.ts") == 2, (
+        "the strip step rewrote text inside a string literal, so a program's "
+        "data changed:\n" + module_js)
+
+    # A relative .ts specifier the step was not given cannot be resolved by the
+    # page either, so it fails and names the file instead of writing a module
+    # that cannot load.
+    (tmp_path / "broken.ts").write_text(
+        "import { x } from './missing.ts'\nexport const y = x\n", encoding="utf-8")
+    run = subprocess.run(
+        ["node", str(_STRIP), str(tmp_path / "out2"), str(tmp_path / "broken.ts")],
+        cwd=_HERE, capture_output=True, text=True, timeout=120)
+    assert run.returncode != 0, "a specifier naming no input was accepted"
+    assert "missing.ts" in run.stderr, run.stderr
+
+
 def test_an_emitted_module_runs_in_a_browser_engine():
     """The emitted module, the runtime and cordis all run in headless Chrome."""
-    _require_toolchain()
+    _require(_browser_reason())
     generated = _HERE / "tests" / "generated"
     generated.mkdir(parents=True, exist_ok=True)
     page_dir = Path(tempfile.mkdtemp(prefix="browser-target-", dir=generated))
     server = None
     try:
+        # A relative runtime import that does not land beside the module:
+        # `tests/generated/<dir>/module.ts` reaches the backend root with
+        # `../../../runtime.ts` (the emitted default `../runtime.ts` from
+        # `tests/generated/` is the same shape one level up). The strip step
+        # has to resolve it against the inputs and rewrite it to the flat
+        # `./runtime.js`.
         source = _emitter().emit(
             compile_source(_DOC, "browser_target.rvl"),
-            runtime_import="./runtime.ts")
+            runtime_import="../../../runtime.ts")
         module_ts = page_dir / "module.ts"
         module_ts.write_text(source, encoding="utf-8")
 
@@ -252,11 +313,16 @@ def test_an_emitted_module_runs_in_a_browser_engine():
             + strip.stdout + strip.stderr)
 
         module_js = (page_dir / "module.js").read_text(encoding="utf-8")
+        assert (page_dir / "runtime.js").exists(), "the step did not write the runtime"
         assert "./runtime.js" in module_js, (
             "the strip step did not rewrite the emitted module's runtime import "
-            "to .js; a page cannot load .ts:\n" + module_js[:400])
-        assert not re.search(r"""from\s*['"][^'"]*\.ts['"]""", module_js), (
-            "the stripped module still names a .ts specifier")
+            "to the flat ./runtime.js; a page cannot follow ../../runtime.ts:\n"
+            + module_js[:400])
+        for specifier in re.findall(r"""from\s*['"]([^'"]+)['"]""", module_js):
+            if specifier.startswith("."):
+                assert (page_dir / specifier).exists(), (
+                    f"the stripped module names {specifier!r}, which is not in "
+                    "the served directory")
 
         importmap = json.dumps({"imports": {
             "cordis": "/node_modules/cordis/lib/index.js",
@@ -283,7 +349,7 @@ def test_an_emitted_module_runs_in_a_browser_engine():
         assert fields["fn"] == "5", f"the emitted fn returned {fields['fn']}"
         assert fields["service"] == "42", (
             f"the component's service method returned {fields['service']}")
-        assert fields["host"].split(",") == list(_BROWSER_HOST), (
+        assert sorted(fields["host"].split(",")) == sorted(_BROWSER_HOST), (
             "runtime.ts's host surface changed; the browser target in "
             "docs/ts-runtime-contract.md and _BROWSER_HOST must change with it:\n"
             f"page saw {fields['host']}")
