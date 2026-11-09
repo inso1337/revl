@@ -477,7 +477,22 @@ def _runtime_ceiling_surface(wal_path: str) -> dict:
 
 def _run_audit(args, ir: dict) -> int:
     """`revl audit` — composition manifest + G8 boundary surface, with the
-    item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
+    item-33 policy gate (`--policy`), the authority-drift gate (`--diff`), and
+    the issue-#2725 participant-class plan view (`--deploy-map`)."""
+    deploy_map_path = getattr(args, "deploy_map", None)
+    if deploy_map_path is not None:
+        if getattr(args, "policy", None) or getattr(args, "diff", None):
+            print("error: `--deploy-map` cannot be combined with `--policy` or "
+                  "`--diff`", file=sys.stderr)
+            return 2
+        try:
+            participant_surface = _participant_surface(deploy_map_path, ir)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read deploy map {deploy_map_path!r}: {error}",
+                  file=sys.stderr)
+            return 2
+    else:
+        participant_surface = None
     runtime_ceilings = None
     if getattr(args, "wal", None):
         if not args.json or getattr(args, "policy", None) or getattr(args, "diff", None):
@@ -650,8 +665,15 @@ def _run_audit(args, ir: dict) -> int:
              **_generated_surface(ir)})
         if runtime_ceilings is not None:
             document["runtime_ceilings"] = runtime_ceilings
+        if participant_surface is not None:
+            classes, refusals = participant_surface
+            # Issue #2725: additive, and only when `--deploy-map` was given, so
+            # every existing `revl audit --json` body is byte-identical.
+            document["participantClasses"] = classes
+            if refusals:
+                document["participantRefusals"] = refusals
         print(json.dumps(document, indent=2))
-        return 0
+        return 1 if participant_surface is not None and participant_surface[1] else 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for row in ir.get("generated_from") or []:
         print(f"generated: {row['file']} from {row['model']} "
@@ -896,7 +918,31 @@ def _run_audit(args, ir: dict) -> int:
     if getattr(args, "recovery", None):
         for line in _recovery_audit_view(ir):
             print(line)
+    if participant_surface is not None:
+        classes, refusals = participant_surface
+        from . import participant_classes  # noqa: PLC0415 — lazy, CLI-only
+        print(f"\nparticipant classes (deploy map {deploy_map_path}):")
+        for line in participant_classes.render(classes, refusals):
+            print(line)
+        if refusals:
+            return 1
     return 0
+
+
+def _participant_surface(path: str, ir: dict) -> tuple[dict, list]:
+    """The `revl audit --deploy-map` view: one typed class per participant and
+    the plan-time refusals those classes raise (issue #2725).
+
+    The map is the SAME deploy map `revl deploy` reads, and the class derivation
+    is the same `participant_classes.plan_refusals` deploy admission appends, so
+    the reporting surface and the gate cannot disagree about a plan.
+    """
+    from . import participant_classes  # noqa: PLC0415 — lazy, CLI-only
+    from .deploy import _load_deploy_map  # noqa: PLC0415 — same reader as deploy
+
+    placement = _load_deploy_map(path)
+    return (participant_classes.participant_classes(ir, placement),
+            participant_classes.plan_refusals(ir, placement))
 
 
 def _retention_surface_rows(ir: dict) -> list:

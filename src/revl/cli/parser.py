@@ -461,6 +461,17 @@ def build_parser() -> argparse.ArgumentParser:
              "table vouches (claimed, unverified); and each model role's "
              "binding per host with the model bindings digest (item 515). "
              "Human output only.")
+    audit.add_argument(
+        "--deploy-map", metavar="MAP", default=None, dest="deploy_map",
+        help="a deploy map (an item-56 placement map with per-process "
+             "`[deploy]` tables): print one typed participant class per "
+             "process (prepare-reversible, deferred-irreversible, "
+             "recoverable-forward, compensable, irreversible, "
+             "irreversible-needs-approval) derived from the declarations of "
+             "the components that process holds, and REFUSE (nonzero) a plan "
+             "that orders an irreversible-needs-approval participant before a "
+             "participant that can still fail (issue #2725). Not with "
+             "`--policy` or `--diff`.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -1939,6 +1950,14 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument(
+        "--decision", default=None, metavar="FILE",
+        help="the conductor's ONE durable decision for this multi-node step: the "
+             "`decision.jsonl` `revl deploy` writes next to its state. Settles "
+             "this participant's WAL against that record (a commit-approved "
+             "record rolls forward; an abort record or a missing file rolls "
+             "back; an unreadable record fails closed). Not with --restore, "
+             "--forward, --operator-resolved or a placement index (issue #2725)")
     recover.add_argument("--composition", nargs="+", default=None,
                          metavar="FILE",
                          help="replay against the REAL world (issue #1477): the "

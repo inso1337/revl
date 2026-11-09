@@ -719,6 +719,19 @@ document is the audited unit), and a layer document (a layer is a delta over
 the composition that stacks it, so it has no boundary surface of its own; audit
 the composition instead).
 
+`--deploy-map MAP` (issue #2725) adds the participant-class view for a deploy
+map: one line per process with the class derived from the declarations of the
+components it holds (`prepare-reversible`, `deferred-irreversible`,
+`recoverable-forward`, `compensable`, `irreversible`,
+`irreversible-needs-approval`, or `no-crossing`). A participant with several
+crossings takes the worst class. The command REFUSES (nonzero) a plan that
+orders an `irreversible-needs-approval` participant before a participant that
+can still fail, naming both; the same derivation is what `revl deploy` appends
+to its plan-time admission, so the report and the gate cannot disagree.
+`--json` carries the table under `participantClasses` (plus `participantRefusals`
+when refused), additively and only when the flag is given. Not accepted with
+`--policy` or `--diff`.
+
 A composition is admitted whole, never as a layer delta, so no row is skipped
 out of the surface being counted, and a non-first-party stack-layer row is
 compiled under its own untrusted-author profile. Both are the over-refusing
@@ -1422,6 +1435,13 @@ LIFO), ending in a checked verdict + residue proof
   Each acknowledgement is appended to the WAL as it is validated, so an invalid
   sequence number leaves the earlier ones applied. Not accepted on a placement
   index: resolve a crossing on its process WAL (exit 2).
+- `--decision FILE` (issue #2725) - settle this participant's WAL against the
+  conductor's ONE durable decision for a multi-node step: the `decision.jsonl`
+  `revl deploy` writes next to its state. A commit-approved record rolls
+  forward; an abort record, a `federation-decision-pending` record or an absent
+  file rolls back; an unreadable record fails closed as `unresolved` rather
+  than guessing. Not accepted with `--restore`, `--forward`,
+  `--operator-resolved` or a placement index (exit 2).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
 - `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the
