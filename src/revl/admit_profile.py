@@ -644,19 +644,12 @@ def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
 
 def _realm_sets(ir: dict) -> dict[str, frozenset[str]]:
     """`component -> every realm its placements name`, the set the policy
-    selects a component by (`policy.component_realms`): the values of its
-    `isolate` map and the realm sets of its item-162 `routes`, provide and
-    require keys alike. A route is a multi-realm placement of a required key
-    (issue #3121)."""
-    out = {}
-    for comp in ir.get("components") or []:
-        realms = {realm for realm in (comp.get("isolate") or {}).values()
-                  if realm is not None}
-        for route in (comp.get("routes") or {}).values():
-            realms.update(realm for realm in route.get("realms") or ()
-                          if realm is not None)
-        out[comp.get("name")] = frozenset(realms)
-    return out
+    selects a component by: read through `policy._entry_realms`, the one
+    definition of the placement fields (`isolate` map and item-162 `routes`),
+    so this walk and the policy selection cannot drift (issue #3121)."""
+    from .policy import _entry_realms  # noqa: PLC0415 — lazy, avoids a cycle
+    return {comp.get("name"): _entry_realms(comp)
+            for comp in ir.get("components") or []}
 
 
 def _shrunk_realm_sets(admitted: dict,

@@ -2082,13 +2082,27 @@ def component_reach(audit: dict, name: str) -> list[Reach]:
     return out
 
 
-def component_realms(manifest: dict, name: str) -> frozenset[str]:
-    """The realms a component is placed in (its `isolate` map values and its
-    `routes` realm sets).
+def _entry_realms(entry: dict) -> frozenset[str]:
+    """Every realm one component entry is placed in: its `isolate` map values
+    and its `routes` realm sets.
 
     An `isolate` value is a single-realm placement of a provide or require
     key; a `routes` entry is the item-162 multi-realm placement
     (`realms(...)`) of a require key, which lowering keeps in its own field.
+    This is the one definition of those placement fields: `component_realms`
+    and the admission realm-removal walk (`admit_profile._realm_sets`) both
+    read it, so the policy selection and the removal check cannot drift
+    (issue #3121)."""
+    realms = set((entry.get("isolate") or {}).values())
+    for route in (entry.get("routes") or {}).values():
+        realms.update(route.get("realms") or ())
+    return frozenset(realms)
+
+
+def component_realms(manifest: dict, name: str) -> frozenset[str]:
+    """The realms a component is placed in (its `isolate` map values and its
+    `routes` realm sets, see `_entry_realms`).
+
     The policy selects a component by every realm it is placed in, so a routed
     requirer is selected by every realm it routes across, exactly as a pinned
     requirer is selected by the one realm it pins (issue #3121).
@@ -2098,10 +2112,7 @@ def component_realms(manifest: dict, name: str) -> frozenset[str]:
     """
     for entry in manifest.get("components") or []:
         if entry.get("name") == name:
-            realms = set((entry.get("isolate") or {}).values())
-            for route in (entry.get("routes") or {}).values():
-                realms.update(route.get("realms") or ())
-            return frozenset(realms)
+            return _entry_realms(entry)
     return frozenset()
 
 
