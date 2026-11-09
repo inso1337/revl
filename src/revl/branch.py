@@ -68,11 +68,11 @@ NOT_COMPARABLE = (
             "(item 250 Slice 3a), and since item 517's envelope 3.0 each "
             "decision says whether the host returned its reasoning span in "
             "full, as a summary, hidden, or not at all, and how many tokens it "
-            "reported. A comparison can therefore name the entries whose "
+            "reported. A per-entry replay plan names the entries whose "
             "reasoning is opaque and how many, never what the span contained: "
-            "the text is never written. It still shows which model each side "
-            "asked and what it cost, never the reasoning that chose between "
-            "them"},
+            "the text is never written. A comparison still shows which model "
+            "each side asked and what it cost, never the reasoning that chose "
+            "between them"},
     {"axis": "counterfactual",
      "why": "neither side can be re-executed from the WAL, so `what would have "
             "happened if` is not answerable here — only `what did happen` on "
