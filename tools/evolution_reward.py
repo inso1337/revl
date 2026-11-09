@@ -158,8 +158,9 @@ The candidate record is a JSON object. Exactly three keys are read:
 Every other key is IGNORED and reported by name under `prose_ignored`, so a
 reader of the scorecard can see that the candidate's narrative was present and
 was not consulted. The held-out seed is NOT a record key: it arrives in
-`REVL_HELDOUT_SEED`, because a candidate that could name its own seed would
-choose the draw it is judged on.
+`REVL_HELDOUT_SEED_FILE`, the path to an owner-only file outside the candidate
+tree, because a candidate that could name its own seed would choose the draw it
+is judged on.
 
 THE EDITABLE SET IS THE OPERATOR'S, NOT THE CANDIDATE'S
 -------------------------------------------------------
@@ -203,15 +204,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
-
-# The evaluator's paths are enumerated ONCE, in `src/revl/kernel_boundary.py`
-# (issue #2802), and the fences the loop's refusals use are views of that
-# enumeration. This module IMPORTS the two views it enforces rather than
-# restating them: a path added to the enumeration arrives here on the next run
-# instead of being read as absent by a stale tuple.
-from revl.kernel_boundary import evaluator_fence  # noqa: E402
 
 # Item 536's eight components in the order it lists them, then `held-out`
 # (item 537), then `progress` (item 545).
@@ -254,11 +246,12 @@ COMPONENTS = (
 # `selfhost/lower.rvl` rather than drawing.
 HELDOUT_DRAW = 200
 
-# The environment variable the seed arrives in. It is NOT a field on the
+# The environment variable the seed FILE arrives in. It is NOT a field on the
 # candidate record: `RECORD_KEYS` is the whitelist that keeps a candidate from
 # reaching a probe, and a candidate that could name its own seed would choose
-# the draw it is judged on.
-HELDOUT_SEED_ENV = "REVL_HELDOUT_SEED"
+# the draw it is judged on. A value here is a path outside the candidate tree,
+# owner-readable only; the scorer checks both properties and refuses otherwise.
+HELDOUT_SEED_FILE_ENV = "REVL_HELDOUT_SEED_FILE"
 
 # The operator's editable set, and NOT a record key. `RECORD_KEYS` is the
 # whitelist that keeps a candidate from naming what it may edit; this arrives on
@@ -270,15 +263,32 @@ ALLOW_ENV = "REVL_EDIT_ALLOW"
 # The files that decide what the reward measures, taken from the SAME single
 # enumeration the controller and the held-out scorer use (issue #2802):
 # `EVALUATOR_PATHS` in `src/revl/kernel_boundary.py`, through its `authority`
-# and `held_out` views. A declared scope that NAMES one of them (an exact path
-# in the list, not merely a directory that contains it) is refused by name
-# before the diff is read: a candidate that says it may edit its own judge has
-# said enough. The measured diff is checked against the same set. This is not
-# the deny list the operator allow set replaces; it is the declaration-side and
-# measured-diff check on the candidate's own footprint. Imported, not restated,
-# so an evaluator path added to the enumeration cannot be forgotten here.
-EVALUATOR_FENCE = tuple(dict.fromkeys(
-    evaluator_fence("authority") + evaluator_fence("held_out")))
+# and `held_out` views. Resolved lazily through `_evaluator_protocol()` so
+# importing this module never pulls in `revl/__init__.py` (and with it the
+# compiler). A declared scope that NAMES one of them (an exact path in the
+# list, not merely a directory that contains it) is refused by name before the
+# diff is read: a candidate that says it may edit its own judge has said
+# enough. The measured diff is checked against the same set with a
+# segment-prefix match, as `kernel_boundary` and the controller match it. This
+# is not the deny list the operator allow set replaces; it is the
+# declaration-side and measured-diff check on the candidate's own footprint.
+def evaluator_fence(name: str) -> tuple:
+    """One view of the evaluator enumeration, without importing `revl`."""
+    return _evaluator_protocol().evaluator_fence(name)
+
+
+def _evaluator_fence() -> tuple:
+    """`AUTHORITY_FENCE + HELD_OUT_FENCE`, de-duplicated, in order."""
+    protocol = _evaluator_protocol()
+    return tuple(dict.fromkeys(
+        protocol.AUTHORITY_FENCE + protocol.HELD_OUT_FENCE))
+
+
+def __getattr__(name: str):
+    """Lazy `EVALUATOR_FENCE` so import never loads the compiler."""
+    if name == "EVALUATOR_FENCE":
+        return _evaluator_fence()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
 # of the candidate's change, which is the half of the item's "can only shrink in
@@ -610,18 +620,23 @@ def probe_held_out(candidate: Candidate) -> Verdict:
 
     The seed comes from the environment and NOT from the candidate record. A
     candidate that could name its own seed would choose the draw it is judged
-    on, which is the fail-open shape this component exists to close. An absent
-    seed is a failed component rather than a skipped one: a promotion pipeline
-    that silently drops this check when nobody configured a seed has exactly
-    the property item 537 was opened about.
+    on, which is the fail-open shape this component exists to close. The value
+    is a path to an owner-only seed file outside the candidate tree, and the
+    scorer refuses a path inside a work tree, a file other users can read, and
+    a digest a previous scored run already consumed. One seed file is one
+    scored promotion: a clean or a divergent score consumes its digest, so the
+    next candidate needs a rotated seed file. An absent seed is a failed
+    component rather than a skipped one: a promotion pipeline that silently
+    drops this check when nobody configured a seed has exactly the property
+    item 537 was opened about.
     """
     name = "held-out"
-    seed = os.environ.get(HELDOUT_SEED_ENV, "")
-    if not seed:
+    seed_file = os.environ.get(HELDOUT_SEED_FILE_ENV, "")
+    if not seed_file:
         return failed(
             name,
-            f"no held-out seed: {HELDOUT_SEED_ENV} is unset, so the candidate "
-            "was not scored on anything it could not read")
+            f"no held-out seed file: {HELDOUT_SEED_FILE_ENV} is unset, so the "
+            "candidate was not scored on anything it could not read")
 
     with tempfile.TemporaryDirectory() as scratch:
         # The record is written OUTSIDE the candidate tree on purpose. Writing
@@ -736,6 +751,7 @@ def probe_scope(candidate: Candidate) -> Verdict:
     of itself.
     """
     name = "scope"
+    fence = _evaluator_fence()
     if not candidate.allow:
         return failed(
             name,
@@ -752,7 +768,7 @@ def probe_scope(candidate: Candidate) -> Verdict:
             + ", ".join(fenced)
             + ". A candidate that declares it may edit its own judge is "
             "refused before the diff is read",
-            ["fence=" + ";".join(EVALUATOR_FENCE)])
+            ["fence=" + ";".join(fence)])
     refusal = base_refusal(candidate)
     if refusal:
         return failed(name, refusal)
@@ -770,7 +786,8 @@ def probe_scope(candidate: Candidate) -> Verdict:
             + ", ".join(outside_allow[:6]),
             [f"git diff --no-renames --name-only {candidate.base}",
              "allow=" + ";".join(candidate.allow)])
-    measured_fence = [p for p in paths if p in set(EVALUATOR_FENCE)]
+    measured_fence = [p for p in paths
+                      if any(_under(p, prefix) for prefix in fence)]
     if measured_fence:
         return failed(
             name,
@@ -780,7 +797,7 @@ def probe_scope(candidate: Candidate) -> Verdict:
             "and a change to it is refused even when a directory glob in the "
             "grant covers it",
             [f"git diff --no-renames --name-only {candidate.base}",
-             "fence=" + ";".join(EVALUATOR_FENCE)])
+             "fence=" + ";".join(fence)])
     if _whole_tree(candidate.scope):
         return failed(
             name,
@@ -816,6 +833,16 @@ def _norm_pattern(pattern) -> str:
     return norm
 
 
+def _under(path: str, prefix: str) -> bool:
+    """Segment-wise prefix match, so `formal` does not match `formalise.py`.
+
+    The same match `kernel_boundary` and the controller use for the evaluator
+    enumeration: an entry like `crates/revl-gate` covers the whole tree beneath
+    it, not only the directory itself.
+    """
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+
+
 def _declared_fence(scope):
     """The fenced evaluator paths a declared scope NAMES, in order.
 
@@ -823,7 +850,7 @@ def _declared_fence(scope):
     operator's to grant or withhold through the allow set, while
     `tools/evolution_reward.py` names the judge itself.
     """
-    fence = set(EVALUATOR_FENCE)
+    fence = set(_evaluator_fence())
     return sorted({_norm_pattern(p) for p in scope} & fence)
 
 

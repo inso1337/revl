@@ -234,10 +234,10 @@ def test_the_held_out_seed_is_not_a_candidate_record_key(reward):
     """A candidate that could name its own seed would choose its own draw.
 
     `RECORD_KEYS` is the whitelist that keeps a candidate from reaching a
-    probe, and the seed stays outside it: it arrives in the environment, where
-    the operator holds it.
+    probe, and the seed file path stays outside it: it arrives in the
+    environment, where the operator holds it.
     """
-    assert reward.HELDOUT_SEED_ENV not in reward.RECORD_KEYS
+    assert reward.HELDOUT_SEED_FILE_ENV not in reward.RECORD_KEYS
     assert "seed" not in reward.RECORD_KEYS
     candidate = reward.load_candidate(
         {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"],
@@ -254,12 +254,12 @@ def test_an_unset_held_out_seed_fails_the_component_rather_than_skipping_it(
     state the item was opened about. There is no `skipped` verdict here and
     this must not invent one.
     """
-    monkeypatch.delenv(reward.HELDOUT_SEED_ENV, raising=False)
+    monkeypatch.delenv(reward.HELDOUT_SEED_FILE_ENV, raising=False)
     candidate = reward.load_candidate(
         {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"]})
     verdict = reward.probe_held_out(candidate)
     assert not verdict.verified
-    assert reward.HELDOUT_SEED_ENV in verdict.reason
+    assert reward.HELDOUT_SEED_FILE_ENV in verdict.reason
 
 
 def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
@@ -271,7 +271,8 @@ def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
     the distinction in the reason and collapses both to `failed`, because
     `verified` means somebody's artifact said yes.
     """
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
 
@@ -295,7 +296,8 @@ def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
 def test_a_held_out_run_that_writes_no_record_fails(reward, monkeypatch,
                                                     tmp_path):
     """A tool that exits 0 and says nothing has verified nothing."""
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -310,7 +312,8 @@ def test_a_held_out_run_that_writes_no_record_fails(reward, monkeypatch,
 def test_a_clean_held_out_run_verifies_the_component(reward, monkeypatch,
                                                      tmp_path):
     """The control: the only path on which this component passes."""
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -339,7 +342,8 @@ def test_a_held_out_run_that_writes_no_file_into_the_candidate_tree(
     draw never becoming a file. The probe writes it to a scratch directory it
     deletes, so a promotion run leaves the candidate tree as it found it.
     """
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -602,6 +606,17 @@ def test_a_change_to_a_fenced_evaluator_is_refused_even_inside_the_grant(
     assert verdict.verified is False
     assert "fenced" in verdict.reason
     assert "tools/evolution_reward.py" in verdict.reason
+
+
+def test_the_measured_fence_matches_segment_prefixes(reward):
+    """`kernel_boundary` matches evaluator entries as path prefixes, not exact
+    membership, so a file beneath an entry is fenced too. Exact membership
+    would miss it."""
+    assert reward._under("crates/revl-gate/src/session.rs", "crates/revl-gate")
+    assert reward._under("formal/CheckAxioms.lean", "formal")
+    assert reward._under("tools/evolution_reward.py", "tools/evolution_reward.py")
+    assert not reward._under("formalities.py", "formal")
+    assert not reward._under("crates/revl-gate-foo/x.rs", "crates/revl-gate")
 
 
 def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(reward, tiny_repo):
