@@ -76,6 +76,7 @@ import types
 from typing import Optional
 
 from .errors import RevlError
+from .refusal import refusals
 from .wal import WALIntegrityError, read_wal
 
 #: The journal record a two-phase admission writes for a fenced crossing
@@ -419,7 +420,7 @@ def _execute(ir: dict, component: str, receiver: str, method: str):
         emit = backend_emit_module("python")
         try:
             source = emit.emit(ir)
-        except Exception as error:  # the emitter's own refusal
+        except refusals(emit) as error:  # a refusal is an answer, reported
             raise SwapError(
                 f"the py emitter refused the document: {error}") from None
         module = types.ModuleType(module_name)
@@ -805,8 +806,6 @@ def swap(old: str, new: str, history: str,
     if not pre["replayable"]:
         return document
 
-    old_component = _component(old_ir, name, "OLD")
-    new_component = _component(new_ir, name, "NEW")
     for step in pre["steps"]:
         receiver, method = step["receiver"], step["method"]
         try:

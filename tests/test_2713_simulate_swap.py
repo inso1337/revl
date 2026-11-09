@@ -31,6 +31,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "backends" / "python"))
@@ -38,6 +40,7 @@ sys.path.insert(0, str(ROOT / "backends" / "python"))
 import replay  # noqa: E402
 
 from revl import simulate_swap  # noqa: E402
+from revl.compiler import compile_source  # noqa: E402
 from revl.wal import determinism, read_wal  # noqa: E402
 
 OLD = """service Counter {
@@ -468,3 +471,113 @@ def test_the_determinism_record_round_trips_and_consumes_no_seq(tmp_path):
     assert "seq" not in record
     effects = [r for r in records if r.get("record") == "admit-crossing"]
     assert [r["seq"] for r in effects] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# emitter refusal versus fault (issue #1406): a refusal is an answer, a fault
+# stays loud -- the same three-way discipline every emitter entry point holds.
+# ---------------------------------------------------------------------------
+
+#: A document the py tier refuses by name (`validated` extern, issue #1382).
+_REFUSED = """type Call = { tool: Str, args: Str }
+type AgentTurn = Final(Str) | ToolCalls(List[Call])
+
+extern emission[model] validated fn complete(h: Str) -> AgentTurn = @py {
+  return {"kind": "Final", "value": "x"}
+}
+
+service Counter {
+  fn value() -> Int
+}
+
+component CounterC provides counter: Counter {
+  provide counter {
+    fn value() -> Int = 0
+  }
+}
+"""
+
+
+def _fake_emitter(exc_factory):
+    """A module whose `emit` raises what the factory builds, with its own
+    `EmitError` (a `ValueError`) -- the two controls every assertion below is
+    paired with."""
+    import types  # noqa: PLC0415
+
+    module = types.ModuleType("fake_emit")
+    module.__file__ = "<fake_emit>"
+
+    class EmitError(ValueError):
+        pass
+
+    module.EmitError = EmitError
+
+    def emit(ir):
+        raise exc_factory(module)
+
+    module.emit = emit
+    return module
+
+
+def _refusing(message="this tier cannot lower that"):
+    return _fake_emitter(lambda m: m.EmitError(message))
+
+
+def _faulting():
+    return _fake_emitter(
+        lambda m: AttributeError("'NoneType' object has no attribute 'get'"))
+
+
+def _bare_value_error():
+    """THE control for this issue. `EmitError` inherits from `ValueError`, so a
+    fix that catches `ValueError` passes every refusal assertion while
+    swallowing a real fault. A bare `ValueError` is a fault, not a refusal."""
+    return _fake_emitter(lambda m: ValueError("an emitter bug that is a ValueError"))
+
+
+def test_the_re_run_reports_an_emitter_refusal_as_an_answer(monkeypatch):
+    """A refusal is the tier's own sentence for this document, carried verbatim
+    in the reported step -- not a traceback and not a swallowed pass."""
+    from revl import placement  # noqa: PLC0415
+
+    ir = compile_source(_REFUSED, "refused.rvl")
+    monkeypatch.setattr(placement, "backend_emit_module", lambda tier: _refusing(
+        "the py tier cannot lower this document"))
+    with pytest.raises(simulate_swap.SwapError) as caught:
+        simulate_swap._execute(ir, "CounterC", "counter", "value")
+    assert "the py emitter refused the document" in str(caught.value)
+    assert "the py tier cannot lower this document" in str(caught.value)
+
+
+def test_the_real_py_refusal_reaches_the_report(monkeypatch):
+    """The paired green half: the real emitter's own refusal sentence, read
+    live off the refused document, not a fragment written down in this file."""
+    ir = compile_source(_REFUSED, "refused.rvl")
+    with pytest.raises(simulate_swap.SwapError) as caught:
+        simulate_swap._execute(ir, "CounterC", "counter", "value")
+    assert "the py emitter refused the document" in str(caught.value)
+    assert "`validated` extern `complete`" in str(caught.value)
+
+
+def test_the_re_run_lets_a_fault_through(monkeypatch):
+    """The control, and the half that was wrong: a bug inside the emitter must
+    keep its own traceback, not arrive as a sentence about the document."""
+    from revl import placement  # noqa: PLC0415
+
+    ir = compile_source(_REFUSED, "refused.rvl")
+    monkeypatch.setattr(placement, "backend_emit_module", lambda tier: _faulting())
+    with pytest.raises(AttributeError, match="NoneType"):
+        simulate_swap._execute(ir, "CounterC", "counter", "value")
+
+
+def test_the_re_run_lets_a_bare_value_error_through(monkeypatch):
+    """The second control, and the one that fails against the lazy fix. An
+    emitter raising a bare `ValueError` is faulting, not refusing, even though
+    `EmitError` is a `ValueError` too."""
+    from revl import placement  # noqa: PLC0415
+
+    ir = compile_source(_REFUSED, "refused.rvl")
+    monkeypatch.setattr(placement, "backend_emit_module",
+                        lambda tier: _bare_value_error())
+    with pytest.raises(ValueError, match="an emitter bug"):
+        simulate_swap._execute(ir, "CounterC", "counter", "value")
