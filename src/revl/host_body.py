@@ -251,7 +251,7 @@ class _Scan:
         """The end of the string or comment starting at `i`, and whether it
         is a string (separators inside one are allowed). None for ordinary
         code."""
-        s, n, p = self.s, self.n, self.p
+        s, p = self.s, self.p
         for opener, closer in p["block_comments"]:
             if s.startswith(opener, i):
                 return self._skip_block(i, opener, closer), False
