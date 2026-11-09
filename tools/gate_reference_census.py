@@ -462,6 +462,17 @@ def make_admission_certify(tables):
             return False
         return token not in keywords
 
+    def is_dunder_name(name: str) -> bool:
+        """The reference's dunder test `^__\\w+__$` (`revl.lower._is_dunder_name`,
+        issue #319): `__init__`, `__proto__`, `__x__`. At least one byte sits
+        between the two `__` pairs, so `__` and `___` are not dunders. This is a
+        rule of the METHOD position only, where the reference applies it: it
+        admits a dunder service, alias, component and parameter name."""
+        middle = name[2:-2]
+        return (len(name) >= 5 and name.startswith("__") and name.endswith("__")
+                and all(ch == "_" or ch.isascii() and ch.isalnum()
+                        for ch in middle))
+
     def is_declarable(token: str) -> bool:
         return is_name(token) and token not in reserved
 
@@ -554,7 +565,11 @@ def make_admission_certify(tables):
             while i < n and toks[i] != "}":
                 # An operation carrying a MARKING (`emission fn`, `async fn`,
                 # …) does not match here and leaves the surface whole.
-                if toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1]):
+                # Issue #3155: the reference refuses a dunder method name
+                # (issue #319) and the native gate does not, so the certifier
+                # decides it. No other name position is held to it.
+                if (toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1])
+                        or is_dunder_name(toks[i + 1])):
                     return None
                 mname = toks[i + 1]
                 i += 2
@@ -968,6 +983,16 @@ ADMISSION_PROGRAMS = (
      "service Dup {\n  fn a(x: Int) -> Int\n}\nservice Dup {\n  fn b(x: Int) -> Int\n}\n"),
     ("near_miss_duplicate_method",
      "service Dup {\n  fn a(x: Int) -> Int\n  fn a(y: Int) -> Int\n}\n"),
+    # Issue #3155: the reference refuses a dunder service-method name (issue
+    # #319) and `admit_src` raises no objection, so the certifier has to
+    # withhold these or they land in the zero-tolerance `false-admission`
+    # bucket. Both shapes from the issue: the bare declaration, and the same
+    # method implemented by a component.
+    ("near_miss_dunder_service_method",
+     "service S {\n  fn __init__()\n}\n"),
+    ("near_miss_dunder_implemented_method",
+     "service S {\n  fn __proto__(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  provide s {\n    fn __proto__(x) = x\n  }\n}\n"),
     ("near_miss_fn_body", "service S {\n  fn a(x: Int) -> Int\n}\n"
                           "fn twice(x: Int) -> Int { return x + x }\n"),
     ("near_miss_generic_type", "service S {\n  fn all() -> List[Int]\n}\n"),

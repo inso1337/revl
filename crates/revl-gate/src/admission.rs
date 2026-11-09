@@ -358,6 +358,26 @@ fn is_name(token: &str) -> bool {
     }
 }
 
+/// A DUNDER / prototype name, by the reference's own test `^__\w+__$`
+/// (`revl.lower._is_dunder_name`, issue #319): `__init__`, `__proto__`,
+/// `__x__`. At least one byte sits between the two `__` pairs, so `__` and
+/// `___` are not dunders, and the byte test is `\w` over an identifier
+/// ([`tokens`] has already refused a non-ASCII source).
+///
+/// This is a rule of the METHOD position only, which is where the reference
+/// applies it. The reference refuses a dunder service-method name and
+/// `admit_src` raises no objection, so the certifier decides it here or the
+/// surface issues an admission the reference refuses (issue #3155). The
+/// reference ADMITS a dunder service, alias, component and parameter name, so
+/// holding those to this test would be a false rejection.
+fn is_dunder_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 5
+        && bytes.starts_with(b"__")
+        && bytes.ends_with(b"__")
+        && bytes[2..bytes.len() - 2].iter().all(|&b| is_ident_byte(b))
+}
+
 /// A name as a MANIFEST WIRE field: a non-empty run of ASCII identifier bytes.
 ///
 /// [`is_name`] is written for tokens that already came out of [`tokens`], where
@@ -530,7 +550,13 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
             // match here and leaves the surface whole. That is deliberate: the
             // markings decide what the reference makes of a call, and this
             // certifier types calls.
-            if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1]) {
+            // A dunder method name is the reference's refusal (issue #319) and
+            // `admit_src` does not carry it, so the certifier decides it (issue
+            // #3155). No other name position is held to it: the reference
+            // admits a dunder there.
+            if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1])
+                || is_dunder_name(toks[i + 1])
+            {
                 return None;
             }
             let mname = toks[i + 1];
@@ -1454,6 +1480,33 @@ mod tests {
         // surface would issue an admission the reference refuses.
         assert!(certify("service A {\n  fn f(x: Int) -> Int\n}\nservice A {\n  fn g(x: Int) -> Int\n}\n").is_none());
         assert!(certify("service A {\n  fn f(x: Int) -> Int\n  fn f(y: Int) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn a_dunder_service_method_is_not_certified() {
+        // Issue #3155: the reference refuses a dunder service-method name
+        // (issue #319) and `admit_src` raises no objection to it, so the
+        // certifier has to withhold it or the surface issues an admission the
+        // reference refuses.
+        for source in [
+            "service S {\n  fn __init__()\n}\n",
+            "service S {\n  fn __proto__(x: Int) -> Int\n}\n",
+            "service S {\n  fn __x__()\n}\n",
+        ] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+        // The other name positions are NOT dunders to the reference: it admits
+        // a dunder service, alias, component and parameter, and `___` has no
+        // byte between its `__` pairs.
+        for source in [
+            "service __init__ {\n}\n",
+            "type __k__ = Str\n",
+            "component __c__ {\n}\n",
+            "service S {\n  fn f(__x__: Int) -> Int\n}\n",
+            "service S {\n  fn ___()\n}\n",
+        ] {
+            assert!(certify(source).is_some(), "must certify: {:?}", source);
+        }
     }
 
     #[test]
