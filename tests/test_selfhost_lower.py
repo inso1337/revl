@@ -6919,8 +6919,9 @@ def test_oracle_b_handoff_state_compatibility(admit_ambient, name, running,
 #: A hand-off whose state type is a NOMINAL record: the spelling is the same on
 #: both sides and only the declaration behind the name differs. The reference
 #: resolves each spelling against its own version's declarations
-#: (`admission._handoff_compatible`); the wire carries the running spelling
-#: alone, so the gate has no running declaration to resolve it against.
+#: (`admission._handoff_compatible`). The wire carries the running ones as
+#: declaration rows (`~St~record~a:Int`, `manifest._decl_rows`) and the gate
+#: reads the incoming ones off the text, so the two agree byte for byte.
 _H_NOMINAL_OLD = _h_comp("Store", "St", extra="type St = { a: Int }\n")
 _H_NOMINAL_NEW = _h_comp("Store", "St", extra="type St = { a: Int, b: Int }\n")
 
@@ -6935,26 +6936,252 @@ def test_handoff_nominal_record_unchanged_agrees(admit_ambient):
 
 
 def test_handoff_nominal_record_changed_is_refused_by_the_reference():
-    """The reference half of the divergence below, OUTSIDE the expected
-    failure: if the reference stops refusing, this goes red on its own."""
+    """The reference half of the divergence below: if the reference stops
+    refusing, this goes red on its own."""
     ref = _ref_ambient(_H_NOMINAL_NEW, _H_NOMINAL_OLD, replacing=("Store",))
     assert ref.startswith("G2|state hand-off on `db` differs from the running "
                           "manifest: `Store` accepts `St` ("), ref
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN DIVERGENCE: the self-host gate compares hand-off SPELLINGS "
-           "only. `C=k:T` carries the running spelling and no declaration, so "
-           "a nominal record whose declaration changed under the same name "
-           "admits here while the reference refuses it. Closing it needs the "
-           "running declarations on the wire (a new row kind) and the "
-           "incoming declarations read off the text.")
 def test_handoff_nominal_record_changed_gate_matches_the_reference(
         admit_ambient):
     ref = _ref_ambient(_H_NOMINAL_NEW, _H_NOMINAL_OLD, replacing=("Store",))
     assert _gate_ambient(admit_ambient, _H_NOMINAL_NEW, _H_NOMINAL_OLD,
                          replacing=("Store",)) == ref
+
+
+#: (name, running spelling, incoming spelling, running declarations, incoming
+#: declarations, refused?). Every row is checked on BOTH legs of oracle B and
+#: the expectation is a third witness: a refusal is the hand-off drift, an
+#: admission is the empty verdict.
+_HANDOFF_DECL_CORPUS = (
+    ("a field added", "St", "St", "type St = { a: Int }\n",
+     "type St = { a: Int, b: Int }\n", True),
+    ("a field removed", "St", "St", "type St = { a: Int, b: Int }\n",
+     "type St = { a: Int }\n", True),
+    ("a field retyped", "St", "St", "type St = { a: Int }\n",
+     "type St = { a: Str }\n", True),
+    ("a Secret field becoming Str", "St", "St",
+     "type St = { a: Secret[Str] }\n", "type St = { a: Str }\n", True),
+    ("a Str field becoming Secret", "St", "St", "type St = { a: Str }\n",
+     "type St = { a: Secret[Str] }\n", True),
+    ("nested under Map and List", "Map[Str, List[St]]", "Map[Str, List[St]]",
+     "type St = { a: Int }\n", "type St = { a: Int, b: Int }\n", True),
+    ("nested under Opt on the accepted side only", "St", "Opt[St]",
+     "type St = { a: Int }\n", "type St = { a: Int, b: Int }\n", True),
+    ("a change reached through another record", "Outer", "Outer",
+     "type St = { a: Int }\ntype Outer = { s: St }\n",
+     "type St = { a: Int, b: Int }\ntype Outer = { s: St }\n", True),
+    ("a generic gaining a field", "Box[Int]", "Box[Int]",
+     "type Box[T] = { v: T }\n", "type Box[T] = { v: T, w: Int }\n", True),
+    ("a generic argument's own record changing", "Box[St]", "Box[St]",
+     "type St = { a: Int }\ntype Box[T] = { v: T }\n",
+     "type St = { a: Int, b: Int }\ntype Box[T] = { v: T }\n", True),
+    ("a recursive variant gaining a case", "Tree", "Tree",
+     "type Tree = Leaf | Node(Tree)\n",
+     "type Tree = Leaf | Node(Tree) | Stump\n", True),
+    ("a recursive record retyped", "Chain", "Chain",
+     "type Chain = { n: Int, next: Opt[Chain] }\n",
+     "type Chain = { n: Str, next: Opt[Chain] }\n", True),
+    ("variant cases reordered", "V", "V", "type V = A | B(Int)\n",
+     "type V = B(Int) | A\n", True),
+    ("a variant payload retyped", "V", "V", "type V = A | B(Int)\n",
+     "type V = A | B(Str)\n", True),
+    ("an alias to a changed record", "St", "S", "type St = { a: Int }\n",
+     "type St = { a: Int, b: Int }\ntype S = St\n", True),
+    ("an unchanged record", "St", "St", "type St = { a: Int }\n",
+     "type St = { a: Int }\n", False),
+    ("an unchanged nested record", "Map[Str, List[St]]", "Map[Str, List[St]]",
+     "type St = { a: Int }\n", "type St = { a: Int }\n", False),
+    ("an unchanged generic", "Box[St]", "Box[St]",
+     "type St = { a: Int }\ntype Box[T] = { v: T, w: List[Box[T]] }\n",
+     "type St = { a: Int }\ntype Box[T] = { v: T, w: List[Box[T]] }\n", False),
+    ("an unchanged recursive variant", "Tree", "Tree",
+     "type Tree = Leaf | Node(Tree)\n", "type Tree = Leaf | Node(Tree)\n",
+     False),
+    ("a generic parameter renamed", "Box[Int]", "Box[Int]",
+     "type Box[T] = { v: T }\n", "type Box[U] = { v: U }\n", False),
+    ("record fields reordered", "St", "St", "type St = { a: Int, b: Str }\n",
+     "type St = { b: Str, a: Int }\n", False),
+    ("an unrelated type changing", "St", "St",
+     "type St = { a: Int }\ntype Other = { x: Int }\n",
+     "type St = { a: Int }\ntype Other = { x: Str }\n", False),
+    ("an unrelated type added", "St", "St", "type St = { a: Int }\n",
+     "type St = { a: Int }\ntype Other = { x: Str }\n", False),
+    ("an alias to an unchanged record", "St", "S", "type St = { a: Int }\n",
+     "type St = { a: Int }\ntype S = St\n", False),
+)
+
+_H_DRIFT_HEAD = ("G2|state hand-off on `db` differs from the running "
+                 "manifest: `Store` accepts `")
+
+
+@pytest.mark.parametrize("name,old_ty,new_ty,old_decl,new_decl,refused",
+                         _HANDOFF_DECL_CORPUS,
+                         ids=[c[0] for c in _HANDOFF_DECL_CORPUS])
+def test_oracle_b_handoff_declared_shape(admit_ambient, name, old_ty, new_ty,
+                                         old_decl, new_decl, refused):
+    """ORACLE B over the declarations behind a hand-off spelling: the gate
+    refuses exactly when the reference does, in the reference's words, which
+    print both declarations."""
+    running = _h_comp("Store", old_ty, extra=old_decl)
+    incoming = _h_comp("Store", new_ty, extra=new_decl)
+    got = _gate_ambient(admit_ambient, incoming, running, replacing=("Store",))
+    ref = _ref_ambient(incoming, running, replacing=("Store",))
+    assert got == ref, name
+    if refused:
+        assert got.startswith(_H_DRIFT_HEAD), got
+    else:
+        assert got == "", got
+
+
+def test_handoff_declared_shape_refusal_names_both_declarations(admit_ambient):
+    got = _gate_ambient(admit_ambient, _H_NOMINAL_NEW, _H_NOMINAL_OLD,
+                        replacing=("Store",))
+    assert got == (
+        "G2|state hand-off on `db` differs from the running manifest: "
+        "`Store` accepts `St` (`St = {a: Int, b: Int}`), but `Store` exports "
+        "`St` (`St = {a: Int}`) — the successor cannot hold the predecessor's "
+        "state, and dropping it on the swap would be residue")
+
+
+def test_handoff_declared_shape_names_the_declaration_that_moved(
+        admit_ambient):
+    """A name whose body is spelled the same but reaches a changed one differs
+    only through it, so the refusal shows the one that moved."""
+    old = _h_comp("Store", "Outer",
+                  extra="type St = { a: Int }\ntype Outer = { s: St }\n")
+    new = _h_comp("Store", "Outer",
+                  extra="type St = { a: Int, b: Int }\ntype Outer = { s: St }\n")
+    got = _gate_ambient(admit_ambient, new, old, replacing=("Store",))
+    assert "`Outer` (`St = {a: Int, b: Int}`), but" in got, got
+    assert got.endswith("exports `Outer` (`St = {a: Int}`) — the successor "
+                        "cannot hold the predecessor's state, and dropping it "
+                        "on the swap would be residue"), got
+    assert got == _ref_ambient(new, old, replacing=("Store",))
+
+
+def test_handoff_declared_shape_without_running_declarations_fails_closed(
+        admit_ambient):
+    """A running document that carries no `types` (an older or hand-built one)
+    cannot prove a name the candidate declares is unchanged, so both legs refuse
+    it: the gate on a wire with the declaration rows left off, the reference on
+    an IR with no `types`."""
+    from revl import manifest_wire
+    ir = compile_source(_H_NOMINAL_OLD, "running.rvl")
+    wire = manifest_wire(ir, replacing=("Store",))
+    bare = ";".join(row for row in wire.split(";") if not row.startswith("~"))
+    assert bare != wire
+    got = admit_ambient(_H_NOMINAL_OLD, bare)
+    ir.pop("types")
+    try:
+        compile_source(_H_NOMINAL_OLD, "diff.rvl", manifest=ir,
+                       replacing=("Store",))
+        ref = ""
+    except RevlErrors as error:
+        ref = _classify(error.errors[0]) + "|" + error.errors[0].message
+    except RevlError as error:
+        ref = _classify(error) + "|" + error.message
+    assert got.startswith(_H_DRIFT_HEAD), got
+    assert got == ref
+
+
+@pytest.mark.parametrize("row", [
+    "~St", "~St~record", "~St~union~a:Int", "~1St~record~a:Int",
+    "~St~record~a", "~St~record~a:", "~St~record~:Int", "~St[]~record~a:Int",
+    "~St[T~record~a:T", "~St[T,1]~record~a:T", "~V~variant~A:", "~V~variant~~A",
+    "~St~record~a:Int;~St~record~b:Int",
+], ids=lambda row: row)
+def test_a_garbled_declaration_row_refuses_the_wire(admit_ambient, row):
+    got = admit_ambient("", "Store/db/;Store=db:St;" + row)
+    assert got.startswith("MANIFEST|manifest declaration row `"), got
+
+
+def test_a_declaration_row_is_a_kind_no_older_reader_has(admit_ambient):
+    """The row is `~`-led, a marker no earlier row kind uses (`!`, `:`, `-` or a
+    component name), so a reader from before it takes the whole wire for
+    garbled: the unknown-marker refusal below is what it answers, and a
+    consumer pinned to it refuses every admission into a composition holding a
+    declaration, the same fail-closed discipline as the presence row (#2289)."""
+    from revl.manifest import DECL_MARKER
+    assert DECL_MARKER not in "!:-_" + "".join(
+        chr(c) for c in range(128) if chr(c).isalnum())
+    assert admit_ambient("", "Store/db/;^St~record~a:Int").startswith(
+        "MANIFEST|unrecognized manifest row `^St")
+    assert admit_ambient("", "Store/db/;~St~record~a:Int") == ""
+
+
+def test_manifest_wire_renders_only_the_declarations_a_handoff_reaches():
+    from revl import manifest_wire
+    src = _H_SVC + (
+        "type St = { a: Int, m: Map[Str, List[Other]], f: (Int) -> Str }\n"
+        "type Other = { x: Opt[St] }\n"
+        "type V[T] = A | B(T) | C(Map[Str, Int])\n"
+        "type Box[T] = { v: T, w: List[Box[T]] }\n"
+        "type Unrelated = { z: Int }\n"
+        "component Store provides db: D {\n"
+        "  handoff db: Map[Str, Box[V[St]]]\n"
+        "  provide db { fn q(s) { let x = s   return 0 } }\n}\n")
+    rows = manifest_wire(compile_source(src, "running.rvl")).split(";")
+    assert [r for r in rows if r.startswith("~")] == [
+        "~Box[T]~record~v:T~w:List[Box[T]]",
+        "~Other~record~x:Opt[St]",
+        "~St~record~a:Int~m:Map[Str, List[Other]]~f:(Int) -> Str",
+        "~V[T]~variant~A~B:T~C:Map[Str, Int]",
+    ]
+    # nothing is rendered for a composition with no hand-off, or one whose
+    # hand-off names no declared type: those wires are what they always were
+    plain = _H_SVC + "type St = { a: Int }\n" + (
+        "component Store provides db: D {\n"
+        "  provide db { fn q(s) { let x = s   return 0 } }\n}\n")
+    assert "~" not in manifest_wire(compile_source(plain, "p.rvl"))
+    builtin = _h_comp("Store", "Map[Str, Int]", extra="type St = { a: Int }\n")
+    assert "~" not in manifest_wire(compile_source(builtin, "b.rvl"))
+
+
+def test_manifest_decl_rows_take_a_set_of_root_spellings():
+    """The emitter is keyed by ROOT spellings, so another consumer of the same
+    comparison can ask for the declarations behind its own."""
+    from revl.manifest import _decl_rows
+    types = {
+        "St": {"params": [], "kind": "record", "fields": {"a": "Int"}},
+        "V": {"params": ["T"], "kind": "variant",
+              "cases": [{"name": "A", "payload": None},
+                        {"name": "B", "payload": "T"}]},
+        "Other": {"params": [], "kind": "record", "fields": {"z": "Int"}},
+    }
+    assert _decl_rows(types, []) == []
+    assert _decl_rows(types, [None, "Int"]) == []
+    assert _decl_rows(types, ["V[St]"]) == ["~St~record~a:Int",
+                                           "~V[T]~variant~A~B:T"]
+    assert _decl_rows(types, ["St", "V[Int]"]) == _decl_rows(types, ["V[St]"])
+    assert _decl_rows(None, ["St"]) == []
+
+
+def test_manifest_decl_rows_withhold_what_the_wire_cannot_spell():
+    """A declaration needing the row separator or terminator, or a name that is
+    not an identifier, is withheld: the name then reads as undeclared on the
+    running side, which refuses a successor that declares it."""
+    from revl.manifest import _decl_rows
+    bad = {
+        "A": {"params": [], "kind": "record", "fields": {"a": "Map[Str;Int]"}},
+        "B": {"params": [], "kind": "record", "fields": {"a": "x~y"}},
+        "C": {"params": [], "kind": "record", "fields": {"a b": "Int"}},
+        "D": {"params": [], "kind": "variant", "cases": [
+            {"name": "X", "payload": ""}]},
+        "E": {"params": [], "kind": "record", "fields": {}},
+        "Ok": {"params": [], "kind": "record", "fields": {"a": "Int"}},
+    }
+    assert _decl_rows(bad, ["A", "B", "C", "D", "E", "Ok"]) == [
+        "~Ok~record~a:Int"]
+
+
+def test_manifest_decl_rows_leave_the_provided_council_types_out():
+    """`Answer` and `Aggregate` are seeded identically into every version and no
+    program can redeclare them, so they carry no difference and no row."""
+    from revl.manifest import _decl_rows
+    from revl.model_answer import ANSWER_TYPES
+    assert _decl_rows(dict(ANSWER_TYPES), ["Aggregate[Str]", "Answer[Str]"]) == []
 
 
 def test_manifest_wire_renders_the_handoff_row():

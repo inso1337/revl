@@ -11651,6 +11651,19 @@ fn find_route(rs: List[MRoute], comp: Str, key: Str, i: Int) -> MRoute {
 // shape against.
 type MHand = { comp: Str, key: Str, ty: Str }
 
+// A declared record or variant, as the reference's `types` entry carries it
+// (`{params, kind, fields | cases}`): the shape a nominal name stands for. One
+// table of these is READ OFF THE INCOMING TEXT (`types_decls`, the very reader
+// that renders the IR `types` section, so the two cannot disagree) and one off
+// the manifest wire's declaration rows (`~Name[T]~record~f:T`), and the
+// hand-off check compares the declarations behind a spelling, not the spelling.
+// `mems` is the record's fields in written order (`has` always true) or the
+// variant's cases in written order (`has` false for a payload-less case, whose
+// `ty` is then ""). `name` "" is the absent declaration.
+type HdMem = { name: Str, ty: Str, has: Bool }
+type HdDecl = { name: Str, kind: Str, params: List[Str], mems: List[HdMem] }
+type HdDeclR = { d: HdDecl, i: Int }
+
 // The running export at `key`, or an empty record when nothing exports one.
 // Keyed by KEY ALONE and LAST-WINS, because that is exactly what the
 // reference's `_running_handoffs` builds: a dict keyed by `h["key"]`, filled
@@ -21323,7 +21336,8 @@ fn model_council_refusal(ts: List[Token]) -> Verd {
 
 fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
                    wrefs: List[Verd], ambSvcs: List[Str],
-                   ambSvcsKnown: Bool, ambOps: List[SvcOps]) -> NoLink {
+                   ambSvcsKnown: Bool, ambOps: List[SvcOps],
+                   runTypes: List[HdDecl]) -> NoLink {
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
@@ -21540,7 +21554,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // are collected at exactly this point in `check_and_lower`, in that order.
   // Empty for `admit_src` and for any admission that neither swaps state nor
   // withdraws anything, so all of those stay byte-identical.
-  refs = append_verds(refs, handoff_refusals(pg.comps, hands, poisoned, al, 0))
+  // the SUCCESSOR's declarations are the program's own (`types_decls`, the
+  // reader behind the IR `types` section); the PREDECESSOR's are the wire's
+  // declaration rows. Read only when there is a running hand-off to compare.
+  let ownTypes = hands.length() > 0 ? types_decls(ts, 0, [], al) : []
+  refs = append_verds(refs, handoff_refusals(pg.comps, hands, poisoned, al,
+                                             ownTypes, runTypes, 0))
   refs = append_verds(refs, wrefs)
   // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
   // once every component is lowered, before the G2/G3 link — the reference's
@@ -21574,7 +21593,7 @@ fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
   // the single-source path: no running hand-off table, no ambient
   // services, and the text IS the whole world, so its own service
   // declarations are the complete set.
-  let nl = collect_nonlink(ts, pg, [], [], [], true, [])
+  let nl = collect_nonlink(ts, pg, [], [], [], true, [], [])
   if (nl.done) { return nl.refs }
   // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
   // source composes only against its own text — no ambient provisions,
@@ -23699,8 +23718,15 @@ pub fn admit_tag(src: Str) -> Str {
 //     already gives. A structural record cannot be one — the reference's
 //     `type_()` refuses `{` at a `handoff` annotation — which is why the
 //     structural branch of `compatible` is out of this port rather than
-//     approximated. It runs over `live_components` on the reference, so the
-//     gate skips a component the component loop refused over (issue #1127):
+//     approximated. A NOMINAL name in a spelling is a different matter: the
+//     reference reads each spelling against its own version's declarations
+//     (`_handoff_compatible` with the two declared-type tables), so the wire
+//     also carries the running declarations a hand-off spelling reaches
+//     (`~T~record~f:Ty`, `parse_decl_row`), the incoming ones are read off the
+//     text (`types_decls`), and `hd_compatible` / `hd_detail` port the
+//     comparison and the refusal's declaration suffix. It runs over
+//     `live_components` on the reference, so the gate skips a component the
+//     component loop refused over (issue #1127):
 //     the body refusal is the whole answer there, and a hand-off verdict
 //     anchored at the component line would otherwise outrank it.
 //
@@ -23711,7 +23737,9 @@ pub fn admit_tag(src: Str) -> Str {
 // requirements "<component><<key>" (with "<key>/<realm>" for a realm-resolved
 // one and "*<key>" for a multi-realm bind), routes
 // "<component>><key>/<realm>,<realm>" (the legs of that multi-realm bind),
-// withdrawals "-<component>", handoffs "<component>=<key>:<type>", the "!halted" header, and the item-346 SERVICE
+// withdrawals "-<component>", handoffs "<component>=<key>:<type>", the
+// declarations a handoff type reaches "~<type>~record~<field>:<type>~..." (or
+// "~<type>[<param>,..]~variant~<case>[:<type>]~..."), the "!halted" header, and the item-346 SERVICE
 // BLOCK ("!services" followed by one ":<service>" row per service the
 // composition declares) — e.g.
 // "Store/db/;KvA/kv/tenant_a;Store<net;Store>net/a,b;!services;:D;-KvA". An
@@ -23776,8 +23804,8 @@ fn cut(s: Str, sep: Str) -> Cut {
 type SvcOps = { name: Str, ops: List[Str], sigs: List[MSig] }
 
 type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
-                  hands: List[MHand], mnames: List[Str], repl: List[Str],
-                  halted: Bool, bad: Str,
+                  hands: List[MHand], decls: List[HdDecl], mnames: List[Str],
+                  repl: List[Str], halted: Bool, bad: Str,
                   svcs: List[Str], svcsKnown: Bool, svcOps: List[SvcOps] }
 
 fn add_mname(names: List[Str], name: Str) -> List[Str] {
@@ -23837,6 +23865,8 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 //   :S        service     (item 346) -> the running composition declares S
 //   -C        replacing  (wave)      -> a withdrawn component name
 //   C=k:T     handoff    (wave 2)    -> an MHand row (the running EXPORT)
+//   ~T~record~f:Ty~..  declaration   -> an HdDecl row (a running record or
+//   ~T~variant~A~B:Ty  (hand-off)       variant a hand-off spelling reaches)
 //   anything else                    -> REFUSE (unknown row kind)
 // A `bad` already set rides through unchanged (first offending row wins).
 //
@@ -23864,7 +23894,7 @@ fn parse_mreq(comp: Str, spec: Str) -> MReq {
 // arrival from having to restate the service block's three fields.
 fn man_bad(man: Manifest, msg: Str) -> Manifest {
   return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-           hands: man.hands,
+           hands: man.hands, decls: man.decls,
            mnames: man.mnames, repl: man.repl, halted: man.halted,
            svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
            bad: tagged("MANIFEST", msg) }
@@ -23980,12 +24010,78 @@ fn mk_ops(rest: Str) -> OpsR {
   return { xs: ok ? xs : [], sigs: ok ? sigs : [], claimed: true, ok: ok }
 }
 
+// The DECLARATION row (`~Name[T,U]~record~f:T~g:U`, `~Name~variant~A~B:T`): one
+// running record or variant declaration, reached from a running hand-off
+// spelling, which the hand-off check reads the running side's names against.
+// The leading `~` is a row kind no earlier reader has, so one refuses it as an
+// unknown row and every consumer pinned to an older gate fails CLOSED on a wire
+// that carries one, instead of reading a hand-off it cannot judge as unchanged.
+// `~` and `;` never occur in a type spelling, so the members split on `~`
+// without escaping; a declaration that would need one is not rendered at all,
+// and its name then reads as undeclared on the running side (a refusal).
+//
+// The members are `f:Type` for a record and `A` or `A:Type` for a variant, in
+// written order. A row naming a type twice, a member with no name or with an
+// empty type, or a record with no field is a garbled wire.
+fn decl_row_bad(man: Manifest, row: Str) -> Manifest {
+  return man_bad(man, "manifest declaration row `".concat(row)
+    .concat("` does not name a type and its members"))
+}
+
+fn parse_decl_mem(tok: Str, isRec: Bool) -> HdMem {
+  let ix = tok.indexOf(":")
+  let nm = ix == 0 - 1 ? tok : tok.slice(0, ix)
+  let ty = ix == 0 - 1 ? "" : tok.slice(ix + 1, tok.length())
+  // `ok` false is spelled by an empty NAME, which no valid member has
+  if (!bare_ident(nm, 0) || (ix != 0 - 1 && ty == "") || (isRec && ix == 0 - 1)) {
+    return { name: "", ty: "", has: false }
+  }
+  return { name: nm, ty: ty, has: ix != 0 - 1 }
+}
+
+fn parse_decl_row(row: Str, man: Manifest) -> Manifest {
+  let a = cut(row.slice(1, row.length()), "~")
+  let b = cut(a.rest, "~")
+  let lb = a.s.indexOf("[")
+  let name = lb == 0 - 1 ? a.s.slice(0, a.s.length()) : a.s.slice(0, lb)
+  var params: List[Str] = []
+  var ok = bare_ident(name, 0) && (b.s == "record" || b.s == "variant")
+  if (ok && lb != 0 - 1) {
+    ok = a.s.endsWith("]")
+    if (ok) { params = split_labels(a.s.slice(lb + 1, a.s.length() - 1), []) }
+    var pi = 0
+    while (ok && pi < params.length()) {
+      ok = bare_ident(params[pi], 0)
+      pi += 1
+    }
+  }
+  var mems: List[HdMem] = []
+  var rest = b.rest
+  while (ok && rest != "") {
+    let one = cut(rest, "~")
+    let m = parse_decl_mem(one.s, b.s == "record")
+    ok = m.name != ""
+    mems = mems.push(m)
+    rest = one.rest
+  }
+  if (ok && b.s == "record" && mems.length() == 0) { ok = false }
+  if (ok && hd_find(man.decls, name).name != "") { ok = false }
+  if (!ok) { return decl_row_bad(man, row) }
+  return { provs: man.provs, reqs: man.reqs, routes: man.routes,
+           hands: man.hands,
+           decls: man.decls.push({ name: name, kind: b.s, params: params,
+                                   mems: mems }),
+           mnames: man.mnames, repl: man.repl, halted: man.halted,
+           svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
+           bad: "" }
+}
+
 fn parse_row(row: Str, man: Manifest) -> Manifest {
   if (man.bad != "") { return man }
   if (row.slice(0, 1) == "!") {
     if (row == "!halted") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               hands: man.hands,
+               hands: man.hands, decls: man.decls,
                mnames: man.mnames, repl: man.repl, halted: true,
                svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
                bad: "" }
@@ -23996,7 +24092,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     // is what `svcsKnown` carries to `unknown_svc_at`.
     if (row == "!services") {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               hands: man.hands,
+               hands: man.hands, decls: man.decls,
                mnames: man.mnames, repl: man.repl, halted: man.halted,
                svcs: man.svcs, svcsKnown: true, svcOps: man.svcOps,
                bad: "" }
@@ -24032,7 +24128,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
         .concat("` does not name an operation"))
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-             hands: man.hands,
+             hands: man.hands, decls: man.decls,
              mnames: man.mnames, repl: man.repl, halted: man.halted,
              svcs: contains(man.svcs, sname) ? man.svcs : man.svcs.push(sname),
              svcsKnown: man.svcsKnown,
@@ -24041,6 +24137,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
                : man.svcOps,
              bad: "" }
   }
+  if (row.slice(0, 1) == "~") { return parse_decl_row(row, man) }
   if (row.slice(0, 1) == "-") {
     // a withdrawal names a component, nothing more: `-C`. A name carrying a
     // separator is a garbled row, not a withdrawal, and a wire the gate cannot
@@ -24051,7 +24148,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
         .concat("` does not name a component"))
     }
     return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-             hands: man.hands,
+             hands: man.hands, decls: man.decls,
              mnames: man.mnames,
              repl: contains(man.repl, name) ? man.repl : man.repl.push(name),
              halted: man.halted,
@@ -24082,6 +24179,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       }
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
                hands: man.hands.push({ comp: a.s, key: b.s, ty: b.rest }),
+               decls: man.decls,
                mnames: add_mname(man.mnames, a.s), repl: man.repl,
                halted: man.halted,
                svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
@@ -24105,7 +24203,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       return { provs: man.provs, reqs: man.reqs,
                routes: man.routes.push({ comp: a.s, key: b.s,
                                          rlms: split_labels(b.rest, []) }),
-               hands: man.hands,
+               hands: man.hands, decls: man.decls,
                mnames: add_mname(man.mnames, a.s), repl: man.repl,
                halted: man.halted,
                svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
@@ -24114,7 +24212,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     if (row.indexOf("<") != 0 - 1) {
       let a = cut(row, "<")
       return { provs: man.provs, reqs: man.reqs.push(parse_mreq(a.s, a.rest)),
-               hands: man.hands,
+               hands: man.hands, decls: man.decls,
                routes: man.routes, mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted,
                svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
@@ -24125,7 +24223,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
       let b = cut(a.rest, "/")
       return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
                reqs: man.reqs, routes: man.routes,
-               hands: man.hands,
+               hands: man.hands, decls: man.decls,
                mnames: add_mname(man.mnames, a.s),
                repl: man.repl, halted: man.halted,
                svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
@@ -24137,7 +24235,7 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
     // row with any separator left is a garbled wire and falls through.
     if (bare_ident(row, 0)) {
       return { provs: man.provs, reqs: man.reqs, routes: man.routes,
-               hands: man.hands,
+               hands: man.hands, decls: man.decls,
                mnames: add_mname(man.mnames, row),
                repl: man.repl, halted: man.halted,
                svcs: man.svcs, svcsKnown: man.svcsKnown, svcOps: man.svcOps,
@@ -24158,6 +24256,7 @@ fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
 
 fn parse_manifest(m: Str) -> Manifest {
   return parse_manifest_rows(m, { provs: [], reqs: [], routes: [], hands: [],
+                                  decls: [],
                                   mnames: [], repl: [], halted: false,
                                   bad: "", svcs: [], svcsKnown: false,
                                   svcOps: [] })
@@ -24327,13 +24426,21 @@ fn withdrawal_refusals(reqs: List[MReq], lost: List[Prov3], comps: List[CompD],
 // Why this needs no expression type layer, which is what deferred it. Both
 // shapes reach the gate as declared SPELLINGS — the running one on the wire
 // (`C=k:T`), the incoming one off the component's own `handoff` annotation — so
-// the only algebra to port is the type-STRING one, which `ty_parse` already is.
-// The reference calls `compatible(accepted, exported)` with NO declared-type
-// table (`admission._handoff_compatible`), so the nominal-record resolution
-// that would need one is not on this path at all, and a STRUCTURAL record
-// cannot be a hand-off shape: the reference's `type_()` refuses a `{` at an
-// annotation position, so `handoff st: {a: Int}` is a parse error, never a
-// comparison. That leaves exactly the head algebra below.
+// the only algebra to port is the type-STRING one, which `ty_parse` already is,
+// plus the declared-shape check below. `compatible` itself is called with no
+// declared-type table, and a STRUCTURAL record cannot be a hand-off shape: the
+// reference's `type_()` refuses a `{` at an annotation position, so `handoff
+// st: {a: Int}` is a parse error, never a comparison. That leaves the head
+// algebra below.
+//
+// What a NOMINAL name stands for is the one thing a spelling does not carry.
+// `St` in the running version and `St` in the replacement may be two different
+// records, and `compatible` takes equal names for equal types, so the reference
+// first renames, per side, every name both spellings mention whose declaration
+// (or anything it reaches) differs between the versions
+// (`admission._handoff_compatible`), which makes the two sides differ as opaque
+// nominals. `hd_compatible` is that step. The running declarations are the
+// wire's `~` rows and the incoming ones the program's own `types` table.
 //
 // Direction: FAIL-CLOSED, like every other refusal on this surface. The
 // admission is what does not happen; the running composition keeps running with
@@ -24414,13 +24521,270 @@ fn ho_compatible(expected: Str, actual: Str) -> Bool {
   return false
 }
 
+// ---- the declared shape behind a nominal name (`admission._decl_key` & co)
+//
+// A record or variant is only a NAME in a hand-off spelling, so `handoff cache:
+// St` over a changed `St` was admitted while the reference refused it. The
+// reference reads each spelling against its OWN version's declarations: the
+// running version's from the running manifest's `types`, the replacement's from
+// its own compile. The running ones arrive on the wire as declaration rows
+// (`parse_decl_row`), the incoming ones off the text (`types_decls`), and the
+// functions below are `_spelling_names`, `_decl_key`, `_decl_differs`,
+// `_changed_names`, `_own_differences`, `_render_decl`, `_handoff_detail` and
+// `_handoff_compatible`, one for one.
+
+// One piece of a type spelling: an identifier run that is a NAME (the reference's
+// `_IDENT`, a word not followed by `:` — a `name:` is a label), or any other
+// text. `ho_toks` concatenated is the spelling back.
+type HoTok = { s: Str, name: Bool }
+
+fn ho_blank(c: Str) -> Bool { return c == " " || c == "\t" || c == "\n" }
+
+fn ho_toks(s: Str) -> List[HoTok] {
+  var out: List[HoTok] = []
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    var j = i + 1
+    if (ty_word_char(s.slice(i, i + 1))) {
+      while (j < n && ty_word_char(s.slice(j, j + 1))) { j += 1 }
+      let w = s.slice(i, j)
+      var k = j
+      while (k < n && ho_blank(s.slice(k, k + 1))) { k += 1 }
+      let label = k < n && s.slice(k, k + 1) == ":"
+      out = out.push({ s: w, name: ident_led(w) && !label })
+    } else {
+      out = out.push({ s: s.slice(i, j), name: false })
+    }
+    i = j
+  }
+  return out
+}
+
+// Every distinct name a spelling spells, in first-seen order.
+fn ho_names(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  let ts = ho_toks(s)
+  var i = 0
+  while (i < ts.length()) {
+    if (ts[i].name && !contains(out, ts[i].s)) { out = out.push(ts[i].s) }
+    i += 1
+  }
+  return out
+}
+
+// `spelling` with `tag` appended to every name in `names` (`_tag_names`).
+fn hd_tag(s: Str, names: List[Str], tag: Str) -> Str {
+  var out = ""
+  let ts = ho_toks(s)
+  var i = 0
+  while (i < ts.length()) {
+    out = out.concat(ts[i].name && contains(names, ts[i].s)
+                       ? ts[i].s.concat(tag) : ts[i].s)
+    i += 1
+  }
+  return out
+}
+
+fn hd_find(tbl: List[HdDecl], name: Str) -> HdDecl {
+  var i = 0
+  while (i < tbl.length()) {
+    if (tbl[i].name == name) { return tbl[i] }
+    i += 1
+  }
+  return hd_none()
+}
+
+// A type spelling with the declaration's own parameters read BY POSITION
+// (`$0`, `$1`), so `Box[T] = {v: T}` and `Box[U] = {v: U}` are one declaration.
+fn hd_norm(ty: Str, params: List[Str]) -> Str {
+  if (params.length() == 0) { return ty }
+  var out = ""
+  let ts = ho_toks(ty)
+  var i = 0
+  while (i < ts.length()) {
+    let ix = ts[i].name ? params.indexOf(ts[i].s) : 0 - 1
+    out = out.concat(ix == 0 - 1 ? ts[i].s : "$".concat(int_str(ix)))
+    i += 1
+  }
+  return out
+}
+
+// The declaration's content as one string, equal iff `_decl_key` is equal. A
+// record's fields compare as a SET (sorted), a variant's cases IN ORDER (case
+// order is observable on the WIT wire). The absent declaration is "!".
+fn hd_key(d: HdDecl) -> Str {
+  if (d.name == "") { return "!" }
+  var parts: List[Str] = []
+  var i = 0
+  while (i < d.mems.length()) {
+    let m = d.mems[i]
+    if (d.kind == "variant") {
+      parts = parts.push(m.name.concat(m.has ? ":1".concat(hd_norm(m.ty, d.params))
+                                              : ":0"))
+    } else {
+      parts = parts.push(m.name.concat(":").concat(hd_norm(m.ty, d.params)))
+    }
+    i += 1
+  }
+  if (d.kind != "variant") { parts = sort_strs(parts) }
+  return d.kind.concat("~").concat(int_str(d.params.length())).concat("~")
+    .concat(parts.join("~"))
+}
+
+// `todo` plus the names `d` is written in terms of (`_decl_refs` minus its own
+// parameters).
+fn hd_push_refs(todo: List[Str], d: HdDecl) -> List[Str] {
+  var out = todo
+  var i = 0
+  while (i < d.mems.length()) {
+    let m = d.mems[i]
+    if (m.ty != "" && (d.kind != "variant" || m.has)) {
+      let ns = ho_names(m.ty)
+      var k = 0
+      while (k < ns.length()) {
+        if (!contains(d.params, ns[k])) { out = out.push(ns[k]) }
+        k += 1
+      }
+    }
+    i += 1
+  }
+  return out
+}
+
+// `_decl_differs`: does `name` mean something different on the two sides —
+// declared on one only, declared differently, or declared alike over a
+// declaration it uses that differs? A name declared on NEITHER side is an
+// opaque nominal and means itself. The walk follows the successor's references
+// (the two sides' are the same wherever their keys agree) and visits a name once.
+fn hd_differs(name: Str, mine: List[HdDecl], theirs: List[HdDecl]) -> Bool {
+  var seen: List[Str] = []
+  var todo: List[Str] = [name]
+  var qi = 0
+  while (qi < todo.length()) {
+    let n = todo[qi]
+    qi += 1
+    if (!contains(seen, n)) {
+      seen = seen.push(n)
+      let a = hd_find(mine, n)
+      let b = hd_find(theirs, n)
+      if (a.name != "" || b.name != "") {
+        if (hd_key(a) != hd_key(b)) { return true }
+        todo = hd_push_refs(todo, a)
+      }
+    }
+  }
+  return false
+}
+
+// `_changed_names`: the names both spellings mention whose meaning differs
+// between the successor's declarations and the predecessor's, sorted.
+fn hd_changed(accepted: Str, exported: Str, mine: List[HdDecl],
+              theirs: List[HdDecl]) -> List[Str] {
+  if (mine.length() == 0 && theirs.length() == 0) { return [] }
+  let en = ho_names(exported)
+  let an = ho_names(accepted)
+  var out: List[Str] = []
+  var i = 0
+  while (i < an.length()) {
+    if (contains(en, an[i]) && hd_differs(an[i], mine, theirs)) {
+      out = out.push(an[i])
+    }
+    i += 1
+  }
+  return sort_strs(out)
+}
+
+// `_handoff_compatible`: may the predecessor's exported state be accepted at
+// the successor's accepted shape? A changed name is renamed PER SIDE first, so
+// the two spellings differ as opaque nominals, which `ho_compatible` refuses
+// exactly as it refuses two differently named records. With nothing changed
+// (or no table on either side) it is `ho_compatible(accepted, exported)`.
+fn hd_compatible(accepted: Str, exported: Str, mine: List[HdDecl],
+                 theirs: List[HdDecl]) -> Bool {
+  let changed = hd_changed(accepted, exported, mine, theirs)
+  if (changed.length() == 0) { return ho_compatible(accepted, exported) }
+  return ho_compatible(hd_tag(accepted, changed, "@successor"),
+                       hd_tag(exported, changed, "@predecessor"))
+}
+
+// `_own_differences`: the declarations, among `names` and everything they reach
+// on either side, that differ on their own — the ones worth showing.
+fn hd_own_diffs(names: List[Str], mine: List[HdDecl],
+                theirs: List[HdDecl]) -> List[Str] {
+  var out: List[Str] = []
+  var seen: List[Str] = []
+  var todo = names
+  var qi = 0
+  while (qi < todo.length()) {
+    let n = todo[qi]
+    qi += 1
+    let a = hd_find(mine, n)
+    let b = hd_find(theirs, n)
+    if (!contains(seen, n) && (a.name != "" || b.name != "")) {
+      seen = seen.push(n)
+      if (hd_key(a) != hd_key(b)) { out = out.push(n) }
+      todo = hd_push_refs(hd_push_refs(todo, a), b)
+    }
+  }
+  return sort_strs(out)
+}
+
+// `_render_decl`: one declaration as backticked text, or the fact that it has none.
+fn hd_render(name: Str, d: HdDecl) -> Str {
+  if (d.name == "") { return "`".concat(name).concat("` is not declared") }
+  let head = d.params.length() > 0
+    ? name.concat("[").concat(d.params.join(", ")).concat("]") : name
+  var parts: List[Str] = []
+  var i = 0
+  while (i < d.mems.length()) {
+    let m = d.mems[i]
+    if (d.kind == "variant") {
+      parts = parts.push(m.has && m.ty != ""
+        ? m.name.concat("(").concat(m.ty).concat(")") : m.name)
+    } else {
+      parts = parts.push(m.name.concat(": ").concat(m.ty))
+    }
+    i += 1
+  }
+  if (d.kind == "variant") {
+    return "`".concat(head).concat(" = ").concat(parts.join(" | ")).concat("`")
+  }
+  return "`".concat(head).concat(" = {").concat(parts.join(", ")).concat("}`")
+}
+
+fn hd_render_all(names: List[Str], tbl: List[HdDecl]) -> Str {
+  var parts: List[Str] = []
+  var i = 0
+  while (i < names.length()) {
+    parts = parts.push(hd_render(names[i], hd_find(tbl, names[i])))
+    i += 1
+  }
+  return " (".concat(parts.join("; ")).concat(")")
+}
+
+// `_handoff_detail`: what each spelling means where the two versions disagree
+// about it, as a suffix for the refusal text ("" when the spellings carry the
+// whole difference, which is every case that spells a nominal the same way and
+// declares it alike). `at` is the accepted side's, `ex` the exported side's.
+type HdDetail = { atx: Str, exx: Str }
+
+fn hd_detail(accepted: Str, exported: Str, mine: List[HdDecl],
+             theirs: List[HdDecl]) -> HdDetail {
+  let shown = hd_own_diffs(hd_changed(accepted, exported, mine, theirs), mine,
+                           theirs)
+  if (shown.length() == 0) { return { atx: "", exx: "" } }
+  return { atx: hd_render_all(shown, mine), exx: hd_render_all(shown, theirs) }
+}
+
 fn handoff_drift_msg(key: Str, newName: Str, accepted: Str, oldName: Str,
-                     exported: Str) -> Str {
+                     exported: Str, atx: Str, exx: Str) -> Str {
   return "state hand-off on `".concat(key)
     .concat("` differs from the running manifest: `").concat(newName)
-    .concat("` accepts `").concat(accepted).concat("`, but `").concat(oldName)
-    .concat("` exports `").concat(exported)
-    .concat("` — the successor cannot hold the predecessor's state, and ")
+    .concat("` accepts `").concat(accepted).concat("`").concat(atx)
+    .concat(", but `").concat(oldName)
+    .concat("` exports `").concat(exported).concat("`").concat(exx)
+    .concat(" — the successor cannot hold the predecessor's state, and ")
     .concat("dropping it on the swap would be residue")
 }
 
@@ -24441,11 +24805,12 @@ fn handoff_drift_msg(key: Str, newName: Str, accepted: Str, oldName: Str,
 // is compared, and reported, as `Str`); the running wire already carries the
 // erased spelling, since it is rendered from the lowered IR.
 fn handoff_refusals(comps: List[CompD], hands: List[MHand],
-                    poisoned: List[Str], al: Map[Str, Str], i: Int) -> List[Verd] {
+                    poisoned: List[Str], al: Map[Str, Str], mine: List[HdDecl],
+                    theirs: List[HdDecl], i: Int) -> List[Verd] {
   if (i >= comps.length()) { return [] }
   let c = comps[i]
   if (c.hoff.name == "") {
-    return handoff_refusals(comps, hands, poisoned, al, i + 1)
+    return handoff_refusals(comps, hands, poisoned, al, mine, theirs, i + 1)
   }
   // issue #1127: `_admit_handoff_replacement` runs over `live_components`,
   // which `check_and_lower` builds by DROPPING every component whose body
@@ -24459,16 +24824,20 @@ fn handoff_refusals(comps: List[CompD], hands: List[MHand],
   // remove a verdict from a component that is refused anyway, so it narrows
   // the NAME and never the verdict.
   if (contains(poisoned, c.name)) {
-    return handoff_refusals(comps, hands, poisoned, al, i + 1)
+    return handoff_refusals(comps, hands, poisoned, al, mine, theirs, i + 1)
   }
   let old = find_mhand(hands, c.hoff.name, 0, { comp: "", key: "", ty: "" })
-  if (old.comp == "") { return handoff_refusals(comps, hands, poisoned, al, i + 1) }
-  let accepted = alias_subst(c.hoff.ty, al)
-  if (ho_compatible(accepted, old.ty)) {
-    return handoff_refusals(comps, hands, poisoned, al, i + 1)
+  if (old.comp == "") {
+    return handoff_refusals(comps, hands, poisoned, al, mine, theirs, i + 1)
   }
+  let accepted = alias_subst(c.hoff.ty, al)
+  if (hd_compatible(accepted, old.ty, mine, theirs)) {
+    return handoff_refusals(comps, hands, poisoned, al, mine, theirs, i + 1)
+  }
+  let det = hd_detail(accepted, old.ty, mine, theirs)
   return [mk_verd(tagged("G2", handoff_drift_msg(c.hoff.name, c.name, accepted,
-                                                 old.comp, old.ty)), c.line)]
+                                                 old.comp, old.ty, det.atx,
+                                                 det.exx)), c.line)]
 }
 
 // Admit `src` against a running `manifest`. The INTERNAL refusals (a component
@@ -24559,7 +24928,7 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   // (issue #1127); the withdrawal reads the FULL list and so is computed here.
   let nl = collect_nonlink(ts, pg, man.hands,
     withdrawal_refusals(keptReqs, lost, pg.comps, 0),
-    man.svcs, manifest_svcs_known(man), man.svcOps)
+    man.svcs, manifest_svcs_known(man), man.svcOps, man.decls)
   if (nl.done) { return pick_min(nl.refs) }
   let wrefs = nl.refs
   // the LINK is the half the running manifest reshapes. Seed the per-(key,
@@ -34900,10 +35269,11 @@ fn skip_brackets(ts: List[Token], i: Int) -> Int {
   return i
 }
 
-fn ir_type_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
+fn hd_none() -> HdDecl { return { name: "", kind: "", params: [], mems: [] } }
+
+fn hd_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[HdMem] {
   var k = lo
-  var out = ""
-  var first = true
+  var out: List[HdMem] = []
   while (k < hi && !atk(ts, k, "}")) {
     // `is_record_key`, not a bare `ident`: a record TYPE reads its field names
     // with the reference's `_record_key_name` too, so `{ config: Int }` declares
@@ -34911,9 +35281,7 @@ fn ir_type_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
     if (is_record_key(tkc(ts, k)) && atk(ts, k + 1, ":")) {
       let nm = tkc(ts, k).text
       let tr = type_at(ts, k + 2)
-      let seg = jstr(nm).concat(":").concat(jstr(alias_subst(tr.ty, al)))
-      out = first ? seg : out.concat(",").concat(seg)
-      first = false
+      out = out.push({ name: nm, ty: alias_subst(tr.ty, al), has: true })
       k = tr.i
       if (atk(ts, k, ",")) { k += 1 }
     } else { k += 1 }
@@ -34921,28 +35289,63 @@ fn ir_type_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
   return out
 }
 
-fn ir_type_cases(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
+fn hd_cases(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[HdMem] {
   var k = lo
-  var out = ""
-  var first = true
+  var out: List[HdMem] = []
   while (k < hi) {
     if (atk(ts, k, "ident")) {
       let nm = tkc(ts, k).text
-      var payload = "null"
+      var payload = ""
+      var has = false
       var nk = k + 1
       if (atk(ts, k + 1, "(")) {
         let tr = type_at(ts, k + 2)
-        payload = jstr(alias_subst(tr.ty, al))
+        payload = alias_subst(tr.ty, al)
+        has = true
         nk = tr.i
         if (atk(ts, nk, ")")) { nk += 1 }
       }
-      let seg = "{\"name\":".concat(jstr(nm)).concat(",\"payload\":").concat(payload).concat("}")
-      out = first ? seg : out.concat(",").concat(seg)
-      first = false
+      out = out.push({ name: nm, ty: payload, has: has })
       k = nk
     } else { k += 1 }
   }
   return out
+}
+
+fn hd_fields_json(ms: List[HdMem]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ms.length()) {
+    let seg = jstr(ms[i].name).concat(":").concat(jstr(ms[i].ty))
+    out = i == 0 ? seg : out.concat(",").concat(seg)
+    i += 1
+  }
+  return out
+}
+
+fn hd_cases_json(ms: List[HdMem]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ms.length()) {
+    let payload = ms[i].has ? jstr(ms[i].ty) : "null"
+    let seg = "{\"name\":".concat(jstr(ms[i].name)).concat(",\"payload\":")
+      .concat(payload).concat("}")
+    out = i == 0 ? seg : out.concat(",").concat(seg)
+    i += 1
+  }
+  return out
+}
+
+// One declaration as its `types` entry: `"Name": {"params": [..], "kind": ..}`.
+fn hd_json(d: HdDecl) -> Str {
+  let head = jstr(d.name).concat(": {\"params\": [")
+    .concat(str_list_json(d.params)).concat("], \"kind\": ")
+  if (d.kind == "record") {
+    return head.concat("\"record\", \"fields\": {")
+      .concat(hd_fields_json(d.mems)).concat("}}")
+  }
+  return head.concat("\"variant\", \"cases\": [")
+    .concat(hd_cases_json(d.mems)).concat("]}")
 }
 
 // True iff a variant RHS (has a `|` alternation or a `(payload)`), as opposed to
@@ -34956,7 +35359,8 @@ fn is_variant_rhs(ts: List[Token], lo: Int, hi: Int) -> Bool {
   return false
 }
 
-fn ir_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
+// The declaration a `type` keyword at `i` makes, or the absent one (`name` "").
+fn hd_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> HdDeclR {
   // the whole declaration span, for the reason `decl_cases` states: a variant
   // written over several lines lost every case below the first one, and the
   // `types` section reported a partial `cases` list rather than no list at all.
@@ -34967,12 +35371,12 @@ fn ir_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
   // reference carries the author's `[T, U]` list here verbatim
   // (`_lower_type_decls`); this reader stepped over the bracket and always wrote
   // `[]`, which no corpus document noticed because none declared a generic type.
-  var tparams = ""
+  var tparams: List[Str] = []
   if (atk(ts, j, "[")) {
-    tparams = str_list_json(explicit_tparams(ts, i))
+    tparams = explicit_tparams(ts, i)
     j = skip_brackets(ts, j)
   }
-  if (!atk(ts, j, "=")) { return { js: "", i: lineHi } }
+  if (!atk(ts, j, "=")) { return { d: hd_none(), i: lineHi } }
   j += 1
   // A TRANSPARENT ALIAS contributes NO entry: the reference drops the
   // declaration outright once it has substituted it everywhere, so nothing
@@ -34980,27 +35384,22 @@ fn ir_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
   // shape questions below, because a function-type alias
   // (`type Handler = (Int) -> Str`) carries a `(` and so read as a variant with
   // one case per parameter type.
-  if (al.has(nm)) { return { js: "", i: lineHi } }
+  if (al.has(nm)) { return { d: hd_none(), i: lineHi } }
   if (atk(ts, j, "{")) {
     let bend = close_brace(ts, j)
-    if (bend == 0 - 1) { return { js: "", i: lineHi } }
-    let fields = ir_type_fields(ts, j + 1, bend - 1, al)
+    if (bend == 0 - 1) { return { d: hd_none(), i: lineHi } }
+    let fields = hd_fields(ts, j + 1, bend - 1, al)
     // Reference declaration lowering treats an empty field table as a variant.
-    if (fields == "") {
-      return { js: jstr(nm).concat(": {\"params\": [").concat(tparams)
-                 .concat("], \"kind\": \"variant\", \"cases\": []}"), i: bend }
+    if (fields.length() == 0) {
+      return { d: { name: nm, kind: "variant", params: tparams, mems: [] },
+               i: bend }
     }
-    let js = jstr(nm).concat(": {\"params\": [").concat(tparams)
-      .concat("], \"kind\": \"record\", \"fields\": {")
-      .concat(fields).concat("}}")
-    return { js: js, i: bend }
+    return { d: { name: nm, kind: "record", params: tparams, mems: fields },
+             i: bend }
   }
   if (is_variant_rhs(ts, j, lineHi)) {
-    let cases = ir_type_cases(ts, j, lineHi, al)
-    let js = jstr(nm).concat(": {\"params\": [").concat(tparams)
-      .concat("], \"kind\": \"variant\", \"cases\": [")
-      .concat(cases).concat("]}")
-    return { js: js, i: lineHi }
+    return { d: { name: nm, kind: "variant", params: tparams,
+                  mems: hd_cases(ts, j, lineHi, al) }, i: lineHi }
   }
   // Neither an alias nor a variant right-hand side: a single-case NOMINAL
   // (`type Status = Pending`, the spelling TypeScript rejects as TS2304 and revl
@@ -35008,71 +35407,80 @@ fn ir_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
   // one-case variant it is; this reader skipped every bare right-hand side
   // alike, so the entry was dropped. The alias question above is what separates
   // the two.
-  let one = ir_type_cases(ts, j, lineHi, al)
-  if (one == "") { return { js: "", i: lineHi } }
-  return { js: jstr(nm).concat(": {\"params\": [").concat(tparams)
-             .concat("], \"kind\": \"variant\", \"cases\": [").concat(one)
-             .concat("]}"), i: lineHi }
+  let one = hd_cases(ts, j, lineHi, al)
+  if (one.length() == 0) { return { d: hd_none(), i: lineHi } }
+  return { d: { name: nm, kind: "variant", params: tparams, mems: one },
+           i: lineHi }
 }
 
 // The `types` entry a typed `event` contributes. The contract clause
 // (`(key: f[, window: n])`) carries no type information, so only the brace body
-// is read, with exactly `ir_type_decl`'s record reader.
-fn ir_event_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> LirFn {
+// is read, with exactly `hd_type_decl`'s record reader.
+fn hd_event_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> HdDeclR {
   let hi = event_decl_end(ts, i)
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   if (atk(ts, j, "(")) { j = close_paren(ts, j) }
-  if (j == 0 - 1 || !atk(ts, j, "{")) { return { js: "", i: hi } }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return { d: hd_none(), i: hi } }
   let bend = close_brace(ts, j)
-  if (bend == 0 - 1) { return { js: "", i: hi } }
-  let fields = ir_type_fields(ts, j + 1, bend - 1, al)
+  if (bend == 0 - 1) { return { d: hd_none(), i: hi } }
+  let fields = hd_fields(ts, j + 1, bend - 1, al)
   // the reference refuses a field-less `event`, so an empty table is not the
-  // empty-variant shape `ir_type_decl` reads it as — no entry is produced.
-  if (fields == "") { return { js: "", i: hi } }
-  let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")
-    .concat(fields).concat("}}")
-  return { js: js, i: bend }
+  // empty-variant shape `hd_type_decl` reads it as — no entry is produced.
+  if (fields.length() == 0) { return { d: hd_none(), i: hi } }
+  return { d: { name: nm, kind: "record", params: [], mems: fields }, i: bend }
 }
 
-fn types_walk(ts: List[Token], i: Int, acc: Str, al: Map[Str, Str]) -> Str {
+// Every declaration of the program, in source order: the `types` section's
+// content as a table. `types_json` renders it as the section; the hand-off
+// check reads it as the SUCCESSOR's declarations.
+fn types_decls(ts: List[Token], i: Int, acc: List[HdDecl],
+               al: Map[Str, Str]) -> List[HdDecl] {
   if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return types_walk(ts, i + 1, acc, al) }
+  if (at_boot(ts, i)) { return types_decls(ts, i + 1, acc, al) }
   // An `event` declaration IS a record declaration with a contract clause (item
   // 130 §6): the reference parser appends an ordinary `TypeDecl` beside the
   // `EventDecl`, so the `types` section carries the same entry a `type` spelling
   // would produce. Without this the section lost the entry entirely.
   if (at_event(ts, i)) {
-    let d = ir_event_decl(ts, i, al)
-    let acc3 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
-    return types_walk(ts, d.i, acc3, al)
+    let d = hd_event_decl(ts, i, al)
+    return types_decls(ts, d.i, d.d.name == "" ? acc : acc.push(d.d), al)
   }
   // a `lifecycle`/`fault`/`prop` test head lexes as an ordinary identifier, so
   // it has to be answered before the `t.kind != "kw"` fall-through or the body
   // is walked as top level one line at a time.
   if (at_qual_test(ts, i)) {
     let qe = qual_test_end(ts, i)
-    if (qe != 0 - 1) { return types_walk(ts, qe, acc, al) }
-    return types_walk(ts, skip_line(ts, i), acc, al)
+    if (qe != 0 - 1) { return types_decls(ts, qe, acc, al) }
+    return types_decls(ts, skip_line(ts, i), acc, al)
   }
-  if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc, al) }
-  if (at_pub_prefix(ts, i)) { return types_walk(ts, i + 1, acc, al) }
+  if (t.kind != "kw") { return types_decls(ts, skip_line(ts, i), acc, al) }
+  if (at_pub_prefix(ts, i)) { return types_decls(ts, i + 1, acc, al) }
   if (t.text == "type") {
-    let d = ir_type_decl(ts, i, al)
-    let acc2 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
-    return types_walk(ts, d.i, acc2, al)
+    let d = hd_type_decl(ts, i, al)
+    return types_decls(ts, d.i, d.d.name == "" ? acc : acc.push(d.d), al)
   }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return types_walk(ts, e, acc, al) }
-    return types_walk(ts, skip_line(ts, i), acc, al)
+    if (e != 0 - 1) { return types_decls(ts, e, acc, al) }
+    return types_decls(ts, skip_line(ts, i), acc, al)
   }
-  if (t.text == "extern") { return types_walk(ts, p_extern(ts, i, empty_prog()).i, acc, al) }
-  if (t.text == "fn") { return types_walk(ts, p_fn(ts, i, empty_prog()).i, acc, al) }
-  if (t.text == "service") { return types_walk(ts, p_service(ts, i, empty_prog()).i, acc, al) }
-  if (t.text == "component") { return types_walk(ts, p_component(ts, i, empty_prog()).i, acc, al) }
-  return types_walk(ts, skip_line(ts, i), acc, al)
+  if (t.text == "extern") { return types_decls(ts, p_extern(ts, i, empty_prog()).i, acc, al) }
+  if (t.text == "fn") { return types_decls(ts, p_fn(ts, i, empty_prog()).i, acc, al) }
+  if (t.text == "service") { return types_decls(ts, p_service(ts, i, empty_prog()).i, acc, al) }
+  if (t.text == "component") { return types_decls(ts, p_component(ts, i, empty_prog()).i, acc, al) }
+  return types_decls(ts, skip_line(ts, i), acc, al)
+}
+
+fn types_json(ds: List[HdDecl]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ds.length()) {
+    out = i == 0 ? hd_json(ds[i]) : out.concat(", ").concat(hd_json(ds[i]))
+    i += 1
+  }
+  return out
 }
 
 // ============================================ the `tests` sections (item 2088)
@@ -35660,7 +36068,7 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
     if (cjs != "") { fnsjs = fnsjs == "" ? cjs : fnsjs.concat(", ").concat(cjs) }
     ci += 1
   }
-  let typesjs = types_walk(ts, 0, "", al)
+  let typesjs = types_json(types_decls(ts, 0, [], al))
   // The bound-secret table is computed once, ahead of the extern walk, because
   // the walk needs it: a secret bound to a capability stamps the NAME onto every
   // emission extern that serves that capability (`externs[i]["secrets"]`).

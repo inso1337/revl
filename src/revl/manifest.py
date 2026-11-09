@@ -11,6 +11,11 @@ rows joined by ``;``, the kind of each row set by its leading marker
     C<*k      requirement: the same, multi-realm bound (item 162)
     C>k/r,r   route:       the realms C binds k across (the legs of that bind)
     C=k:T     handoff:     C exports state of type T at key k (item 53)
+    ~T~record~f:Ty~g:Ty
+    ~T[P]~variant~A~B:Ty
+              declaration: a running record or variant that a handoff spelling
+                           reaches, so the gate compares the declarations
+                           behind a nominal name and not only its spelling
     -C        replacing:   component C is withdrawn by this admission
     !halted   header:      the composition is halted; every admission refuses
     !services header:      the `:S` rows below ENUMERATE the running
@@ -27,7 +32,10 @@ the withdrawn set of a REPLACEMENT admission, so the wire says exactly what
 ``compile_files(paths, manifest=IR(M), replacing=R)`` says on the reference
 side. The handoff row (``C=k:T``) carries the state shape each running provider
 EXPORTS (item 53), which is what the gate compares a replacement's ACCEPTED
-shape against — the port of `admission._admit_handoff_replacement`.
+shape against — the port of `admission._admit_handoff_replacement`. The
+declaration rows (``~T~record~…``) carry what the names in those shapes MEAN in
+the running version, which `_handoff_compatible` reads each side's spelling
+against; see `_decl_rows`.
 
 The SERVICE BLOCK (issue #346) says which services the running composition
 DECLARES, and its header is the load-bearing half. The service names are what
@@ -46,6 +54,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from .admission import _decl_refs, _spelling_names
+from .model_answer import ANSWER_TYPES
+
 SHARED_REALM = ""
 
 #: The header row asserting that the `:S` rows beside it are the WHOLE running
@@ -54,6 +65,12 @@ SERVICES_HEADER = "!services"
 
 #: The leading marker of a service-declaration row.
 SERVICE_MARKER = ":"
+
+#: The leading marker, and the separator, of a type-declaration row. No reader
+#: from before this row has the kind, so every one of them refuses a wire that
+#: carries it (fail closed). It never occurs in a type spelling, which is what
+#: lets the members be joined by it without escaping.
+DECL_MARKER = "~"
 
 
 def _components(ir: dict) -> list[dict]:
@@ -279,6 +296,81 @@ def _handoff_row(name: str, handoff: dict | None) -> list[str]:
     return [f"{name}={handoff['key']}:{handoff.get('type') or ''}"]
 
 
+def _decl_row(name: str, spec: dict) -> str | None:
+    """``~Name[P,Q]~record~f:T~g:U`` or ``~Name~variant~A~B:T`` for one
+    declaration, or None when it cannot be spelled on the wire.
+
+    None is WITHHELD, never escaped, and it errs in the right direction: a name
+    the running side does not declare reads there as undeclared, which the gate
+    refuses against a successor that declares it, so a declaration this wire
+    cannot carry refuses the swap and never admits it. A name, a parameter or a
+    member name that is not a bare identifier, a type spelling that is empty or
+    carries the row separator or the row terminator, or a record with no field
+    is such a case."""
+    params = list(spec.get("params") or ())
+    if not _wire_name(name) or not all(_wire_name(p) for p in params):
+        return None
+    head = f"{name}[{','.join(params)}]" if params else name
+    members: list[str] = []
+    if spec.get("kind") == "variant":
+        kind = "variant"
+        for case in spec.get("cases") or []:
+            cname, payload = case.get("name"), case.get("payload")
+            if not _wire_name(cname):
+                return None
+            if payload is None:
+                members.append(cname)
+            elif _decl_type_ok(payload):
+                members.append(f"{cname}:{payload}")
+            else:
+                return None
+    else:
+        kind = "record"
+        for fname, ftype in (spec.get("fields") or {}).items():
+            if not _wire_name(fname) or not _decl_type_ok(ftype):
+                return None
+            members.append(f"{fname}:{ftype}")
+        if not members:
+            return None
+    return DECL_MARKER + DECL_MARKER.join([head, kind, *members])
+
+
+def _decl_type_ok(text: object) -> bool:
+    return (isinstance(text, str) and text != ""
+            and not any(c in text for c in f";{DECL_MARKER}\n"))
+
+
+def _decl_rows(types: dict | None, roots: Iterable[str | None]) -> list[str]:
+    """The declaration rows for every record or variant that the ROOT type
+    spellings reach, and only those, sorted by name.
+
+    A spelling reaches a declared name by mentioning it, and a declaration
+    reaches whatever its own fields or cases mention (minus its own type
+    parameters), so a nested ``Map[Str, List[St]]``, a generic and a recursive
+    type are all followed, each declaration once. A name the table does not
+    declare (a builtin, an opaque nominal) reaches nothing and renders nothing,
+    and so does a PROVIDED type (`model_answer.ANSWER_TYPES`), which every
+    version seeds identically and no program can redeclare.
+
+    `roots` is a set of spellings so a consumer other than the hand-off state
+    can ask for the declarations behind its own spellings. With no roots, or
+    roots that name no declared type, no row is rendered and the wire is
+    byte-identical to one rendered before this row existed."""
+    types = types or {}
+    seen: set[str] = set()
+    todo = [n for root in roots for n in _spelling_names(root)]
+    while todo:
+        name = todo.pop()
+        spec = types.get(name)
+        if name in seen or not isinstance(spec, dict) or name in ANSWER_TYPES:
+            continue
+        seen.add(name)
+        params = set(spec.get("params") or ())
+        todo += [n for t in _decl_refs(spec) for n in _spelling_names(t) - params]
+    rows = (_decl_row(name, types[name]) for name in sorted(seen))
+    return [row for row in rows if row is not None]
+
+
 def _requirement_row(name: str, key: str, entry: dict) -> str:
     """One requirement row for `key`, carrying the realm the running consumer
     resolves it in — which is what makes the gate's per-(key, realm) reasoning
@@ -326,6 +418,14 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
     incoming TEXT redeclares are NOT rendered here — the gate derives that
     implicit half from the text itself, as `compile_files` does.
 
+    The DECLARATION rows (``~T~record~…``) follow the composition rows and
+    precede the service block: they say what the type names in the handoff rows
+    mean in the running version (`_decl_rows`), and only for the types those
+    rows reach. A composition with no handoff, or whose handoffs name no
+    declared type, renders none, so every such wire is byte-identical to before.
+    A reader from before this row refuses it as an unknown row kind, which fails
+    closed for the same reason as the presence row above.
+
     A route row is a COMPOSITION row — it says what one running component binds
     across which realms — so it sits with its component, after that component's
     requirement rows and ahead of the service block. The handoff row (``C=k:T``,
@@ -361,6 +461,11 @@ def manifest_wire(ir: dict, replacing: Iterable[str] = ()) -> str:
         rows.extend(_handoff_row(name, handoffs.get(name)))
         if len(rows) == before:
             rows.append(_presence_row(name))
+    # the declarations the running hand-off spellings reach: after every
+    # composition row, so none of their positions moves, and nothing at all for
+    # a composition with no hand-off over a declared type
+    rows.extend(_decl_rows(ir.get("types") if isinstance(ir, dict) else None,
+                           [h.get("type") for h in handoffs.values()]))
     services = _declared_services(ir)
     if services is not None:
         rows.append(SERVICES_HEADER)
