@@ -2417,6 +2417,13 @@ class _FlowChecker:
         position is a declared `Secret[T]` receiver (G-SECRET-FLOW, §7b), and the
         concrete origins the arguments carry are recorded on the audit surface.
 
+        The one `secret` crossing that is ADMITTED is the §4b same-capability
+        re-entry: handing the bound key back into an extern body of its own bound
+        capability (`let k = emit complete(d); let r = emit echo(k)`). The callee
+        there is exactly the emission whose return minted `secret`
+        (`model.sources[callee] == SECRET_ORIGIN`), so it stands down as the
+        statement arm's `model.sources` early return does.
+
         The outer call of an `emit` STATEMENT is skipped: its expression reaches
         here through `taint_of` too, and the statement arm is the one that owns
         its diagnostic and its return-inclusive recording."""
@@ -2424,10 +2431,16 @@ class _FlowChecker:
             return
         args = self._emit_args or ()
         if not self.infer and self.enforce:
-            for index, at in enumerate(args):
-                if _carries_secret(at):
-                    self._refuse_secret(callee, "an emission crossing", index, at,
-                                        node)
+            # §4b: the bound capability's own body is the one receiver the bound
+            # key may re-enter, so this is the one callee whose secret arguments
+            # are admitted.
+            bound_reentry = (
+                self.model.sources.get(callee) == SECRET_ORIGIN)
+            if not bound_reentry:
+                for index, at in enumerate(args):
+                    if _carries_secret(at):
+                        self._refuse_secret(callee, "an emission crossing",
+                                            index, at, node)
             receivers = self.model.secret_receivers.get(callee, set())
             for index, at in enumerate(args):
                 if index not in receivers and _carries_confidential(at):
