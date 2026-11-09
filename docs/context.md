@@ -124,6 +124,23 @@ loop the run uses matters as much as the pack. revl's bench loop hands the
 error text back and applies no suggested edit yet. Until that run exists, the
 claim is the token number above and nothing more.
 
+`bench/context_arm.py` is that run. Each of the eight tasks in
+`bench/context_tasks.json` removes one component from a real composition and
+asks for it back. The raw arm reads the composition without the component,
+plus every other file the pack draws a declaration from; the pack arm reads
+`revl context --component C`. Both get the same system prompt, task text,
+header and retry loop. The reply must be the component block alone (an empty
+or renamed reply would otherwise pass wherever nothing depends on the
+component); it is spliced back and the whole file compiled. An unsolved cell
+counts `max_iters + 1` rounds. `summary.md` gives, per task, the rounds of
+each arm and both readings in tokens, then whether the pack loses rounds, its
+share of input tokens, and a verdict: PROMOTE only when it loses no rounds and
+reads fewer tokens, HOLD otherwise, and none while a cell was cut short by an
+endpoint error or usage went unreported. `--runner mock` checks the
+pipeline without a model; `--runner local` with `--base-url`, `--model` and
+`--api-key-env` (the NAME of the variable holding the key) runs it against a
+hosted endpoint.
+
 ## Where it is listed, and what would move it
 
 `revl_context` is NOT in the core tier `tools/list` advertises, and the

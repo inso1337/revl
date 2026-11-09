@@ -802,6 +802,16 @@ def test_bench_run_falls_back_to_the_reasoning_channel(fake):
     assert row["text"] == "thinking..." and row["answer_from_reasoning"]
 
 
+def test_bench_run_reads_a_hosted_key_from_the_variable_it_names(
+        fake, monkeypatch):
+    bench_run = _load_by_path("bench_run_1461c", ROOT / "bench" / "run.py")
+    monkeypatch.setenv(ENV, SECRET)
+    row = bench_run.run_local("sys", "prompt", "m", fake.base + "/v1", 30,
+                              api_key_env=ENV)
+    assert fake.requests[-1]["headers"]["authorization"] == f"Bearer {SECRET}"
+    assert SECRET not in json.dumps(row)
+
+
 # --------------------------------------------------------------------------
 # opt-in live test against a local Ollama
 # --------------------------------------------------------------------------

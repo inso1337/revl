@@ -234,7 +234,8 @@ DEFAULT_LOCAL_MAX_TOKENS = 8192
 
 
 def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
-              max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS):
+              max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS,
+              api_key_env: str | None = None):
     """OpenAI-compatible chat-completions runner for a local server (LM Studio,
     ollama's OpenAI shim, etc). Mirrors run_cline's call/return shape but posts
     directly to `{base_url}/chat/completions` through the runtime's
@@ -257,6 +258,10 @@ def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
     draft the model then revised. Falling back is recorded on the row
     (`answer_from_reasoning`) rather than done silently, because a corpus
     scored off draft code is not the same measurement.
+
+    `api_key_env` names the environment variable a hosted endpoint's key is
+    read from, at call time, by the adapter. The key itself never passes
+    through this file, a flag or a result row.
     """
     # One client: the runtime's OpenAI-compatible adapter (issue #1461). It
     # refuses redirects, so a benchmark cannot silently measure a server other
@@ -265,6 +270,7 @@ def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
     binding = parse_config({"roles": {"bench": {
         "provider": "openai-compatible", "base_url": base_url, "model": model,
         "timeout": timeout, "max_tokens": max_tokens,
+        **({"api_key_env": api_key_env} if api_key_env else {}),
     }}}, "bench/run.py --base-url").binding("bench")
     try:
         completion = Adapter(binding).complete(
@@ -446,7 +452,7 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
             reply = mock(spec)
         elif args.runner == "local":
             reply = run_local(system, task, args.model, args.base_url,
-                              args.timeout, args.max_tokens)
+                              args.timeout, args.max_tokens, args.api_key_env)
         else:
             reply = run_cline(system, task, args.model, args.provider,
                               args.timeout, args.inline_system)
@@ -509,6 +515,11 @@ def main():
     ap.add_argument("--base-url", default="http://localhost:1234/v1",
                     help="--runner local: OpenAI-compatible base URL "
                          "(no trailing /chat/completions)")
+    ap.add_argument("--api-key-env", default=None,
+                    help="--runner local: the NAME of the environment variable "
+                         "holding the endpoint's key (e.g. DEEPSEEK_API_KEY "
+                         "with --base-url https://api.deepseek.com/v1). The "
+                         "key is read from it at call time and never printed")
     ap.add_argument("--max-iters", type=int, default=3)
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_LOCAL_MAX_TOKENS,
                     help="--runner local: output-token cap per call (default "
@@ -624,7 +635,8 @@ def main():
                         reply = run_mock(system, prompt, spec, attempt)
                     elif args.runner == "local":
                         reply = run_local(system, prompt, args.model, args.base_url,
-                                          args.timeout, args.max_tokens)
+                                          args.timeout, args.max_tokens,
+                                          args.api_key_env)
                     else:
                         reply = run_cline(system, prompt, args.model, args.provider,
                                           args.timeout, args.inline_system)

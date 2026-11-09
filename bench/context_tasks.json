@@ -1,0 +1,53 @@
+{
+  "_doc": "Authoring tasks for bench/context_arm.py (docs/context.md). Each task removes one component from a real composition and asks for it back. `file` is the composition, `component` the one removed, `task` what the component must do. A task names every non-service helper the body calls (an extern fn, a stdlib function, an `asset` expression), so both arms know the name; only the raw arm sees its declaration.",
+  "tasks": [
+    {
+      "id": "notes-http",
+      "file": "examples/app/notes.rvl",
+      "component": "NotesHttp",
+      "task": "Implement the HTTP surface over the note store. `get_note` answers the stored note, or a typed 404 built with `not_found_error(\"no note with that id\")` (imported from stdlib/http.rvl) when the id is missing. `list_notes` answers every note when `limit` is absent and the first `limit` notes when it is present (the stdlib `take(list, n)`). `create_note` mints the id as \"note-\" followed by the store's current size, builds the row from the new note's title and body, records it with the store's `create` emission, and answers it."
+    },
+    {
+      "id": "notes-console",
+      "file": "examples/app/notes.rvl",
+      "component": "NotesConsole",
+      "task": "At activation, register the console's web entry with the WebUI service: the dev source is `asset \"./frontend/entry.client.ts\"`, the production manifest is \"./frontend/dist/.vite/manifest.json\", the entry owns the client route \"/notes\", and its initial state carries the ranker's current strategy and signal count. The console's `score` and `bump` forward to the ranker."
+    },
+    {
+      "id": "private-notes-http",
+      "file": "examples/app/private_notes.rvl",
+      "component": "PrivateNotesHttp",
+      "task": "Every operation first validates the bearer with the auth service, and a failed validation is answered as it came back. On success, `get_private_note` answers the store's lookup of that id for the validated principal, and `list_private_notes` answers that principal's own notes."
+    },
+    {
+      "id": "job-store",
+      "file": "examples/uxprobe2_jobs.rvl",
+      "component": "JobStore",
+      "task": "Keep jobs in a component-owned `Map` created as an effect and dropped on unload. `status` reads a job's payload by id. `submit` inserts the payload under its id as a revertible effect whose undo removes it, then records the audit line `submit <id> sha:<hex>`, where `<hex>` is the file's `sha256_hex` helper applied to the payload."
+    },
+    {
+      "id": "user-cache",
+      "file": "examples/ts_host_body.rvl",
+      "component": "UserCache",
+      "task": "Keep entries in a component-owned `Map` created as an effect and dropped on unload. `get` reads a key. `module_scope` answers the file's `host_module_scope()` helper. `put` inserts the value as a revertible effect whose undo removes it, then executes `INSERT INTO cache_log VALUES (<key>)` on the database."
+    },
+    {
+      "id": "audit-seam",
+      "file": "examples/interpose_observe.rvl",
+      "component": "Seam",
+      "task": "An interposer in front of the database: `execute` forwards the query to the inner database, records the query with the audit service, and answers the inner database's result."
+    },
+    {
+      "id": "payment-gateway",
+      "file": "bench/blast_radius/compositions/commerce.rvl",
+      "component": "PaymentGateway",
+      "task": "`status` answers the order id unchanged. `charge` appends the order id to the ledger and answers what the ledger answers."
+    },
+    {
+      "id": "tenant-api",
+      "file": "bench/blast_radius/compositions/tenants.rvl",
+      "component": "TenantAApi",
+      "task": "Tenant A's API. Its `sessions`, `notify` and `api` keys are each isolated in the realm \"tenant_a\". `handle` opens a session for the path, and `refund` forwards to the billing service's refund."
+    }
+  ]
+}
