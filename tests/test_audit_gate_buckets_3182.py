@@ -346,3 +346,30 @@ def test_a_weakened_move_is_not_also_a_gained_recovery():
                              _moved("inverse", "declared", None))
     assert recovery["recovery_weakened"] == ["recovery:a:inverse"]
     assert recovery["recovery_added"] == []
+
+
+# migrate and the changelog read the recovery diff, not the gate: a kind move
+# that weakens the inverse class must still reach both through `inverse:<name>`.
+
+def test_migrate_reports_a_kind_move_that_weakens_the_inverse():
+    from revl.migrate import authority  # noqa: PLC0415
+    declared = compile_source(_DECLARED, "corpus.rvl")
+    compensation = compile_source(_COMPENSATION, "corpus.rvl")
+    assert authority(declared, compensation)["widened"] == ["inverse:deposit"]
+    strengthened = authority(compensation, declared)
+    assert strengthened["widened"] == []
+    assert "inverse:deposit" in strengthened["narrowed"]
+
+
+def test_the_changelog_breaks_on_a_kind_move_that_weakens_the_inverse():
+    from revl.changelog import derive_changelog  # noqa: PLC0415
+    declared = compile_source(_DECLARED, "corpus.rvl")
+    compensation = compile_source(_COMPENSATION, "corpus.rvl")
+    weakened = derive_changelog(declared, compensation, no_semver=True)
+    ledes = [ln["fact"] for ln in weakened["breaking"] if ln["lede"]]
+    assert "inverse.weakened:deposit" in ledes
+    strengthened = derive_changelog(compensation, declared, no_semver=True)
+    facts = [ln["fact"] for ln in strengthened["breaking"]]
+    assert not [f for f in facts if f.startswith(("inverse.", "recovery."))]
+    assert "inverse.strengthened:deposit" in [
+        ln["fact"] for ln in strengthened["added"]]

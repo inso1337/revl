@@ -98,7 +98,12 @@ decision reads the same function, so the gate and the update path cannot
 disagree about what widened (issue #3182). A recovery whose kind moves on a
 kept name (`compensation` to `inverse`, or back) is not a dropped recovery:
 the direction of that move is the inverse-provenance diff's, so a weakening
-is one `inverse:<name>` token and a strengthening passes. A lost kind is
+is one `inverse:<name>` token and a strengthening passes. Every reader of the
+recovery diff also reads that token: the gate (`inverse_weakened` is in
+`GATED_BUCKETS`), `revl migrate` (`migrate.authority` lists `inverse:<name>`
+under `widened`, a strengthening under `narrowed`) and the changelog (a
+breaking `inverse.weakened:<name>` line, a strengthening as an added
+`inverse.strengthened:<name>` line). A lost kind is
 treated as a move only when the inverse diff actually emits that token and the
 name still has a recovery entry. Otherwise it is still reported as dropped: a
 recovery gone entirely (even when its class moved, as in `compensation` to
