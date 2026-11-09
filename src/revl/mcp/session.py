@@ -6812,10 +6812,16 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         for lz in leases:
             cap = lz["capability"]
-            component = lz["component"]
-            if self._live_lease_grant(component, cap) is not None:
-                continue  # already minted from an approved ticket (retry / pre-mint)
+            # The grant is bound to the CROSSING component the ticket names,
+            # which can differ from the acquiring activation body (`lz[
+            # "component"]`): a lease over a key another component provides is
+            # acquired by one component and consumed at another's crossing. The
+            # liveness check must use the identity the mint will use, or an
+            # approved lease re-raises its ticket forever in that topology
+            # (issue #2693).
             ticket = self._build_lease_ticket(lz)
+            if self._live_lease_grant(ticket["component"], cap) is not None:
+                continue  # already minted from an approved ticket (retry / pre-mint)
             # roadmap item 471: the lease's own votes are the answer. The mint
             # is taken from the LIVE satisfied decision for THIS ticket and from
             # nothing else (see the docstring). `in self._tickets` is the other
@@ -8644,7 +8650,7 @@ class Session:
     # -- item 442 (issue #2693): delegated use, attribution and revocation ---
 
     def _delegate_use(self, request_id: str, subject: str,
-                      capability: str) -> int:
+                      capability: str, *, lender: str | None = None) -> int:
         """Spend one use of standing grant `request_id` FOR a second party.
 
         This is item 294's lease path with a SUBJECT: the delegation is a lookup
@@ -8710,7 +8716,21 @@ class Session:
                 f"standing grant `{request_id}` covers `{grant['capability']}`, "
                 f"not `{capability}` — a delegated reference authorizes only the "
                 f"surface it was minted for (item 442, issue #2693)")
-        lender = grant.get("component")
+        # The LENDER is the component that acquired and handed out this lease
+        # (the handle's holder), which can be distinct from the grant's own
+        # `component`: the lease's grant is bound to the CROSSING component the
+        # ticket bound (often the provider emitting the host op), while the
+        # delegating party is the activation body that minted the handle. Both
+        # are recorded, so the row says who holds the grant and who lent it.
+        lender = lender or grant.get("component")
+        known_lender = grant.get("lender")
+        if known_lender is not None and lender is not None \
+                and known_lender != lender:
+            raise SessionError(
+                f"standing grant `{request_id}` was already delegated by "
+                f"`{known_lender}`, so `{lender}` cannot lend it as well — one "
+                f"grant is lent by the party that holds it "
+                f"(item 442, issue #2693)")
         held_by = grant.get("subject")
         if held_by is not None and held_by != subject:
             raise SessionError(
@@ -8719,6 +8739,7 @@ class Session:
                 f"(item 442, issue #2693)")
         if held_by is None:
             grant["subject"] = subject
+            grant["lender"] = lender
             grant.setdefault("chain", []).append({
                 "from": lender, "to": subject,
                 "narrowed": _delegation_narrowed(grant["capability"])})
@@ -9831,10 +9852,13 @@ class Session:
                  # so the row an operator reads says the handle is retired.
                  "revoked": g.get("revoked", False),
                  # item 442 (issue #2693): the delegation record an operator
-                 # reads. `subject` is the party the authority was lent to and
-                 # `chain` is who lent what to whom; both are None/[] until a
-                 # delegated use names a subject, so an ordinary lease's row is
-                 # unchanged in meaning.
+                 # reads. `lender` is the component that acquired and handed out
+                 # the lease (which can differ from `component`, the crossing
+                 # component the grant is bound to), `subject` is the party the
+                 # authority was lent to, and `chain` is who lent what to whom.
+                 # They are None/[] until a delegated use names a subject, so an
+                 # ordinary lease's row is unchanged in meaning.
+                 "lender": g.get("lender"),
                  "subject": g.get("subject"),
                  "chain": list(g.get("chain") or [])}
                 for g in self._grants],
