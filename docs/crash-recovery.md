@@ -796,3 +796,16 @@ Two WALs read differently once a session has been forked.
 - It works from the durable log alone. Recovery never re-enters the dead runtime,
   which is the point: the process is gone, and the WAL was written so that its
   absence would not matter.
+
+
+## Approval questions a halt revoked (issue #2991)
+
+The operator E-Stop closes every approval question it strands and writes one
+durable row per question: `ticket-revoked` for a pending single-party asking and
+`quorum-revoked` for an open multi-party one. `revl recover` reports these under
+`revokedTickets`, kept apart from `expiredTickets` (which it builds from
+`quorum-expired`): an expired question ran out of time and may be asked afresh,
+a revoked one was withdrawn. Neither is residue - both are decisions about a
+question, not effects - so they do not move the residue proof or the exit
+status. A WAL with neither record renders byte-identically to before this
+report existed.

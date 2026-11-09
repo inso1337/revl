@@ -2970,6 +2970,24 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_ticket_revoked(self, entry: dict) -> dict:
+        """Append the ``ticket-revoked`` record when the operator E-Stop revokes
+        a PENDING single-party question (issue #2991).
+
+        One row per ticket, written before the session is dead, so a post-mortem
+        reader (`revl recover`, `revl.wal.revoked_tickets`) can say a question
+        was revoked by the halt rather than merely never answered. It is
+        deliberately a different record from ``quorum-revoked`` (which closes a
+        MULTI-party question) and from ``approval-revoked`` (which withdraws a
+        MINTED grant): the three name three different things, and folding them
+        would lose which one happened. Consumes no seq: like ``approval-granted``
+        it names a consent fact, not an effect. The entry carries the ticket's
+        binding (``hash``, ``candidateHash``, ``component``, ``kind``, ``round``),
+        who halted it, why, and the proposers whose asking it refused."""
+        record = {"record": "ticket-revoked", **entry}
+        self._write(record)
+        return record
+
     def record_approval_emission(self, request_id: str, capability: str,
                                  component: str, *,
                                  use: int | None = None) -> dict:

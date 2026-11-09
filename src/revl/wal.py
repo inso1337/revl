@@ -240,6 +240,77 @@ def model_decisions(records: list) -> dict:
 RECORD_APPROVAL_CONSUMED = "approval-consumed"
 RECORD_APPROVAL_EMISSION = "approval-emission"
 
+#: The two rows that name an approval question's TERMINAL disposition after an
+#: operator halt (issue #2991), as ``replay.WriteAheadLog`` writes them:
+#: ``ticket-revoked`` for a single-party asking, ``quorum-revoked`` for a
+#: multi-party question. Kept apart from ``quorum-expired`` so a reader can tell
+#: a question the operator withdrew from one that merely ran out of time: the
+#: first is a decision, the second is its absence.
+RECORD_TICKET_REVOKED = "ticket-revoked"
+RECORD_QUORUM_REVOKED = "quorum-revoked"
+RECORD_QUORUM_EXPIRED = "quorum-expired"
+
+
+def revoked_tickets(records: list) -> list:
+    """Every approval question a WAL reports as REVOKED, in recorded order.
+
+    A revoked question was withdrawn by the operator (an ordinary revoke, or the
+    E-Stop's sweep of every pending question). Returns
+    ``[{hash, component, candidateHash, round, kind, state, by, reason, at,
+    estop}]`` with ``state`` always ``"revoked"``. Distinct from
+    :func:`expired_tickets` by construction, which is the point: the two are
+    different outcomes and folding them would lose which one happened."""
+    out = []
+    for record in records:
+        kind = record.get("record")
+        if kind == RECORD_TICKET_REVOKED:
+            out.append({
+                "hash": record.get("hash"),
+                "component": record.get("component"),
+                "candidateHash": record.get("candidateHash"),
+                "round": record.get("round"), "kind": "single",
+                "state": "revoked", "by": record.get("by"),
+                "reason": record.get("reason"), "at": record.get("at"),
+                "estop": bool(record.get("estop")),
+                "withdrewApprovals": list(record.get("withdrewApprovals") or []),
+            })
+        elif kind == RECORD_QUORUM_REVOKED:
+            out.append({
+                "hash": record.get("hash"),
+                "component": record.get("component"),
+                "candidateHash": record.get("candidateHash"),
+                "round": record.get("round"), "kind": "quorum",
+                "requestId": record.get("requestId"),
+                "state": "revoked", "by": record.get("by"),
+                "reason": record.get("reason"), "at": record.get("at"),
+                "estop": bool(record.get("estop")),
+                "withdrewVotes": list(record.get("withdrewVotes") or []),
+            })
+    return out
+
+
+def expired_tickets(records: list) -> list:
+    """Every approval question a WAL reports as EXPIRED, in recorded order.
+
+    The counterpart of :func:`revoked_tickets`, and deliberately NOT merged with
+    it: an expired question ran out of time, a revoked one was withdrawn. Both
+    are terminal and neither can be voted on, but only the second is a decision
+    the operator made."""
+    out = []
+    for record in records:
+        if record.get("record") != RECORD_QUORUM_EXPIRED:
+            continue
+        out.append({
+            "hash": record.get("hash"),
+            "component": record.get("component"),
+            "candidateHash": record.get("candidateHash"),
+            "round": record.get("round"), "kind": "quorum",
+            "requestId": record.get("requestId"),
+            "state": "expired", "at": record.get("resolvedAt")
+            or record.get("at") or record.get("expiredAt"), "estop": False,
+        })
+    return out
+
 
 def approval_spends(records: list) -> list:
     """Every approval spend on a WAL, in recorded order, each joined to its

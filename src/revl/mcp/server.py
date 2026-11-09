@@ -3687,6 +3687,40 @@ def _tool_override(arguments: dict) -> dict:
         return _session_error(error)
 
 
+def _tool_approvals(arguments: dict) -> dict:
+    """The approval query surface (issue #2991): `list`, `show` and `stats` over
+    the live session's outstanding-ticket table, decision graph and ledger.
+
+    Read-only by construction: it projects the session's own fields and never
+    spends, mints, revokes or writes. It is gated on the `approve` verb because
+    the questions, their blast radius and their history are the same authority
+    as answering them."""
+    from . import approvals_surface  # noqa: PLC0415 — lazy, no cordis
+    action = arguments.get("action")
+    try:
+        if action == "list":
+            return {"ok": True, **approvals_surface.list_approvals(
+                SESSION,
+                pending=bool(arguments.get("pending")),
+                session_id=arguments.get("session"))}
+        if action == "show":
+            ticket_hash = arguments.get("hash")
+            if not ticket_hash:
+                return _session_error(SessionError(
+                    "`revl_approvals` with `action: \"show\"` needs the ticket "
+                    "`hash` the approvalRequired response carried"))
+            return {"ok": True, **approvals_surface.show_approval(
+                SESSION, ticket_hash, diff=bool(arguments.get("diff")))}
+        if action == "stats":
+            return {"ok": True, **approvals_surface.stats(
+                SESSION, session_id=arguments.get("session"))}
+        return _session_error(SessionError(
+            f"unknown `revl_approvals` action {action!r}: use `list`, `show` or "
+            f"`stats` (issue #2991)"))
+    except (ValueError, SessionError) as error:
+        return _session_error(error)
+
+
 def _tool_quorum(arguments: dict) -> dict:
     """Read the DECISION GRAPH of one multi-party question, and the admission
     receipt once the authority it minted has been spent (roadmap item 471).
@@ -7082,6 +7116,60 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_quorum,
+    },
+    {
+        "name": "revl_approvals",
+        "description": "THE APPROVAL QUERY SURFACE (issue #2991): one read-only "
+                       "view over the live session's outstanding and answered "
+                       "class-(c) tickets. `action: \"list\"` returns every ticket "
+                       "the session issued - its effect, candidate-hash binding, "
+                       "asking round, raisers, state (pending, granted, consumed, "
+                       "expired, revoked, refused, satisfied, denied, escalated) "
+                       "and the counts by state; `pending: true` keeps only the "
+                       "questions still waiting for an answer. `action: \"show\"` "
+                       "returns one ticket by `hash`: the full ticket body, the "
+                       "policy rules that answer for it, the binding hashes, the "
+                       "decision graph, grant provenance once a yes was minted or "
+                       "spent, and the deterministic next actions; `diff: true` "
+                       "adds the blast radius (the crossings with whether each has "
+                       "a checked inverse, external effects, secret flows, "
+                       "capability widenings and what the ticket discloses about "
+                       "caller-supplied resource values). `action: \"stats\"` "
+                       "folds this session's decision mirror with the durable "
+                       "approval log: counts by state, average time to decision, "
+                       "and the override/escalation/revocation history. It reads "
+                       "the session's own fields and writes nothing. Gated by the "
+                       "`approve` operator verb: seeing the questions and what "
+                       "they would let through is the same authority as answering "
+                       "them. Honest limits it states rather than invents: a "
+                       "pending single-party question carries no timestamp or "
+                       "ttl, and no model recommendation is recorded for "
+                       "approvals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "stats"],
+                           "description": "list the tickets, show one ticket, or "
+                                          "fold the decision history"},
+                "hash": {"type": "string",
+                         "description": "for `show`: the ticket hash from the "
+                                        "approvalRequired response"},
+                "pending": {"type": "boolean",
+                            "description": "for `list`: keep only questions still "
+                                           "waiting for an answer"},
+                "diff": {"type": "boolean",
+                         "description": "for `show`: add the blast-radius "
+                                        "projection (crossings and their inverse "
+                                        "classification, secret flows, "
+                                        "capability widenings)"},
+                "session": {"type": "string",
+                            "description": "the live session id; naming another "
+                                           "session is refused rather than read "
+                                           "as a whole-table request"}},
+            "required": ["action"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_approvals,
     },
     {
         "name": "revl_distillation_offers",

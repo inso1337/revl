@@ -88,6 +88,16 @@ TOOL_VERB = {
     # scoped `may approve on payments` grant is usable while other components are
     # live.
     "revl_approve": "approve",
+    # issue #2991: the approval query surface is READ-ONLY, but reading the
+    # questions, their blast radius and their history is the same authority as
+    # answering them - a bystander who could enumerate what an irreversible
+    # crossing would reach and who is being asked is inside the approval
+    # boundary. So it gates under `approve`, never ungated like `revl_quorum`
+    # (which reads one hash the caller already holds). `_targets` resolves a
+    # `show` hash to its crossing component; `list`/`stats` name no one
+    # component, so they scope to the whole composition and need the literal
+    # `may approve on *`.
+    "revl_approvals": "approve",
     # item 379: revoking a standing grant early is the mirror of granting it —
     # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
     # gates under the same `approve` verb. Its `_approve_targets` branch resolves

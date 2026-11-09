@@ -418,3 +418,35 @@ single-process path does not forward it: the rust and go runs write no
 does not read the latch. Single-process E-Stop is therefore py-only until those
 tiers forward the latch (and ts gains an in-process seam); each one that does
 joins the single-process set.
+
+## The approval questions the halt strands (issue #2991)
+
+A halt also has to answer "what about the questions a human was still deciding".
+A pending class-(c) ticket asks whether an irreversible crossing may fire; once
+the instance is dead, that question can never be answered, so leaving it live
+would be a consent prompt for an action no live session will take. The halt
+therefore sweeps the approval state, and the sweep is stated here because it is
+an E-Stop *authority*, not a side effect.
+
+* Every open multi-party question is closed with a `quorum-revoked` row
+  (`estop: true`, the operator who halted, the reason). The votes already cast
+  stay recorded and stop counting. A question already past its deadline is
+  left to the expiry vocabulary instead: writing `revoked` over a timeout would
+  retract the distinction the two outcomes exist to keep.
+* Every pending single-party asking is refused, and each ticket gets ONE
+  durable `ticket-revoked` row naming its binding, the operator, the reason and
+  the proposers whose asking it refused. An unspent grant minted for one of
+  those askings is withdrawn with an `approval-revoked` row, exactly as an
+  operator's NO withdraws it.
+* A grant already CONSUMED is untouched. It authorized its crossing before the
+  halt, and the E-Stop does not rewrite what already happened: ownership of the
+  fire belongs to the approval that was spent, not to the button that stopped
+  the next one.
+
+The sweep is after the latch flips, so it can only close what the halt already
+made unanswerable. A failure in one revocation is reported in the halt result
+(`revocationErrors`) rather than hidden and never undoes the halt. `revl
+recover` reports both row families as `REVOKED`, kept distinct from `expired`:
+an expired question ran out of time and can be asked afresh, a revoked one was
+withdrawn by the operator. `revl_approvals` (the read-only query surface) reads
+the same rows back through `estop_report`'s `revokedTickets`.

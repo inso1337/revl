@@ -331,6 +331,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     WAL holds it (:func:`_split_nested`). ``None`` for a single-process WAL.
     """
     from .wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
+    from .wal import (expired_tickets, revoked_tickets)  # noqa: PLC0415
 
     try:
         wal = read_wal(wal_path)
@@ -355,7 +356,14 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # recover treats it as RETIRED at k — a terminal, non-live state — and
         # does NOT re-admit it as a callable continuation. The branch (its own
         # distinct WAL) recovers independently to its own fork point.
-        return _with_world(_fork_retired(wal, frozen), world, tally)
+        report = _fork_retired(wal, frozen)
+        revoked = revoked_tickets(records)
+        if revoked:
+            report["revokedTickets"] = revoked
+        expired = expired_tickets(records)
+        if expired:
+            report["expiredTickets"] = expired
+        return _with_world(report, world, tally)
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
@@ -370,6 +378,18 @@ def recover(wal_path: str, *, world: Optional[World] = None,
                                       world=bound(), reissue=reissue)
     else:
         report = _roll_back(wal, world=bound(), wal_path=wal_path)
+
+    # issue #2991: name the approval questions a halt or an operator left in a
+    # TERMINAL disposition, and keep `revoked` apart from `expired`. Both are
+    # decisions about a question, not effects and not residue: an expired
+    # question ran out of time and can be asked afresh, a revoked one was
+    # withdrawn. A WAL with neither record is byte-identical to before.
+    revoked = revoked_tickets(records)
+    if revoked:
+        report["revokedTickets"] = revoked
+    expired = expired_tickets(records)
+    if expired:
+        report["expiredTickets"] = expired
 
     # design 460 §5: the forward-recovery scan runs in BOTH branches — an
     # admission can be owed under either verdict, because the session's activation
@@ -2702,6 +2722,21 @@ def render(report: dict) -> str:
                      f"({binding.get('digest', '')[:19]}...); providers booted: "
                      f"{booted}{refused}.")
     lines += [report["decision"], ""]
+    # issue #2991: an approval question's TERMINAL disposition. `revoked` and
+    # `expired` are different outcomes, so they are different lines here too -
+    # a halt that withdrew a question must not read as one that merely timed out.
+    for entry in report.get("revokedTickets") or []:
+        lines.append(
+            f"  REVOKED  {entry.get('component') or '(component)'} "
+            f"ticket {entry.get('hash')} ({entry.get('kind') or 'single'})"
+            f"{' by E-Stop' if entry.get('estop') else ''} by "
+            f"{entry.get('by') or 'an operator'}: "
+            f"{entry.get('reason') or 'no reason recorded'}")
+    for entry in report.get("expiredTickets") or []:
+        lines.append(
+            f"  expired  {entry.get('component') or '(component)'} "
+            f"ticket {entry.get('hash')} ({entry.get('kind') or 'quorum'}): "
+            f"the deadline passed with no decision")
     if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
         # item 245's approved-to-discharged window verdict shares the
         # `rolled-forward` name but carries a different body (no
