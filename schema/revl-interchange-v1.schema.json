@@ -40,6 +40,15 @@
     "gauntlet": {
       "description": "Optional. A gauntlet dossier (docs/gauntlet.md) carried in the same envelope. Its proved/tested/claimed/pending sections reuse the manifest+boundary vocabulary defined here, so item 31's dossier composes into this format without a schema change. Left open (additionalProperties) so the dossier can evolve independently.",
       "type": "object"
+    },
+    "function_specs": {
+      "description": "Optional (issue #2705). One row per function that states an `ensures` spec, present only when a function states one. `last_result` is the result of the last recorded `revl test --report json` run supplied with `revl audit --spec-results`, or `unrun` when none was recorded (docs/function-specs.md).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["function", "spec", "last_result"],
+        "additionalProperties": true
+      }
     }
   },
   "additionalProperties": true,

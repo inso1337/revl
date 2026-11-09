@@ -33,11 +33,15 @@ from .inverse import inverse_class, inverse_rank
 from .resources import retention_surface
 
 
-def audit_report(ir: dict) -> dict:
+def audit_report(ir: dict, spec_results: dict | None = None) -> dict:
     """Build the same dict `revl audit --json` emits, from a compiled ir.
 
     Reuses the one authoritative boundary computation (`_boundary`) rather
     than recomputing the surface a second, divergent way.
+
+    ``spec_results`` is the recorded `function_specs` map from the last
+    `revl test --report json` run (issue #2705); absent, every spec lists
+    `last_result: "unrun"`, which is what a static audit honestly knows.
     """
     from .boundary import _boundary  # noqa: PLC0415 — lazy, avoids import cycle
 
@@ -138,6 +142,10 @@ def audit_report(ir: dict) -> dict:
         # issue #1896: each `revl gen-types` file's model document and digest,
         # checked at load. ADDITIVE and present only when one was compiled.
         **_generated_surface(ir),
+        # issue #2705: the functions that state an `ensures` spec, with the
+        # last recorded result. ADDITIVE and present only when a fn states a
+        # spec, so every other composition's audit is byte-identical.
+        **_function_specs_surface(ir, spec_results),
     }
 
 
@@ -194,6 +202,71 @@ def _secrets_surface(ir: dict) -> dict:
     (the same conditional-presence discipline as `_parallel_plan_surface`)."""
     table = _secrets_table(ir)
     return {"secrets": table} if table else {}
+
+
+def spec_results_from_report(report: dict) -> dict:
+    """The `function_specs` map a `revl test --report json` payload carries.
+
+    `revl audit --spec-results` reads that payload so the audit can list each
+    function's spec next to the result of the last recorded run (issue #2705).
+    Anything else (no section, an entry with no function, no status) loads as
+    absent, which the audit renders as `unrun` rather than inventing a result.
+    """
+    results: dict[str, dict] = {}
+    for row in report.get("function_specs") or []:
+        if not isinstance(row, dict):
+            continue
+        function = row.get("function")
+        if not function:
+            continue
+        entry = {"status": row.get("status") or "unrun",
+                 "spec": row.get("spec")}
+        if row.get("counterexample"):
+            entry["counterexample"] = row["counterexample"]
+        results[function] = entry
+    return results
+
+
+def function_specs_table(ir: dict, results: dict | None = None) -> list:
+    """One row per fn that states an `ensures` clause (issue #2705).
+
+    The spec, the parameter types the generated property drew its inputs from,
+    and the last result the caller recorded. `unrun` is NOT a failure: the
+    audit is a static surface, so a spec that no recorded `revl test` run has
+    checked yet is listed with that fact rather than a guess
+    (docs/function-specs.md).
+    """
+    results = results or {}
+    rows = []
+    for unit in ir.get("prop_tests") or []:
+        function = unit.get("spec_of")
+        if not function:
+            continue
+        result = results.get(function) or {}
+        # a record from a different spelling of the clause is not this spec's
+        # result; report `unrun` rather than attributing another claim's check
+        if result.get("spec") is not None and result["spec"] != (unit.get("spec") or ""):
+            result = {}
+        row = {
+            "function": function,
+            "spec": unit.get("spec") or "",
+            "property": unit.get("name"),
+            "params": [{"name": p.get("name"), "type": p.get("type")}
+                       for p in unit.get("params") or []],
+            "last_result": result.get("status") or "unrun",
+        }
+        if result.get("counterexample"):
+            row["counterexample"] = result["counterexample"]
+        rows.append(row)
+    rows.sort(key=lambda row: row["function"])
+    return rows
+
+
+def _function_specs_surface(ir: dict, results: dict | None = None) -> dict:
+    """The additive `function_specs` audit key, or `{}` when no fn states a
+    spec, so every other composition's audit surface stays byte-identical."""
+    rows = function_specs_table(ir, results)
+    return {"function_specs": rows} if rows else {}
 
 
 def _generated_surface(ir: dict) -> dict:

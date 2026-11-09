@@ -105,7 +105,7 @@ type      := 'Str'|'Int'|'Float'|'Bool'|'Bytes'|'Unit'
 -- no null/undefined: absence is Opt[T]. Float is IEEE754 (NaN != NaN).
 
 --- pure expressions & functions (stratum 1: TS subset, verbatim syntax) ---
-fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] block
+fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] ['ensures' expr] block
 endorse   := 'endorse' '[' IDENT (',' IDENT)* ']'     -- taint classes the body may declassify
 block     := '{' stmt* '}'
 stmt      := let | var | assign(var-only) | 'if' '(' expr ')' block ['else' block]

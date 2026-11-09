@@ -160,6 +160,11 @@ also folds in the full agent story and the standing correctness debt.
 - The go tier passes a component `fail` message to `fmt.Errorf` as an argument,
   so a `%` in the message is returned verbatim instead of read as a format verb
   (#2427, closes #2379).
+- A function can state a spec with an `ensures` clause over its parameters and
+  the returned `result`; it expands to a `prop test`, so the type-derived
+  generator, the shrinker and the minimal counterexample all apply, and
+  `revl audit --spec-results` lists each spec with the result of its last
+  recorded check (#2705, docs/function-specs.md).
 
 ### The agent story
 
