@@ -2083,14 +2083,25 @@ def component_reach(audit: dict, name: str) -> list[Reach]:
 
 
 def component_realms(manifest: dict, name: str) -> frozenset[str]:
-    """The realms a component is isolated into (its `isolate` map values).
+    """The realms a component is placed in (its `isolate` map values and its
+    `routes` realm sets).
 
-    A component with no isolate lives in the shared realm and is *not* a
+    An `isolate` value is a single-realm placement of a provide or require
+    key; a `routes` entry is the item-162 multi-realm placement
+    (`realms(...)`) of a require key, which lowering keeps in its own field.
+    The policy selects a component by every realm it is placed in, so a routed
+    requirer is selected by every realm it routes across, exactly as a pinned
+    requirer is selected by the one realm it pins (issue #3121).
+
+    A component with no placement lives in the shared realm and is *not* a
     tenant — the tenants rule only pairs components that each name a realm.
     """
     for entry in manifest.get("components") or []:
         if entry.get("name") == name:
-            return frozenset((entry.get("isolate") or {}).values())
+            realms = set((entry.get("isolate") or {}).values())
+            for route in (entry.get("routes") or {}).values():
+                realms.update(route.get("realms") or ())
+            return frozenset(realms)
     return frozenset()
 
 
