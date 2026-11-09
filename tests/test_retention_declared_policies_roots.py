@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import retention as R  # noqa: E402
 from revl.compiler import compile_files  # noqa: E402
+from revl.parser import Parser  # noqa: E402
 
 APP = '''retention customer_pii {
   until: "2099-01-01T00:00:00Z"
@@ -47,6 +48,9 @@ def test_declared_policies_resolves_a_root_asset_inside_the_root_tree(tmp_path):
 
 
 def test_declared_policies_agrees_with_compile_files(tmp_path):
+    """The compiler accepts the composition, and the closure walk reads the
+    same policy the root's own text declares."""
     root = _app(tmp_path)
     compile_files([str(root)])
-    assert "customer_pii" in R.declared_policies([str(root)])
+    expected = R.policies(Parser(APP, str(root)).parse(), str(root))
+    assert R.declared_policies([str(root)]) == expected
