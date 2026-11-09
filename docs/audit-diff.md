@@ -99,13 +99,15 @@ disagree about what widened (issue #3182). A recovery whose kind moves on a
 kept name (`compensation` to `inverse`, or back) is not a dropped recovery:
 the direction of that move is the inverse-provenance diff's, so a weakening
 is one `inverse:<name>` token and a strengthening passes. A lost kind is
-treated as a move only when the inverse diff actually emits that token, so it
-is still reported as dropped when the class did not move: an extern with both
-`undo` and `compensate` that loses one, or a kind change against an older
-baseline without `inverse` (the inverse diff skips that extern). Across a move
-the register is still compared: a new-kind entry whose register is weaker
-than the lost kind's (for example `compensation` with `keyed` to `inverse`
-with none) is reported as `recovery_weakened` on the new entry.
+treated as a move only when the inverse diff actually emits that token and the
+name still has a recovery entry. Otherwise it is still reported as dropped: a
+recovery gone entirely (even when its class moved, as in `compensation` to
+`irreversible`), an extern with both `undo` and `compensate` that loses one
+while its class stays put, or a kind change against an older baseline without
+`inverse` (the inverse diff skips that extern). Across a move the register is
+still compared: a new-kind entry whose register is weaker than the lost kind's
+(for example `compensation` with `keyed` to `inverse` with none) is reported
+as `recovery_weakened` on the new entry, not as a gained recovery.
 
 ## Inverse provenance drift
 

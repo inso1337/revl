@@ -608,16 +608,19 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     a weaker kind is its `inverse:<name>` token, a stronger one passes. Read
     here as a drop, one kind change gated twice and a strengthening failed.
     A lost kind is suppressed only when `diff_inverses` actually emits an
-    `inverse:<name>` token for that name (the class moved). Otherwise it stays
-    dropped: a recovery that disappears entirely, an extern with both kinds
+    `inverse:<name>` token for that name (the class moved) and the name still
+    has an entry on the new side. Otherwise it stays dropped: a recovery that
+    disappears entirely (even when its class moved, for example
+    `compensation` to `irreversible`), an extern with both kinds
     that loses one while its class stays put, and a kind change on an extern
     that lacks `inverse` on either side (a baseline captured before that field
     existed, which `diff_inverses` skips). Across a move the extern's
     `register` is still compared: a new-kind entry whose register is weaker
     than the one the lost kind carried is a weakened recovery, so a move that
     strengthens the class but loses its idempotency floor does not pass as a
-    plain strengthening. Buckets are sorted, so the diff is deterministic over
-    the unhashable `list[dict]` surface without ever hashing a dict.
+    plain strengthening; that entry is reported weakened, not gained.
+    Buckets are sorted, so the diff is deterministic over the unhashable
+    `list[dict]` surface without ever hashing a dict.
     """
     from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
     prev_r = {(e["name"], e["kind"]): e.get("register")
@@ -628,9 +631,10 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     weakened: list[str] = []
     added: list[str] = []
     inverses = diff_inverses(prev, new)
+    # a move needs both: the class moved, and the name still has an entry.
     moved = {token.split(":", 1)[1]
              for bucket in ("inverse_weakened", "inverse_strengthened")
-             for token in inverses[bucket]}
+             for token in inverses[bucket]} & {name for name, _kind in new_r}
     lost_rank: dict[str, int] = {}
     for name, kind in prev_r.keys() - new_r.keys():
         if name in moved:
@@ -639,10 +643,11 @@ def diff_recovery(prev: dict, new: dict) -> dict:
         else:
             dropped.append(f"recovery:{name}:{kind}")
     for name, kind in new_r.keys() - prev_r.keys():
-        added.append(f"recovery:{name}:{kind}")
         if (name in lost_rank and
                 _REGISTER_RANK.get(new_r[(name, kind)], -1) < lost_rank[name]):
             weakened.append(f"recovery:{name}:{kind}")
+        else:
+            added.append(f"recovery:{name}:{kind}")
     for key in prev_r.keys() & new_r.keys():
         before = _REGISTER_RANK.get(prev_r[key], -1)
         after = _REGISTER_RANK.get(new_r[key], -1)

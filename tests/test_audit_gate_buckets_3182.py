@@ -325,3 +325,24 @@ def test_a_kind_change_that_keeps_or_gains_its_register_passes():
         after = _moved("inverse", "declared", new_reg)
         assert diff_recovery(before, after)["recovery_weakened"] == []
         assert evaluate(before, after)["widened"] is False
+
+
+_PLAIN_EMISSION = _COMPENSATION.replace(" compensate rollback()", "", 1)
+
+
+def test_a_moved_class_with_no_recovery_left_is_still_dropped():
+    # compensation -> irreversible emits `inverse:deposit`, but the name has no
+    # recovery entry left, so the lost kind is a drop, not a move. migrate and
+    # the changelog read only the recovery diff.
+    compensation = audit_report(compile_source(_COMPENSATION, "corpus.rvl"))
+    plain = audit_report(compile_source(_PLAIN_EMISSION, "corpus.rvl"))
+    result = evaluate(compensation, plain)
+    assert result["inverse_weakened"] == ["inverse:deposit"]
+    assert result["recovery_dropped"] == ["recovery:deposit:compensation"]
+
+
+def test_a_weakened_move_is_not_also_a_gained_recovery():
+    recovery = diff_recovery(_moved("compensation", "compensation", "keyed"),
+                             _moved("inverse", "declared", None))
+    assert recovery["recovery_weakened"] == ["recovery:a:inverse"]
+    assert recovery["recovery_added"] == []
