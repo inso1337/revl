@@ -86,7 +86,12 @@ def _entries(keys: Any) -> tuple[Mapping[str, Any], ...]:
         values = tuple(keys)
     except TypeError:
         raise _Refused("the pinned release key list is not a list of entries")
-    return tuple(entry for entry in values if isinstance(entry, Mapping))
+    for index, entry in enumerate(values):
+        if not isinstance(entry, Mapping):
+            raise _Refused(
+                f"pinned release key entry {index} is not an object "
+                f"({type(entry).__name__}), so the pin list is unusable")
+    return values
 
 
 def _select_entry(document: Mapping[str, Any], keys: Any) -> Mapping[str, Any]:

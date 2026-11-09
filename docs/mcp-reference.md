@@ -2486,11 +2486,12 @@ running toolchain. Reports the release, the semver bump, whether the release
 declares itself live-safe (`live`), whether it changes host bytes
 (`hostChanges`), and whether this host satisfies the declared gate, language
 and Python requirements. Reads only: fetches no artifact and compiles
-nothing. A networked manifest must be signed by a key pinned in
-`src/revl/update/release_keys.py` and valid at the check instant; an unsigned
-or invalid one is `UPDATE_UNSIGNED` unless the operator started the server with
-`--update-trust-unsigned`. The release report carries `signed` and the
-`signature` (`status`, `keyId`, `notAfter`). `applyAvailable` says whether a
+nothing. A networked manifest that carries a signature is verified against a
+key pinned in `src/revl/update/release_keys.py` and valid at the check instant;
+an invalid or expired signature is `UPDATE_UNSIGNED`. A manifest that carries
+no signature at all is also `UPDATE_UNSIGNED` unless the operator started the
+server with `--update-trust-unsigned`. The release report carries `signed` and
+the `signature` (`status`, `keyId`, `notAfter`). `applyAvailable` says whether a
 live apply is possible right now
 (a composition is loaded and the release carries a `source` artifact).
 

@@ -240,3 +240,16 @@ def test_a_signed_manifest_reports_the_pinned_key():
     assert release.signature["status"] == "valid"
     assert release.signature["keyId"] == TEST_RELEASE_KEY["keyId"]
     assert release.as_report()["signed"] is True
+
+
+def test_trust_unsigned_does_not_accept_a_broken_signature():
+    # the escape accepts a manifest with no signature at all; one that carries
+    # a signature is verified either way, so a broken value is still refused
+    feed = serve_feed(version="1.2.0", signature_tampered=True)
+    try:
+        with pytest.raises(UpdateError) as raised:
+            resolve_release("owner/app", api_base_override=feed.base_url,
+                            trust_unsigned=True)
+    finally:
+        feed.close()
+    assert raised.value.code == "UPDATE_UNSIGNED"

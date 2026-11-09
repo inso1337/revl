@@ -3,9 +3,11 @@
 **Status:** implemented: `revl update check|fetch|status` on the CLI, and
 `revl_update_check`, `revl_update_apply`, `revl_update_status` and
 `revl_update_rollback` on `revl mcp serve` when the operator starts it with
-`--update`. A networked release manifest must be signed by a pinned release
-key; the applied release lives on the generation history and in snapshot meta,
-and the update journal is a log.
+`--update`. A networked release manifest must carry a valid signature from a
+pinned release key; a manifest with no signature at all is refused unless the
+operator passes the `--update-trust-unsigned` escape. The applied release lives
+on the generation history and in snapshot meta, and the update journal is a
+log.
 
 Revl systems already know how to replace a running component: the admission
 gate, the swap, the generation history and the undo are the machinery a
@@ -54,7 +56,7 @@ Rules the parser enforces, each with its own refusal code:
 | `compat` | `language` is required semver; `gateApi`, `irVersion`, `minPython`, `frontier` are optional host facts |
 | `live` | true only when the release was tested as a live update over the previous release |
 | `hostChanges` | true when the release also changes host Python, compiler or venv bytes |
-| signature | a manifest fetched over the network must carry `sign_alg`, `key_id`, `public_key` and `signature` from a key pinned in `src/revl/update/release_keys.py` and valid at the check instant; `UPDATE_UNSIGNED` otherwise, `--trust-unsigned` for the operator escape |
+| signature | a manifest fetched over the network must carry `sign_alg`, `key_id`, `public_key` and `signature` from a key pinned in `src/revl/update/release_keys.py` and valid at the check instant; `UPDATE_UNSIGNED` otherwise. A manifest with no signature at all is the only one `--trust-unsigned` accepts; a manifest that carries one is always verified |
 
 A repository that publishes no manifest still resolves through its newest
 semantic tag. The result says `tagFallback: true`, carries a locally computed
@@ -210,7 +212,8 @@ replaces the gate:
 1. a networked manifest must validate, must name the feed's project, and must
    carry a valid signature from a pinned key active at the check instant
    (`UPDATE_UNSIGNED` otherwise; `--update-trust-unsigned` is the operator
-   escape);
+   escape for a manifest that carries no signature at all, never for one whose
+   signature fails);
 2. the artifact must hash to the manifest's sha256;
 3. a reused staging's kept archive must still hash to that sha256, so a
    rewritten staging and provenance pair is fetched again;

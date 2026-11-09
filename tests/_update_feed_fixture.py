@@ -120,12 +120,14 @@ def serve_feed(*, repo: str = "owner/app", version: str = "1.2.0",
                artifact_override: bytes | None = None,
                live: bool = True, host_changes: bool = False,
                manifest_extra: dict | None = None,
-               signed: bool = True) -> FixtureFeed:
+               signed: bool = True,
+               signature_tampered: bool = False) -> FixtureFeed:
     """Start a feed serving one (optionally one prerelease) release.
 
     ``artifact_override`` serves bytes that differ from the manifest hash, the
     digest-mismatch case. ``tag_only`` publishes no releases and only tags.
-    ``signed`` signs the served manifest with the fixture's release key.
+    ``signed`` signs the served manifest with the fixture's release key;
+    ``signature_tampered`` keeps the signature members but breaks the value.
     """
     files = source_tar(version)
     artifact = files if artifact_bytes is None else artifact_bytes
@@ -212,6 +214,8 @@ def serve_feed(*, repo: str = "owner/app", version: str = "1.2.0",
                 if signed:
                     document = sign_record(RELEASE_DOMAIN, document,
                                            TEST_SIGNING_IDENTITY)
+                    if signature_tampered:
+                        document["signature"] = "0" * 128
                 self._bytes(json.dumps(document).encode())
                 return
             if path.startswith("/assets/"):

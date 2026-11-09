@@ -183,6 +183,27 @@ jobs:
           python3 tools/release_signing.py sign release.json --key-file "$key_file"
       - name: Validate the signed manifest
         run: python3 tools/release_manifest.py --validate release.json
+      # `--validate` only parses the document; it ignores the signature members.
+      # Verify the signed file against the keys this tree pins, so a wrong
+      # identity, domain or an unpinned/expired key stops the release here
+      # instead of publishing a manifest every updater must refuse.
+      - name: Verify the signature against the pinned release keys
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+
+          sys.path.insert(0, "src")
+          from revl.update import signing
+
+          with open("release.json", encoding="utf-8") as handle:
+              document = json.load(handle)
+          ok, reason = signing.verify_manifest(document)
+          if not ok:
+              print(f"::error::release.json does not verify against RELEASE_KEYS: {reason}")
+              raise SystemExit(1)
+          print(reason)
+          PY
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

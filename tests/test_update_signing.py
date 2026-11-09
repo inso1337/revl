@@ -137,6 +137,12 @@ def test_a_malformed_pinned_entry_fails_closed():
         assert reason
 
 
+def test_a_non_object_pinned_entry_fails_closed():
+    ok, reason = verify_manifest(_signed(), keys=(_keys()[0], "typo"), now=NOW)
+    assert not ok
+    assert "entry 1 is not an object" in reason
+
+
 def test_trust_unsigned_bypasses_verification():
     unsigned = _document()
     assert require_signed(unsigned, trust_unsigned=True, keys=_keys(),

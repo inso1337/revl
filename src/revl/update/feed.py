@@ -281,12 +281,13 @@ def _signature_report(document: dict, *, trust_unsigned: bool
     """The signature report, and whether an unsigned manifest was accepted.
 
     A networked manifest is signed by the release key under the release
-    domain; the operator escape accepts one without a verifiable signature,
-    and the report says that so the trust decision is visible afterwards.
+    domain. The operator escape accepts a manifest that carries NO signature;
+    a manifest that carries one is verified either way, so a broken, expired or
+    unknown-key signature is still a refusal rather than quietly downgraded to
+    "unsigned". The report says which case applied.
     """
-    if trust_unsigned:
-        return ({"status": "trusted-unsigned"},
-                "signature" not in document)
+    if "signature" not in document and trust_unsigned:
+        return {"status": "trusted-unsigned"}, True
     report = signing.require_signed(document, trust_unsigned=False)
     return {"status": "valid", **(report or {})}, False
 
