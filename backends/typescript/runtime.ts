@@ -941,6 +941,31 @@ export class MapHandle {
     liveResources.delete(this.label)
     record(`${this.label}.drop`)
   }
+
+  // -- state hand-off protocol (item 53, docs/state-handoff.md) --------------
+  //
+  // A Map *is* a provider's state: its entries. These are the ts peers of
+  // `backends/python/runtime.py`'s `Map.__revl_state__`/`__revl_restore__`, so
+  // the same declared `handoff` contract crosses a swap on both tiers: a swap
+  // snapshots the live predecessor through this pair, then seats the snapshot
+  // in the successor it just loaded. A resource carrying neither (a `Pool`,
+  // whose checkouts are transient) migrates as a fresh equivalent, with only
+  // its type pinned, exactly as on py.
+
+  /** Snapshot this Map's state: its entries, in insertion order. A copy, so
+   *  the snapshot outlives this Map's teardown. */
+  __revl_state__(): [any, any][] {
+    this.assertLive('__revl_state__')
+    return [...this.data.entries()]
+  }
+
+  /** Seat a captured snapshot in this (fresh) Map, replacing whatever it
+   *  acquired at activation. */
+  __revl_restore__(state: [any, any][]): void {
+    this.assertLive('__revl_restore__')
+    this.data.clear()
+    for (const [key, value] of state) this.data.set(key, value)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,6 +1358,14 @@ export class Frame {
   /** issue #1369: the runs failed UI transaction units performed, newest
    * last, as py's `ui_transaction_runs`. */
   readonly uiTransactionRuns: UiTransactionRun[] = []
+  /** item 53: the stateful host resources this activation acquired, in
+   * acquisition order — the ts analog of py's `Frame._resources`. The carrier
+   * of a declared `handoff` (docs/state-handoff.md): a swap snapshots this
+   * vector from the live predecessor and seats it in the successor. Only a
+   * component that declares a `handoff` has its resource acquisitions emitted
+   * with `track()`, so this stays empty for every other program and the
+   * pre-item-53 emission is byte-identical. */
+  readonly resources: any[] = []
 
   constructor(ctx: Context, name: string) {
     this.ctx = ctx
@@ -1343,6 +1376,16 @@ export class Frame {
     // frame through the fiber ctx it holds. A no-op for every prior program
     // (nothing looks the frame up unless `abort()` is called).
     _frameByCtx.set(ctx, this)
+  }
+
+  /** item 53: attribute a freshly-acquired stateful host resource to this
+   * activation, so a declared `handoff` can carry it across a swap. Emitted
+   * only inside a component that declares a `handoff`; returns the resource so
+   * it can be written as `const m = $revl_frame.track(host.Map.new())` or as a
+   * standalone line after the acquisition. */
+  track<R>(resource: R): R {
+    this.resources.push(resource)
+    return resource
   }
 
   private nextSeq(): number {
@@ -1969,6 +2012,279 @@ export class Frame {
     const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(', ')
     return `${this.name}: ${outstanding.length} residue record(s) (${parts}) — never claiming a ` +
       "dead closure ran; see 'outstanding' for what to check by hand."
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verified provider state hand-off on hot-swap (item 53, docs/state-handoff.md)
+//
+// The ts peer of the py tier's `Session._capture_provider_state` /
+// `_restore_provider_state` + `_abort_swap`. A swap replaces one live
+// provider's fiber with a successor's, carrying the declared `handoff` state
+// across so the successor starts WARM instead of cold:
+//
+//   1. capture, while the predecessor is still live and its world still
+//      exists — the ts analog of py's `frame._resources`, the vector
+//      `Frame.track` accumulated in acquisition order;
+//   2. check the whole successor cohort, then apply — one incompatible
+//      resource rejects with nothing half-written;
+//   3. on any failure past the teardown, roll the whole swap back: dispose the
+//      half-loaded successor, reload the predecessor and re-seat its captured
+//      state, so the composition is exactly as if the swap had never been
+//      attempted.
+//
+// Admission (`compile_source` with the running manifest) has already proved
+// the DECLARED shapes §5-compatible (`admission._handoff_compatible`); the
+// resource-vector check here is defence in depth for a provider whose runtime
+// shape diverges from its declaration, exactly as in the py session.
+
+export interface HandoffDecl {
+  /** The provided key whose state crosses. */
+  key: string
+  /** The declared state shape as rendered in the IR (e.g. `Map[Str, Str]`).
+   *  Carried for the report and diagnostics; the accept-vs-export §5 relation
+   *  is admission's, computed in the compiler, not on this tier. */
+  type?: string
+}
+
+/** An emitted component that may declare a `handoff` (the emitter writes the
+ *  declaration onto the component object when the IR carries one). */
+export interface HandoffComponent extends RealmComponent {
+  handoff?: HandoffDecl
+}
+
+/** One resource's captured state: the vector's type pin plus the snapshot the
+ *  resource's `__revl_state__` answered, or `null` when it carries none (a
+ *  `Pool`, whose checkouts are transient). */
+export interface CapturedResource {
+  type: string
+  state: any
+}
+
+/** What the swap reports per provided key (the `handoff` block py's
+ *  `Session.swap` returns). */
+export interface HandoffEntry {
+  component: string
+  migrated: boolean
+  /** The resources whose state actually crossed (not merely type-pinned). */
+  resources: number
+}
+
+/** A swap the ts tier refused: either the successor could not load or its
+ *  state vector does not match the predecessor's. By the time this is thrown
+ *  the swap has been rolled back and the predecessor is serving again. */
+export class SwapRejected extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SwapRejected'
+  }
+}
+
+/** A captured state vector that cannot migrate onto the successor — the
+ *  runtime-shape half of the hand-off gate. Admission has already checked the
+ *  DECLARED shapes; this is defence in depth. */
+export class StateIncompatible extends SwapRejected {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StateIncompatible'
+  }
+}
+
+function resourceType(resource: any): string {
+  const ctor = resource?.constructor
+  return typeof ctor === 'function' && ctor.name ? ctor.name : typeof resource
+}
+
+/** Snapshot a live provider's state vector, keyed by acquisition order (the
+ *  order the successor reproduces deterministically — that is what makes the
+ *  positional restore sound). Empty for a component that declares no
+ *  `handoff`, whose acquisitions are not tracked. */
+export function captureProviderState(fiber: Fiber): CapturedResource[] {
+  const frame = frameForCtx(fiber.ctx)
+  if (frame === undefined) return []
+  return frame.resources.map((resource) => ({
+    type: resourceType(resource),
+    state: typeof resource?.__revl_state__ === 'function'
+      ? resource.__revl_state__()
+      : null,
+  }))
+}
+
+/** Check a captured vector against the successor's, without mutating
+ *  anything: same length, same type at each position, and a state-carrying
+ *  resource must have a restore entry point. Kept separate from the apply so
+ *  a whole cohort can be checked before any of it is written. */
+function checkProviderState(
+  key: string,
+  resources: any[],
+  captured: CapturedResource[],
+): void {
+  if (resources.length !== captured.length) {
+    throw new StateIncompatible(
+      `provider of ${JSON.stringify(key)} held ${captured.length} stateful ` +
+      `resource(s); the successor acquires ${resources.length} — state ` +
+      `cannot migrate without dropping or inventing a resource`)
+  }
+  for (let pos = 0; pos < resources.length; pos++) {
+    const now = resourceType(resources[pos])
+    if (now !== captured[pos].type) {
+      throw new StateIncompatible(
+        `provider of ${JSON.stringify(key)}: resource #${pos} was ` +
+        `${captured[pos].type}, the successor acquires ${now} — retyped ` +
+        `state cannot migrate`)
+    }
+    if (captured[pos].state != null
+        && typeof resources[pos]?.__revl_restore__ !== 'function') {
+      throw new StateIncompatible(
+        `provider of ${JSON.stringify(key)}: resource #${pos} ` +
+        `(${captured[pos].type}) captured state but has no ` +
+        `__revl_restore__ — state cannot migrate`)
+    }
+  }
+}
+
+/** Check, then seat each captured state in the successor. Returns how many
+ *  resources actually carried state across (the honest count py reports). */
+function restoreProviderState(
+  key: string,
+  resources: any[],
+  captured: CapturedResource[],
+): number {
+  checkProviderState(key, resources, captured)
+  let migrated = 0
+  for (let pos = 0; pos < resources.length; pos++) {
+    const state = captured[pos].state
+    if (state == null) continue
+    resources[pos].__revl_restore__(state)
+    migrated += 1
+  }
+  return migrated
+}
+
+export interface ProviderSwap {
+  /** The component the live fiber was loaded from: its `handoff` declaration
+   *  says which key can cross, and the rollback reloads it. */
+  from: HandoffComponent
+  /** The live predecessor fiber being replaced. */
+  fiber: Fiber
+  /** The predecessor's config, replayed if the swap must roll back. */
+  fromConfig?: any
+  /** The successor to load in its place. */
+  to: HandoffComponent
+  /** The successor's config. */
+  toConfig?: any
+}
+
+export interface ProviderSwapResult {
+  /** The loaded successor fiber (also a thenable while activating). */
+  fiber: Fiber & PromiseLike<Fiber>
+  /** The hand-off block, keyed by provided key. Absent when nothing crossed:
+   *  no declared hand-off, a successor that opted out (cold start), or an
+   *  empty state vector. */
+  handoff?: Record<string, HandoffEntry>
+}
+
+/** Replace a live provider with a successor, carrying a compatible declared
+ *  `handoff` state across and rolling the whole swap back if the successor
+ *  cannot hold it. Returns the loaded successor fiber and the hand-off
+ *  report. */
+export async function swapProvider(
+  ctx: Context,
+  swap: ProviderSwap,
+): Promise<ProviderSwapResult> {
+  const captured = captureProviderState(swap.fiber)
+  const accepts = swap.to.handoff
+  // State crosses only when both sides declare a hand-off on the SAME
+  // provided key AND the same placement. A successor that declares none opts
+  // out of inheriting it (cold, no refusal — the author's explicit choice); a
+  // key the predecessor never exported has nothing to carry; and a successor
+  // moved to another realm is a different provider there, so its store starts
+  // cold rather than inheriting another realm's entries.
+  const key = accepts !== undefined && swap.from.handoff !== undefined
+    && swap.from.handoff.key === accepts.key
+    && samePlacement(swap.from.isolate, swap.to.isolate)
+    ? accepts.key
+    : null
+
+  await swap.fiber.dispose()
+
+  let successor: (Fiber & PromiseLike<Fiber>) | null = null
+  let migrated = 0
+  try {
+    // `plug`, not `ctx.plugin`: a successor with realm placements must be
+    // isolated before its fiber exists, exactly as at boot.
+    successor = plug(ctx, swap.to, swap.toConfig)
+    await successor
+    if (key !== null && captured.length > 0) {
+      const resources = frameForCtx(successor.ctx)?.resources ?? []
+      migrated = restoreProviderState(key, resources, captured)
+    }
+  } catch (error) {
+    try {
+      await rollBackProviderSwap(ctx, swap, successor, captured)
+    } catch (rollbackError) {
+      throw new StateIncompatible(
+        `swap failed (${describeError(error)}) and the rollback to the ` +
+        `predecessor failed too (${describeError(rollbackError)}); the ` +
+        `composition may not be serving`)
+    }
+    if (error instanceof SwapRejected) throw error
+    throw new SwapRejected(
+      `swap of ${JSON.stringify(swap.to.name ?? '?')} failed after the ` +
+      `predecessor was torn down; it was rolled back and the composition is ` +
+      `unchanged: ${describeError(error)}`)
+  }
+  // A key both sides declared is reported even when only a type-pinned
+  // resource crossed (`resources: 0`, as py reports a Pool-only vector).
+  const handoff = key !== null && captured.length > 0
+    ? { [key]: { component: swap.to.name ?? '', migrated: true, resources: migrated } }
+    : undefined
+  return { fiber: successor, handoff }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** True when two components are placed in the same realms: the same keys are
+ *  isolated, in the same named realm. Both are loaded on the same context, so
+ *  inherited placement is equal by construction; only the component's own
+ *  `isolate` map can differ. */
+function samePlacement(
+  left: Record<string, string> | undefined,
+  right: Record<string, string> | undefined,
+): boolean {
+  const a = left ?? {}
+  const b = right ?? {}
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  for (const key of keys) if (a[key] !== b[key]) return false
+  return true
+}
+
+/** The tens-of-lines rollback py's `_abort_swap` performs for a provider: drop
+ *  the half-loaded successor (if it got that far), reload the predecessor on
+ *  its own code and re-seat the captured state, so nothing is dropped and
+ *  nothing is left half-migrated. */
+async function rollBackProviderSwap(
+  ctx: Context,
+  swap: ProviderSwap,
+  successor: (Fiber & PromiseLike<Fiber>) | null,
+  captured: CapturedResource[],
+): Promise<void> {
+  if (successor !== null) {
+    try {
+      await successor.dispose()
+    } catch {
+      // A failed teardown of the rejected successor must not stop the
+      // predecessor from coming back; the reload below is what restores
+      // service.
+    }
+  }
+  const reloaded = plug(ctx, swap.from, swap.fromConfig)
+  await reloaded
+  if (captured.length > 0) {
+    const resources = frameForCtx(reloaded.ctx)?.resources ?? []
+    restoreProviderState(swap.from.handoff?.key ?? '?', resources, captured)
   }
 }
 

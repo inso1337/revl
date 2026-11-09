@@ -2591,6 +2591,36 @@ def _await_statement(expr: dict, ctx: "_Ctx") -> str:
     return "await " + rendered
 
 
+#: Host acquisitions that create a resource a `handoff` state vector carries —
+#: the ts peers of py's `_Closable`: a `Map` (its entries ARE the state) and a
+#: `Pool` (state `null`, its type pinned). Emitted with `track()` only inside a
+#: component that declares a `handoff`, so every other program is unchanged.
+_HANDOFF_RESOURCE_FNS = {"Map.new", "Pool.open"}
+
+
+def _handoff_resource(component: dict, step: dict) -> Optional[str]:
+    """The IR bind name of a bound `let-effect` acquisition that belongs to the
+    component's declared `handoff` state vector (item 53), or None.
+
+    Py's `_Closable` resources register themselves on the activating frame;
+    this tier's resources are plain runtime objects, so the emitter tells the
+    frame explicitly (`$revl_frame.track(<bind>)`), keeping the captured vector
+    in acquisition order — the order the successor reproduces, which is what
+    makes the positional restore sound."""
+    if step.get("step") != "let-effect":
+        return None
+    handoff = component.get("handoff")
+    if not isinstance(handoff, dict) or not handoff.get("key"):
+        return None
+    acquire = step.get("acquire")
+    if not isinstance(acquire, dict) or acquire.get("kind") != "host":
+        return None
+    if acquire.get("fn") not in _HANDOFF_RESOURCE_FNS:
+        return None
+    bind = step.get("bind")
+    return bind if isinstance(bind, str) else None
+
+
 def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     indent: str, lines: list[str], frame_var: Optional[str]) -> None:
     """One step of the activation body, appended to `lines`.
@@ -2665,6 +2695,15 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     lines.append(f"{indent}const {bind_name} = {acquire}")
                 else:
                     lines.append(f"{indent}{_asi_safe(acquire)}")
+            # item 53: a component that declares a `handoff` carries its
+            # stateful resources on the activation frame, so a swap can capture
+            # them from the live provider before teardown and seat them in the
+            # successor (runtime.ts `swapProvider`). `tracked` is only non-None
+            # for a bound let-effect of a resource, whose emitted local
+            # `bind_name` the branches above just bound.
+            tracked = _handoff_resource(component, step)
+            if tracked is not None and frame_var is not None:
+                lines.append(f"{indent}{frame_var}.track({bind_name})")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
             b_key = step.get("bind") or _acquire_method_name(acquire_node)
@@ -3027,6 +3066,19 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     if provides:
         keys = ", ".join(_string(_host_key(k)) for k in provides)
         lines.append(f"  provide: [{keys}],")
+    handoff = component.get("handoff")
+    if isinstance(handoff, dict) and handoff.get("key"):
+        # item 53: the declared state contract, carried onto the emitted
+        # component so a swap engine can correlate predecessor and successor
+        # by the key they provide and capture its live state before teardown
+        # (docs/state-handoff.md; runtime.ts `swapProvider`). Additive: a
+        # component with no `handoff` emits exactly as before. The key takes
+        # the same host spelling the `provide` row above uses.
+        decl = f"{{ key: {_string(_host_key(handoff['key']))}"
+        if handoff.get("type"):
+            decl += f", type: {_string(handoff['type'])}"
+        decl += " }"
+        lines.append(f"  handoff: {decl},")
 
     # item 131: a body containing an `await` step (or an async-flagged
     # `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles
@@ -3098,8 +3150,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # WeakMap), so teardown behaviour is unchanged for those components except
     # that a raising inverse is now caught instead of starving every
     # earlier-registered entry.
+    # item 53: a component that declares a `handoff` always builds the Frame —
+    # it is where `track()` records the state vector a swap captures — even if
+    # an acquisition shape `_has_bracket` does not see (the emitted `track` is
+    # itself conditional on the acquisition, so this only guarantees the frame).
     needs_frame = _needs_frame(component, doc_ctx)
-    frame_var = "$revl_frame" if (needs_frame or _has_bracket(component)) else None
+    declares_handoff = (isinstance(component.get("handoff"), dict)
+                        and bool(component["handoff"].get("key")))
+    frame_var = ("$revl_frame"
+                 if (needs_frame or _has_bracket(component) or declares_handoff)
+                 else None)
     if frame_var is not None:
         lines.append(f"    const {frame_var} = new Frame(ctx, {_string(name)})")
 

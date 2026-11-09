@@ -143,6 +143,38 @@ diverges from its declaration. Either way, a rejected hand-off **rolls the whole
 swap back** — the predecessor is reloaded and its captured state re-seated — so
 the running composition is left exactly as if the swap had never been attempted.
 
+## The ts tier (cordis-ts)
+
+The ts tier has no MCP session engine: a host replaces a provider by disposing
+its fiber and plugging the successor (`backends/typescript/demo.ts`), so the
+swap primitive lives in the tier's runtime instead —
+`backends/typescript/runtime.ts`'s `swapProvider` — and carries the same
+contract:
+
+* **The declaration is emitted.** A component that declares a `handoff` carries
+  `handoff: {key, type}` on its emitted component object, and the emitter
+  records each stateful acquisition of that component (`Map.new`, `Pool.open`)
+  on its activation `Frame` in acquisition order — the ts analog of py's
+  `frame._resources`. Both are additive: a component with no `handoff` emits
+  byte-identically to before.
+* **Capture before teardown, check the whole cohort, then apply.**
+  `swapProvider` snapshots the live predecessor's vector, disposes it, loads
+  the successor, checks the successor's fresh vector (same length, same type at
+  each position) and only then seats each snapshot through the resource's
+  `__revl_state__`/`__revl_restore__` protocol (a `Pool` carries no state; its
+  type alone is pinned).
+* **A rejected hand-off rolls the whole swap back.** The half-loaded successor
+  is disposed, the predecessor reloaded and its captured state re-seated, so
+  the composition keeps serving and nothing is dropped. A successor that
+  declares no hand-off still opts out and starts cold, a successor placed in
+  another realm starts cold (its store is a different provider there), and a
+  component with no hand-off emits and swaps exactly as before.
+
+Admission is the same compiler-side gate
+(`admission._handoff_compatible`), run on the candidate against the running
+manifest; the ts runtime vector check is the same defence in depth as the py
+session's.
+
 ## Files
 
 * grammar + lowering — `src/revl/parser.py` (`HandoffStmt`), `src/revl/lower.py`
@@ -154,6 +186,11 @@ the running composition is left exactly as if the swap had never been attempted.
   threaded into the ambient by `src/revl/compiler.py::_running_handoffs`;
 * the warm-start threading — `src/revl/mcp/session.py` (`_capture_provider_state`,
   `_restore_provider_state`, and the extended `_abort_swap`);
-* tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime)
-  and `tests/test_state_handoff_exec.py` (the warm start and the rollback, on
-  cordis-py).
+* the ts warm-start — `backends/typescript/emit.py` (the emitted `handoff`
+  declaration and `$revl_frame.track(...)`), `backends/typescript/runtime.ts`
+  (`swapProvider`, `StateIncompatible`, `Frame.resources`/`track`, and
+  `MapHandle.__revl_state__`/`__revl_restore__`);
+* tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime),
+  `tests/test_state_handoff_exec.py` (the warm start and the rollback, on
+  cordis-py) and `backends/typescript/tests/handoff_swap.test.ts` (the warm
+  start, the opt-out and the rollback, executed on cordis-ts).
