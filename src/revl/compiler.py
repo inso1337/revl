@@ -756,11 +756,14 @@ class _ModuleLoader:
             # containment check). After this each asset node is a record
             # literal carrying the root-relative path and the sha256 of the
             # file's bytes; an asset that does not exist, is not a regular
-            # file, or escapes the jail is a compile refusal here.
+            # file, or escapes the jail is a compile refusal here. In a module
+            # that is only `use`d, an asset inside a component is skipped:
+            # components are never imported, so it is never lowered.
             _resolve_assets(program, os.path.dirname(abs_path),
                             self._root_dirs(), self._sources,
                             virtual is not None,
-                            install_root=install_root)
+                            install_root=install_root,
+                            skip_components=not is_root)
             if py_bodies:
                 _check_user_py_body_imports(
                     program, install_root is not None
