@@ -23,7 +23,7 @@ from revl.lsp import (
     fix_code,
     generate_fix,
 )
-from revl.lsp.fixgen import apply_edits
+from revl.lsp.fixgen import _g4_release_handle, apply_edits
 
 
 # ------------------------------------------------------------ fixtures
@@ -352,7 +352,6 @@ def test_g4_unbound_acquisition_declines_a_mechanical_fix():
     assert "reason" in payload
 
 
-
 # ------------------------------------------------------------ SYNTAX: provider `emission fn`
 
 # a provider method spelled `emission fn`: provider methods are plain `fn`,
@@ -499,11 +498,14 @@ def test_g4_release_handle_declines_a_multiline_acquisition():
 
 
 def test_g4_release_handle_declines_several_undos_on_the_line():
-    # the generator reads the line itself, so a synthesized diagnostic over a
-    # line with two `undo` spellings pins the decline independent of parsing
+    # two `undo` on one line is a parse error, so the original diagnostic is
+    # replayed over that line; the generator itself declines, before the
+    # verify gate is reached
     text = G4_RELEASE_HANDLE.replace(
-        "undo Map.drop()", "undo Map.drop() // was: undo Map.clear()")
-    diag = dict(_only_diag(G4_RELEASE_HANDLE))
+        "undo Map.drop()", "undo x() undo Map.drop()")
+    diag = _only_diag(G4_RELEASE_HANDLE)
+    assert _g4_release_handle(G4_RELEASE_HANDLE, diag, "<lsp>.rvl") is not None
+    assert _g4_release_handle(text, diag, "<lsp>.rvl") is None
     assert generate_fix(text, diag) is None
 
 
