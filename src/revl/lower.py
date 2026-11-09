@@ -13080,11 +13080,13 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
 # safe direction, since every wrong answer is a false positive, not an unsound
 # admission).
 #
-# Deferred, each with its landing place named in the design doc:
-#   TODO(308-followup): `shared` mode (a 294 lease binding); `shared`/`transfer`
-#     are reserved contextual keywords, not implemented in v1.
-#   TODO(308-followup): explicit `transfer` (a source marker that moves the
-#     bracket; the only honest future for a handoff of resource-carrying state).
+# Deferred (each with its landing place named in the design doc):
+#   `shared` landed in #698 (the 294 lease binding; S1 in the design doc), so
+#   the only remaining deferred mode is `transfer`.
+#   TODO(308-followup): explicit `transfer` (TR1: a resource-typed `handoff`
+#     across a same-realm swap, where the bracket migrates; the only honest
+#     future for a handoff of resource-carrying state). Design decided; the
+#     implementation slice is next.
 #
 # F10 (the retaining-extern audit) SHIPPED as `resources.retention_surface`,
 # read by `revl audit` and its `--json` document: report-only, because the

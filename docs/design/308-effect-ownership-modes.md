@@ -1,4 +1,4 @@
-# Design: effect ownership modes, owned / borrowed / shared (item 308)
+# Design: effect ownership modes, owned / borrowed / shared / transfer (item 308)
 
 Status: OWNED+BORROWED v1 LANDED (2026-08-31, merged 66e2999); owned/borrowed
 inferred over the teardown accumulator with zero new grammar: R0 (acquire/
@@ -6,14 +6,14 @@ witnessed returns are nominal opaque handles), O1 (no hand-call of a declared
 inverse), B1 (the seven-clause borrow-does-not-escape). F10 retention audit
 SHIPPED and F9 method-scope early-release DECIDED/closed (the early-release form
 is already refused, count zero); the inline § markers below are authoritative
-per decision. SHARED + TRANSFER stay reserved contextual keywords (markers
-landed, slice 3a / PR #503); the SHARED SLICE 3b SPEC IS NOW COMPLETE (S1
-below, "S1 completed": the crash-path debt is paid by retiring the owned
-out-of-frame ttl executor once cross-process shared is a premise, binding
-teardown to the 294 counted-grant ledger, and re-using `revl recover` for the
-whole-process crash with a new `reclaim` residue record). Implementation of
-3b is the next slice and stays deferred, sequenced with item 294. TRANSFER
-remains reserved and unspecced. PRODUCT-VISION, 243-261 arc.
+per decision. SHARED landed: slice 3a reserved the contextual markers (PR #503)
+and slice 3b is admitted by the parser and built on the reference tier (PR
+#698), with the S1 spec below complete. TRANSFER's first surface is DECIDED in
+TR1 below: a resource-typed `handoff` across a same-realm swap, where the
+bracket migrates from predecessor to successor. TR1 is design only; its
+implementation slice is next, and the acquire-head reservation in
+`src/revl/parser.py` is the placeholder it replaces. PRODUCT-VISION, 243-261
+arc.
 Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
 [teardown-contract.md](teardown-contract.md),
 [247-compensate.md](247-compensate.md),
@@ -127,7 +127,7 @@ accumulator already enforces; no-close-outside-the-accumulator and
 borrow-does-not-escape are genuinely new checks, currently absent from the
 frontend entirely.
 
-## The three modes, precisely
+## The modes, precisely
 
 Each mode is a static discipline plus a runtime teardown consequence. The
 runtime side reuses the teardown contract's entry kinds; only `shared` would
@@ -136,7 +136,8 @@ add one.
 ### `owned`
 
 - **Who:** the activation that ran the acquire effect form (or spawn). One
-  owner per handle, fixed for the handle's life; v1 has no transfer.
+  owner per handle, fixed for the handle's life unless the handle is
+  transferred (TR1 below); v1 shipped no transfer.
 - **Static discipline:** the final inverse is the accumulator's, full stop.
   No hand-call of a resource's declared inverse anywhere, including the
   owner's own body (rule O1 below). The owner MAY freely store its own
@@ -211,13 +212,28 @@ add one.
     and exhaustion (count zero, or a liveness-confirmed expiry after a
     crash; see S1 on why bare ttl is not enough for teardown) triggers
     the inverse.
-- **Recommendation: defer shared out of v1 entirely,** and when it lands,
-  build it as the 294 lease binding, not a bespoke refcount. The lease
+- **Recommendation (S1 completed, PR #698):** build it as the 294 lease
+  binding, not a bespoke refcount. The lease
   runtime already solved the two hard parts (durable consume-before-fire
   accounting, and a crash backstop so a SIGKILLed holder cannot pin the
   count forever). A bespoke refcount would re-derive both, which is
   exactly the parallel-mechanism shape the 294 doc refuses. Section
   "Honest scope" details the cut.
+
+### `transfer`
+
+- **Who:** the owner gives up a handle and the closing duty moves to one
+  named receiver. The source does not keep a copy; the receiver is the
+  sole owner and its teardown runs the close.
+- **Static discipline:** a transfer is admitted only at a declared
+  passing site, and the source never performs the close at all; the
+  receiver accepts the duty explicitly, and the move is checked for
+  exactly one owner.
+- **Runtime consequence:** the `bracket` entry migrates from the source
+  frame's LIFO stack to the receiver's: the same entry, never a copy and
+  never a second registration. The first surface, its marker position,
+  the entry move (including E-Stop and G7) and its exit tests are TR1
+  below.
 
 ## Spelling: annotation, inference, or manifest
 
@@ -250,25 +266,28 @@ can only be a borrow in v1. Annotating what is forced is ceremony.
   This matches what admitted programs already mean (handles passed around
   are de facto borrows), so inference changes no existing program's
   meaning; it only starts refusing the hazards.
-- `shared` is a future contextual keyword at the acquire binding
-  (`let pool = effect shared Pool.open(url) undo pool.close()`), reserved
-  now, not implemented in v1. Contextual, not a lexer keyword, for the
-  same reason `witnessed` is (243 Slice 1 refinement 2): the self-hosted
-  lexer's keyword-set parity oracle stays untouched, and no program using
+- `shared` is a contextual keyword at the acquire binding
+  (`let pool = effect shared Pool.open(url) undo pool.close()`), shipped
+  in slice 3b. Contextual, not a lexer keyword, for the same reason
+  `witnessed` is (243 Slice 1 refinement 2): the self-hosted lexer's
+  keyword-set parity oracle stays untouched, and no program using
   `shared` as an identifier breaks.
-- explicit transfer (`transfer conn`), which the item text requires at a
-  realm boundary, is likewise reserved and NOT in v1: v1 has no transfer
-  at all, an owned handle stays where it was acquired, and a realm or
-  process boundary refuses it (next section). When transfer lands it is a
-  source-level marker at the passing site, because it changes who runs
-  the final inverse, which is author intent again.
+- explicit transfer is a source-level marker at the passing site, because
+  it changes who runs the final inverse, which is author intent again.
+  The marker position is now DECIDED (TR1): for the first surface it sits
+  on the handoff state type (`handoff <key>: transfer <Type>`), not at
+  the acquire head the parser currently reserves; a per-call marker
+  remains the later surface. The item's realm-boundary requirement is not
+  relaxed: realm-crossing transfer stays refused until its later slice
+  (TR1 below, "Reconciling with the seam").
 
 The recommendation in one line: ownership is contract, so it lives at the
 source level like `emission[...]` does; but the compiler infers the mode
 from position, and source spelling is reserved for the two places where
-intent genuinely diverges from the default (`shared`, `transfer`), neither
-of which is in v1. v1 therefore ships ZERO new grammar, which also means
-zero self-host parser/lexer porting for the surface.
+intent genuinely diverges from the default (`shared`, `transfer`). Shared
+shipped its marker in slice 3b; transfer's marker is decided in TR1. The
+owned/borrowed v1 itself shipped zero new grammar, which also means zero
+self-host parser/lexer porting for that surface.
 
 ## The checks, as static rules with refusal diagnostics
 
@@ -456,8 +475,9 @@ OWNED values, as noted inline:
    teardown closes the handle: the successor starts warm holding a dead
    descriptor. v1 refuses a resource-tainted handoff type at admission,
    from the same shared taint module. A real handle transfer is "the
-   bracket migrates", which is exactly what the deferred `transfer`
-   marker means (next section); handoff shape-compat cannot express it.
+   bracket migrates", which is exactly what the `transfer` marker now
+   decides (TR1 below); handoff shape-compat alone cannot express it,
+   which is why a resource-typed handoff needs the marker.
 
 Passing the borrow DOWN (as an argument to a `fn` or a further service
 call) is admitted; the callee's parameter is a borrow with the same rules.
@@ -628,12 +648,12 @@ that returns an `Int`, not the handle); every other spawn is
 activation-scope and stays admitted under the owner carve-out. A sweep of
 all 258 compilable corpus files produces zero new refusals.
 
-**What stays open.** `shared` and `transfer` remain deferred to item 294's
-leases; a general explicit-release surface for an ACTIVATION-scope handle
-is still not in the language, and O1's hint still says so honestly. F9
-does not change either.
+**What stays open.** `shared` landed (S1 completed, PR #698); `transfer` is
+decided in TR1 below and its implementation slice is next. A general
+explicit-release surface for an ACTIVATION-scope handle is still not in the
+language, and O1's hint still says so honestly. F9 does not change either.
 
-### S1: shared teardown, exactly once at last release (deferred with shared)
+### S1: shared teardown, exactly once at last release (completed below; landed in PR #698)
 
 **Rule (direction fixed here; the shared slice finishes the spec).** A
 `shared` acquire registers, in each holder's frame, a release entry; the
@@ -774,6 +794,232 @@ awaiting holder simply pins the handle, which is correct, at the cost that a
 truly-wedged holder pins it forever (the same liveness limit the whole language
 accepts for a hung activation, not a new one shared introduces).
 
+## TR1: transfer, the decided first surface (resource-typed handoff)
+
+Status: DECIDED design; implementation not started. No grammar and no
+runtime change has landed for it. The acquire-head reservation in
+`src/revl/parser.py` (slice 3a, PR #503) is the placeholder TR1 replaces.
+The language reference gains `transfer` when the implementation slice
+lands; documenting an unimplemented spelling there would promise syntax
+the compiler refuses.
+
+### The surface and the marker position
+
+The first transfer surface is a resource-typed `handoff` across a
+same-realm swap. The predecessor declares that the state it exports at
+replacement is transferred, not copied: its `bracket` entries move to the
+successor that re-provides the same key, and the successor's teardown
+runs their inverses. The predecessor's teardown does not.
+
+```
+component Db provides db: Session {
+  handoff db: transfer Session         // the transfer marker
+  let session = effect Db.open() undo session.close()
+  // ...
+}
+```
+
+The marker sits on the handoff state type, after the key's colon:
+`handoff <key>: transfer <Type>`. That is the passing site for this
+surface: the exported state vector is the value that moves. `transfer`
+stays a CONTEXTUAL keyword, so the self-hosted lexer's keyword-set parity
+oracle is untouched and `transfer` remains usable as an identifier. The
+marker is recognized only when `transfer` is followed by a type, so
+`transfer[Sock]` still names a type called `transfer`. The acquire-head
+spelling a mode marker would take (`effect transfer <acquire>`) is
+retired: at the acquisition there is nothing being passed yet, and the
+marker changes who runs the final inverse, which is a property of the
+passing site, not of the acquire. The implementation slice removes that
+refusal and admits the keyword at the handoff type only.
+
+### The receiver and the admission rules
+
+The receiver is the successor frame that re-provides the handoff key in
+the same realm. This is the composition-level provider swap; a template's
+per-instance state migration (item 10) is a different surface and is not
+part of TR1. Both sides of the swap carry the marker:
+
+1. A `transfer`-marked handoff must be resource-tainted. The marker on a
+   state type with no resource in it is refused: there is no bracket to
+   move.
+2. The successor must accept the key with a `transfer`-marked handoff of
+   a compatible type. A successor that declares the handoff without the
+   marker, or declares no handoff at all, is refused at admission rather
+   than cold-started: the predecessor would close what the program said it
+   moved. The refusal reuses the existing `_b1_message("handoff", ...)`
+   G7 wording and names the missing accept.
+3. Exactly one successor accepts the (key, placement) slot. Zero or two
+   claimants is a refusal for a transfer-marked export, not the cold start
+   the ordinary handoff allows. A missing same-placement claimant includes
+   the realm case, and that refusal names the realm.
+4. Only plain brackets move. Every entry in the transferred vector is a
+   `bracket` acquired by the predecessor's activation. A `transactional`
+   entry (a `witnessed` handle) is refused: it is WAL-logged with a
+   witness payload, and moving it is the WAL migration this slice does not
+   do. A `shared` handle is refused: its last-holder count is a 294
+   ledger, and moving holders across a swap is out of this slice. A
+   borrowed value in the vector is already refused by B1 clause 1, and a
+   method-scope borrow is not part of the activation vector at all.
+
+The transferred vector is the whole state shape the handoff type
+describes: transfer moves the handles, not `__revl_state__` snapshots.
+The copy path's `Pool` re-establishment rider does not apply here; a
+resource that cannot move by handle is refused for the vector rather
+than silently re-established or copied.
+
+### The entry move, against teardown-contract.md
+
+The teardown contract's one-stack rule is the model: one LIFO disposer
+stack per activation, and every close is an entry on the stack that owns
+it. Transfer moves the SAME `bracket` entry, never a copy and never a
+second registration. The move has four states and exactly one owner at
+each:
+
+1. **Capture (before the predecessor's teardown).** For each transferred
+   position the entry is lifted out of the predecessor frame's stack into
+   the swap transaction's transfer escrow. The value that crosses is the
+   live host handle itself, not a serialized snapshot: transfer is the
+   one hand-off path that bypasses `__revl_state__`.
+2. **Predecessor teardown (`_dispose_all`).** The entries still on its
+   stack run as usual. The lifted entries do not, because they are no
+   longer on it. They stay registered in the escrow: not run, not
+   discharged.
+3. **Adoption (restore, after the successor loads).** For each position,
+   the successor's fresh entry (it acquired its own vector during
+   activation) is released exactly once and removed: it was acquired
+   moments earlier and never handed out, so this is a scoped release, not
+   a teardown (the F9 precedent). The lifted predecessor entry is
+   inserted at the BOTTOM of the successor's LIFO stack, the close-last
+   position: the handle was acquired before every entry on that stack, so
+   reverse acquisition order puts its close last. The successor's state
+   then observes the predecessor's handle. The slot re-point is a runtime
+   mechanism (adopt the predecessor's host value into the successor's slot
+   object, or alias the slot to the predecessor's object); what the
+   contract fixes is that the moved entry is the only close and the
+   successor's fresh host resource is released.
+4. **Rollback (the successor fails before adoption).** The escrowed
+   entries run in the rollback, exactly once, as the predecessor's
+   teardown would have; the reloaded predecessor starts from the captured
+   state as today. After adoption commits there is nothing to roll back.
+
+The move is one atomic step of the swap transaction (check the whole
+cohort, then apply), so the entries are the predecessor's before it and
+the successor's after it, never on both stacks and never on neither. The
+escrow is a transaction holding area, not a second disposer list: neither
+teardown phase walks it, on the clean path, the abort path, or a
+rollback; only adoption or the rollback consumes it. A crash in that
+window loses the escrow with the process; a `bracket` is not WAL-logged,
+so the handles leak exactly as any acquired handle never torn down does,
+and the host reclaims them. That is the existing bracket crash story, not
+residue `revl recover` should re-issue, and the move adds no WAL record
+kind. This is also why `witnessed` handles are out of the slice: a
+`transactional` entry does have a descriptor.
+
+### E-Stop, G7 and the realm/process seams
+
+- **G7 (LIFO completeness).** The close set is the union of the two
+  frames' stacks: the predecessor's stack loses exactly the moved
+  entries, the successor's gains exactly them, and each inverse runs
+  once. The predecessor skips them (no double-close); the successor runs
+  them in the position above (no leak). The moved entry keeps its place
+  in reverse acquisition order across the two stacks, and the move opens
+  no second close channel.
+- **E-Stop (443).** A move is an ownership change, not a discharge: it
+  writes no `discharge` record and drops no inverse. Under `halted` the
+  move does not commit. Before the commit point the entries are stranded
+  as the predecessor's (registered, not run, not dropped; the halt record
+  carries the entry's crossing identity, and the escrow is inventoried
+  with the predecessor's activation); after it they are stranded as the
+  successor's. The escrow is not a frame stack and never runs under a
+  halt, so `RevL.G7.estop_strands_everything`,
+  `RevL.G7.estop_replays_nothing` and `RevL.G7.estop_discharges_nothing`
+  hold unchanged.
+- **Realm boundary: refused.** A transfer-marked successor placed in
+  another realm is refused at admission, never cold-started: the slot is
+  (key, placement), so a different realm is a different slot and the
+  transfer has no receiver there. A borrowed handle crossing a realm
+  boundary stays refused by B1, as the issue requires.
+- **Process seam: refused, unchanged.** `resource_crossing_refusal`
+  refuses a resource-typed value at a process seam, and transfer does not
+  move a bracket across processes: that needs the WAL to move processes
+  ("Reconciling with the seam"; 363/F1). The refusal stays mode-named;
+  transfer does not approximate it.
+
+### The issue's checks, restated on this surface
+
+Issue #2698 asked for four checks. On the decided first surface they
+take these forms:
+
+1. **The source cannot use the handle after the marker.** A prelude
+   declaration has no source-order "after", so the check is that the
+   source never runs or performs the close. O1 already refuses every hand
+   close; the swap protocol drains in-flight calls before capture
+   (docs/state-handoff.md), so no source code runs after the move; and
+   the moved entries are gone from the source's stack, so its teardown
+   cannot run them.
+2. **Exactly one owner exists after it.** One entry, one stack: the
+   source's stack loses it at capture, the successor's gains it at
+   adoption, and the all-or-nothing swap leaves no window with two owners
+   or none.
+3. **The receiver's teardown includes the close (G7).** The successor's
+   transfer-marked acceptance is what puts the duty in its teardown. A
+   successor that does not accept it (no declaration, no marker, another
+   realm) is refused with the existing G7 handoff wording rather than
+   cold-started.
+4. **A borrow taken before the transfer cannot outlive it.** B1 forbids
+   storing a borrow in another activation's state, and the drain ends
+   in-flight borrows before capture. A borrowed value cannot be in the
+   transferred vector (B1 clause 1). The realm refusal above is
+   unchanged.
+
+### Exit tests (the implementation slice)
+
+The design is done when the implementing slice makes these green; the
+new fixtures belong in `tests/test_ownership_transfer_308.py`, with the
+runtime cases on the py trace harness:
+
+- **Move and close.** A same-realm cache holding a `Sock` is swapped; the
+  successor closes it exactly once, the predecessor never does, and the
+  trace shows the close in the successor's frame.
+- **LIFO position.** A successor that acquires two resources of its own
+  closes them newest-first and the transferred handle last; its fresh
+  entries for the transferred slots are released at adoption, with no
+  second close and no leak.
+- **Accept rule.** A transfer-marked export whose successor declares no
+  handoff, or declares it without the marker, is refused with the
+  existing G7 handoff wording; the same export with exactly one
+  transfer-marked successor in the same realm is admitted.
+- **Realm.** A successor placed in another realm is refused, not
+  cold-started; a borrowed handle across a realm boundary is still
+  refused (re-pin).
+- **Process seam.** A resource-typed transfer across a process seam is
+  still refused by `resource_crossing_refusal` (re-pin the message).
+- **Rollback.** A successor whose activation fails after capture leaves
+  the running composition on the reloaded predecessor; the escrowed
+  entries run exactly once there, no handle is closed twice and none
+  leaks.
+- **E-Stop.** A halt between capture and adoption strands the entries as
+  the predecessor's; a halt after adoption strands them as the
+  successor's; neither runs nor discharges them, and the stranded
+  inventory reports each at most once.
+- **Static guards.** `transfer` on a non-resource handoff type is
+  refused; a resource-typed handoff without the marker stays B1 clause 7
+  refused; `shared` and `witnessed` in the vector are refused with their
+  mode-named messages.
+- **Additivity.** No transfer-marked program is in the corpus, so the
+  sweep and every backend golden stay byte-identical; a transfer-marked
+  component adds only its handoff flag to the IR.
+
+### What the first surface does not include
+
+The call-argument marker (`srv.take(transfer conn)`), realm-crossing
+transfer, process-seam transfer, transfer of `shared` or `witnessed`
+handles, and a general explicit-release surface are out. Each is named
+above with its refusal; none is approximated. The per-call move is the
+next transfer surface after this one, and it will reuse the same
+entry-move primitive: the escrow, the adoption position and the
+single-owner rule are the surface-independent parts.
+
 ## Reconciling with the seam (and the realm boundary)
 
 The seam rule today (`resource_crossing_refusal`, tier-agnostic, every
@@ -805,20 +1051,20 @@ from its undo contract. Per mode:
   wanted, it arrives as a 294 realm/task lease with ttl (already
   crash-honest, already audited), not as a distributed count. The design
   does not pretend otherwise.
-- **The realm boundary ("requires explicit transfer").** v1 has no
-  transfer, so the realm rule collapses to: an owned handle is also
-  realm-bound; `isolate db in realm("tenant")` partitions providers, and
+- **The realm boundary ("requires explicit transfer").** An owned handle
+  is realm-bound: `isolate db in realm("tenant")` partitions providers, and
   a handle acquired in one realm reaching a component of another realm is
   refused by the same promoted resource-type check (the checker now sees
-  resource types, so it can see realm labels next to them). The reserved
-  `transfer` marker is the future surface that would move the bracket
-  itself; deferred, with the note that transfer across a PROCESS seam
-  additionally needs the WAL entry to move processes, which is why it is
-  not a v1 afterthought.
+  resource types, so it can see realm labels next to them). TR1 decides
+  that transfer is the surface that moves the bracket, and its first
+  surface is a same-realm swap only: a transfer-marked handoff whose
+  successor is placed in another realm is refused, never cold-started. A
+  move across a PROCESS seam is still refused as well, because it needs
+  the WAL to move processes, so it is not an afterthought of this slice.
 
 ## What it buys, and what it formalizes
 
-| property | today | under 308 v1 |
+| property | today | under 308 |
 |---|---|---|
 | owner runs the final inverse | by construction (accumulator), unchecked elsewhere | formalized; O1 closes the out-of-band channel |
 | no double-close | writable in admitted programs | refused (O1) |
@@ -826,7 +1072,8 @@ from its undo contract. Per mode:
 | borrow cannot outlive owner | by construction for static topology (R3/G7); broken by stored copies under swap; closures can smuggle | refused (B1), including the swap shape |
 | no resource in teardown-phase positions | writable; compensations are use-after-close by phase order | refused (B1 clause 5) |
 | no borrow seated in another activation | writable via spawn config and handoff | refused (B1 clauses 6, 7) |
-| shared teardown exactly once | no shared notion at all | spec COMPLETE (S1 completed): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse; impl deferred, sequenced with 294 |
+| shared teardown exactly once | no shared notion at all | S1 completed and landed (PR #698): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse |
+| a handle can move with its closing duty | not expressible: the owner and its bracket stay together | DECIDED (TR1): a resource-typed `handoff` across a same-realm swap moves the bracket from predecessor to successor; implementation next |
 | owned cannot cross a seam | refused (363/F1) | unchanged, mode-named diagnostic |
 
 Relation to the arc: G5 is untouched in v1 (checker-only, no new
@@ -875,12 +1122,11 @@ The minimal cut that pays for itself immediately:
    adds is B1's does-not-escape rule extended to that handle. No new
    surface, no new grammar, no discharge.
 
-Deferred, each with its landing place named: `shared` (a 294 lease
-binding; spec S1 above is now COMPLETE per "S1 completed", crash path resolved
-by `revl recover` + the `reclaim` residue record, implementation the next
-slice), explicit `transfer`
-and realm-crossing moves (new source marker, WAL migration; also the only
-honest future for handoff of resource-carrying state, per clause 7), an
+Landed since this cut: `shared` (S1 above, PR #698). Decided and next:
+`transfer` (TR1 above: a resource-typed handoff across a same-realm swap;
+the call-argument marker, realm-crossing moves and process-seam moves stay
+later slices; it is also the only honest future for handoff of
+resource-carrying state, per clause 7). Still deferred: an
 explicit-release surface for an ACTIVATION-scope handle (F9 resolved the
 method-scope half without one; this half still interacts with 245 session
 commit and stays unbuilt), remote borrows (a service, not a proxy, is the
@@ -929,7 +1175,8 @@ into the shared corpus and strike this deferral.
 ## Staged plan and exit tests
 
 Slices are additive and land in order; each leaves the suite green and
-per-backend goldens byte-identical (checker-only until the shared slice).
+per-backend goldens byte-identical (checker-only until the shared slice;
+the transfer slice adds its marker and the entry move).
 
 - **Slice 0: R0 decision + shared resource-type module + report-only
   sweep + the method-scope count.** First, land R0 (nominal acquire
@@ -986,8 +1233,8 @@ per-backend goldens byte-identical (checker-only until the shared slice).
   - swap shape covered: the consumer-stores-provider-handle program that
     motivated the rule is refused at check time (no runtime swap test
     needed; the point is it never compiles).
-- **Slice 3b: shared (spec completed above at "S1 completed"; sequenced
-  with 294).** Exit tests, each grounded in the completed spec:
+- **Slice 3b: shared (spec completed above at "S1 completed"; landed in
+  PR #698).** Exit tests, each grounded in the completed spec:
   - `shared` admitted only at an acquire binding: the reserved-refusal from
     slice 3a flips to admission for `let p = effect shared Pool.open(url)
     undo p.close()`; a `shared` marker anywhere but the acquire-binding
@@ -1022,6 +1269,14 @@ per-backend goldens byte-identical (checker-only until the shared slice).
     until the ownership-dialect slice ports the flow walk (the slice-2
     deferral in "Self-host note" extends to S1 unchanged; S1 is checker/
     recover surface, no new grammar).
+- **Slice 3c: transfer (TR1 decided above; implementation next).** TR1 is
+  the whole design: the marker at the handoff state type, the both-sides
+  acceptance rule, the bracket entry move with its E-Stop and G7
+  placement, the realm and process-seam refusals, and the exit tests
+  listed there. No grammar or runtime change has landed yet. This slice
+  removes the acquire-head reservation and admits the contextual marker
+  at the handoff type only; the self-hosted lexer's keyword set is
+  untouched because `transfer` stays contextual.
 - **Seam re-pin (any slice): owned crosses seam refused.** Already green
   today via `resource_crossing_refusal`; re-pin with the mode-named
   diagnostic text so the message upgrade cannot regress silently.
