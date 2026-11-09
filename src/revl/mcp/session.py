@@ -440,16 +440,29 @@ def host_body_entry(extern: dict) -> dict:
     The server's live-body reader and the applied-generation provenance below
     both produce this record, so the fields a ticket names have one
     definition rather than one per producer.
+
+    `digests` maps each backend to the lowercase hex sha256 of the verbatim
+    body string in `extern["bodies"][backend]`, encoded as UTF-8 with no
+    normalisation, so a one-byte change moves that backend's digest. Its keys
+    are in the same sorted order as `backends`. Comparing two records by
+    equality therefore sees a replaced host body as a changed record, which
+    is the point: without it a body whose text changed under the same extern
+    name, class and backends read as unchanged.
     """
+    bodies = extern.get("bodies") or {}
+    backends = sorted(bodies)
     return {"extern": extern.get("name"),
             "classification": extern.get("class"),
-            "backends": sorted(extern.get("bodies") or {})}
+            "backends": backends,
+            "digests": {backend: hashlib.sha256(
+                bodies[backend].encode("utf-8")).hexdigest()
+                for backend in backends}}
 
 
 def host_body_entries(ir: dict | None) -> list:
     """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends}`. This is the surface G8 does not
-    check inside (item 24) and the item-246 classifier never looks at."""
+    `{extern, classification, backends, digests}`. This is the surface G8 does
+    not check inside (item 24) and the item-246 classifier never looks at."""
     out = []
     for extern in (ir or {}).get("externs") or []:
         if extern.get("bodies"):

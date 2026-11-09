@@ -84,7 +84,7 @@ is a non-event.
 | `operations`  | the ordered, executable steps, each with the effect it predicts |
 | `runningIR`   | the pre-state's bodies, so the CLI can boot it (and so a teardown's inverse can re-load a withdrawn component) |
 | `resultingIR` | the resulting composition's bodies, so an added or replaced component can be loaded |
-| `authoredHostBodies` | candidate host bodies attributed from the plan compile's source map; apply uses it to keep changed operator providers out of candidate disclosure |
+| `authoredHostBodies` | candidate host bodies attributed from the plan compile's source map; apply uses it to keep changed operator providers out of candidate disclosure. Each entry names the extern, its classification, its backends and a `digests` sha256 map of the verbatim body per backend |
 | `plan`        | the full `revl plan` payload, for re-rendering and the summary |
 
 Artifacts written before this field existed use the conservative fallback that
