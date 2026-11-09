@@ -76,6 +76,17 @@ state hand-off on `cache` differs from the running manifest: `CacheV2` accepts
 the predecessor's state, and dropping it on the swap would be residue
 ```
 
+A shape spelled with a declared record or variant name means what **its own
+version** declares. The running version's declarations come from the running
+manifest's `types`, the candidate's from its own text, and a name both shapes
+mention whose declaration (or any declaration it reaches) differs between the
+two is a different shape even though the spelling is the same: `St` going from
+`{ a: Int }` to `{ a: Int, b: Int }`, a field changing type, `Secret[Str]`
+becoming `Str`, or a variant gaining a case is refused, and the refusal prints
+both declarations. This is deliberately strict: it compares declarations for
+identity, so a harmless widening of a record is refused too and has to be
+migrated explicitly. `revl migrate` reports the same verdict.
+
 Refusing is the sound move: silently dropping the predecessor's state on a swap
 would be **residue**, which G7/the erase-report forbid.
 

@@ -150,3 +150,154 @@ def test_cold_key_no_running_export_is_admitted():
     old = compile_source(src_old, "c.rvl")
     compile_source(_cache("Map[Str, Str]", version=2), "c.rvl",
                    manifest=old, replacing=("Cache",))
+
+
+# -- the declared shape behind a nominal name ---------------------------------
+#
+# A `handoff` names its state by a written spelling, and a nominal type is only
+# a NAME: `St` in the running version and `St` in the replacement can be two
+# different records. The gate resolves each spelling against the declarations
+# of ITS OWN version, so a name that points at a changed declaration is a
+# changed shape, and the swap is refused instead of threading the old value
+# into a record that cannot hold it.
+
+def _with_decls(decls: str, state_type: str, *, version: int = 1) -> str:
+    return decls + "\n" + _cache(state_type, version=version)
+
+
+def _refusal(old_src: str, new_src: str):
+    old = compile_source(old_src, "c.rvl")
+    with pytest.raises(RevlError) as info:
+        compile_source(new_src, "c.rvl", manifest=old, replacing=("Cache",))
+    return info.value
+
+
+def _assert_drift(exc) -> None:
+    assert "state hand-off on `cache` differs from the running manifest" in str(exc)
+    assert exc.why is not None and exc.why.kind == "state-handoff-drift"
+    assert {step.kind for step in exc.why.steps} == {"accept", "export"}
+
+
+def test_nominal_record_unchanged_is_admitted():
+    decl = "type St = { a: Int }"
+    old = compile_source(_with_decls(decl, "St", version=1), "c.rvl")
+    compile_source(_with_decls(decl, "St", version=2), "c.rvl",
+                   manifest=old, replacing=("Cache",))
+
+
+def test_nominal_record_field_added_is_refused():
+    exc = _refusal(_with_decls("type St = { a: Int }", "St"),
+                   _with_decls("type St = { a: Int, b: Int }", "St", version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_record_field_type_changed_is_refused():
+    exc = _refusal(_with_decls("type St = { a: Int }", "St"),
+                   _with_decls("type St = { a: Str }", "St", version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_record_field_removed_is_refused():
+    exc = _refusal(_with_decls("type St = { a: Int, b: Int }", "St"),
+                   _with_decls("type St = { a: Int }", "St", version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_record_secret_field_declassified_is_refused():
+    exc = _refusal(_with_decls("type St = { t: Secret[Str] }", "St"),
+                   _with_decls("type St = { t: Str }", "St", version=2))
+    _assert_drift(exc)
+
+
+def test_nested_nominal_record_changed_is_refused():
+    state = "Map[Str, List[St]]"
+    exc = _refusal(_with_decls("type St = { a: Int }", state),
+                   _with_decls("type St = { a: Str }", state, version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_record_reached_through_another_record_is_refused():
+    # `Outer` is spelled identically and declared identically; the record it
+    # holds is what changed
+    outer = "type Outer = { inner: Inner }\n"
+    exc = _refusal(
+        _with_decls(outer + "type Inner = { a: Int }", "Outer"),
+        _with_decls(outer + "type Inner = { a: Str }", "Outer", version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_variant_payload_changed_is_refused():
+    exc = _refusal(_with_decls("type Sh = Circle(Int) | Square", "Sh"),
+                   _with_decls("type Sh = Circle(Str) | Square", "Sh", version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_variant_case_added_is_refused():
+    exc = _refusal(_with_decls("type Sh = Circle(Int) | Square", "Sh"),
+                   _with_decls("type Sh = Circle(Int) | Square | Dot", "Sh",
+                               version=2))
+    _assert_drift(exc)
+
+
+def test_generic_nominal_record_changed_is_refused():
+    exc = _refusal(_with_decls("type Box[T] = { v: T }", "Box[Int]"),
+                   _with_decls("type Box[T] = { v: T, n: Int }", "Box[Int]",
+                               version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_drift_refusal_names_both_declarations():
+    exc = _refusal(_with_decls("type St = { a: Int }", "St"),
+                   _with_decls("type St = { a: Int, b: Int }", "St", version=2))
+    text = str(exc)
+    assert "{a: Int, b: Int}" in text and "{a: Int}" in text
+    accept = next(s for s in exc.why.steps if s.kind == "accept")
+    export = next(s for s in exc.why.steps if s.kind == "export")
+    assert "{a: Int, b: Int}" in accept.detail and "{a: Int}" in export.detail
+
+
+def test_secret_in_a_written_map_is_refused_control():
+    # already refused before the declared shapes were consulted
+    exc = _refusal(_cache("Map[Str, Secret[Str]]"),
+                   _cache("Map[Str, Str]", version=2))
+    _assert_drift(exc)
+
+
+def test_unrelated_changed_declaration_does_not_refuse():
+    # `Other` changes but the hand-off never reaches it
+    old = compile_source(_with_decls("type St = { a: Int }\ntype Other = { x: Int }",
+                                     "St"), "c.rvl")
+    new = _with_decls("type St = { a: Int }\ntype Other = { x: Str }", "St",
+                      version=2)
+    compile_source(new, "c.rvl", manifest=old, replacing=("Cache",))
+
+
+def test_wildcard_acceptor_still_admits_a_changed_record():
+    # `Any` accepts whatever is exported, whatever the record became
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    compile_source(_cache("Any", version=2), "c.rvl",
+                   manifest=old, replacing=("Cache",))
+
+
+def test_migrate_plan_agrees_with_the_gate_on_a_changed_record():
+    from revl.migrate import handoffs
+
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    changed = compile_source(
+        _with_decls("type St = { a: Int, b: Int }", "St", version=2), "c.rvl")
+    same = compile_source(_with_decls("type St = { a: Int }", "St", version=2),
+                          "c.rvl")
+    assert [h["verdict"] for h in handoffs(old, changed)] == ["incompatible"]
+    assert [h["verdict"] for h in handoffs(old, same)] == ["compatible"]
+
+
+def test_nested_nominal_record_unchanged_is_admitted_through_a_json_round_trip():
+    # the running manifest usually arrives as a parsed file, not the live dict;
+    # the harness shape `Map[Str, List[Msg]]` is the real user of this path
+    import json
+
+    decl = "type Msg = { role: Str, text: Str }"
+    state = "Map[Str, List[Msg]]"
+    old = json.loads(json.dumps(compile_source(_with_decls(decl, state), "c.rvl")))
+    compile_source(_with_decls(decl, state, version=2), "c.rvl",
+                   manifest=old, replacing=("Cache",))
