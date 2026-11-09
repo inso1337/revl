@@ -274,8 +274,18 @@ impl Engine {
         // runtime's own site, never the machine's `PYTHONPATH`, user site, or
         // `sys.path[0]`. The PATH fallback runs WITHOUT `-I`, because its job is
         // to find the machine's installed `revl`.
+        //
+        // What the fallback still gets is `-P` (PYTHONSAFEPATH, issue #317): an
+        // editor launches this server with the project it opened as the working
+        // directory, and `python -c` would put that directory at `sys.path[0]`,
+        // so the worker's first `import json` and its later `import revl` would
+        // resolve to the opened repository instead of the standard library and
+        // the installed reference. The private runtime's `-I` already implies
+        // `-P`, so only this branch has to spell it out (issue #3158).
         if self.isolated {
             command.arg("-I");
+        } else {
+            command.arg("-P");
         }
         let mut child = command
             .arg("-c")
