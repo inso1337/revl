@@ -150,6 +150,86 @@ pre-edit text that never compiled. A compile the caller describes only by disk
 paths carries the prose repairs. The record itself is unchanged in shape either
 way, and the MCP `revl_check` answer carries it as classified.
 
+### G4: an `undo` that does not release the bound handle
+
+A host acquisition has exactly one inverse, its family's release applied to
+the handle it bound. An `undo` that names the family instead of the handle is
+refused, and the message spells the right one:
+
+```revl reject G4
+service Flags {
+  fn enabled(name: Str) -> Opt[Str]
+}
+component FeatureFlags provides flags: Flags {
+  let store = effect Map.new() undo Map.drop()
+  provide flags {
+    fn enabled(name) = store.get(name)
+  }
+}
+```
+
+The message reads "the `undo` of `let store = effect Map.new(...)` must
+release THAT handle: write `undo store.drop()`". The quick fix replaces the
+call after `undo` with the inverse the message names, and the result is clean:
+
+```revl
+service Flags {
+  fn enabled(name: Str) -> Opt[Str]
+}
+component FeatureFlags provides flags: Flags {
+  let store = effect Map.new() undo store.drop()
+  provide flags {
+    fn enabled(name) = store.get(name)
+  }
+}
+```
+
+Only the one-line shape is rewritten: the `let`, the acquisition and a single
+trailing `undo <call>` on the refused line. An acquisition that spans lines, a
+line with a second `undo`, or a comment on the line gets no action. This and
+the `site-undo` repair above share the G4 entry: a refusal with this message
+goes to this generator, every other G4 refusal to `site-undo`.
+
+### SYNTAX: `emission fn` in a `provide` block
+
+Provider methods are plain `fn`: whether an operation is an emission comes
+from the service declaration, so writing `emission` again on the provider
+method is a syntax error ("expected fn, found 'emission'"):
+
+```revl reject SYNTAX
+service Database {
+  fn query(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
+}
+component Db provides db: Database {
+  provide db {
+    fn query(sql: Str) -> Int { return 1 }
+    emission fn execute(sql: Str) -> Int { return 2 }
+  }
+}
+```
+
+The quick fix deletes the `emission ` before `fn` on the refused line; the
+service declaration keeps its own:
+
+```revl
+service Database {
+  fn query(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
+}
+component Db provides db: Database {
+  provide db {
+    fn query(sql: Str) -> Int { return 1 }
+    fn execute(sql: Str) -> Int { return 2 }
+  }
+}
+```
+
+This is the only SYNTAX refusal with a generator, and it is gated on that
+message: a top-level `emission fn`, refused as "expected a top-level
+declaration", gets nothing. A refused line with zero or several `emission fn`
+spellings declines too.
+
 ## The agent payload
 
 `fix_code(rejection, source)` takes a structured rejection (the
