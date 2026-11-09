@@ -39,6 +39,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import _childproc
+
 # ------------------------------------------------------------------ statuses
 
 OK = "ok"
@@ -167,7 +169,7 @@ class Prober:
     def run(self, argv: list[str], timeout: int = PROBE_TIMEOUT,
             stdin: str = "") -> ProbeResult:
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True,
+            proc = _childproc.run(argv, capture_output=True,
                                   input=stdin, timeout=timeout, check=False)
         except (OSError, ValueError):
             return ProbeResult(found=False)

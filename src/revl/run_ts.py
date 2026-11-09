@@ -56,6 +56,7 @@ from pathlib import Path
 # read-only reuse of the placement machinery (roadmap item 23): the same emit
 # path the cross-tier bridge uses for node processes. We drive the resulting
 # module through the same placement runner, in `once` mode.
+from . import _childproc
 from . import placement as _placement
 from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import stdlib_root
@@ -72,8 +73,8 @@ _MIN_NODE = (23, 6)
 def _node_version() -> "tuple[int, int] | None":
     """(major, minor) of the node on PATH, or None when node is absent/broken."""
     try:
-        probe = subprocess.run(["node", "--version"], capture_output=True,
-                               text=True, timeout=30)
+        probe = _childproc.run(["node", "--version"], capture_output=True,
+                               timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     match = re.match(r"^v(\d+)\.(\d+)\.", probe.stdout.strip())
@@ -201,10 +202,10 @@ def run_ts(ir: dict, config: dict, files, once: bool = False,
                              encoding="utf-8")
 
         print("== load composition (ts tier) ==", flush=True)
-        proc = subprocess.Popen(
+        proc = _childproc.popen(
             ["node", str(_RUNNER), str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True,
+            stderr=subprocess.STDOUT,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)
