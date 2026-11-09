@@ -79,8 +79,8 @@ author-written bound; a VALUE is never in the audit at all (values arrive at
 | `scope_tightened` | the scope covers less | always passes |
 | `backends_added` | an extern gained a host backend body (`backend:<extern>:<backend>`), e.g. a `@ts` body beside `@py` | fails (exit 1) unless acknowledged |
 | `backends_removed` | an extern gave up a backend body | always passes |
-| `recovery_dropped` | a name lost every recovery entry (`recovery:<name>:<kind>`) | fails (exit 1) unless acknowledged |
-| `recovery_weakened` | a kept recovery entry's idempotency register dropped | fails (exit 1) unless acknowledged |
+| `recovery_dropped` | a recovery entry is gone and no `inverse:<name>` token carries it as a kind move (`recovery:<name>:<kind>`) | fails (exit 1) unless acknowledged |
+| `recovery_weakened` | a recovery entry's idempotency register dropped, on a kept entry or across a kind move | fails (exit 1) unless acknowledged |
 | `recovery_added` | a recovery entry appeared | always passes |
 | `registers_weakened` | a capability's idempotency floor dropped or was removed (`register:<token>`) | fails (exit 1) unless acknowledged |
 | `registers_strengthened` | a floor rose or was added | always passes |
@@ -98,10 +98,14 @@ decision reads the same function, so the gate and the update path cannot
 disagree about what widened (issue #3182). A recovery whose kind moves on a
 kept name (`compensation` to `inverse`, or back) is not a dropped recovery:
 the direction of that move is the inverse-provenance diff's, so a weakening
-is one `inverse:<name>` token and a strengthening passes. That holds only
-when both audits record the extern's `inverse`. Against an older baseline
-without it, the inverse diff skips the extern, so the recovery is still
-reported as dropped.
+is one `inverse:<name>` token and a strengthening passes. A lost kind is
+treated as a move only when the inverse diff actually emits that token, so it
+is still reported as dropped when the class did not move: an extern with both
+`undo` and `compensate` that loses one, or a kind change against an older
+baseline without `inverse` (the inverse diff skips that extern). Across a move
+the register is still compared: a new-kind entry whose register is weaker
+than the lost kind's (for example `compensation` with `keyed` to `inverse`
+with none) is reported as `recovery_weakened` on the new entry.
 
 ## Inverse provenance drift
 
@@ -145,7 +149,8 @@ thing that works:
   addition, or a weakened or widened fact such as `backend:x:ts`).
   The token is exactly the string printed after the `+` in the report, so the
   ack list is copy-paste from the failure output.
-- `--accept-all` — acknowledge every addition in this diff.
+- `--accept-all`: acknowledge every gated token in this diff (additions and
+  every weakened or widened fact).
 
 An acknowledged addition is reported (as `~`, `acknowledged`) but does not fail
 the gate.

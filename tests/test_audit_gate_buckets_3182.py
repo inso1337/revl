@@ -269,3 +269,59 @@ def test_a_kind_change_against_a_baseline_without_inverse_is_still_gated():
     assert update_tools._widening_from_audits(
         declared, compensation)["recoveryDropped"] == [
             "recovery:deposit:inverse"]
+
+
+# An extern with both recovery kinds that loses one: the inverse class does not
+# move (`declared` on both sides), so no `inverse:` token carries the change and
+# the lost kind must stay a dropped recovery.
+_BOTH = """\
+type Sock = { fd: Int }
+extern pure fn close_sock(s: Sock) -> Unit = @py { return None }
+extern pure fn rollback() -> Unit = @py { return None }
+extern acquire fn open_sock() -> Sock undo close_sock(result) compensate rollback() = @py { return {"fd": 1} }
+component C {
+  let s = effect open_sock() undo close_sock(s)
+}
+"""
+_UNDO_ONLY = _BOTH.replace(" compensate rollback()", "", 1)
+
+
+def test_losing_one_of_two_recovery_kinds_is_still_dropped():
+    both = audit_report(compile_source(_BOTH, "corpus.rvl"))
+    undo_only = audit_report(compile_source(_UNDO_ONLY, "corpus.rvl"))
+    result = evaluate(both, undo_only)
+    assert result["inverse_weakened"] == []
+    assert result["recovery_dropped"] == ["recovery:open_sock:compensation"]
+    assert result["widened"] is True
+    assert result["unacknowledged"] == ["recovery:open_sock:compensation"]
+    assert update_tools._widening_from_audits(
+        both, undo_only)["recoveryDropped"] == [
+            "recovery:open_sock:compensation"]
+
+
+def _moved(kind: str, inverse: str, register: str | None) -> dict:
+    ext = {"name": "a", "inverse": inverse}
+    entry = {"name": "a", "kind": kind, "register": register}
+    if register:
+        ext["register"] = register
+    return {"externs": [ext], "recovery_surface": [entry]}
+
+
+def test_a_kind_change_that_loses_its_register_is_weakened():
+    # compensation -> inverse strengthens the class, but the entry lost its
+    # `keyed` register on the way: not a plain strengthening.
+    before = _moved("compensation", "compensation", "keyed")
+    after = _moved("inverse", "declared", None)
+    recovery = diff_recovery(before, after)
+    assert recovery["recovery_dropped"] == []
+    assert recovery["recovery_weakened"] == ["recovery:a:inverse"]
+    assert evaluate(before, after)["widened"] is True
+
+
+def test_a_kind_change_that_keeps_or_gains_its_register_passes():
+    for prev_reg, new_reg in (("keyed", "keyed"), (None, "keyed"),
+                              ("declared", "keyed")):
+        before = _moved("compensation", "compensation", prev_reg)
+        after = _moved("inverse", "declared", new_reg)
+        assert diff_recovery(before, after)["recovery_weakened"] == []
+        assert evaluate(before, after)["widened"] is False

@@ -607,12 +607,17 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     the move goes is the inverse-provenance question `diff_inverses` answers:
     a weaker kind is its `inverse:<name>` token, a stronger one passes. Read
     here as a drop, one kind change gated twice and a strengthening failed.
-    A recovery that disappears entirely, with no entry of any kind left for
-    that name, is still dropped. So is a kind change on a name whose extern
-    lacks `inverse` on either side (a baseline captured before that field
-    existed): `diff_inverses` skips such an extern, so nothing else would
-    carry the move. Buckets are sorted, so the diff is deterministic over the unhashable
-    `list[dict]` surface without ever hashing a dict.
+    A lost kind is suppressed only when `diff_inverses` actually emits an
+    `inverse:<name>` token for that name (the class moved). Otherwise it stays
+    dropped: a recovery that disappears entirely, an extern with both kinds
+    that loses one while its class stays put, and a kind change on an extern
+    that lacks `inverse` on either side (a baseline captured before that field
+    existed, which `diff_inverses` skips). Across a move the extern's
+    `register` is still compared: a new-kind entry whose register is weaker
+    than the one the lost kind carried is a weakened recovery, so a move that
+    strengthens the class but loses its idempotency floor does not pass as a
+    plain strengthening. Buckets are sorted, so the diff is deterministic over
+    the unhashable `list[dict]` surface without ever hashing a dict.
     """
     from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
     prev_r = {(e["name"], e["kind"]): e.get("register")
@@ -622,18 +627,22 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     dropped: list[str] = []
     weakened: list[str] = []
     added: list[str] = []
-    # a kind change is carried by `diff_inverses` only when both sides record
-    # the extern's `inverse`; otherwise it stays a drop.
-    def _with_inverse(audit: dict) -> set[str]:
-        return {ext["name"] for ext in audit.get("externs") or []
-                if "inverse" in ext}
-    kept_names = ({name for name, _kind in new_r}
-                  & _with_inverse(prev) & _with_inverse(new))
+    inverses = diff_inverses(prev, new)
+    moved = {token.split(":", 1)[1]
+             for bucket in ("inverse_weakened", "inverse_strengthened")
+             for token in inverses[bucket]}
+    lost_rank: dict[str, int] = {}
     for name, kind in prev_r.keys() - new_r.keys():
-        if name not in kept_names:
+        if name in moved:
+            rank = _REGISTER_RANK.get(prev_r[(name, kind)], -1)
+            lost_rank[name] = max(rank, lost_rank.get(name, -1))
+        else:
             dropped.append(f"recovery:{name}:{kind}")
     for name, kind in new_r.keys() - prev_r.keys():
         added.append(f"recovery:{name}:{kind}")
+        if (name in lost_rank and
+                _REGISTER_RANK.get(new_r[(name, kind)], -1) < lost_rank[name]):
+            weakened.append(f"recovery:{name}:{kind}")
     for key in prev_r.keys() & new_r.keys():
         before = _REGISTER_RANK.get(prev_r[key], -1)
         after = _REGISTER_RANK.get(new_r[key], -1)
