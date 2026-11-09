@@ -2504,7 +2504,7 @@ calls) and the sha256 of the IR it was derived from. Source positions are
 excluded from the digest, so moving or reformatting the file does not stale
 the block while a change to the component's lowered behavior does.
 
-```revl
+```revl sketch
 // the consumer: requires the `db` key, provides the `cache` key ...
 // revl:behavior begin
 // kind: component
