@@ -18,12 +18,11 @@ needs: a `service` is the whole contract a provider is held to (G4 makes it an
 upper bound), and it carries no body. So the pack is a cut, not a new
 artifact.
 
-revl does not enforce that boundary at compile time, though. A consumer's
-compile merges every component of a module it `use`s, whatever names the
-`use` lists, so a provider body that does not check, in the same module as a
-service the consumer imports, fails the consumer's compile too. The pack does
-not depend on that boundary: it is cut from the parse, and it never reads a
-body.
+The compiler keeps the same boundary. Compiling a consumer reads the
+declarations its `use` names, and a provider body in the imported module is
+not checked as part of the consumer, even one that does not check. A module
+given as a root is compiled whole, bodies included. The pack does not lean on
+either: it is cut from the parse, and it never reads a body.
 
 ## What the pack carries
 
