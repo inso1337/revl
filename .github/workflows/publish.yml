@@ -39,6 +39,16 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      # Any account with write access can push a tag straight from a branch
+      # that never went through review. A release is a claim that the merged
+      # main branch was gated by the full suite, so refuse a tag whose commit
+      # main does not carry. The default checkout fetches only the tag; fetch
+      # main explicitly, then test the ancestry. A failure leaves `channel`
+      # unset below, so both release jobs skip instead of publishing.
+      - name: Tag is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "tag is not on main"; exit 1; }
       - name: Tag matches pyproject version
         id: version
         run: |
@@ -140,6 +150,10 @@ jobs:
   github-release:
     needs: [ci, check-version]
     runs-on: ubuntu-latest
+    # The release assets are what `revl update` reads, so they get the same
+    # reviewer gate as the upload: name only, no url, because this job does
+    # not publish to PyPI.
+    environment: pypi
     permissions:
       contents: write
     steps:
