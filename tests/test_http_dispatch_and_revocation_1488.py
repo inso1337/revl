@@ -178,10 +178,11 @@ SETTLE_S = 1.1   # a little more than the default --profile-settle-ms (1000)
 
 
 def _settle(port, who="alice"):
-    """The first request after an edit sees the new content once and is refused
-    ("changing"); one SETTLE later the second identical read adopts it."""
+    """The first request after an edit sees the new content once and is refused;
+    one SETTLE later the second identical read adopts it. The refusal no longer
+    names the state, so only the status is asserted."""
     status, body = _list(port, who)
-    assert status == 503 and "changing" in body["error"]["message"], (status, body)
+    assert status == 503, (status, body)
     time.sleep(SETTLE_S)
 
 

@@ -91,7 +91,8 @@ where two writes in one timestamp tick could leave the signature unchanged.
 twice, at least `--profile-settle-ms` apart (default 1000 ms). A profile caught
 mid-write can still parse, and one cut off just before a `may not` line would
 widen a grant, so an unsettled profile is never used. While the content is
-settling, every request is answered `503` ("the operator profile is changing").
+settling, every request is answered `503` with the same fixed text as a broken
+profile (below); the path and the reason stay in the server's log.
 The previous profile is not used in that window either: the edit in progress may
 be a revocation, and serving the old grants would delay it. So adding `operator
 bob revoked`, removing an operator, or narrowing a grant is refused, then applied,
@@ -106,7 +107,10 @@ partial file at all. `--profile-settle-ms 0` removes the settle protection
 entirely.
 
 A profile that can no longer be read or parsed **fails closed**: every request
-is answered `503` naming the problem, until the file is fixed.
+is answered `503` with a fixed text, until the file is fixed. The caller is told
+no more than that. The path, the parser error and the rejected line (often a
+`key sha256:` credential line being edited) are written to the server's standard
+error log, so a caller without a credential learns nothing about the file.
 
 **E-Stop is never fenced by a profile edit.** While the profile is settling or
 broken, `revl_estop` is still accepted, from a caller authorized for it under the
