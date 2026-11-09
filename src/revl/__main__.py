@@ -1303,6 +1303,10 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
                   f"reach `{info['capability']}`  "
                   f"on_failure {info['onFailure']}  "
                   f"redirect {info.get('redirect', 'refuse')}")
+            if info.get("pin"):
+                # Issue #2719: the admission fact the run-time check enforces.
+                print(f"  {'':<24}   pinned TLS leaf "
+                      f"sha256:{info['pin']}")
             print(f"  {'':<24}   synthesized from service "
                   f"`{info['service']}` ({info['serviceSource']}); "
                   "NO inverse — a remote effect survives unwind")

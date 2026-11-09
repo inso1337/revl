@@ -48,6 +48,7 @@ from .parser import (SLO_IR_KEYS, Address, CompositionDecl, GrantDecl,
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
+from .tls_pin import check_pin
 from .typecheck import compatible
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
@@ -899,13 +900,18 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
     check_remotable(service, doc=doc, line=remote.line, label=remote.label,
                     on_failure=remote.on_failure,
                     on_failure_line=remote.on_failure_line)
+    # Issue #2719: the pin is admitted here, before synthesis, so a malformed
+    # identifier refuses the row at admission rather than failing at run time.
+    pin = check_pin(remote.pin, doc=doc, line=remote.pin_line or remote.line,
+                    label=remote.label)
 
     capability = cap_token(remote.host)
     component, text = synthesize_provider(service, "remote", {
         "label": remote.label, "key": remote.key, "host": remote.host,
         "realm": remote.realm, "capability": capability,
         "on_failure": remote.on_failure, "transport": remote.transport,
-        "redirect": remote.redirect,
+        "redirect": remote.redirect, "pin": pin,
+        "pin_line": remote.pin_line,
         "long_running": remote.long_running,
         "long_running_line": remote.long_running_line,
         "doc": doc, "line": remote.line,
@@ -933,6 +939,10 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
             "serviceSource": service_source,
             "capability": capability,
             "onFailure": remote.on_failure,
+            # Issue #2719: the pinned TLS leaf SPKI, on the row table so the
+            # manifest and `revl audit` carry what the crossing will refuse at
+            # run time. It is present only when the row wrote `pinned`.
+            **({"pin": pin} if pin else {}),
             # The row's redirect policy, on the row table so the audit surface
             # and the manifest carry it: "where this crossing may reach" is not
             # readable from the peer address alone if the transport may be
