@@ -98,7 +98,10 @@ decision reads the same function, so the gate and the update path cannot
 disagree about what widened (issue #3182). A recovery whose kind moves on a
 kept name (`compensation` to `inverse`, or back) is not a dropped recovery:
 the direction of that move is the inverse-provenance diff's, so a weakening
-is one `inverse:<name>` token and a strengthening passes.
+is one `inverse:<name>` token and a strengthening passes. That holds only
+when both audits record the extern's `inverse`. Against an older baseline
+without it, the inverse diff skips the extern, so the recovery is still
+reported as dropped.
 
 ## Inverse provenance drift
 

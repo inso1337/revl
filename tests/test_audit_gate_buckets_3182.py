@@ -85,12 +85,14 @@ def test_audit_diff_fails_on_a_widened_scope(tmp_path, capsys):
 
 def test_a_new_backend_is_acknowledged_with_its_token(tmp_path, capsys):
     _, prev, after = _pair(tmp_path, ENGINE_PY, ENGINE_PY_TS)
+    assert main(["audit", str(after), "--diff", str(prev)]) == 1
     assert main(["audit", str(after), "--diff", str(prev),
                  "--accept", "backend:engine_run:ts"]) == 0
 
 
 def test_a_widened_scope_is_acknowledged_with_its_token(tmp_path, capsys):
     _, prev, after = _pair(tmp_path, CACHE_SCOPED, CACHE_WIDE)
+    assert main(["audit", str(after), "--diff", str(prev)]) == 1
     assert main(["audit", str(after), "--diff", str(prev),
                  "--accept", "scope:Front:cache.put"]) == 0
 
@@ -217,10 +219,12 @@ component C {
 
 
 def test_a_kind_change_on_a_kept_name_is_not_a_dropped_recovery():
-    before = {"recovery_surface": [
-        {"name": "a", "kind": "compensation", "register": None}]}
-    after = {"recovery_surface": [
-        {"name": "a", "kind": "inverse", "register": None}]}
+    before = {"externs": [{"name": "a", "inverse": "compensation"}],
+              "recovery_surface": [
+                  {"name": "a", "kind": "compensation", "register": None}]}
+    after = {"externs": [{"name": "a", "inverse": "declared"}],
+             "recovery_surface": [
+                 {"name": "a", "kind": "inverse", "register": None}]}
     assert diff_recovery(before, after)["recovery_dropped"] == []
     assert diff_recovery(after, before)["recovery_dropped"] == []
 
@@ -249,3 +253,19 @@ def test_the_update_path_gives_the_gate_verdicts_on_a_kind_change():
     strengthened = update_tools._widening_from_audits(compensation, declared)
     assert strengthened["widened"] is False
     assert evaluate(compensation, declared)["widened"] is False
+
+
+def test_a_kind_change_against_a_baseline_without_inverse_is_still_gated():
+    # A baseline captured before `inverse` existed: `diff_inverses` skips the
+    # extern, so the recovery diff must still report the kind change.
+    declared = audit_report(compile_source(_DECLARED, "corpus.rvl"))
+    compensation = audit_report(compile_source(_COMPENSATION, "corpus.rvl"))
+    for ext in declared["externs"]:
+        ext.pop("inverse", None)
+    result = evaluate(declared, compensation)
+    assert result["inverse_weakened"] == []
+    assert result["recovery_dropped"] == ["recovery:deposit:inverse"]
+    assert result["widened"] is True
+    assert update_tools._widening_from_audits(
+        declared, compensation)["recoveryDropped"] == [
+            "recovery:deposit:inverse"]

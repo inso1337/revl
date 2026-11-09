@@ -608,7 +608,10 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     a weaker kind is its `inverse:<name>` token, a stronger one passes. Read
     here as a drop, one kind change gated twice and a strengthening failed.
     A recovery that disappears entirely, with no entry of any kind left for
-    that name, is still dropped. Buckets are sorted, so the diff is deterministic over the unhashable
+    that name, is still dropped. So is a kind change on a name whose extern
+    lacks `inverse` on either side (a baseline captured before that field
+    existed): `diff_inverses` skips such an extern, so nothing else would
+    carry the move. Buckets are sorted, so the diff is deterministic over the unhashable
     `list[dict]` surface without ever hashing a dict.
     """
     from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
@@ -619,7 +622,13 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     dropped: list[str] = []
     weakened: list[str] = []
     added: list[str] = []
-    kept_names = {name for name, _kind in new_r}
+    # a kind change is carried by `diff_inverses` only when both sides record
+    # the extern's `inverse`; otherwise it stays a drop.
+    def _with_inverse(audit: dict) -> set[str]:
+        return {ext["name"] for ext in audit.get("externs") or []
+                if "inverse" in ext}
+    kept_names = ({name for name, _kind in new_r}
+                  & _with_inverse(prev) & _with_inverse(new))
     for name, kind in prev_r.keys() - new_r.keys():
         if name not in kept_names:
             dropped.append(f"recovery:{name}:{kind}")
