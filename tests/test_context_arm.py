@@ -55,13 +55,39 @@ def test_a_reply_that_is_not_the_component_alone_is_red(task, reply):
 def test_the_arms_differ_only_in_what_they_read(task):
     piece = arm.cut(task)
     pack = arm.context([str(piece["path"])], component=task["component"])
-    raw, packed = (arm.prompt(task, a, piece, pack) for a in arm.ARMS)
-    # the task, the header and the instructions are the same text in both
-    tail = raw[raw.index("Write the component"):]
-    assert packed.endswith(tail)
-    # the pack arm reads no provider body, and less than the raw arm
-    assert "provide " not in packed[:packed.index("Write the component")]
-    assert len(packed) < len(raw)
+    prompts = {a: arm.prompt(task, a, piece, pack) for a in arm.ARMS}
+    # the task, the header and the instructions are the same text in all
+    tail = prompts["raw"][prompts["raw"].index("Write the component"):]
+    assert all(p.endswith(tail) for p in prompts.values())
+    read = {a: arm.reading(a, piece, pack, task) for a in arm.ARMS}
+    # the pack arm reads no provider body; the others add exactly their part
+    assert "provide " not in read["pack"]
+    card = arm.CARD_READING.format(text=arm.CARD.read_text(encoding="utf-8"))
+    name, block = arm.sibling(task, pack)
+    near = arm.SIBLING_READING.format(name=name, text=block)
+    assert read["pack-card"] == read["pack"] + card
+    assert read["pack-sibling"] == read["pack"] + near
+    assert read["pack-both"] == read["pack"] + card + near
+    # and every pack arm reads less than the raw arm
+    assert all(len(read[a]) < len(read["raw"]) for a in arm.ARMS if a != "raw")
+
+
+def test_the_card_compiles_as_shown():
+    from revl import compile_source
+    compile_source(arm.CARD.read_text(encoding="utf-8"), "context_card.rvl")
+
+
+@pytest.mark.parametrize("task", TASKS, ids=[t["id"] for t in TASKS])
+def test_the_sibling_is_another_providing_component(task):
+    pack = arm.context([str(arm.ROOT / task["file"])],
+                       component=task["component"])
+    name, block = arm.sibling(task, pack)
+    assert name != task["component"]
+    assert block.lstrip().startswith(f"component {name}") and "provide " in block
+    # the provider of a required service is preferred when there is one
+    required = {p["component"] for s in pack["services"]
+                if s["role"] == "requires" for p in s["providers"]}
+    assert name in required or not required
 
 
 def test_a_reply_that_does_not_check_is_graded_red_with_the_compiler_text():
@@ -93,12 +119,13 @@ def test_a_retry_asks_again_for_the_block_alone(tmp_path, monkeypatch):
 def test_the_mock_run_is_green_at_round_two_in_both_arms(tmp_path):
     rows = arm.main(["--runner", "mock", "--out", str(tmp_path),
                      "--label", "m"])
-    assert len(rows) == 2 * len(TASKS)
+    assert len(rows) == len(arm.ARMS) * len(TASKS)
     assert all(r["solved"] and r["rounds"] == 2 for r in rows)
     lines = (tmp_path / "m" / "results.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == len(rows)
     summary = (tmp_path / "m" / "summary.md").read_text(encoding="utf-8")
-    assert "the pack does not lose rounds" in summary
+    assert "pack minus raw, mean rounds per task: +0.00 (does not lose rounds)" \
+        in summary
     assert "0 of 8" in summary
 
 
@@ -132,8 +159,7 @@ def test_runner_errors_are_left_out_and_withhold_the_verdict():
     rows = [_row("a", "raw", 1, 1000), _row("a", "pack", 1, 300),
             _row("a", "pack", 4, 0, error=True)]
     summary = arm.summarize(rows, 3)
-    assert "+0.00" in summary and "runner error: 1" in summary
-    assert "verdict: none" in summary
+    assert "runner error: 1" in summary and "verdict:" not in summary
 
 
 def test_unreported_usage_makes_the_token_ratio_unknown():
@@ -144,24 +170,26 @@ def test_unreported_usage_makes_the_token_ratio_unknown():
 
 def test_resume_drops_rows_of_another_model(tmp_path):
     arm.main(["--runner", "mock", "--out", str(tmp_path), "--label", "x",
-              "--tasks", "audit-seam"])
+              "--tasks", "audit-seam", "--arms", "raw,pack"])
     path = tmp_path / "x" / "results.jsonl"
     rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
     path.write_text("".join(json.dumps({**r, "model": "other"}) + "\n"
                             for r in rows))
     again = arm.main(["--runner", "mock", "--out", str(tmp_path), "--label",
-                      "x", "--tasks", "audit-seam", "--resume"])
+                      "x", "--tasks", "audit-seam", "--resume",
+                      "--arms", "raw,pack"])
     assert [r["model"] for r in again] == ["mock", "mock"]
 
 
 def test_resume_runs_only_the_cells_without_a_row(tmp_path, monkeypatch):
     arm.main(["--runner", "mock", "--out", str(tmp_path), "--label", "r",
-              "--tasks", "audit-seam"])
+              "--tasks", "audit-seam", "--arms", "raw,pack"])
     calls = []
     real = arm.run_cell
     monkeypatch.setattr(arm, "run_cell", lambda *a: calls.append(a) or real(*a))
     rows = arm.main(["--runner", "mock", "--out", str(tmp_path), "--label", "r",
-                     "--tasks", "audit-seam", "--reps", "2", "--resume"])
+                     "--tasks", "audit-seam", "--reps", "2", "--resume",
+                     "--arms", "raw,pack"])
     assert [(c[0]["id"], c[1], c[2]) for c in calls] \
         == [("audit-seam", "raw", 2), ("audit-seam", "pack", 2)]
     assert len(rows) == 4

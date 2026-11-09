@@ -21,7 +21,15 @@ did, so an unsolved cell counts against its arm instead of dropping out.
 Input tokens are what the endpoint reports, summed over the cell's attempts.
 
 The pack is promoted into the authoring loop only if it does not lose rounds
-and still wins on tokens (docs/context.md). `summary.md` states both.
+and still wins on tokens (docs/context.md). `summary.md` states both, for
+every pack arm against raw:
+
+  pack-card     the pack, then a compiled illustration of provider-body
+                idioms (`context_card.rvl`), the same for every task;
+  pack-sibling  the pack, then one providing component of the same
+                composition, verbatim (the provider of a required service
+                first);
+  pack-both     the pack, the card and the sibling.
 
 Usage:
   python3 bench/context_arm.py --runner mock                 # pipeline check
@@ -39,7 +47,11 @@ from pathlib import Path
 BENCH = Path(__file__).resolve().parent
 ROOT = BENCH.parent
 TASKS = BENCH / "context_tasks.json"
-ARMS = ("raw", "pack")
+ARMS = ("raw", "pack", "pack-card", "pack-sibling", "pack-both")
+# A compiled illustration of provider-body idioms, the same text for every
+# task (tests/test_context_arm.py compiles it). The `pack-card` arms read it
+# after the pack.
+CARD = BENCH / "context_card.rvl"
 
 sys.path.insert(0, str(ROOT / "src"))
 from revl import RevlError, compile_files  # noqa: E402
@@ -94,21 +106,20 @@ def load_tasks(ids=None) -> list[dict]:
     return tasks
 
 
-def cut(task: dict) -> dict:
-    """The composition with the component's lines removed, the block those
-    lines held, and where it goes back. The comment lines directly above the
-    component go too, so the raw arm does not read a description of the
-    answer the pack arm never sees."""
-    path = ROOT / task["file"]
-    text = path.read_text(encoding="utf-8")
-    tokens = [t for t in lex(text, str(path)) if t.kind != "eof"]
+def _components(tokens) -> list[str]:
+    return [tokens[k + 1].value for k, t in enumerate(tokens[:-1])
+            if t.kind == "kw" and t.value == "component"]
+
+
+def _span(tokens, name: str, where: str) -> tuple[int, int]:
+    """The whole lines `component <name> ... }` occupies, as a slice."""
     at = next(k for k, t in enumerate(tokens)
               if t.kind == "kw" and t.value == "component"
-              and tokens[k + 1].value == task["component"])
+              and tokens[k + 1].value == name)
     if at and tokens[at - 1].kind == "kw" and tokens[at - 1].value == "pub":
         at -= 1
     if at and tokens[at - 1].line == tokens[at].line:
-        raise SystemExit(f"{task['id']}: the component shares its first line")
+        raise SystemExit(f"{where}: `{name}` shares its first line")
     depth, end = 0, None
     for k in range(at, len(tokens)):
         if tokens[k].kind == "{":
@@ -119,9 +130,46 @@ def cut(task: dict) -> dict:
                 end = k
                 break
     if end + 1 < len(tokens) and tokens[end + 1].line == tokens[end].line:
-        raise SystemExit(f"{task['id']}: the component shares its last line")
+        raise SystemExit(f"{where}: `{name}` shares its last line")
+    return tokens[at].line - 1, tokens[end].line
+
+
+def sibling(task: dict, pack: dict) -> tuple[str, str]:
+    """(name, block): one other component of the same composition that
+    provides something, cut verbatim. The provider of a service the task's
+    component requires comes first, so the body shown is one it will call;
+    otherwise the first providing component in file order."""
+    path = ROOT / task["file"]
+    text = path.read_text(encoding="utf-8")
+    tokens = [t for t in lex(text, str(path)) if t.kind != "eof"]
     lines = text.splitlines(keepends=True)
-    first, last = tokens[at].line - 1, tokens[end].line
+    blocks = {}
+    for name in _components(tokens):
+        if name == task["component"]:
+            continue
+        first, last = _span(tokens, name, task["id"])
+        block = "".join(lines[first:last])
+        if any(t.kind == "kw" and t.value == "provide"
+               for t in lex(block, "<sibling>")):
+            blocks[name] = block
+    wanted = [p["component"] for s in pack["services"] if s["role"] == "requires"
+              for p in s["providers"]]
+    name = next((n for n in wanted if n in blocks), next(iter(blocks), None))
+    if name is None:
+        raise SystemExit(f"{task['id']}: no other providing component")
+    return name, blocks[name]
+
+
+def cut(task: dict) -> dict:
+    """The composition with the component's lines removed, the block those
+    lines held, and where it goes back. The comment lines directly above the
+    component go too, so the raw arm does not read a description of the
+    answer the pack arm never sees."""
+    path = ROOT / task["file"]
+    text = path.read_text(encoding="utf-8")
+    tokens = [t for t in lex(text, str(path)) if t.kind != "eof"]
+    lines = text.splitlines(keepends=True)
+    first, last = _span(tokens, task["component"], task["id"])
     block = "".join(lines[first:last])
     while first and lines[first - 1].lstrip().startswith("//"):
         first -= 1
@@ -154,13 +202,27 @@ def raw_reading(piece: dict, pack: dict) -> str:
     return text
 
 
-def reading(arm: str, piece: dict, pack: dict) -> str:
-    return (raw_reading(piece, pack) if arm == "raw"
-            else PACK_READING.format(text=pack["pack"].rstrip("\n") + "\n"))
+CARD_READING = ("\n\nHow a provider body is written, as a compiled "
+                "illustration (not part of this composition):\n\n"
+                "```revl\n{text}```")
+SIBLING_READING = ("\n\nAnd one provider body from this composition, "
+                   "`{name}`, as written there:\n\n```revl\n{text}```")
+
+
+def reading(arm: str, piece: dict, pack: dict, task: dict) -> str:
+    if arm == "raw":
+        return raw_reading(piece, pack)
+    text = PACK_READING.format(text=pack["pack"].rstrip("\n") + "\n")
+    if arm in ("pack-card", "pack-both"):
+        text += CARD_READING.format(text=CARD.read_text(encoding="utf-8"))
+    if arm in ("pack-sibling", "pack-both"):
+        name, block = sibling(task, pack)
+        text += SIBLING_READING.format(name=name, text=block)
+    return text
 
 
 def prompt(task: dict, arm: str, piece: dict, pack: dict) -> str:
-    return FIRST_TEMPLATE.format(reading=reading(arm, piece, pack),
+    return FIRST_TEMPLATE.format(reading=reading(arm, piece, pack, task),
                                  component=task["component"],
                                  header=pack["header"], task=task["task"])
 
@@ -270,7 +332,7 @@ def run_cell(task: dict, arm: str, rep: int, args, system: str) -> dict:
         "tokens_in": _total(attempts, "tokens_in"),
         "output_tokens": _total(attempts, "output_tokens"),
         # what this arm reads, by the pack's own proxy
-        "reading_tokens": count_tokens(reading(arm, piece, pack)),
+        "reading_tokens": count_tokens(reading(arm, piece, pack, task)),
         "runner_error": any(a.get("runner_error") for a in attempts),
         "attempts": attempts,
     }
@@ -280,70 +342,95 @@ def _mean(xs):
     return statistics.mean(xs) if xs else float("nan")
 
 
-def summarize(rows: list, max_iters: int) -> str:
-    by = {}
-    for r in rows:
-        by.setdefault((r["task"], r["arm"]), []).append(r)
-    tasks = sorted({r["task"] for r in rows})
-    out = [f"# Rounds-to-green, raw vs pack (max_iters {max_iters}; "
-           f"unsolved = {max_iters + 1})", "",
-           "| task | raw rounds | pack rounds | raw solved | pack solved | "
-           "reading raw / pack | raw tokens in | pack tokens in |",
-           "|---|---|---|---|---|---|---|---|"]
-    diffs, tok_raw, tok_pack, unknown = [], [], [], False
+def _versus(by: dict, tasks: list, arm: str) -> list[str]:
+    """The promotion rule (docs/context.md) for one pack arm against raw:
+    it must not lose rounds AND must read fewer input tokens, judged on
+    complete runs only."""
+    diffs, tok_raw, tok_arm, unknown = [], [], [], False
     for t in tasks:
-        # a cell a runner error cut short measured the endpoint, not the arm
-        raw = [r for r in by.get((t, "raw"), []) if not r["runner_error"]]
-        pack = [r for r in by.get((t, "pack"), []) if not r["runner_error"]]
-        rr, pr = _mean([r["rounds"] for r in raw]), _mean([r["rounds"] for r in pack])
-        known = all(r["tokens_in"] is not None for r in raw + pack)
-        unknown = unknown or not known
-        ti_r = _mean([r["tokens_in"] for r in raw]) if known else float("nan")
-        ti_p = _mean([r["tokens_in"] for r in pack]) if known else float("nan")
-        if raw and pack:
-            diffs.append(pr - rr)
-            tok_raw.append(ti_r)
-            tok_pack.append(ti_p)
-        reading = "/".join(str(rs[0]["reading_tokens"]) if rs else "-"
-                           for rs in (raw, pack))
-        out.append(f"| {t} | {rr:.2f} | {pr:.2f} | "
-                   f"{sum(r['solved'] for r in raw)}/{len(raw)} | "
-                   f"{sum(r['solved'] for r in pack)}/{len(pack)} | "
-                   f"{reading} | {ti_r:.0f} | {ti_p:.0f} |")
-    errors = sum(r["runner_error"] for r in rows)
-    out.append("")
-    out.append("`reading` is the proxy token count of what the arm reads (the "
-               "file, or the pack); `tokens in` is what the endpoint reported, "
-               "system prompt and retries included.")
-    out.append("")
-    ratio = None
-    if diffs:
-        loses = _mean(diffs) > 0
-        out.append(f"- pack minus raw, mean rounds per task: {_mean(diffs):+.2f} "
-                   f"({'the pack LOSES rounds' if loses else 'the pack does not lose rounds'})")
-        out.append(f"- tasks where the pack took more rounds: "
-                   f"{sum(d > 0 for d in diffs)} of {len(diffs)}")
-        if unknown:
-            out.append("- input tokens, pack / raw: unknown (an attempt's usage "
-                       "was not reported)")
-        elif sum(tok_raw):
-            ratio = sum(tok_pack) / sum(tok_raw)
-            out.append(f"- input tokens, pack / raw: {ratio:.2f}")
+        raw, other = by.get((t, "raw"), []), by.get((t, arm), [])
+        if not (raw and other):
+            continue
+        diffs.append(_mean([r["rounds"] for r in other])
+                     - _mean([r["rounds"] for r in raw]))
+        if any(r["tokens_in"] is None for r in raw + other):
+            unknown = True
         else:
-            out.append("- input tokens, pack / raw: not reported (no endpoint "
-                       "usage)")
-    if errors:
-        out.append(f"- cells cut short by a runner error: {errors}, left out "
-                   f"of the means; rerun with --resume")
-    # the rule in docs/context.md: promote only if the pack does not lose
-    # rounds AND wins on tokens, judged on complete runs only
-    if errors or not diffs or ratio is None:
-        out.append("- verdict: none (the run is incomplete or reported no usage)")
+            tok_raw.append(_mean([r["tokens_in"] for r in raw]))
+            tok_arm.append(_mean([r["tokens_in"] for r in other]))
+    if not diffs:
+        return []
+    out = [f"## `{arm}` against `raw`", ""]
+    loses = _mean(diffs) > 0
+    out.append(f"- {arm} minus raw, mean rounds per task: {_mean(diffs):+.2f} "
+               f"({'LOSES rounds' if loses else 'does not lose rounds'})")
+    out.append(f"- tasks where {arm} took more rounds: "
+               f"{sum(d > 0 for d in diffs)} of {len(diffs)}; fewer: "
+               f"{sum(d < 0 for d in diffs)}")
+    ratio = None
+    if unknown:
+        out.append(f"- input tokens, {arm} / raw: unknown (an attempt's usage "
+                   f"was not reported)")
+    elif sum(tok_raw):
+        ratio = sum(tok_arm) / sum(tok_raw)
+        out.append(f"- input tokens, {arm} / raw: {ratio:.2f}")
+    else:
+        out.append(f"- input tokens, {arm} / raw: not reported (no endpoint "
+                   f"usage)")
+    if ratio is None:
+        out.append("- verdict: none (no usage reported)")
     elif not loses and ratio < 1:
         out.append("- verdict: PROMOTE (no rounds lost, fewer input tokens)")
     else:
         out.append("- verdict: HOLD (" + ("loses rounds" if loses
                                           else "no token win") + ")")
+    return out + [""]
+
+
+def summarize(rows: list, max_iters: int) -> str:
+    # a cell a runner error cut short measured the endpoint, not the arm
+    errors = sum(r["runner_error"] for r in rows)
+    kept = [r for r in rows if not r["runner_error"]]
+    by = {}
+    for r in kept:
+        by.setdefault((r["task"], r["arm"]), []).append(r)
+    tasks = sorted({r["task"] for r in rows})
+    arms = [a for a in ARMS if any(r["arm"] == a for r in rows)]
+    out = [f"# Rounds-to-green by arm (max_iters {max_iters}; unsolved = "
+           f"{max_iters + 1})", "",
+           "Rounds, mean per task, with cells solved:", "",
+           "| task | " + " | ".join(arms) + " |",
+           "|---" * (len(arms) + 1) + "|"]
+    for t in tasks:
+        cells = []
+        for a in arms:
+            rs = by.get((t, a), [])
+            cells.append(f"{_mean([r['rounds'] for r in rs]):.2f} "
+                         f"({sum(r['solved'] for r in rs)}/{len(rs)})"
+                         if rs else "-")
+        out.append(f"| {t} | " + " | ".join(cells) + " |")
+    out += ["", "Tokens, mean per task: what the arm reads (proxy) / what the "
+            "endpoint reported in, system prompt and retries included:", "",
+            "| task | " + " | ".join(arms) + " |",
+            "|---" * (len(arms) + 1) + "|"]
+    for t in tasks:
+        cells = []
+        for a in arms:
+            rs = by.get((t, a), [])
+            known = rs and all(r["tokens_in"] is not None for r in rs)
+            cells.append((f"{rs[0]['reading_tokens']} / "
+                          + (f"{_mean([r['tokens_in'] for r in rs]):.0f}"
+                             if known else "?")) if rs else "-")
+        out.append(f"| {t} | " + " | ".join(cells) + " |")
+    out.append("")
+    if errors:
+        out += [f"Cells cut short by a runner error: {errors}, left out of the "
+                f"means; no verdict is given until they are rerun with "
+                f"--resume.", ""]
+        return "\n".join(out) + "\n"
+    for a in arms:
+        if a != "raw":
+            out += _versus(by, tasks, a)
     return "\n".join(out) + "\n"
 
 
