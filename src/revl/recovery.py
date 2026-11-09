@@ -29,11 +29,11 @@ The WAL's terminal ``activation-complete`` marker is the whole decision:
 
 The marker is scoped to the OPENING it belongs to (issue #3147). A WAL appended
 to by a later run (``--wal PATH`` reuses the file, #641/#642) starts that run
-with a ``generation`` record, and the prior run's marker or ``commit-approved``
-proves only that the PRIOR run finished. Recovery decides by the latest
-opening's own marker and rolls back every opening that never committed; a
-committed opening's effects are never inverted. A single-opening WAL reads
-exactly as it always did.
+with a ``generation`` record when it is opened with a composition, and the prior
+run's marker or ``commit-approved`` proves only that the PRIOR run finished.
+Recovery decides by the latest opening's own marker and rolls back every opening
+that never committed; a committed opening's effects are never inverted. A
+single-opening WAL reads exactly as it always did.
 
 Why boundary state is the real cargo (the honest analysis)
 ----------------------------------------------------------

@@ -518,10 +518,12 @@ the exit status, and section 5c how to recover against the real world.
 ### A reused WAL is decided per opening (issue #3147)
 
 `--wal PATH` appends to a file an earlier run left (#641/#642), and a service
-that restarts under the same `--wal` path reuses it the same way. Every later
-opening writes a `generation` record before its first effect, and the earlier
-opening's `activation-complete` and `commit-approved` prove only that the
-EARLIER opening finished. They are scoped to their own opening:
+that restarts under the same `--wal` path reuses it the same way. A later
+opening that is opened with a composition writes a `generation` record before
+its first effect (section 5c; a bare reopen records no boundary, so its file
+still reads as one opening), and the earlier opening's `activation-complete`
+and `commit-approved` prove only that the EARLIER opening finished. They are
+scoped to their own opening:
 
 - the LATEST opening's own `activation-complete` rolls forward; its own
   `commit-approved` rolls the approved-to-discharged window forward;

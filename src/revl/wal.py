@@ -360,11 +360,12 @@ def opening_intervals(records: list) -> list:
     """The records each OPENING of a WAL file owns, in order (issue #3147).
 
     A WAL opened more than once -- a later run appending to the same ``--wal``
-    path, or a ``--watch`` reload -- starts every later opening with a
-    ``generation`` record (#641/#642). Everything from that record until the
-    next one belongs to that opening; the records before the first belong to the
-    first opening, whose generation the header carried. A single-opening WAL
-    yields one interval, so every single-run caller reads exactly as before.
+    path, or a ``--watch`` reload -- starts a later opening with a
+    ``generation`` record when that opening carries an IR (#641/#642).
+    Everything from that record until the next one belongs to that opening; the
+    records before the first belong to the first opening, whose generation the
+    header carried. A single-opening WAL yields one interval, so every
+    single-run caller reads exactly as before.
     """
     intervals: list = [[]]
     for record in records:
