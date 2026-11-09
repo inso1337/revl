@@ -1,0 +1,193 @@
+"""Issue #3182: `revl audit --diff` gates on every drift bucket, and `revl diff`
+reports the drift a stable crossing can carry.
+
+The gate used to read only added crossings, reach weakenings and inverse
+weakenings, so a new host backend body or a scope widened on a stable crossing
+printed "authority-drift: clean" and exited 0, and `revl diff` printed
+"no structural change". The gated set now lives in
+`audit_diff.widening_from_audits`, shared with the MCP update path.
+"""
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl import compile_source  # noqa: E402
+from revl.__main__ import main  # noqa: E402
+from revl.audit_diff import (  # noqa: E402
+    GATED_BUCKETS, audit_report, evaluate, widening_from_audits)
+from revl.composition_diff import diff  # noqa: E402
+from revl.mcp import update_tools  # noqa: E402
+
+_ENGINE = """\
+extern emission{reach} fn engine_run(argv_json: Str, cwd: Str, timeout_s: Int) -> Str = @py {{
+    return ""
+}}{ts}
+service Ops {{ emission fn go(u: Str) -> Str }}
+component Runner provides ops: Ops {{
+  provide ops {{
+    fn go(u) {{ return emit engine_run(u, ".", 5) }}
+  }}
+}}
+"""
+_TS = ' = @ts {\n    return "";\n}'
+ENGINE_PY = _ENGINE.format(reach="(confined: cwd)", ts="")
+ENGINE_PY_TS = _ENGINE.format(reach="(confined: cwd)", ts=_TS)
+ENGINE_BARE = _ENGINE.format(reach="", ts="")
+
+_CACHE = """\
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { emission[db] fn put(key: Str, value: Str) }
+
+component PgCache requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key, value) { emit db.execute(`INSERT ${key} ${value}`) }
+  }
+}
+component Front requires cache: Cache {
+  emit cache.put("k", "v")
+}
+"""
+CACHE_SCOPED = _CACHE
+CACHE_WIDE = _CACHE.replace("emission[db] fn put", "emission fn put")
+
+
+def _pair(tmp_path: Path, before: str, after: str) -> tuple[Path, Path, Path]:
+    prev_src = tmp_path / "before.rvl"
+    prev_src.write_text(before)
+    prev = tmp_path / "prev.json"
+    prev.write_text(json.dumps(audit_report(compile_source(before))))
+    after_src = tmp_path / "after.rvl"
+    after_src.write_text(after)
+    return prev_src, prev, after_src
+
+
+# ------------------------------------------------------- revl audit --diff
+
+def test_audit_diff_fails_on_a_new_backend_body(tmp_path, capsys):
+    _, prev, after = _pair(tmp_path, ENGINE_PY, ENGINE_PY_TS)
+    assert main(["audit", str(after), "--diff", str(prev)]) == 1
+    out = capsys.readouterr().out
+    assert "backend:engine_run:ts" in out
+    assert "clean" not in out
+
+
+def test_audit_diff_fails_on_a_widened_scope(tmp_path, capsys):
+    _, prev, after = _pair(tmp_path, CACHE_SCOPED, CACHE_WIDE)
+    assert main(["audit", str(after), "--diff", str(prev)]) == 1
+    out = capsys.readouterr().out
+    assert "scope:Front:cache.put" in out
+    assert "clean" not in out
+
+
+def test_a_new_backend_is_acknowledged_with_its_token(tmp_path, capsys):
+    _, prev, after = _pair(tmp_path, ENGINE_PY, ENGINE_PY_TS)
+    assert main(["audit", str(after), "--diff", str(prev),
+                 "--accept", "backend:engine_run:ts"]) == 0
+
+
+def test_a_widened_scope_is_acknowledged_with_its_token(tmp_path, capsys):
+    _, prev, after = _pair(tmp_path, CACHE_SCOPED, CACHE_WIDE)
+    assert main(["audit", str(after), "--diff", str(prev),
+                 "--accept", "scope:Front:cache.put"]) == 0
+
+
+def test_audit_diff_json_carries_the_new_buckets(tmp_path, capsys):
+    _, prev, after = _pair(tmp_path, ENGINE_PY, ENGINE_PY_TS)
+    assert main(["audit", str(after), "--diff", str(prev), "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["backends_added"] == ["backend:engine_run:ts"]
+    assert report["unacknowledged"] == ["backend:engine_run:ts"]
+    assert report["widened"] is True
+
+
+def test_a_dropped_backend_and_a_narrowed_scope_pass(tmp_path, capsys):
+    _, prev, after = _pair(tmp_path, ENGINE_PY_TS, ENGINE_PY)
+    assert main(["audit", str(after), "--diff", str(prev)]) == 0
+    assert "backend:engine_run:ts" in capsys.readouterr().out
+    _, prev, after = _pair(tmp_path, CACHE_WIDE, CACHE_SCOPED)
+    assert main(["audit", str(after), "--diff", str(prev)]) == 0
+
+
+# ------------------------------------------- one gated set, two consumers
+
+def _synthetic(**surface) -> dict:
+    return {"boundary": {}, "externs": [], **surface}
+
+
+_WIDENINGS = {
+    "scopesWidened": (
+        _synthetic(boundary={"C": {"capabilities": {"n": ["send.mail"]}}}),
+        _synthetic(boundary={"C": {"capabilities": {"n": ["send.*"]}}})),
+    "backendsAdded": (
+        _synthetic(externs=[{"name": "x", "backends": ["py"]}]),
+        _synthetic(externs=[{"name": "x", "backends": ["py", "ts"]}])),
+    "recoveryDropped": (
+        _synthetic(recovery_surface=[{"name": "s", "kind": "effect",
+                                      "register": "keyed"}]),
+        _synthetic()),
+    "registersWeakened": (
+        _synthetic(capability_registers={"net": "keyed"}),
+        _synthetic(capability_registers={"net": None})),
+    "cardinalityWidened": (
+        _synthetic(cardinality={"C": {"per_capability": {
+            "send.mail": {"kind": "bounded", "bound": 2}}}}),
+        _synthetic(cardinality={"C": {"per_capability": {
+            "send.mail": {"kind": "bounded", "bound": 5}}}})),
+}
+
+
+def test_evaluate_gates_every_bucket_the_update_path_does():
+    for key, (before, after) in _WIDENINGS.items():
+        widening = widening_from_audits(before, after)
+        assert widening[key], key
+        result = evaluate(before, after)
+        assert result["widened"] is True, key
+        assert result["unacknowledged"] == [
+            t for k, _ in GATED_BUCKETS for t in widening[k]], key
+
+
+def test_the_update_path_reads_the_shared_gated_set():
+    for before, after in _WIDENINGS.values():
+        assert update_tools._widening_from_audits(before, after) == \
+            widening_from_audits(before, after)
+
+
+# ------------------------------------------------------------- revl diff
+
+def test_revl_diff_reports_a_new_backend_body(tmp_path, capsys):
+    before, _, after = _pair(tmp_path, ENGINE_PY, ENGINE_PY_TS)
+    assert main(["diff", str(before), str(after)]) == 0
+    out = capsys.readouterr().out
+    assert "no structural change" not in out
+    assert "`engine_run` gained a `ts` backend body" in out
+    assert "~ Runner  (changed)" in out
+
+
+def test_revl_diff_reports_a_widened_scope(tmp_path, capsys):
+    before, _, after = _pair(tmp_path, CACHE_SCOPED, CACHE_WIDE)
+    assert main(["diff", str(before), str(after)]) == 0
+    out = capsys.readouterr().out
+    assert "no structural change" not in out
+    assert "component `Front` widened emission `cache.put` scope" in out
+
+
+def test_revl_diff_reports_a_weakened_reach():
+    delta = diff(compile_source(ENGINE_PY), compile_source(ENGINE_BARE))
+    assert delta["changed"] is True
+    assert delta["crossings"]["reach_weakened"] == ["reach-weakened:engine_run"]
+    assert "host extern `engine_run` reach weakened (its bound was loosened " \
+        "or moved)" in delta["guarantees"]
+    assert delta["components"]["changed"] == ["Runner"]
+
+
+def test_revl_diff_reports_the_safe_directions():
+    delta = diff(compile_source(ENGINE_PY_TS), compile_source(ENGINE_PY))
+    assert delta["crossings"]["backends_removed"] == ["backend:engine_run:ts"]
+    delta = diff(compile_source(CACHE_WIDE), compile_source(CACHE_SCOPED))
+    assert delta["crossings"]["scope_tightened"] == ["scope:Front:cache.put"]
+    assert "component `Front` narrowed emission `cache.put` scope" in \
+        delta["guarantees"]

@@ -47,7 +47,10 @@ def test_identical_compositions_diff_to_empty():
     delta = _diff(BASE, BASE)
     assert delta["changed"] is False
     assert delta["components"] == {"added": [], "removed": [], "changed": []}
-    assert delta["crossings"] == {"added": [], "removed": []}
+    assert delta["crossings"] == {"added": [], "removed": [],
+                                  "reach_weakened": [],
+                                  "scope_widened": [], "scope_tightened": [],
+                                  "backends_added": [], "backends_removed": []}
     assert delta["guarantees"] == []
 
 
