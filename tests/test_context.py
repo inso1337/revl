@@ -306,3 +306,41 @@ def test_the_cli_refuses_a_non_positive_budget():
     run = subprocess.run([sys.executable, "-P", "-m", "revl", "context", MEDIATOR,
                           "--budget", "0"], capture_output=True, text=True)
     assert run.returncode == 2 and "at least 1" in run.stderr
+
+
+def test_many_declarations_on_one_line_cost_a_lex_or_two_each(monkeypatch):
+    # every service on one line, each operation named after the keyword and a
+    # trailing comment holding a brace: each cut is still its first candidate,
+    # where trying every pair of the line's matches grew about cubically
+    import revl.context as module
+
+    n, lexes, real = 200, 0, module._spelled
+
+    def counted(text):
+        nonlocal lexes
+        lexes += 1
+        assert lexes <= 3 * n, f"more than {3 * n} lexes for {n} declarations"
+        return real(text)
+
+    monkeypatch.setattr(module, "_spelled", counted)
+    decls = [f"service S{i} {{ fn service{i}() -> Int }}" for i in range(n)]
+    source = " ".join(decls) + " // } service }\n"
+    result = context(["many.rvl"], sources={"many.rvl": source})
+    assert [s["text"] for s in result["services"]] == decls
+
+
+@pytest.mark.parametrize("tail", [
+    "liveness 30s {\n  provide p {\n    fn g() = s.f()\n  }\n}\n",
+    "liveness 30s { provide p { fn g() = s.f() } }\n",
+    "liveness 1_000ms {\n  provide p {\n    fn g() = s.f()\n  }\n}\n",
+    # many clauses on the line: every `s` in them is a bare-text lookalike
+    " ".join(f"requires sss{i}: S" for i in range(25))
+    + " liveness 30s { provide p { fn g() = s.f() } }\n",
+])
+def test_a_header_ending_in_a_duration_is_cut_at_its_suffix(tail):
+    # `30s` lexes as `30` then `s`: the suffix is glued to the digits, so a
+    # word-boundary match never finds it and the cut has to look again
+    source = ("service S {\n  fn f() -> Int\n}\nservice P {\n  fn g() -> Int\n}\n"
+              "component C requires s: S provides p: P " + tail)
+    header = context(["d.rvl"], sources={"d.rvl": source}, component="C")["header"]
+    assert header == "component C requires s: S provides p: P " + tail.split(" {")[0]

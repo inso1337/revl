@@ -20,6 +20,7 @@ named, with its clause and its hash, at every step.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
 import os
@@ -57,56 +58,132 @@ def _spelled(text: str) -> list | None:
         return None
 
 
-def _cut(text: str, tokens: list, i: int, j: int) -> tuple[str, bool]:
+class _Source:
+    """One file's text and tokens, with the indexes the cuts look up: its
+    lines split on `\\n` alone (what the lexer counts), each token's rank
+    among the tokens spelled the same on its line, and where each keyword sits
+    on each line."""
+
+    def __init__(self, text: str, path: str):
+        self.text = text
+        self.lines = text.split("\n")
+        self.tokens = lex(text, path)
+        self.rank: list[int] = []
+        self.keywords: dict[tuple, list[int]] = {}
+        seen: dict[tuple, int] = {}
+        for x, t in enumerate(self.tokens):
+            spelled = (t.line, str(t.value))
+            self.rank.append(seen.get(spelled, 0))
+            seen[spelled] = self.rank[-1] + 1
+            if t.kind == "kw":
+                self.keywords.setdefault((t.line, t.value), []).append(x)
+
+
+def _spelling(token, bounded: bool) -> str:
+    """A pattern for where `token` may stand on its line: its text, held to
+    word boundaries when `bounded` and it starts or ends with a word
+    character, so `service` is never found inside `service0`."""
+    text = str(token.value)
+    pattern = re.escape(text)
+    if bounded and re.match(r"\w", text[:1]):
+        pattern = r"(?<!\w)" + pattern
+    if bounded and re.match(r"\w", text[-1:]):
+        pattern += r"(?!\w)"
+    return pattern
+
+
+# candidate spans lexed per search before a cut falls back to whole lines
+_TRIES = 64
+
+
+def _cut(src: _Source, i: int, j: int) -> tuple[str, bool]:
     """The exact source text of `tokens[i..j]`, and whether it starts its line.
 
-    Tokens carry a line and no column, so the cut is found, not computed: every
-    place the first token's text starts on its line is paired with every place
-    the last token's text ends on its line, and the first pair whose text lexes
-    back to exactly `tokens[i..j]` wins. A brace in a comment, a second
-    declaration on the same line, a body opened on the header's line: each
-    yields a candidate that lexes to something else, and is passed over.
-    Lines are split on `\\n` alone because that is what the lexer counts."""
-    lines = text.split("\n")
+    Tokens carry a line and no column, so the cut is found, not computed: a
+    span from a place the first token's text starts on its line to a place the
+    last token's text ends on its line is kept when it lexes back to exactly
+    `tokens[i..j]`. A brace in a comment, a second declaration on the same
+    line, a body opened on the header's line: each yields a span that lexes to
+    something else, and is passed over.
+
+    The search runs twice. First with word tokens held to word boundaries,
+    which a token glued to the one before it fails (the `s` of `30s` lexes on
+    its own after the `30`); then with the bare text. The lex check keeps
+    either one exact; the boundaries only make the first one short."""
+    first, last = src.tokens[i].line, src.tokens[j].line
+    for bounded in (True, False):
+        found = _search(src, i, j, bounded)
+        if found is not None:
+            return found
+    # a token whose value is not its spelling (a float's exponent): whole lines
+    return "\n".join(src.lines[first - 1:last]), True
+
+
+def _search(src: _Source, i: int, j: int,
+            bounded: bool) -> tuple[str, bool] | None:
+    """One search for `_cut`. Every token is one of the matches of its own
+    text, and a lookalike (the text inside a string, or in a `//` comment,
+    which only ever follows the tokens of its line) only adds matches, so the
+    token is its rank-th match on the line (its rank among the tokens spelled
+    the same) or a later one. The search walks up from those ranks: on a line
+    with no lookalike its first span is the answer, whatever else shares the
+    line. A start whose span already lexes longer than wanted is dropped, and
+    at most `_TRIES` spans are lexed."""
+    tokens, lines = src.tokens, src.lines
     first, last = tokens[i].line, tokens[j].line
     want = [(t.kind, t.value) for t in tokens[i:j + 1]]
     head, tail = lines[first - 1], lines[last - 1]
-    starts = [m.start() for m in re.finditer(re.escape(str(tokens[i].value)), head)]
-    ends = [m.end() for m in re.finditer(re.escape(str(tokens[j].value)), tail)]
-    for s in starts:
-        for e in ends:
-            if first == last:
-                if e <= s:
-                    continue
-                piece = head[s:e]
-            else:
-                piece = "\n".join([head[s:], *lines[first:last - 1], tail[:e]])
-            if _spelled(piece) == want:
-                return piece, not head[:s].strip()
-    # a token whose value is not its spelling (a duration literal): whole lines
-    return "\n".join(lines[first - 1:last]), True
+    starts = [m.start()
+              for m in re.finditer(_spelling(tokens[i], bounded), head)]
+    ends = [m.end() for m in re.finditer(_spelling(tokens[j], bounded), tail)]
+
+    def pairs():
+        lo_a, lo_b = src.rank[i], src.rank[j]
+        for a in range(lo_a, len(starts)):
+            # on one line an end at or before the start is no span
+            past = bisect.bisect_right(ends, starts[a]) if first == last else 0
+            for b in range(max(lo_b, past), len(ends)):
+                yield a, b
+        # below the ranks: reached when the boundaries hid the token itself
+        for a in range(len(starts)):
+            for b in range(len(ends)):
+                if a < lo_a or b < lo_b:
+                    yield a, b
+
+    tried, longer = 0, set()
+    for a, b in pairs():
+        s, e = starts[a], ends[b]
+        if a in longer or (first == last and e <= s):
+            continue
+        if tried == _TRIES:
+            break
+        tried += 1
+        if first == last:
+            piece = head[s:e]
+        else:
+            piece = "\n".join([head[s:], *lines[first:last - 1], tail[:e]])
+        spelled = _spelled(piece)
+        if spelled == want:
+            return piece, not head[:s].strip()
+        if spelled is not None and len(spelled) > len(want):
+            longer.add(a)  # a later end from this start only lexes longer
+    return None
 
 
-def _doc_above(text: str, line: int) -> list[str]:
+def _doc_above(lines: list[str], line: int) -> list[str]:
     """The contiguous `//` block directly above `line`: the declaration's doc."""
-    lines = text.split("\n")
     first = line
     while first > 1 and lines[first - 2].strip().startswith("//"):
         first -= 1
     return lines[first - 1:line - 1]
 
 
-def _nth_keyword(tokens: list, keyword: str, line: int, nth: int) -> int:
-    hits = [i for i, t in enumerate(tokens)
-            if t.line == line and t.kind == "kw" and t.value == keyword]
-    return hits[nth]
-
-
-def _block(text: str, tokens: list, line: int, nth: int) -> str:
+def _block(src: _Source, line: int, nth: int) -> str:
     """The `nth` service declared on `line`, with its prefixes and its doc,
     brace-matched over the lexed tokens (so a brace inside a string or a
     comment is never counted)."""
-    i = _nth_keyword(tokens, "service", line, nth)
+    tokens = src.tokens
+    i = src.keywords[(line, "service")][nth]
     while i > 0 and tokens[i - 1].kind == "kw" and tokens[i - 1].value in _SERVICE_PREFIX:
         i -= 1
     depth, j = 0, i
@@ -117,20 +194,24 @@ def _block(text: str, tokens: list, line: int, nth: int) -> str:
             depth -= 1
             if depth == 0:
                 break
-    piece, alone = _cut(text, tokens, i, j)
-    doc = _doc_above(text, tokens[i].line) if alone else []
+    piece, alone = _cut(src, i, j)
+    doc = _doc_above(src.lines, tokens[i].line) if alone else []
     return "\n".join([*doc, piece])
 
 
-def _header(text: str, tokens: list, line: int, nth: int) -> str:
+def _header(src: _Source, line: int, nth: int) -> str:
     """A component's header, `component X requires ... provides ...`, as
     written: from its keyword (and a `boot` before it) up to the `{` that opens
     the body."""
-    i = _nth_keyword(tokens, "component", line, nth)
+    tokens = src.tokens
+    i = src.keywords[(line, "component")][nth]
     if i > 0 and tokens[i - 1].kind == "ident" and tokens[i - 1].value in _COMPONENT_PREFIX:
         i -= 1
     brace = next(k for k in range(i, len(tokens)) if tokens[k].kind == "{")
-    return _cut(text, tokens, i, brace - 1)[0]
+    # cut through the brace, whose place on its line is never in doubt (the
+    # header's own last token may be the `s` glued to a `30s`), then drop it
+    piece = _cut(src, i, brace)[0]
+    return piece[:piece.rindex("{")].rstrip() if piece.endswith("{") else piece
 
 
 def _strip_docs(block: str) -> str:
@@ -140,7 +221,12 @@ def _strip_docs(block: str) -> str:
 def _hash(block: str) -> str:
     # `pub` on a service is documentation (services are pub by default), so it
     # is not part of what a consumer compiles against
-    spelled = repr([t for t in _spelled(block) or [] if t != ("kw", "pub")])
+    lexed = _spelled(block)
+    if lexed is None:
+        # a cut that does not lex on its own (it never should): hash what it
+        # says without its docs, so two such blocks never share one hash
+        return hashlib.sha256(_strip_docs(block).encode()).hexdigest()[:16]
+    spelled = repr([t for t in lexed if t != ("kw", "pub")])
     return hashlib.sha256(spelled.encode()).hexdigest()[:16]
 
 
@@ -158,12 +244,12 @@ class _Closure:
         self.roots = [_load_root(self.loader, p) for p in paths]
         self.modules = dict(self.loader._cache)
         self.texts = {**self.loader.disk_reads, **virtual}
-        self._tokens: dict[str, list] = {}
+        self._sources: dict[str, _Source] = {}
 
-    def tokens(self, path: str) -> list:
-        if path not in self._tokens:
-            self._tokens[path] = lex(self.texts[path], path)
-        return self._tokens[path]
+    def source(self, path: str) -> _Source:
+        if path not in self._sources:
+            self._sources[path] = _Source(self.texts[path], path)
+        return self._sources[path]
 
     def _imported(self, module, use):
         try:
@@ -231,8 +317,8 @@ def context(paths: list[str], *, sources: dict[str, str] | None = None,
     header = None
     if component is not None:
         module, comp = components[component]
-        header = _header(closure.texts[module.path], closure.tokens(module.path),
-                         comp.line, _nth_on_line(module.program.components, comp))
+        header = _header(closure.source(module.path), comp.line,
+                         _nth_on_line(module.program.components, comp))
         wanted += [("provides", k, s, module) for k, s, _ in comp.provides]
         wanted += [("requires", k, s, module) for k, s, _ in comp.requires]
     else:
@@ -253,8 +339,8 @@ def context(paths: list[str], *, sources: dict[str, str] | None = None,
             continue
         owner, decl = found
         drawn.add(owner.path)
-        text = _block(closure.texts[owner.path], closure.tokens(owner.path),
-                      decl.line, _nth_on_line(owner.program.services, decl))
+        text = _block(closure.source(owner.path), decl.line,
+                      _nth_on_line(owner.program.services, decl))
         clause_key = key if role != "declared" else (
             entry["providers"][0]["key"] if entry["providers"] else None)
         entries.append({
