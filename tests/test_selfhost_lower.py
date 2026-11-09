@@ -8679,12 +8679,17 @@ def test_a_shorthand_fn_body_is_checked_at_the_return_position(admit):
 def test_verified_totality_matches_the_reference(admit):
     # `_check_verified_totality` refuses any `verified fn` in a direct or mutual
     # recursion cycle, at the declaration line, with its own sentence and G7.
+    # The shorthand spelling rides the SAME graph: its desugared return is what
+    # records the edge, so the cycle is seen there too.
     direct = ("verified fn recurse(n: Int) -> Int {\n"
               "  return recurse(n - 1)\n}\n")
     mutual = ("verified fn a(n: Int) -> Int {\n  return b(n)\n}\n"
               "fn b(n: Int) -> Int {\n  return a(n)\n}\n")
+    direct_short = "verified fn recurse(n: Int) -> Int = recurse(n - 1)\n"
+    mutual_short = ("verified fn a(n: Int) -> Int = b(n)\n"
+                    "fn b(n: Int) -> Int = a(n)\n")
     plain = "fn recurse(n: Int) -> Int {\n  return recurse(n - 1)\n}\n"
-    for src in (direct, mutual):
+    for src in (direct, mutual, direct_short, mutual_short):
         ref_tag, ref_msg = _ref(src)
         assert ref_tag == "G7", (ref_tag, ref_msg)
         assert admit(src) == "G7|" + ref_msg

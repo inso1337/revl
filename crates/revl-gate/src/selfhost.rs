@@ -37542,9 +37542,11 @@ fn own_fns_walk(ts: Vec<Token>, i: i64, acc: Vec<FnOwn>) -> Vec<FnOwn> {
     if (t.text == "extern") {
         return own_fns_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, acc);
     }
-    let public_fn = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
+    let pub_plain = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
+    let pub_verified = (((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "verified")) && atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "fn"));
+    let public_fn = (pub_plain || pub_verified);
     if ((t.text == "fn") || public_fn) {
-        let fi = if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i };
+        let fi = if public_fn { if pub_plain { (i).checked_add(1i64).expect("revl: Int overflow") } else { (i).checked_add(2i64).expect("revl: Int overflow") } } else { i };
         return own_fns_walk(ts.clone(), p_fn(ts.clone(), fi.clone(), empty_prog()).i, own_collect_fn(ts.clone(), fi.clone(), acc));
     }
     if at_pub_prefix(&ts, i) {
@@ -38695,9 +38697,11 @@ fn fns_walk(ts: Vec<Token>, i: i64, acc: String, cases: Vec<Bind>, colored: &[St
     if (t.text == "extern") {
         return fns_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones);
     }
-    let public_fn = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
+    let pub_plain = ((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
+    let pub_verified = (((t.text == "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "verified")) && atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "fn"));
+    let public_fn = (pub_plain || pub_verified);
     if ((t.text == "fn") || public_fn) {
-        let fi = if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i };
+        let fi = if public_fn { if pub_plain { (i).checked_add(1i64).expect("revl: Int overflow") } else { (i).checked_add(2i64).expect("revl: Int overflow") } } else { i };
         let f = lir_function_named(ts.clone(), fi.clone(), cases.clone(), public_fn.clone(), colored, sm.clone(), al.clone(), String::from(""), false, fnty);
         let acc2 = if (f.js == "") { acc.clone() } else { if (acc == "") { f.js } else { (acc.revl_concat(",")).revl_concat(&f.js) } };
         let mname = mget_str(monos.clone(), tkc(&ts, (fi).checked_add(1i64).expect("revl: Int overflow")).text);

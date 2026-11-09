@@ -131,6 +131,10 @@ fn public_and_cached_functions_preserve_reference_signatures() {
         ("pub fn f() -> Int { return 1 }\n", "pub fn f() -> Int"),
         ("fn f() -> Int cache pure { return 1 }\n", "fn f() -> Int"),
         ("pub fn f() -> Int cache pure { return 1 }\n", "pub fn f() -> Int"),
+        // issue #3107: the reference's prefix is `pub ` + `verified `, and the
+        // self-host walker reaches the `fn` through both.
+        ("verified fn f() -> Int { return 1 }\n", "verified fn f() -> Int"),
+        ("pub verified fn f() -> Int { return 1 }\n", "pub verified fn f() -> Int"),
     ] {
         let found = table(source);
         let symbol = found.get("f").unwrap();

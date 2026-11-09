@@ -6972,10 +6972,22 @@ fn signature(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option<Str
         SymbolKind::Service => Some(format!("service {}", decl.name)),
         SymbolKind::Component => Some(format!("component {}", decl.name)),
         SymbolKind::Fn => {
-            let public = decl.fn_at.checked_sub(1)
-                .and_then(|index| tokens.get(index))
-                .is_some_and(|token| token.kind == "kw" && token.text == "pub");
-            let prefix = if public { "pub " } else { "" };
+            // `pub fn`, `verified fn` and `pub verified fn` are the reference's
+            // spellings (`analysis.py`'s `prefix = "pub " + "verified "`), and
+            // the `verified` prefix sits between `pub` and `fn`.
+            let before = decl.fn_at.checked_sub(1)
+                .and_then(|index| tokens.get(index));
+            let verified = before.is_some_and(|token| token.kind == "kw" && token.text == "verified");
+            let public = before.is_some_and(|token| token.kind == "kw" && token.text == "pub")
+                || (verified
+                    && decl.fn_at.checked_sub(2)
+                        .and_then(|index| tokens.get(index))
+                        .is_some_and(|token| token.kind == "kw" && token.text == "pub"));
+            let prefix = format!(
+                "{}{}",
+                if public { "pub " } else { "" },
+                if verified { "verified " } else { "" }
+            );
             Some(format!("{prefix}fn {}", callable_tail(tokens, raw, decl)?))
         }
         SymbolKind::Extern => {
@@ -7166,6 +7178,10 @@ fn public_and_cached_functions_preserve_reference_signatures() {
         ("pub fn f() -> Int { return 1 }\n", "pub fn f() -> Int"),
         ("fn f() -> Int cache pure { return 1 }\n", "fn f() -> Int"),
         ("pub fn f() -> Int cache pure { return 1 }\n", "pub fn f() -> Int"),
+        // issue #3107: the reference's prefix is `pub ` + `verified `, and the
+        // self-host walker reaches the `fn` through both.
+        ("verified fn f() -> Int { return 1 }\n", "verified fn f() -> Int"),
+        ("pub verified fn f() -> Int { return 1 }\n", "pub verified fn f() -> Int"),
     ] {
         let found = table(source);
         let symbol = found.get("f").unwrap();

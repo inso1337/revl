@@ -33122,9 +33122,14 @@ fn own_fns_walk(ts: List[Token], i: Int, acc: List[FnOwn]) -> List[FnOwn] {
   }
   if (t.text == "type") { return own_fns_walk(ts, type_decl_end(ts, i + 1), acc) }
   if (t.text == "extern") { return own_fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
-  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  // `pub fn` and `pub verified fn` alike are public (issue #3107): the
+  // `verified` prefix sits between the visibility prefix and the `fn`, so the
+  // fn keyword is `i + 2` in that spelling.
+  let pub_plain = t.text == "pub" && atw(ts, i + 1, "fn")
+  let pub_verified = t.text == "pub" && atw(ts, i + 1, "verified") && atw(ts, i + 2, "fn")
+  let public_fn = pub_plain || pub_verified
   if (t.text == "fn" || public_fn) {
-    let fi = public_fn ? i + 1 : i
+    let fi = public_fn ? (pub_plain ? i + 1 : i + 2) : i
     return own_fns_walk(ts, p_fn(ts, fi, empty_prog()).i, own_collect_fn(ts, fi, acc))
   }
   if (at_pub_prefix(ts, i)) { return own_fns_walk(ts, i + 1, acc) }
@@ -34354,9 +34359,14 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
     return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
   if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
-  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  // `pub fn` and `pub verified fn` alike are public (issue #3107): the
+  // `verified` prefix sits between the visibility prefix and the `fn`, so the
+  // fn keyword is `i + 2` in that spelling.
+  let pub_plain = t.text == "pub" && atw(ts, i + 1, "fn")
+  let pub_verified = t.text == "pub" && atw(ts, i + 1, "verified") && atw(ts, i + 2, "fn")
+  let public_fn = pub_plain || pub_verified
   if (t.text == "fn" || public_fn) {
-    let fi = public_fn ? i + 1 : i
+    let fi = public_fn ? (pub_plain ? i + 1 : i + 2) : i
     let f = lir_function_named(ts, fi, cases, public_fn, colored, sm, al, "", false, fnty)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
     let mname = mget_str(monos, tkc(ts, fi + 1).text)
