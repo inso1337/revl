@@ -944,7 +944,15 @@ def revl_declare_model_decision(**members) -> None:
     (`origins`), what the candidates were and which was taken (`candidates`,
     `chosen`), how it was asked (`sampling`), under which rule
     (`policy_digest`), how far down the ladder and why (`fallback_depth`,
-    `fallback_reason`), and where it ran (`role`, `residence`).
+    `fallback_reason`), where it ran (`role`, `residence`), and how much of the
+    model's reasoning span the host returned (`reasoning`: its `visibility`, a
+    `tokens` count tagged `host-reported`, and a `digest` of returned reasoning
+    text only when the origins permit one).
+
+    `reasoning` is REQUIRED by envelope 3.0. A host that reported no span says
+    `none-reported` rather than omitting the member, because an omitted member
+    reads exactly like a run that had nothing to hide. The text itself is never
+    declared; only its digest, and only over a non-disclosing input.
 
     It may NOT name `component`, `step_index` or `outcome`: the crossing is the
     one the recorder just made and the outcome is the one the validation seam

@@ -365,10 +365,13 @@ def test_compare_lists_each_sides_decisions_and_still_says_what_it_cannot(tmp_pa
         assert decision["model"] == "openai:gpt-4o-2024-08-06"
         assert decision["attempts"] == 1 and decision["outcome"] == "validated"
     assert doc["delta"]["modelDecisions"] == {"left": 1, "right": 1}
-    # the honest half is unchanged in shape and now precise in wording
+    # the honest half is unchanged in shape and now precise in wording; since
+    # envelope 3.0 it names which entries had opaque reasoning spans and how
+    # many, and still never what they contained
     assert [e["axis"] for e in doc["notComparable"]] == \
         ["decisionCause", "counterfactual"]
-    assert "no prompt/response digest" in doc["notComparable"][0]["why"]
+    assert "opaque" in doc["notComparable"][0]["why"]
+    assert "never what the span contained" in doc["notComparable"][0]["why"]
     text = branch_mod.render(doc)
     assert "1 model decision(s)" in text
     assert "model openai:gpt-4o-2024-08-06" in text
