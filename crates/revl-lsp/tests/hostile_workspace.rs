@@ -51,7 +51,7 @@ fn the_server_does_not_run_a_json_module_from_the_repository_it_opens() {
     let workspace = Scratch::new();
     workspace.write("json.py", SHADOW);
 
-    let published = reference.drive_clean_document(&workspace.path);
+    let published = reference.drive_clean_document(&workspace.path, None);
 
     assert!(
         !workspace.ran("HIJACKED"),
@@ -82,7 +82,7 @@ fn the_server_does_not_import_a_revl_package_from_the_repository_it_opens() {
     let workspace = Scratch::new();
     workspace.write("revl/__init__.py", SHADOW);
 
-    let published = reference.drive_clean_document(&workspace.path);
+    let published = reference.drive_clean_document(&workspace.path, None);
 
     assert!(
         !workspace.ran("HIJACKED"),
@@ -147,16 +147,65 @@ fn the_worker_source_does_not_import_a_json_module_from_its_working_directory() 
 
 // ----------------------------------------------------------------- harness
 
+// The launch flag itself, pinned independently of the worker source's own
+// scrub: the "interpreter" is a wrapper that records its argv and then hands
+// off to the real python, so deleting `command.arg("-P")` in engine.rs fails
+// here even though the worker source still defends itself.
+#[cfg(unix)]
+#[test]
+fn the_fallback_launch_passes_pythonsafepath() {
+    let Some(reference) = Reference::new() else {
+        return;
+    };
+    let workspace = Scratch::new();
+    let argv = workspace.path().join("argv.txt");
+    let wrapper = workspace.path().join("python-wrapper");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv:?}\nexec {:?} \"$@\"\n",
+            reference.python
+        ),
+    )
+    .unwrap();
+    make_executable(&wrapper);
+
+    let published = reference.drive_clean_document(&workspace.path, Some(&wrapper));
+
+    let recorded =
+        std::fs::read_to_string(&argv).expect("the fallback launch did not go through the wrapper");
+    let args: Vec<&str> = recorded.lines().collect();
+    let flag = args
+        .iter()
+        .position(|arg| *arg == "-c")
+        .expect("the worker source is launched with -c");
+    assert!(
+        args[..flag].contains(&"-P"),
+        "the fallback launch must pass -P (PYTHONSAFEPATH) ahead of -c, \
+         got {:?} (issue #3158, regression of #317)",
+        &args[..flag]
+    );
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert!(
+        published[0].is_empty(),
+        "a clean document came back with diagnostics through the wrapper: {:?}",
+        published[0]
+    );
+}
+
 struct Reference {
     root: PathBuf,
     python: String,
 }
 
 impl Reference {
-    /// The reference interpreter must be able to `import revl`; without one the
-    /// worker cannot run at all, so the test reports the reason and skips
-    /// rather than passing vacuously. CI sets `REVL_LSP_PYTHON` to its own
-    /// python and `PYTHONPATH=src`, so it always runs there.
+    /// The reference is this crate's engine AND its oracle, so a machine that
+    /// cannot import `revl` cannot verify anything here. That is reported, not
+    /// papered over: the test fails with the reason unless the run explicitly
+    /// opts out with `REVL_LSP_ALLOW_NO_REFERENCE=1` (the "skip with a stated
+    /// reason, never a hollow green" discipline the crate's other oracle tests
+    /// follow). CI sets `REVL_LSP_PYTHON` to its own python and
+    /// `PYTHONPATH=src`, so it always runs there.
     fn new() -> Option<Self> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -167,26 +216,30 @@ impl Reference {
             .arg("import revl.lsp")
             .env("PYTHONPATH", root.join("src"))
             .output();
-        match probe {
-            Ok(output) if output.status.success() => Some(Reference { root, python }),
-            Ok(output) => {
-                eprintln!(
-                    "SKIPPED: no reference front end to run the worker with: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                None
-            }
-            Err(err) => {
-                eprintln!("SKIPPED: cannot run `{python}`: {err}");
-                None
-            }
+        let reason = match probe {
+            Ok(output) if output.status.success() => return Some(Reference { root, python }),
+            Ok(output) => format!(
+                "no reference front end to run the worker with: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(err) => format!("cannot run `{python}`: {err}"),
+        };
+        if std::env::var("REVL_LSP_ALLOW_NO_REFERENCE").is_ok() {
+            eprintln!("SKIPPED: {reason}");
+            return None;
         }
+        panic!(
+            "{reason}\n\
+             set REVL_LSP_PYTHON to an interpreter that can `import revl`, \
+             or REVL_LSP_ALLOW_NO_REFERENCE=1 to skip this crate's oracle."
+        );
     }
 
     /// Start the binary with `workspace` as the working directory (what an
     /// editor does when it opens a folder) and drive one clean document.
+    /// `python` overrides `REVL_LSP_PYTHON` for the launch under test.
     /// Returns the diagnostics of each `publishDiagnostics`.
-    fn drive_clean_document(&self, workspace: &Path) -> Vec<Vec<Value>> {
+    fn drive_clean_document(&self, workspace: &Path, python: Option<&Path>) -> Vec<Vec<Value>> {
         let messages = vec![
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
             json!({"jsonrpc": "2.0", "method": "textDocument/didOpen",
@@ -203,8 +256,11 @@ impl Reference {
             input.extend_from_slice(&body);
         }
 
+        let interpreter = python
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(&self.python));
         let mut child = Command::new(env!("CARGO_BIN_EXE_revl-lsp"))
-            .env("REVL_LSP_PYTHON", &self.python)
+            .env("REVL_LSP_PYTHON", &interpreter)
             .env("PYTHONPATH", self.root.join("src"))
             .current_dir(workspace)
             .stdin(Stdio::piped())
@@ -303,4 +359,12 @@ fn parse_stream(bytes: &[u8]) -> Vec<Value> {
         rest = &rest[split + 4 + length..];
     }
     messages
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
 }
