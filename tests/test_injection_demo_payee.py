@@ -43,9 +43,10 @@ def test_a_payee_from_the_supplier_book_is_admitted_with_a_mail_memo():
 
 
 def test_the_refusal_rests_on_the_untrusted_return_alone(tmp_path):
-    source = (DEMO / "pay_from_mail.rvl").read_text()
+    source = (DEMO / "pay_from_mail.rvl").read_text(encoding="utf-8")
     marked = "fn read_inbox() -> Untrusted[Str]"
     assert source.count(marked) == 1
     unmarked = tmp_path / "pay_from_mail_unmarked.rvl"
-    unmarked.write_text(source.replace(marked, "fn read_inbox() -> Str"))
+    unmarked.write_text(source.replace(marked, "fn read_inbox() -> Str"),
+                        encoding="utf-8")
     compile_files([str(unmarked)])
