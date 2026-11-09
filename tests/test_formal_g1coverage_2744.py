@@ -8,9 +8,9 @@ resolution VISITS every statement of a real component body. G1 is enforced
 during lowering, so the walk that resolves roots is the lowering walk.
 
 `RevL.G1Coverage.coversAccessBodyB` states the obligation over
-`RevL.Syntax.Body`: every scope of a body is opened, every statement of it
-visited, and every declared parameter seeded into the scope's own
-environment. This module pins the differential-oracle half, the
+`RevL.Syntax.Body`: every scope of a body is opened, as many of its
+statements visited as the scope declares, and every declared parameter seeded
+into the scope's own environment. This module pins the differential-oracle half, the
 `G1B`/`G1P`/`G1W` rows and the `G1C` verdicts that `formal/harness/diff_corpus.py`
 adds.
 
@@ -158,7 +158,7 @@ def test_the_reference_decides_every_exported_scope(harness, rows, verdicts):
 
 def test_the_decider_is_not_a_constant(harness):
     """`coversAccessB` is a recursion over the scope list. Each of the three
-    conjuncts must move the verdict on its own — otherwise a row that read
+    conjuncts must move the verdict on its own, otherwise a row that read
     only one of them would pass here."""
     body = [("activation", 2, []), ("k.m", 3, ["x"])]
     assert [v for _l, v in harness._g1_covers(body, list(body))] == \
@@ -219,7 +219,7 @@ def test_the_ratchet_bites_when_nothing_was_observed(harness):
         mp.setattr(harness, "_G1_COVERAGE_CENSUS", {"active": 0})
         findings = harness.g1coverage_coverage()
     assert findings == [
-        "g1 coverage: the observation ran over no ACTIVE file — the "
+        "g1 coverage: the observation ran over no ACTIVE file, the "
         "lowering recorder captured nothing, so the row is its own blind "
         "spot"]
 
@@ -227,7 +227,7 @@ def test_the_ratchet_bites_when_nothing_was_observed(harness):
         mp.setattr(harness, "_G1_COVERAGE_CENSUS", {"active": 1, "scopes": 0})
         findings = harness.g1coverage_coverage()
     assert findings == [
-        "g1 coverage: the observation recorded no SCOPE at all — the "
+        "g1 coverage: the observation recorded no SCOPE at all, the "
         "`lower._note_access_visit` seam this pins did not fire, so a `fail` "
         "row would be reporting a coverage failure that is really an "
         "instrument failure"]
@@ -238,7 +238,7 @@ def test_the_ratchet_bites_without_any_row_at_all(harness):
         mp.setattr(harness, "_G1_COVERAGE_ROWS", {})
         findings = harness.g1coverage_coverage()
     assert findings == [
-        "g1 coverage: no G1B/G1P/G1W rows at all — the row would decide "
+        "g1 coverage: no G1B/G1P/G1W rows at all, the row would decide "
         "nothing and agree vacuously"]
 
 

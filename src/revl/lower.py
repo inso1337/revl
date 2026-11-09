@@ -14442,8 +14442,8 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
 # separate walk function to wrap the way the G9 row wraps
 # `taint._walk_component_methods`. The obligation the coverage theorem states
 # is about the walk that lowering IS: every scope a component body induces is
-# opened and every statement of it is lowered, and therefore has its names
-# resolved. `formal/harness/diff_corpus.py` observes exactly that by
+# opened and each of its top-level statements is lowered, and therefore has
+# its names resolved. `formal/harness/diff_corpus.py` observes exactly that by
 # installing a log here for the duration of ONE `compile_files` call.
 #
 # None in production: every call site is one branch and a module-global

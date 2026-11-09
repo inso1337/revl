@@ -3564,7 +3564,8 @@ def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
 # "G1 undeclared access -> `_lower_postfix` name resolution"), so the walk that
 # resolves roots is the lowering walk itself. `RevL.G1Coverage.coversAccessBodyB`
 # states the obligation over `RevL.Syntax.Body`: every scope a body induces is
-# opened, every statement of it visited, and every declared parameter seeded
+# opened, as many statements of it visited as the scope declares, and every
+# declared parameter seeded
 # into the scope's own environment. This section is the corpus half.
 #
 # THE TWO SIDES ARE INDEPENDENT OBSERVATIONS.
@@ -3649,7 +3650,7 @@ _G1_COVERED: list = []
 def g1_body_scopes(rel: str, prog) -> tuple[dict, list[str]]:
     """The scopes of every component body in `prog`, as the PARSE sees them:
     `{component: [(label, stmts, [param name, ...])]}` in
-    `RevL.Syntax.Body.scopes` order — the activation first and only when it
+    `RevL.Syntax.Body.scopes` order, the activation first and only when it
     has a statement, then one scope per provide method, in declaration order.
 
     Independent of the walk: nothing here reads the checker's output, so the
@@ -3802,8 +3803,8 @@ def g1coverage_rows(rel: str, prog) -> list[str]:
 def _g1_covers(body: list, walk: list) -> list[tuple[str, str]]:
     """`RevL.G1Coverage.coversAccessB` at the carried columns, respelled in
     Python so the reference's verdict is an INDEPENDENT recomputation of the
-    three conjuncts the theorem names — label, statement count and declared
-    parameters — out to the longer of the two lists, so a walk that opened
+    three conjuncts the theorem names, label, statement count and declared
+    parameters, out to the longer of the two lists, so a walk that opened
     FEWER scopes still yields a named `fail` for the missing one."""
     out: list[tuple[str, str]] = []
     for i in range(max(len(body), len(walk))):
@@ -3839,22 +3840,22 @@ def g1coverage_coverage() -> list[str]:
     COVERAGE OF THE ACCESS WALK, which is the half the `G1` verdict cannot
     state. The ratchet has to fail in each of these ways:
 
-      * the corpus must EXERCISE the row — at least one component with a
+      * the corpus must EXERCISE the row, at least one component with a
         non-empty activation scope, at least one provide scope, and at least
-        one provide scope declaring a parameter — and the observation must
+        one provide scope declaring a parameter, and the observation must
         have RUN, so a corpus that stopped reaching the walk fails here
         instead of passing vacuously;
       * the observation must have SUCCEEDED for every component the parse
         says has scopes: a component with scopes and no recorded visit is
         `missed-G1-coverage-observation`, this harness's own blind spot; and
       * the verdict must FLIP under each of four SHORTENINGS of the recorded
-        walk — drop a scope, bump a count, strip a parameter, and add a scope
+        walk, drop a scope, bump a count, strip a parameter, and add a scope
         the body does not have. `RevL.G1Coverage` proves each shortening is a
         distinct way to fail; this is the corpus half, and a row that
         returned a constant fails all four.
 
-    A verdict that comes out `fail` on the corpus — the walk genuinely having
-    skipped a scope — is NOT reported here: it is `checker_alignment`'s
+    A verdict that comes out `fail` on the corpus, the walk genuinely having
+    skipped a scope, is NOT reported here: it is `checker_alignment`'s
     `missed-G1-coverage` bucket. This ratchet is evidence the row BITES; the
     bucket is the row's verdict.
 
@@ -3864,18 +3865,18 @@ def g1coverage_coverage() -> list[str]:
     findings.extend(f"g1 coverage: {p}"
                     for p in _G1_COVERAGE_CENSUS.get("findings", []))
     if not _G1_COVERAGE_ROWS:
-        findings.append("g1 coverage: no G1B/G1P/G1W rows at all — the row "
+        findings.append("g1 coverage: no G1B/G1P/G1W rows at all, the row "
                         "would decide nothing and agree vacuously")
         return findings
     if not _G1_COVERAGE_CENSUS.get("active"):
         findings.append(
-            "g1 coverage: the observation ran over no ACTIVE file — the "
+            "g1 coverage: the observation ran over no ACTIVE file, the "
             "lowering recorder captured nothing, so the row is its own blind "
             "spot")
         return findings
     if not _G1_COVERAGE_CENSUS.get("scopes"):
         findings.append(
-            "g1 coverage: the observation recorded no SCOPE at all — the "
+            "g1 coverage: the observation recorded no SCOPE at all, the "
             "`lower._note_access_visit` seam this pins did not fire, so a "
             "`fail` row would be reporting a coverage failure that is really "
             "an instrument failure")
@@ -3891,12 +3892,12 @@ def g1coverage_coverage() -> list[str]:
     if any_activation and not _G1_COVERAGE_CENSUS.get("activation_visits"):
         findings.append(
             "g1 coverage: components declare activation statements but the "
-            "`lower._note_access_visit` activation call site recorded none — "
+            "`lower._note_access_visit` activation call site recorded none, "
             "an instrument failure, not a walk that skipped them")
     if any_provide and not _G1_COVERAGE_CENSUS.get("scope_opens"):
         findings.append(
             "g1 coverage: components declare provide scopes but the "
-            "`lower._note_access_scope` call site recorded none — an "
+            "`lower._note_access_scope` call site recorded none, an "
             "instrument failure, not a walk that skipped them")
     acts = provs = params = 0
     drop_scope = bump = strip = extra = 0
@@ -3937,19 +3938,19 @@ def g1coverage_coverage() -> list[str]:
     if not drop_scope:
         findings.append(
             "g1 coverage: dropping a scope from every recorded walk changes "
-            "no verdict — the row does not read the scope list")
+            "no verdict, the row does not read the scope list")
     if not bump:
         findings.append(
             "g1 coverage: bumping a visited-statement count changes no "
-            "verdict — the row does not read the count")
+            "verdict, the row does not read the count")
     if not strip:
         findings.append(
-            "g1 coverage: stripping a parameter changes no verdict — the row "
+            "g1 coverage: stripping a parameter changes no verdict, the row "
             "does not read the parameters")
     if not extra:
         findings.append(
             "g1 coverage: adding a scope the body does not have changes no "
-            "verdict — the row does not read the label list")
+            "verdict, the row does not read the label list")
     if not findings:
         print(f"g1 coverage: {len(_G1_COVERAGE_ROWS)} files over "
               f"{_G1_COVERAGE_CENSUS['components']} components "
@@ -3959,7 +3960,7 @@ def g1coverage_coverage() -> list[str]:
               f"refused={_G1_COVERAGE_CENSUS.get('refused', 0)} "
               f"no-walk={_G1_COVERAGE_CENSUS.get('no_walk', 0)}, each verdict "
               "flipping under dropping a scope, bumping a count, stripping a "
-              "parameter and adding a scope — coverage of the checker's "
+              "parameter and adding a scope, coverage of the checker's "
               "lowering walk ON THE CORPUS")
     return findings
 
@@ -6612,8 +6613,8 @@ class Verdicts(NamedTuple):
     body the parse enumerates and seeds every origin-carrying parameter — the
     obligation `RevL.G9Coverage.coversBodyB` states, issue #2108), and `g1cov`
     G1C rows (G1 declared-access coverage: the lowering walk the checker
-    PERFORMED visits every statement of the body the parse enumerates and
-    seeds every declared parameter of each scope — the obligation
+    PERFORMED visits as many statements of each scope as the body the parse
+    enumerates declares, and seeds every declared parameter of each scope, the obligation
     `RevL.G1Coverage.coversAccessBodyB` states, issue #2744), and `ev`
     EV rows (G4 emission value: an emission is reached only by a call, never
     as a function value, issues #2842 and #2834)."""
@@ -6880,7 +6881,7 @@ def parse_verdicts(text: str) -> Verdicts:
             # G1 coverage (issue #2744): (file, component, scope) -> ok|fail,
             # the projection of `coversAccessBodyB` per scope, as `GC` is for
             # G9. `fail` is coverage VIOLATED: the lowering walk did not visit
-            # every statement of a scope the body declares, or seeded a
+            # as many statements as a scope the body declares, or seeded a
             # different parameter set than that scope declares.
             g1cov[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
         else:
@@ -7310,7 +7311,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # G1C rows: declared-access coverage (issue #2744), the reference's own
     # verdict, recomputed independently from the three export rows in Python.
     # `G1B`/`G1P` are the body as the PARSE sees it; `G1W` is the lowering walk
-    # the checker PERFORMED. Same projection as GC — per scope, out to the
+    # the checker PERFORMED. Same projection as GC: per scope, out to the
     # longer of the two lists, so a walk that opened FEWER scopes still yields
     # a named `fail` for the missing one.
     g1cov: dict[tuple[str, str, str], str] = {}
@@ -8300,7 +8301,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # G1 DECLARED-ACCESS COVERAGE (issue #2744), on the same axis and with
         # the same split. A `fail` here is the lowering walk having SKIPPED a
         # scope or a statement the body has (or seeded a scope a different
-        # parameter set than it declares) — G1's name resolution never visited
+        # parameter set than it declares): G1's name resolution never visited
         # it, so its undeclared reads were never refused. That is fatal on its
         # own bucket. An UNOBSERVED walk takes the other bucket and never this
         # one: when the parse gives a component scopes and the recorder
@@ -8411,10 +8412,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     g1_covered_scopes = sum(1 for k in v.g1cov if k[0] in g1_covered)
     print(f"G1 coverage of the access walk (issue #2744; a second axis over "
           f"the files above, not a bucket and outside the total): "
-          f"{len(_G1_COVERED)} file(s) over {g1_covered_scopes} scope(s) agree "
-          f"— every scope the bodies have is one the checker's lowering walk "
-          f"visits, with the statement count and the declared parameters it "
-          f"seeds. The two `missed-G1-coverage*` buckets above are the "
+          f"{len(_G1_COVERED)} file(s) over {g1_covered_scopes} scope(s) "
+          f"agree. Every scope the bodies have is one the checker's lowering "
+          f"walk visits, with the statement count and the declared parameters "
+          f"it seeds. The two `missed-G1-coverage*` buckets above are the "
           f"disagreements.")
 
     print(f"no-manifest ({len(componentless)} files parsed with no component, "

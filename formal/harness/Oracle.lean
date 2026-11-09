@@ -2973,12 +2973,12 @@ def gcVerdicts (p : String) (rs : G9CoverageRows) : String := Id.run do
 
 end G9Coverage
 
-/-! ### The `G1C` row — G1 declared-access coverage (issue #2744)
+/-! ### The `G1C` row: G1 declared-access coverage (issue #2744)
 
 `STATUS.md` carried G1 as `partial` because `RevL.G1.declared_only_access`
-proves the RULE — an undeclared access cannot be written — and the `G1` row
+proves the RULE, an undeclared access cannot be written, and the `G1` row
 below decides that rule over each component's access roots, but neither says
-the checker's name resolution VISITS every statement of a real body. G1 is
+the checker's name resolution VISITS the statements of a real body. G1 is
 enforced by name resolution during lowering, so the walk that resolves roots
 is the lowering walk itself; `RevL.G1Coverage` states the coverage
 obligation over `RevL.Syntax.Body`, and this section is the oracle bridge
@@ -2987,14 +2987,14 @@ that makes the differential row bite.
 Three kinds of row, deliberately **not** folded into one, because the two
 sides are independent observations:
 
-* `G1B` — a component body's ACTIVATION, as the **parse** sees it: how many
+* `G1B`, a component body's ACTIVATION, as the **parse** sees it: how many
   statements the activation declares. `0` means the body has no activation
   scope at all, which `Body.scopes` reads as no scope.
-* `G1P` — one provide METHOD of that body, as the **parse** sees it: its
+* `G1P`, one provide METHOD of that body, as the **parse** sees it: its
   block key, its method name, how many statements its body declares and its
   declared parameter NAMES. Names only: for G1 every declared parameter is a
   local of its own scope whatever origin it carries.
-* `G1W` — one scope the **checker's lowering walk actually visited**,
+* `G1W`, one scope the **checker's lowering walk actually visited**,
   observed by running the checker: its label, how many statements of it the
   walk dispatched, and the parameter names it seeded into the scope's own
   environment.
@@ -3065,8 +3065,8 @@ def parseG1W (f : List String) : Option G1WRow :=
 
 /-- The body a `G1B` row and its `G1P` rows describe, as `RevL.Syntax.Body`.
 The statements are placeholders and the parameter QUALIFIERS are `plain`:
-what the row observes is the scope SHAPE — which scopes, how many statements,
-which declared parameter names — and both projections read exactly those
+what the row observes is the scope SHAPE, which scopes, how many statements,
+which declared parameter names, and both projections read exactly those
 columns. A `G1B` row carrying `0` produces a body with no activation scope,
 so `Body.scopes`'s "the activation first, and only when it has a statement"
 is exercised rather than assumed. -/
@@ -3092,7 +3092,7 @@ def accessCoverageRowB (r : G1BRow) (ps : List G1PRow)
   RevL.G1Coverage.coversAccessBodyB (walkOfAccessRows ws) (bodyOfAccess r ps)
 
 /-- `accessCoverageRowB` is exactly the theorem's three conjuncts at the
-carried columns — so the procedure the oracle runs and the judgment
+carried columns, so the procedure the oracle runs and the judgment
 `RevL.G1Coverage` proves are the same statement. -/
 theorem accessCoverageRowB_iff (r : G1BRow) (ps : List G1PRow)
     (ws : List G1WRow) :
@@ -3118,7 +3118,7 @@ def parseG1CoverageRows (fields : List (List String)) : G1CoverageRows :=
     g1w := fields.filterMap parseG1W }
 
 /-- One `G1C` row per scope of each component the export carries, in the
-body's order and out to the longer of the body's scope list and the walk's —
+body's order and out to the longer of the body's scope list and the walk's, 
 so a walk that opened FEWER scopes than the body still produces a row for the
 missing one, with `fail`, and the missing scope is *named* rather than
 silently absent. The per-scope verdict is `Walked.matches`, the same

@@ -1,23 +1,23 @@
 import RevL.Typing
 
 /-!
-# G1Coverage — the `G1` **coverage** row (issue #2744)
+# G1Coverage: the `G1` **coverage** row (issue #2744)
 
 `formal/STATUS.md` carried G1 as `partial` for one reason that could be
 worked: `RevL.G1.declared_only_access` says an undeclared access cannot be
 *written*, and since issue #1807 `RevL.G1Access` decides the rule over each
 component's access roots on the corpus (`GA` rows, the `G1` verdict, 21
 `agree-G1` documents). Neither says that the checker's name resolution
-VISITS every statement of a real component body. A body statement the walk
+VISITS the statements of a real component body. A body statement the walk
 never lowered is a statement whose undeclared reads are never refused, and
 the corpus row would agree about it vacuously.
 
 G9 had the same shape of gap and closed it over `RevL.Syntax.Body`
 (issue #2108, `RevL.G9Coverage.coversBodyB`, the `GB`/`GP`/`GW`/`GC` rows).
 This file states G1's coverage obligation the same way, over the same
-`Body`: every scope a body induces is opened by the access walk, every
-statement of it is visited, and every declared parameter is seeded into the
-scope's own environment, so the per-scope classification the rule will
+`Body`: every scope a body induces is opened by the access walk, as many of
+its statements are visited as the scope declares, and every declared parameter
+is seeded into the scope's own environment, so the per-scope classification the rule will
 later compare against has something to be per-scope about.
 
 ## The row, and the route it takes
@@ -56,7 +56,7 @@ instrument failure rather than as a checker regression.
 
 **Two limits of the observation, stated rather than smuggled.**
 
-* The count is of a scope's **top-level statements** — the list `Body.scopes`
+* The count is of a scope's **top-level statements**, the list `Body.scopes`
   carries, which is the flat `Stmt` list L0 can express. A statement inside an
   `if`/`while`/`for` body is lowered by the scope's own recursion and is not
   counted as a second statement. A lowering bug that skips a NESTED statement
@@ -71,12 +71,12 @@ instrument failure rather than as a checker regression.
 
 ## The three conjuncts, and why each one is here
 
-* the scope's LABEL — a walk that never opened a provide method's scope, or
+* the scope's LABEL, a walk that never opened a provide method's scope, or
   that reports a scope the body does not have, fails here;
-* the scope's STATEMENT COUNT — a walk that opened the scope and then lowered
+* the scope's STATEMENT COUNT, a walk that opened the scope and then lowered
   only some of its statements fails here. This is the general form of the
   historical activation-skip class of bug (a walk that stops early);
-* the scope's DECLARED PARAMETERS — a walk that seeded fewer (or other)
+* the scope's DECLARED PARAMETERS, a walk that seeded fewer (or other)
   parameters than the method declares would classify that method's locals
   against the wrong environment. This is the observation the second slice of
   the issue moves the root classification onto: the exporter's classification
@@ -109,7 +109,7 @@ classification cannot express. -/
 def Scope.paramNames (s : Scope) : List String := s.params.map (·.name)
 
 /-- A body's declared parameter names, by scope, read through
-`Body.scopeParams` — the projection the export and the oracle both carry. -/
+`Body.scopeParams`, the projection the export and the oracle both carry. -/
 def Body.scopeParamNames (b : Body) : List (List String) :=
   b.scopeParams.map fun lp => lp.2.map (·.name)
 
@@ -165,8 +165,8 @@ def scopeParamNames (ss : List Scope) : List (List String) :=
 /-! ## The deciders -/
 
 /-- The walk covers the scopes: scope by scope, in order, the walk's label,
-visited-statement count and seeded parameters all match. `false` — never
-vacuously `true` — when either list runs out, which is what makes a walk that
+visited-statement count and seeded parameters all match. `false`, never
+vacuously `true`, when either list runs out, which is what makes a walk that
 never opened a scope a failure rather than a prefix that happens to agree. -/
 def coversAccessB : List Walked → List Scope → Bool
   | [], [] => true
@@ -174,7 +174,7 @@ def coversAccessB : List Walked → List Scope → Bool
   | _, _ => false
 
 /-- The coverage obligation on a whole component body: the access walk covers
-the body's `Body.scopes` — the activation first (when it has a statement),
+the body's `Body.scopes`, the activation first (when it has a statement),
 then one scope per provide method, in declaration order. -/
 def coversAccessBodyB (w : List Walked) (b : Body) : Bool := coversAccessB w b.scopes
 
@@ -186,8 +186,8 @@ def walkOf (b : Body) : List Walked :=
   b.scopes.map fun s =>
     { scope := s.label, stmts := s.stmts.length, params := s.paramNames }
 
-/-- `coversAccessB` is exactly the conjunction of the three conjuncts — the
-walk's labels, its counts and its seeded parameters — against the scopes'. -/
+/-- `coversAccessB` is exactly the conjunction of the three conjuncts, the
+walk's labels, its counts and its seeded parameters, against the scopes'. -/
 theorem coversAccessB_iff (w : List Walked) (ss : List Scope) :
     coversAccessB w ss = true ↔
       walkLabels w = scopeLabels ss
@@ -362,7 +362,7 @@ theorem walkOf_is_the_walk :
          ⟨"Store.get", 2, ["payload", "count", "probe", "cert"]⟩] := by
   decide
 
-/-- The complete walk is admitted — the positive half, on concrete data, so the
+/-- The complete walk is admitted, the positive half, on concrete data, so the
 refusals below are not the only thing the decider can do. -/
 theorem coversAccessB_admits_the_full_walk :
     coversAccessBodyB (walkOf witnessBody) witnessBody = true
@@ -388,8 +388,8 @@ theorem coversAccessB_refuses_a_shortened_walk :
       witnessBody = false := by decide
 
 /-- A walk that opened the provide scope but seeded fewer parameters than the
-method declares — the shape that would classify that method's locals against
-another scope's environment — is refused. -/
+method declares, the shape that would classify that method's locals against
+another scope's environment, is refused. -/
 theorem coversAccessB_refuses_a_walk_that_strips_a_param :
     coversAccessBodyB
       [⟨"activation", 2, []⟩,
@@ -414,8 +414,8 @@ theorem coversAccessB_refuses_a_scope_the_body_does_not_have :
       activationlessBody = false := by decide
 
 /-- **Non-vacuity**: the row admits the complete walk on both witness bodies and
-refuses each way a walk can be wrong — a missing scope, a shortened scope, a
-stripped parameter, an extra parameter and a scope the body does not have — so
+refuses each way a walk can be wrong, a missing scope, a shortened scope, a
+stripped parameter, an extra parameter and a scope the body does not have, so
 a decider that answered constantly, in either direction, fails here. -/
 theorem g1Coverage_not_vacuous :
     coversAccessBodyB (walkOf witnessBody) witnessBody = true

@@ -478,8 +478,8 @@ import RevL
 #print axioms RevL.G9Coverage.g9Coverage_not_vacuous
 -- Issue #2744: G1 DECLARED-ACCESS COVERAGE. The `GA`/`G1` row decides the rule
 -- over a component's access roots; this states that the walk which resolves
--- those roots (the lowering walk) visits every scope and statement of a real
--- body and seeds every declared parameter of each scope. See
+-- those roots (the lowering walk) visits every scope, as many statements of
+-- each scope as it declares, and every declared parameter of each scope. See
 -- RevL/Theorems/G1Coverage.lean.
 #print axioms RevL.G1Coverage.coversAccessB_iff
 #print axioms RevL.G1Coverage.scopeParamNames_eq
