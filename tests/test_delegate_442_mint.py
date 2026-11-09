@@ -136,3 +136,16 @@ def test_plain_fn_call_inside_the_delegatee_is_untouched():
         "}\n", "t.rvl")
     body = _spec(ir["components"][0], "run")["body"]
     assert all(n.get("expr", {}).get("delegate") is None for n in body)
+
+
+def test_field_access_on_a_delegated_reference_is_refused():
+    # The handle is a lookup key, not a record: reading its backing state would
+    # hand the delegatee the session-side provider and bypass the ledger.
+    msg = _refuse(
+        _FS
+        + "service Worker { fn run(d: Delegate[Fs]) -> Int }\n"
+        "component W provides worker: Worker {\n"
+        '  provide worker { fn run(d) { return d.provider } }\n'
+        "}\n")
+    assert "reads a field of a delegated reference" in msg
+    assert "exposes S's operations and nothing else" in msg

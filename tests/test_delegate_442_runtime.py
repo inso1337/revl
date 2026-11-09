@@ -149,3 +149,106 @@ def test_an_expired_lease_revokes_the_delegated_handle(sink):
     row = _lease_row(session)
     assert row["revoked"] is True, "the delegated handle reads revoked"
     assert row["remainingUses"] == 2, "a refused use is not spent"
+
+
+# ---------------------------------------------------------------------------
+# B2: the lender's generation is the ACQUIRING scope, not the crossing scope.
+# A provider method that reaches another service must not false-revoke the
+# delegation that lent it the lease.
+# ---------------------------------------------------------------------------
+
+_SOURCE_PROVIDER_REACHES_SERVICE = (
+    'extern emission[fs.write(path="/tmp")] fn wr(sink: Str, msg: Str)'
+    " = @py {\n    with open(sink, 'a') as f: f.write('w:' + msg + '\\n')\n"
+    "    return\n}\n"
+    "service Sink { fn put(msg: Str) -> Int }\n"
+    "service Fs { emission fn write(sink: Str, msg: Str) }\n"
+    "service Worker { emission fn run(job: Str, d: Delegate[Fs]) }\n"
+    "service Job { emission fn go(sink: Str) }\n"
+    "component SinkImpl provides sink: Sink {\n"
+    "  provide sink { fn put(msg) = 1 }\n"
+    "}\n"
+    "component FsProvider requires sink: Sink provides fs: Fs {\n"
+    "  provide fs { fn write(sink, msg) { let n = sink.put(msg)"
+    "  emit wr(sink, msg) } }\n"
+    "}\n"
+    "component W provides worker: Worker {\n"
+    '  provide worker { fn run(job, d) { emit d.write(job, "delegated") } }\n'
+    "}\n"
+    "component A requires fs: Fs, worker: Worker provides job: Job {\n"
+    '  let l = effect lease fs.write(path="/tmp") ttl 10m uses 3 '
+    "undo l.revoke()\n"
+    "  provide job { fn go(sink) { emit worker.run(sink, l) } }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_a_provider_that_reaches_another_service_keeps_the_delegation_live(sink):
+    from revl.mcp.approval import ApprovalRequired  # noqa: PLC0415
+
+    session = _session()
+    ir = compile_source(_SOURCE_PROVIDER_REACHES_SERVICE, "deleg_reach.rvl")
+    try:
+        session.load(copy.deepcopy(ir), record=True)
+    except ApprovalRequired as exc:
+        session.mint_standing_grant(ticket_hash=exc.ticket["hash"])
+        session.load(copy.deepcopy(ir), record=True)
+    session.mint_standing_grant(capability="worker", uses=10)
+
+    session.call("job", "go", [sink])
+    assert _lines(sink) == ["w:delegated"]
+    row = _lease_row(session)
+    assert row["revoked"] is False, "the lender's scope did not change"
+    assert row["subject"] == "W" and row["remainingUses"] == 2
+
+
+# ---------------------------------------------------------------------------
+# B3: a provider method reaching a SECOND class-(c) capability is decided too.
+# The delegation authorizes the leased token, never the provider's whole reach.
+# ---------------------------------------------------------------------------
+
+_SOURCE_SECOND_CLASS_C = (
+    'extern emission[fs.write(path="/tmp")] fn wr(sink: Str, msg: Str)'
+    " = @py {\n    with open(sink, 'a') as f: f.write('w:' + msg + '\\n')\n"
+    "    return\n}\n"
+    'extern emission[net.post(host="api")] fn post(payload: Str) = @py {\n'
+    "    return\n}\n"
+    "service Fs { emission fn write(sink: Str, msg: Str) }\n"
+    "service Worker { emission fn run(job: Str, d: Delegate[Fs]) }\n"
+    "service Job { emission fn go(sink: Str) }\n"
+    "component FsProvider provides fs: Fs {\n"
+    "  provide fs { fn write(sink, msg) { emit wr(sink, msg)"
+    '  emit post(msg) } }\n'
+    "}\n"
+    "component W provides worker: Worker {\n"
+    '  provide worker { fn run(job, d) { emit d.write(job, "delegated") } }\n'
+    "}\n"
+    "component A requires fs: Fs, worker: Worker provides job: Job {\n"
+    '  let l = effect lease fs.write(path="/tmp") ttl 10m uses 3 '
+    "undo l.revoke()\n"
+    "  provide job { fn go(sink) { emit worker.run(sink, l) } }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_a_provider_methods_second_class_c_capability_is_not_fired(sink):
+    from revl.mcp.approval import ApprovalRequired  # noqa: PLC0415
+
+    session = _session()
+    ir = compile_source(_SOURCE_SECOND_CLASS_C, "deleg_second_c.rvl")
+    try:
+        session.load(copy.deepcopy(ir), record=True)
+    except ApprovalRequired as exc:
+        session.mint_standing_grant(ticket_hash=exc.ticket["hash"])
+        session.load(copy.deepcopy(ir), record=True)
+    session.mint_standing_grant(capability="worker", uses=10)
+
+    # The delegated crossing reaches `net.post`, which the lease does not cover:
+    # the ordinary decision asks for it instead of firing it under fs.write.
+    with pytest.raises(ApprovalRequired):
+        session.call("job", "go", [sink])
+    assert _lines(sink) == [], "neither crossing fired before the decision"
+    row = _lease_row(session)
+    assert row["remainingUses"] == 3, "an uncovered reach spends nothing"

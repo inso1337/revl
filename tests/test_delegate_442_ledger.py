@@ -70,8 +70,13 @@ def _grant(session: Session, *, capability: str = _CAP, uses: int = 3,
         "revoked": False,
         "lease": True,
         "declaredCeilings": {},
+        # The delegation record, written by the first delegated use. A real mint
+        # starts these None; the row a delegated use finds carries the lender's
+        # scope hash taken when the handle was acquired.
         "subject": None,
         "chain": [],
+        "lender": None,
+        "lenderGeneration": None,
     }
     session._grants.append(row)
     return row
@@ -182,6 +187,8 @@ def test_an_expired_lease_revokes_the_delegated_handle():
 def test_a_swapped_lender_revokes_the_delegated_handle():
     session = _session()
     grant = _grant(session, uses=3, candidate_hash="hash-A")
+    grant["lender"] = "A"
+    grant["lenderGeneration"] = "hash-A"
     session._class_map = _SwappedMap("hash-A-swapped")
 
     with pytest.raises(SessionError, match="swapped"):
@@ -194,6 +201,8 @@ def test_a_swapped_lender_revokes_the_delegated_handle():
 def test_an_unchanged_lender_generation_keeps_the_delegation_live():
     session = _session()
     grant = _grant(session, uses=3, candidate_hash="hash-A")
+    grant["lender"] = "A"
+    grant["lenderGeneration"] = "hash-A"
     session._class_map = _SwappedMap("hash-A")
 
     session._delegate_use(grant["requestId"], "B", "fs.write")

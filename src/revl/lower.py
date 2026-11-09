@@ -13434,8 +13434,38 @@ def _mark_delegate_calls(node, env: "Env", filename: str, line: int) -> None:
     """
     tenv = getattr(env, "type_env", None) or {}
 
+    def delegate_root(n):
+        """The name at the root of a field chain (`d`, in `d.provider.x`), or
+        None when the chain does not start at a plain name."""
+        target = n.get("target")
+        while isinstance(target, dict) and target.get("kind") == "field":
+            target = target.get("target")
+        return target if isinstance(target, dict) \
+            and target.get("kind") == "name" else None
+
     def walk(n) -> None:
         if isinstance(n, dict):
+            if n.get("kind") == "field":
+                # item 442 (issue #2693): a delegated reference exposes S's
+                # OPERATIONS and nothing else. Field reads on it would reach
+                # whatever the runtime value happens to carry (the field reader
+                # falls through to `getattr` for a non-record type), which is
+                # the escape that must not exist: the handle's backing state is
+                # the session's, not the delegatee's.
+                root = delegate_root(n)
+                if root is not None:
+                    head, _ = parse_type(tenv.get(root.get("id")) or "")
+                    if head == DELEGATE_HEAD:
+                        raise RevlError(
+                            filename, n.get("line") or line,
+                            f"`{root.get('id')}.{n.get('name')}` reads a field "
+                            f"of a delegated reference; a `{DELEGATE_HEAD}[S]` "
+                            f"exposes S's operations and nothing else",
+                            hint="call the delegated reference's own methods "
+                                 "(they are checked against the session's "
+                                 "ledger); it is a lookup key, not a record "
+                                 "(item 442, issue #2693)",
+                            code="G1", category="delegation")
             if n.get("kind") == "call":
                 target = n.get("target")
                 method = n.get("method")
