@@ -4844,7 +4844,7 @@ def launch_container_participant(
 
 
 def _local_participant_spec(process: str, components: Sequence[str],
-                            state_dir: Path) -> Path:
+                            state_dir: Path, *, generation: int = 0) -> Path:
     """Write one LOCAL process's participant spec, derived from its declared
     components.
 
@@ -4852,10 +4852,17 @@ def _local_participant_spec(process: str, components: Sequence[str],
     OWNS, recorded in its own world file and WAL under `state_dir`. On ABORT the
     child runs its own newest-first unwind over exactly these — the conductor
     holds only a pipe and a name (`TEARDOWN_PROMISE[BOUNDARY_PROCESS]`).
+
+    `generation` is the federation generation this participant state belongs to.
+    It is written into the child's WAL header and its `activation-complete`
+    marker, so a recovery pass can tell which generation a stranded slice was
+    activating (item 118's correlation identity). The default is the deploy
+    path's existing single generation, 0.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     spec = {
         "identity": process,
+        "generation": int(generation),
         "world": str((state_dir / f"{process}.world.json").resolve()),
         "wal": str((state_dir / f"{process}.wal").resolve()),
         "effects": [{"name": str(c), "reversible": True} for c in components],
@@ -4966,7 +4973,8 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
         components = pconf.get("components") or []
         target = verdict.targets.get(pname) or DeployTarget(
             process=pname, via=VIA_LOCAL, raw={})
-        spec_path = _local_participant_spec(pname, components, state_dir)
+        spec_path = _local_participant_spec(pname, components, state_dir,
+                                            generation=generation)
         participant, error = launch_local_participant(
             target, spec_path=spec_path, python=python)
         if error is not None:
@@ -5159,7 +5167,8 @@ def deploy_ssh_map(placement: Mapping, *, local_bundle: Path | str,
                 ssh_exe=ssh_exe, scp_exe=scp_exe)
         else:
             components = pconf.get("components") or []
-            spec_path = _local_participant_spec(pname, components, state_dir)
+            spec_path = _local_participant_spec(pname, components, state_dir,
+                                                generation=generation)
             participant, error = launch_local_participant(
                 target, spec_path=spec_path, python=python)
             if participant is not None:

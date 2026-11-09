@@ -444,6 +444,48 @@ verbatim; it decides nothing on its own.
   between roll-forward and roll-back is precisely the split-brain the durable
   record exists to prevent.
 
+### The written plan, the command and the prior-generation restore
+
+Issue #2718. The admission rule and the coordinated protocol above were
+reachable only from Python. `revl federation-apply PLAN` and
+`src/revl/federation_apply.py` add the written form without adding a protocol:
+
+```toml
+federation = "shop"
+generation = 2
+
+[compositions.app]
+source = "app.revl"
+prior = "app-v1.revl"
+health_probe = ["python3", "probe_app.py"]
+allow_capabilities = ["net"]
+
+[[contracts]]
+surface = "app.surface.json"
+provider = "billing"
+```
+
+Admission compiles each new source, checks every contract with
+`federation.check`, runs the irreversible-crossing rule, and compares each
+composition's derived capability surface with the one it names in `prior`. The
+comparison is the receiver ceiling's own surface (`deploy.capability_surface`),
+so the plan check and the trust-store ceiling cannot disagree. A capability the
+new generation reaches and the old one does not is reported in the verdict and
+refused unless that composition's `allow_capabilities` names it.
+
+A refusal happens before any participant is spawned, so the whole update stays
+on its prior generation. When the update does commit, the plan's health probes
+run after it. A failed probe writes the durable abort decision first and then
+asks every committed participant to run its own local LIFO unwind back to the
+prior generation, the same settle rule a stranded participant gets. Participant
+state lives under `<state-dir>/<generation>`, so restoring the prior generation
+is observable: the failed generation's directory unwinds to empty while the
+previous generation's directory is byte-identical.
+
+This is still the co-located case only. Two-phase commit across hosts, with
+partial failure and coordinator crash, remains undefined, and every participant
+here is the conductor's own child on one kernel.
+
 ## 5. The deploy map, and the boundary a deploy may cross
 
 **Slice 2a.** Slice 1 built the protocol and left the caller to construct

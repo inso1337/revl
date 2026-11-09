@@ -2951,6 +2951,45 @@ def build_parser() -> argparse.ArgumentParser:
              "repeatable. These are the versions bound into the load-time "
              "measurement a later audit correlates against")
 
+    # `revl federation-apply PLAN [--dry-run]` — an all-or-nothing update of
+    # several co-located compositions, written as a plan file (issue #2718).
+    # The admission half compiles each composition's new source, runs the
+    # consumer contracts and the irreversible-crossing rule through
+    # `deploy.federation_admission`, and reports any capability the new
+    # generation reaches and the one it replaces does not. Without --dry-run it
+    # also drives the coordinated PREPARE/COMMIT protocol, runs the plan's
+    # health probes after the commit, and restores the prior generation when a
+    # probe fails.
+    fed_cmd = sub.add_parser(
+        "federation-apply",
+        help="admit a federation plan (new sources, consumer contracts, health "
+             "probes) and, without --dry-run, apply it as one co-located "
+             "all-or-nothing update (item 2718)")
+    fed_cmd.add_argument("plan", metavar="PLAN",
+                         help="the federation plan (TOML or JSON): "
+                              "[compositions.<id>] tables with each "
+                              "composition's `source`, optional `prior` "
+                              "generation, `health_probe` and "
+                              "`allow_capabilities`, plus [[contracts]] "
+                              "consumer surfaces")
+    fed_cmd.add_argument(
+        "--dry-run", action="store_true",
+        help="run only the effect-free admission half and print the verdict; "
+             "opens no boundary and moves no composition off its prior "
+             "generation")
+    fed_cmd.add_argument("--json", action="store_true",
+                         help="machine-readable verdict (admission, widened "
+                              "capabilities, participant outcomes, probes)")
+    fed_cmd.add_argument(
+        "--state-dir", metavar="DIR",
+        help="the participant state directory for THIS generation (default: "
+             "<wal-dir>/federation/<plan-stem>/<generation>); the prior "
+             "generation's directory is never written")
+    fed_cmd.add_argument(
+        "--probe-timeout", type=float, default=30.0, metavar="SECONDS",
+        help="how long one declared health probe may run before it counts as "
+             "failed (default: 30)")
+
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
     # after `truc` is handed verbatim to truc's own launcher (`revl.truc:main`,

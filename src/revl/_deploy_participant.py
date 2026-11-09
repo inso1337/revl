@@ -38,6 +38,7 @@ Commands (one JSON object per line, one reply per command):
 Spec (argv[1], a JSON file):
 
     {"identity": "db", "world": "<path>", "wal": "<path>",
+     "generation": 2,           # optional: the federation generation (default 0)
      "effects": [{"name": "row", "reversible": true}, ...],
      "failAt": 1,               # optional: fail the commit at this index
      "refusePrepare": "why",    # optional: refuse in PREPARE instead
@@ -146,6 +147,7 @@ class _Participant:
 
     def __init__(self, spec: dict) -> None:
         self.identity = spec.get("identity") or "?"
+        self.generation = int(spec.get("generation", 0))
         self.world_path = spec["world"]
         self.wal_path = spec["wal"]
         self.effects = list(spec.get("effects") or [])
@@ -231,7 +233,8 @@ class _Participant:
     def _append(self, record: dict) -> None:
         if not self._wal_open:
             self._raw({"record": "header", "walVersion": WAL_VERSION,
-                       "generation": 0, "participant": self.identity})
+                       "generation": self.generation,
+                       "participant": self.identity})
             self._wal_open = True
         self._raw(record)
 
@@ -335,6 +338,7 @@ class _Participant:
             self._apply_one(effect)
         self._append({"record": "activation-complete",
                       "participant": self.identity,
+                      "generation": self.generation,
                       "components": [e["name"] for e in self.effects]})
         return {"ok": True, "identity": self.identity, "pid": os.getpid(),
                 "applied": [self._referent(e) for e in self.effects]}

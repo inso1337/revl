@@ -2346,6 +2346,83 @@ host under a pinned SSH host key (`revl deploy`, `via = ssh`).
 revl deploy-admit --key host.pub --host-key host.key --runtime-version python=3.14
 ```
 
+### `revl federation-apply`
+
+Apply an all-or-nothing update of several co-located compositions from a written
+plan (issue #2718). The admission half is the same `federation_admission` rule
+the Python API exposes: a plan that breaks a pinned consumer surface,
+necessarily crosses a non-deferrable irreversible effect, or widens a
+composition's capability set without the plan allowing it is refused as one
+unit, before any boundary opens.
+
+A plan is TOML or JSON:
+
+```toml
+federation = "shop"     # optional; defaults to the plan file's stem
+generation = 2          # the generation this update deploys
+
+[compositions.app]
+source = "app.revl"             # the new generation's source
+prior = "app-v1.revl"           # optional: the generation it replaces
+health_probe = ["python3", "probe_app.py"]   # argv, exit 0 is healthy
+allow_capabilities = ["net"]    # optional: widened capabilities it permits
+
+[compositions.billing]
+source = "billing.revl"
+prior = "billing-v1.revl"
+
+[[contracts]]
+surface = "app.surface.json"    # a `revl contract export` artifact
+provider = "billing"
+```
+
+Relative paths resolve against the plan's own directory. An unknown key, a
+missing source, an unreadable consumer surface and a composition id that cannot
+be a file name are refused rather than ignored.
+
+The run has the deploy protocol's shape:
+
+1. **Admission**, effect-free. Each source is compiled, every contract is
+   checked against the provider's new IR with the landed `federation.check`
+   predicate, and each composition's derived capability surface is compared with
+   the generation it names in `prior`. Every capability in the new generation
+   and not in the old one is reported; one the plan does not name in that
+   composition's `allow_capabilities` refuses the update. No participant is
+   spawned, so a refusal leaves every composition on its prior generation.
+2. **Commit** through the coordinated PREPARE/COMMIT/ABORT protocol over one
+   local participant per composition, under the plan's generation directory.
+   The durable `federation-commit-approved` and `federation-abort-decided`
+   records are the same ones `revl deploy` writes.
+3. **Health probes** declared per composition, run after the commit. A probe is
+   an argv list run in the plan's directory; exit 0 is healthy, and a
+   composition that declares none is reported as not declared, not failed.
+4. **Restore the prior generation.** A failed probe writes the durable abort
+   decision first, then every committed participant runs its own local LIFO
+   unwind back to the prior generation. The generation is a real directory
+   boundary in the state directory, so the previous generation's WAL and world
+   files are never written by the failed update.
+
+- `PLAN`, the plan file (TOML or JSON).
+- `--dry-run`, run only the admission half and print the verdict; opens no
+  boundary and moves no composition.
+- `--json`, machine-readable verdict: admission or deploy report, widened
+  capabilities, participant outcomes and probe results.
+- `--state-dir DIR`, the participant state directory for this generation
+  (default: `<wal-dir>/federation/<plan-stem>/<generation>`).
+- `--probe-timeout SECONDS`, how long one declared probe may run before it
+  counts as failed (default: 30).
+
+```bash
+revl federation-apply federation.toml --dry-run   # admit, open nothing
+revl federation-apply federation.toml             # apply as one unit
+revl federation-apply federation.toml --json      # machine-readable report
+```
+
+The command exits non-zero, with the refusal named, when admission refuses or a
+health probe fails. Two-phase commit across hosts, with partial failure and
+coordinator crash, stays out of this command: every participant is the
+conductor's own child on one kernel (see [deploy.md](deploy.md) section 4).
+
 ## Interop: MCP, import, export, source maps, serve
 
 ### `revl mcp`
