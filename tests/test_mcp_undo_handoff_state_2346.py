@@ -1,14 +1,12 @@
-"""Issue #2346: `revl_undo` after a handoff swap must not drop a component's
-state while its dossier reports that nothing was dropped.
+"""Issue #2346: when `revl_undo` really drops state, its dossier must say so.
 
-An undo re-admits the target generation's sources and starts them cold
-(`migrate="respawn"`): a rollback never carries the generation it leaves into
-the one it returns to, so the forward swap's `handoff` is deliberately not run
-in reverse (docs/state-handoff.md, docs/generation-history.md). What the undo
-owes the caller is the truth about that: every component whose live state the
-cold start discards is named in `dossier.stateDropped.components`, with a
-`note`, and the forward swap's `undo` advice says the same before the caller
-follows it.
+An undo re-admits the target generation's sources through the same gate a
+swap runs. A `handoff` both generations declare on the same key now carries
+the live state back in the restore direction (issue #3293, its own test file);
+what still starts cold is reported here. What the undo owes the caller is the
+truth about that: every component whose live state the cold start discards is
+named in `dossier.stateDropped.components`, with a `note`, and the forward
+swap's `undo` advice says the same before the caller follows it.
 
 These drive a live composition, so they need the cordis-py runtime; the gate
 is a per-test marker.
@@ -100,35 +98,6 @@ def _swapped_with_state(*, handoff: bool = True) -> dict:
     assert changed["ok"] is True and changed.get("committed") is True, changed
     assert _meter_call("version")["result"] == 2
     return changed
-
-
-@needs_runtime
-def test_undo_after_a_handoff_swap_reports_the_state_it_drops():
-    changed = _swapped_with_state()
-    assert changed["handoff"]["meter"]["migrated"] is True
-    assert _meter_call("get", "l1")["result"] == "l1"   # carried forward
-    assert changed["undo"] == {"tool": "revl_undo", "arguments": {"to": 1}}
-
-    undone = _call(changed["undo"]["tool"], changed["undo"]["arguments"])
-    assert undone["ok"] is True and undone["undone"] is True, undone
-    assert _meter_call("version")["result"] == 1
-    # the undo starts generation 1 cold: the labels are gone ...
-    assert _meter_call("get", "l1")["result"] is None
-    # ... and the dossier says so, rather than `components: []`
-    dropped = undone["dossier"]["stateDropped"]
-    assert dropped["components"] == ["MeterBook"], dropped
-    assert "MeterBook" in dropped["note"] and "cold" in dropped["note"]
-    assert "handoff" not in undone
-
-
-@needs_runtime
-def test_the_swaps_undo_advice_names_the_state_it_will_not_restore():
-    """The forward swap's response says, next to its `undo`, that following
-    it re-admits sources only: the running state is not carried back."""
-    changed = _swapped_with_state()
-    note = changed.get("undoNote")
-    assert note and "MeterBook" in note and "revl_change" in note, changed
-    assert "would be dropped" in note
 
 
 @needs_runtime
@@ -242,9 +211,9 @@ def test_an_unreadable_live_state_says_so_and_the_undo_still_runs(monkeypatch):
 
 @needs_runtime
 def test_a_refused_undo_keeps_the_state_and_claims_no_drop(monkeypatch):
-    """A refused undo changed nothing: the dossier still plans which
-    components would lose state, but carries no note saying it was dropped,
-    and the state is still there."""
+    """A refused undo changed nothing: the dossier names the state a completed
+    undo would carry back, carries no note saying it was dropped, and the
+    state is still there."""
     from revl.errors import RevlError
     from revl.mcp import persist
 
@@ -257,6 +226,6 @@ def test_a_refused_undo_keeps_the_state_and_claims_no_drop(monkeypatch):
     refused = _call("revl_undo", {})
     assert refused["ok"] is False and refused["refused"] is True, refused
     dropped = refused["dossier"]["stateDropped"]
-    assert dropped["components"] == ["MeterBook"]
+    assert dropped["components"] == [] and dropped["carried"] == ["MeterBook"]
     assert "note" not in dropped, dropped
     assert _meter_call("get", "l1")["result"] == "l1"

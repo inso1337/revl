@@ -38,7 +38,7 @@ from . import operator as _operator
 from . import quorum as _quorum
 from . import identity as _identity
 from .approval import ApprovalRequired
-from .undo_record import undo_cold_start_note
+from .undo_record import undo_cold_start_note, undo_dropped_state_note
 from .approval import UnencodableTicketArgs
 from .approval import _args_digest
 
@@ -656,6 +656,9 @@ class _SwapPlan:
     # the `migrate` label that captured `pre`, named in the migration report so
     # a declared swap does not report itself as generational (issue #2673)
     policy: str = "generational"
+    # issue #3293: under `handoff_back` (an undo) only these captured slots may
+    # cross back; None keeps the forward-swap rule in `_restore_provider_state`
+    handoff_carry: frozenset | None = None
 
 
 def _container_copy(value):
@@ -842,6 +845,54 @@ def _handoff_cold_report(successors: dict, pre: dict) -> dict:
             "component": names[0] if len(names) == 1 else names,
             "migrated": False, "reason": reason, "note": note})
     return report
+
+
+def _handoff_acceptors(ir: dict) -> dict:
+    """`{slot: [component, ...]}` for every non-template component in `ir` that
+    declares a `handoff` (item 53), keyed like `_capture_provider_state`'s
+    slots so old and new providers correlate by what they provide and where."""
+    templates = set((ir.get("manifest") or {}).get("templates") or [])
+    out: dict = {}
+    for comp in ir.get("components") or []:
+        if comp.get("name") in templates:
+            continue
+        handoff = comp.get("handoff")
+        if isinstance(handoff, dict) and handoff.get("key"):
+            out.setdefault(_handoff_slot(comp, handoff["key"]), []).append(comp)
+    return out
+
+
+def _handoff_back_pairs(old_ir: dict, new_ir: dict) -> dict[str, str]:
+    """Issue #3293: the running providers whose live state an undo carries back.
+
+    A forward swap threads a `handoff` from predecessor to successor when the
+    successor's declared shape ACCEPTS the predecessor's (`compatible(accepted,
+    exported)`). An undo runs that exchange in the other direction: the running
+    generation is the one being left, the restored generation is the one
+    accepting its state. So a running component is carried back only when the
+    restored generation declares exactly one `handoff` on the same slot and
+    that accepted shape is compatible with the running provider's exported one
+    in THIS direction. Anything else (no acceptor, an ambiguous one, or a shape
+    that does not accept the running state) stays cold, exactly as before.
+
+    Returns `{running component name: restored component name}`."""
+    acceptors = _handoff_acceptors(new_ir or {})
+    templates = set(((old_ir or {}).get("manifest") or {}).get("templates") or [])
+    out: dict = {}
+    for comp in (old_ir or {}).get("components") or []:
+        if comp.get("name") in templates:
+            continue  # F5: a template's state is the per-instance path
+        handoff = comp.get("handoff")
+        if not isinstance(handoff, dict) or not handoff.get("key"):
+            continue
+        claimants = acceptors.get(_handoff_slot(comp, handoff["key"])) or []
+        if len(claimants) != 1:
+            continue
+        accepted = (claimants[0].get("handoff") or {}).get("type")
+        if not compatible(accepted, handoff.get("type")):
+            continue
+        out[comp["name"]] = claimants[0].get("name")
+    return out
 
 
 class Session:
@@ -1958,6 +2009,13 @@ class Session:
           (F4) NO provider hand-off capture either — a cold start carries nothing
           across, so a rollback through `respawn` cannot launder the generation
           it rolls back FROM into the one it rolls back TO.
+        * ``"handoff_back"`` — an undo's policy (issue #3293): the instance
+          layer starts cold as under ``"respawn"``, but a provider's live state
+          crosses BACK across a `handoff` both generations declare on the same
+          key when the restored generation's shape accepts the running state
+          (the restore direction of the same §5 relation). A key either side
+          does not declare, or one whose shapes disagree in that direction,
+          starts cold exactly as before, and the undo dossier says so.
         * ``"declared"`` — the item-334 disclosure policy `Gate.propose` uses for
           an AGENT-authored successor. Operator (gen N) state crosses the trust
           boundary onto the untrusted successor ONLY through a `handoff` declared
@@ -2062,7 +2120,7 @@ class Session:
         # stays cold-start (F4): rollback and undo route through it, and
         # capturing there would launder the rolled-back generation's writes.
         pre = (self._capture_instances(old_ir, ir)
-               if migrate != "respawn" else {})
+               if migrate not in ("respawn", "handoff_back") else {})
         # item 53: capture each stateful *provider's* live state (its
         # effect-created world) before teardown too, so a component that
         # declared a `handoff` starts its successor warm. Admission (or, under
@@ -2076,6 +2134,17 @@ class Session:
         # operator code it rolled back to.
         handoff_pre = (self._capture_provider_state(old_ir)
                        if migrate != "respawn" else {})
+        # issue #3293: an undo (migrate="handoff_back") carries a provider's
+        # state back only across a `handoff` the restored generation declares
+        # on the same slot AND whose shape accepts the running provider's. The
+        # capture stays whole so `_abort_swap` can re-seat every running
+        # provider; this names the slots allowed to cross on success.
+        handoff_carry = None
+        if migrate == "handoff_back":
+            back = _handoff_back_pairs(old_ir, ir)
+            handoff_carry = frozenset(
+                slot for slot, info in handoff_pre.items()
+                if info["component"] in back)
         # item 334 (EDGE 1): the keys gen N ACTUALLY served, captured before
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
@@ -2088,7 +2157,8 @@ class Session:
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
                          agent_authored=(migrate == "declared" or agent_authored),
-                         pre_pending=pre_pending, policy=migrate)
+                         pre_pending=pre_pending, policy=migrate,
+                         handoff_carry=handoff_carry)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -2184,7 +2254,8 @@ class Session:
         if handoff_pre:
             try:
                 handoff = self._restore_provider_state(
-                    ir, handoff_pre, agent_authored=plan.agent_authored)
+                    ir, handoff_pre, agent_authored=plan.agent_authored,
+                    carry_slots=plan.handoff_carry)
             except driver.runtime.StateIncompatible as exc:
                 # defence in depth: admission gates the *declared* shapes, but a
                 # provider whose resource vector diverges from its declaration
@@ -2675,9 +2746,10 @@ class Session:
     def live_state_components(self) -> list[str]:
         """The running components whose live state a cold start would discard
         (issue #2346): a provider whose activation frame holds non-empty state,
-        and a template with a live instance that does. `revl_undo` and
-        `revl_rollback` re-admit through `respawn`, which carries none of it,
-        so these are what such an undo drops. Read-only."""
+        and a template with a live instance that does. `revl_rollback` re-admits
+        through `respawn`, which carries none of it; `revl_undo` now carries a
+        provider's state back across a compatible `handoff` (issue #3293), so
+        only the rest is what such an undo drops. Read-only."""
         driver = self._driver
         if driver is None or self.ir is None:
             return []
@@ -2703,7 +2775,8 @@ class Session:
         return list(frame._resources) if frame is not None else []
 
     def _restore_provider_state(self, new_ir: dict, pre: dict,
-                                agent_authored: bool = False) -> dict:
+                                agent_authored: bool = False,
+                                carry_slots: frozenset | None = None) -> dict:
         """Thread each captured provider state onto the successor that
         re-provides its key (item 53). Two passes — check the whole cohort,
         then apply — so a single incompatible provider rejects with nothing
@@ -2727,17 +2800,16 @@ class Session:
         places every key in one realm: resources are matched by position, so
         an agent could rewire a store of one realm to a key served in another
         behind an identical placement. A frame spanning realms starts cold
-        (`reason: "multi-realm"`) unless the operator wrote the successor."""
+        (`reason: "multi-realm"`) unless the operator wrote the successor.
+
+        Issue #3293: under an undo's `handoff_back` policy the caller passes
+        `carry_slots`, the captures whose restored generation declares a
+        compatible `handoff` in the restore direction (`_handoff_back_pairs`).
+        A capture outside that set starts cold with `reason: "incompatible"`
+        where a restored provider declares the key but its shape does not
+        accept the running state; the undo still restores the code."""
         runtime = self._driver.runtime
-        templates = set((new_ir.get("manifest") or {}).get("templates") or [])
-        successors: dict = {}
-        for comp in new_ir.get("components") or []:
-            if comp.get("name") in templates:
-                continue  # F5: a template is the per-instance path, as in capture
-            handoff = comp.get("handoff")
-            if isinstance(handoff, dict) and handoff.get("key"):
-                key = handoff["key"]
-                successors.setdefault(_handoff_slot(comp, key), []).append(comp)
+        successors = _handoff_acceptors(new_ir)
         plan: list = []
         report: dict = _handoff_cold_report(successors, pre)
         for slot, info in pre.items():
@@ -2746,6 +2818,18 @@ class Session:
             if len(claimants) != 1:
                 continue  # none accepts it (cold), or ambiguous (reported cold)
             comp = claimants[0]
+            if carry_slots is not None and slot not in carry_slots:
+                accepted = (comp.get("handoff") or {}).get("type")
+                exported = info.get("type")
+                report[_handoff_label(slot)] = _handoff_entry(slot, {
+                    "component": comp["name"], "migrated": False,
+                    "reason": "incompatible",
+                    "note": (f"the restored generation accepts `{accepted}` "
+                             f"on `{key}`, but the running provider exports "
+                             f"`{exported}`: the declared hand-off types are "
+                             f"not compatible in the restore direction, so it "
+                             f"starts cold")})
+                continue
             if agent_authored and _frame_spans_realms(slot[1]):
                 report[_handoff_label(slot)] = _handoff_entry(slot, {
                     "component": comp["name"], "migrated": False,
@@ -3370,31 +3454,60 @@ class Session:
             "toGeneration": target["generation"],
             "admissible": p["admissible"],
             "unloads": p["cascade"]["withdrawn"],
-            "stateDropped": self._undo_state_dropped(p, target["generation"]),
+            "stateDropped": self._undo_state_dropped(p, target["generation"],
+                                                     target["ir"]),
             "cascade": p["cascade"],
             "provisions": p["provisions"],
             "unemittableCrossings": unemittable,
         }
 
-    def _undo_state_dropped(self, p: dict, to: int) -> dict:
-        """The dossier's `stateDropped` (issue #2346). An undo re-admits
-        through `respawn`, a cold start: a `handoff` is not run in reverse, so
-        a rollback never carries the generation it leaves into the one it
-        returns to (the F4 rule in `_plan_swap`). So besides the components
-        the target withdraws, every running component holding live state loses
-        it, and is named here, with a note that says so. A failure to read
-        the live state is said in the note, and never stops the undo."""
+    def undo_carried_components(self, generation: int) -> list[str]:
+        """The running components whose live state an undo to `generation`
+        carries back (issue #3293), for the forward call's `undoNote`. Empty
+        when the live state cannot be read: the advice stays conservative."""
+        entry = next((e for e in self._history
+                      if e["generation"] == generation), None)
+        if entry is None or entry.get("ir") is None:
+            return []
+        back = _handoff_back_pairs(self.ir, entry["ir"])
+        try:
+            held = self.live_state_components()
+        except Exception:  # noqa: BLE001 - the note is advice; nothing carried
+            return []
+        return [name for name in held if name in back]
+
+    def _undo_state_dropped(self, p: dict, to: int,
+                            target_ir: dict | None) -> dict:
+        """The dossier's `stateDropped` (issues #2346 and #3293). An undo
+        carries a provider's live state back across a `handoff` both the
+        running and the restored generation declare on the same slot, when
+        the restored shape accepts the running one in the restore direction
+        (`_handoff_back_pairs`). Every other running component that holds live
+        state still starts cold, as the target's withdrawn components do, and
+        is named here with a note that says so. A failure to read the live
+        state is said in the note, and never stops the undo."""
+        back = _handoff_back_pairs(self.ir, target_ir or {})
         try:
             held, unread = self.live_state_components(), None
         except Exception as exc:  # noqa: BLE001 - a report, never a fault
             held, unread = [], f"{type(exc).__name__}: {exc}"
+        carried = [name for name in held if name in back]
+        dropped = [name for name in held if name not in back]
         out = {
             "provisions": p["provisions"]["withdrawn"],
-            "components": sorted(set(p["components"]["withdrawn"]) | set(held)),
+            # a carried provider may be named differently in the restored
+            # generation (the correlation is the provided key), so the plan can
+            # list the running component as withdrawn even though its state
+            # crosses back: it is not dropped
+            "components": sorted((set(p["components"]["withdrawn"])
+                                  | set(dropped)) - set(back)),
             "teardownOrder": p["teardownOrder"],
         }
-        if held:
-            out["note"] = undo_cold_start_note(held, to, done=True)
+        if carried:
+            out["carried"] = sorted(carried)
+        if dropped:
+            out["note"] = undo_dropped_state_note(dropped, to, done=True,
+                                                  carried=sorted(carried))
         elif unread is not None:
             out["note"] = (
                 f"the running components' live state could not be read "
@@ -3490,7 +3603,7 @@ class Session:
                 target_origin[AUTHORED_HOST_BODIES_KEY] or [])
         try:
             state = self.swap(target_ir, origin=origin,
-                              migrate="respawn", agent_authored=False)
+                              migrate="handoff_back", agent_authored=False)
         except ApprovalRequired as error:
             error.host_bodies = list(
                 origin.get(AUTHORED_HOST_BODIES_KEY) or [])
