@@ -213,7 +213,9 @@ design/457-endpoint-one-definition.md). A `route post "/a2a/notify/{task}"`
 operation with a `Bearer` parameter carrying the push token, validated
 explicitly by the handler against the token the start call configured, feeds
 the same `TaskEvent` shape into the consumer. 457 S1, the routed-endpoint
-surface, landed on 2026-09-08 (`427d366d2`); what remains is the way a pushed
+surface, landed on 2026-09-08 (`427d366d2`); what remains is the receiver
+itself (`src/revl` has no notify route, and `src/revl/import_a2a.py` records
+webhooks as NOT projected) and the way a pushed
 event reaches the waiting operation. Polling stays the canonical feed; push is
 an optimisation that must not change what the consumer sees.
 
