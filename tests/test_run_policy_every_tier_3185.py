@@ -141,3 +141,41 @@ def test_watch_reload_check_rejects_an_edit_the_policy_refuses(tmp_path):
     clean = _both_checks(None, _policy_check(parse_policy(UNRELATED)))
     assert clean(compile_source(APP)) is None
     assert _both_checks(None, _policy_check(None)) is None
+
+
+@pytest.mark.parametrize("which", ["evaluate", "approval_admission"])
+def test_a_policy_error_during_evaluation_is_a_clean_refusal(
+        tmp_path, monkeypatch, capsys, which):
+    # a RevlError raised while the policy is evaluated refuses the run with a
+    # stage-named error, never a traceback and never a boot
+    import revl.policy as policy_mod  # noqa: PLC0415
+    from revl.__main__ import main  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    def boom(*_args, **_kwargs):
+        raise RevlError("p.policy", 1, "policy evaluation broke")
+
+    monkeypatch.setattr(policy_mod, which, boom)
+    app, pol = _write(tmp_path, DENY)
+    code = main(["run", app, "--policy", pol, "--once"])
+    err = capsys.readouterr()
+    assert code == 1
+    assert "cannot apply policy" in err.err
+    assert "policy evaluation broke" in err.err
+    assert "lifecycle stage: config" in err.err
+    assert MARK not in err.out
+
+
+def test_placement_compile_error_is_reported_at_the_compile_stage(tmp_path):
+    app = tmp_path / "app.rvl"
+    app.write_text("component Broken {\n", encoding="utf-8")
+    pol = tmp_path / "p.policy"
+    pol.write_text(DENY, encoding="utf-8")
+    placement = tmp_path / "p.toml"
+    placement.write_text('[components.Broken]\nbackend = "py"\n',
+                         encoding="utf-8")
+    result = _cli("run", str(app), "--placement", str(placement),
+                  "--policy", str(pol), "--once")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "lifecycle stage: compile" in result.stderr, result.stderr
+    assert "cannot apply policy" not in result.stderr

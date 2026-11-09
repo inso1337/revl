@@ -289,9 +289,19 @@ def test_deny_for_another_capability_admits():
     assert least_authority_breaches(ir, policy, modules) == []
 
 
-def test_component_breaches_deny_leg_reads_imports_and_declared():
+def test_component_breaches_deny_leg_reads_the_declared_set():
     breaches = component_breaches(
         "W", import_caps={"kv"}, declared_caps={"kv", "net"}, allow=None,
         deny=("net",))
     assert [(b.leg, b.capabilities) for b in breaches] == [
         ("declared>deny", ("net",))]
+
+
+def test_component_breaches_deny_leg_reads_the_import_set():
+    # an import outside the declared set is the first leg's breach, and the
+    # deny leg names it too when a deny rule matches it
+    breaches = component_breaches(
+        "W", import_caps={"kv", "net"}, declared_caps={"kv"}, allow=None,
+        deny=("net",))
+    assert [(b.leg, b.capabilities) for b in breaches] == [
+        ("import>declared", ("net",)), ("declared>deny", ("net",))]

@@ -351,9 +351,15 @@ on every backend (py, rust, ts, java, go, wasm) and under `--placement`: any
 violation `revl audit --policy` reports (with `approval_admission`, no
 `--mcp-scope`, no evidence inputs) refuses the run at the admission stage with
 the audit's own report, and nothing is booted. Under `--watch` an edit the
-policy refuses is rejected and the running generation is kept. On the wasm tier
-the item-289 least-authority chain over the emitted host imports runs as well,
-and it reads the policy's deny rules as well as its allow-lists (issue #3185).
+policy refuses is rejected and the running generation is kept. With
+`--backend wasm` the item-289 least-authority chain over the emitted host
+imports runs as well, and it reads the policy's deny rules as well as its
+allow-lists (issue #3185); it does not run for wasm components placed by
+`--placement`, where only the gate above applies.
+
+A policy with evidence rules always refuses `revl run`: run takes no
+`--evidence` or `--key`, so every evidence clause is evaluated against absent
+evidence. Check such a policy with `revl audit --policy --evidence` instead.
 
 ## The MCP / agent sandbox
 

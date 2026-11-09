@@ -2984,6 +2984,9 @@ def run_command(args, hold_once: bool = False) -> int:
             # each component lands in; refuse before any process starts.
             try:
                 placed_ir = compile_files(args.files)
+            except RevlError as exc:
+                return _fail(str(exc), lifecycle.COMPILE)
+            try:
                 refusal = _policy_refusal(_load_run_policy(args.policy),
                                           placed_ir)
             except (RevlError, OSError) as exc:
@@ -3026,7 +3029,10 @@ def run_command(args, hold_once: bool = False) -> int:
             run_policy = _load_run_policy(args.policy)
         except (RevlError, OSError) as exc:
             return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
-        refusal = _policy_refusal(run_policy, ir)
+        try:
+            refusal = _policy_refusal(run_policy, ir)
+        except RevlError as exc:
+            return _fail(f"cannot apply policy: {exc}", lifecycle.CONFIG)
         if refusal is not None:
             return _fail(refusal, lifecycle.ADMISSION)
     # issue #2730 slice 1: an attestation supplied for the record must bind THIS
