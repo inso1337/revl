@@ -170,6 +170,7 @@ def test_an_emission_failure_without_a_secret_is_recorded_verbatim(tmp_path):
 
     failed = [r for r in read_wal(str(path))["records"]
               if r.get("record") == "emission-failed"]
+    assert len(failed) == 1, failed
     assert failed[0]["error"] == {
         "type": "ValueError",
         "message": "upstream rejected credential opaque",
