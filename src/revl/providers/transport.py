@@ -9,8 +9,8 @@ message.
 Standard library only. revl has no required runtime dependency, and a model
 call is a POST with a JSON body, which `urllib` does without help.
 
-THE THREE RULES THIS FILE ENFORCES
-----------------------------------
+THE FOUR RULES THIS FILE ENFORCES
+---------------------------------
 1. **No redirect is followed.** urllib follows a 301/302/303 by default and
    re-issues the POST as a GET, body dropped, at whatever host `Location`
    names. The endpoint is part of what the operator bound a model role to, and
@@ -18,13 +18,21 @@ THE THREE RULES THIS FILE ENFORCES
    redirect would move the prompt somewhere the check never saw, so it is a
    refusal, the same policy `revl.crossing_redirect` gives the emitted
    crossings.
-2. **A credential never reaches a message.** The caller passes every secret it
+2. **No ambient proxy is used.** urllib's default `ProxyHandler` reads
+   `http_proxy`, `https_proxy` and friends from the environment. For a loopback
+   endpoint that would send the prompt and its Authorization header to the
+   proxy host, while `endpoint_residence` and `_check_url` judged the bytes to
+   stay on this machine (issue #3109). The opener carries an empty proxy map,
+   so a model request goes to the endpoint named by `base_url` and nowhere
+   else. To route through a proxy, bind the role to the proxy's URL and
+   declare its residence.
+3. **A credential never reaches a message.** The caller passes every secret it
    put in a header as `secrets`, and every string this module raises is passed
    through `redact` first, including the provider's own error body, which is
    where a key most often comes back: several providers echo the rejected key
    in a 401. The urllib exception is not chained (`from None`), so a traceback
    does not carry the request object either.
-3. **Only a JSON object is a response.** Anything else is a named error rather
+4. **Only a JSON object is a response.** Anything else is a named error rather
    than a value the caller has to guess about.
 """
 
@@ -99,7 +107,12 @@ def request_json(url: str, *, body: dict | None = None,
     request = urllib.request.Request(
         url, data=data, method="GET" if data is None else "POST",
         headers=send)
-    opener = urllib.request.build_opener(_NoRedirect)
+    # An empty proxy map replaces urllib's default ProxyHandler, so the
+    # environment's http_proxy/https_proxy/all_proxy cannot route this request
+    # through a proxy (issue #3109). The endpoint the placement check judged is
+    # the only host contacted.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoRedirect)
 
     def fail(message: str, status: int | None = None) -> ProviderError:
         return ProviderError(redact(f"{label}: {message}", secrets),

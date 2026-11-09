@@ -172,7 +172,14 @@ every refusal is listed at once. Each is a `G-MODEL-PLACE` refusal:
 Each operation is wired to its role's adapter once, when the host is built.
 There is no fallback and no run-time choice: a call can reach only the endpoint
 its role is bound to. Redirects are refused, so the endpoint the check judged is
-the endpoint the prompt reaches.
+the endpoint the prompt reaches. Proxy variables in the environment
+(`http_proxy`, `https_proxy`, `all_proxy`) are ignored: a model request is sent
+directly to `base_url`, never through a proxy the environment names, because
+for a loopback endpoint that proxy would carry the prompt and the key off this
+machine while the residence still read `on_device` (issue #3109). To route a
+model call through a forwarding proxy you run, bind the role to that proxy's
+URL and declare its residence, as with any other endpoint; revl contacts that
+URL directly.
 
 ## Residence of an endpoint
 
