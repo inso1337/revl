@@ -426,6 +426,9 @@ def test_a_required_quarantine_refuses_the_repair_and_nothing_swaps(
 UNGATED = {
     # read-only compiles and static queries over agent-supplied source
     "revl_check": "compiles a candidate; loads nothing",
+    "revl_apply_repair": "applies a refusal's verified edit to the candidate "
+                         "the check already compiled and re-checks it; installs "
+                         "nothing, loads nothing, swaps nothing (issue #2855)",
     "revl_admit": "compiles against the running manifest; mutates nothing",
     "revl_plan": "reports the delta a swap would produce; swaps nothing",
     "revl_audit": "reads the boundary of a candidate",

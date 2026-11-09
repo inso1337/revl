@@ -310,4 +310,5 @@ def test_each_converted_verb_section_names_the_codes_it_can_emit():
 
 
 def test_the_converted_verbs_are_the_only_ones_converted():
-    assert set(answer.PAYLOAD_KEYS) == {"revl_check", "revl_test_run"}
+    assert set(answer.PAYLOAD_KEYS) == {"revl_check", "revl_apply_repair",
+                                        "revl_test_run"}

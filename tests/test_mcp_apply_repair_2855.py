@@ -110,6 +110,8 @@ def test_a_type_error_refusal_carries_an_applyable_repair():
 
     applied = _call("revl_apply_repair", {"repairId": refused["repairId"]})
     assert applied["ok"] is True
+    assert applied["payloadKey"] == "repaired"
+    assert applied["verdict"] == "passed"
     assert applied["applied"]["code"] == "T2"
     patched = applied["repaired"]["source"]
     assert "null" not in patched and "None" in patched
@@ -175,6 +177,8 @@ def test_an_unknown_repair_id_is_a_named_refusal():
     refused = _call("revl_apply_repair", {"repairId": "0" * 64})
     assert refused["ok"] is False
     assert refused["code"] == "UNKNOWN_REPAIR"
+    assert refused["payloadKey"] == "repaired"
+    assert refused["verdict"] == "refused"
     assert refused["refusal"]["code"] == "UNKNOWN_REPAIR"
     assert refused["diagnostics"][0]["category"] == "usage"
 
