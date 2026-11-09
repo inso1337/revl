@@ -3498,9 +3498,11 @@ class Session:
             # a carried provider may be named differently in the restored
             # generation (the correlation is the provided key), so the plan can
             # list the running component as withdrawn even though its state
-            # crosses back: it is not dropped
+            # crosses back. Only a component whose state really crosses is
+            # removed; a stateless one the target withdraws stays named, as
+            # before.
             "components": sorted((set(p["components"]["withdrawn"])
-                                  | set(dropped)) - set(back)),
+                                  | set(dropped)) - set(carried)),
             "teardownOrder": p["teardownOrder"],
         }
         if carried:
@@ -3573,9 +3575,11 @@ class Session:
             check_no_realm_removal(self.ir, target_ir, profile)
         except RevlError as error:
             diag = classify(error)
-            # nothing ran, so no state was dropped: the list stays as the
-            # plan, but the note saying it "is dropped" does not apply
+            # nothing ran, so no state was dropped and none crossed: the list
+            # stays as the plan, but neither the note saying it "is dropped"
+            # nor the carried list of a completed undo applies
             dossier["stateDropped"].pop("note", None)
+            dossier["stateDropped"].pop("carried", None)
             return {
                 "undone": False,
                 "refused": True,

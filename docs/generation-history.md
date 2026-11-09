@@ -120,13 +120,15 @@ Because an undo is a change, its plan is computed like any change:
   a shape that does not accept the running state in the restore direction, and
   a template's live instances (an undo deliberately keeps the instance layer
   at `respawn`). `note` says what is lost, and the undo's result carries the
-  same `handoff` report a forward swap does. The forward call that offered the
-  undo says the same in its `undoNote`: it names only the components whose
-  state the undo would really drop, is absent when the undo carries it all
-  back, and names the carried ones when a note is needed. A forward
-  `revl_change` with `replace` that re-applies the earlier source keeps the
-  state of a component that declares a `handoff` on both sides, and of a
-  template's live instances; any other component starts cold either way;
+  same `handoff` report a forward swap does. A refused undo reports the
+  plan's `components` but omits both the note and `carried`, because nothing
+  ran. The forward call that offered the undo says the same in its `undoNote`:
+  it names only the components whose state the undo would really drop, is
+  absent when the undo carries it all back, and names the carried ones when a
+  note is needed. A forward `revl_change` with `replace` that re-applies the
+  earlier source keeps the state of a component that declares a `handoff` on
+  both sides, and of a template's live instances; any other component starts
+  cold either way;
 * **the interim boundary crossings that no undo can un-emit** — §6.1.
 
 ## What no undo can un-emit (compensation is not inversion)
