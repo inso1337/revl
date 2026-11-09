@@ -373,14 +373,32 @@ def _bound_token(bound) -> str:
 
 
 def _reach_map(audit: dict) -> dict[str, dict | None]:
-    """Extern name -> its reach dict (`{"kind","target"}`) or None (unconfined).
+    """Extern name -> its CONFINEMENT dict (`{"kind","target"}`) or None.
 
     The reach is a property of the EXTERN, not of a per-component crossing, so it
     is read from the audit's flat `externs` list rather than the boundary table.
     A bare emission has no `reach` key, which reads here as None = unconfined.
+
+    Issue #2971 makes `reach` also carry a `reaches [...]` declaration
+    (`caps`/`basis`) on an extern that writes one. That is a claim about the
+    host body's reach, not a confinement of the crossing, so this diff projects
+    the confinement half only: a document that adds `reaches` without touching
+    its confinement is not a bound moved, and a document that keeps its
+    confinement and adds `reaches` must not read as `confined(a) ->
+    confined(b)` (a false weakening).
     """
-    return {ext["name"]: ext.get("reach")
-            for ext in (audit.get("externs") or [])}
+    out: dict[str, dict | None] = {}
+    for ext in audit.get("externs") or []:
+        reach = ext.get("reach")
+        if reach and "kind" in reach:
+            # keep the confinement keys the entry actually carries, so a
+            # hand-built audit with a minimal `{"kind": ...}` record reads the
+            # same before and after the extra `caps`/`basis` keys existed.
+            out[ext["name"]] = {k: reach[k]
+                                for k in ("kind", "target") if k in reach}
+        else:
+            out[ext["name"]] = None
+    return out
 
 
 def diff_reach(prev: dict, new: dict) -> dict:

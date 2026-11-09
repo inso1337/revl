@@ -608,6 +608,16 @@ extern emission fn send(sock: Socket, data: Bytes)
   inverse that replays on abort only), `local` (a durable write to local state,
   which takes no `undo`/`compensate` and no capability scope). An unclassified
   extern does not parse.
+- An extern may state what its opaque host body can reach, as a clause after
+  the return type:
+  `extern pure fn read(p: Str) -> Str reaches [fs.read] = @py { ... }`.
+  `reaches [*]` declares the unbounded reach and `reaches []` declares that it
+  reaches nothing; omitting the clause is UNDECLARED, which a consumer reads as
+  UNKNOWN and never as empty. A claim must cover the extern's own
+  `emission[X]`/`witnessed[X]` scope. It is a declaration, not a sandbox: the
+  IR carries `reach: {"caps": [...], "basis": "declared"}`, and only a consumer
+  that already trusts the author's host body may narrow on it
+  (docs/design/1729-extern-reach-declaration.md).
 - Inside a host block the model writes *real* TypeScript or Python. The
   place full fluency is wanted is exactly the place checking was never
   promised.
