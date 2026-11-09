@@ -465,9 +465,12 @@ def make_admission_certify(tables):
     def is_dunder_name(name: str) -> bool:
         """The reference's dunder test `^__\\w+__$` (`revl.lower._is_dunder_name`,
         issue #319): `__init__`, `__proto__`, `__x__`. At least one byte sits
-        between the two `__` pairs, so `__` and `___` are not dunders. This is a
-        rule of the METHOD position only, where the reference applies it: it
-        admits a dunder service, alias, component and parameter name."""
+        between the two `__` pairs, so `__` and `___` are not dunders. The
+        reference refuses a dunder name in three positions, a service METHOD, a
+        record FIELD and a config FIELD; this surface parses no record
+        declaration and no config clause, so the service method is the one it has
+        to decide. The reference admits a dunder service, alias, component and
+        parameter name."""
         middle = name[2:-2]
         return (len(name) >= 5 and name.startswith("__") and name.endswith("__")
                 and all(ch == "_" or ch.isascii() and ch.isalnum()
@@ -567,7 +570,10 @@ def make_admission_certify(tables):
                 # …) does not match here and leaves the surface whole.
                 # Issue #3155: the reference refuses a dunder method name
                 # (issue #319) and the native gate does not, so the certifier
-                # decides it. No other name position is held to it.
+                # decides it. The reference also refuses dunder record-field and
+                # config-field names, but this surface parses neither
+                # declaration, so the method position is the only one it can
+                # decide.
                 if (toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1])
                         or is_dunder_name(toks[i + 1])):
                     return None

@@ -364,12 +364,17 @@ fn is_name(token: &str) -> bool {
 /// `___` are not dunders, and the byte test is `\w` over an identifier
 /// ([`tokens`] has already refused a non-ASCII source).
 ///
-/// This is a rule of the METHOD position only, which is where the reference
-/// applies it. The reference refuses a dunder service-method name and
-/// `admit_src` raises no objection, so the certifier decides it here or the
-/// surface issues an admission the reference refuses (issue #3155). The
-/// reference ADMITS a dunder service, alias, component and parameter name, so
-/// holding those to this test would be a false rejection.
+/// The reference refuses a dunder name in three positions: a service METHOD, a
+/// record FIELD and a component CONFIG field (`_reject_dunder_name`). The
+/// admission surface carries neither field declaration (a `type` naming a
+/// record and a `config` clause both fail [`parse`]), so the service-method
+/// position is the one this certifier has to decide. `admit_src` does not carry
+/// the rule, so the certifier decides it here or the surface issues an
+/// admission the reference refuses (issue #3155). A widening of the surface to
+/// records or config must add the two field positions with it.
+///
+/// The reference ADMITS a dunder service, alias, component and parameter name,
+/// so holding those to this test would be a false rejection.
 fn is_dunder_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() >= 5
@@ -552,8 +557,9 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
             // certifier types calls.
             // A dunder method name is the reference's refusal (issue #319) and
             // `admit_src` does not carry it, so the certifier decides it (issue
-            // #3155). No other name position is held to it: the reference
-            // admits a dunder there.
+            // #3155). The reference also refuses dunder record-field and
+            // config-field names, but this surface parses neither declaration,
+            // so the method position is the only one it can decide.
             if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1])
                 || is_dunder_name(toks[i + 1])
             {
@@ -1495,9 +1501,9 @@ mod tests {
         ] {
             assert!(certify(source).is_none(), "must not certify: {:?}", source);
         }
-        // The other name positions are NOT dunders to the reference: it admits
-        // a dunder service, alias, component and parameter, and `___` has no
-        // byte between its `__` pairs.
+        // The other name positions this SURFACE sees are not dunders to the
+        // reference: it admits a dunder service, alias, component and
+        // parameter, and `___` has no byte between its `__` pairs.
         for source in [
             "service __init__ {\n}\n",
             "type __k__ = Str\n",

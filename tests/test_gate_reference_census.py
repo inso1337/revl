@@ -914,8 +914,8 @@ def test_the_admission_mirror_matches_the_rust(census):
                    "service S {\n  fn __proto__(x: Int) -> Int\n}\n",
                    "service S {\n  fn __x__()\n}\n"):
         assert not certify(source), source
-    # The other name positions are admitted by the reference and stay inside
-    # the surface, and `___` has no byte between its `__` pairs.
+    # The other name positions this surface sees are admitted by the reference
+    # and stay inside it, and `___` has no byte between its `__` pairs.
     for source in ("service __init__ {\n}\n", "type __k__ = Str\n",
                    "component __c__ {\n}\n",
                    "service S {\n  fn f(__x__: Int) -> Int\n}\n",
