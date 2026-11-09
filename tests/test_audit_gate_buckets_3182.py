@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_source  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.audit_diff import (  # noqa: E402
-    GATED_BUCKETS, audit_report, evaluate, widening_from_audits)
+    GATED_BUCKETS, audit_report, diff_recovery, evaluate, widening_from_audits)
 from revl.composition_diff import diff  # noqa: E402
 from revl.mcp import update_tools  # noqa: E402
 
@@ -191,3 +191,61 @@ def test_revl_diff_reports_the_safe_directions():
     assert delta["crossings"]["scope_tightened"] == ["scope:Front:cache.put"]
     assert "component `Front` narrowed emission `cache.put` scope" in \
         delta["guarantees"]
+
+
+# ------------------------------- a recovery kind change on a kept name
+
+# The same crossing name with an exact inverse, then as a compensated emission:
+# the recovery kind moves from `inverse` to `compensation` and the name stays.
+_DECLARED = """\
+type W = { path: Str }
+type E = { msg: Str }
+extern pure fn restore(w: W) -> Unit = @py { return None }
+extern witnessed fn deposit(p: Str) -> Result[W, E] undo restore(result) = @py { return {"path": p} }
+component C {
+  effect deposit("t")
+}
+"""
+
+_COMPENSATION = """\
+extern pure fn rollback() -> Unit = @py { return None }
+extern emission fn deposit(p: Str) -> Str compensate rollback() = @py { return p }
+component C {
+  emit deposit("t")
+}
+"""
+
+
+def test_a_kind_change_on_a_kept_name_is_not_a_dropped_recovery():
+    before = {"recovery_surface": [
+        {"name": "a", "kind": "compensation", "register": None}]}
+    after = {"recovery_surface": [
+        {"name": "a", "kind": "inverse", "register": None}]}
+    assert diff_recovery(before, after)["recovery_dropped"] == []
+    assert diff_recovery(after, before)["recovery_dropped"] == []
+
+
+def test_a_recovery_removed_entirely_is_still_dropped():
+    before = {"recovery_surface": [
+        {"name": "a", "kind": "inverse", "register": None},
+        {"name": "b", "kind": "compensation", "register": None}]}
+    after = {"recovery_surface": [
+        {"name": "b", "kind": "compensation", "register": None}]}
+    assert diff_recovery(before, after)["recovery_dropped"] == [
+        "recovery:a:inverse"]
+    assert diff_recovery(before, {"recovery_surface": []})[
+        "recovery_dropped"] == ["recovery:a:inverse", "recovery:b:compensation"]
+
+
+def test_the_update_path_gives_the_gate_verdicts_on_a_kind_change():
+    declared = audit_report(compile_source(_DECLARED, "corpus.rvl"))
+    compensation = audit_report(compile_source(_COMPENSATION, "corpus.rvl"))
+    weakened = update_tools._widening_from_audits(declared, compensation)
+    assert weakened["widened"] is True
+    assert weakened["inverseWeakened"] == ["inverse:deposit"]
+    assert weakened["recoveryDropped"] == []
+    assert evaluate(declared, compensation,
+                    accepted={"inverse:deposit"})["widened"] is False
+    strengthened = update_tools._widening_from_audits(compensation, declared)
+    assert strengthened["widened"] is False
+    assert evaluate(compensation, declared)["widened"] is False

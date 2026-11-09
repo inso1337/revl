@@ -170,7 +170,7 @@ def diff(before: dict, after: dict) -> dict:
     removed_c = sorted(before_names - after_names)
     common_c = before_names & after_names
 
-    # authority surface — the reused drift relation. Issue #3182: besides the
+    # authority surface: the reused drift relation. Issue #3182: besides the
     # crossing set, carry the reach weakening and the scope and backend
     # buckets, the drift a crossing that STAYS can carry.
     cross = diff_crossings(bf["audit"], af["audit"])

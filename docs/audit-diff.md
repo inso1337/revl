@@ -73,11 +73,32 @@ author-written bound; a VALUE is never in the audit at all (values arrive at
 | `unchanged` | crossing in both                           | always passes |
 | `inverse_weakened` | the derived `inverse` class of a crossing moved to a weaker one (defaulted to `unknown`) | fails (exit 1) unless acknowledged |
 | `inverse_strengthened` | the class moved to a stronger one | always passes |
+| `reach_weakened` | a stable extern's reach lost or moved its bound (`reach-weakened:<extern>`) | fails (exit 1) unless acknowledged |
+| `reach_tightened` | the reach gained a bound | always passes |
+| `scope_widened` | a stable emission's capability scope covers more (`scope:<component>:<label>`), e.g. `[db]` to unscoped | fails (exit 1) unless acknowledged |
+| `scope_tightened` | the scope covers less | always passes |
+| `backends_added` | an extern gained a host backend body (`backend:<extern>:<backend>`), e.g. a `@ts` body beside `@py` | fails (exit 1) unless acknowledged |
+| `backends_removed` | an extern gave up a backend body | always passes |
+| `recovery_dropped` | a name lost every recovery entry (`recovery:<name>:<kind>`) | fails (exit 1) unless acknowledged |
+| `recovery_weakened` | a kept recovery entry's idempotency register dropped | fails (exit 1) unless acknowledged |
+| `recovery_added` | a recovery entry appeared | always passes |
+| `registers_weakened` | a capability's idempotency floor dropped or was removed (`register:<token>`) | fails (exit 1) unless acknowledged |
+| `registers_strengthened` | a floor rose or was added | always passes |
+| `cardinality_widened` | a per-capability emission ceiling rose (`cardinality:<component>:<token>`) | fails (exit 1) unless acknowledged |
+| `cardinality_tightened` | the ceiling fell | always passes |
 
 Adding authority is the only dangerous direction, so **only unacknowledged
-additions and weakenings fail**. Giving up authority (a removal, a tightened
-reach, a strengthened inverse) never needs a gate. Exit code is `0` iff there
-are no unacknowledged additions or weakenings.
+additions, weakenings and widenings fail**. Giving up authority (a removal, a
+tightened reach or scope, a strengthened inverse, a dropped backend) never
+needs a gate. Exit code is `0` iff there are no unacknowledged gated tokens.
+
+The gated set is `audit_diff.GATED_BUCKETS`, read through
+`audit_diff.widening_from_audits`. The MCP update path's acknowledgement
+decision reads the same function, so the gate and the update path cannot
+disagree about what widened (issue #3182). A recovery whose kind moves on a
+kept name (`compensation` to `inverse`, or back) is not a dropped recovery:
+the direction of that move is the inverse-provenance diff's, so a weakening
+is one `inverse:<name>` token and a strengthening passes.
 
 ## Inverse provenance drift
 
@@ -117,7 +138,8 @@ produces neither a false weakening nor a false strengthening.
 A widening is sometimes intended. Two ack paths, chosen to be the smallest
 thing that works:
 
-- `--accept <crossing>` (repeatable) — acknowledge one addition by its token.
+- `--accept <crossing>` (repeatable): acknowledge one gated token (an
+  addition, or a weakened or widened fact such as `backend:x:ts`).
   The token is exactly the string printed after the `+` in the report, so the
   ack list is copy-paste from the failure output.
 - `--accept-all` — acknowledge every addition in this diff.
@@ -151,8 +173,12 @@ Accepting that widening on purpose:
 
 `--json` stays composable — `revl audit ... --diff PREV.json --json` prints the
 `added` / `removed` / `unchanged` / `reach_weakened` / `reach_tightened` /
-`inverse_weakened` / `inverse_strengthened` / `acknowledged` /
-`unacknowledged` / `widened` decision object instead of the human report.
+`inverse_weakened` / `inverse_strengthened` / `scope_widened` /
+`scope_tightened` / `backends_added` / `backends_removed` /
+`recovery_dropped` / `recovery_weakened` / `recovery_added` /
+`registers_weakened` / `registers_strengthened` / `cardinality_widened` /
+`cardinality_tightened` / `acknowledged` / `unacknowledged` / `widened`
+decision object instead of the human report.
 
 ## Capturing a baseline
 

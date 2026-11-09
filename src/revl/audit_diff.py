@@ -599,7 +599,16 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     can carry, and invisible to every crossing/reach/interface differ. An entry
     whose idempotency `register` WEAKENS (a lower `_REGISTER_RANK`, or lost
     entirely) is a weakened recovery. A newly-appearing entry is a GAINED recovery
-    (safe). Buckets are sorted, so the diff is deterministic over the unhashable
+    (safe).
+
+    A name that still has a recovery of SOME kind on the new side is not
+    dropped when only its kind moved (`compensation` to `inverse`, or back;
+    issue #3182). The effect can still be put back or offset, and which way
+    the move goes is the inverse-provenance question `diff_inverses` answers:
+    a weaker kind is its `inverse:<name>` token, a stronger one passes. Read
+    here as a drop, one kind change gated twice and a strengthening failed.
+    A recovery that disappears entirely, with no entry of any kind left for
+    that name, is still dropped. Buckets are sorted, so the diff is deterministic over the unhashable
     `list[dict]` surface without ever hashing a dict.
     """
     from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
@@ -610,8 +619,10 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     dropped: list[str] = []
     weakened: list[str] = []
     added: list[str] = []
+    kept_names = {name for name, _kind in new_r}
     for name, kind in prev_r.keys() - new_r.keys():
-        dropped.append(f"recovery:{name}:{kind}")
+        if name not in kept_names:
+            dropped.append(f"recovery:{name}:{kind}")
     for name, kind in new_r.keys() - prev_r.keys():
         added.append(f"recovery:{name}:{kind}")
     for key in prev_r.keys() & new_r.keys():

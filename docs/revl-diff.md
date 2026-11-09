@@ -44,7 +44,15 @@ A composition is three things at once, and `revl diff` reports a delta on each:
    per-component crossing tokens the authority gate uses
    (`emit:<component>:<label>`, `host:<component>:<name>`). A gained emission
    carries its declared capability scope, so the guarantee reads
-   ``component `UserCache` gained emission `put` [bus]``.
+   ``component `UserCache` gained emission `put` [bus]``. A crossing that
+   stays can still drift, so this axis also carries the reach weakening
+   (`audit_diff.diff_reach`), the per-emission scope buckets
+   (`diff_capability_scopes`) and the host backend buckets (`diff_backends`):
+   ``component `Front` widened emission `cache.put` scope to any capability``,
+   ``host extern `engine_run` gained a `ts` backend body``,
+   ``host extern `engine_run` reach weakened (its bound was loosened or
+   moved)``. A component whose scope moved, or that reaches such an extern,
+   is listed as changed (issue #3182).
 
 3. **Wiring** — the composition's dependency graph: which key each component
    *provides* (and with which providing component/service) and which keys it
@@ -101,7 +109,10 @@ an agent can consume:
                                  "to_service": "Database" } ] },
   "requires":   { "added": [ { "component": "Auth", "key": "session" } ],
                   "removed": [...], "broken": [...] },
-  "crossings":  { "added": ["emit:UserCache:put"], "removed": [...] },
+  "crossings":  { "added": ["emit:UserCache:put"], "removed": [...],
+                  "reach_weakened": [...], "scope_widened": [...],
+                  "scope_tightened": [...], "backends_added": [...],
+                  "backends_removed": [...] },
   "guarantees": [ "component `UserCache` gained emission `put` [bus]", ... ],
   "changed": true
 }
