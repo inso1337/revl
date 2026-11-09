@@ -9195,6 +9195,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _validate_declared_types(program, program.filename)
     _check_principal_producers(program, program.filename)
     types = _lower_type_decls(program, program.filename)
+    # the declarations behind the signatures of the running services: a name a
+    # running component was checked against must still mean what it meant
+    # (`_admit_service_replacement` above read the signatures as spellings)
+    _admit_service_types(program, ambient_services,
+                         {svc.name: svc for svc in program.services},
+                         ambient, types)
     # item 521 slice 4: the computer-use target record and the signatures
     # that carry it. Checked here because the obligation is a program-level
     # fact (a verb declared in one place, a record declared in another) and
@@ -9900,6 +9906,7 @@ from .admission import (  # noqa: E402,F401
     _admit_handoff_replacement,
     _admit_provision_withdrawal,
     _admit_service_replacement,
+    _admit_service_types,
     _caps_str,
     _caps_widen,
     _drift_error,
