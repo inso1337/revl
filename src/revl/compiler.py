@@ -1701,7 +1701,9 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             # the declared-type table those hand-off spellings are written
             # against: a nominal name in `handoffs` means what the RUNNING
             # version declared it to be, which the replacement's own table
-            # cannot say. Absent for a manifest that carries none.
+            # cannot say. `{}` for a manifest that carries none, and then a
+            # name the candidate declares cannot be proved the same, so the
+            # gate refuses it (`admission._handoff_compatible`, fail closed).
             "handoff_types": manifest.get("types") or {},
             # item 186 / issue #86: what this admission WITHDRAWS from the
             # running composition — `replacing=` plus every running component

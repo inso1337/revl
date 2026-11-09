@@ -85,7 +85,10 @@ two is a different shape even though the spelling is the same: `St` going from
 becoming `Str`, or a variant gaining a case is refused, and the refusal prints
 both declarations. This is deliberately strict: it compares declarations for
 identity, so a harmless widening of a record is refused too and has to be
-migrated explicitly. `revl migrate` reports the same verdict.
+migrated explicitly. Type parameters are compared by position, so renaming `T`
+to `U` is no change; variant cases are compared in order, because the WIT export
+numbers them by position, so a reorder is refused. The agent-authored swap path
+(`revl_propose`/`revl_swap`) and `revl migrate` apply the same check.
 
 Refusing is the sound move: silently dropping the predecessor's state on a swap
 would be **residue**, which G7/the erase-report forbid.

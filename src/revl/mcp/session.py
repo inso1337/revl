@@ -28,12 +28,12 @@ from fnmatch import fnmatchcase
 from .. import cap_order
 from .. import intent as _intent
 from .._paths import backends_root, python_backend_emitter, venv_python
+from ..admission import _handoff_compatible, _handoff_detail
 from ..gate import _ir_referenced_names
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
 from ..taint import REDACTED_SECRET
-from ..typecheck import compatible
 from . import operator as _operator
 from . import quorum as _quorum
 from . import identity as _identity
@@ -2319,11 +2319,14 @@ class Session:
             accepted = accepts.get(key)
             if accepted is None:
                 continue  # the successor opts out of this key — starts cold
-            if not compatible(accepted, exported):
+            if not _handoff_compatible(accepted, exported, new_ir.get("types"),
+                                       old_ir.get("types")):
+                at, ex = _handoff_detail(accepted, exported, new_ir.get("types"),
+                                         old_ir.get("types"))
                 raise SessionError(
                     f"the successor's `handoff` on {key!r} accepts "
-                    f"`{accepted}`, but the running provider exports "
-                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"`{accepted}`{at}, but the running provider exports "
+                    f"`{exported}`{ex} — the declared hand-off types are not §5-"
                     f"compatible, so operator state cannot cross onto the "
                     f"agent-authored successor (the item-53 accept-vs-export "
                     f"gate never ran on the standalone decision compile). "
@@ -2645,6 +2648,9 @@ class Session:
             pre[_handoff_slot(comp, key)] = {
                 "component": comp["name"],
                 "type": handoff.get("type"),
+                # the declarations that spelling is written against, so the
+                # restore step compares shapes and not just names
+                "types": (old_ir or {}).get("types") or {},
                 "captured": captured,
             }
         return pre
@@ -2765,11 +2771,14 @@ class Session:
             # check below passes it through.
             accepted = (comp.get("handoff") or {}).get("type")
             exported = info.get("type")
-            if not compatible(accepted, exported):
+            if not _handoff_compatible(accepted, exported, new_ir.get("types"),
+                                       info.get("types")):
+                at, ex = _handoff_detail(accepted, exported, new_ir.get("types"),
+                                         info.get("types"))
                 raise runtime.StateIncompatible(
                     f"provider of {key!r}: the successor accepts state "
-                    f"`{accepted}`, but the running provider exported "
-                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"`{accepted}`{at}, but the running provider exported "
+                    f"`{exported}`{ex} — the declared hand-off types are not §5-"
                     f"compatible, so the state cannot migrate")
             captured = info["captured"]
             fiber = self._driver.fibers.get(comp["name"])

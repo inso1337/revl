@@ -454,15 +454,32 @@ def _decl_refs(spec: dict) -> list[str]:
 
 
 def _decl_key(spec: dict | None) -> tuple | None:
-    """The declaration's content, order-free for fields (the record relation
-    is by field SET) and ordered for cases."""
+    """The declaration's content. Fields compare as a SET (the record relation
+    is by field set). Type parameters are read by POSITION, so `Box[T] = {v: T}`
+    and `Box[U] = {v: U}` are one declaration while `P[T, U]` and `P[U, T]`
+    over the same body are not.
+
+    Variant cases compare IN ORDER, on purpose: case order is observable. The
+    WIT export (`export_wit`) numbers a variant's cases by position on the
+    canonical-ABI wire and the JSON schema lists them in order, so a reorder is
+    a different encoding, not a spelling change. It is refused with the other
+    declaration changes."""
     if not isinstance(spec, dict):
         return None
     params = tuple(spec.get("params") or ())
+    slot = {p: f"${i}" for i, p in enumerate(params)}
+
+    def norm(ty):
+        if not isinstance(ty, str) or not slot:
+            return ty
+        return _IDENT.sub(lambda m: slot.get(m.group(0), m.group(0)), ty)
+
     if spec.get("kind") == "variant":
-        return ("variant", params, tuple(
-            (c.get("name"), c.get("payload")) for c in spec.get("cases") or []))
-    return ("record", params, tuple(sorted((spec.get("fields") or {}).items())))
+        return ("variant", len(params), tuple(
+            (c.get("name"), norm(c.get("payload")))
+            for c in spec.get("cases") or []))
+    return ("record", len(params), tuple(sorted(
+        (k, norm(v)) for k, v in (spec.get("fields") or {}).items())))
 
 
 def _decl_differs(name: str, mine: dict, theirs: dict,
@@ -566,8 +583,22 @@ def _handoff_compatible(accepted: str | None, exported: str | None,
     declaration (or anything it reaches) differs between the versions is
     renamed per side before the comparison. The two sides then differ as
     opaque nominals, which `compatible` refuses, exactly as it refuses two
-    differently named records. With no table on either side nothing is
-    renamed and this is `compatible(accepted, exported)` unchanged."""
+    differently named records.
+
+    Where a table is absent, exactly:
+
+    * A name declared on NEITHER side (a builtin, an opaque nominal) is never
+      renamed: equal spellings are equal, as before.
+    * A name declared on only ONE side is a changed name and is refused, even
+      if its spelling is unchanged. That includes a running document that
+      carries no `types` at all (a hand-built or older manifest) meeting a
+      candidate that declares the name: the predecessor's declaration cannot
+      be read, so sameness cannot be proved and the gate fails closed. The
+      remedy is to supply the running document with its `types`.
+    * With no table on either side nothing is renamed and this is
+      `compatible(accepted, exported)` unchanged.
+    * A manifest projection with no `components` exports no hand-off, so this
+      is never reached."""
     changed = _changed_names(accepted, exported, accepted_types, exported_types)
     if changed:
         accepted = _tag_names(accepted, changed, "@successor")
@@ -640,10 +671,20 @@ def _handoff_error(program: Program, comp: dict, key: str,
                f"`{old_name}` exports `{exported}`{exported_at} — the successor "
                f"cannot hold the predecessor's state, and dropping it on the "
                f"swap would be residue")
-    hint = ("a successor's `handoff` type must accept everything the running "
-            "provider's `handoff` exports (state compatibility, the §5 relation "
-            "pointed at state — docs/state-handoff.md); widen the accepted type "
-            "or migrate the shape explicitly")
+    if accepted_at or exported_at:
+        # the spellings agree and the declaration behind a name moved, so
+        # "widen the accepted type" would not change the verdict
+        hint = ("a successor's `handoff` must hold everything the running "
+                "provider's `handoff` exports (state compatibility, the §5 "
+                "relation pointed at state — docs/state-handoff.md), and a "
+                "record or variant it names must be declared exactly as the "
+                "running version declares it: keep the declaration unchanged, "
+                "or migrate the shape explicitly")
+    else:
+        hint = ("a successor's `handoff` type must accept everything the "
+                "running provider's `handoff` exports (state compatibility, "
+                "the §5 relation pointed at state — docs/state-handoff.md); "
+                "widen the accepted type or migrate the shape explicitly")
     steps = [
         TraceStep(f"{new_name}.{key}", "accept", program.filename, line,
                   f"accepts state `{accepted}`{accepted_at}"),

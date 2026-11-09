@@ -6934,6 +6934,14 @@ def test_handoff_nominal_record_unchanged_agrees(admit_ambient):
                         replacing=("Store",)) == ""
 
 
+def test_handoff_nominal_record_changed_is_refused_by_the_reference():
+    """The reference half of the divergence below, OUTSIDE the expected
+    failure: if the reference stops refusing, this goes red on its own."""
+    ref = _ref_ambient(_H_NOMINAL_NEW, _H_NOMINAL_OLD, replacing=("Store",))
+    assert ref.startswith("G2|state hand-off on `db` differs from the running "
+                          "manifest: `Store` accepts `St` ("), ref
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="KNOWN DIVERGENCE: the self-host gate compares hand-off SPELLINGS "
@@ -6942,10 +6950,9 @@ def test_handoff_nominal_record_unchanged_agrees(admit_ambient):
            "admits here while the reference refuses it. Closing it needs the "
            "running declarations on the wire (a new row kind) and the "
            "incoming declarations read off the text.")
-def test_handoff_nominal_record_changed_is_refused_like_the_reference(
+def test_handoff_nominal_record_changed_gate_matches_the_reference(
         admit_ambient):
     ref = _ref_ambient(_H_NOMINAL_NEW, _H_NOMINAL_OLD, replacing=("Store",))
-    assert ref.startswith("G2|state hand-off on `db` differs"), ref
     assert _gate_ambient(admit_ambient, _H_NOMINAL_NEW, _H_NOMINAL_OLD,
                          replacing=("Store",)) == ref
 

@@ -301,3 +301,109 @@ def test_nested_nominal_record_unchanged_is_admitted_through_a_json_round_trip()
     old = json.loads(json.dumps(compile_source(_with_decls(decl, state), "c.rvl")))
     compile_source(_with_decls(decl, state, version=2), "c.rvl",
                    manifest=old, replacing=("Cache",))
+
+
+# -- the same declared-shape check on the agent-authored swap path -------------
+#
+# `Session._enforce_declared_disclosure` (before teardown) and
+# `Session._restore_provider_state` (as the state is threaded) each carried a
+# spelling-only `compatible(accepted, exported)` of their own, so a changed
+# record under an unchanged name crossed there although admission refused it.
+
+def _session_stub(**driver):
+    from types import SimpleNamespace
+
+    from revl.mcp import session as session_mod
+
+    return session_mod, SimpleNamespace(
+        _driver=SimpleNamespace(
+            runtime=SimpleNamespace(live_instances=lambda name: [],
+                                    StateIncompatible=RuntimeError),
+            fibers={}, **driver),
+        _frame_resources=lambda fiber: [],
+        _declared_handoffs=session_mod.Session._declared_handoffs)
+
+
+def test_session_disclosure_gate_refuses_a_changed_record_under_one_name():
+    session_mod, stub = _session_stub()
+    old = compile_source(_with_decls("type St = { t: Secret[Str] }", "St"), "c.rvl")
+    new = compile_source(_with_decls("type St = { t: Str }", "St", version=2),
+                         "c.rvl")
+    with pytest.raises(session_mod.SessionError) as caught:
+        session_mod.Session._enforce_declared_disclosure(stub, old, new)
+    assert caught.value.code == "STATE_UNDISCLOSED"
+
+
+def test_session_disclosure_gate_admits_an_unchanged_record():
+    session_mod, stub = _session_stub()
+    decl = "type St = { t: Secret[Str] }"
+    old = compile_source(_with_decls(decl, "St"), "c.rvl")
+    new = compile_source(_with_decls(decl, "St", version=2), "c.rvl")
+    session_mod.Session._enforce_declared_disclosure(stub, old, new)
+
+
+def test_session_restore_refuses_a_changed_record_under_one_name():
+    session_mod, stub = _session_stub()
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    new = compile_source(
+        _with_decls("type St = { a: Int, b: Int }", "St", version=2), "c.rvl")
+    pre = session_mod.Session._capture_provider_state(stub, old)
+    assert pre
+    with pytest.raises(RuntimeError, match="not §5-compatible"):
+        session_mod.Session._restore_provider_state(stub, new, pre)
+
+
+def test_session_restore_admits_an_unchanged_record():
+    session_mod, stub = _session_stub()
+    decl = "type St = { a: Int }"
+    old = compile_source(_with_decls(decl, "St"), "c.rvl")
+    new = compile_source(_with_decls(decl, "St", version=2), "c.rvl")
+    pre = session_mod.Session._capture_provider_state(stub, old)
+    assert session_mod.Session._restore_provider_state(stub, new, pre)
+
+
+# -- what counts as the same declaration --------------------------------------
+
+def test_renamed_type_parameter_is_the_same_declaration():
+    old = compile_source(_with_decls("type Box[T] = { v: T }", "Box[Int]"), "c.rvl")
+    compile_source(_with_decls("type Box[U] = { v: U }", "Box[Int]", version=2),
+                   "c.rvl", manifest=old, replacing=("Cache",))
+
+
+def test_type_parameter_swap_is_a_different_declaration():
+    # positional, not by name: `{a: T, b: U}` read with its parameters swapped
+    # is another record
+    old = compile_source(
+        _with_decls("type P[T, U] = { a: T, b: U }", "P[Int, Str]"), "c.rvl")
+    new = _with_decls("type P[U, T] = { a: T, b: U }", "P[Int, Str]", version=2)
+    _assert_drift(_refusal(_with_decls("type P[T, U] = { a: T, b: U }",
+                                       "P[Int, Str]"), new))
+    assert old
+
+
+def test_variant_case_reorder_is_refused():
+    # case order is observable: the WIT/canonical-ABI export numbers a variant's
+    # cases by position, and the JSON schema lists them in order
+    exc = _refusal(_with_decls("type Sh = Circle(Int) | Square", "Sh"),
+                   _with_decls("type Sh = Square | Circle(Int)", "Sh", version=2))
+    _assert_drift(exc)
+
+
+def test_nominal_drift_hint_does_not_say_widen():
+    exc = _refusal(_with_decls("type St = { a: Int }", "St"),
+                   _with_decls("type St = { a: Int, b: Int }", "St", version=2))
+    assert "widen" not in exc.hint and "declaration" in exc.hint
+
+
+def test_missing_running_types_refuses_even_an_unchanged_declaration():
+    # fail closed: a running document that carries no `types` cannot say what
+    # `St` was, so the gate cannot prove it is the same
+    import copy
+
+    decl = "type St = { a: Int }"
+    old = copy.deepcopy(compile_source(_with_decls(decl, "St"), "c.rvl"))
+    old.pop("types")
+    with pytest.raises(RevlError) as info:
+        compile_source(_with_decls(decl, "St", version=2), "c.rvl",
+                       manifest=old, replacing=("Cache",))
+    _assert_drift(info.value)
