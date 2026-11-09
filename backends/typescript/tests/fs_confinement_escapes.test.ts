@@ -490,12 +490,14 @@ describe('#3235: a dangling outside symlink is refused, not resolved inward', ()
   })
 
   it('a relative dangling target resolves against the link\'s real parent', () => {
-    // `outdir` is an inside name that is really outside; the dangling link
-    // physically lives outside, so its relative target is outside too. Joining
-    // it against the spelled parent would put the miss back inside the root.
-    fs.symlinkSync(outside, inWs('outdir'))
-    fs.symlinkSync('../does-not-exist.txt', inWs('outdir/relative_dangling'))
-    const given = inWs('outdir/relative_dangling')
+    // `alias_root` is an INSIDE name that resolves to the root itself, so the
+    // link physically lives at the root and its relative target climbs out of
+    // the root. Joining that target against the spelled parent
+    // (`.../alias_root/../outside/...`) would put the miss back inside the
+    // jail; only resolving against the link's REAL parent refuses it.
+    fs.symlinkSync(ws, inWs('alias_root'))
+    fs.symlinkSync('../outside/does-not-exist.txt', inWs('alias_root/relative_dangling'))
+    const given = inWs('alias_root/relative_dangling')
     let caught: unknown
     try { resolveWithin(given) } catch (e) { caught = e }
     expect(caught).toBeInstanceOf(FsOpError)
