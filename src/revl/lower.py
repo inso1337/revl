@@ -5224,6 +5224,44 @@ def _lower_externs(program: Program, filename: str, types: dict,
                          "body cannot swap for a literal, or the reach claim is "
                          "unreviewable (item 373)",
                 )
+        # issue #2971: the `reaches [...]` host-body declaration is a CLAIM about
+        # opaque host code, so the compiler checks the one fact it holds: the
+        # claim may not omit a capability the declaration ALREADY says the
+        # crossing joins. An `emission[X]`/`witnessed[X]` scope is that fact,
+        # and a `reaches` that drops it would narrow the declaration against
+        # itself, which is the unsound direction. `reaches [*]` is the declared
+        # unbounded spelling and omits nothing. An extern with no scope has no
+        # compiler-known boundary, so its claim stays the author's declaration
+        # (`basis: "declared"`; docs/design/1729-extern-reach-declaration.md).
+        if (decl.reaches is not None and decl.capabilities
+                and "*" not in decl.reaches):
+            from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+            try:
+                scope_caps = [cap_order.parse_cap(c) for c in decl.capabilities]
+                reach_caps = [cap_order.parse_cap(c) for c in decl.reaches]
+                missing = [c.to_str() for c in
+                           cap_order.covers_set(reach_caps, scope_caps)]
+            except cap_order.CapError:
+                # A token whose dimensions were declared by a `capability`
+                # declaration is canonical but not re-parsable without that
+                # declaration (the same limit `_model_reach_caps` degrades
+                # around). Fall back to exact membership: it refuses a claim
+                # that plainly does not name the scope, without turning a
+                # capability the registry cannot re-read into an internal error.
+                missing = [c for c in decl.capabilities if c not in decl.reaches]
+            if missing:
+                named = ", ".join(f"`{c}`" for c in missing)
+                raise RevlError(
+                    decl_file, decl.line,
+                    f"extern `{decl.name}` declares a `reaches [...]` that omits "
+                    f"{named}, the capability scope it already declares",
+                    hint="the `emission[X]`/`witnessed[X]` scope says which "
+                         "boundary the crossing joins; a `reaches [...]` that does "
+                         "not COVER it narrows the declaration against itself, "
+                         "which is the unsound direction. Name the scoped "
+                         "capability in `reaches [...]`, or write `reaches [*]` "
+                         "for an unbounded claim (issue #2971)",
+                )
         # issue #1985: the same rule for the emission SCOPE's own destination
         # claim - `emission[network.call(host=host)]` names the declaration's
         # parameter, so the name is resolved against the signature here, next
@@ -5558,6 +5596,22 @@ def _lower_externs(program: Program, filename: str, types: dict,
             if body.source_path is not None:
                 body_files[body.backend] = {"path": body.source_path,
                                             "sha256": body.sha256}
+        # issue #2971: `reach` carries BOTH declared-reach facts when present:
+        # the item-373 confinement (`kind`/`target`, unchanged for an extern that
+        # does not write `reaches`) and the declared host-body reach (`caps`/
+        # `basis`, present only when `reaches [...]` was written). Absent when
+        # neither clause was written, so every existing extern's IR stays
+        # byte-identical; a consumer reads an absent key as UNKNOWN, never as
+        # empty. `basis: "declared"` is the honest tier: the claim about opaque
+        # host code is the author's, and a future `verified` value (#2708) is
+        # what a consumer would need to narrow without trusting the author.
+        reach_ir: dict | None = None
+        if decl.reach is not None:
+            reach_ir = {"kind": decl.reach[0], "target": decl.reach[1]}
+        if decl.reaches is not None:
+            reach_ir = dict(reach_ir or {})
+            reach_ir["caps"] = list(decl.reaches)
+            reach_ir["basis"] = "declared"
         entry: dict = {
             "name": decl.name,
             "class": decl.classification,
@@ -5602,12 +5656,10 @@ def _lower_externs(program: Program, filename: str, types: dict,
             # byte-identical. A crossing reaching this extern needs a covering
             # `with e` edge or lowering refuses (Decision 3).
             **({"requires_approval": True} if decl.requires_approval else {}),
-            # item 373: the reach clause, recorded as `{"kind", "target"}`. Absent
-            # unless the author wrote it, so every existing extern's IR is
-            # byte-identical (a bare emission is "unconfined" = no key). `revl
-            # audit` prints it and `audit --diff` reads it to flag a weakening.
-            **({"reach": {"kind": decl.reach[0], "target": decl.reach[1]}}
-               if decl.reach is not None else {}),
+            # item 373 / issue #2971: the reach facts, each present only when its
+            # clause was written. `revl audit` prints the confinement; an absent
+            # key is undeclared (unknown), never reaching nothing.
+            **({"reach": reach_ir} if reach_ir is not None else {}),
             # item 309: the idempotency register, ADDITIVE. Absent unless the
             # author declared one of the three surfaces, so every existing
             # extern's IR is byte-identical. `undo_idempotent` marks an

@@ -38737,6 +38737,14 @@ fn ir_extern(ts: Vec<Token>, i: i64, decls: &[TaintDecl], al: std::collections::
         retDecl = alias_subst(tr.ty.clone(), al.clone());
         k = tr.i;
     }
+    let mut reachJson = String::from("");
+    let mut hasReach = false;
+    if (ati(&ts, k, "reaches") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "[")) {
+        let rc = ir_cap_list(&ts, (k).checked_add(1i64).expect("revl: Int overflow"));
+        reachJson = rc.js;
+        hasReach = true;
+        k = rc.i;
+    }
     let mut undoJson = String::from("");
     let mut hasUndo = false;
     let mut undoIdem = false;
@@ -38846,6 +38854,9 @@ fn ir_extern(ts: Vec<Token>, i: i64, decls: &[TaintDecl], al: std::collections::
     }
     if (((cls == "witnessed") || (cls == "emission")) && hasCaps) {
         js = ((js.revl_concat(", \"capabilities\": [")).revl_concat(&capsJson)).revl_concat("]");
+    }
+    if hasReach {
+        js = ((js.revl_concat(", \"reach\": {\"caps\": [")).revl_concat(&reachJson)).revl_concat("], \"basis\": \"declared\"}");
     }
     if (hasCfg && (cfgJson != "")) {
         js = ((js.revl_concat(", \"config\": [")).revl_concat(&cfgJson)).revl_concat("]");

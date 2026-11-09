@@ -817,8 +817,18 @@ def _run_audit(args, ir: dict) -> int:
             # backends: py, ts`). A bare emission carries no reach and prints
             # exactly as before — byte-compatible.
             reach = ext.get("reach")
-            reach_str = (f"  reach: {reach['kind']}({reach['target']})"
-                         if reach else "")
+            # issue #2971: `reach` now carries the item-373 confinement
+            # (`kind`/`target`) and/or the declared host-body reach
+            # (`caps`/`basis`). Print each half only when it is present, so an
+            # extern that writes only `reaches [...]` renders as
+            # `reach: reaches [fs]`, and the item-373 output is unchanged.
+            reach_parts = []
+            if reach and "kind" in reach:
+                reach_parts.append(f"{reach['kind']}({reach['target']})")
+            if reach and "caps" in reach:
+                reach_parts.append(f"reaches [{', '.join(reach['caps'])}]")
+            reach_str = (f"  reach: {'; '.join(reach_parts)}"
+                         if reach_parts else "")
             # item 484: the `deferred` modifier reads INSIDE the bracket, in the
             # same order the declaration is written (`extern emission deferred fn
             # outbox_deliver`), so a deferrable crossing is distinguishable from

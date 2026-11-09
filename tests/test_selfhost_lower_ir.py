@@ -1808,6 +1808,35 @@ def test_the_idempotent_fixture_lowers_to_the_reference(lower_to_ir):
     assert native["externs"] == reference["externs"]
 
 
+def test_declared_extern_reach_lowers_to_the_reference(lower_to_ir):
+    """Issue #2971: `reaches [...]` after the extern return type lowers to the
+    reference's `reach: {"caps", "basis"}` key in the self-host producer. The
+    clause sits outside the item-241 covered surface until the producer reads
+    it, so before this the declaration either dropped the whole `externs`
+    section or emitted an entry without the key."""
+    source = (
+        "extern emission[fs] fn write(p: Str) -> Int\n"
+        "reaches [fs]\n"
+        "= @py { return 1 }\n"
+        "extern pure fn env(n: Str) -> Str\n"
+        "reaches [*]\n"
+        "= @py { return n }\n"
+        "extern pure fn none(n: Int) -> Int\n"
+        "reaches []\n"
+        "= @py { return n }\n"
+        "extern pure fn plain(n: Int) -> Int\n"
+        "= @py { return n }\n")
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert "externs" in native, "the externs section was dropped"
+    assert native["externs"] == reference["externs"]
+    reaches = {e["name"]: e.get("reach") for e in native["externs"]}
+    assert reaches["write"] == {"caps": ["fs"], "basis": "declared"}
+    assert reaches["env"] == {"caps": ["*"], "basis": "declared"}
+    assert reaches["none"] == {"caps": [], "basis": "declared"}
+    assert reaches["plain"] is None
+
+
 # ------------------------------------------- issue #2012: bound secrets
 #
 # `secret NAME for CAP` is a top-level statement that binds a NAME to a

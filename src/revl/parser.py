@@ -1686,6 +1686,19 @@ class ExternDecl:
     # (both checked in lower) — so a weakened reach (confined -> unconfined) is a
     # reviewable diff, not a buried host-body comment.
     reach: tuple[str, str] | None = None
+    # issue #2971: the DECLARED host-body reach, spelled `reaches [...]` after
+    # the return type and shaped like item 519's `model role` clause. It is not
+    # the item-373 confinement above: `reach` bounds WHERE an emission crosses,
+    # `reaches` states what an opaque host body may reach at all, which is the
+    # fact a consumer needs to narrow on. `None` means the clause was OMITTED,
+    # which is UNDECLARED and therefore UNKNOWN, never empty; `()` is a written
+    # `reaches []` and `("*",)` is the unbounded spelling `reaches [*]`. Tokens
+    # are canonicalized through `_capability_params`, so they share the one
+    # capability namespace. Lowering refuses a claim that omits the extern's own
+    # `emission[X]`/`witnessed[X]` scope and records the rest as
+    # `{"caps": [...], "basis": "declared"}` (docs/design/1729-extern-reach-
+    # declaration.md); `basis` is reserved for a future `verified` value.
+    reaches: tuple[str, ...] | None = None
     # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md: a
     # typed `config { field: T = default, ... }` block, the same shape a
     # `ComponentDecl` carries (parser.py:284), letting a document-global extern
@@ -3261,21 +3274,27 @@ class Parser:
         return DeviceProfileClause(device, memory.value, quant, dline)
 
     def _model_role_reach(self) -> tuple:
-        """`reaches [<cap>, ...]` on a `model role` (roadmap item 519).
+        """`reaches [<cap>, ...]` on a `model role` (roadmap item 519)."""
+        return self._reaches_clause("a role")
 
-        The capability tokens a call to this role can itself reach. Spelled
-        with the `emission [...]` / `witnessed [...]` bracket so a reader meets
-        one capability-list grammar, and funnelled through `_capability_params`
-        so `model.complete(calls=3)` validates and canonicalizes at the one
-        canonical point every other token list uses.
+    def _reaches_clause(self, owner: str) -> tuple:
+        """`reaches [<cap>, ...]` -- one grammar for model roles and externs.
 
-        Two spellings the emission list does not carry, both meaningful here:
-        `reaches [*]` is the DECLARED unbounded role, and `reaches []` is the
-        role that declares it reaches nothing. Omitting the clause is neither.
-        It leaves the reach UNDECLARED, and what that means is decided in
-        `revl.model_route`, not here. `reaches` is a CONTEXTUAL identifier read
-        only in this slot, so the lexer's KEYWORDS table and the self-hosted
-        lexer that mirrors it need no sync."""
+        Item 519 spells a model role's reach this way; issue #2971 gives an
+        extern declaration the same clause, so one capability-list reader serves
+        both. Tokens are funnelled through `_capability_params`, so
+        `model.complete(calls=3)` or `fs.write(path="/tmp")` validates and
+        canonicalizes at the one canonical point every other token list uses.
+
+        Two spellings the emission list does not carry, both meaningful:
+        `reaches [*]` is the DECLARED unbounded reach, and `reaches []` declares
+        it reaches nothing. Omitting the clause is neither: it leaves the reach
+        UNDECLARED, and what that means is decided by the consumer
+        (`revl.model_route` for a role, the IR `reach` key for an extern).
+        `reaches` is a CONTEXTUAL identifier read only in this slot, so the
+        lexer's KEYWORDS table and the self-hosted lexer that mirrors it need no
+        sync. `owner` names the declaration kind in the duplicate diagnostic.
+        """
         self.expect("ident", value="reaches")
         self.expect("[", what="`[` after `reaches`")
         names: list[str] = []
@@ -3294,7 +3313,7 @@ class Parser:
                 raise self.err(
                     tok.line,
                     f"duplicate capability `{names[-1]}` in `reaches [...]`",
-                    hint="a role's reach is a set; name each capability once")
+                    hint=f"{owner}'s reach is a set; name each capability once")
             if self.at(","):
                 self.next()
         self.expect("]")
@@ -3610,6 +3629,18 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # issue #2971: the declared host-body reach, after the return type on
+        # every extern class and before the trailing clauses. Spelled exactly
+        # like item 519's `model role ... reaches [...]`, so one capability-list
+        # grammar covers both. `reaches` is a CONTEXTUAL identifier read only in
+        # this slot, so the lexer's KEYWORDS set needs no sync; `(` after the
+        # return type is the item-373 `(confined: ...)` clause and stays illegal
+        # here, so the lookahead is unambiguous. `None` (absent) is UNDECLARED
+        # and never empty; lower records it as `{"caps", "basis"}` only when
+        # written.
+        reaches: tuple[str, ...] | None = None
+        if self.at("ident", "reaches"):
+            reaches = self._reaches_clause("an extern")
         # item 310: the `cache` trailing clause, after the return type and before
         # the teardown clauses (design §Surface: "before `=` or `undo`"). Grammar-
         # legal but admission-refused for externs until the interior-crossing slice
@@ -3740,7 +3771,7 @@ class Parser:
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
                           capabilities=capabilities, type_params=type_params, async_=async_,
                           deferred=deferred, requires_approval=requires_approval,
-                          reach=reach, config=config, colour_poly=colour_poly,
+                          reach=reach, reaches=reaches, config=config, colour_poly=colour_poly,
                           undo_idempotent=undo_idempotent, undo_read=undo_read,
                           idempotent=idempotent,
                           idempotency_key=idempotency_key, cache=cache,

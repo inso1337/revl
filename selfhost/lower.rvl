@@ -34355,8 +34355,9 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
   }
   // The modifier slot, in any order as the reference's `extern_decl` reads
   // it: `async`, `deferred` (item 245) and `idempotent` with its optional
-  // `(key: p)` role (item 309). `validated`/`retry` and the reach clause stay
-  // outside the covered surface.
+  // `(key: p)` role (item 309). `validated`/`retry` and the item-373
+  // `(confined: ...)` reach clause stay outside the covered surface; issue
+  // #2971's `reaches [...]` lands after the return type and IS covered.
   var isAsync = false
   var isDeferred = false
   var isIdem = false
@@ -34393,6 +34394,19 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
     retJson = jstr(taint_strip(alias_subst(tr.ty, al)))
     retDecl = alias_subst(tr.ty, al)
     k = tr.i
+  }
+  // issue #2971: `reaches [...]` after the return type, the item-519-shaped
+  // declared host-body reach. `*` is the unbounded spelling and `[]` is the
+  // declared-empty one; an OMITTED clause writes no key, so absence reads as
+  // unknown and never as empty. The covered surface spells the tokens the way
+  // the reference's `_capability_params` canonicalizes them.
+  var reachJson = ""
+  var hasReach = false
+  if (ati(ts, k, "reaches") && atk(ts, k + 1, "[")) {
+    let rc = ir_cap_list(ts, k + 1)
+    reachJson = rc.js
+    hasReach = true
+    k = rc.i
   }
   // Teardown slots. `undo [idempotent] [pure] <inverse>` (items 243/309/440) and
   // `compensate <inverse>` lower their inverse EXPRESSION with the same
@@ -34547,6 +34561,14 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
   // keyed on (a bare `emission` writes none — name-as-capability).
   if ((cls == "witnessed" || cls == "emission") && hasCaps) {
     js = js.concat(", \"capabilities\": [").concat(capsJson).concat("]")
+  }
+  // issue #2971: the declared host-body reach, item 519's clause on an extern.
+  // Present ONLY when `reaches [...]` was written, so an omitted clause leaves
+  // no key and a consumer reads UNKNOWN rather than empty. `basis` is
+  // `declared`; a future `verified` value is reserved for #2708's enforcement.
+  if (hasReach) {
+    js = js.concat(", \"reach\": {\"caps\": [").concat(reachJson)
+      .concat("], \"basis\": \"declared\"}")
   }
   // an EMPTY block writes no key: the reference gates the entry on a non-empty
   // `decl.config`, so `config { }` stays byte-identical to no block at all.
