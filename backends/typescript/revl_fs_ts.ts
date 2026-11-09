@@ -360,14 +360,42 @@ function makeTotal<F extends (...a: never[]) => unknown>(name: string, fn: F): F
  * membership test (must #1). */
 function realpathish(p: string): string {
   const abs = path.resolve(p)
-  const tail: string[] = []
+  let tail: string[] = []
   let cur = abs
+  let links = 0
   for (;;) {
     try {
       const real = fs.realpathSync.native(cur)
       if (tail.length === 0) return real
       return path.join(real, ...tail.slice().reverse())
-    } catch {
+    } catch (err) {
+      // A DANGLING symlink is not a missing leaf: realpath refuses it, but the
+      // path the containment check must see is its target. py's os.path.realpath
+      // resolves the link text even when the target does not exist, so a link
+      // inside the root pointing outside is refused, never answered as an
+      // in-root missing leaf (the Ok(true)/EOUTSIDE oracle, #3235).
+      let link: string | null = null
+      try {
+        if (fs.lstatSync(cur).isSymbolicLink()) link = fs.readlinkSync(cur)
+      } catch {
+        // not a link, or it vanished between the two calls: an ordinary
+        // missing component, handled by the tail walk below
+      }
+      if (link !== null) {
+        // the kernel's own symlink budget: a cycle must fail like ELOOP, not
+        // spin, and realpath's error already carries that code
+        if (++links > 40) throw err
+        // a RELATIVE target resolves against the link's REAL parent (py's
+        // realpath resolves the parent first), so a symlinked directory cannot
+        // launder a relative dangling target into an in-root miss
+        const target = path.isAbsolute(link)
+          ? link
+          : path.join(fs.realpathSync.native(path.dirname(cur)), link)
+        const rest = tail.slice().reverse()
+        cur = rest.length === 0 ? target : path.join(target, ...rest)
+        tail = []
+        continue
+      }
       const parent = path.dirname(cur)
       if (parent === cur) return path.normalize(abs)
       tail.push(path.basename(cur))

@@ -514,8 +514,11 @@ def test_outside_refusal_through_the_stdlib_body_3184(workspace, outside, tmp_pa
     for name in ("canary.txt", "no_such_file.txt"):
         given = str(link / name)
         r = mod.lexists(given)
-        assert r.kind == "Err" if hasattr(r, "kind") else True
-        err = r.value if hasattr(r, "value") else r
+        # the py tier's Result carries its case in the class, not a `kind`
+        # field: assert the failure case directly instead of the vacuous
+        # `hasattr` fallback that could never fail (#3235)
+        assert isinstance(r, mod.Err)
+        err = r.value
         code = err["code"] if isinstance(err, dict) else err.code
         path = err["path"] if isinstance(err, dict) else err.path
         assert code == "EOUTSIDE"
@@ -527,3 +530,29 @@ def test_outside_refusal_through_the_stdlib_body_3184(workspace, outside, tmp_pa
 def test_inside_resolution_is_unchanged_3184(workspace):
     got = ws.resolve_within("artifact.txt")
     assert got == os.path.join(os.path.realpath(str(workspace)), "artifact.txt")
+
+
+# ===========================================================================
+# #3235: a `..` AFTER a symlink must not move the boundary. The ts tier
+# collapses `..` lexically (path.resolve); this tier applied it to the link's
+# target, so the same path was Ok or EOUTSIDE depending on whether an outside
+# name was a symlink and where it pointed.
+# ===========================================================================
+
+def test_dotdot_after_a_symlink_is_not_a_symlink_oracle_3235(workspace, outside):
+    """`O/dlink/../../../ws/in.txt` was EOUTSIDE for a plain directory `dlink`
+    and Ok for a symlink one. Both tiers must collapse the `..` before
+    resolving any link, so both spellings are refused the same way."""
+    (workspace / "a" / "b" / "c").mkdir(parents=True)
+    (workspace / "in.txt").write_text("in\n", encoding="utf-8")
+    plain = outside / "dlink_plain"
+    plain.mkdir()
+    link = outside / "dlink_link"
+    # deep enough that three `..` land back at the workspace root
+    link.symlink_to(workspace / "a" / "b" / "c", target_is_directory=True)
+    traversal = os.path.join("..", "..", "..", "ws", "in.txt")
+    for dlink in (plain, link):
+        given = os.path.join(str(dlink), traversal)
+        with pytest.raises(ws.ConfinementError) as ei:
+            ws.resolve_within(given)
+        assert ei.value.code == "EOUTSIDE"

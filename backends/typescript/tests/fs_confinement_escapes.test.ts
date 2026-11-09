@@ -455,3 +455,54 @@ describe('#3184: an outside path is refused with the caller\'s own spelling', ()
     expect(resolveWithin('here.txt')).toBe(inWs('here.txt'))
   })
 })
+
+// ===========================================================================
+// #3235: a dangling symlink whose target is OUTSIDE the root must answer like a
+// link to an existing outside path, not like an in-root missing leaf. Existence
+// of an outside path otherwise leaks through Ok versus Err.
+// ===========================================================================
+
+describe('#3235: a dangling outside symlink is refused, not resolved inward', () => {
+  it('the guard and fsLexists refuse a dangling link to an outside target', () => {
+    fs.symlinkSync(outWs('does-not-exist.txt'), inWs('dangling_out'))
+    fs.symlinkSync(outWs('canary.txt'), inWs('existing_out'))
+
+    const answers: Array<{ code: string; path: string }> = []
+    for (const given of [inWs('dangling_out'), inWs('existing_out')]) {
+      let caught: unknown
+      try { resolveWithin(given) } catch (e) { caught = e }
+      expect(caught).toBeInstanceOf(FsOpError)
+      const err = caught as FsOpError
+      answers.push({ code: err.code, path: err.path })
+      expect(err.code).toBe('EOUTSIDE')
+      expect(err.path).toBe(given)
+
+      const r = host.fsLexists(given)
+      expect(r.kind).toBe('Err')
+      if (r.kind !== 'Err') return
+      expect(r.value.code).toBe('EOUTSIDE')
+      expect(r.value.path).toBe(given)
+    }
+    // the dangling leaf and the existing outside target answer in the same
+    // form: a refusal naming the caller's path, never a fact about existence
+    expect(answers[0].code).toBe(answers[1].code)
+    expect(answers[0].path).toBe(inWs('dangling_out'))
+  })
+
+  it('a relative dangling target resolves against the link\'s real parent', () => {
+    // `outdir` is an inside name that is really outside; the dangling link
+    // physically lives outside, so its relative target is outside too. Joining
+    // it against the spelled parent would put the miss back inside the root.
+    fs.symlinkSync(outside, inWs('outdir'))
+    fs.symlinkSync('../does-not-exist.txt', inWs('outdir/relative_dangling'))
+    const given = inWs('outdir/relative_dangling')
+    let caught: unknown
+    try { resolveWithin(given) } catch (e) { caught = e }
+    expect(caught).toBeInstanceOf(FsOpError)
+    expect((caught as FsOpError).code).toBe('EOUTSIDE')
+    const r = host.fsLexists(given)
+    expect(r.kind).toBe('Err')
+    if (r.kind !== 'Err') return
+    expect(r.value.code).toBe('EOUTSIDE')
+  })
+})
