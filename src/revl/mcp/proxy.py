@@ -457,26 +457,30 @@ class Proxy:
             self._adopt_attestation(result, phase="tools/list")
             record = (result.get("_meta") or {}).get(
                 _attestation.META_ATTESTATION)
-            if isinstance(record, dict):
-                self._refuse_served_manifest(page if isinstance(page, list) else [],
-                                             record)
             if not cursor:
+                # Compare the ACCUMULATED list once pagination ends: a
+                # paginated upstream may sign its whole manifest once, so
+                # checking page one against the full signed list would refuse
+                # a perfectly honest unpinned server (fix-verify #3103).
+                if isinstance(record, dict):
+                    self._refuse_served_manifest(tools, record)
                 return tools
         raise UpstreamError("the upstream server's tools/list did not terminate")
 
     @staticmethod
-    def _refuse_served_manifest(page: list, record: dict) -> None:
+    def _refuse_served_manifest(served_tools: list, record: dict) -> None:
         """The served tools must BE the tools the record signed.
 
         Verifying the record against the pin says nothing about the list the
         upstream returned next to it: a genuine record can travel beside an
-        edited description, a changed schema or an added tool. Compare the
-        served digests with the signed ones and refuse, naming the tools that
-        differ (blocking review on #3103).
+        edited description, a changed schema or an added tool. `served_tools`
+        is the ACCUMULATED list, so a paginated response is compared as a
+        whole. Compare the served digests with the signed ones and refuse,
+        naming the tools that differ (blocking review on #3103).
         """
         signed = record.get("tools") or {}
         try:
-            served = _attestation.tool_digests(page)
+            served = _attestation.tool_digests(served_tools)
         except _attestation.AttestationError as error:
             if signed:
                 raise UpstreamError(
@@ -629,6 +633,15 @@ class Proxy:
     # -- the host-body side --------------------------------------------------
 
     def _upstream_call(self, tool: dict, arguments: dict, meta: dict | None) -> dict:
+        # The caller-side check in `call_tool` is not enough: an approved
+        # class-(c) call, or a witnessed call resumed after its ticket, reaches
+        # the upstream through the host body, which calls this directly. Refuse
+        # here, before the request, so a mutation staged before expiry cannot
+        # reach the upstream after it (fix-verify #3103). `revert` stays
+        # outside this check: an abort must still reach the upstream to undo.
+        refusal = self._attestation_refusal()
+        if refusal is not None:
+            raise UpstreamError(refusal)
         params: dict = {"name": tool["name"], "arguments": arguments}
         if meta:
             params["_meta"] = meta

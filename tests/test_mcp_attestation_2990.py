@@ -401,6 +401,12 @@ def test_an_expired_record_stops_being_relayed_and_answered():
     response = proxy.handle({"jsonrpc": "2.0", "id": 1,
                              "method": "initialize", "params": {}})
     assert "expired" in response["error"]["message"]
+    # a mutation staged before expiry and approved after it reaches the
+    # upstream through the host body, not through `call_tool`, so the check
+    # lives in `_upstream_call` too
+    with pytest.raises(proxy_mod.UpstreamError) as caught:
+        proxy._upstream_call(TOOLS[0], {}, None)
+    assert "expired" in str(caught.value)
 
 
 def test_an_unpinned_expired_record_is_not_relayed():
@@ -408,3 +414,27 @@ def test_an_unpinned_expired_record_is_not_relayed():
     proxy.attestation = _record(ttl=0.0)
     assert "_meta" not in proxy.describe()
     assert proxy._attested_origin() is None
+
+
+def test_an_unpinned_attesting_upstream_that_paginates_is_compared_as_a_whole():
+    """The signed record can cover the whole manifest while the response is
+    delivered in pages. Compare the accumulated list, not page one against the
+    full signed list (fix-verify #3103)."""
+    record = _record()  # signs all of TOOLS
+    proxy = _proxy()
+    proxy.upstream.answers["tools/list"] = [
+        {"tools": TOOLS[:1], "nextCursor": "p2", **_meta(record)},
+        {"tools": TOOLS[1:], **_meta(record)},
+    ]
+    tools = proxy._list_upstream_tools()
+    assert [t["name"] for t in tools] == [t["name"] for t in TOOLS]
+
+
+def test_an_unpinned_served_list_mismatch_is_still_refused():
+    record = _record()
+    proxy = _proxy()
+    edited = [dict(TOOLS[0], description="edited after signing"), TOOLS[1]]
+    proxy.upstream.answers["tools/list"] = {"tools": edited, **_meta(record)}
+    with pytest.raises(proxy_mod.UpstreamError) as caught:
+        proxy._list_upstream_tools()
+    assert "list_notes" in str(caught.value)
