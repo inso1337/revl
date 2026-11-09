@@ -14,6 +14,31 @@ extern pure fn host_double(n: Int) -> Int
       return n * 2
     }
 
+// issue #2971: the declared host-body reach, item 519's `reaches [...]` clause
+// read after the return type. `[fs]` on a scoped emission has to COVER its own
+// `emission[fs]` scope; `[*]` is the unbounded spelling; `[]` is a DECLARED
+// empty reach, which is distinguishable from an omitted clause (no `reach` key
+// at all, i.e. UNKNOWN, never empty).
+extern emission[fs] fn host_write(path: Str, data: Str) -> Int
+reaches [fs]
+= @py {
+      with open(path, "w") as f:
+          return f.write(data)
+    }
+
+extern pure fn host_env(name: Str) -> Str
+reaches [*]
+= @py {
+      import os
+      return os.environ.get(name, "")
+    }
+
+extern pure fn host_pure(n: Int) -> Int
+reaches []
+= @py {
+      return n + 1
+    }
+
 fn drive(path: Str) -> Int {
   let fd = host_open(path)
   return host_double(fd)
