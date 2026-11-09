@@ -13,7 +13,7 @@ revl compile demo/injection/pay_from_mail.rvl   # exit 1
 revl compile demo/injection/pay_from_book.rvl   # exit 0
 ```
 
-The refusal, without its file and line prefix:
+The refusal begins, after its file and line prefix:
 
 ```
 untrusted value (mail) flows into the trusted sink `pay` at argument 1 of `pay`
@@ -40,6 +40,9 @@ Its hint ends with the path the value took: `read_inbox() -> account_in() -> pay
   what a granted capability is used for
   ([docs/prompt-injection-resistance.md](../../docs/prompt-injection-resistance.md),
   residual risks).
+- The book decides the account for a name, not which name gets paid.
+  `settle` takes the supplier as a plain `Str`, so a caller steered into
+  naming another supplier in the book is in bounds too.
 - Nothing runs. There is no agent, no model and no mailbox in this directory,
   only the two sources the gate rules on.
 

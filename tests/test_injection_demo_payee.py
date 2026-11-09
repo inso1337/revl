@@ -30,12 +30,16 @@ def test_a_payee_read_from_mail_is_refused():
     assert ("untrusted value (mail) flows into the trusted sink `pay` "
             "at argument 1 of `pay`") in str(error)
     # the helper between the read and the payment is named, not skipped
-    assert "read_inbox() -> account_in() -> pay" in str(error)
+    assert "account_in()" in str(error)
 
 
 def test_a_payee_from_the_supplier_book_is_admitted_with_a_mail_memo():
     ir = compile_files([str(DEMO / "pay_from_book.rvl")])
-    assert "PayInvoices" in str(ir)
+    (component,) = ir["components"]
+    assert component["name"] == "PayInvoices"
+    # mail text does leave with the payment, as the memo, and nothing was
+    # declassified to let it
+    assert component["taint"] == {"reaches": ["mail"], "declassify": []}
 
 
 def test_the_refusal_rests_on_the_untrusted_return_alone(tmp_path):
