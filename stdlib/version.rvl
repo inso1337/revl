@@ -113,6 +113,18 @@
 //        as item 104: a vendored copy under the old stamp has no id-token
 //        verifier, so its author is hand-rolling one, and the hand-rolled
 //        verifier is where `alg` confusion and non-canonical base64url live.
+//  14 -> adds `stdlib/memory.rvl` (issue #2696): the typed memory service for a
+//        long-lived component. `MemoryMeta`, and the three `kv`-scoped
+//        crossings `put`, `get` and `forget`. `put` and `get` are generic over
+//        the item's base type and share one `kv` resource scope, so the
+//        persistence-resource fixpoint carries the item's origin back out of
+//        the store; a `Retained[T, P]` item is refused at `put` like any other
+//        persistence sink, and a `Secret[T]` item is refused at every
+//        undeclared receiver after the round trip. The metadata record is
+//        informational. Same reason as item 104: a vendored copy under the old
+//        stamp has no memory service, so its author is keeping agent notes in
+//        whatever provider store the host happens to offer, with no qualifier
+//        surviving the store boundary.
 pub fn stdlib_version() -> Str {
-  return "13"
+  return "14"
 }

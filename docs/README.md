@@ -66,7 +66,7 @@ an exhaustive listing. `ls docs/` has more.
 - [webapp-competitiveness-report.md](webapp-competitiveness-report.md): roadmap item 462 acceptance bar 5, where revl is already competitive against a real app, and every friction point filed rather than worked around
 - [stability.md](stability.md): what a version number promises
 - [process.md](process.md): how changes are proposed, tested and merged
-- [stdlib-json.md](stdlib-json.md) · [stdlib-list.md](stdlib-list.md) · [stdlib-str.md](stdlib-str.md) · [stdlib-value.md](stdlib-value.md) · [stdlib-version.md](stdlib-version.md): per-module stdlib pages
+- [stdlib-json.md](stdlib-json.md) · [stdlib-list.md](stdlib-list.md) · [stdlib-memory.md](stdlib-memory.md) · [stdlib-str.md](stdlib-str.md) · [stdlib-value.md](stdlib-value.md) · [stdlib-version.md](stdlib-version.md): per-module stdlib pages
 - [opentelemetry.md](opentelemetry.md): exporting a run's lifecycle trace to OpenTelemetry · [witnessed-fs.md](witnessed-fs.md): witnessed filesystem operations
 - [gate-dependency-contract.md](gate-dependency-contract.md): the security contract for a host that depends on the gate as a library: the Python package's `revl.gate` (the promised `__all__` surface; install from source, not from PyPI, where the name `revl` is an unrelated project), and the native `revl-gate` crate, whose verdict surface issues no admissions and whose separate admission surface is deliberately tiny
 - [../CONTRIBUTING.md](../CONTRIBUTING.md): the wave/worktree workflow and the pre-commit contract · [../SECURITY.md](../SECURITY.md): reporting a soundness escape
