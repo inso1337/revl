@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import signing
 from .errors import UpdateError
 from .manifest import (ReleaseManifest, parse_manifest,
                        require_remote_artifacts)
@@ -47,6 +48,8 @@ class ResolvedRelease:
     manifest_source: str  # "release" or "tag"
     release_url: str | None = None
     published_at: str | None = None
+    signature: dict | None = None
+    unsigned_accepted: bool = False
 
     @property
     def tag_fallback(self) -> bool:
@@ -72,6 +75,11 @@ class ResolvedRelease:
             report["channel"] = self.manifest.channel
             report["artifacts"] = [artifact.as_dict()
                                    for artifact in self.manifest.artifacts]
+        report["signed"] = self.signature is not None
+        if self.signature is not None:
+            report["signature"] = self.signature
+        if self.unsigned_accepted:
+            report["unsignedAccepted"] = True
         return report
 
 
@@ -253,9 +261,38 @@ def _expected_project(repo: str, project: str | None) -> str:
     return project or repo.rsplit("/", 1)[-1]
 
 
+def _decode_manifest(body: bytes) -> dict:
+    """The manifest JSON object, with parse_manifest's own refusal codes."""
+    try:
+        document = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise UpdateError(
+            "MANIFEST_JSON",
+            f"the release manifest is not JSON: {error}") from None
+    if not isinstance(document, dict):
+        raise UpdateError("MANIFEST_NOT_OBJECT",
+                          "the release manifest must be a JSON object")
+    return document
+
+
+def _signature_report(document: dict, *, trust_unsigned: bool
+                      ) -> tuple[dict, bool]:
+    """The signature report, and whether an unsigned manifest was accepted.
+
+    A networked manifest is signed by the release key under the release
+    domain; the operator escape accepts one without a verifiable signature,
+    and the report says that so the trust decision is visible afterwards.
+    """
+    if trust_unsigned:
+        return ({"status": "trusted-unsigned"},
+                "signature" not in document)
+    report = signing.require_signed(document, trust_unsigned=False)
+    return {"status": "valid", **(report or {})}, False
+
+
 def _manifest_from_release(release: dict, *, repo: str, project: str,
-                           token: str | None, timeout: float,
-                           base: str) -> ResolvedRelease:
+                           token: str | None, timeout: float, base: str,
+                           trust_unsigned: bool = False) -> ResolvedRelease:
     tag = release.get("tag_name")
     version = _tag_version(tag)
     if version is None:
@@ -280,8 +317,11 @@ def _manifest_from_release(release: dict, *, repo: str, project: str,
             "FEED_RESPONSE",
             f"release {tag} of {repo} names a {MANIFEST_ASSET} asset with no "
             "download URL")
-    document = _get_bytes(url, token, timeout=timeout,
-                          accept="application/octet-stream")
+    document = _decode_manifest(
+        _get_bytes(url, token, timeout=timeout,
+                   accept="application/octet-stream"))
+    signature, unsigned_accepted = _signature_report(
+        document, trust_unsigned=trust_unsigned)
     manifest = parse_manifest(document)
     require_remote_artifacts(manifest)
     expected = _expected_project(repo, project)
@@ -301,7 +341,8 @@ def _manifest_from_release(release: dict, *, repo: str, project: str,
         repo=repo, project=manifest.project, version=manifest.version,
         tag=manifest.tag, commit=manifest.commit, manifest=manifest,
         manifest_source="release", release_url=release.get("html_url"),
-        published_at=release.get("published_at"))
+        published_at=release.get("published_at"), signature=signature,
+        unsigned_accepted=unsigned_accepted)
 
 
 def _tag_fallback(repo: str, tag: str, version: str, *, project: str,
@@ -335,12 +376,16 @@ def resolve_release(repo: str, *, channel: str = "stable",
                     project: str | None = None, token: str | None = None,
                     token_env: str | None = None, api_base_override: str | None = None,
                     manifest_source: str | None = None,
+                    trust_unsigned: bool = False,
                     timeout: float = 20.0) -> ResolvedRelease:
     """Resolve the newest release of ``repo`` on ``channel``.
 
     ``manifest_source`` (a URL or a path) bypasses the feed entirely and reads
     that manifest; it exists for an operator mirror and for tests, and it still
-    passes the same validation.
+    passes the same validation. A manifest read over the network must also be
+    signed by a pinned release key unless ``trust_unsigned`` is set; a manifest
+    read from the operator's own disk is not a network input and needs no
+    signature.
     """
     global _ACTIVE_API_HOST
     base = api_base(api_base_override)
@@ -349,7 +394,8 @@ def resolve_release(repo: str, *, channel: str = "stable",
     if manifest_source is not None:
         return resolve_manifest_source(manifest_source, repo=repo,
                                        project=project, token=token,
-                                       timeout=timeout)
+                                       timeout=timeout,
+                                       trust_unsigned=trust_unsigned)
     url = f"{base}/repos/{repo}/releases?per_page=100"
     releases = _get_json(url, token, timeout=timeout)
     if not isinstance(releases, list):
@@ -369,7 +415,8 @@ def resolve_release(repo: str, *, channel: str = "stable",
         return _manifest_from_release(selected[1], repo=repo,
                                       project=_expected_project(repo, project),
                                       token=token, timeout=timeout,
-                                      base=base)
+                                      base=base,
+                                      trust_unsigned=trust_unsigned)
     return _tag_fallback_from_tags(repo, channel=channel, project=project,
                                    token=token, timeout=timeout, base=base)
 
@@ -408,16 +455,21 @@ def _tag_fallback_from_tags(repo: str, *, channel: str, project: str,
 
 def resolve_manifest_source(source: str, *, repo: str | None = None,
                             project: str | None = None, token: str | None = None,
-                            timeout: float = 20.0) -> ResolvedRelease:
+                            timeout: float = 20.0,
+                            trust_unsigned: bool = False) -> ResolvedRelease:
     """Read a manifest from a URL or a path and wrap it as a resolved release."""
     remote = source.startswith(("http://", "https://"))
     if remote:
-        document = _get_bytes(source, token, timeout=timeout)
+        document = _decode_manifest(_get_bytes(source, token, timeout=timeout))
+        signature, unsigned_accepted = _signature_report(
+            document, trust_unsigned=trust_unsigned)
     else:
         path = (Path(urllib.parse.urlparse(source).path)
                 if source.startswith("file://") else Path(source))
         try:
-            document = path.read_bytes()
+            document = _decode_manifest(path.read_bytes())
+        except UpdateError:
+            raise
         except OSError as error:
             raise UpdateError(
                 "MANIFEST_UNREADABLE",
@@ -425,6 +477,7 @@ def resolve_manifest_source(source: str, *, repo: str | None = None,
                 f"{error.strerror or error}",
                 fix="pass --manifest a path or URL that names a release "
                     "manifest") from None
+        signature, unsigned_accepted = None, False
     manifest = parse_manifest(document)
     if remote:
         require_remote_artifacts(manifest)
@@ -440,7 +493,8 @@ def resolve_manifest_source(source: str, *, repo: str | None = None,
         repo=repo or manifest.project, project=manifest.project,
         version=manifest.version, tag=manifest.tag, commit=manifest.commit,
         manifest=manifest, manifest_source="release",
-        release_url=manifest.url, published_at=manifest.published_at)
+        release_url=manifest.url, published_at=manifest.published_at,
+        signature=signature, unsigned_accepted=unsigned_accepted)
 
 
 def source_archive_url(repo: str, commit: str,

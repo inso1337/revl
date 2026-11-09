@@ -61,12 +61,13 @@ class StagedRelease:
     manifest_digest: str | None
     tag_fallback: bool
     provenance: dict
+    signature: dict | None = None
 
     def source_paths(self) -> list[str]:
         return [str(self.source_root / name) for name in self.files]
 
     def as_report(self) -> dict:
-        return {
+        report = {
             "project": self.project,
             "version": self.version,
             "tag": self.tag,
@@ -80,6 +81,9 @@ class StagedRelease:
             "sources": {"count": len(self.files), "root": str(self.source_root)},
             "provenance": self.provenance,
         }
+        if self.signature is not None:
+            report["signature"] = self.signature
+        return report
 
 
 def _slug(release: ResolvedRelease, digest: str) -> str:
@@ -332,6 +336,22 @@ def staged_intact(staged: "StagedRelease") -> bool:
         return False
 
 
+def staged_artifact_intact(staged: "StagedRelease") -> bool:
+    """Whether the staging still holds the artifact archive it recorded.
+
+    The downloaded archive is kept beside the extracted sources. A local
+    writer who can rewrite the extracted tree and ``provenance.json`` can make
+    those two agree; re-hashing the kept archive against the declared sha256,
+    which the signed manifest authenticates, is what catches the substitution.
+    """
+    path = staged.directory / _safe_name(staged.artifact_name)
+    try:
+        return (path.is_file() and not path.is_symlink()
+                and _sha256(path) == staged.digest)
+    except OSError:
+        return False
+
+
 def _rvl_files(root: Path) -> tuple[str, ...]:
     files, _linked = _walk_files(root)
     return tuple(path.relative_to(root).as_posix() for path in files
@@ -411,6 +431,7 @@ def stage_release(release: ResolvedRelease, *, home_dir: str | os.PathLike | Non
             "artifact": {"name": artifact.name, "kind": artifact.kind,
                          "url": url, "sha256": actual},
             "tagFallback": release.tag_fallback,
+            "signature": release.signature,
             "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "sources": {"count": len(files),
                         "files": _source_digests(source_root)},
@@ -423,6 +444,7 @@ def stage_release(release: ResolvedRelease, *, home_dir: str | os.PathLike | Non
             existing = _read_provenance(final)
             reused = _staged(final, existing)
             if (existing.get("artifact", {}).get("sha256") == actual
+                    and staged_artifact_intact(reused)
                     and staged_intact(reused)):
                 shutil.rmtree(work, ignore_errors=True)
                 return reused
@@ -464,7 +486,9 @@ def _staged(directory: Path, provenance: dict) -> StagedRelease:
         artifact_kind=str(artifact.get("kind", "")),
         manifest_digest=provenance.get("manifestDigest"),
         tag_fallback=bool(provenance.get("tagFallback")),
-        provenance=provenance)
+        provenance=provenance,
+        signature=(provenance.get("signature")
+                   if isinstance(provenance.get("signature"), dict) else None))
 
 
 def find_staged(home_dir: str | os.PathLike | None = None,

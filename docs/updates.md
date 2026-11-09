@@ -3,7 +3,9 @@
 **Status:** implemented: `revl update check|fetch|status` on the CLI, and
 `revl_update_check`, `revl_update_apply`, `revl_update_status` and
 `revl_update_rollback` on `revl mcp serve` when the operator starts it with
-`--update`.
+`--update`. A networked release manifest must be signed by a pinned release
+key; the applied release lives on the generation history and in snapshot meta,
+and the update journal is a log.
 
 Revl systems already know how to replace a running component: the admission
 gate, the swap, the generation history and the undo are the machinery a
@@ -52,11 +54,21 @@ Rules the parser enforces, each with its own refusal code:
 | `compat` | `language` is required semver; `gateApi`, `irVersion`, `minPython`, `frontier` are optional host facts |
 | `live` | true only when the release was tested as a live update over the previous release |
 | `hostChanges` | true when the release also changes host Python, compiler or venv bytes |
+| signature | a manifest fetched over the network must carry `sign_alg`, `key_id`, `public_key` and `signature` from a key pinned in `src/revl/update/release_keys.py` and valid at the check instant; `UPDATE_UNSIGNED` otherwise, `--trust-unsigned` for the operator escape |
 
 A repository that publishes no manifest still resolves through its newest
 semantic tag. The result says `tagFallback: true`, carries a locally computed
 hash, has no compatibility statement, and is never applied automatically.
 A manifest always wins over a tag.
+
+A networked manifest is signed in place: the release workflow adds
+`sign_alg`, `key_id`, `public_key` and `signature` to `release.json` with
+`peer_identity.sign_record` under the domain `revl.release/1`. The updater
+selects a pinned key by `key_id`, checks that key's `[notBefore, notAfter]`
+window, and calls `peer_identity.verify_record` with the pinned public half.
+The document's own `public_key` is only compared against the pin; it is never
+the key that verifies it. A manifest read from the operator's own disk is not a
+network input and needs no signature.
 
 ## The commands
 
@@ -68,9 +80,9 @@ revl update status  [--home DIR] [--json]
 
 `check` compares the running toolchain (`compiler_version()`, `gate_version()`,
 the IR revision and the interpreter) with the newest release, reports the
-semver bump, whether the release declares itself live-safe, and whether the
-host satisfies its declared gate, language and Python requirements. Exit
-codes are stable for automation:
+semver bump, whether the release declares itself live-safe, whether the
+manifest is signed, and whether the host satisfies its declared gate, language
+and Python requirements. Exit codes are stable for automation:
 
 | exit | meaning |
 | --- | --- |
@@ -83,17 +95,21 @@ sha256 and declared size, extracts it safely under the update home
 (`$REVL_UPDATE_HOME`, default `~/.revl/updates`) and writes a
 `provenance.json` beside the sources, with the sha256 of every extracted
 file. A staging is reused only while every file still has that digest and
-none was added or removed, and no link was planted in the tree; otherwise
-the release is fetched and extracted again. Nothing is compiled and nothing is
-executed. Extraction refuses absolute paths, `..`, backslashes, drive paths,
-links and device entries, and bounds the archive at 300 MB and 50,000 files.
+none was added or removed, no link was planted in the tree, and the kept
+artifact archive still hashes to the signed manifest's declared sha256;
+otherwise the release is fetched and extracted again. Nothing is compiled and
+nothing is executed. Extraction refuses absolute paths, `..`, backslashes,
+drive paths, links and device entries, and bounds the archive at 300 MB and
+50,000 files.
 
 `status` prints the running identity, the staged releases and the update
-journal, which is an append-only JSONL file in the update home.
+journal, which is an append-only JSONL log in the update home.
 
 `--manifest PATH_OR_URL` bypasses the feed and reads that manifest directly.
 The same validation runs, so a mirror document is not a second code path. A
-path that cannot be read is the `MANIFEST_UNREADABLE` refusal, exit 2.
+path that cannot be read is the `MANIFEST_UNREADABLE` refusal, exit 2. A
+manifest fetched over the network is still signature-checked; an operator who
+must accept an unsigned mirror passes `--trust-unsigned`.
 
 ## Applying a release to a running composition
 
@@ -110,14 +126,16 @@ incompatible release or a widening.
    fetched or compiled. The release version is compared with the release the
    running composition was updated to (`runningRelease`), never with the
    toolchain's own version: an application feed versions the application.
-   Each apply is recorded in the update journal with the digest of the
-   composition it produced, so the record survives a server restart and a
-   rollback consumes it. A composition no release was applied to has no known
-   release version; one swapped or reloaded by hand after an apply has a
-   version unknown since that apply (`since`, `lastApplied`). Either way
-   `relation` is `unknown`, `updateAvailable` is null and the check fails
-   closed: `applyAvailable` is false and a plan needs `acceptUnknownVersion`.
-   An applied release is not offered again.
+   The applied release is recorded on the generation history entry the apply
+   produced, and in that entry's snapshot meta beside `approval`. The update
+   journal is a log only: a local writer who appends to it cannot move the
+   version gate. An operator restore of a snapshot carries the release; a
+   plain restart without one has no running release. A composition no release
+   was applied to has no known release version; one swapped or reloaded by
+   hand after an apply has a version unknown since that apply (`since`,
+   `lastApplied`). Either way `relation` is `unknown`, `updateAvailable` is
+   null and the check fails closed: `applyAvailable` is false and a plan
+   needs `acceptUnknownVersion`. An applied release is not offered again.
 2. `revl_update_apply` with no `planHash` stages the release, hashes the
    staged bytes, compiles and admits the release against the running
    manifest, plans the swap and returns a `planHash`. Nothing is mutated.
@@ -157,10 +175,11 @@ incompatible release or a widening.
 4. `revl_update_rollback` returns to the generation before the last applied
    release, through the same admitted undo `revl_undo` runs (the same
    authoring profile, and an `approvalRequired` ticket answered the same
-   way). A rollback consumes its apply, so a second rollback is
-   `UPDATE_NOTHING_APPLIED`, and it is `UPDATE_ROLLBACK_STALE` when a later
-   generation than the one the apply started is running: going back would
-   also discard that change, so `revl_undo` is the tool for it.
+   way). It reads the generation history, not the journal. A rollback consumes
+   its apply, so a second rollback is `UPDATE_NOTHING_APPLIED`, and it is
+   `UPDATE_ROLLBACK_STALE` when a later generation than the one the apply
+   started is running: going back would also discard that change, so
+   `revl_undo` is the tool for it.
 
    Each apply writes the bytes it swaps into a fresh directory under
    `<home>/applied`, and its journal record names that directory. After an
@@ -188,23 +207,29 @@ still check and stage it.
 Nothing a feed says is trusted until it is verified, and verification never
 replaces the gate:
 
-1. the manifest must validate, and must name the feed's project;
+1. a networked manifest must validate, must name the feed's project, and must
+   carry a valid signature from a pinned key active at the check instant
+   (`UPDATE_UNSIGNED` otherwise; `--update-trust-unsigned` is the operator
+   escape);
 2. the artifact must hash to the manifest's sha256;
-3. the running compiler and admission gate must accept the release sources
+3. a reused staging's kept archive must still hash to that sha256, so a
+   rewritten staging and provenance pair is fetched again;
+4. the running compiler and admission gate must accept the release sources
    before any swap is planned;
-4. the operator surface that applies a staged release is a two-stage call
+5. the operator surface that applies a staged release is a two-stage call
    bound to a plan hash, so what is applied is what was planned against the
    generation that is running;
-5. a post-apply health check reverts automatically when the successor does
+6. a post-apply health check reverts automatically when the successor does
    not serve its keys.
 
-There is no signature. The manifest and the artifact are as authentic as the
-channel that served them: TLS to the release host, and the account that
-publishes releases on the feed repository. Whoever can publish a release
-there can publish a manifest whose sha256 matches their own artifact; the
-sha256 binds the artifact to the manifest, not to an author. A manifest
-fetched over the network may not name a `file://` artifact, so a publisher
-cannot choose a file on the host to stage.
+A manifest fetched over the network may not name a `file://` artifact, so a
+publisher cannot choose a file on the host to stage. The signature binds the
+manifest to a release key the maintainer pinned in the installed tree, and the
+artifact sha256 is inside that manifest. A publishing account without the
+signing key can replace an artifact, but not the signed manifest that names
+it, so a host with the key pinned refuses the substitution. A manifest read
+from the operator's own disk is not a network input; it is trusted the way the
+operator trusts their own files.
 
 A release whose bytes are verified is operator-sanctioned code: it may carry
 host bodies, exactly as a checkout the operator compiled would. A release
@@ -238,3 +263,19 @@ python3 tools/release_manifest.py --validate release.json
 sdist and wheel; `release-dryrun.yml` generates and validates it on a schedule
 and on PRs that touch the release path, so the writer cannot drift from the
 reader without a red run.
+
+The release job then signs `release.json` with the private key from the
+protected `pypi` environment and fails when the secret is absent, so a release
+cannot be published unsigned by accident. The maintainer provisions the key
+once:
+
+```
+python3 tools/release_signing.py keygen --private-key-out ~/.config/revl/release-key.json
+```
+
+`keygen` writes the private identity at mode 0600 and prints the entry to paste
+into `RELEASE_KEYS` in `src/revl/update/release_keys.py`. The private identity
+file's whole contents are the `REVL_RELEASE_SIGNING_KEY` environment secret in
+the protected environment. The pinned tuple is empty until then, which refuses
+every networked manifest rather than trusting one; keeping more than one entry
+lets a key rotate without a flag day.

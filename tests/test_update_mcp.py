@@ -16,7 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from _update_feed_fixture import serve_feed, tar_gz  # noqa: E402
+from _update_feed_fixture import pin_test_key, serve_feed, tar_gz  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp import update_tools  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
@@ -63,6 +63,11 @@ def _isolated():
     if server_mod.SESSION.loaded:
         server_mod.SESSION.unload()
     update_tools.reset()
+
+
+@pytest.fixture(autouse=True)
+def _pin_fixture_release_key(monkeypatch):
+    pin_test_key(monkeypatch)
 
 
 def _configure(feed, tmp_path: Path, *,
@@ -663,30 +668,65 @@ def test_a_hand_swap_after_an_apply_leaves_the_version_unknown_since_it(
 
 
 @needs_runtime
-def test_the_applied_release_survives_a_server_restart(monkeypatch, tmp_path):
+def test_a_journal_log_does_not_move_the_version_gate(tmp_path):
     feed = _release_feed()
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
         _apply()
-    finally:
-        feed.close()
-    # a restarted server: a new session id, no in-memory state, the same
-    # update home and running composition
-    monkeypatch.setattr(update_tools, "_SESSION_ID", "restarted:1")
-    update_tools.reset()
-    older = _release_feed(version="1.0.0", source=CACHE)
-    try:
-        _configure(older, tmp_path)
+        # The journal is a log. A local writer can append an apply record whose
+        # irDigest matches the running composition and whose version is lower;
+        # the version gate must not read it.
+        journal = Journal(str(tmp_path))
+        journal.append("apply", planHash="f" * 64, sessionId="forged:1",
+                       project="app", version="0.0.1",
+                       irDigest=update_tools._ir_digest(server_mod.SESSION.ir),
+                       generationBefore=0, generationAfter=1)
         check = _call("revl_update_check", {})
         assert check["runningRelease"]["version"] == "9.9.9"
-        assert check["comparison"]["relation"] == "older"
-        assert _call("revl_update_apply", {})["planned"] is False
-        forced = _call("revl_update_apply", {"force": True})
-        assert forced["refusal"]["code"] == "UPDATE_DOWNGRADE"
-        assert _call("revl_update_apply", FIRST)["planned"] is False
+        assert check["comparison"]["relation"] == "same"
+        assert check["comparison"]["updateAvailable"] is False
+        # A real restart unloads the session, and its generation history with
+        # it: the log names no release, so the version is unknown.
+        _call("revl_unload", {})
+        update_tools.reset()
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE_V2})
+        after = _call("revl_update_check", {})
+        assert after["runningRelease"] is None
+        assert after["lastApplied"] is None
+        assert after["comparison"]["relation"] == "unknown"
     finally:
-        older.close()
+        feed.close()
+
+
+@needs_runtime
+def test_an_operator_restore_carries_the_applied_release(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        _apply()
+        snap = _call("revl_snapshot", {})["snapshot"]
+        assert snap["meta"]["appliedRelease"]["version"] == "9.9.9"
+        assert server_mod.SESSION._history[-1]["appliedRelease"]["version"] == \
+            "9.9.9"
+        _call("revl_unload", {})
+        update_tools.reset()
+        # the operator restore path (no agent profile), like --restore
+        restored = server_mod.SESSION.restore(snap)
+    finally:
+        feed.close()
+    assert restored["restored"] is True
+    assert restored["appliedRelease"]["version"] == "9.9.9"
+    check_feed = _release_feed()
+    try:
+        _configure(check_feed, tmp_path)
+        check = _call("revl_update_check", {})
+    finally:
+        check_feed.close()
+    assert check["runningRelease"]["version"] == "9.9.9"
+    assert check["comparison"]["relation"] == "same"
 
 
 # ------------------------------------------- issue #3021: follow-ups

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 import tarfile
@@ -10,10 +11,16 @@ import zipfile
 
 import pytest
 
-from _update_feed_fixture import serve_feed, source_tar
+from _update_feed_fixture import pin_test_key, serve_feed, source_tar
 from revl.update.errors import UpdateError
-from revl.update.fetch import extract_archive, find_staged, stage_release
+from revl.update.fetch import (extract_archive, find_staged, stage_release,
+                               staged_artifact_intact)
 from revl.update.feed import resolve_release
+
+
+@pytest.fixture(autouse=True)
+def _pin_fixture_release_key(monkeypatch):
+    pin_test_key(monkeypatch)
 
 
 def _malicious_tar(entries: list[tarfile.TarInfo]) -> bytes:
@@ -227,3 +234,21 @@ def test_a_link_planted_in_a_staging_is_not_intact(tmp_path):
         feed.close()
     assert not (second.source_root / "planted.rvl").is_symlink()
     assert staged_intact(second) is True
+
+
+def test_a_staging_whose_kept_archive_was_rewritten_is_fetched_again(tmp_path):
+    feed = serve_feed(version="1.2.0")
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        first = stage_release(release, home_dir=str(tmp_path))
+        archive = first.directory / first.artifact_name
+        assert staged_artifact_intact(first) is True
+        # a local writer rewrites the kept archive; the extracted tree and its
+        # provenance can agree with each other and still not be the release
+        archive.write_bytes(b"rewritten bytes")
+        assert staged_artifact_intact(first) is False
+        second = stage_release(release, home_dir=str(tmp_path))
+    finally:
+        feed.close()
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == second.digest
+    assert (second.source_root / "app.rvl").is_file()

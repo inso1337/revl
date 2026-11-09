@@ -108,6 +108,9 @@ def _add_update_feed_arguments(sub) -> None:
                      help="read the release manifest from this file or URL "
                           "instead of resolving the feed; the same validation "
                           "runs")
+    sub.add_argument("--trust-unsigned", action="store_true",
+                     help="accept a manifest fetched over the network without a "
+                          "signature from a pinned release key")
     sub.add_argument("--home", default=None, metavar="DIR",
                      help="update home (default $REVL_UPDATE_HOME or "
                           "~/.revl/updates)")
@@ -1351,6 +1354,11 @@ def build_parser() -> argparse.ArgumentParser:
                                 "fallback) as applicable; such a release has no "
                                 "declared sha256 and is never applied "
                                 "automatically")
+    mcp_serve.add_argument("--update-trust-unsigned", action="store_true",
+                           help="accept a networked release manifest without a "
+                                "signature from a pinned release key "
+                                "(UPDATE_UNSIGNED otherwise); the manifest is "
+                                "then as authentic as the channel that served it")
     mcp_serve.add_argument("--update-allow-consent", action="append", default=[],
                            choices=UPDATE_OPERATOR_CONSENTS, metavar="NAME",
                            help="honour this consent flag from "
