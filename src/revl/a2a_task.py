@@ -94,6 +94,206 @@ PARAMS = {
 }
 
 
+#: The environment variable that names the LOCAL webhook base the push
+#: receiver is served under (e.g. "https://agent.example"). Unset means push
+#: is off and polling is the only feed; the canonical feed never depends on it.
+PUSH_BASE_ENV = "REVL_A2A_PUSH_BASE"
+
+#: The route the synthesized push receiver serves (item 439 T3). `{task}` is
+#: the LOCALLY minted push correlation id, not the peer's task id: the peer
+#: posts to the exact URL it was configured with, so the receiver maps a push
+#: back to a token and an inbox without trusting anything in the body first.
+PUSH_ROUTE = "/a2a/notify"
+
+#: Bounded per-task inbound queue. Overflow is an explicit refusal (the peer
+#: may retry, and the canonical poll still sees the task), never a silent drop.
+PUSH_INBOX_LIMIT = 64
+
+
+def _push_state_prelude() -> str:
+    """Source that lazily creates the module-level push registry shared by the
+    three bodies (`_start`, `_poll`, the receiver). The registry maps a peer
+    task id to a push id and a push id to its token and bounded inbox; it is
+    per emitted module, which is the per-row module the synthesizer writes."""
+    return (
+        "    global _A2A_PUSH_STATE\n"
+        "    try:\n"
+        "        _A2A_PUSH_STATE\n"
+        "    except NameError:\n"
+        "        _A2A_PUSH_STATE = {\"tasks\": {}, \"push\": {}}\n"
+    )
+
+
+def _push_start_setup(message_obj: str) -> str:
+    """Source that mints the local push id and token, registers the entry, and
+    builds the A2A `pushNotificationConfig` that rides the `message/send` with
+    the task's creation. `REVL_A2A_PUSH_BASE` unset means no config, and
+    polling is the only feed."""
+    return (
+        "    _A2A_PUSH_BASE = _os.environ.get(" + json.dumps(PUSH_BASE_ENV)
+        + ", \"\").rstrip(\"/\")\n"
+        "    _push_id = _push_token = _push_cfg = None\n"
+        "    if _A2A_PUSH_BASE:\n"
+        "        _push_id = _uuid.uuid4().hex\n"
+        "        _push_token = _secrets.token_hex(16)\n"
+        "        _push_cfg = {\"pushNotificationConfig\": {\n"
+        "            \"url\": _A2A_PUSH_BASE + " + json.dumps(PUSH_ROUTE)
+        + " + \"/\" + _push_id,\n"
+        "            \"token\": _push_token,\n"
+        "            \"authentication\": {\"schemes\": [\"Bearer\"],\n"
+        "                               \"credentials\": _push_token},\n"
+        "        }}\n"
+        "        _A2A_PUSH_STATE[\"push\"][_push_id] = {\"token\": _push_token,\n"
+        "            \"task\": None, \"inbox\": []}\n"
+        "    _params = {\"message\": " + message_obj + "}\n"
+        "    if _push_cfg:\n"
+        "        _params[\"configuration\"] = _push_cfg\n"
+    )
+
+
+def _push_start_store() -> str:
+    """After a successful `_start` the entry learns the peer's task id, which
+    is the key `_poll` holds; before that reply a push can still arrive and is
+    accepted against the push id alone."""
+    return (
+        "    if _push_id:\n"
+        "        _A2A_PUSH_STATE[\"push\"][_push_id][\"task\"] = _tid\n"
+        "        _A2A_PUSH_STATE[\"tasks\"][_tid] = _push_id\n"
+    )
+
+
+def _push_start_cleanup() -> str:
+    """A `_start` that faulted never handed the consumer a handle, so its push
+    entry is dropped rather than left holding an inbox nothing can drain."""
+    return (
+        "        if _push_id:\n"
+        "            _A2A_PUSH_STATE[\"push\"].pop(_push_id, None)\n"
+    )
+
+
+def _push_poll_drain() -> str:
+    """`_poll` drains the inbox BEFORE crossing. A non-terminal status, a
+    message or an artifact is returned without a network round trip; a pushed
+    terminal FALLS THROUGH to the `tasks/get` that confirms it, because a peer
+    must not be able to end a Task by pushing a terminal."""
+    return (
+        "    _push_key = (_task.get(\"id\") if isinstance(_task, dict)\n"
+        "                  else getattr(_task, \"id\", None))\n"
+        "    _push_id = (_A2A_PUSH_STATE[\"tasks\"].get(_push_key)\n"
+        "                if _push_key else None)\n"
+        "    _entry = (_A2A_PUSH_STATE[\"push\"].get(_push_id)\n"
+        "              if _push_id else None)\n"
+        "    if _entry and _entry[\"inbox\"]:\n"
+        "        _ev = _entry[\"inbox\"].pop(0)\n"
+        "        if _ev[\"kind\"] == \"message\":\n"
+        "            return Message(_ev[\"text\"])\n"
+        "        if _ev[\"kind\"] == \"artifact\":\n"
+        "            return Artifact(_ev[\"text\"])\n"
+        "        if not is_terminal(task_state_from_wire(_ev[\"state\"])):\n"
+        "            return Status(task_state_from_wire(_ev[\"state\"]))\n"
+        "        # a pushed terminal is not trusted: the tasks/get below confirms\n"
+        "        # it, and only its answer is returned.\n"
+    )
+
+
+def push_notify_body() -> str:
+    """The receiver handler's `@py` body (item 439 T3): an exact token check, a
+    shape check of the A2A `StreamResponse` push payload, and a deposit into
+    the bounded per-task inbox. It returns a `Response` (stdlib/http.rvl) so
+    the statuses are spelled in one place: 401 for an unknown task or a bad
+    token, 400 for a malformed payload, 429 for a full inbox, 204 when the
+    event is accepted. Nothing is deposited on any refusal."""
+    return '''
+    import json as _json
+    global _A2A_PUSH_STATE
+    try:
+        _A2A_PUSH_STATE
+    except NameError:
+        _A2A_PUSH_STATE = {"tasks": {}, "push": {}}
+
+    def _reply(status, message=None):
+        if message is None:
+            return {"status": status, "headers": [],
+                    "body": {"$kind": "Empty"}}
+        return {"status": status, "headers": [],
+                "body": {"$kind": "Json", "$value": _json.dumps(
+                    {"code": "a2a-push", "message": message})}}
+
+    _pid, _auth, _req = _args[0], _args[1], _args[2]
+    _tok = (_auth.get("token") if isinstance(_auth, dict)
+            else getattr(_auth, "token", None))
+    _entry = _A2A_PUSH_STATE["push"].get(_pid)
+    if _entry is None or _tok != _entry["token"]:
+        return _reply(401, "a2a push: unknown task or token mismatch")
+    _carrier = (_req.get("body") if isinstance(_req, dict)
+                else getattr(_req, "body", None))
+    if isinstance(_carrier, dict):
+        _raw = _carrier.get("$value") if _carrier.get("$kind") == "Text" else None
+    else:
+        _raw = (getattr(_carrier, "value", None)
+                if type(_carrier).__name__ == "Text" else None)
+    if not isinstance(_raw, str) or not _raw.strip():
+        return _reply(400, "a2a push: missing or non-text body")
+    try:
+        _obj = _json.loads(_raw)
+    except Exception:
+        return _reply(400, "a2a push: body is not JSON")
+    if not isinstance(_obj, dict):
+        return _reply(400, "a2a push: body is not a JSON object")
+    _keys = [k for k in ("task", "message", "statusUpdate", "artifactUpdate")
+             if k in _obj]
+    if len(_keys) != 1:
+        return _reply(400, "a2a push: body must carry exactly one StreamResponse arm")
+    _kind = _keys[0]
+    _tid = None
+    _event = None
+    if _kind in ("task", "statusUpdate"):
+        _holder = _obj[_kind]
+        if not isinstance(_holder, dict):
+            return _reply(400, "a2a push: %s is not an object" % _kind)
+        _tid = _holder.get("id") if _kind == "task" else _holder.get("taskId")
+        _status = _holder.get("status")
+        if not isinstance(_status, dict) or not isinstance(_status.get("state"), str):
+            return _reply(400, "a2a push: %s carries no string status.state" % _kind)
+        _event = {"kind": "status", "state": _status["state"]}
+    elif _kind == "message":
+        _holder = _obj["message"]
+        if not isinstance(_holder, dict):
+            return _reply(400, "a2a push: message is not an object")
+        _tid = _holder.get("taskId")
+        _parts = _holder.get("parts")
+        if not isinstance(_parts, list):
+            return _reply(400, "a2a push: message carries no parts list")
+        _text = "".join(p.get("text", "") for p in _parts
+                        if isinstance(p, dict) and p.get("kind") == "text"
+                        and isinstance(p.get("text"), str))
+        _event = {"kind": "message", "text": _text}
+    else:
+        _holder = _obj["artifactUpdate"]
+        if not isinstance(_holder, dict):
+            return _reply(400, "a2a push: artifactUpdate is not an object")
+        _tid = _holder.get("taskId")
+        _artifact = _holder.get("artifact")
+        _parts = _artifact.get("parts") if isinstance(_artifact, dict) else None
+        if not isinstance(_parts, list):
+            return _reply(400, "a2a push: artifactUpdate carries no parts list")
+        _text = "".join(p.get("text", "") for p in _parts
+                        if isinstance(p, dict) and p.get("kind") == "text"
+                        and isinstance(p.get("text"), str))
+        _event = {"kind": "artifact", "text": _text}
+    if not isinstance(_tid, str) or not _tid:
+        return _reply(400, "a2a push: payload carries no task id")
+    if _entry["task"] is not None and _entry["task"] != _tid:
+        return _reply(401, "a2a push: payload task id is not the configured task")
+    if _entry["task"] is None:
+        _entry["task"] = _tid
+    if len(_entry["inbox"]) >= __LIMIT__:
+        return _reply(429, "a2a push: inbox is full; polling remains canonical")
+    _entry["inbox"].append(_event)
+    return _reply(204)
+'''.replace("__LIMIT__", str(PUSH_INBOX_LIMIT))
+
+
 def op_name(base: str, suffix: str) -> str:
     """`("research", "start") -> "research_start"`. The one place the naming
     convention lives, so the projector and the classifier cannot disagree."""
@@ -176,7 +376,7 @@ def _event_from_result(fault) -> str:
 
 def task_body(kind: str, endpoint: str, base_or_skill: str, *,
               follow_redirects: bool = False, label: str = "",
-              rest: bool = False) -> str:
+              rest: bool = False, push: bool = True) -> str:
     """One four-op crossing, Python tier, over A2A 1.0.0.
 
     `kind` is one of `SUFFIXES`; `endpoint` is the agent's HTTPS endpoint (the
@@ -221,6 +421,25 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
                     '                      headers={"content-type": '
                     '"application/json"})\n')
 
+    # -- push (item 439 T3): a locally minted token and a per-task inbox -----
+    # `_start` sends the config on the SAME `message/send`; `_poll` drains the
+    # inbox before crossing; the receiver (a separate route op) deposits. The
+    # three bodies share one module-level registry, which is the per-row module
+    # the synthesizer writes.
+    push_imports = ""
+    push_setup = ""
+    push_cleanup = ""
+    push_store = ""
+    push_drain = ""
+    if kind == "start" and push:
+        push_imports = "    import os as _os, secrets as _secrets\n"
+        push_setup = _push_state_prelude() + _push_start_setup(message_obj)
+        push_cleanup = _push_start_cleanup()
+        push_store = _push_start_store()
+    elif kind == "poll" and push:
+        push_setup = _push_state_prelude()
+        push_drain = _push_poll_drain()
+
     # Item 439: the boundary's own gates are `a2a_boundary`'s, shared with the
     # terminal wire and the importer so a peer cannot be read differently
     # depending on which entry point generated the client. Which of them a wire
@@ -239,8 +458,15 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
             wire = "HTTP+JSON/REST `POST " + a2a_boundary.HTTPJSON_SEND_PATH + "`"
             url_src = ("    _url = " + base + " + "
                        + json.dumps(a2a_boundary.HTTPJSON_SEND_PATH) + "\n")
-            request = ('    _payload = _json.dumps({"message": ' + message_obj
-                       + '}).encode()\n' + post_headers)
+            if sends_message:
+                if kind == "start" and push:
+                    request = (
+                        '    _payload = _json.dumps({"message": ' + message_obj
+                        + ', **({"configuration": _push_cfg} if _push_cfg else {})'
+                        '}).encode()\n' + post_headers)
+                else:
+                    request = ('    _payload = _json.dumps({"message": '
+                               + message_obj + '}).encode()\n' + post_headers)
         elif kind == "poll":
             wire = "HTTP+JSON/REST `GET /v1/tasks/{id}`"
             url_src = a2a_boundary.py_rest_task_url(base, fault)
@@ -261,7 +487,9 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
         # A2A 1.0.0 JSON-RPC 2.0: one endpoint, the method in the envelope.
         correlation = a2a_boundary.py_correlation()
         if sends_message:
-            method, params = "message/send", '{"message": ' + message_obj + '}'
+            method = "message/send"
+            params = ('_params' if (kind == "start" and push)
+                      else '{"message": ' + message_obj + '}')
         elif kind == "poll":
             method, params = "tasks/get", '{"id": _task["id"]}'
         else:  # cancel
@@ -299,6 +527,7 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
             '    if not isinstance(_tid, str) or not _tid:\n'
             + fault(8, '"a2a: _start reply carried no task id"')
             + a2a_boundary.py_context_id_gate(fault)
+            + push_store
             + '    return {"id": _tid, "context": _ctx}\n')
     elif kind == "cancel":
         # tasks/cancel is BEST-EFFORT (item 247): a 2xx with any result is
@@ -315,11 +544,11 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-{faults}{funnel}{correlation}{header}{bind}{url_src}{request}{policy}    try:
+{push_imports}{faults}{funnel}{correlation}{header}{bind}{push_setup}{push_drain}{url_src}{request}{policy}    try:
         # A crossing that never returns is not a crossing.
 {unwrap}    except _RedirectRefused:
         # NOT a transport failure: the peer declining to be the declared
         # endpoint, re-raised so it is never flattened into a feed event.
         raise
     except Exception as _exc:
-{fault(8, '"a2a: transport failure"', cause="_exc")}{gates}{handle}    """
+{push_cleanup}{fault(8, '"a2a: transport failure"', cause="_exc")}{gates}{handle}    """

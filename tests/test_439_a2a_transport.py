@@ -2362,3 +2362,376 @@ def test_revl_simulate_policy_diff_refuses_a_layer_document(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "`revl simulate policy-diff`" in err
     assert "layer" in err and "DELTA" in err
+
+
+# ============================================= the push receiver (T3, #2726)
+# `docs/design/439-a2a-task-lifecycle.md` decision 5, in the shape issue #2726
+# was rescoped to: polling is the canonical feed; `_start` mints a local push
+# id and token and carries the A2A `pushNotificationConfig` on the one
+# `message/send`; a routed receiver checks the token exact-match and deposits
+# into a bounded inbox that `_poll` drains before crossing; a pushed terminal
+# is confirmed by one `tasks/get`.
+
+import contextlib  # noqa: E402
+import os  # noqa: E402
+
+from revl.a2a_task import (  # noqa: E402
+    PUSH_BASE_ENV, PUSH_INBOX_LIMIT, push_notify_body,
+)
+from revl.mcp.http_face import HttpComposedServer  # noqa: E402
+
+PUSH_REPLY = {"jsonrpc": "2.0", "result": {
+    "kind": "task", "id": "t-42", "contextId": "c-1",
+    "status": {"state": "working"}}}
+
+
+@contextlib.contextmanager
+def _push_module(replies=None, env="https://receiver.example"):
+    """Execute `_start`, `_poll` and the receiver body in ONE module namespace,
+    the way the synthesized row's module carries them, against a stubbed peer.
+
+    `replies` seeds the peer's reply queue (the start reply first); an empty
+    queue answers a working task. The caller drives the three functions and
+    inspects `calls`, so "the drain did not cross" is a count, not a guess."""
+    start_src = task_body("start", "https://agent.example:8443", "research",
+                          label="researcher")
+    poll_src = task_body("poll", "https://agent.example:8443", "research",
+                         label="researcher")
+    notify_src = push_notify_body()
+    queue = list(replies if replies is not None else [PUSH_REPLY])
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    calls = []
+
+    class _Opener:
+        def open(self, request, *a, **k):
+            calls.append(json.loads(request.data))
+            reply = queue.pop(0) if queue else {
+                "jsonrpc": "2.0", "result": {"kind": "task",
+                                             "status": {"state": "working"}}}
+            return _Resp(json.dumps(_answer(request.data, reply)).encode())
+
+    class _Ev:
+        def __init__(self, tag, value=None):
+            self.tag = tag
+            self.value = value
+
+        def __eq__(self, other):
+            return (isinstance(other, _Ev) and other.tag == self.tag
+                    and other.value == self.value)
+
+        def __repr__(self):
+            return f"_Ev({self.tag!r}, {self.value!r})"
+
+    ns = {
+        "__name__": "generated",
+        "Status": lambda v: _Ev("Status", v),
+        "Done": lambda v: _Ev("Done", v),
+        "Message": lambda v: _Ev("Message", v),
+        "Artifact": lambda v: _Ev("Artifact", v),
+        "task_state_from_wire": lambda s: s,
+        "is_terminal": lambda s: s in ("completed", "failed", "canceled",
+                                       "rejected"),
+    }
+
+    def fn(name, params, body):
+        return (f"def {name}({params}):\n    _args = [{params}]\n"
+                + textwrap.indent(textwrap.dedent(body), "    "))
+
+    exec(compile("\n".join([
+        fn("_start", "a", start_src),
+        fn("_poll", "a", poll_src),
+        fn("_notify", "pid, auth, req", notify_src),
+    ]), "<push-module>", "exec"), ns)
+
+    original = urllib.request.build_opener
+    urllib.request.build_opener = lambda *h: _Opener()
+    previous = os.environ.get(PUSH_BASE_ENV)
+    if env is None:
+        os.environ.pop(PUSH_BASE_ENV, None)
+    else:
+        os.environ[PUSH_BASE_ENV] = env
+    try:
+        yield ns, calls, _Ev
+    finally:
+        urllib.request.build_opener = original
+        if previous is None:
+            os.environ.pop(PUSH_BASE_ENV, None)
+        else:
+            os.environ[PUSH_BASE_ENV] = previous
+
+
+def _push_cfg(calls):
+    return calls[0]["params"]["configuration"]["pushNotificationConfig"]
+
+
+def _push_id(cfg):
+    return cfg["url"].rsplit("/", 1)[1]
+
+
+def _status_push(task_id, state):
+    return json.dumps({"statusUpdate": {
+        "taskId": task_id, "status": {"state": state}}})
+
+
+def _notify(ns, cfg, raw):
+    return ns["_notify"](_push_id(cfg), {"token": cfg["token"]},
+                         {"body": {"$kind": "Text", "$value": raw}})
+
+
+def test_the_push_receiver_is_a_routed_endpoint(tmp_path):
+    """The synthesized row carries a receiver service, its route, and a
+    provider component (with no consumer) that the served route table sees."""
+    _write_lr(tmp_path)
+    table = resolve(tmp_path)
+    text = table.sources[table.rows[0].source]
+    assert 'route post "/a2a/notify/{task}"' in text
+    assert "service A2APushResearcher" in text
+    assert ("component RemoteResearcherPushReceiver provides "
+            "a2a_push_researcher: A2APushResearcher") in text
+    assert "extern emission fn a2a_push_researcher_notify(" in text
+
+
+def test_the_push_receiver_route_is_served(tmp_path):
+    """The receiver is on the item 457 route table: the peer's POST reaches the
+    receiver's `notify`, keyed by the receiver's provision."""
+    _write_lr(tmp_path)
+    ir = compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+
+    class _Stub:
+        def __init__(self, ir):
+            self.ir = ir
+            self.calls = []
+
+        def call(self, key, method, args, *, raw=False):
+            self.calls.append((key, method, args))
+            return {"result": None, "trace": []}
+
+        def state(self, drain=False):
+            return {}
+
+    face = HttpComposedServer(_Stub(ir), composition="revl")
+    routes = [(r.method, r.template, r.key, r.op) for r in face._routes_457]
+    assert ("POST", "/a2a/notify/{task}", "a2a_push_researcher",
+            "notify") in routes
+
+
+def test_start_sends_the_push_config():
+    """`_start` rides a locally minted push id and token on the SAME
+    `message/send`; the URL is the local receiver route under the configured
+    base, and the token is what the bearer delivery will carry."""
+    with _push_module() as (ns, calls, _Ev):
+        out = ns["_start"]("survey the field")
+    assert out == {"id": "t-42", "context": "c-1"}
+    cfg = _push_cfg(calls)
+    assert cfg["url"].startswith("https://receiver.example/a2a/notify/")
+    assert len(_push_id(cfg)) == 32
+    assert cfg["token"] and cfg["token"] != _push_id(cfg)
+    assert cfg["authentication"] == {"schemes": ["Bearer"],
+                                     "credentials": cfg["token"]}
+
+
+def test_the_rest_start_sends_the_push_config(monkeypatch):
+    """The REST start carries the same `configuration` on its bare message
+    body; the push config is not JSON-RPC-only."""
+    monkeypatch.setenv(PUSH_BASE_ENV, "https://receiver.example")
+    body = task_body("start", REST_ROOT, "research", label="researcher",
+                     rest=True)
+    src = ("def _crossing(a):\n    _args = [a]\n"
+           + textwrap.indent(textwrap.dedent(body), "    "))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    calls = []
+
+    class _Opener:
+        def open(self, request, *a, **k):
+            calls.append(json.loads(request.data))
+            return _Resp(json.dumps({"kind": "task", "id": "t-42",
+                                     "status": {"state": "working"}}).encode())
+
+    ns = {"__name__": "generated"}
+    exec(compile(src, "<rest-push>", "exec"), ns)
+    original = urllib.request.build_opener
+    urllib.request.build_opener = lambda *h: _Opener()
+    try:
+        out = ns["_crossing"]("survey the field")
+    finally:
+        urllib.request.build_opener = original
+    assert out == {"id": "t-42", "context": None}
+    cfg = calls[0]["configuration"]["pushNotificationConfig"]
+    assert cfg["url"].startswith("https://receiver.example/a2a/notify/")
+    assert cfg["token"]
+
+
+def test_a_pushed_status_is_drained_before_the_crossing():
+    """A pushed non-terminal status is returned from the inbox with NO
+    `tasks/get`; polling is still the canonical feed, just not re-read here."""
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        resp = _notify(ns, cfg, _status_push("t-42", "working"))
+        assert resp["status"] == 204
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Status", "working")
+        assert len(calls) == 1  # the start only: the drain did not cross
+
+
+def test_a_pushed_terminal_is_confirmed_by_one_tasks_get():
+    """A pushed terminal is NOT believed: `_poll` spends exactly one `tasks/get`
+    and returns the confirmed event (with the confirmed payload)."""
+    confirmed = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": "the answer"}]}]}}
+    with _push_module(replies=[PUSH_REPLY, confirmed]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        assert _notify(ns, cfg, _status_push("t-42", "completed"))["status"] == 204
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Done", "the answer")
+        assert len(calls) == 2
+        assert calls[1]["method"] == "tasks/get"
+
+
+def test_a_lying_pushed_terminal_is_not_believed():
+    """A peer cannot end a Task by pushing a terminal it does not answer for:
+    the confirming `tasks/get` says `working`, and that is what the consumer
+    gets."""
+    working = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "status": {"state": "working"}}}
+    with _push_module(replies=[PUSH_REPLY, working]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        assert _notify(ns, cfg, _status_push("t-42", "completed"))["status"] == 204
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Status", "working")
+        assert len(calls) == 2
+
+
+def test_a_bad_push_token_is_401_and_deposits_nothing():
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        pid = _push_id(cfg)
+        resp = ns["_notify"](pid, {"token": "not-the-token"},
+                             {"body": {"$kind": "Text", "$value": json.dumps(
+                                 {"statusUpdate": {"taskId": "t-42",
+                                                   "status": {"state": "completed"}}})}})
+        assert resp["status"] == 401
+        # nothing was deposited: the poll crosses and sees the peer's working
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Status", "working")
+        assert len(calls) == 2
+        # an unknown push id is the same refusal
+        resp = ns["_notify"]("unknown", {"token": cfg["token"]},
+                             {"body": {"$kind": "Text", "$value": _status_push(
+                                 "t-42", "completed")}})
+        assert resp["status"] == 401
+
+
+def test_a_malformed_push_is_400_and_deposits_nothing():
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        cases = [
+            "not json",
+            "[]",
+            json.dumps({}),                       # no StreamResponse arm
+            json.dumps({"task": {"status": {"state": "working"}}}),  # no id
+            json.dumps({"statusUpdate": {"taskId": "t-42", "status": {}}}),
+            json.dumps({"task": {"id": "t-42", "status": {"state": "working"}},
+                        "message": {"messageId": "m", "parts": []}}),
+        ]
+        for raw in cases:
+            assert _notify(ns, cfg, raw)["status"] == 400, raw
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Status", "working")
+        assert len(calls) == 2  # nothing was deposited
+
+
+def test_the_push_inbox_is_bounded_and_overflow_is_explicit():
+    """The bound is per task. The first `PUSH_INBOX_LIMIT` events are kept and
+    drained in order; the next is an explicit 429, never a silent drop."""
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        for _ in range(PUSH_INBOX_LIMIT):
+            assert _notify(ns, cfg, _status_push("t-42", "working"))["status"] == 204
+        assert _notify(ns, cfg, _status_push("t-42", "completed"))["status"] == 429
+        entry = ns["_A2A_PUSH_STATE"]["push"][_push_id(cfg)]
+        assert len(entry["inbox"]) == PUSH_INBOX_LIMIT
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Status", "working")
+        assert len(entry["inbox"]) == PUSH_INBOX_LIMIT - 1
+        assert len(calls) == 1  # all drained without a crossing
+
+
+def test_push_is_off_without_the_base_url():
+    """Polling is canonical: with `REVL_A2A_PUSH_BASE` unset, `_start` sends no
+    configuration and `_poll` crosses exactly as it did before T3."""
+    with _push_module(env=None) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        assert "configuration" not in calls[0]["params"]
+        out = ns["_poll"]({"id": "t-42", "context": "c-1"})
+        assert out == Ev("Status", "working")
+        assert len(calls) == 2
+        assert calls[1]["method"] == "tasks/get"
+
+
+def test_the_importer_start_body_does_not_reference_push_state():
+    """`revl import a2a` does not synthesize the receiver, so its four-op
+    bodies are passed `push=False` and stay byte-for-byte the T1 wire: no
+    registry, no `_params`, the plain `{"message": ...}` params."""
+    body = task_body("start", "https://agent.example:8443", "research",
+                     label="researcher", push=False)
+    assert "_A2A_PUSH_STATE" not in body
+    assert "_params" not in body
+    assert '"params": {"message"' in body
+
+
+def test_the_receiver_response_is_the_http_status(tmp_path):
+    """The receiver owns the status: the `Response` it returns is what the
+    route face sends, so a refused push is an HTTP 401 (and an accepted one a
+    204), never a 200 carrying an error object."""
+    _write_lr(tmp_path)
+    ir = compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+
+    class _Stub:
+        def __init__(self, ir, response):
+            self.ir = ir
+            self.response = response
+
+        def call(self, key, method, args, *, raw=False):
+            return {"result": self.response, "trace": []}
+
+        def state(self, drain=False):
+            return {}
+
+    face = HttpComposedServer(_Stub(ir, {
+        "status": 401, "status_text": "Unauthorized", "headers": [],
+        "body": {"$kind": "Json", "$value": '{"code":"a2a-push"}'},
+    }), composition="revl")
+    reply = face.dispatch_http("POST", "/a2a/notify/p1", b"{}",
+                               {"Authorization": "Bearer wrong"})
+    assert reply.status == 401
+    assert b"a2a-push" in reply.body
+
+    face = HttpComposedServer(_Stub(ir, {
+        "status": 204, "headers": [], "body": {"$kind": "Empty"},
+    }), composition="revl")
+    reply = face.dispatch_http("POST", "/a2a/notify/p1", b"{}",
+                               {"Authorization": "Bearer right"})
+    assert reply.status == 204
