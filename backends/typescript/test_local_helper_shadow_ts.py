@@ -72,10 +72,10 @@ pub fn loop(xs: List[Int], a: Int, b: Int) -> Int {
   }
   return 0
 }
-pub fn escape(x: Int) -> Int = x + 100
+pub fn slip(x: Int) -> Int = x + 100
 pub fn local_beside_module_fn(a: Int) -> Int {
-  let escape = 5
-  return escape + a
+  let slip = 5
+  return slip + a
 }
 pub fn plain(total: Int, count: Int) -> Int {
   let sum = total + count
@@ -98,7 +98,7 @@ CASES = [
     ("lambda param revlI64", "M.lam(2n, 3n)", "5"),
     ("for variable revlI64", "M.loop([1n], 2n, 3n)", "5"),
     ("local beside module fn", "M.local_beside_module_fn(1n)", "6"),
-    ("module fn kept", "M.escape(1n)", "101"),
+    ("module fn kept", "M.slip(1n)", "101"),
 ]
 
 
@@ -106,19 +106,19 @@ CASES = [
 # local spelled exactly like the module name must keep the module read's
 # spelling, and an escaped local must not land on the module name.
 MODULE_TRAILING_SOURCE = """\
-fn undefined_(x: Int) -> Int = x + 100
+fn zzz_(x: Int) -> Int = x + 100
 pub fn main(a: Int) -> Int {
-  let undefined_ = a
-  return undefined_ + 1
+  let zzz_ = a
+  return zzz_ + 1
 }
-fn revlFoo_(x: Int) -> Int = x + 100
+fn foo_(x: Int) -> Int = x + 100
 pub fn beside(a: Int) -> Int {
   let revlFoo = a
-  return revlFoo_(a) + revlFoo
+  return foo_(a) + revlFoo
 }
 pub fn same(a: Int) -> Int {
-  let revlFoo_ = a
-  return revlFoo_ + 1
+  let foo_ = a
+  return foo_ + 1
 }
 pub fn pair(x: Int) -> Int {
   let x_ = x + 10
@@ -127,8 +127,8 @@ pub fn pair(x: Int) -> Int {
 """
 
 MODULE_TRAILING_CASES = [
-    ("let named like module fn undefined_", "M.main(1n)", "2"),
-    ("escaped revlFoo beside fn revlFoo_", "M.beside(1n)", "102"),
+    ("let named like module fn zzz_", "M.main(1n)", "2"),
+    ("escaped revlFoo beside fn foo_", "M.beside(1n)", "102"),
     ("let named like module fn revlFoo_", "M.same(1n)", "2"),
     ("x and x_", "M.pair(1n)", "111"),
 ]
@@ -165,10 +165,10 @@ def test_locals_beside_module_names_ending_in_underscore(tmp_path):
 
 def test_an_escaped_local_never_spells_a_module_name():
     out = _emit(MODULE_TRAILING_SOURCE)
-    assert "const undefined_ = a" in out
-    assert "return revlI64(undefined_ + 1n)" in out
-    assert "const revlFoo_ = a" in out
-    assert re.search(r"const revlFoo_+ = a\n\s+return revlI64\(revlFoo_\(a\) \+ revlFoo_{2,}\)",
+    assert "const zzz_ = a" in out
+    assert "return revlI64(zzz_ + 1n)" in out
+    assert "const foo_ = a" in out
+    assert re.search(r"const revlFoo_+ = a\n\s+return revlI64\(foo_\(a\) \+ revlFoo_{2,}\)",
                      out) is not None
 
 
@@ -185,7 +185,7 @@ def test_locals_are_renamed_and_ordinary_names_are_not():
     # ordinary names and a local named like a module fn keep their spelling
     assert "export function plain(total: bigint, count: bigint): bigint {" in out
     assert "const sum = revlI64(total + count)" in out
-    assert "const escape = 5n" in out
+    assert "const slip = 5n" in out
 
 
 def test_provide_method_locals_and_params_are_renamed():

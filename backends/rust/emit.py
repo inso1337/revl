@@ -145,6 +145,47 @@ _RUST_TYPE_RESERVED = frozenset({
     "RevlPendingCompensation", "RevlWal",
 })
 
+# Issue #3159: the prelude CONSTRUCTORS the emitted body spells as bare tokens
+# (`Ok(..)`, `Err(..)`, the `Some`/`None` of an `Opt`). They are reserved at the
+# VALUE-name positions a user binding can occupy at module scope, where the
+# rename is injective: a module `fn Err` emitted `fn Err(..)` and every
+# `Err("denied")` in the module resolved to that fn instead of the constructor,
+# so a denial returned `Ok`. `_RUST_TYPE_RESERVED` already carries these names
+# for the type-name position (#1920); a fn lives in the value namespace, so it
+# needs the same names at its own position. Locals and parameters of these
+# spellings are already escaped by the frontend's `_predeclared_mangle` (item
+# #320), so only the module-level value positions are added here, and the
+# existing ladder keeps `Err` -> `Err_`, `Err_` -> `Err__` distinct.
+_RUST_VALUE_RESERVED = frozenset({"Ok", "Err", "Some", "None"})
+
+# The rust helper namespace: the emitted module declares `fn revl_concat`,
+# `revl_ftoa`, `REVL_JOURNAL_DEPTH`, ... and a user value of that spelling can
+# shadow a bare helper call inside its function (and a module fn collides at
+# package scope). Keep the namespace unspellable from user names, the same rule
+# the ts, java, go and python emitters apply. An `extern parameter name` is
+# excluded because a verbatim `@rust` body spells the parameter by its source
+# name.
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z_]|REVL_|_revl|_REVL)")
+
+_RUST_VALUE_ROLES = frozenset({
+    "arrow parameter", "bind", "binding", "extern name", "function",
+    "function name", "loop binding", "match bind", "name", "parameter",
+    "parameter name", "setup assign", "setup binding",
+})
+
+
+def _in_revl_namespace(name: str) -> bool:
+    """Whether *name* (or a trailing-underscore root of it) is in the emitted
+    helper namespace, so a user value of that spelling would shadow a helper."""
+    root = name
+    while root:
+        if _REVL_NAMESPACE_RE.match(root) is not None:
+            return True
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return False
+
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
 
@@ -1748,7 +1789,17 @@ def _ident(name: object, role: str) -> str:
     # A user type must not shadow a Rust prelude / cordis name the emitted
     # module spells as a bare token (#552 B2). Only the type-name position
     # reserves them; a field/local/param of the same spelling is left alone.
-    extra = _RUST_TYPE_RESERVED if role == "type name" else frozenset()
+    # A module-level `fn`/extern is a VALUE name, so it takes the prelude
+    # CONSTRUCTOR set instead (issue #3159).
+    if role == "type name":
+        extra = _RUST_TYPE_RESERVED
+    elif role in ("function name", "extern name"):
+        extra = _RUST_VALUE_RESERVED
+    else:
+        extra = frozenset()
+    if role in _RUST_VALUE_ROLES and _in_revl_namespace(name):
+        # the emitter's own `revl_*`/`REVL_*` helpers must stay reachable bare
+        return name + "_"
     return _mangle(name, extra)
 
 

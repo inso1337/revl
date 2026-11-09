@@ -493,6 +493,19 @@ _EMITTER_RESERVED = {
     "_svc", "_err", "_r", "_ok",
 }
 
+# Issue #3168: the go tier lowers arithmetic, string, list and Opt operations to
+# package-level helpers spelled `revl<Upper>...` (`revlAdd`, `revlSub`,
+# `revlStrIndex`, `revlListPush`, ...) and the lifecycle scaffolding to
+# `revl*`/`_revl*`. A user `let` or parameter of one of those spellings is a Go
+# binding INSIDE the function, so the emitter's own bare helper call binds the
+# user's closure instead: `let revlSub = (..) => 0; return a - b` returned 0 and
+# the overflow trap was gone. The whole namespace is therefore unspellable from
+# a user name, the same rule the ts tier's `_TS_HELPER_PREFIX_RE` applies
+# (issue #3179) and java's `_REVL_NAMESPACE_RE` (issue #3160). The root-stripped
+# ladder below keeps the rename injective (`revlSub` -> `revlSub_`,
+# `revlSub_` -> `revlSub__`).
+_REVL_HELPER_PREFIX_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
+
 
 def _safe_local(name: str) -> str:
     """Rename a revl identifier that collides with a *Go* keyword (or a name
@@ -510,21 +523,22 @@ def _safe_local(name: str) -> str:
     compiler CI does not run.
 
     The injective rule: escape a name iff the name OR any name reachable from
-    it by dropping trailing `_` is a Go keyword or an `_EMITTER_RESERVED` name,
-    and escape it by exactly ONE `_`. Names whose underscore-stripped root is
-    reserved shift up one rung of the `kw`/`kw_`/`kw__` ladder (`func` ->
-    `func_`, `func_` -> `func__`), which is injective; every other name is
-    returned unchanged and can never equal a shifted name, because a shifted
-    name's root is reserved and an unchanged name's root is not. The output is
-    never itself reserved: no member of `_GO_KEYWORDS` or `_EMITTER_RESERVED`
-    ends in `_`. Only a name whose root is reserved can change, so a program
-    that binds no reserved name emits byte-identically to before; binding one
-    of the driver's own spellings now moves the USER name one rung clear
-    (issue #3053)."""
+    it by dropping trailing `_` is a Go keyword, an `_EMITTER_RESERVED` name or
+    a helper-namespace name (`_REVL_HELPER_PREFIX_RE`), and escape it by exactly
+    ONE `_`. Names whose underscore-stripped root is reserved shift up one rung
+    of the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
+    which is injective; every other name is returned unchanged and can never
+    equal a shifted name, because a shifted name's root is reserved and an
+    unchanged name's root is not. The output is never itself reserved: no member
+    of `_GO_KEYWORDS` or `_EMITTER_RESERVED` ends in `_`. Only a name whose root
+    is reserved can change, so a program that binds no reserved name emits
+    byte-identically to before; binding one of the driver's own spellings now
+    moves the USER name one rung clear (issue #3053)."""
     n = str(name)
     root = n
     while root:
-        if root in _GO_KEYWORDS or root in _EMITTER_RESERVED:
+        if (root in _GO_KEYWORDS or root in _EMITTER_RESERVED
+                or _REVL_HELPER_PREFIX_RE.match(root) is not None):
             return n + "_"
         if not root.endswith("_"):
             break
@@ -6317,21 +6331,28 @@ _GO_RESERVED = {
     # ladder below closes it — the user's `len` emits as `len_`, the emitter's
     # `len(...)` stays the builtin.
     #
-    # Only the ACTUALLY-emitted subset is reserved, not the whole predeclared
-    # list: a predeclared identifier the emitter never spells (`clear`, `close`,
-    # `cap`, `new`, `min`/`max`, …) cannot be shadowed because nothing references
-    # it, and over-reserving would rename a user `clear`/`cap` that the
-    # self-hosted `selfhost/emit_go.rvl` (keyword-escape only) leaves alone —
-    # breaking the byte-agreement oracle
-    # (`tests/test_selfhost_emit_go.py::test_selfhosted_emitter_is_byte_identical`,
-    # which `emit_go_corpus/accumulators.rvl`'s `clear` parameter exercises)
-    # without a matching change to that digest-input file. Go service methods
-    # are emitted capitalized (`r.Close()`), so they never reach `_v3_ident`'s
-    # predeclared check and need no exclusion. None of these end in `_`, so the
-    # ladder stays injective and a mangled name never re-enters the set.
-    "any", "append", "bool", "byte", "comparable", "copy", "delete", "error",
-    "float64", "int", "int32", "int64", "len", "make", "panic", "rune",
-    "string", "uint32",
+    # Issue #3161: the WHOLE predeclared set is reserved, not only the subset
+    # this emitter was known to spell. The subset was measured against the code
+    # emitted at the time, but the emitter also writes `recover()` (the
+    # lifecycle test driver and the component `Apply` guard), `close`, `cap`,
+    # `clear` and `uint64`, and a later helper can add another. A zero-argument
+    # `fn recover` compiles and the deferred `if r := recover(); r != nil`
+    # guard calls the USER fn, so a real panic is no longer recovered and an
+    # ordinary lifecycle test fails at the end of every run. Reserving the whole
+    # universe-block set means a helper added later cannot reopen the hole, and
+    # over-reserving only renames a user binding of that spelling (an injective
+    # ladder shift, never a wrong value). `selfhost/emit_go.rvl::is_go_reserved`
+    # carries the identical set, so the byte-agreement oracle stays exact; the
+    # `clear` parameter of `emit_go_corpus/accumulators.rvl` now emits `clear_`
+    # in both implementations. Go service methods are emitted capitalized
+    # (`r.Close()`), so they never reach `_v3_ident`'s predeclared check and
+    # need no exclusion. None of these end in `_`, so the ladder stays injective
+    # and a mangled name never re-enters the set.
+    "any", "append", "bool", "byte", "cap", "clear", "close", "comparable",
+    "complex", "complex64", "complex128", "copy", "delete", "error", "float32",
+    "float64", "imag", "int", "int8", "int16", "int32", "int64", "len", "make",
+    "max", "min", "new", "panic", "print", "println", "real", "recover", "rune",
+    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
 }
 
 _V3_PRIM = {
@@ -6348,17 +6369,21 @@ def _v3_ident(name, role: str) -> str:
     """The pure-v3 counterpart of `_safe_local`, over the full Go keyword set.
 
     Same injective rule (see `_safe_local`): escape a name iff the name OR any
-    name reachable from it by dropping trailing `_` is a Go keyword, by exactly
-    one `_`. The plain "reserved -> name + '_'" map sent both `func` and the
-    equally legal revl identifier `func_` to `func_`, so two distinct revl
-    locals became one Go local and `go build` reported "no new variables on
-    left side of :=" — a loud break here, a SILENT capture on the python tier
-    from the same shape."""
+    name reachable from it by dropping trailing `_` is a Go keyword, an
+    `_EMITTER_RESERVED` helper name or a name in the helper namespace
+    (`_REVL_HELPER_PREFIX_RE`, issue #3168), by exactly one `_`. The plain
+    "reserved -> name + '_'" map sent both `func` and the equally legal revl
+    identifier `func_` to `func_`, so two distinct revl locals became one Go
+    local and `go build` reported "no new variables on left side of :=" — a
+    loud break here, a SILENT capture on the python tier from the same shape.
+    A `revl*` user binding is escaped for the same reason a keyword is: the
+    emitter's bare helper call inside the function must keep binding the
+    helper (issue #3168)."""
     if not isinstance(name, str) or not name:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     root = name
     while root:
-        if root in _GO_RESERVED:
+        if (root in _GO_RESERVED or _REVL_HELPER_PREFIX_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
