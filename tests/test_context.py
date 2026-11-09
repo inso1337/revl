@@ -179,9 +179,9 @@ def test_the_token_proxy_is_the_one_tokens_to_green_counts_with():
 
 
 def test_examples_bar_the_pack_is_under_seventy_percent_and_bodiless():
-    """The bar in docs/context.md, set from iyi's gate before this change was
-    measured: across every component of every example, the pack costs under 70%
-    of the files it was cut from, and no pack carries a body keyword."""
+    """The bar in docs/context.md, set before this change was measured:
+    across every component of every example, the pack costs under 70% of the
+    files it was cut from, and no pack carries a body keyword."""
     pack = raw = 0
     for path in sorted(glob.glob(str(ROOT / "examples" / "**" / "*.rvl"),
                                  recursive=True)):

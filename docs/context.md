@@ -12,12 +12,18 @@ composition to find those declarations is where its grounding tokens go, and
 it reads. `revl context` is the input side: the declarations, cut verbatim from
 the source, and nothing else.
 
-The idea is the one the iyi language builds on ("declarations, not bodies":
-a module compiles against its imports' export metadata only, and `iyi mod
-context` hands that metadata to an agent). revl already has the boundary
-iyi had to add: a `service` declaration is the whole contract a provider is
-held to (G4 makes it an upper bound), and it carries no body. So the pack is a
-cut, not a new artifact.
+The idea is "declarations, not bodies": hand the agent the interface it
+compiles against and nothing else. revl already has the declaration the pack
+needs: a `service` is the whole contract a provider is held to (G4 makes it an
+upper bound), and it carries no body. So the pack is a cut, not a new
+artifact.
+
+revl does not enforce that boundary at compile time, though. A consumer's
+compile merges every component of a module it `use`s, whatever names the
+`use` lists, so a provider body that does not check, in the same module as a
+service the consumer imports, fails the consumer's compile too. The pack does
+not depend on that boundary: it is cut from the parse, and it never reads a
+body.
 
 ## What the pack carries
 
@@ -90,7 +96,7 @@ in order.
 
 ## The bar, and what it measured
 
-The bar was iyi's hermetic gate, adopted before this change was measured:
+The bar was fixed before this change was measured:
 **the pack costs under 70% of the raw files it was cut from, and carries no
 body.** `tests/test_context.py::test_examples_bar_the_pack_is_under_seventy_percent_and_bodiless`
 holds it over every component of every example under `examples/` (the
@@ -112,11 +118,12 @@ when it is the cheaper read.
 
 What this does NOT measure: rounds-to-green with and without the pack. That
 needs paid model runs on a fixed task, the way `bench/run.py` drives
-iterations-to-green, and it is the half of iyi's gate that decided whether
-the claim stayed on its README (iyi's own pack lost rounds on three of its
-first five runs, until its loop applied the compiler's fixes before asking the
-model again). Until that run exists, the claim is the token number above and nothing
-more.
+iterations-to-green, and it is the half that decides whether the pack helps.
+A pack can win on tokens and still lose rounds: a model given less context
+can spend a round retyping an edit the compiler already suggested, so the
+loop the run uses matters as much as the pack. revl's bench loop hands the
+error text back and applies no suggested edit yet. Until that run exists, the
+claim is the token number above and nothing more.
 
 ## Where it is listed, and what would move it
 
