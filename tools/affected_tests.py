@@ -122,6 +122,9 @@ BENCH_DEPENDENT_TESTS = (
     # lines on synthetic fixture records (it does not re-derive the committed
     # receipt's figures), so a bench change can change its verdict.
     "tests/test_bench_compare_runs.py",
+    # Drives bench/run.py's attempt loop with the mock runner and checks that
+    # the compiler's verified edits are applied before the model is re-asked.
+    "tests/test_bench_autofix.py",
     # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
     # loaders and checks they leave one `revl` in the process.
     "tests/test_bench_compiler_reload_keeps_one_revl.py",

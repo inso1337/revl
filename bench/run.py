@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import datetime
 import json
 import math
@@ -152,15 +153,7 @@ def compile_check(code: str, name: str):
     lazy import inside the compiler resolved to the new one, so
     `except RevlError` stopped catching the compiler's own refusals."""
     global _GRADED_BY
-    src = str(COMPILER_ROOT / "src")
-    saved_path = list(sys.path)
-    saved = {m: mod for m, mod in sys.modules.items() if _is_revl(m)}
-    if src in sys.path:
-        sys.path.remove(src)
-    sys.path.insert(0, src)
-    for mod in saved:
-        del sys.modules[mod]
-    try:
+    with _fresh_revl():
         try:
             import revl  # noqa: PLC0415
             from revl import RevlError, compile_source  # noqa: PLC0415
@@ -174,11 +167,82 @@ def compile_check(code: str, name: str):
             return False, str(exc)
         except Exception as exc:
             return False, f"[compiler crash] {type(exc).__name__}: {exc}"
+
+
+@contextlib.contextmanager
+def _fresh_revl():
+    """Import `revl` fresh from COMPILER_ROOT for the duration of the block,
+    then put the process's own `revl` modules and `sys.path` back (see
+    `compile_check`)."""
+    src = str(COMPILER_ROOT / "src")
+    saved_path = list(sys.path)
+    saved = {m: mod for m, mod in sys.modules.items() if _is_revl(m)}
+    if src in sys.path:
+        sys.path.remove(src)
+    sys.path.insert(0, src)
+    for mod in saved:
+        del sys.modules[mod]
+    try:
+        yield
     finally:
         for mod in [m for m in sys.modules if _is_revl(m)]:
             del sys.modules[mod]
         sys.modules.update(saved)
         sys.path[:] = saved_path
+
+
+# A bound on the edits applied to one candidate. Each edit is verified only
+# against its own refusal, so this stops fixes that trade refusals elsewhere
+# in the file back and forth.
+AUTOFIX_MAX_EDITS = 8
+
+
+def next_fix(code: str, name: str):
+    """The first verified edit the compiler offers for a refused candidate, as
+    `(record, patched_code)`, or None when no diagnostic carries one.
+
+    The edit comes from `revl.lsp.fixgen.generate_fix`, the engine behind the
+    LSP quick fix and `fix_code`: it applies its candidate edit and recompiles
+    before returning it, so it never hands back an edit that leaves the
+    refusal in place (docs/fix-code.md, "verified or nothing"). It is imported
+    from the same compiler tree `compile_check` grades with."""
+    with _fresh_revl():
+        try:
+            from revl.lsp.analysis import compute_diagnostics  # noqa: PLC0415
+            from revl.lsp.fixgen import apply_edits, generate_fix  # noqa: PLC0415
+        except Exception as exc:  # compiler tree mid-edit
+            print(f"  !! autofix unavailable: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return None
+        try:
+            for diagnostic in compute_diagnostics(code, name):
+                fix = generate_fix(code, diagnostic, name)
+                if fix is not None:
+                    patched = apply_edits(code, fix.edits)
+                    if patched != code:
+                        return ({"code": fix.code, "title": fix.title,
+                                 "edits": fix.edits}, patched)
+        except Exception as exc:  # a fix crash is no fix, never a lost run
+            print(f"  !! autofix crashed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+        return None
+
+
+def autofix(code: str, name: str, ok: bool, error):
+    """Apply the compiler's verified edits to a refused candidate, one at a
+    time with a recompile after each, until it is clean or no diagnostic
+    carries an edit. Returns `(code, ok, error, applied)`; `applied` lists
+    each edit as `{code, title, edits}` and is empty when nothing applied, in
+    which case the candidate comes back unchanged."""
+    applied = []
+    while not ok and len(applied) < AUTOFIX_MAX_EDITS:
+        found = next_fix(code, name)
+        if found is None:
+            break
+        record, code = found
+        applied.append(record)
+        ok, error = compile_check(code, name)
+    return code, ok, error, applied
 
 
 def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
@@ -534,6 +598,12 @@ def main():
     ap.add_argument("--raw-ts-cycles", type=int, default=DEFAULT_CYCLES,
                     help="load/unload cycles for the probe-scored hosts, raw-ts "
                          f"and mcp (default {DEFAULT_CYCLES})")
+    ap.add_argument("--no-autofix", dest="autofix", action="store_false",
+                    help="re-ask the model on every refusal, even one the "
+                         "compiler carries a verified edit for. By default "
+                         "those edits are applied (and recorded as "
+                         "`autofixed`) before the model is asked again; run "
+                         "once with and once without to report both arms.")
     args = ap.parse_args()
 
     if args.runner == "local" and args.model is None:
@@ -616,6 +686,7 @@ def main():
             turn_count_total, turn_count_seen = 0, False
             tokens_in_complete, turn_count_complete = True, True
             invocation_count = 0
+            applied = None  # the autofix edits on the latest attempt
             for attempt in range(1, args.max_iters + 1):
                 invocation_count += 1
                 t0 = time.time()
@@ -660,6 +731,18 @@ def main():
                 (adir / f"attempt-{attempt}.rvl").write_text(
                     code, encoding="utf-8")
                 ok, error = compile_check(code, f"{spec['id']}.rvl")
+                applied = None
+                if args.autofix:
+                    # The compiler's own verified edits go in before the model
+                    # is re-asked: a refusal it can repair costs no model turn.
+                    # attempt-N.rvl stays the model's text; the patched file
+                    # sits beside it (outside the attempt-*.rvl glob rescoring
+                    # reads).
+                    code, ok, error, applied = autofix(
+                        code, f"{spec['id']}.rvl", ok, error)
+                    if applied:
+                        (adir / f"autofix-{attempt}.rvl").write_text(
+                            code, encoding="utf-8")
                 rows.append({"spec": spec["id"], "variant": variant,
                              "model": model_seen, "attempt": attempt, "ok": ok,
                              "error": error, "duration_s": dur,
@@ -676,8 +759,12 @@ def main():
                              "reasoning_chars": reply.get("reasoning_chars"),
                              "answer_from_reasoning": reply.get("answer_from_reasoning"),
                              "finish_reason": reply.get("finish_reason")})
+                if applied is not None:
+                    rows[-1]["autofixed"] = applied
                 status = "green" if ok else "red"
                 print(f"  {spec['id']}/{variant} attempt {attempt}: {status}"
+                      + (f" (autofixed: {', '.join(a['code'] for a in applied)})"
+                         if applied else "")
                       + (f" — {error.splitlines()[0][:100]}" if error else ""))
                 if ok:
                     green_at = attempt
@@ -696,6 +783,8 @@ def main():
                          # beside iterations-to-green (bench/tokens.py). None when
                          # the provider reported no token usage.
                          "tokens_to_green": tokens_total if tokens_seen else None})
+            if args.autofix:
+                rows[-1]["green_by_autofix"] = bool(green_at and applied)
             results_path.write_text(
                 "\n".join(json.dumps(r) for r in rows) + "\n",
                 encoding="utf-8")
@@ -733,6 +822,9 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
     lines = ["# syntax-2.0 acceptance benchmark — run summary", "",
              f"runner: `{args.runner}`" + (f" · model: `{args.model}`" if args.model else ""),
              f"max iterations: {args.max_iters}",
+             # whether a verified compiler edit was applied before a re-ask
+             # (`--no-autofix` turns it off); the two arms are separate runs
+             f"autofix: {'on' if getattr(args, 'autofix', False) else 'off'}",
              # Which compiler graded this. An editable install of revl registers
              # a meta-path finder that is consulted before sys.path, so a run
              # launched from the wrong interpreter can score against a different
@@ -746,8 +838,8 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
                   "| variant | specs | first-pass compile | green ≤ max iters | "
                   "mean compile attempts | mean model turns to green | "
                   "mean tokens_in to green | "
-                  "mean output tokens-to-green | cost |",
-                  "|---|---|---|---|---:|---:|---:|---:|---:|"]
+                  "mean output tokens-to-green | cost | green via autofix |",
+                  "|---|---|---|---|---:|---:|---:|---:|---:|---:|"]
     for variant in revl_variants:
         vs = [r for r in finals if r["variant"] == variant]
         if not vs:
@@ -773,9 +865,14 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         mean_tokens_in = (f"{sum(tokens_in) / len(tokens_in):.0f}"
                           if tokens_in else "—")
         cost = sum(r.get("cost_total") or 0 for r in vs)
+        # cells whose green attempt needed a compiler edit; "—" for a run
+        # with autofix off (its rows carry no `green_by_autofix`)
+        by_fix = [r for r in vs if "green_by_autofix" in r]
+        via_fix = (f"{sum(1 for r in by_fix if r['green_by_autofix'])}/{n}"
+                   if by_fix else "—")
         lines.append(f"| {variant} | {n} | {first}/{n} ({100 * first / n:.0f}%) "
                      f"| {len(green)}/{n} | {mean_iters} | {mean_turns} | "
-                     f"{mean_tokens_in} | {mean_toks} | ${cost:.2f} |")
+                     f"{mean_tokens_in} | {mean_toks} | ${cost:.2f} | {via_fix} |")
 
     invocation_rows = [r for r in rows
                        if not r.get("summary")
