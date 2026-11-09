@@ -121,6 +121,19 @@ Useful flags:
   the run.
 - `--variants v1,v2,v2host`, `--specs all|N|id,id`, `--max-iters`,
   `--timeout`, `--label`.
+- `--no-autofix`: turn off the compiler-edit step. By default, after a
+  refused attempt `run.py` applies the compiler's own verified edits
+  (`src/revl/lsp/fixgen.py`, the engine behind the LSP quick fix and
+  `fix_code`, see `docs/fix-code.md`) one at a time, recompiling after each,
+  until the candidate is clean or no diagnostic carries an edit. A green
+  reached that way is green on that attempt with no model turn; the edits are
+  recorded on the attempt row as `autofixed` and the patched file is written
+  beside the model's as `autofix-N.rvl`. Only what is still refused goes back
+  to the model. Run once with and once without to report both arms. With
+  autofix on, `summary.md`'s first-pass and green counts include those
+  compiler-edit greens, while `rescore.py`, `tokens.py` and
+  `framework_bench.py` read `attempt-N.rvl`, the model's own text, so they
+  report the model alone (the `--no-autofix` arm's numbers).
 - `--inline-system` — if a provider misbehaves with cline's `-s` system
   override, merge the grammar into the user prompt instead.
 
@@ -608,7 +621,9 @@ these metrics are the scale.
 
 `summary.md` per run reports, per variant: first-pass compile rate,
 green-within-max-iters, mean compiler-feedback attempts-to-green, mean model
-turns-to-green, mean `tokens_in`-to-green, mean tokens-to-green, and cost. The
+turns-to-green, mean `tokens_in`-to-green, mean tokens-to-green, cost, and
+the cells whose green attempt needed a compiler edit (`green via autofix`,
+`—` with `--no-autofix`). The
 turn and input-token means use the same admitted cells that recorded both
 measurements. Its invocation table keeps `turn_count` and `tokens_in` together
 for each compile-gated revl invocation; probe-scored variants have their own
