@@ -422,3 +422,17 @@ source = "alpha.revl"
 """)
     plan = load_federation_plan(path)
     assert plan["compositions"]["alpha"]["source"] == plan_dir / "alpha.revl"
+
+
+def test_a_json_plan_loads_like_a_toml_plan(tmp_path):
+    _write(tmp_path / "alpha.revl", EMPTY_ALPHA)
+    path = _write(tmp_path / "plan.json", json.dumps({
+        "federation": "shop",
+        "generation": 4,
+        "compositions": {"alpha": {"source": "alpha.revl"}},
+        "contracts": [],
+    }))
+    plan = load_federation_plan(path)
+    assert plan["federation"] == "shop"
+    assert plan["generation"] == 4
+    assert plan["compositions"]["alpha"]["source"] == tmp_path / "alpha.revl"
