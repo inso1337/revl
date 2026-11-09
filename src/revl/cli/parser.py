@@ -1774,11 +1774,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "Credentials come from the environment variables the "
                           "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
-                     help="boundary policy file (item 33). With --backend wasm it "
-                          "enforces the item-289 least-authority chain (host "
-                          "imports subset-of declared caps subset-of policy-allowed) "
-                          "before booting; a wasm cell exceeding the allow-list is "
-                          "refused (docs/boundary-policy.md)")
+                     help="boundary policy file (item 33). On every backend, "
+                          "and under --placement, the run is refused before boot "
+                          "on any violation `revl audit --policy` refuses (deny "
+                          "and allow rules, pair and evidence rules, `requires "
+                          "approval`); under --watch an edit the policy refuses "
+                          "is rejected. With --backend wasm it also enforces the "
+                          "item-289 least-authority chain over the emitted host "
+                          "imports (docs/boundary-policy.md)")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--record", action="store_true",

@@ -21,11 +21,12 @@ written on, so none of them was red first):
   carry `FsMediator` in. The `nope` refusal appears only when that module is
   itself a root of the compile, where its components are the composition.
 
-Not pinned here: the used module is still parsed and resolved whole (syntax,
-`asset` files, refs, host body files), so a syntax error or a missing asset in
-a component body there breaks the importer. Compiling against service
-declarations alone, with the dependency's source gone, is an open design
-question.
+Not pinned here: the used module is still parsed whole, so a syntax error in
+a component body there breaks the importer. The `asset` files its components
+name are not read, and for a module used only for a service neither are its
+externs' host body files and refs: `tests/test_used_module_resources.py`.
+Compiling against service declarations alone, with the dependency's source
+gone, is an open design question.
 """
 
 from __future__ import annotations
