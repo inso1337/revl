@@ -8745,7 +8745,7 @@ def ir_coverage() -> list[str]:
     realms, which is the case the slot distinction exists for."""
     findings: list[str] = []
     if not _IR_ROWS:
-        return ["ir coverage: no IRD/IRS rows at all — the IR rows are vacuous"]
+        return ["ir coverage: no IRD/IRS rows at all. The IR rows are vacuous"]
     components = sum(len(v["components"]) for v in _IR_ROWS.values())
     slots = sum(len(v["slots"]) for v in _IR_ROWS.values())
     realms = sum(v["realms"] for v in _IR_ROWS.values())
@@ -8756,11 +8756,11 @@ def ir_coverage() -> list[str]:
             by_key.setdefault(k, set()).add(r)
         spread += sum(1 for rs in by_key.values() if len(rs) > 1)
     if components == 0:
-        findings.append("ir coverage: no IR components — the IR rows are "
+        findings.append("ir coverage: no IR components. The IR rows are "
                         "vacuous")
     if realms == 0:
         findings.append("ir coverage: NO realm-pinned slot in any lowered "
-                        "document — the isolate column is never exercised")
+                        "document. The isolate column is never exercised")
     if spread == 0:
         findings.append("ir coverage: NO composition provides one key in two "
                         "realms, so the slot distinction is never exercised")
