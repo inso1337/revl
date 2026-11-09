@@ -180,13 +180,18 @@ def test_d_broken_provider_beside_the_used_services_leaves_the_consumer_green(
         _compile(tmp_path, ["consumer.rvl", "svc.rvl"], modules)
 
 
-_MISSING_ASSET = 'let entry = asset "./nope.ts"\n      return 0'
 _NOT_IN_SOURCES = "is not in the in-memory sources map"
 
 
+@pytest.mark.parametrize("body", [
+    pytest.param('let entry = asset "./nope.ts"\n      return 0', id="plain"),
+    # A `${...}` is parsed by a sub-parser that shares the asset list.
+    pytest.param('let entry = `${asset "./nope.ts"}`\n      return 0',
+                 id="interpolated"),
+])
 def test_e_missing_asset_in_provider_body_beside_the_used_services_leaves_the_consumer_green(
-        tmp_path):
-    modules = {"svc.rvl": _SERVICES + "\n" + _MEDIATOR % _MISSING_ASSET,
+        tmp_path, body):
+    modules = {"svc.rvl": _SERVICES + "\n" + _MEDIATOR % body,
                "consumer.rvl": _CONSUMER}
 
     ir = _compile(tmp_path, ["consumer.rvl"], modules)
