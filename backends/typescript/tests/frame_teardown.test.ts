@@ -193,6 +193,33 @@ describe('Frame — bracket / transactional / compensation on one LIFO stack', (
     expect(record.outcome).toBe('failed')
   })
 
+  it('a failed compensation with an Int (bigint) argument records its residue and older compensations still run (#3209)', async () => {
+    const frame = new Frame(ctx, 'CompFailureInt')
+    const ran: string[] = []
+    const yields: Array<() => unknown> = []
+    yields.push(frame.begin)
+    yields.push(
+      frame.compensation({ key: 'k', method: 'g', args: [7n], site: 's#1' }, 'g', [8n], () =>
+        ran.push('older-compensation'),
+      ),
+    )
+    yields.push(
+      frame.compensation({ key: 'k', method: 'g', args: [5n, [6n], { n: 9n }], site: 's#2' }, 'g', [6n], () => {
+        throw new Error('compensation host failed')
+      }),
+    )
+
+    await disposeLifo(yields)
+
+    expect(ran).toEqual(['older-compensation'])
+    const outstanding = frame.report().outstanding
+    expect(outstanding).toHaveLength(1)
+    expect(outstanding[0].kind).toBe('compensation-residue')
+    expect(outstanding[0].error).toEqual({ type: 'Error', message: 'compensation host failed' })
+    // digits with no `n` suffix and no quotes, as the config echo renders an Int
+    expect(outstanding[0].referent).toBe('k.g(5, [6], {"n":9})')
+  })
+
   it('the between-compensation deadline check skips remaining Phase-2 entries and records each as not-attempted', async () => {
     process.env.REVL_COMPENSATION_BUDGET_MS = '1000'
     const frame = new Frame(ctx, 'Deadline')

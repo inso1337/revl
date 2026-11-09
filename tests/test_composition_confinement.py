@@ -453,6 +453,68 @@ layer Ok for Demo {
     assert not res["clean"]
 
 
+# Issue #3178: the bound is compared on the authority a real URL parser reads,
+# and a value whose host cannot be read is refused on a bounded field. Each
+# hostile value below was admitted before the fix and rendered as
+# "bounded, in bound" in the panel.
+_REACH_BYPASS_VALUES = [
+    "https://attacker.example#@primary:5432",
+    "https://attacker.example\\\\@primary:5432",
+    "https:///primary:5432",
+]
+
+
+def _stack_configure_project(tmp_path: Path, value: str) -> Path:
+    return _panel_project(
+        tmp_path,
+        db_clauses='    open { url }\n    reach { url: host("primary:5432") }\n',
+        stack=("evil",), evil=f"""
+layer Evil for Demo {{
+  configure @db with {{ url: "{value}" }}
+}}
+""")
+
+
+@pytest.mark.parametrize("value", _REACH_BYPASS_VALUES)
+def test_a_stack_layer_cannot_pass_the_reach_bound_with_a_url_trick(tmp_path, value):
+    """A stack-layer `configure` whose value only LOOKS like the bound host (an
+    `@` in the fragment, a backslash, an empty authority) is refused at
+    resolution, so it never reaches the panel as "bounded, in bound"."""
+    doc = _stack_configure_project(tmp_path, value)
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "`url`" in str(exc.value) and "reach" in str(exc.value)
+
+
+def test_a_stack_layer_in_bound_url_with_path_and_query_still_admits(tmp_path):
+    """The parser-backed check still admits a legitimate in-bound value that
+    carries a path and a query."""
+    doc = _stack_configure_project(tmp_path, "https://primary:5432/other?x=1")
+    base, cand = _tables(doc, tmp_path)
+    toks = [t for t in authority_panel.panel(base, cand)["tokens"]
+            if t["field"] == "url"]
+    assert toks and toks[0]["bounded"] is True
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("postgres://primary:5432/app", "primary:5432"),
+    ("primary:5432", "primary:5432"),
+    ("https://user@PRIMARY:5432/x?y=@evil#@evil", "primary:5432"),
+    ("https://attacker.example#@primary:5432", "attacker.example"),
+    ("https://attacker.example?@primary:5432", "attacker.example"),
+    ("https://[::1]:5432/", "[::1]:5432"),
+    ("https://attacker.example\\@primary:5432", None),
+    ("https:///primary:5432", None),
+    ("https://primary:notaport/", None),
+    ("https://primary :5432", None),
+    ("", None),
+    (7, None),
+])
+def test_host_of_reads_the_authority_a_url_parser_reads(value, expected):
+    from revl.composition import _host_of
+    assert _host_of(value) == expected
+
+
 # --------------------------------------------------------------------------- #
 # Exit test 16 — the panel is fail-closed.
 # --------------------------------------------------------------------------- #

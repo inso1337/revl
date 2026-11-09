@@ -398,3 +398,23 @@ name. The formal layer is tier-independent and already carries the verdict, so
 a later tier's loop is built against the same table, and wiring one is a matter
 of adding it to `revl.estop.TIERS_WITH_ESTOP` once its runtime reads the latch
 and prints the `HALTED` inventory line.
+
+**Single-process runs (issue #3200).** Outside a placement there is no
+conductor to kill and report a seamless tier, and today only the py tier reads
+the latch on its single-process path. So `revl run --backend B` with an E-Stop
+latch (named by `--estop-latch FILE` or by the ambient `REVL_ESTOP_LATCH`)
+refuses the boot for every `B` other than py, before any runtime is imported,
+the same way `--attestation` is refused off the py tier. Without the refusal an
+armed run there would be a halt that silently does nothing. The refusal does
+not depend on whether a halt is already written; a run that asks to be haltable
+on a tier that cannot be halted is refused either way.
+
+The single-process set (`revl.run.SINGLE_PROCESS_ESTOP_TIERS`) is deliberately
+narrower than `revl.estop.TIERS_WITH_ESTOP`. ts and wasm have no seam at all.
+rust, go and java are in `TIERS_WITH_ESTOP` because their placement runners
+honour the latch when the conductor writes it into their spec, but their
+single-process path does not forward it: the rust and go runs write no
+`estopLatch` into the runner's spec, and the java run boots `RunOnce`, which
+does not read the latch. Single-process E-Stop is therefore py-only until those
+tiers forward the latch (and ts gains an in-process seam); each one that does
+joins the single-process set.

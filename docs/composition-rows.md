@@ -778,7 +778,11 @@ component does not declare is a refusal there, not a silent no-op.
 
 A `configure` that moves a `reach`-bounded field to a value whose host is
 outside the bound is a refusal at resolution ("widen the bound in your site
-layer, or refuse the layer"). One recorded deviation from §8.3's sketch: the
+layer, or refuse the layer"). The host is read with a URL parser
+(`urllib.parse.urlsplit`), so an `@` or `:` in a path, query or fragment does
+not count as the authority. A value whose host cannot be read (a backslash,
+whitespace, an empty host, a port that does not parse, a non-string value) is
+refused on a bounded field too: it fails closed rather than passing unchecked. One recorded deviation from §8.3's sketch: the
 `reach` clause is keyed by CONFIG FIELD, not by extern name. Resolution is
 header-only and cannot trace a value from a field to the extern it feeds
 without lowering the body; the operator-facing bound is naturally written on the

@@ -3598,7 +3598,8 @@ def _tool_approve(arguments: dict) -> dict:
                               "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
         return {"ok": True, **SESSION.approve_ticket(
-            ticket_hash, vote=vote or "approve", as_token=as_token,
+            ticket_hash, vote=vote or "approve",
+            proposer=arguments.get("proposer"), as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
         return _session_error(error)
@@ -6762,6 +6763,15 @@ TOOLS = [
                           "description": "item 344: how long (ms) the standing "
                                          "grant stays live; checked at the "
                                          "crossing against the session clock"},
+                "proposer": {"type": "string",
+                             "description": "issue #3216: the operator whose "
+                                            "call this yes lets through, one "
+                                            "of the ticket's `proposers`. A "
+                                            "yes is spent only by the operator "
+                                            "it names. Required only when more "
+                                            "than one operator raised the same "
+                                            "call; otherwise it defaults to "
+                                            "the one that did"},
                 "vote": {"type": "string", "enum": ["approve", "deny"],
                          "description": "item 471: a ticket whose rule demands a "
                                         "QUORUM takes votes, not a yes/no, so it "
