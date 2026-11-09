@@ -470,10 +470,15 @@ def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
     """The outstanding entries of a `revl run --placement --wal` run: each
     process WAL the index names, read as one session's WAL is (issue #1477).
     Known only when every process WAL could be read."""
-    from ..placement_wal import process_wal_path  # noqa: PLC0415
+    from ..placement_wal import PlacementIndexError, process_wal_path  # noqa: PLC0415
     processes, entries = [], []
     for entry in index["processes"]:
-        one = _estop_outstanding_wal(process_wal_path(index_path, entry))
+        try:
+            path = process_wal_path(index_path, entry)
+        except PlacementIndexError as error:   # issue #3193: never followed
+            one = {"known": False, "note": str(error)}
+        else:
+            one = _estop_outstanding_wal(path)
         processes.append({"process": entry["name"], **one})
         entries.extend({"process": entry["name"], **e}
                        for e in one.get("entries") or [])
@@ -679,6 +684,7 @@ def _run_recover(args) -> int:
 def _recover_placement(args, index: dict, reissue, session) -> int:
     """`revl recover --wal INDEX` for a `revl run --placement --wal INDEX` run
     (issue #1477): every process WAL the index names, one verdict."""
+    from ..placement_wal import PlacementIndexError  # noqa: PLC0415
     from ..recover_placement import recover_index, render_placement  # noqa: PLC0415
     from ..recovery import RecoveryError  # noqa: PLC0415
     from ..wal import WALIntegrityError  # noqa: PLC0415
@@ -692,7 +698,7 @@ def _recover_placement(args, index: dict, reissue, session) -> int:
             args.wal, index, composition=getattr(args, "composition", None),
             config=_recover_config(args), reissue=reissue,
             forward_admissions=getattr(args, "forward", False))
-    except (RecoveryError, WALIntegrityError, OSError) as error:
+    except (RecoveryError, WALIntegrityError, PlacementIndexError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     if args.json:

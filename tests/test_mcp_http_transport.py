@@ -423,6 +423,129 @@ def test_the_agent_cannot_approve_its_own_ticket_and_the_human_can(serving, fres
     assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
 
 
+def _shout(port, who, sink, msg):
+    return _payload(port, who, "revl_call",
+                    {"key": "ops", "method": "shout", "args": [sink, msg]})
+
+
+@needs_cordis
+def test_an_approval_is_spent_only_by_the_operator_who_raised_it(serving, fresh,
+                                                                 tmp_path):
+    """Issue #3216: the yes answers alice's ticket, so bob's byte-identical call
+    is a new question with its own ticket, and nothing fires on alice's yes."""
+    _load_shout(fresh)
+    port = _port(serving())
+    sink = str(tmp_path / "sink.log")
+    asked = _shout(port, "alice", sink, "a")
+    assert asked["approvalRequired"] is True
+    approved = _payload(port, "human", "revl_approve", {"hash": asked["ticket"]["hash"]})
+    assert approved["ok"] is True
+
+    by_bob = _shout(port, "bob", sink, "a")
+    assert not os.path.exists(sink), "nothing fired on alice's yes"
+    assert by_bob.get("approvalRequired") is True, by_bob
+    assert by_bob["ticket"]["hash"] == asked["ticket"]["hash"], "the same question"
+    assert asked["ticket"]["proposers"] == ["alice"]
+    assert approved["proposers"] == ["alice"]
+    assert by_bob["ticket"]["proposers"] == ["bob"], "alice's asking is answered"
+
+    fired = _shout(port, "alice", sink, "a")
+    assert fired["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+
+    # bob's own ticket is answerable, and that yes is his alone
+    for_bob = _payload(port, "human", "revl_approve",
+                       {"hash": by_bob["ticket"]["hash"], "proposer": "bob"})
+    assert for_bob["ok"] is True and for_bob["proposers"] == ["bob"]
+    assert _shout(port, "alice", sink, "a").get("approvalRequired") is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+    assert _shout(port, "bob", sink, "a")["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\nannounce:a\n"
+    assert _shout(port, "bob", sink, "a").get("approvalRequired") is True, \
+        "single use"
+    granted = [r for r in _wal(fresh) if r.get("record") == "approval-granted"]
+    assert [r.get("proposers") for r in granted] == [["alice"], ["bob"]]
+
+
+@needs_cordis
+def test_two_raisers_before_the_yes_must_be_told_apart(serving, fresh, tmp_path):
+    """Issue #3216: alice and bob both ask before the human answers. A bare hash
+    cannot say whose call it lets through, so it is refused; a yes naming alice
+    is spent by alice only, and bob's asking stays pending on its own."""
+    _load_shout(fresh)
+    port = _port(serving())
+    sink = str(tmp_path / "sink.log")
+    asked = _shout(port, "alice", sink, "a")
+    by_bob = _shout(port, "bob", sink, "a")
+    ticket_hash = asked["ticket"]["hash"]
+    assert by_bob["ticket"]["hash"] == ticket_hash
+
+    bare = _payload(port, "human", "revl_approve", {"hash": ticket_hash})
+    assert bare["ok"] is False
+    assert "pass `proposer`" in bare["diagnostics"][0]["message"]
+    assert by_bob["ticket"]["proposers"] == ["alice", "bob"]
+    stranger = _payload(port, "human", "revl_approve",
+                        {"hash": ticket_hash, "proposer": "carol"})
+    assert stranger["ok"] is False
+    for_alice = _payload(port, "human", "revl_approve",
+                         {"hash": ticket_hash, "proposer": "alice"})
+    assert for_alice["ok"] is True and for_alice["proposers"] == ["alice"]
+    resent = _payload(port, "human", "revl_approve",
+                      {"hash": ticket_hash, "proposer": "alice"})
+    assert resent["ok"] is True and resent["proposers"] == ["alice"]
+
+    again = _shout(port, "bob", sink, "a")
+    assert not os.path.exists(sink), "alice's yes is not bob's"
+    assert again.get("approvalRequired") is True
+    assert again["ticket"]["proposers"] == ["bob"]
+    assert _shout(port, "alice", sink, "a")["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+    granted = [r for r in _wal(fresh) if r.get("record") == "approval-granted"]
+    assert [r.get("proposers") for r in granted] == [["alice"]], "the resend mints nothing"
+
+
+@needs_cordis
+def test_a_swap_forgets_who_was_waiting_for_a_yes(serving, fresh, tmp_path):
+    """Issue #3216: bob's asking before a swap is gone with the ticket table, so
+    a yes to alice's asking after it covers alice only."""
+    _load_shout(fresh)
+    port = _port(serving())
+    sink = str(tmp_path / "sink.log")
+    before = _shout(port, "bob", sink, "a")
+    assert before.get("approvalRequired") is True
+    # the operator's own swap of the same text: a new ticket table
+    fresh.swap(copy.deepcopy(compile_source(_SHOUT, "shout.rvl")),
+               origin={"source": _SHOUT}, agent_authored=False)
+    asked = _shout(port, "alice", sink, "a")
+    assert asked["ticket"]["hash"] == before["ticket"]["hash"]
+    approved = _payload(port, "bob", "revl_approve", {"hash": asked["ticket"]["hash"]})
+    assert approved["ok"] is True
+    by_bob = _shout(port, "bob", sink, "a")
+    assert not os.path.exists(sink), "bob's own yes does not fire his call"
+    assert by_bob.get("approvalRequired") is True
+    assert asked["ticket"]["proposers"] == ["alice"], "bob's old asking is gone"
+    assert approved["proposers"] == ["alice"]
+    assert _shout(port, "alice", sink, "a")["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+
+
+@needs_cordis
+def test_another_operators_different_call_leaves_the_approval_standing(
+        serving, fresh, tmp_path):
+    _load_shout(fresh)
+    port = _port(serving())
+    sink = str(tmp_path / "sink.log")
+    asked = _shout(port, "alice", sink, "a")
+    assert _payload(port, "human", "revl_approve",
+                    {"hash": asked["ticket"]["hash"]})["ok"] is True
+    other = _shout(port, "bob", sink, "b")
+    assert other.get("approvalRequired") is True
+    assert other["ticket"]["hash"] != asked["ticket"]["hash"]
+    assert not os.path.exists(sink)
+    assert _shout(port, "alice", sink, "a")["ok"] is True
+    assert Path(sink).read_text(encoding="utf-8") == "announce:a\n"
+
+
 def _quorum_run(port_or_none, session, tmp_path, *, over_http):
     """alice proposes, bob and carol answer. Over HTTP each on its own
     authenticated request; on stdio each by the session's own binding."""

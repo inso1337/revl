@@ -2790,6 +2790,49 @@ def _fail(exc_text: str, stage: str, code: int = 1) -> int:
     return code
 
 
+def _load_run_policy(path: str):
+    """The boundary policy a `revl run --policy` names, loaded once for every
+    tier. A file that does not load is a configuration failure, so the run
+    refuses rather than booting with the policy silently absent."""
+    from .policy import load_policy  # noqa: PLC0415 - lazy
+    return load_policy(path)
+
+
+def _policy_refusal(policy, ir: dict) -> str | None:
+    """The `revl audit --policy` decision for `revl run --policy` (issue
+    #3185), or None when the composition is within the policy.
+
+    The same two calls the audit gate makes, over the same audit graph: every
+    rule kind `policy.evaluate` applies (deny, allow-list, pair, evidence) plus
+    `approval_admission`. Before this the run read the policy on the wasm tier
+    only, and there through the allow-list alone, so a composition the audit
+    refused booted and ran its host bodies on py, rust, ts, java and go. No
+    `--mcp-scope` and no evidence inputs exist on `run`; both default empty, as
+    they do for an audit run without those flags."""
+    from .audit_diff import audit_report  # noqa: PLC0415 - lazy
+    from .policy import (approval_admission, evaluate,  # noqa: PLC0415 - lazy
+                         render_report)
+    violations = evaluate(policy, audit_report(ir)) \
+        + approval_admission(policy, ir)
+    return render_report(policy, violations) if violations else None
+
+
+def _policy_check(policy):
+    """The reload check for `--policy` under `--watch`: an edit that the policy
+    refuses is rejected like any other bad edit, so the running generation is
+    never replaced by one the boot would have refused."""
+    if policy is None:
+        return None
+    return lambda ir: _policy_refusal(policy, ir)
+
+
+def _both_checks(first, second):
+    """Compose two reload checks; the first problem found wins."""
+    if first is None or second is None:
+        return first or second
+    return lambda ir: first(ir) or second(ir)
+
+
 def _model_host_check(args, model_hosts):
     """The reload check for `--providers` model hosts (issue #1569), or None
     when the run binds none."""
@@ -2936,6 +2979,20 @@ def run_command(args, hold_once: bool = False) -> int:
                   "there is no single --backend for the whole composition; drop "
                   "--backend, or run without --placement", file=sys.stderr)
             return 2
+        if getattr(args, "policy", None):
+            # issue #3185: the policy binds the composition, whatever process
+            # each component lands in; refuse before any process starts.
+            try:
+                placed_ir = compile_files(args.files)
+            except RevlError as exc:
+                return _fail(str(exc), lifecycle.COMPILE)
+            try:
+                refusal = _policy_refusal(_load_run_policy(args.policy),
+                                          placed_ir)
+            except (RevlError, OSError) as exc:
+                return _fail(f"cannot apply policy: {exc}", lifecycle.CONFIG)
+            if refusal is not None:
+                return _fail(refusal, lifecycle.ADMISSION)
         from .placement import run_placement  # noqa: PLC0415 — lazy: no cordis needed to orchestrate
         # item 443: `--estop-latch` means the same thing for a placement as for
         # a single process — an operator in another terminal halts it — but the
@@ -2963,6 +3020,21 @@ def run_command(args, hold_once: bool = False) -> int:
         refuse_admission(ir)
     except RevlError as exc:
         return _fail(str(exc), lifecycle.ADMISSION)
+    # issue #3185: `--policy` is the `revl audit --policy` gate, applied to
+    # every tier before anything is imported or booted. A violation refuses
+    # the run with the audit's own report.
+    run_policy = None
+    if getattr(args, "policy", None):
+        try:
+            run_policy = _load_run_policy(args.policy)
+        except (RevlError, OSError) as exc:
+            return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
+        try:
+            refusal = _policy_refusal(run_policy, ir)
+        except RevlError as exc:
+            return _fail(f"cannot apply policy: {exc}", lifecycle.CONFIG)
+        if refusal is not None:
+            return _fail(refusal, lifecycle.ADMISSION)
     # issue #2730 slice 1: an attestation supplied for the record must bind THIS
     # composition, checked before a runtime is imported or anything loads. The
     # header it yields is written on the trace's first event and every OTel
@@ -3067,20 +3139,13 @@ def run_command(args, hold_once: bool = False) -> int:
         if backend == "go":
             from .run_go import run_go  # noqa: PLC0415 — lazy: no go toolchain needed to compile/plan
             return run_go(ir, config, args.files, once=once, interactive=interactive)
-        # item 289: with a boundary policy in force, the wasm tier enforces the
-        # full least-authority chain (host imports subset-of declared caps
-        # subset-of policy-allowed) before booting; all three sets are
-        # statically decidable for a wasm module.
-        policy = None
-        if getattr(args, "policy", None):
-            from .policy import load_policy  # noqa: PLC0415
-            try:
-                policy = load_policy(args.policy)
-            except (RevlError, OSError) as exc:
-                return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
+        # item 289: with a boundary policy in force, the wasm tier ALSO
+        # enforces the least-authority chain over the emitted import section
+        # (host imports subset-of declared caps subset-of policy-allowed) before
+        # booting, on top of the every-tier gate above (issue #3185).
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once,
-                        interactive=interactive, policy=policy)
+                        interactive=interactive, policy=run_policy)
 
     backend_dir = backends_root() / "python"
     try:
@@ -3153,7 +3218,9 @@ def run_command(args, hold_once: bool = False) -> int:
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
                          ambient=ambient,
-                         ambient_check=_model_host_check(args, model_hosts),
+                         ambient_check=_both_checks(
+                             _model_host_check(args, model_hosts),
+                             _policy_check(run_policy)),
                          run_header=run_header)
     except UnsettledWalError as exc:
         print(f"error: {exc}", file=sys.stderr)

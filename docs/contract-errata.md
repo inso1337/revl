@@ -409,6 +409,27 @@ This goes in the compiler spec, not the runtimes.
     only the narrower `CONTEXT_MEMBERS` check). A loud portability error in
     place of a silent wrong resolution — the same posture as the existing
     `CONTEXT_MEMBERS` and java `_EMITTER_RESERVED` rejections.
+  - **ts locals: CLOSED (issue #3179).** A function-local `let`, parameter,
+    match/loop binder, lambda parameter or provide-method parameter spelled
+    like a name the emitted code calls bare inside that function (an emitted
+    helper `revlI64`/`revlIndex`/..., an import such as `host`/`record`, or a
+    JS global in `JS_GLOBAL_RESERVED` such as `undefined`) replaced it there:
+    checked Int arithmetic and index bounds stopped trapping and an `Opt` test
+    compared against the user's value. `backends/typescript/emit.py::
+    _mangle_local` renames such a local by the A3 ladder (`revlI64` ->
+    `revlI64_`) at its declaration and every read. The family is every
+    emitted helper (`TS_HELPER_NAMES`, read off the helper sources), any
+    `revl`+upper-case / `REVL_` / `_revl` name, the imports and
+    `JS_GLOBAL_RESERVED`; `test_local_helper_shadow_ts.py` checks every
+    module-scope binding of the emitted corpus against it. A local spelled
+    exactly like one of the document's own module-level names takes the
+    spelling a read of that module name takes, and an escaped local gains one
+    more `_` than any module spelling ends with, so it never lands on one. A
+    module-level `fn`/`extern`/`component` name is issue #3127. An `extern`
+    parameter keeps its spelling because the verbatim `@ts` body refers to it.
+    The self-hosted `selfhost/emit_ts.rvl` does not port the rule yet (pinned
+    by `tests/test_selfhost_emit_ts.py::
+    test_local_helper_rename_is_a_recorded_port_divergence`).
   - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
     `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
     flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding
