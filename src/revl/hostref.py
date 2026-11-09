@@ -347,10 +347,12 @@ def program_has_ref(program) -> bool:
 
 def resolve_assets(program, module_dir: str, root_dirs: list[str],
                    sources: dict[str, str], is_virtual: bool,
-                   install_root: str | None = None) -> None:
+                   install_root: str | None = None,
+                   nodes: list | None = None) -> None:
     """Resolve every `asset "<path>"` in `program` against the root-tree jail,
     filling the node's record fields with the root-relative path and the
-    sha256 of the file's bytes.
+    sha256 of the file's bytes. `nodes` narrows it to those of `program.assets`
+    the caller will lower (a used module's components are never imported).
 
     The five refusals, all fail-closed (each REFUSES; none falls back to a
     default, a guess, or an unresolved handle):
@@ -371,7 +373,9 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
        virtual arm reads only `sources`;
     5. a file whose bytes cannot be read.
     """
-    if not program.assets:
+    if nodes is None:
+        nodes = program.assets
+    if not nodes:
         return
     if install_root is not None:
         jail_roots = [os.path.realpath(install_root)]
@@ -379,7 +383,7 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
     else:
         jail_roots = [os.path.realpath(r) for r in root_dirs]
         root_kind = None
-    for node in program.assets:
+    for node in nodes:
         _reject_bad_asset_path(node, program.filename)
         if is_virtual:
             _resolve_asset_memory(node, module_dir, sources,

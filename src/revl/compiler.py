@@ -33,6 +33,7 @@ from .hostref import resolve_assets as _resolve_assets
 from .hostref import resolve_refs as _resolve_refs
 from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
+from .lower import _ui_nodes as _nodes_of_kind
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
 from .type_arity import check_declared_type_arity as _check_declared_type_arity
 from .typecheck import format_type, parse_type
@@ -251,6 +252,9 @@ class _LoadedModule:
     named_from: dict[str, set[int]] = field(default_factory=dict)
     aliases: dict[str, "_LoadedModule"] = field(default_factory=dict)
     pure_dependencies: set[int] = field(default_factory=set)
+    # Whether the files this module names (host-body files, host-module refs,
+    # assets) are still unresolved: `_ModuleLoader.defer_used_resources`.
+    resources_pending: bool = False
 
 
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -363,6 +367,15 @@ class _ModuleLoader:
         self._profiles: dict[str, AdmissionProfile | None] = {
             os.path.abspath(k): v for k, v in (profiles or {}).items()}
         self._root_paths: set[str] = set()
+        # Whether a NON-root module's host-body files, host-module refs and
+        # assets wait for `resolve_pending` instead of resolving at load. Only
+        # a caller that knows which modules it emits from can turn this on:
+        # `_compile_files` does, and resolves the modules in its declaration
+        # closure. A module it reaches only for a service (and the types that
+        # service names) emits no extern and lowers no body, so the files its
+        # externs and components name are never read, and a missing one there
+        # does not refuse the importer. Off, every module resolves at load.
+        self.defer_used_resources = False
         # item 410: abspath -> the search-path ENTRY that resolved it, recorded
         # by `resolve_use` when a `use` did NOT resolve relative to its importer
         # (an install-origin module: a REVL_IMPORT_PATH entry or the stdlib
@@ -722,50 +735,18 @@ class _ModuleLoader:
                 # asset is resolved or stat'd, so an untrusted author cannot
                 # use the refusal itself as a file-existence oracle.
                 _check_no_asset([authored], root_profile)
-            # item 396: resolve external host-body files under the jail,
-            # replacing each HostBodyFile node with a spliced HostBody. A
-            # virtual (in-memory) module resolves ONLY through the sources map
-            # (no disk fallback, re-review F5).
-            _resolve_body_files(program, os.path.dirname(abs_path),
-                                self._sources, virtual is not None)
-            # item 396 option B: resolve external host-MODULE refs against the
-            # ROOT-tree jail (a different root than A's per-module jail: B's file
-            # must be reachable at deploy time through one import root). A ref
-            # resolving outside every root tree is refused; an imported module
-            # inside the tree resolves normally. The pinned rel-path + hash flow
-            # through lower into the additive `refs` IR key.
-            # item 410: origin decides the ref jail's root set. An install-origin
-            # module (search-path-resolved, or contained in stdlib_root()) jails
-            # its refs to ONE install entry and stamps `root_kind = "stdlib"`; a
-            # user module jails to the composition's root trees, byte-identical
-            # to 396(B). A user ref never resolves against the install root and
-            # vice versa — the loader passes the single set the origin selects.
-            # issue #2195: the origin (a realpath of `abs_path`, and of the
-            # stdlib once per loader) matters only to a ref, an asset or an
-            # `@py` body, so a module with none of them does not ask, and one
-            # with any asks once: nothing below records a new origin.
-            py_bodies = _py_host_bodies(program)
-            install_root = (self._origin_install_root(abs_path)
-                            if py_bodies or _program_has_ref(program)
-                            or _program_has_asset(program) else None)
-            _resolve_refs(program, os.path.dirname(abs_path),
-                          self._root_dirs(), self._sources, virtual is not None,
-                          install_root=install_root)
-            # item 459 F1: resolve every `asset "<path>"` under the SAME jail
-            # the ref above resolves under (same roots, same origin rule, same
-            # containment check). After this each asset node is a record
-            # literal carrying the root-relative path and the sha256 of the
-            # file's bytes; an asset that does not exist, is not a regular
-            # file, or escapes the jail is a compile refusal here.
-            _resolve_assets(program, os.path.dirname(abs_path),
-                            self._root_dirs(), self._sources,
-                            virtual is not None,
-                            install_root=install_root)
-            if py_bodies:
+            pending = self.defer_used_resources and not is_root
+            if not pending:
+                self._resolve_resources(abs_path, program)
+            elif _py_host_bodies(program):
+                # The inline `@py` bodies are in hand without reading a file,
+                # so their import rule holds for every loaded module, as it
+                # did; a body in a file is checked once the file is resolved.
                 _check_user_py_body_imports(
-                    program, install_root is not None
+                    program, self._origin_install_root(abs_path) is not None
                     or _contained(abs_path, self.stdlib_real()))
-            module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
+            module = _LoadedModule(abs_path, os.path.dirname(abs_path), program,
+                                   resources_pending=pending)
             for fn in program.fn_decls:
                 if fn.public:
                     module.public_fns[fn.name] = fn
@@ -797,6 +778,74 @@ class _ModuleLoader:
         except Exception:
             self._stack.pop()
             raise
+
+    def _resolve_resources(self, abs_path: str, program: Program,
+                           component_assets: bool = True) -> None:
+        """Resolve the files `program` names (host-body files, host-module
+        refs, assets), then check its `@py` bodies. At load for a root, and
+        for every module unless `defer_used_resources` is on."""
+        is_virtual = self._sources.get(abs_path) is not None
+        # item 396: resolve external host-body files under the jail,
+        # replacing each HostBodyFile node with a spliced HostBody. A
+        # virtual (in-memory) module resolves ONLY through the sources map
+        # (no disk fallback, re-review F5).
+        _resolve_body_files(program, os.path.dirname(abs_path),
+                            self._sources, is_virtual)
+        # item 396 option B: resolve external host-MODULE refs against the
+        # ROOT-tree jail (a different root than A's per-module jail: B's file
+        # must be reachable at deploy time through one import root). A ref
+        # resolving outside every root tree is refused; an imported module
+        # inside the tree resolves normally. The pinned rel-path + hash flow
+        # through lower into the additive `refs` IR key.
+        # item 410: origin decides the ref jail's root set. An install-origin
+        # module (search-path-resolved, or contained in stdlib_root()) jails
+        # its refs to ONE install entry and stamps `root_kind = "stdlib"`; a
+        # user module jails to the composition's root trees, byte-identical
+        # to 396(B). A user ref never resolves against the install root and
+        # vice versa — the loader passes the single set the origin selects.
+        # issue #2195: the origin (a realpath of `abs_path`, and of the
+        # stdlib once per loader) matters only to a ref, an asset or an
+        # `@py` body, so a module with none of them does not ask, and one
+        # with any asks once: nothing below records a new origin.
+        py_bodies = _py_host_bodies(program)
+        install_root = (self._origin_install_root(abs_path)
+                        if py_bodies or _program_has_ref(program)
+                        or _program_has_asset(program) else None)
+        _resolve_refs(program, os.path.dirname(abs_path),
+                      self._root_dirs(), self._sources, is_virtual,
+                      install_root=install_root)
+        # item 459 F1: resolve every `asset "<path>"` under the SAME jail
+        # the ref above resolves under (same roots, same origin rule, same
+        # containment check). After this each asset node is a record
+        # literal carrying the root-relative path and the sha256 of the
+        # file's bytes; an asset that does not exist, is not a regular
+        # file, or escapes the jail is a compile refusal here.
+        # A used module's components are never imported, so the assets
+        # written inside them (`component_assets=False`) are left alone.
+        assets = program.assets
+        if not component_assets and assets and program.components:
+            inside = {id(node) for node in _nodes_of_kind(
+                program.components, (_ast.ExprAsset,))}
+            assets = [node for node in assets if id(node) not in inside]
+        _resolve_assets(program, os.path.dirname(abs_path),
+                        self._root_dirs(), self._sources,
+                        is_virtual,
+                        install_root=install_root, nodes=assets)
+        if py_bodies:
+            _check_user_py_body_imports(
+                program, install_root is not None
+                or _contained(abs_path, self.stdlib_real()))
+
+    def resolve_pending(self, module: _LoadedModule) -> None:
+        """Resolve the files a deferred module names, once: the caller emits
+        this module's pure declarations, externs included, so their host
+        files must be there. Its components stay out of the compile, and so
+        do the assets written inside them."""
+        if not module.resources_pending:
+            return
+        self._resolve_resources(module.path, module.program,
+                                component_assets=False)
+        module.resources_pending = False
 
     def _import_named(self, importer: _LoadedModule, used: _LoadedModule,
                       name: str, line: int) -> None:
@@ -1367,6 +1416,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
     loader.mark_roots(os.path.abspath(p) for p in paths)
+    loader.defer_used_resources = True
     root_modules = [_load_root(loader, path) for path in paths]
     _canonicalize_identical_module_copies(loader, root_modules)
 
@@ -1455,6 +1505,11 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
                 included.append(by_id[dep_id])
                 included_ids.add(dep_id)
                 queue.append(by_id[dep_id])
+    # The closure is what the merge below emits from, so it is what must have
+    # its host-body files, refs and assets resolved (`defer_used_resources`).
+    # Before the privacy pass: a refusal names an extern as it was written.
+    for module in included:
+        loader.resolve_pending(module)
 
     # CAPSTONE SEAM 2 (roadmap 228): a `use`d module's PRIVATE (non-`pub`)
     # top-level declarations must not enter the merged namespace. Before the
