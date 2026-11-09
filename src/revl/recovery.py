@@ -2009,6 +2009,15 @@ def _replay_through_binding(world: World, descriptors: list, *,
                                  "the composition that generation ran"),
             "would-reactivate": (f"{named}: {refusal}; not attempted",
                                  "reactivation-residue", _REACTIVATION_HINT),
+            # issue #3149: the binding hands the runtime only the calls the
+            # composition declares as inverses and compensations
+            "undeclared": (f"{named}: not declared as an inverse or "
+                           "compensation of this entry kind in this "
+                           "composition; not attempted", "unresolved-residue",
+                           "this composition never registers this call as "
+                           "that kind of entry, so the log line was not "
+                           "written by its runtime; check the WAL for edits "
+                           "and finish it by hand"),
         }.get(state, (f"{named}: names no host body in this composition "
                       "binding; not attempted", "unresolved-residue",
                       "the call's receiver or method is not bound here; "

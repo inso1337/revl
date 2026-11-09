@@ -75,7 +75,14 @@ def _stamp_commit(path: str, entry: dict) -> None:
     stamped its own marker. Stamp it, so recover rolls it forward."""
     record = {"record": "activation-complete", "generation": 1,
               "components": entry["components"], "stampedBy": "placement-index"}
-    with open(path, "a", encoding="utf-8") as handle:
+    # O_NOFOLLOW: `process_wal_path` refused a symbolic link; one swapped in
+    # since is not followed either (issue #3193)
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RecoveryError(f"{path}: cannot stamp the recorded commit: {error}") from None
+    with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -132,7 +139,8 @@ class _PlacementBinding:
                 for entry, path in recorded}
 
     def _world(self, path: str, plan: tuple, keys: set):
-        from .recover_binding import CompositionWorld, _provider_closure  # noqa: PLC0415
+        from .recover_binding import (CompositionWorld, _provider_closure,  # noqa: PLC0415
+                                      declared_inverses)
         _wal, foreign, _grants, foreign_handles = plan
         refused = {k: v for k, v in self.refused.items() if k in keys}
         return CompositionWorld(
@@ -141,7 +149,8 @@ class _PlacementBinding:
             services={k: v for k, v in self.services.items() if k in keys},
             booted=_provider_closure(self.ir, keys - set(refused)),
             provider_session=None, cleanup=[], foreign=foreign,
-            foreign_handles=foreign_handles, refused=refused)
+            foreign_handles=foreign_handles, refused=refused,
+            declared=declared_inverses(self.ir))
 
     def close(self) -> None:
         session, self.session = self.session, None
@@ -264,9 +273,10 @@ def recover_index(index_path: str, index: dict, *,
         ir, digest = compile_composition(composition)
         _check_roster(entries, ir, composition)
     order = _consumers_first(entries, ir)
+    # every entry is checked before any WAL is stamped (issue #3193)
+    paths = [process_wal_path(index_path, entry) for entry in order]
     results = []
-    for entry in order:
-        path = process_wal_path(index_path, entry)
+    for entry, path in zip(order, paths):
         results.append({"process": entry["name"],
                         "components": entry["components"], "wal": path,
                         **_process_state(path, entry, index["committed"])})
