@@ -325,53 +325,143 @@ def test_boundary_refusals_say_why_not_unknown_kind():
 
 
 # ---------------------------------------------------------------------------
-# item 301: the emit-refusal has to recurse into ADT variant PAYLOADS, list
-# elements, record fields and match-arm/result widths — not just declared
-# boundary types. A `Float` in any of those value positions has no wasm value
-# representation on this tier (`_wasm_ty` would call it i32 while the value is
-# an `f64.const`), so it must be REFUSED at emit, never lowered to a module
-# that then fails wasm validation ("a wasm target never silently degrades",
-# docs/wasm-capabilities.md). Found by the item-292 fuzzer.
+# Float is a native f64 value on the substrate: locals, record fields, list
+# elements, ADT payloads, arithmetic, comparison, equality, `%` (C fmod) and
+# the service boundary. These are the positions that used to be refused by
+# name; they are EXECUTED on wasmtime here, not merely emitted, because the
+# original bug was a module that failed validation at load.
 # ---------------------------------------------------------------------------
 
-def test_float_in_value_positions_is_refused_not_mis_emitted():
+def _invoke_wat(wat_path: Path, fn: str, *args):
+    _wasmtime_or_fail()
+    result = subprocess.run(
+        ["wasmtime", "--invoke", fn, str(wat_path), *[str(a) for a in args]],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip().splitlines()[-1]
+
+
+def _wasmtime_or_fail():
+    if shutil.which("wasmtime") is None:
+        pytest.fail("wasmtime is not on PATH; this tier's Float coverage needs it",
+                    pytrace=False)
+
+
+def test_float_value_positions_lower_and_run(tmp_path):
     emitter = _emitter()
-    # fuzz_wasm_ad4e66e8: a `List[Float]` literal (`[0.0, 0.0, 0.0].length()`).
-    # The element has no slot representation, so refuse at the list element.
-    ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_ad4e66e8.rvl")])
-    with pytest.raises(emitter.EmitError, match="list element: type 'Float' is not lowerable"):
-        emitter.emit(ir)
-    # fuzz_wasm_af371f9d: a match over `Err(-3.4)` — a `Float` variant payload.
-    # Refuse rather than emit an f64 into the cell. The SITE moved earlier than
-    # it used to be: the arm's payload BINDING is a Float local, and a Float
-    # local is refused by `_declare_local` (an f64 into an i32 local is a module
-    # that does not validate), which runs before the constructed payload is
-    # checked. Same refusal, same wording, one step sooner — so this asserts the
-    # wording both sites share rather than pinning whichever fires first.
-    ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_af371f9d.rvl")])
-    with pytest.raises(emitter.EmitError, match="type 'Float' is not lowerable"):
-        emitter.emit(ir)
-    # and the payload site itself is still there, reached where no binding
-    # precedes it (a wildcard arm binds nothing).
-    with pytest.raises(emitter.EmitError,
-                       match="payload of .*: type 'Float' is not lowerable"):
-        emitter.emit(compile_source(
-            "pub fn probe() -> Int { return match Err(1.5) { Ok(_) => 0, Err(_) => 1 } }\n"
-            'test "t" { assert probe() == 1 }\n'))
+    source = (
+        "type P = { x: Float, y: Float }\n"
+        "pub fn addf(a: Float, b: Float) -> Float = a + b\n"
+        "pub fn local(x: Float) -> Float { let y: Float = x + 0.5 return y }\n"
+        "pub fn divi(n: Int) -> Float = n / 2\n"
+        "pub fn divf(x: Float) -> Float = x / 4.0\n"
+        "pub fn modf(a: Float, b: Float) -> Float = a % b\n"
+        "pub fn cmpf(x: Float) -> Bool = x < 1.5\n"
+        "pub fn eqf(x: Float) -> Bool = x == 1.0\n"
+        "pub fn negf(x: Float) -> Float = -x\n"
+        "pub fn widen(n: Int) -> Float = n\n"
+        "pub fn listf() -> Float = [1.5, 2.5][1]\n"
+        "pub fn recf() -> Float = ({ x: 1.5, y: 2.5 }).y\n"
+        "pub fn somef(x: Float) -> Float = match Some(x) { Some(v) => v + 0.25, None => 0.0 }\n"
+        'test "t" { assert recf() == 2.5 }\n'
+    )
+    wat_path = tmp_path / "float.wat"
+    wat_path.write_text(emitter.emit(compile_source(source))["functions"], encoding="utf-8")
+
+    assert float(_invoke_wat(wat_path, "addf", 1.5, 2.25)) == 3.75
+    assert float(_invoke_wat(wat_path, "local", 2.0)) == 2.5
+    # `/` is true division even over two Ints (docs/arithmetic.md).
+    assert float(_invoke_wat(wat_path, "divi", 7)) == 3.5
+    assert float(_invoke_wat(wat_path, "divf", 9.0)) == 2.25
+    # `%` is C fmod: a large dividend must not round to zero, and the sign is
+    # the dividend's (including -0.0's sign bit).
+    assert float(_invoke_wat(wat_path, "modf", 1e300, 7.0)) == 1.0
+    assert float(_invoke_wat(wat_path, "modf", -5.5, 2.0)) == -1.5
+    assert _invoke_wat(wat_path, "cmpf", 1.0) == "1"
+    assert _invoke_wat(wat_path, "cmpf", 2.0) == "0"
+    assert _invoke_wat(wat_path, "eqf", 1.0) == "1"
+    assert _invoke_wat(wat_path, "eqf", 2.0) == "0"
+    assert float(_invoke_wat(wat_path, "negf", 1.5)) == -1.5
+    assert float(_invoke_wat(wat_path, "widen", 3)) == 3.0
+    assert float(_invoke_wat(wat_path, "listf")) == 2.5
+    assert float(_invoke_wat(wat_path, "recf")) == 2.5
+    assert float(_invoke_wat(wat_path, "somef", 1.0)) == 1.25
 
 
-def test_float_adt_variant_payload_with_match_is_refused():
+def test_component_float_remainder_includes_the_f64_mod_helper():
+    """A provide-method body takes the component renderer, whose helper tail is
+    demand-driven: `%` on Float must pull `$f64_mod` in there too, or the module
+    calls an undefined function."""
+    emitter = _emitter()
+    source = (
+        "service Math { fn wrap(a: Float) -> Float }\n"
+        "component C provides math: Math {\n"
+        "  provide math { fn wrap(a: Float) -> Float = a % 3.5 }\n"
+        "}\n"
+    )
+    wat = emitter.emit(compile_source(source))["C"]
+    assert "(call $f64_mod)" in wat, wat
+    assert "(func $f64_mod" in wat, wat
+
+
+def test_float_fuzz_regressions_lower_and_run(tmp_path):
+    emitter = _emitter()
+    for example, expected in (("fuzz_wasm_ad4e66e8", "3"), ("fuzz_wasm_af371f9d", "0")):
+        ir = compile_files([str(ROOT / "examples" / "regressions" / f"{example}.rvl")])
+        wat_path = tmp_path / f"{example}.wat"
+        wat_path.write_text(emitter.emit(ir)["functions"], encoding="utf-8")
+        assert _invoke_wat(wat_path, "probe") == expected
+
+
+def test_float_adt_variant_payload_with_match_runs(tmp_path):
     # The roadmap-301 shape verbatim: `type Adt0 = C0_0(Float)` matched over.
-    # The variant carries a Float payload with no representation here — the
-    # emitter must refuse at construction, not emit invalid wasm.
+    # The payload is a Float slot; the result is f64, so the module validates
+    # and runs instead of being refused.
     emitter = _emitter()
     source = (
         "type Adt0 = C0_0(Float)\n"
-        "pub fn probe() -> Int { return match C0_0(1.0) { C0_0(v) => 0 } }\n"
-        'test "t" { assert probe() == 0 }\n'
+        "pub fn probe() -> Float { return match C0_0(1.0) { C0_0(v) => v + 0.5 } }\n"
+        'test "t" { assert probe() == 1.5 }\n'
     )
-    with pytest.raises(emitter.EmitError, match="payload of 'Adt0' case 'C0_0': type 'Float' is not lowerable"):
-        emitter.emit(compile_source(source))
+    wat_path = tmp_path / "adt.wat"
+    wat_path.write_text(emitter.emit(compile_source(source))["functions"], encoding="utf-8")
+    assert float(_invoke_wat(wat_path, "probe")) == 1.5
+
+
+@pytest.mark.skipif(not CORDIS_WASM_PY.exists(), reason="cordis-wasm venv not available")
+def test_float_crosses_the_service_boundary_on_the_real_substrate(tmp_path):
+    # f64 is a scalar boundary value: a provider's export and a consumer's
+    # coeffect import carry it by value, with no pointer into linear memory.
+    script = tmp_path / "float_boundary.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path[:0] = [{str(ROOT / 'src')!r}, {str(ROOT / 'backends' / 'wasm')!r}, "
+        f"{str(Path.home() / 'Projects' / 'cordis-wasm')!r}]\n"
+        "from revl import compile_source\n"
+        "import emit\n"
+        "from runtime import Runtime, State\n"
+        "mods = emit.emit(compile_source('''\n"
+        "service Math { fn scale(a: Float) -> Float }\n"
+        "service Out { fn get() -> Float }\n"
+        "component C provides m: Math { provide m { fn scale(a: Float) -> Float = a * 2.0 } }\n"
+        "component D requires m: Math provides out: Out {\n"
+        "  provide out { fn get() -> Float = m.scale(1.5) }\n"
+        "}\n"
+        "'''))\n"
+        "rt = Runtime()\n"
+        "c = rt.plug('C', mods['C'])\n"
+        "d = rt.plug('D', mods['D'])\n"
+        "assert c.state is State.ACTIVE, c.state\n"
+        "assert d.state is State.ACTIVE, d.state\n"
+        "assert rt.call(d, 'provide:out.get') == 3.0\n"
+        "print('float boundary ok')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([str(CORDIS_WASM_PY), str(script)],
+                            capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "float boundary ok" in result.stdout
 
 
 def test_supported_value_shapes_still_emit_no_over_refusal():

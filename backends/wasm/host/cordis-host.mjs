@@ -1,0 +1,226 @@
+// A JavaScript host for components compiled by the wasm backend.
+//
+// The emitted module's import section is its dependency declaration:
+// `coeffect:<key>` imports are calls a host (or another component) must bind,
+// and `provide:<key>.<op>` exports are its provisions. This host carries that
+// seam in the browser and in node: a component whose coeffects are not
+// resolvable stays GATED (no instance is created), exactly as cordis-wasm's
+// linker refuses to instantiate it, and activates once the host or a loaded
+// provider supplies them.
+//
+// It is deliberately the synchronous base calculus: activation is driven by
+// `activate_step() -> i32`, teardown by `deactivate()`, and a component's
+// `provide:` exports are published only after activation. The async inertia
+// layer (`host.job_run`), spawn/routed realms and the instance accessors are
+// not carried here; those need the cordis-wasm runtime's state machine. An
+// unsupported import is refused by name, never bound to a wrong function.
+
+const COEFFECT_PREFIX = "coeffect:";
+const PROVIDE_PREFIX = "provide:";
+const MAX_ACTIVATION_STEPS = 100000;
+
+export class CordisHost {
+  #hostCoeffects = new Map(); // key -> { op: fn }
+  #components = new Map(); // name -> record
+  #providers = new Map(); // "key.op" -> { component, fn }
+  #log;
+
+  constructor({ log = () => {} } = {}) {
+    this.#log = log;
+  }
+
+  /** The keys a host provides (a browser resource, a clock, a test stub). */
+  provideHost(key, ops) {
+    if (!ops || typeof ops !== "object") {
+      throw new TypeError(`provideHost(${JSON.stringify(key)}) expects an object of ops`);
+    }
+    this.#hostCoeffects.set(key, ops);
+    this.#pump();
+    return this;
+  }
+
+  /** The state of a loaded component: absent | gated | active | failed. */
+  state(name) {
+    return this.#components.get(name)?.state ?? "absent";
+  }
+
+  /** The coeffect imports still unresolved for a gated component. */
+  missing(name) {
+    return [...(this.#components.get(name)?.missing ?? [])];
+  }
+
+  /**
+   * Compile and (if its coeffects resolve) instantiate a component.
+   *
+   * `source` is a fetchable URL string, a Response, an ArrayBuffer or a typed
+   * array. A gated component's module is compiled and kept; it instantiates as
+   * soon as `provideHost` or another component publishes the missing ops.
+   */
+  async load(name, source) {
+    if (this.#components.has(name)) {
+      throw new Error(`component ${JSON.stringify(name)} is already loaded`);
+    }
+    const module = await compile(source);
+    const imports = WebAssembly.Module.imports(module);
+    for (const imp of imports) {
+      if (imp.kind !== "function") {
+        throw new Error(`${name}: unsupported import kind ${imp.kind} from ${imp.module}`);
+      }
+      if (imp.module.startsWith(COEFFECT_PREFIX)) continue;
+      if (imp.module === "host") {
+        throw new Error(
+          `${name}: host import ${JSON.stringify(imp.name)} is not carried by the ` +
+          "browser host (the async inertia layer and the route/spawn host ops need " +
+          "the cordis-wasm runtime)");
+      }
+      throw new Error(
+        `${name}: unsupported import namespace ${JSON.stringify(imp.module)}; the ` +
+        "browser host carries coeffect imports only");
+    }
+    const record = {
+      name,
+      module,
+      imports,
+      state: "gated",
+      missing: [],
+      instance: null,
+      exports: null,
+    };
+    this.#components.set(name, record);
+    this.#tryInstantiate(record);
+    this.#pump();
+    return record;
+  }
+
+  /** Call an export on an ACTIVE component, e.g. `provide:motion.step`. */
+  call(componentName, exportName, ...args) {
+    const record = this.#components.get(componentName);
+    if (!record) throw new Error(`component ${JSON.stringify(componentName)} is not loaded`);
+    if (record.state !== "active") {
+      throw new Error(
+        `component ${JSON.stringify(componentName)} is ${record.state}; ` +
+        `missing coeffects: ${this.missing(componentName).join(", ") || "none"}`);
+    }
+    const fn = record.exports[exportName];
+    if (typeof fn !== "function") {
+      throw new Error(`${componentName} has no exported function ${JSON.stringify(exportName)}`);
+    }
+    return fn(...args);
+  }
+
+  /**
+   * Unload a component: its compiled inverses run through `deactivate`, and its
+   * provisions are withdrawn. Dependents already instantiated are left for the
+   * caller to unload first (there is no reactive withdrawal in this host).
+   */
+  unload(name) {
+    const record = this.#components.get(name);
+    if (!record) return false;
+    if (record.state === "active") {
+      if (typeof record.exports.deactivate === "function") record.exports.deactivate();
+      for (const [opKey, provider] of this.#providers) {
+        if (provider.component === name) this.#providers.delete(opKey);
+      }
+    }
+    this.#components.delete(name);
+    return true;
+  }
+
+  #missingImports(record) {
+    const missing = [];
+    for (const imp of record.imports) {
+      const key = imp.module.slice(COEFFECT_PREFIX.length);
+      if (!this.#resolve(key, imp.name)) missing.push(`${key}.${imp.name}`);
+    }
+    return missing;
+  }
+
+  #tryInstantiate(record) {
+    const missing = this.#missingImports(record);
+    if (missing.length) {
+      record.state = "gated";
+      record.missing = missing;
+      return false;
+    }
+    const imports = {};
+    for (const imp of record.imports) {
+      const key = imp.module.slice(COEFFECT_PREFIX.length);
+      const namespace = (imports[imp.module] ??= {});
+      namespace[imp.name] = (...args) => {
+        const fn = this.#resolve(key, imp.name);
+        if (!fn) {
+          throw new Error(
+            `${record.name}: coeffect ${key}.${imp.name} is not provided at call time`);
+        }
+        return fn(...args);
+      };
+    }
+    let instance;
+    try {
+      instance = new WebAssembly.Instance(record.module, imports);
+    } catch (error) {
+      record.state = "failed";
+      throw error;
+    }
+    record.instance = instance;
+    record.exports = instance.exports;
+    if (typeof instance.exports.activate_step === "function") {
+      let steps = 0;
+      while (instance.exports.activate_step() !== 0) {
+        if (++steps > MAX_ACTIVATION_STEPS) {
+          record.state = "failed";
+          throw new Error(`${record.name}: activation did not finish in ${MAX_ACTIVATION_STEPS} steps`);
+        }
+      }
+    }
+    record.state = "active";
+    record.missing = [];
+    for (const [exportName, fn] of Object.entries(instance.exports)) {
+      if (!exportName.startsWith(PROVIDE_PREFIX)) continue;
+      const opKey = exportName.slice(PROVIDE_PREFIX.length);
+      const existing = this.#providers.get(opKey);
+      if (existing) {
+        record.state = "failed";
+        throw new Error(
+          `provision conflict on ${opKey}: ${existing.component} already provides it`);
+      }
+      this.#providers.set(opKey, { component: record.name, fn });
+    }
+    this.#log(`active ${record.name}`);
+    return true;
+  }
+
+  #resolve(key, op) {
+    const host = this.#hostCoeffects.get(key);
+    if (host && typeof host[op] === "function") return host[op];
+    const provider = this.#providers.get(`${key}.${op}`);
+    return provider ? provider.fn : null;
+  }
+
+  #pump() {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const record of this.#components.values()) {
+        if (record.state === "gated" && this.#tryInstantiate(record)) changed = true;
+      }
+    }
+  }
+}
+
+async function compile(source) {
+  if (source instanceof WebAssembly.Module) return source;
+  if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
+    return WebAssembly.compile(source);
+  }
+  if (typeof Response !== "undefined" && source instanceof Response) {
+    if (!source.ok) throw new Error(`fetching the component failed: ${source.status}`);
+    return WebAssembly.compile(await source.arrayBuffer());
+  }
+  if (typeof source === "string" && typeof fetch === "function") {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`fetching ${source} failed: ${response.status}`);
+    return WebAssembly.compile(await response.arrayBuffer());
+  }
+  throw new TypeError("load expects a URL, Response, ArrayBuffer, or typed array");
+}

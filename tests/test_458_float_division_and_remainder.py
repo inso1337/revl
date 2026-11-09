@@ -300,9 +300,10 @@ def test_python_answers_nan_for_a_nan_dividend():
         "NaN is neither zero nor signed — it came back an infinity")
 
 
-def test_wasm_refuses_float_by_name():
-    """The sixth tier cannot match, and fails CLOSED: a named refusal at emit
-    time, not a silent approximation at runtime (docs/arithmetic.md)."""
-    with pytest.raises(ValueError) as excinfo:
-        _emit("wasm", "pub fn r(a: Float, b: Float) -> Float { return a % b }")
-    assert "'Float' is not lowerable" in str(excinfo.value), excinfo.value
+def test_wasm_lowers_float_remainder_to_an_exact_fmod_helper():
+    """The sixth tier now matches instead of refusing: `%` over two Floats is
+    C fmod, and wasm has no remainder instruction, so the emitter calls the
+    exact `$f64_mod` helper (docs/arithmetic.md, docs/wasm-capabilities.md)."""
+    emitted = _emit("wasm", "pub fn r(a: Float, b: Float) -> Float { return a % b }")
+    assert "(call $f64_mod)" in emitted, emitted
+    assert "(func $f64_mod" in emitted, emitted

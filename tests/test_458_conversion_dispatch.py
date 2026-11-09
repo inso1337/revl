@@ -34,14 +34,17 @@ six-tier fault on a `to_int32` out of range.
     2. `let x: Float = 0.5` on wasm     **the emitted module does not validate**
 
        "type mismatch: expected i32, found f64", from wasmtime at load. Every
-       local on that tier is an i32 except an `Int`, and a Float value is an
-       f64. A Float parameter, return, comparison, equality, list element,
-       variant payload and `.to_str()` are each refused BY NAME there; the
-       binding was the one Float position that emitted instead — even for a
-       program that never read it. It is the same named refusal now
-       (docs/wasm-capabilities.md). An interpolated Float EXPRESSION that is
-       never bound (`` `${3.0}` ``) still lowers, inside the documented
-       `$f64_to_str` fence.
+       local on that tier was an i32 except an `Int`, and a Float value is an
+       f64. The binding was the one Float position that emitted instead — even
+       for a program that never read it — after the other positions had been
+       refused BY NAME. Issue #3295 closed this from the other direction:
+       `Float` is a native `f64` local now, as it is a record field, list
+       element, variant payload, comparison/equality operand, `.to_str()`
+       receiver and service-boundary value (docs/wasm-capabilities.md). The
+       rendering fence is unchanged: `$f64_to_str` renders NaN, Infinity and
+       integer-valued finites, and non-integer finites are still refused
+       because the canonical shortest-round-trip renderer is not implemented
+       there (docs/strings.md).
 
     3. `?.to_int()` / `?.to_str()` / `?.to_int32()` on ts  **TypeError at run time**
 
@@ -257,21 +260,22 @@ def test_the_go_parse_checks_its_bound_before_the_accumulate_step():
 
 # --------------------------------------- 2. a Float binding on the wasm tier
 
-def test_wasm_refuses_a_float_binding_by_name():
-    """The tier cannot hold a Float local — every local is an i32 but an Int —
-    and it fails CLOSED now: an emit-time refusal naming the type, not a module
-    wasmtime rejects at load (docs/wasm-capabilities.md)."""
-    with pytest.raises(Exception) as excinfo:
-        _emit("wasm", "pub fn probe() -> Int { let x: Float = 0.5 return 7 }")
-    assert "type 'Float' is not lowerable" in str(excinfo.value), excinfo.value
-
-
-def test_wasm_refuses_a_float_binding_even_where_it_is_read():
-    """The shape that surfaced it: a `${…}` template over a bound Float. The
-    same refusal, at the binding, before the rendering is reached."""
-    with pytest.raises(Exception) as excinfo:
-        _emit("wasm", "pub fn probe() -> Str { let x: Float = 0.5 return `${x}` }")
-    assert "type 'Float' is not lowerable" in str(excinfo.value), excinfo.value
+def test_wasm_float_binding_lowers_and_runs():
+    """A `let x: Float` is an f64 local now, a native value: it can be read,
+    compared and rendered (docs/wasm-capabilities.md). The old defect emitted
+    an invalid module here; the intermediate fix refused the binding by name.
+    """
+    status, message = _run("wasm", """
+pub fn probe() -> Int { let x: Float = 0.5 return x < 1.0 ? 1 : 0 }
+pub fn rendered() -> Str { let x: Float = 2.5 return `${x + 0.5}` }
+pub fn stringed() -> Str { let x: Float = 2.5 return (x + 0.5).to_str() }
+test "a bound Float is a value" { assert probe() == 1 }
+test "a bound Float renders when integral-valued" { assert rendered() == "3" }
+test "Float.to_str uses the same renderer" { assert stringed() == "3" }
+""")
+    if status == "skip":
+        pytest.skip(f"wasm: {message}")
+    assert status == "pass", f"wasm: {message}"
 
 
 WASM_INLINE_FLOAT = """

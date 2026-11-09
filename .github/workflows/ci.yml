@@ -2181,6 +2181,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
+      # the browser host's node test (`backends/wasm/test_browser_host.py`)
+      # would otherwise skip here, and this job's no-skip guard reds a skip.
+      # Node runs the same CordisHost module the page imports, on a real
+      # WebAssembly engine.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: "22"
       - run: pip install -e ".[test]"
       # the wasmtime-gated tests (WAT validation, emitted-component execution)
       # used to skip silently here: the runtime was never installed. Pin a
