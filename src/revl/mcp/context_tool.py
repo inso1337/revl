@@ -17,9 +17,10 @@ _INLINE = "<context>.rvl"
 
 
 def _usage(message: str) -> dict:
-    return {"ok": False, "diagnostics": [{
-        "severity": "error", "code": "REVL", "category": "usage",
-        "message": message}]}
+    # the server's refusal shape, not a copy of it; imported here because the
+    # server imports this module
+    from .server import _session_error  # noqa: PLC0415
+    return _session_error(message, category="usage")
 
 
 def _tool_context(arguments: dict) -> dict:
