@@ -1506,7 +1506,10 @@ class _FlowChecker:
         # (top-level fns, externs, service ops, constructors). A `{kind:call}`
         # through a `var` callee that is none of these and resolves to no known
         # fn value is an UNNAMEABLE indirect call — over-approximated as a sink on
-        # every argument when the program has any sink at all (`any_sink`).
+        # every argument when the program has any sink at all (`any_sink`), and
+        # its callee VALUE's taint always joins the result, so a captured
+        # `secret`, `confidential` or `retained` value is never dropped (issue
+        # #3110).
         self.known_callables = known_callables
         self.any_sink = any_sink
         # Slice B4: local bindings that hold a reference to a NAMED callable
@@ -2286,17 +2289,30 @@ class _FlowChecker:
             return self._union_children(node, env)
 
         # `arrow`: a parameter SHADOWS an outer binding of the same name for the
-        # body, so the capture join reads the body against an env that seeds the
-        # parameters clean. Without this, `(t: Str) => t` over a tainted outer
-        # `t` is read as CAPTURING it, and the closure is tainted by a value its
-        # body never reads. The over-approximation predates the callee-value
-        # join, but it only produced a refusal when `any_sink` was true; now
-        # that the join runs for every unnameable indirect call, seeding the
-        # parameters is what keeps a shadowing closure clean.
+        # body, so the capture join must read the body against an env that seeds
+        # a shadowing parameter clean. Without this, `(t: Str) => t` over a
+        # tainted outer `t` is read as CAPTURING it, and the closure is tainted
+        # by a value its body never reads. The over-approximation predates the
+        # callee-value join, but it only produced a refusal when `any_sink` was
+        # true; now that the join runs for every unnameable indirect call,
+        # seeding the parameters is what keeps a shadowing closure clean.
+        #
+        # The body is ALSO walked against the enclosing environment, as it
+        # always was. That walk is what keeps a sink INSIDE the arrow body
+        # judged where it is written: `(row: Str) => db_put(row)` called with a
+        # retained `row` still sees the retained origin and refuses, so seeding
+        # the parameter for the VALUE cannot hide a write behind a shadowing
+        # parameter. The two walks are the pre-existing body walk (for sinks and
+        # for inference) and the exact capture join (for the closure's value).
         if kind == "arrow":
+            shadowed = [p for p in _param_names(node.get("params") or [])
+                        if env.get(p, CLEAN).dirty]
+            if not shadowed:
+                return self._union_children(node, env)
             inner = dict(env)
-            for pname in _param_names(node.get("params") or []):
+            for pname in shadowed:
                 inner[pname] = CLEAN
+            self._union_children(node, env)
             return self._union_children(node, inner)
 
         # everything else (record/list/field/index/if/match/...) is walked
@@ -2913,7 +2929,9 @@ def _known_callables(program, fns, components, model: TaintModel) -> frozenset:
     top-level fns, externs, service operations, constructors, and everything the
     taint model already knows. A `var`-callee outside this set (and unresolved by
     a fn-value binding) is an unnameable indirect call, over-approximated as a
-    sink on every argument."""
+    sink on every argument when the program has any sink at all, and its callee
+    VALUE's taint always joins the result so a closure's capture is never
+    dropped."""
     known: set = set(_BUILTIN_CALLABLE_NAMES)
     known |= {fn.get("name") for fn in fns if fn.get("name")}
     for ext in getattr(program, "externs", ()) or ():

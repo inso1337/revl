@@ -436,9 +436,10 @@ crossing kind. Each is a distinct code path and gets its own test:
    G-SECRET. An ordinary extern that is neither a declared `Trusted[T]` sink nor
    an `emit` still must not receive a `secret` value.
 
-3. **The unnameable indirect / `*` callable** (the `indirect and self.any_sink
-   and self._is_unnameable(resolved)` path in `_taint_of_call`, which already
-   over-approximates every argument as a sink via `_on_sink`). Extend the
+3. **The unnameable indirect / `*` callable** (the `indirect and
+   self._is_unnameable(resolved)` path in `_taint_of_call`, whose every-argument
+   sink over-approximation via `_on_sink` is gated on `any_sink`, and whose
+   result now always joins the callee VALUE's taint, issue #3110). Extend the
    over-approximation to fire for a `secret`-carrying argument independently of
    `any_sink`: a first-class emitting callable revl cannot name must refuse a
    `secret` argument, because what cannot be named cannot be proven to re-emit

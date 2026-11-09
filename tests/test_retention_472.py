@@ -140,6 +140,31 @@ def test_a_live_retained_value_carried_out_of_a_closure_compiles():
     compile_source(src, "retain.rvl")
 
 
+def test_a_retained_value_passed_to_a_closure_that_writes_it_is_refused():
+    """A parameter that shadows the retained binding still reaches the sink
+    INSIDE the arrow body: the seeded walk computes the closure's value, and the
+    body is also walked against the enclosing environment as it always was, so
+    `(row: Str) => db_put(row)` called with the retained `row` refuses. The seed
+    must not hide a write behind a shadowing parameter."""
+    src = PAST + '''extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+service Ops { emission fn go(k: Str) -> Int }
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let f = (row: Str) => emit db_put(row)
+      let n = f(row)
+      return n
+    }
+  }
+}
+'''
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "may not be written to durable storage" in err.message
+
+
 def test_a_declared_persistence_sink_parameter_is_refused_on_the_declaration():
     """The declaration half: a crossing that DECLARES it persists a retained
     value is refused off the declaration alone, with no call site needed."""
