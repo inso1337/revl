@@ -382,7 +382,10 @@ def test_a_registered_secret_echoed_as_a_map_key_is_redacted_in_a_grammar_fault(
     message = str(exc.value)
     assert CANARY_TOKEN not in message
     assert message.count(confidential.REDACTED) == 2   # path and member list
-    assert "['tag']" in message                        # ordinary members remain
+    # precise on both halves: the declared order is schema-authored and stays,
+    # the observed ordinary member stays beside the scrubbed key
+    assert "pins the members ['tag']" in message
+    assert f"the completion has ['{confidential.REDACTED}', 'tag']" in message
 
 
 def test_redact_value_scrubs_a_secret_dict_key_as_well_as_a_secret_value():
