@@ -10,6 +10,11 @@ beside model turns.
   back into the agent's context.
 - **Compound verb:** `revl_ship` in `src/revl/mcp/ship.py`, registered in
   `src/revl/mcp/server.py`, pinned by `tests/test_mcp_ship.py`.
+- **Input side (grounding):** `revl context` / `revl_context`
+  ([context.md](context.md)), pinned by `tests/test_context.py`: the
+  declarations a component may depend on, with no bodies. Its token number is
+  recorded; its rounds-to-green is not, so it stays out of the core tier and the
+  authoring loop until a benchmark run says it pays.
 - **Deferred this wave:** the terse authoring form (needs the parser — owned by
   item 53). See the last section.
 

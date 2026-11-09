@@ -38,6 +38,28 @@ def _run_explain(args) -> int:
     return 0
 
 
+def _run_context(args) -> int:
+    """`revl context FILE... [--component X]`: the declarations an edit may
+    depend on and nothing else, so an agent grounds on signatures instead of
+    reading the composition (docs/context.md)."""
+    from ..context import context
+    try:
+        record = context(args.files, component=args.component, budget=args.budget)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(record, indent=2))
+        return 0 if record["ok"] else 1
+    if not record["ok"]:
+        diagnostic = record["diagnostics"][0]
+        print(f"error: {diagnostic['message']}", file=sys.stderr)
+        print(f"components: {', '.join(diagnostic['available'])}", file=sys.stderr)
+        return 1
+    print(record["pack"], end="")
+    return 0
+
+
 def _run_why(args) -> int:
     """`revl why <component> --trace run.jsonl` — the runtime companion to the
     compile-time why-traces: the cause chain behind a component's recorded

@@ -381,6 +381,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_query_dependents` | yes | no | `target` (source) |
 | `revl_query_reach` | yes | no | `component` (source) |
 | `revl_query_drift` | yes | no | `service` (source) |
+| `revl_context` | yes | no | - (source) |
 | `revl_live_query` | yes | no | `verb` |
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
@@ -840,6 +841,31 @@ this tool is for asking about a construct before there is a hole in it.
   `{ok, idioms: [{name, summary}]}`. An unknown name
   is refused, listing the idioms. The same table is printed by
   [`revl idiom`](commands-reference.md#revl-idiom).
+
+---
+
+### `revl_context`
+
+WHAT CAN THIS COMPONENT SEE? The MCP twin of
+[`revl context`](commands-reference.md#revl-context): the service
+declarations a component must provide and may require, cut verbatim from the
+source with no provider body. Read it instead of the composition before
+writing a component ([context.md](context.md)). Built from the parse, so a
+component whose body does not check yet still grounds; a parse error is the
+usual structured refusal.
+
+- Inputs: `source` / `files` / `modules`; `component` (default: every declared
+  service); `budget` (a token ceiling: docs off, then collapse, from the last
+  service backwards, and never a dropped name). With neither `source` nor
+  `files` it reads the session's held working set and answers
+  `grounded: "session"`.
+- Answer: `{ok, component, header, services, pack, tokens, budget}`. Each
+  `services` row carries `role` (`provides`, `requires` or `declared`),
+  `key`, `service`, `providers`, `module`, `line`, `hash`, `clause`, `use`,
+  `operations` and `text`. `hash` is over the lexed tokens, so it ignores
+  comments and layout. `tokens: {pack, raw, rawFiles}` sets the pack beside
+  the files it was cut from: on a file of a few hundred tokens the file itself
+  can be the cheaper read. An unknown `component` is refused with `available`.
 
 ---
 
