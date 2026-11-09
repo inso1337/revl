@@ -103,7 +103,9 @@ recovery diff also reads that token: the gate (`inverse_weakened` is in
 `GATED_BUCKETS`), `revl migrate` (`migrate.authority` lists `inverse:<name>`
 under `widened`, a strengthening under `narrowed`) and the changelog (a
 breaking `inverse.weakened:<name>` line, a strengthening as an added
-`inverse.strengthened:<name>` line). A lost kind is
+`inverse.strengthened:<name>` line). migrate and the changelog report every
+`inverse_weakened`, as the gate does, not only one that carries a kind move
+(an effectful extern that becomes `pure` is breaking there too). A lost kind is
 treated as a move only when the inverse diff actually emits that token and the
 name still has a recovery entry. Otherwise it is still reported as dropped: a
 recovery gone entirely (even when its class moved, as in `compensation` to

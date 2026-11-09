@@ -373,3 +373,16 @@ def test_the_changelog_breaks_on_a_kind_move_that_weakens_the_inverse():
     assert not [f for f in facts if f.startswith(("inverse.", "recovery."))]
     assert "inverse.strengthened:deposit" in [
         ln["fact"] for ln in strengthened["added"]]
+
+
+def test_the_changelog_does_not_also_honesty_line_the_inverse_leaf():
+    # `externs[*].inverse` has its own `inverse.*` line, so the completeness
+    # guard must not list it again under `audit-path:externs`.
+    from revl.changelog import derive_changelog  # noqa: PLC0415
+    doc = derive_changelog(compile_source(_DECLARED, "corpus.rvl"),
+                           compile_source(_COMPENSATION, "corpus.rvl"),
+                           no_semver=True)
+    externs = [ln["paths"] for ln in doc["unclassified"]
+               if ln["fact"] == "audit-path:externs"]
+    assert externs, "control: the extern class leaf is still honesty-lined"
+    assert not [p for p in externs[0] if p.endswith(".inverse")]

@@ -109,6 +109,7 @@ CONSUMED_PATHS: dict[tuple, tuple[str, str]] = {
     # the differ whose source `test_every_consumed_path_*` asserts reads the leaf.
     ("boundary", _STAR, "capabilities"): ("audit_diff", "_capability_scopes"),
     ("externs", _STAR, "backends"): ("audit_diff", "diff_backends"),
+    ("externs", _STAR, "inverse"): ("audit_diff", "diff_inverses"),
     ("recovery_surface",): ("audit_diff", "diff_recovery"),
     ("capability_registers",): ("audit_diff", "diff_registers"),
     ("cardinality",): ("audit_diff", "diff_cardinality"),
