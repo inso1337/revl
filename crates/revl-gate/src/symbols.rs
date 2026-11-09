@@ -29,10 +29,11 @@
 //! # What it covers
 //!
 //! The self-host front end (`selfhost/lower.rvl::parse_prog`) recognises
-//! top-level `fn`, `extern ... fn`, `service` and `component` declarations. It
-//! does not model `pub`, `verified`, `type` declarations, fn type parameters,
-//! parameters or `let` bindings, so those are NOT in the table, and a document
-//! using the ones it cannot parse at all yields [`Symbols::Undecided`].
+//! top-level `fn`, `extern ... fn`, `service` and `component` declarations,
+//! with the `pub` and `verified` prefixes the reference reads before `fn`. It
+//! does not model `type` declarations, fn type parameters, parameters or `let`
+//! bindings, so those are NOT in the table, and a document using the ones it
+//! cannot parse at all yields [`Symbols::Undecided`].
 //!
 //! # How the lines are recovered
 //!

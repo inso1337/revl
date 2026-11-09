@@ -99,6 +99,7 @@ pub struct FnD {
     line: i64,
     caps: Vec<String>,
     inv: String,
+    isVerified: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -675,6 +676,7 @@ pub struct FbSpan {
     name: String,
     line: i64,
     retDecl: String,
+    eq: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -9502,14 +9504,17 @@ fn secret_end(ts: &[Token], i: i64) -> i64 {
 }
 
 fn at_top_decl(ts: &[Token], i: i64) -> bool {
-    return ((((((((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i)) || at_event(ts, i)) || at_qual_test(ts, i)) || at_model_role(ts, i)) || at_model_council(ts, i)) || at_secret(ts, i));
+    return (((((((((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i)) || at_event(ts, i)) || at_qual_test(ts, i)) || at_model_role(ts, i)) || at_model_council(ts, i)) || at_secret(ts, i)) || (atw(ts, i, "verified") && atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn")));
 }
 
 fn at_pub_prefix(ts: &[Token], i: i64) -> bool {
+    if atw(ts, i, "verified") {
+        return atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn");
+    }
     if (!atw(ts, i, "pub")) {
         return false;
     }
-    return (((atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn") || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "type")) || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "service")) || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "extern"));
+    return ((((atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn") || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "type")) || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "service")) || atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "extern")) || (atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "verified") && atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "fn")));
 }
 
 fn is_builtin_type_name(name: &str) -> bool {
@@ -10006,12 +10011,12 @@ fn mk_step(p: Prog, i: i64) -> PStep {
     return PStep { pg: p, i: i };
 }
 
-fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, ps: Vec<ParamN>, bd: Vec<Stmt>, ln: i64, cps: Vec<String>) -> FnD {
-    return FnD { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs, asyncSlots: slots, asyncParams: aps, params: ps, body: bd, cachePure: false, line: ln, caps: cps, inv: String::from("") };
+fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, ps: Vec<ParamN>, bd: Vec<Stmt>, ln: i64, cps: Vec<String>, ver: bool) -> FnD {
+    return FnD { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs, asyncSlots: slots, asyncParams: aps, params: ps, body: bd, cachePure: false, line: ln, caps: cps, inv: String::from(""), isVerified: ver };
 }
 
 fn fnd_with_inv(f: FnD, inv: String) -> FnD {
-    return FnD { name: f.name.clone(), isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern, callees: f.callees.clone(), asyncSlots: f.asyncSlots.clone(), asyncParams: f.asyncParams.clone(), params: f.params.clone(), body: f.body.clone(), cachePure: f.cachePure, line: f.line, caps: f.caps.clone(), inv: inv };
+    return FnD { name: f.name.clone(), isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern, callees: f.callees.clone(), asyncSlots: f.asyncSlots.clone(), asyncParams: f.asyncParams.clone(), params: f.params.clone(), body: f.body.clone(), cachePure: f.cachePure, line: f.line, caps: f.caps.clone(), inv: inv, isVerified: f.isVerified };
 }
 
 fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool, ps: Vec<ParamN>, ret: String) -> MSig {
@@ -11137,7 +11142,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
-    return mk_step(push_fn(pg, fnd_with_inv(mk_fnd(nm, (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), ps.ps.clone(), vec![], tkc(&ts, i).line, if (isEm || isWit) { caps } else { vec![] }), inv)), k);
+    return mk_step(push_fn(pg, fnd_with_inv(mk_fnd(nm, (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), ps.ps.clone(), vec![], tkc(&ts, i).line, if (isEm || isWit) { caps } else { vec![] }, false), inv)), k);
 }
 
 fn declared_inverse_at(ts: &[Token], k: i64) -> String {
@@ -11172,6 +11177,10 @@ fn inverse_slots(ts: &[Token], i: i64, depth: i64, acc: String, fresh: bool) -> 
 }
 
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
+    return p_fn_v(ts, i, pg, false);
+}
+
+fn p_fn_v(ts: Vec<Token>, i: i64, pg: Prog, ver: bool) -> PStep {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = fn_params_at(ts.clone(), fn_params_i(&ts, i));
     let mut rti = ret_at(ts.clone(), ps.i);
@@ -11179,19 +11188,27 @@ fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     if cachePure {
         rti = (rti).checked_add(2i64).expect("revl: Int overflow");
     }
-    if (!atk(&ts, rti, "{")) {
-        return mk_step(bad_prog(pg, String::from("expected { after fn signature")), rti);
-    }
     let dmiss = dp_order_miss(&param_defaults_at(ts.clone(), fn_params_i(&ts, i)), 0i64, false);
     if (dmiss != "") {
         return mk_step(bad_prog(pg, (String::from("parameter `").revl_concat(&dmiss)).revl_concat("` has no default but follows a defaulted parameter")), rti);
+    }
+    if atk(&ts, rti, "=") {
+        let sh = expr_at(ts.clone(), (rti).checked_add(1i64).expect("revl: Int overflow"));
+        if is_bad(sh.e.clone()) {
+            return mk_step(bad_prog(pg, String::from("bad expression body of fn")), rti);
+        }
+        let ebody = vec![mkstmt(String::from("return"), sh.e.clone())];
+        return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&ebody, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: ebody.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver }), sh.i);
+    }
+    if (!atk(&ts, rti, "{")) {
+        return mk_step(bad_prog(pg, String::from("expected { after fn signature")), rti);
     }
     let bend = close_brace(&ts, rti);
     if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return PStep { pg: bad_prog(pg, String::from("unbalanced braces in fn body")), i: ts.revl_length() };
     }
     let body = p_stmts(ts.clone(), (rti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
-    return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&body, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from("") }), bend);
+    return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&body, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver }), bend);
 }
 
 fn dp_in_scope(scopes: Vec<DpScope>, name: &str) -> bool {
@@ -11968,6 +11985,14 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
     }
     if (t.kind != "kw") {
         return p_top(ts.clone(), skip_line(&ts, i), bad_prog(pg, String::from("unexpected token at top level")));
+    }
+    if (atw(&ts, i, "verified") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn")) {
+        let sv = p_fn_v(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), pg.clone(), true);
+        return p_top(ts, sv.i, sv.pg.clone());
+    }
+    if ((atw(&ts, i, "pub") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "verified")) && atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "fn")) {
+        let sv = p_fn_v(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), pg.clone(), true);
+        return p_top(ts, sv.i, sv.pg.clone());
     }
     if at_pub_prefix(&ts, i) {
         return p_top(ts, (i).checked_add(1i64).expect("revl: Int overflow"), pg);
@@ -24337,7 +24362,7 @@ fn fb_params_tys(ps: &[ParamN], i: i64, acc: Vec<Bind>, tps: &[String], al: std:
 }
 
 fn fb_no_span() -> FbSpan {
-    return FbSpan { ps: vec![], ret: String::from(""), lo: 0i64, hi: 0i64, next: 0i64, ok: false, name: String::from(""), line: 0i64, retDecl: String::from("") };
+    return FbSpan { ps: vec![], ret: String::from(""), lo: 0i64, hi: 0i64, next: 0i64, ok: false, name: String::from(""), line: 0i64, retDecl: String::from(""), eq: (0i64).checked_sub(1i64).expect("revl: Int overflow") };
 }
 
 fn fb_span(ts: Vec<Token>, i: i64) -> FbSpan {
@@ -24360,6 +24385,13 @@ fn fb_span(ts: Vec<Token>, i: i64) -> FbSpan {
     if (ati(&ts, reti, "cache") && atw(&ts, (reti).checked_add(1i64).expect("revl: Int overflow"), "pure")) {
         reti = (reti).checked_add(2i64).expect("revl: Int overflow");
     }
+    if atk(&ts, reti, "=") {
+        let e = expr_at(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"));
+        if is_bad(e.e.clone()) {
+            return fb_no_span();
+        }
+        return FbSpan { ps: ps.ps.clone(), ret: ret, lo: 0i64, hi: 0i64, next: e.i, ok: true, name: tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(&ts, i).line, retDecl: retDecl, eq: reti };
+    }
     if (!atk(&ts, reti, "{")) {
         return fb_no_span();
     }
@@ -24368,7 +24400,7 @@ fn fb_span(ts: Vec<Token>, i: i64) -> FbSpan {
         return fb_no_span();
     }
     let body = (reti).checked_add(1i64).expect("revl: Int overflow");
-    return FbSpan { ps: ps.ps.clone(), ret: ret, lo: body, hi: (bend).checked_sub(1i64).expect("revl: Int overflow"), next: bend, ok: true, name: tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(&ts, i).line, retDecl: retDecl };
+    return FbSpan { ps: ps.ps.clone(), ret: ret, lo: body, hi: (bend).checked_sub(1i64).expect("revl: Int overflow"), next: bend, ok: true, name: tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(&ts, i).line, retDecl: retDecl, eq: (0i64).checked_sub(1i64).expect("revl: Int overflow") };
 }
 
 fn rp_true_cond(e: Expr) -> bool {
@@ -24506,8 +24538,25 @@ fn rp_refusal(ts: &[Token], sp: FbSpan, steps: &[FbStep]) -> Verd {
 
 fn fb_function(ts: Vec<Token>, i: i64, sp: FbSpan, gtys: Vec<Bind>, al: std::collections::HashMap<String, String>) -> Verd {
     let tps = collect_tparams__m2(&sp.ps, sp.ret.clone(), &gtys, explicit_tparams(&ts, i));
+    let solidRet = tk_solid(mark_tparams__m2(alias_subst(sp.ret.clone(), al.clone()), &tps), &gtys);
+    let tys = fb_params_tys(&sp.ps, 0i64, tk_tparam_rows(&tps, 0i64, gtys.clone()), &tps, al.clone());
+    if (sp.eq >= 0i64) {
+        let e = expr_at(ts.clone(), (sp.eq).checked_add(1i64).expect("revl: Int overflow"));
+        if is_bad(e.e.clone()) {
+            return mk_verd(String::from(""), sp.line);
+        }
+        let r = tk_check(e.e.clone(), solidRet.clone(), tys.clone(), "this function's return");
+        if (r.v != "") {
+            return mk_verd(r.v.clone(), sp.line);
+        }
+        let lo = tk_low(e.e.clone(), tys.clone());
+        if (lo != "") {
+            return mk_verd(lo, sp.line);
+        }
+        return no_verd();
+    }
     let steps = fb_scan(ts.clone(), sp.lo, sp.hi, al.clone());
-    let v = fb_walk(&steps, 0i64, fb_params_scope(&sp.ps, 0i64, vec![]), fb_params_tys(&sp.ps, 0i64, tk_tparam_rows(&tps, 0i64, gtys.clone()), &tps, al.clone()), tk_solid(mark_tparams__m2(alias_subst(sp.ret.clone(), al.clone()), &tps), &gtys)).v;
+    let v = fb_walk(&steps, 0i64, fb_params_scope(&sp.ps, 0i64, vec![]), tys.clone(), solidRet.clone()).v;
     if (v.v != "") {
         return v;
     }
@@ -26474,6 +26523,42 @@ fn model_council_refusal(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
+fn callees_of(fs: &[FnD], n: &str, i: i64) -> Vec<String> {
+    if (i >= fs.revl_length()) {
+        return vec![];
+    }
+    if ((fs)[(i) as usize].name == n) {
+        return (fs)[(i) as usize].callees.clone();
+    }
+    return callees_of(fs, n, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn fn_reaches_self(fs: &[FnD], start: &str, work: Vec<String>, seen: &[String], k: i64) -> bool {
+    if (k >= work.revl_length()) {
+        return false;
+    }
+    let n = (work)[(k) as usize].clone();
+    if (n == start) {
+        return true;
+    }
+    if contains__m2(seen, &n) {
+        return fn_reaches_self(fs, start, work, seen, (k).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    return fn_reaches_self(fs, start, push_all(work, &callees_of(fs, &n, 0i64), 0i64), &(seen.revl_push(n.clone())), (k).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn verified_totality_refusal(pg: Prog) -> Verd {
+    let mut i = 0i64;
+    while (i < pg.fns.revl_length()) {
+        let f = (pg.fns)[(i) as usize].clone();
+        if (f.isVerified && fn_reaches_self(&pg.fns, &f.name, f.callees.clone(), &(vec![f.name.clone()]), 0i64)) {
+            return mk_verd(tagged("G7", &((String::from("verified fn `").revl_concat(&f.name)).revl_concat(&String::from("` is not total: it participates in direct or mutual recursion ").revl_concat("(verified totality, syntax-2.0 §7)")))), f.line);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], ambSvcs: &[String], ambSvcsKnown: bool, ambOps: &[SvcOps]) -> NoLink {
     let base = ctx_evals(ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), &type_ctors(&ts)), amb_ops_map(ambOps, 0i64, std::collections::HashMap::new())), appr_info(&ts, pg.clone())), &ts, pg.clone());
     let dav = declared_arity_refusal(ts.clone());
@@ -26513,6 +26598,10 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], am
     let sav = svc_arg_at(ts.clone(), 0i64);
     if (sav.v != "") {
         return NoLink { done: true, refs: vec![sav.clone()] };
+    }
+    let vtv = verified_totality_refusal(pg.clone());
+    if (vtv.v != "") {
+        return NoLink { done: true, refs: vec![vtv.clone()] };
     }
     let fbv = fb_refusal_at(ts.clone(), 0i64, nr_binds(&ts, gtys.clone()), al.clone());
     if (fbv.v != "") {
@@ -26627,6 +26716,9 @@ fn pt_decl_head(ts: &[Token], i: i64) -> bool {
         let w = t.text;
         if ((((w == "type") || (w == "fn")) || (w == "extern")) || (w == "service")) {
             return true;
+        }
+        if (w == "verified") {
+            return atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn");
         }
         return ((((w == "component") || (w == "use")) || (w == "test")) || (w == "pub"));
     }

@@ -105,7 +105,7 @@ fn an_unclassified_extern_gets_no_signature() {
 #[test]
 fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
     for source in [
-        "verified fn f() -> Int {\n  return 1\n}\n",
+        "commutative service S { fn op() -> Int }\n",
         "fn broken( {\n",
     ] {
         let found = symbols(source);
@@ -113,6 +113,16 @@ fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
         assert!(found.get("f").is_none());
         assert!(found.rows().is_empty());
     }
+}
+
+#[test]
+fn a_verified_fn_declares_a_navigable_symbol() {
+    // issue #3107: the front end reads the `verified` prefix, so the document is
+    // decided and the declaration is navigable.
+    let found = symbols("verified fn f() -> Int {\n  return 1\n}\n");
+    let symbol = found.get("f").expect("the declaration is navigable");
+    assert_eq!(symbol.kind, SymbolKind::Fn);
+    assert_eq!(symbol.line, 1);
 }
 
 #[test]

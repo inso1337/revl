@@ -596,6 +596,11 @@ def _classify(e: RevlError) -> str:
             or "record literal for `" in m
             or "but the record has " in m):
         return "TYPE"
+    # issue #3107: `verified fn` totality (`lower.py::_check_verified_totality`),
+    # which `revl.diagnostics.classify` names G7. The gate spells the reference's
+    # sentence byte for byte, so this is a claim of agreement.
+    if m.startswith("verified fn `") and " is not total: it participates in " in m:
+        return "G7"
     return "OUT:" + m
 
 
@@ -8613,3 +8618,75 @@ component D provides r: R {
     rows = [r.split("|", 2) for r in admit_all(src).split("\\n")]
     assert rows[0][:2] == ["6", "T1"], rows
     assert [r[1] for r in rows] == ["T1", "G1"], rows
+
+
+# ================================================================ issue #3107
+#
+# Two spellings the reference parser admits and the gate's declaration reader
+# used to refuse at a parse stage: a shorthand module `fn` body
+# (`fn f(x: Int) -> Int = x + 1`) at `expected { after fn signature`, and a
+# `verified fn` at `unexpected declaration`. A gate test could be written in
+# neither form, because the parse stopped before every later stage, the match
+# totality check included. Both are read now, and the verdict comes from the
+# stage the reference reaches.
+
+GATE_3107_ADMITTED = [
+    ("shorthand", "fn twice(x: Int) -> Int = x * 2\n"),
+    ("shorthand_cache_pure", "fn sq(x: Int) -> Int cache pure = x * x\n"),
+    ("verified", "verified fn twice(x: Int) -> Int { return x * 2 }\n"),
+    ("verified_shorthand", "verified fn twice(x: Int) -> Int = x * 2\n"),
+    ("pub_verified", "pub verified fn twice(x: Int) -> Int = x * 2\n"),
+    ("verified_after_a_type", "type Row = { id: Int }\n"
+                              "verified fn id_of(r: Row) -> Int { return r.id }\n"),
+    ("verified_before_an_ordinary_fn",
+     "verified fn one() -> Int { return 1 }\n"
+     "fn two() -> Int { return 2 }\n"),
+]
+
+
+@pytest.mark.parametrize("name,src", GATE_3107_ADMITTED,
+                         ids=[n for n, _ in GATE_3107_ADMITTED])
+def test_the_two_reference_spellings_are_admitted(admit, name, src):
+    assert _ref(src) == ("", ""), name
+    assert admit(src) == "", name
+
+
+def test_a_shorthand_fn_body_reaches_the_match_totality_check(admit):
+    # The issue's motivating shape: the parse no longer stands where the
+    # missing-case verdict belongs.
+    src = ("type Color = Red | Green\n"
+           "fn pick(c: Color) -> Int = match c { Red => 1 }\n")
+    assert _ref(src)[0] == "T1"
+    _agree(admit, src)
+
+
+def test_a_verified_fn_reaches_the_match_totality_check(admit):
+    src = ("type Color = Red | Green\n"
+           "verified fn pick(c: Color) -> Int {\n"
+           "  return match c { Red => 1 }\n}\n")
+    assert _ref(src)[0] == "T1"
+    _agree(admit, src)
+
+
+def test_a_shorthand_fn_body_is_checked_at_the_return_position(admit):
+    # the desugared `return` is the body's one check position: the reference
+    # holds it to the declared return, and the gate must reach the same T1.
+    src = 'fn f(x: Int) -> Int = "s"\n'
+    assert _ref(src)[0] == "T1"
+    _agree(admit, src)
+
+
+def test_verified_totality_matches_the_reference(admit):
+    # `_check_verified_totality` refuses any `verified fn` in a direct or mutual
+    # recursion cycle, at the declaration line, with its own sentence and G7.
+    direct = ("verified fn recurse(n: Int) -> Int {\n"
+              "  return recurse(n - 1)\n}\n")
+    mutual = ("verified fn a(n: Int) -> Int {\n  return b(n)\n}\n"
+              "fn b(n: Int) -> Int {\n  return a(n)\n}\n")
+    plain = "fn recurse(n: Int) -> Int {\n  return recurse(n - 1)\n}\n"
+    for src in (direct, mutual):
+        ref_tag, ref_msg = _ref(src)
+        assert ref_tag == "G7", (ref_tag, ref_msg)
+        assert admit(src) == "G7|" + ref_msg
+    assert _ref(plain) == ("", "")
+    assert admit(plain) == ""
