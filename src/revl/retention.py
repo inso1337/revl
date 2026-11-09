@@ -897,10 +897,14 @@ def declared_policies(paths, *, sources=None) -> dict:
     — the same rule `policies` holds inside one file."""
     from .compiler import _load_root, _ModuleLoader  # noqa: PLC0415 — cycle
 
+    paths = [str(path) for path in paths]
     loader = _ModuleLoader(sources=sources)
+    # mark the roots before any load, as `compile_files` does: they set the
+    # directory tree an `asset` or `ref` in a root module resolves inside
+    loader.mark_roots(os.path.abspath(p) for p in paths)
     out: dict = {}
     where: dict = {}
-    queue = [_load_root(loader, str(path)) for path in paths]
+    queue = [_load_root(loader, path) for path in paths]
     seen: set = set()
     while queue:
         module = queue.pop(0)
