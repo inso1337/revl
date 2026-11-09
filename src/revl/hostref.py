@@ -347,10 +347,17 @@ def program_has_ref(program) -> bool:
 
 def resolve_assets(program, module_dir: str, root_dirs: list[str],
                    sources: dict[str, str], is_virtual: bool,
-                   install_root: str | None = None) -> None:
+                   install_root: str | None = None,
+                   skip_components: bool = False) -> None:
     """Resolve every `asset "<path>"` in `program` against the root-tree jail,
     filling the node's record fields with the root-relative path and the
     sha256 of the file's bytes.
+
+    `skip_components` leaves an asset written inside a component unresolved.
+    The loader sets it for a module that is only `use`d: components are never
+    imported, so such an asset never lowers, and a consumer does not depend on
+    a provider body's files. It stays unresolved, so
+    `require_resolved_asset` still refuses it should it ever reach lowering.
 
     The five refusals, all fail-closed (each REFUSES; none falls back to a
     default, a guess, or an unresolved handle):
@@ -380,6 +387,8 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
         jail_roots = [os.path.realpath(r) for r in root_dirs]
         root_kind = None
     for node in program.assets:
+        if skip_components and node.in_component:
+            continue
         _reject_bad_asset_path(node, program.filename)
         if is_virtual:
             _resolve_asset_memory(node, module_dir, sources,

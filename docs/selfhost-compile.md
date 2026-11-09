@@ -118,6 +118,11 @@ path, which is what the resolution needs:
   reference lexer does; a body whose brace sits in a `'` string or a comment is
   misread by both self-host scans alike, its externs do not lower, and the
   module is refused.
+
+  The driver resolves no `asset` (`lir_expr` in `selfhost/lower.rvl` lowers
+  one to a `bad` node), so it has no counterpart to the reference loader
+  skipping the assets in a used module's component bodies
+  (`hostref.resolve_assets`, `skip_components`).
 - Last, the driver links the types an imported service carries (issue #2308).
   A `use "./lib.rvl" { Store }` that names only a service makes no pure
   dependency, but the reference's `compile_files` still brings the PUBLIC record

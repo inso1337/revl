@@ -6,8 +6,8 @@ AppendWriter`), and `mediator.rvl` holds `FsMediator`, the provider, in
 variants. Every module is an in-memory source, and `_compile` makes any read
 from disk raise, so a module left out of `sources` is absent.
 
-What holds today, pinned as regressions (they pass on the base they were
-written on, so none of them was red first):
+(a) to (d) held before they were written and are regression pins; (e) was red
+until the loader skipped component assets in a used module:
 
 - (a) the consumer plus the service module compiles with no provider at all;
 - (b) the consumer component's IR is byte-equal whether the provider is
@@ -19,13 +19,15 @@ written on, so none of them was red first):
   components are never imported, and so never lowered or checked (the
   root-module merge in `compiler._compile_files`), so `use { names }` does not
   carry `FsMediator` in. The `nope` refusal appears only when that module is
-  itself a root of the compile, where its components are the composition.
+  itself a root of the compile, where its components are the composition;
+- (e) a missing `asset` in that provider body leaves it green too: the loader
+  does not resolve a used module's component assets; (f) an asset outside a
+  component there is still resolved, since a `pub fn` is importable.
 
-Not pinned here: the used module is still parsed and resolved whole (syntax,
-`asset` files, refs, host body files), so a syntax error or a missing asset in
-a component body there breaks the importer. Compiling against service
-declarations alone, with the dependency's source gone, is an open design
-question.
+Not pinned here: the rest of the used module is still parsed and resolved
+whole (syntax, refs, host body files), so a syntax error in a component body
+there breaks the importer. Compiling against service declarations alone, with
+the dependency's source gone, is an open design question.
 """
 
 from __future__ import annotations
@@ -176,3 +178,36 @@ def test_d_broken_provider_beside_the_used_services_leaves_the_consumer_green(
     # The refusal belongs to a compile that makes the module a root.
     with pytest.raises(RevlError, match=_NOPE):
         _compile(tmp_path, ["consumer.rvl", "svc.rvl"], modules)
+
+
+_NOT_IN_SOURCES = "is not in the in-memory sources map"
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param('let entry = asset "./nope.ts"\n      return 0', id="plain"),
+    # A `${...}` is parsed by a sub-parser that shares the asset list.
+    pytest.param('let entry = `${asset "./nope.ts"}`\n      return 0',
+                 id="interpolated"),
+])
+def test_e_missing_asset_in_provider_body_beside_the_used_services_leaves_the_consumer_green(
+        tmp_path, body):
+    modules = {"svc.rvl": _SERVICES + "\n" + _MEDIATOR % body,
+               "consumer.rvl": _CONSUMER}
+
+    ir = _compile(tmp_path, ["consumer.rvl"], modules)
+    assert _component(ir, "NotesConsumer") == \
+        _component(_consumer_only(tmp_path), "NotesConsumer")
+
+    # A root's components are the composition, so there the asset still refuses.
+    with pytest.raises(RevlError, match=_NOT_IN_SOURCES):
+        _compile(tmp_path, ["consumer.rvl", "svc.rvl"], modules)
+
+
+def test_f_missing_asset_outside_components_in_a_used_module_still_refuses(tmp_path):
+    # Only component bodies are skipped: a `pub fn` is importable, so its asset
+    # is resolved whether or not the consumer names that fn.
+    lib = ("type Asset = { path: Str, sha256: Str }\n"
+           'pub fn entry() -> Asset { return asset "./nope.ts" }\n')
+    modules = {"svc.rvl": _SERVICES + lib, "consumer.rvl": _CONSUMER}
+    with pytest.raises(RevlError, match=_NOT_IN_SOURCES):
+        _compile(tmp_path, ["consumer.rvl"], modules)

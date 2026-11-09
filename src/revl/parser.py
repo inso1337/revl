@@ -1941,6 +1941,10 @@ class ExprAsset(ExprRecord):
     rel_path: str | None = None
     sha256: str | None = None
     root_kind: str | None = None
+    # Written inside a component declaration. Components are never imported,
+    # so the loader leaves such an asset unresolved in a module that is only
+    # `use`d (`hostref.resolve_assets`); it is never lowered there.
+    in_component: bool = False
 
 
 @dataclass
@@ -4958,6 +4962,7 @@ class Parser:
 
     def component(self, boot: bool = False) -> ComponentDecl:
         line = self.expect("kw", "component").line
+        first_asset = len(self._assets)
         name = self.expect("ident").value
         requires: list[tuple[str, str, int]] = []
         provides: list[tuple[str, str, int]] = []
@@ -5000,6 +5005,8 @@ class Parser:
             else:
                 body.append(self.stmt(in_method=False))
         self.expect("}")
+        for node in self._assets[first_asset:]:
+            node.in_component = True
         return ComponentDecl(name, config, requires, provides, body, line,
                              require_carry=require_carry, boot=boot,
                              liveness_ms=liveness_ms,
