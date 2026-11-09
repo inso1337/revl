@@ -2529,11 +2529,22 @@ class _FlowChecker:
             # launder a `secret`-carrying argument - the parser-declassifier clean
             # is SKIPPED for the bound key and the crossing is refused. There is no
             # declassifier for a bound provider key, verified-fn or otherwise.
+            # Issue #3113: it does NOT launder a `confidential` argument either.
+            # The parser declassifier is a G9 downgrade for the `untrusted`
+            # authority origin, not a §7c downgrade for `confidential`: without
+            # this check a one-line identity `verified fn wash(x) -> Trusted[Str]`
+            # cleared a `Secret[T]` payment token and the value reached a log or
+            # an LLM prompt with no declared, audited `endorse[confidential]`.
+            # A `confidential` value downgrades ONLY at that declared slot, so
+            # the crossing is refused here exactly as the bound key is.
             if not self.infer and self.enforce:
                 for index, at in enumerate(arg_taints):
                     if _carries_secret(at):
                         self._refuse_secret(callee, "a verified-fn declassifier",
                                             index, at, node)
+                    if _carries_confidential(at):
+                        self._refuse_confidential(
+                            callee, "a verified-fn declassifier", index, at, node)
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
             return CLEAN
