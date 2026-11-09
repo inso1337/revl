@@ -8612,30 +8612,33 @@ def _refuse_case_name_collisions(program: Program, filename: str) -> None:
             cases.setdefault(case.name, (decl.name, decl_file, case.line))
     if not cases:
         return
-    # (kind, name, line, file) for everything the emitters place at module
-    # scope under the declaration's own name.
-    others: list[tuple[str, str, int, str]] = []
+    # (kind, name, line, file, decl) for everything the emitters place at
+    # module scope under the declaration's own name. The decl object is kept so
+    # the self-named-type exception can ask the type about its OWN cases
+    # instead of about whichever type happened to claim the name first.
+    others: list[tuple[str, str, int, str, object]] = []
     for decl in program.type_decls:
         others.append(("a type", decl.name, decl.line,
-                       program.decl_files.get(id(decl), filename)))
+                       program.decl_files.get(id(decl), filename), decl))
     for decl in program.fn_decls:
         others.append(("a function", decl.name, decl.line,
-                       decl.source or program.decl_files.get(id(decl), filename)))
+                       decl.source or program.decl_files.get(id(decl), filename),
+                       decl))
     for decl in program.externs:
         others.append(("an extern", decl.name, decl.line,
-                       program.decl_files.get(id(decl), filename)))
+                       program.decl_files.get(id(decl), filename), decl))
     for decl in program.services:
         others.append(("a service", decl.name, decl.line,
-                       program.decl_files.get(id(decl), filename)))
+                       program.decl_files.get(id(decl), filename), decl))
     for decl in program.components:
         others.append(("a component", decl.name, decl.line,
-                       decl.source or filename))
+                       decl.source or filename, decl))
     hint = ("a case name and a module-scope declaration are each emitted as one "
             "symbol per tier, so the declaration can replace the constructor a "
             "call was typed against (the python tier's later `def` replaces the "
             "class, and the ts tier declares the name twice); rename one of the "
             "two (issue #3138)")
-    for kind, name, line, decl_file in others:
+    for kind, name, line, decl_file, decl in others:
         case = cases.get(name)
         if case is None:
             continue
@@ -8643,9 +8646,11 @@ def _refuse_case_name_collisions(program: Program, filename: str) -> None:
         # `type Tag = Tag(Str)` is the newtype spelling: the type declaration
         # and its OWN case are one declaration, and the python tier emits
         # `class Tag:` before `class Tag(Tag):`, which resolves the base before
-        # the case rebinds the name. A declaration OTHER than that type still
-        # collides with the case.
-        if kind == "a type" and name == type_name:
+        # the case rebinds the name. Ask this type about its own case list, not
+        # about the first type to claim the name: two ADTs may share a case
+        # name, and the order the declarations appear in must not decide
+        # whether the newtype spelling is admitted.
+        if kind == "a type" and any(c.name == name for c in decl.cases):
             continue
         if os.path.abspath(decl_file) != os.path.abspath(case_file):
             raise RevlError(

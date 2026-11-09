@@ -119,3 +119,17 @@ def test_a_type_may_name_its_own_case():
                        "fn Tag(x: Str) -> Str = x\n", "m.rvl")
     assert classify(caught.value)["message"] == (
         "`Tag` is already declared as a case of `Tag` on line 1")
+
+
+@pytest.mark.parametrize("source", [
+    "type Tag = Tag(Str)\ntype A = Tag(Int)\n",
+    "type A = Tag(Int)\ntype Tag = Tag(Str)\n",
+], ids=["own-case-first", "own-case-second"])
+def test_a_type_may_name_its_own_case_in_either_declaration_order(source):
+    """Two ADTs may share a case name. The shared constructor is already loud
+    at its use site (`_case_table` drops it), so the declarations themselves
+    stay admitted, and the newtype exemption follows the type's OWN case list
+    rather than whichever type claimed the name first."""
+    ir = compile_source(source, "m.rvl")
+    assert ir["types"]["Tag"]["kind"] == "variant"
+    assert ir["types"]["A"]["kind"] == "variant"
