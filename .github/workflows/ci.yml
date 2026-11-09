@@ -2102,7 +2102,13 @@ jobs:
       - run: cd bench/mcp_host && npm ci && npm test
       # the ROOT, not a named file — naming files is what let the six above rot
       # unseen. Measured at ~2s for 42 tests, 0 skips with node present.
+      # issue #3294: the browser target's gate loads an emitted module in
+      # headless Chrome. `ubuntu-latest` carries `google-chrome`, and this
+      # variable makes a missing engine a failure that names the command to
+      # install one, rather than a silent skip in the one job that can run it.
       - run: pytest backends/typescript/ -q
+        env:
+          REVL_BROWSER_REQUIRED: "1"
 
   # Gap G5 of docs/webapp-competitiveness-report.md, and the structural half of
   # roadmap item 459: NO job built or typechecked the frontend. The suite already

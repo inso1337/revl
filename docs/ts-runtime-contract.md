@@ -1,7 +1,9 @@
 # The ts tier runtime contract
 
 What an emitted TypeScript module may assume about the environment it runs in,
-and how that assumption is gated (issue #295).
+and how that assumption is gated (issue #295). The browser target (issue #3294)
+extends the same contract to a page: what it may assume there, which parts of
+the runtime and cordis are portable, and the browser-engine test that holds it.
 
 ## Why this document exists
 
@@ -154,6 +156,117 @@ rules and additionally imports `@temporalio/workflow`, which its own worker
 provides. It is executed against a real dev server in the `temporal-exit` CI
 job, so it is excluded by name from the golden load check below rather than
 silently dropped.
+
+## The browser target
+
+A page can load an emitted module, the runtime it imports and cordis, with no
+build tool at run time. The gate is
+`backends/typescript/test_browser_target.py`, which runs an emitted module in
+headless Chrome; this section is what it holds.
+
+### What the page has to supply
+
+A browser is not plain node with a different global object. Two things the node
+tier gets from node are not in a page:
+
+1. **JavaScript, not TypeScript.** A page has no type stripper. Emit the
+   module, then strip it, and the runtime it imports, from
+   `backends/typescript` after `npm ci`:
+
+       node scripts/strip-types.mjs <out-dir> <module.ts> runtime.ts
+
+   The script erases types with the TypeScript compiler the package already
+   depends on, and rewrites each relative `./x.ts` specifier to `./x.js`. Run it
+   once when the module is emitted; the page then loads plain ESM. This is the
+   strip step the issue allowed in place of a second JavaScript rendering of the
+   emitter: an emitted module is strip-only TypeScript by rule 3, so stripping
+   is one mechanical step with one input and one output, while a second
+   rendering would be a second emitter to keep in step with this one.
+
+2. **`cordis` as a resolvable specifier.** The emitted module imports cordis
+   for its `Context` type, and `runtime.ts` imports it for types. A page
+   without a bundler resolves the bare specifier with an import map. These
+   three entries are enough, with paths relative to `backends/typescript`; all
+   three packages are already ESM with no node builtin imports:
+
+   | specifier | path |
+   |---|---|
+   | `cordis` | `node_modules/cordis/lib/index.js` |
+   | `cosmokit` | `node_modules/cosmokit/lib/index.mjs` |
+   | `@standard-schema/spec` | `node_modules/@standard-schema/spec/dist/index.js` |
+
+   Nothing else is needed: after stripping, `runtime.ts` has no imports at all,
+   and the emitted module's only other import is its relative `./runtime.js`.
+
+`Int` is a `bigint` on this tier (docs/arithmetic.md), so the page needs a
+`BigInt` engine. Every engine the gate can find has one.
+
+### What is portable
+
+`runtime.ts` names no node builtin in an import, and its one node lookup is
+optional:
+
+    const getBuiltin = (globalThis as any).process?.getBuiltinModule
+    const hooks = typeof getBuiltin === 'function' ? getBuiltin('node:async_hooks') : undefined
+
+A page has no `process`, so `_uiStorage` returns null and the ui scope uses the
+same stack fallback it uses wherever the builtin is absent. That fallback is the
+supported path, not an error path.
+
+The `host` object an emitted module resolves host calls against is portable in
+exactly these members:
+
+`Stream`, `Pool`, `Map`, `Job`, `scheduleEvery`, `scheduleAfter`,
+`clockAdvance`, `clockReset`, `applyConfigDefaults`, `markSecret`,
+`secretResult`.
+
+The gate asserts the exact set, so a new host member is an edit to this list and
+to the gate together. A member that reaches for the filesystem, a child process,
+a socket or another node builtin does not belong in it.
+
+### What is outside the target
+
+The process transport is node-only and stays node-only: `bridge.ts`,
+`bridge_node.ts`, `placement_runner.ts` and `estop.ts` import
+`node:child_process`, `node:fs`, `node:net`, `node:tls` or `node:crypto`, so a
+page cannot load them. `revl run --placement` and the host bridge are not
+browser features; a page loads one emitted module directly.
+
+The platform globals in "The same under both" split the same way. A page has
+`structuredClone`, `fetch`, `performance`, `URL`, `TextDecoder`, `WeakRef` and
+`import.meta.url`; it does not have `Buffer`, `setImmediate`, `process` or
+`global`, and `import.meta.dirname` / `import.meta.filename` are node
+extensions. An emitted module does not reach for any of them, but a verbatim
+`@ts` body that does is outside the target.
+
+A document that reaches for `fs` or `shell` imports a host module that names
+node builtins (`revl_fs_ts.ts`, `revl_shell_ts.ts`), and is outside the target
+for the same reason. A document that carries `lifecycle test` blocks is outside
+it as well: those blocks make the emitted module import `AsyncLocalStorage` from
+`node:async_hooks` (rule 7), which a page cannot load. Pure documents, and
+documents whose host surface is the list above, are in it.
+
+The playground wheel is unchanged: it still packages `backends/python` and not
+the ts emitter, so a page compiles nothing. The third wanted item of issue
+#3294 (the ts emitter in the wheel) is not part of this target.
+
+### How the browser target is gated
+
+`test_an_emitted_module_runs_in_a_browser_engine` emits a document with a
+top-level `fn` and a component that provides a service, strips the module and
+`runtime.ts`, serves them with the import map above, and runs the page in
+headless Chrome. The page calls the function, applies the component through
+`plug`, calls the service method and reports the `host` keys it sees; the test
+asserts the function's value, the service's value and the host set. A page that
+fails to load reports `REVL-BROWSER-ERROR` with its stack, so a refusal names
+itself rather than hanging.
+
+The engine is found from `REVL_CHROME`, then `google-chrome` and the other usual
+names, then the macOS application paths. The `backend-typescript` job runs the
+test with `REVL_BROWSER_REQUIRED=1` (`ubuntu-latest` carries `google-chrome`),
+which turns a missing engine into a failure with the command to install one; a
+local run without an engine skips with the same reason. A gate that skips in CI
+would prove nothing, which is why the job sets the variable.
 
 ## How it is gated
 
