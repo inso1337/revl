@@ -602,7 +602,7 @@ def apply_response(
                 if not is_armed
                 else (
                     "the read-only latch is armed and the named tier reads it; "
-                    "every new effectful crossing refuses, reads still proceed"
+                    "every new effectful crossing refuses, local reads still proceed"
                     if enforced
                     else "the read-only latch is armed, but no named tier's "
                     "runtime reads this path; a host must point its runtime's "

@@ -236,10 +236,16 @@ Only the two responses that narrow authority are carried out:
   approval crossing, deferred fire, and a remote call through the placement
   bridge), so a component may still read locally but may no longer start a
   world-changing crossing, and the refusal happens before the host body runs
-  or, for a remote call, before anything is encoded or sent. The caller cannot
-  see whether a peer's method writes, so under the hold every remote call
-  refuses, reads included. Teardown, inverse registration and recovery paths are not
-  narrowed, because a read-only hold must not strand cleanup. The runtime must
+  or, for a remote call, before anything is encoded or sent. The service IR
+  carries each method's declared class (`emission`, `witnessed`), but this
+  slice does not hand it to the bridge, so under the hold every remote call
+  refuses, reads included (fail closed); passing a per-method `writes` set the
+  way `async_methods` is passed would let reads through. Teardown, inverse
+  registration and recovery paths are not narrowed, because a read-only hold
+  must not strand cleanup. That covers the paths themselves, not what an undo
+  or compensation body calls: today a body that calls a remote peer is
+  refused under the hold at the bridge, as a body that calls a local
+  `estop_gated` extern is refused at its gate. The runtime must
   be pointed at the exact latch path with `arm_read_only_latch` or the ambient
   `REVL_READ_ONLY_LATCH`; the actuator reports which tiers honour it, and this
   slice wires the py reference runtime only. The record distinguishes `armed`

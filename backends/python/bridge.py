@@ -889,8 +889,11 @@ class _Client:
         # every other crossing path calls. The bridge stays importable without
         # the runtime; with none loaded there is no halt to honour.
         # issue #2758: a read-only hold refuses the same call, AFTER the E-Stop
-        # so a suspend is never masked by it. The caller cannot see whether the
-        # peer's method writes, so under the hold every remote call refuses.
+        # so a suspend is never masked by it. The service IR carries each
+        # method's declared class (`emission`, `witnessed`), but this slice does
+        # not hand it to the bridge, so under the hold every remote call
+        # refuses (fail closed). Passing a per-method `writes` set the way
+        # `async_methods` is passed would let reads through.
         runtime = _sys.modules.get("runtime")
         for name in ("_estop_check", "_read_only_check"):
             check = getattr(runtime, name, None)
