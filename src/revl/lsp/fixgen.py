@@ -485,11 +485,31 @@ class Repair:
                 "fix_code": {"title": self.action, "edits": self.edits}}
 
 
+class CompileBudget:
+    """How many verification compiles a caller may still spend.
+
+    Each candidate check is a full compile, so `diagnostics.report` makes ONE
+    budget per call and hands it to every record's `generate_repairs`: a report
+    with many refusals then spends at most that many compiles in all, not that
+    many per record (issue #2759 review)."""
+
+    def __init__(self, compiles: int) -> None:
+        self.remaining = compiles
+
+    def take(self) -> bool:
+        """Spend one compile, or say there is none left."""
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+
 def generate_repairs(text: str, diagnostic: dict,
                      filename: str = "<lsp>.rvl", *,
                      widens_authority: bool = False, verify=None,
                      baseline: list[tuple[str, int]] | None = None,
-                     limit: int = 8) -> list[Repair]:
+                     limit: int = 8,
+                     budget: CompileBudget | None = None) -> list[Repair]:
     """Every verified way out of one admission refusal, in a fixed order.
 
     One candidate generator per covered code (see ``_REPAIR_GENERATORS``) emits
@@ -510,7 +530,8 @@ def generate_repairs(text: str, diagnostic: dict,
     authority. They are omitted otherwise, which is the whole point: nothing
     here suggests widening authority by default. At most ``limit`` candidates
     are re-checked (each check is a full compile, so the cap is a cost bound as
-    well), and survivors are ordered narrowest authority first, then smallest
+    well); a shared ``budget`` bounds the compiles across several calls, and a
+    candidate past it is not checked and not returned. Survivors are ordered narrowest authority first, then smallest
     edit, then kind, so the list is deterministic and a learned ordering can
     only reorder these verified entries later (issue #2759)."""
     code = diagnostic.get("code")
@@ -531,6 +552,8 @@ def generate_repairs(text: str, diagnostic: dict,
         if signature in seen:
             continue
         seen.add(signature)
+        if budget is not None and not budget.take():
+            break
         patched = apply_edits(text, candidate.edits)
         if verify is not None:
             patched_diagnostics = verify(patched)
@@ -538,7 +561,8 @@ def generate_repairs(text: str, diagnostic: dict,
                 continue
         else:
             patched_diagnostics = compute_diagnostics(patched, filename)
-        if not _repair_clears(target, known, patched_diagnostics):
+        if not _repair_clears(target, known, patched_diagnostics,
+                              candidate.edits):
             continue
         survivors.append(candidate)
     survivors.sort(key=lambda repair: (repair.widens_authority,
@@ -565,18 +589,33 @@ def _edit_weight(text: str, edits: list[dict]) -> int:
 
 
 def _repair_clears(target: tuple[str, int], known: set[tuple[str, int]],
-                   patched: list[dict]) -> bool:
+                   patched: list[dict], edits: list[dict] = ()) -> bool:
     """Whether a patched compile clears `target` and adds no new refusal.
 
     `known` already holds the refused compile's diagnostics (and `target`), so a
-    patched diagnostic outside it is a refusal the candidate introduced."""
+    patched diagnostic outside it is a refusal the candidate introduced. Both
+    are moved to the patched file's line numbers first: an edit that deletes
+    or adds lines shifts every record below it, and a shifted pre-existing
+    record is not a new one."""
+    moved = {(code, _patched_line(edits, line)) for code, line in known
+             if (code, line) != target}
     for diag in patched:
         pair = (diag.get("code"), diag["range"]["start"]["line"])
-        if pair == target:
-            return False                 # the refusal is still there
-        if pair not in known:
-            return False                 # the candidate introduced a new one
+        if pair not in moved:
+            return False                 # the refusal itself, or a new one
     return True
+
+
+def _patched_line(edits, line: int) -> int:
+    """Where original zero-based `line` sits after `edits`: each edit ending on
+    or above it moves it by the lines that edit adds minus the lines it spans."""
+    shift = 0
+    for edit in edits:
+        span = edit["range"]
+        if span["end"]["line"] <= line:
+            shift += edit["newText"].count("\n") - (
+                span["end"]["line"] - span["start"]["line"])
+    return line + shift
 
 
 _REQUIREMENT_MESSAGE = re.compile(
@@ -623,10 +662,10 @@ def _g1_requirement_repairs(text: str, diagnostic: dict,
     """G1, ``requirement`` mode: a body reads or calls a key its component does
     not declare. Two ways out, and the split is a question of authority:
 
-    * `add-requires` names the declaration the body already relied on. It is a
-      WIDENING candidate when the service is not provided inside this program
-      (the declaration reaches an ambient capability), and a narrowing one when
-      a sibling component provides it (the reach was always internal).
+    * `add-requires` names the declaration the body already relied on. It is
+      always a WIDENING candidate: a new `requires` row enlarges the authority
+      the component declares, whether a sibling component or an ambient
+      provider satisfies it, so it is returned only on opt-in.
     * `remove-call` drops the declaration that reaches the undeclared key. It is
       offered only when the line is a whole statement (`let x = key.m()`, or a
       bare call line), so the deletion is a syntactic statement rather than a
@@ -644,14 +683,14 @@ def _g1_requirement_repairs(text: str, diagnostic: dict,
     if component is None:
         return []
     repairs: list[Repair] = []
-    for service, internal in _services_for_key(program, key):
+    for service, _internal in _services_for_key(program, key):
         edit = _add_requires_edit(text, component, key, service)
         if edit is None:
             continue
         repairs.append(Repair(
             "add-requires",
             f"Declare `{key}: {service}` in {comp_name}'s `requires` clause",
-            [edit], widens_authority=not internal))
+            [edit], widens_authority=True))
     edit = _remove_call_edit(text, diagnostic)
     if edit is not None:
         repairs.append(Repair(

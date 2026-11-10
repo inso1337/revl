@@ -173,13 +173,18 @@ attaches the survivors to the record. An empty list means the engine ran and
 nothing verified, which is different from a record produced without the text
 (the field is then absent).
 
+Each check is a full compile, so one `report` call spends at most
+`diagnostics.REPAIR_COMPILE_BUDGET` (8) verification compiles across all its
+records. A record reached after the budget is spent keeps no list, as if the
+text were absent, and a record that spends the last of it lists only the
+candidates checked before it ran out.
+
 The authority rule is the safety half. A candidate that enlarges the reach the
 source *declares* is marked `widens_authority: true`, omitted unless the
 caller passes `widens_authority=True`, and never ordered first. `add-requires`
-is the ambient case: naming a requirement nothing in the compilation provides
-reaches an outside capability, so it is opt-in; when a sibling component
-provides the service the reach was always internal and the candidate is
-narrowing. `remove-call`, `rename-key` and `route-via-granted-service` are
+is always widening: a new `requires` row enlarges the authority the component
+declares, whether a sibling component or an ambient provider satisfies it, so
+it is opt-in. `remove-call`, `rename-key` and `route-via-granted-service` are
 always narrowing. Survivors are ordered narrowest authority first, then by the
 smallest edit, then by kind, so the list is deterministic and a later learned
 ordering can only reorder verified entries.

@@ -32,8 +32,9 @@ from revl.lsp.fixgen import apply_edits, generate_repairs
 
 _SERVICES = "service Clock { fn now() -> Int }\nservice UserSvc { fn go() -> Int }\n"
 
-# G1: the program declares the provider of `clock`, so declaring the dependency
-# is an internal reach and the candidate does not widen authority.
+# G1: the program declares the provider of `clock`. Declaring the dependency
+# still adds a `requires` row, so the candidate widens the declared authority
+# even though the reach is internal.
 G1_INTERNAL = _SERVICES + (
     "component Provider provides clock: Clock {\n"
     "  provide clock { fn now() = 1 }\n"
@@ -192,11 +193,11 @@ def _assert_clears(source: str, repair: dict, **compile_kwargs) -> None:
 # --------------------------------------------------------------- one per kind
 
 def test_g1_declares_the_missing_requirement_and_the_patch_clears_it():
-    record = _record(G1_INTERNAL)
+    record = _record(G1_INTERNAL, widens_authority=True)
     kinds = [repair["kind"] for repair in record["repairs"]]
     assert "add-requires" in kinds
     add = next(r for r in record["repairs"] if r["kind"] == "add-requires")
-    assert add["widens_authority"] is False     # the program provides it
+    assert add["widens_authority"] is True      # a new `requires` row
     assert add["fix_code"]["edits"][0]["newText"] == " requires clock: Clock"
     _assert_clears(G1_INTERNAL, add)
 
@@ -258,6 +259,21 @@ def test_a_widening_candidate_is_absent_by_default_and_present_on_opt_in():
     _assert_clears(G1_AMBIENT, opted["repairs"][0])
 
 
+def test_add_requires_widens_even_when_a_sibling_provides_the_key():
+    # a sibling component provides `clock`, but the new `requires` row still
+    # enlarges what User declares: the default list must not carry it
+    default = _record(G1_INTERNAL)
+    assert [r["kind"] for r in default["repairs"]] == []
+    seeds = fixgen._g1_requirement_repairs(
+        G1_INTERNAL, {"code": "G1", "message":
+                      "`clock` is not a declared requirement of User",
+                      "range": {"start": {"line": 6, "character": 0},
+                                "end": {"line": 6, "character": 0}}},
+        "<candidate>.rvl")
+    adds = [seed for seed in seeds if seed.kind == "add-requires"]
+    assert adds and all(seed.widens_authority for seed in adds)
+
+
 def test_a_narrowing_candidate_is_ordered_ahead_of_a_widening_one():
     opted = _record(G1_WHOLE_STATEMENT, widens_authority=True)
     kinds = [repair["kind"] for repair in opted["repairs"]]
@@ -299,7 +315,7 @@ def test_a_candidate_that_leaves_the_refusal_is_dropped():
 
 
 def test_a_repair_entry_carries_the_kind_action_and_verified_edit():
-    record = _record(G1_INTERNAL)
+    record = _record(G1_INTERNAL, widens_authority=True)
     entry = record["repairs"][0]
     assert set(entry) == {"kind", "action", "widens_authority", "fix_code"}
     assert entry["action"] == entry["fix_code"]["title"]
@@ -311,11 +327,72 @@ def test_revl_check_carries_the_verified_repairs_to_the_agent_door():
 
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": "revl_check",
-                                  "arguments": {"source": G1_INTERNAL}}})
+                                  "arguments": {"source": G1_WHOLE_STATEMENT}}})
     record = response["result"]["structuredContent"]["diagnostics"][0]
     assert record["code"] == "G1"
-    assert [repair["kind"] for repair in record["repairs"]] == ["add-requires"]
-    _assert_clears(G1_INTERNAL, record["repairs"][0])
+    # the agent door asks for no widening, so `add-requires` is not offered
+    assert [repair["kind"] for repair in record["repairs"]] == ["remove-call"]
+    _assert_clears(G1_WHOLE_STATEMENT, record["repairs"][0])
+
+
+def _g1_components(count: int) -> str:
+    """`count` components, each reaching the undeclared `clock` from a
+    whole-statement `let`, so each yields one G1 record with two candidates."""
+    source = "service Clock { fn now() -> Int }\n"
+    for i in range(count):
+        source += (
+            f"service S{i} {{ fn go() -> Int }}\n"
+            f"component C{i} provides s{i}: S{i} {{\n"
+            f"  provide s{i} {{\n"
+            "    fn go() -> Int {\n"
+            "      let t = clock.now()\n"
+            "      return 1\n"
+            "    }\n"
+            "  }\n"
+            "}\n")
+    return source
+
+
+def _report_counting(source: str, **kwargs) -> tuple[dict, list[str]]:
+    compiles: list[str] = []
+    check = _verifier_for(source)
+
+    def verify(patched: str, error: RevlError):
+        compiles.append(patched)
+        return check(patched, error)
+
+    try:
+        compile_source(source, "<candidate>.rvl")
+    except RevlError as error:
+        return (report(error, sources={"<candidate>.rvl": source},
+                       verifier=verify, **kwargs), compiles)
+    raise AssertionError("expected a refusal")
+
+
+def test_one_report_spends_one_compile_budget_across_its_records():
+    source = _g1_components(12)
+    payload, compiles = _report_counting(source, widens_authority=True)
+    records = payload["diagnostics"]
+    assert [record["code"] for record in records] == ["G1"] * 12
+    # two candidates per record would be 24 compiles without a shared budget
+    assert len(compiles) == 8
+    from revl.diagnostics import REPAIR_COMPILE_BUDGET
+    assert REPAIR_COMPILE_BUDGET == 8
+    unchecked = [record for record in records if "repairs" not in record]
+    assert len(unchecked) == 12 - REPAIR_COMPILE_BUDGET // 2
+
+
+def test_a_line_removal_is_kept_when_later_refusals_shift_up():
+    # removing C0's `let` line moves C1's and C2's G1 records up one line; they
+    # are the same pre-existing refusals, not new ones
+    source = _g1_components(3)
+    payload, _compiles = _report_counting(source)
+    for record in payload["diagnostics"]:
+        assert [r["kind"] for r in record["repairs"]] == ["remove-call"]
+        patched = apply_edits(source, record["repairs"][0]["fix_code"]["edits"])
+        with pytest.raises(RevlError) as refused:
+            compile_source(patched, "<patched>.rvl")
+        assert len(refused.value.errors) == 2
 
 
 # ------------------------------------------------------------ explain, records

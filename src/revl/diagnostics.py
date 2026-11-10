@@ -512,6 +512,10 @@ REPAIR_KINDS: dict[str, tuple[str, ...]] = {
 #: The codes `report` may ask the fixgen engine to repair from source.
 REPAIRABLE_CODES = frozenset(REPAIR_KINDS)
 
+#: The verification compiles one `report` call may spend on candidate repairs,
+#: across all its records.
+REPAIR_COMPILE_BUDGET = 8
+
 # The same split for the guarantee one-liner. `GUARANTEES[code]` is the code's
 # headline — it is what `revl explain`, the LSP hover and three generated docs
 # render — and it is written for the code's commonest mode. A mode whose
@@ -805,6 +809,8 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
                 for record in records]
     from .lsp import fixgen  # noqa: PLC0415
 
+    # one compile budget for the whole report, not one per record
+    budget = fixgen.CompileBudget(REPAIR_COMPILE_BUDGET)
     for record, one in zip(records, errors):
         repairs = record.get("repairs")
         text = _compiled_text(one, sources)
@@ -839,10 +845,12 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
             # record instead of an empty list that reads as "checked, nothing
             # found".
             continue
+        if budget.remaining <= 0:
+            continue                     # unchecked, so no list that reads as checked
         generated = fixgen.generate_repairs(
             text, diagnostic, one.filename,
             widens_authority=widens_authority, verify=verify,
-            baseline=baseline)
+            baseline=baseline, budget=budget)
         # The list is present even when it is empty: the engine ran and found no
         # candidate that verifies, which a caller must be able to tell from "no
         # engine ran" (the same split issue #2845 made for `repair`).
