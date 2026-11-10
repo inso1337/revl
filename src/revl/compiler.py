@@ -390,6 +390,12 @@ class _ModuleLoader:
         # MCP door reads it to tell whether a compile reached a file an export
         # wrote, which `dependencies` cannot say for an install-origin path.
         self.disk_reads: dict[str, str] = {}
+        # issue #3198: every NON-module host file this compile read from disk — a
+        # `@backend file` body, a `ref` target, an `asset`. A container-sandboxed
+        # process re-compiles its roots inside the boundary (item 337), so the
+        # driver has to mount exactly these files too; they are reported through
+        # `compile_files(report=)`'s `host_file_reads` key, outside the IR.
+        self.host_file_reads: set[str] = set()
         # issue #2195: `(realpath(stdlib_root()), str(stdlib_root().parent))`,
         # taken once per loader instead of once per origin question.
         self._stdlib_paths: tuple[str, str] | None = None
@@ -727,7 +733,8 @@ class _ModuleLoader:
             # virtual (in-memory) module resolves ONLY through the sources map
             # (no disk fallback, re-review F5).
             _resolve_body_files(program, os.path.dirname(abs_path),
-                                self._sources, virtual is not None)
+                                self._sources, virtual is not None,
+                                reads=self.host_file_reads)
             # item 396 option B: resolve external host-MODULE refs against the
             # ROOT-tree jail (a different root than A's per-module jail: B's file
             # must be reachable at deploy time through one import root). A ref
@@ -750,7 +757,8 @@ class _ModuleLoader:
                             or _program_has_asset(program) else None)
             _resolve_refs(program, os.path.dirname(abs_path),
                           self._root_dirs(), self._sources, virtual is not None,
-                          install_root=install_root)
+                          install_root=install_root,
+                          reads=self.host_file_reads)
             # item 459 F1: resolve every `asset "<path>"` under the SAME jail
             # the ref above resolves under (same roots, same origin rule, same
             # containment check). After this each asset node is a record
@@ -760,7 +768,8 @@ class _ModuleLoader:
             _resolve_assets(program, os.path.dirname(abs_path),
                             self._root_dirs(), self._sources,
                             virtual is not None,
-                            install_root=install_root)
+                            install_root=install_root,
+                            reads=self.host_file_reads)
             if py_bodies:
                 _check_user_py_body_imports(
                     program, install_root is not None
@@ -1313,7 +1322,13 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     module the loader read from the disk mapped to the text compiled for it,
     and `report["host_extern_sources"]`, the host-body extern names declared
     by each compiled source path. Extern names are unique after lowering, so a
-    name has one declaration source. It is never part of the returned document.
+    name has one declaration source. It also carries `report["disk_reads"]`
+    (every module read, install-origin ones included) and, from issue #3198,
+    `report["host_file_reads"]` (the NON-module files a `ref`, `asset` or
+    `@backend file` body read from disk), so a caller that has to reproduce
+    this compile elsewhere — the container-sandboxed runner's item-337
+    recompile — can name its exact input set. It is never part of the returned
+    document.
 
     Under the export rule (`_export_rule`, issue #2547), on unless the MCP
     server turned it off, an operator compile that names or reaches a file
@@ -1825,6 +1840,9 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         # compiled for each.
         report["dependencies"] = dict(loader.dependencies)
         report["disk_reads"] = dict(loader.disk_reads)
+        # issue #3198: the non-module files the compile read (ref, asset, host
+        # body), so a container-sandboxed recompile can be handed their mounts.
+        report["host_file_reads"] = sorted(loader.host_file_reads)
         host_extern_sources: dict[str, list[str]] = {}
         for name, (_extern, path) in _included_host_externs(included).items():
             host_extern_sources.setdefault(os.path.abspath(path), []).append(name)

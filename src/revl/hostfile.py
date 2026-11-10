@@ -164,13 +164,20 @@ def _read_all(fd: int) -> bytes:
 
 def read_body_file_disk(module_dir: str, written: str, backend: str,
                         decl_name: str, filename: str,
-                        line: int) -> tuple[str, str]:
+                        line: int,
+                        reads: set[str] | None = None) -> tuple[str, str]:
     """Read a body file from disk under the jail. Returns
     `(normalized_text, sha256_of_raw_bytes)`.
 
     open-then-fstat-then-validate: open once, confirm it is a regular file,
     validate containment against the OPENED handle's real path, and read from
     that same fd, so the checked file and the spliced file are identical.
+
+    `reads` (issue #3198) is the collector the compiler passes so a
+    container-sandboxed recompile can be handed exactly this file as a mount.
+    Both the spelling the sandbox will construct (the module dir joined with
+    the written path) and the real path the bytes came from are recorded: a
+    symlinked body file needs the one, a symlink-resolved open the other.
     """
     _reject_bad_written_path(written, backend, decl_name, filename, line)
     candidate = os.path.join(module_dir, written)
@@ -218,6 +225,9 @@ def read_body_file_disk(module_dir: str, written: str, backend: str,
                      "396 jail). The one accepted residual is a hardlink inside "
                      "the tree to a file outside it, which needs write access "
                      "inside the tree to create.")
+        if reads is not None:
+            reads.add(os.path.abspath(candidate))
+            reads.add(real_file)
         data = _read_all(fd)
     finally:
         os.close(fd)
@@ -255,12 +265,16 @@ def read_body_file_memory(sources: dict[str, str], module_dir: str,
 
 
 def resolve_body_files(program, module_dir: str, sources: dict[str, str],
-                       is_virtual: bool) -> None:
+                       is_virtual: bool,
+                       reads: set[str] | None = None) -> None:
     """Replace every `HostBodyFile` node in `program`'s externs with a resolved
     `HostBody` carrying the spliced (normalized) text plus provenance (the
     written path and the sha256 of the raw file bytes). A virtual module
     resolves through `sources` only; a real module reads from disk under the
-    jail. After this runs, nothing downstream ever sees a `HostBodyFile`."""
+    jail. After this runs, nothing downstream ever sees a `HostBodyFile`.
+
+    `reads` (issue #3198) collects the disk paths a real read touched, so the
+    sandbox driver can mount them for the in-boundary recompile."""
     from .parser import HostBody, HostBodyFile
 
     for ext in program.externs:
@@ -274,7 +288,7 @@ def resolve_body_files(program, module_dir: str, sources: dict[str, str],
             else:
                 text, digest = read_body_file_disk(
                     module_dir, body.path, body.backend, ext.name,
-                    program.filename, body.line)
+                    program.filename, body.line, reads=reads)
             ext.bodies[index] = HostBody(
                 body.backend, text, body.line,
                 source_path=body.path, sha256=digest)
