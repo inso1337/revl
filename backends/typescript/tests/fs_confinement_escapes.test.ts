@@ -508,3 +508,67 @@ describe('#3235: a dangling outside symlink is refused, not resolved inward', ()
     expect(r.value.code).toBe('EOUTSIDE')
   })
 })
+
+// ===========================================================================
+// #3284: the dangling-link walk must resolve link TEXT one component at a time,
+// as py's realpath does, and refuse a walk it cannot finish with the caller's
+// path. Peers of the #3284 cases in tests/test_fs_confinement_escapes.py.
+// ===========================================================================
+
+/** The refusal `resolveWithin` and `fsLexists` give for `given`, asserted to
+ * be the same EOUTSIDE naming the caller's own path. */
+function expectOutsideRefusal(given: string): void {
+  let caught: unknown
+  try { resolveWithin(given) } catch (e) { caught = e }
+  expect(caught).toBeInstanceOf(FsOpError)
+  expect((caught as FsOpError).code).toBe('EOUTSIDE')
+  expect((caught as FsOpError).path).toBe(given)
+  const r = host.fsLexists(given)
+  expect(r.kind).toBe('Err')
+  if (r.kind !== 'Err') return
+  expect(r.value.code).toBe('EOUTSIDE')
+  expect(r.value.path).toBe(given)
+}
+
+describe('#3284: a `..` in link text applies to the resolved component', () => {
+  it('answers the same whether or not the outside name exists', () => {
+    // `inlink` leaves the root, so `<ws>/inlink/../X` is `<outside>/X` to the
+    // kernel. Collapsing the `..` lexically turned it into `<ws>/X` whenever
+    // the link dangled, so the answer told whether `<outside>/X` exists.
+    fs.mkdirSync(outWs('deep'))
+    fs.symlinkSync(outWs('deep'), inWs('inlink'))
+    fs.symlinkSync(`${ws}/inlink/../X`, inWs('D'))
+    const given = inWs('D/x')
+    expectOutsideRefusal(given)        // `<outside>/X` absent
+    fs.mkdirSync(outWs('X'))
+    expectOutsideRefusal(given)        // `<outside>/X` present
+    fs.rmdirSync(outWs('X'))
+    fs.writeFileSync(outWs('X'), 'x\n')
+    expectOutsideRefusal(given)        // `<outside>/X` a file
+  })
+
+  it('a `..` in link text that comes back inside still resolves inside', () => {
+    fs.mkdirSync(inWs('sub'))
+    fs.symlinkSync(inWs('sub'), inWs('sublink'))
+    fs.symlinkSync(`${ws}/sublink/../missing`, inWs('back'))
+    expect(resolveWithin(inWs('back/leaf'))).toBe(inWs('missing/leaf'))
+  })
+})
+
+describe('#3284: a walk that cannot finish is refused with the caller\'s path', () => {
+  it('an inside link into an outside symlink cycle is EOUTSIDE, not ELOOP', () => {
+    fs.symlinkSync(outWs('c2'), outWs('c1'))
+    fs.symlinkSync(outWs('c1'), outWs('c2'))
+    fs.symlinkSync(outWs('c1'), inWs('cyc'))
+    for (const given of [inWs('cyc'), inWs('cyc/x')]) expectOutsideRefusal(given)
+  })
+
+  it('a link chain past the 40-link budget is EOUTSIDE, not ELOOP', () => {
+    // l0 -> l1 -> ... -> l44 -> <outside>/end, every link outside the root
+    for (let i = 0; i < 45; i++) {
+      fs.symlinkSync(i === 44 ? outWs('end') : outWs(`l${i + 1}`), outWs(`l${i}`))
+    }
+    fs.symlinkSync(outWs('l0'), inWs('chain'))
+    for (const given of [inWs('chain'), inWs('chain/x')]) expectOutsideRefusal(given)
+  })
+})
