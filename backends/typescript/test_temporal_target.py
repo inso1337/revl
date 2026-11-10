@@ -279,9 +279,11 @@ def test_extern_named_temporal_scaffolding_refused(name):
 
 
 def test_activity_named_input_refused_in_a_component_with_config():
-    """The `input` activity passes the module-scope check (the destructuring is
-    legal) but the generated `input: PayInput` parameter shadows it at the call
-    site; the body-reserved set must be applied to activity names too."""
+    """A configured component does not change the rule: `input` is refused for
+    the extern before rendering, so the generated `input: PayInput` parameter
+    cannot shadow an activity of that name. The body-name check in `register`
+    is defensive: a service-derived activity name always carries the uppercase
+    key/method join, and every extern is already refused here."""
     src = (
         'extern emission fn input(card: Str) -> Str = @ts { return "ok" }\n'
         "component Pay {\n"
