@@ -384,7 +384,9 @@ policy-style why:
 
 ### What each verb touches
 
-The target set is computed **before** the action runs, from the session's IR:
+The target set is computed **before** the action runs, from the composition
+that would run: the session's IR for a change to the running composition, the
+candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
 
 * **swap** — the components the candidate actually *changes*: those added,
   removed, or whose IR entry differs (modulo provenance) from the running
@@ -397,7 +399,9 @@ The target set is computed **before** the action runs, from the session's IR:
   realm it leaves never counts toward an allow. A no-op or server-side
   re-admit targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
-* **restore** — every component named in the snapshot manifest.
+* **restore** — every component the snapshot's `sources` compile to, the
+  composition that actually boots. The document's `manifest` and
+  `meta.components` are caller-written claims and scope nothing.
 * **unload / edit / snapshot / undo / rollback** — the whole running
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:

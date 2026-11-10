@@ -1056,19 +1056,31 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
 
 
 def _snapshot_targets(snap: dict | None) \
-        -> list[tuple[str, frozenset[str]]]:
-    """A restore's targets, read from the snapshot manifest without compiling
-    (a snapshot is re-admitted by the handler; gating only needs the names)."""
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A restore's targets, derived from the composition its `sources` compile
+    to — never from the `manifest` the caller writes.
+
+    A snapshot document is caller-supplied JSON, so its `manifest` and `meta`
+    are claims, not evidence. Reading them scoped the gate to a composition the
+    caller described rather than the one that boots: an operator granted
+    `restore` on one subject could name that subject there while its sources
+    compiled and loaded anything (issue #3197). This compiles the same sources
+    the handler re-admits, as `_targets` does for a `load` candidate.
+
+    Unprofiled by the same rule as :func:`_compile_candidate`: it derives names
+    and realms, lowers no host body and boots nothing, and the handler's own
+    compile under the authoring profile still runs. ``None`` when the document
+    has no sources or does not compile — an *undecidable* target set, which
+    :func:`decide` fails closed on."""
     if not isinstance(snap, dict):
         return [("*", frozenset({WHOLE}))]
-    manifest = (snap.get("manifest") or {})
-    from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
+    from .persist import recompile_snapshot  # noqa: PLC0415 — lazy, no cycle
 
-    targets = []
-    for entry in manifest.get("components") or []:
-        name = entry.get("name")
-        targets.append((name, frozenset({name}) | component_realms(manifest, name)))
-    return targets or [("*", frozenset({WHOLE}))]
+    try:
+        ir = recompile_snapshot(snap)
+    except Exception:  # noqa: BLE001 - a failed derivation must not widen
+        return None
+    return _live_targets(ir)
 
 
 def _compile_candidate(arguments: dict, manifest: dict | None = None,
@@ -1221,8 +1233,7 @@ def _targets(verb: str, session, arguments: dict) \
 def _approve_targets(session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """A `revl_approve`'s target: the crossing component the approval names,
-    resolved WITHOUT running anything (the same resolve-without-running pattern
-    `_snapshot_targets` uses for `restore`). A ticket `hash` resolves against the
+    resolved WITHOUT running anything. A ticket `hash` resolves against the
     session's outstanding-ticket table; a proactive item-344 `capability` grant
     resolves against the live class map. Either way the target scopes to the
     crossing component and its realms, so a subject-scoped `may approve on

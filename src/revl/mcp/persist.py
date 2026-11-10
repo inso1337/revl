@@ -236,6 +236,21 @@ def admitted_name(snap: dict | None) -> str:
     return "<snapshot>.rvl"
 
 
+def recompile_snapshot(snap: dict | None, profile=None,
+                       report: dict | None = None) -> dict:
+    """The IR `restore` re-admits from `snap`: its `sources` compiled through
+    the entry points a live `revl_load` uses.
+
+    One spelling for the handler and for the operator gate's target derivation
+    (issue #3197). The gate used to read its targets from the document's
+    `manifest`, which the caller writes, so a snapshot could claim one
+    component and boot another. Deriving from this compile scopes the gate to
+    the composition that runs, not to the document's description of it."""
+    sources = (snap or {}).get("sources") or {}
+    return _recompile(sources, admitted_name(snap), profile=profile,
+                      report=report)
+
+
 def _recompile(sources: dict, name: str = "<snapshot>.rvl",
                profile=None, report: dict | None = None) -> dict:
     """Compile the snapshotted sources through the very entry points a live
@@ -402,8 +417,7 @@ def restore(session, snap: dict, profile=None,
     _refuse_policy_downgrade(session, meta)
 
     try:
-        ir = _recompile(sources, admitted_name(snap), profile=profile,
-                        report=report)
+        ir = recompile_snapshot(snap, profile=profile, report=report)
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic
@@ -412,10 +426,12 @@ def restore(session, snap: dict, profile=None,
     # defence in depth: the runtime IR is the freshly compiled one, never the
     # stored manifest. Verify re-admission produced the composition the
     # snapshot described, so a silent drift is a loud refusal, not a smuggle.
+    # Unconditional (issue #3197): a caller-supplied document that leaves
+    # `meta.components` out claims nothing, and an absent claim is not a match.
     claimed = set(meta.get("components") or [])
     got = {entry.get("name")
            for entry in (ir.get("manifest") or {}).get("components") or []}
-    if claimed and claimed != got:
+    if claimed != got:
         raise RestoreError(
             f"restore refused: re-admission produced components {sorted(got)}, "
             f"but the snapshot claimed {sorted(claimed)} — the sources no "

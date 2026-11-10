@@ -74,8 +74,10 @@ no code path in restore that loads a component without first re-admitting it.
 As defence in depth, after recompiling, restore verifies that the re-admitted
 component set matches the set the snapshot claimed. If the sources no longer
 reproduce the snapshotted composition, that is a loud refusal too, not a quiet
-substitution. The authority is always the freshly compiled IR; the stored
-manifest is only ever compared against, never loaded.
+substitution. A document that names no components claims nothing, which is not
+a match either: the check is unconditional, and a snapshot from `revl_snapshot`
+always names the set it was taken from. The authority is always the freshly
+compiled IR; the stored manifest is only ever compared against, never loaded.
 
 ## Using it
 
