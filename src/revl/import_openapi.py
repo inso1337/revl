@@ -1939,7 +1939,7 @@ def load_document(text: str, *, filename: str = "<openapi>") -> object:
                  "YAML rather than parse it. Convert the spec once — "
                  "`python -c \"import sys,yaml,json; "
                  "json.dump(yaml.safe_load(open(sys.argv[1], "
-                 "encoding=\\\"utf-8\\\")), sys.stdout)\" "
+                 "encoding='utf-8')), sys.stdout)\" "
                  "spec.yaml > spec.json` — or install PyYAML, which this "
                  "importer will use if it is importable") from None
     try:
