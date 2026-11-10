@@ -155,9 +155,11 @@ restore-ward. Those providers start warm on the restored generation. Every
 other one still starts cold, with the `stateDropped` report naming it (and the
 swap report's `handoff` entry carrying `migrated: false, reason:
 "incompatible"` when a restored hand-off exists but does not accept the running
-state). The restored code's authorship counts as it did on the forward swap
-to it: an undo to an agent-authored generation applies the multi-realm rule
-above, so a frame spanning realms starts cold with `reason: "multi-realm"`.
+state). The restored code's authorship counts as it was recorded when that
+generation was admitted (by its load, swap or rollback; an unrecorded one
+counts as agent-authored): an undo to an agent-authored generation applies
+the multi-realm rule above, so a frame spanning realms starts cold with
+`reason: "multi-realm"`.
 The resource-vector check of step 2 does not refuse an undo: a carried
 provider whose runtime resources differ in count or type starts cold with
 `reason: "resources"` and the undo completes, where a forward swap is rolled

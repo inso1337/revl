@@ -268,6 +268,11 @@ def test_undo_starts_cold_when_the_resource_vector_differs():
     assert entry["migrated"] is False, entry
     assert entry["reason"] == "resources", entry
     assert "2 stateful resource(s)" in entry["note"], entry
+    # the completed undo's dossier says what really happened: dropped
+    dropped = undone["dossier"]["stateDropped"]
+    assert dropped["components"] == ["MeterBook"], dropped
+    assert "carried" not in dropped, dropped
+    assert "MeterBook is dropped" in dropped["note"], dropped
 
 
 @needs_runtime
@@ -357,3 +362,125 @@ def test_undo_to_an_agent_authored_generation_keeps_the_multi_realm_rule(
     assert read["ok"] is True and read.get("result") != SECRET[1], read
     assert _secret_store().data.get(SECRET[0]) is None
     assert undone["handoff"]["board"] == forward["handoff"]["board"], undone
+    _assert_dossier_dropped(undone, "Mixed")
+
+
+def _assert_dossier_dropped(undone: dict, component: str) -> None:
+    """A slot the completed undo started cold is reported as dropped, not as
+    carried: the dossier settles the plan against the `handoff` report."""
+    dropped = undone["dossier"]["stateDropped"]
+    assert component in dropped["components"], dropped
+    assert component not in (dropped.get("carried") or []), dropped
+    assert f"{component} is dropped" in dropped["note"], dropped
+
+
+def _assert_no_leak(undone: dict) -> None:
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert undone["handoff"]["board"]["migrated"] is False, undone
+    assert undone["handoff"]["board"]["reason"] == "multi-realm", undone
+    read = _call("revl_call", {"key": "board", "method": "get",
+                               "args": [SECRET[0]]})
+    assert read["ok"] is True and read.get("result") != SECRET[1], read
+    _assert_dossier_dropped(undone, "Mixed")
+
+
+@needs_runtime
+def test_a_rollback_generation_keeps_the_authorship_of_the_code_it_restores(
+        tmp_path, monkeypatch):
+    """`revl_rollback` restores the agent-authored generation 2's code, so
+    the generation it makes is agent-authored too: an undo to it later gets
+    the multi-realm cold start, not the operator's warm one."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("open"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    for board_reads in ("secret", "open"):
+        changed = _call("revl_change", {"commit": True, "replace": {
+            "component": "Mixed", "source": _mixed(board_reads)}})
+        assert changed["ok"] is True and changed.get("committed"), changed
+    rolled = _call("revl_rollback", {})
+    assert rolled["ok"] is True, rolled
+    history = server_mod.SESSION._history
+    assert history[-1]["agentAuthored"] is True, history[-1]
+    rollback_generation = history[-1]["generation"]
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert changed["ok"] is True and changed.get("committed"), changed
+    _secret_store().insert(*SECRET)
+
+    _assert_no_leak(_call("revl_undo", {"to": rollback_generation}))
+
+
+@needs_runtime
+def test_an_inline_load_is_agent_authored_for_a_later_undo(
+        tmp_path, monkeypatch):
+    """Inline source over the transport is agent text at `revl_load` as at a
+    forward swap, so an undo back to generation 1 keeps the multi-realm rule."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    loaded = _call("revl_load", {"source": MIXED_SERVICE + _mixed("secret")})
+    assert loaded["ok"] is True, loaded
+    assert server_mod.SESSION._history[-1]["agentAuthored"] is True
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert changed["ok"] is True and changed.get("committed"), changed
+    _secret_store().insert(*SECRET)
+
+    _assert_no_leak(_call("revl_undo", {"to": 1}))
+
+
+@needs_runtime
+def test_a_history_entry_without_authorship_reads_as_agent_authored(
+        tmp_path, monkeypatch):
+    """Fail closed: a generation recorded without `agentAuthored` (a load
+    made by a caller that has no compile report) is undone to as
+    agent-authored code."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("secret"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    server_mod.SESSION._history[-1].pop("agentAuthored", None)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert changed["ok"] is True and changed.get("committed"), changed
+    _secret_store().insert(*SECRET)
+
+    _assert_no_leak(_call("revl_undo", {"to": 1}))
+
+
+@needs_runtime
+def test_control_an_operator_file_load_still_carries_back_warm(
+        tmp_path, monkeypatch):
+    """The control for the fail-closed rules: an operator file under
+    untrusted host code is the operator's own text, so an undo to it carries
+    the multi-realm frame back warm, as before."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=False)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("open"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    assert server_mod.SESSION._history[-1]["agentAuthored"] is False
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(MIXED_SERVICE + _mixed("open").replace(
+        "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    swapped = _call("revl_swap", {"files": [str(successor)],
+                                  "replacing": ["Mixed"]})
+    assert swapped["ok"] is True and swapped.get("swapped"), swapped
+    _secret_store().insert(*SECRET)
+
+    undone = _call("revl_undo", {"to": 1})
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert undone["handoff"]["board"]["migrated"] is True, undone
+    assert _secret_store().data.get(SECRET[0]) == SECRET[1]
+    assert undone["dossier"]["stateDropped"]["carried"] == ["Mixed"]

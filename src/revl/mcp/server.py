@@ -1773,7 +1773,10 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
         include_trusted_files=True)
     _with_authored_host_bodies(origin, authored)
     try:
-        state = SESSION.load(ir, config, record=record, origin=origin)
+        # issue #3293: the generation records who wrote it, as a forward swap
+        # does, so an undo back to it applies the agent-authored rules
+        state = SESSION.load(ir, config, record=record, origin=origin,
+                             agent_authored=bool(compile_report.get("authored")))
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:

@@ -847,6 +847,32 @@ def _handoff_cold_report(successors: dict, pre: dict) -> dict:
     return report
 
 
+def _settle_undo_carry(dropped: dict, held: list[str], back: dict,
+                       handoff: dict | None, to: int) -> None:
+    """Issue #3293: settle a completed undo's `stateDropped` against what
+    really crossed. The plan lists as `carried` every running component with
+    a compatible hand-off in the restore direction, but the restore can still
+    start a slot cold (the multi-realm rule, or a resource vector that does
+    not match). Each such component moves from `carried` to `components`, and
+    the note is rewritten to name it. `back` is `_handoff_back_pairs` for the
+    undo, `held` the running components that held live state."""
+    cold = {entry.get("component") for entry in (handoff or {}).values()
+            if isinstance(entry, dict) and entry.get("migrated") is False}
+    planned = dropped.get("carried") or []
+    moved = [name for name in planned if back.get(name) in cold]
+    if not moved:
+        return
+    carried = [name for name in planned if name not in moved]
+    dropped["components"] = sorted(set(dropped["components"]) | set(moved))
+    if carried:
+        dropped["carried"] = carried
+    else:
+        dropped.pop("carried", None)
+    lost = [name for name in held if name not in back or name in moved]
+    dropped["note"] = undo_dropped_state_note(lost, to, done=True,
+                                              carried=carried)
+
+
 def _resource_mismatch(key: str, resources: list, captured: list) -> str | None:
     """Why a captured resource vector cannot be re-seated onto `resources`
     (a different count, or a resource of a different type at some position),
@@ -950,6 +976,9 @@ class Session:
         # snapshotted, because there is nothing to replay through the gate.
         self.origin: dict | None = None
         self.previous_origin: dict | None = None  # origin `rollback` restores
+        # issue #3293: the authorship of `previous`, which `rollback` restores
+        # and records with the generation it makes. Unknown reads as agent.
+        self.previous_agent_authored: bool = True
         # the retained generation history (roadmap item 65). `previous` above is
         # the depth-1 slot `rollback` uses and keeps its old semantics; this is
         # the deep version: every admitted change (load, swap, undo) appends a
@@ -1426,20 +1455,26 @@ class Session:
     # -- lifecycle ---------------------------------------------------------
 
     def load(self, ir: dict, config: dict | None = None,
-             record: bool = False, origin: dict | None = None) -> dict:
+             record: bool = False, origin: dict | None = None, *,
+             agent_authored: bool | None = None) -> dict:
         """Boot `ir` as this session's composition, or change nothing.
 
         A load that is refused, raises a ticket, or faults leaves the session
         exactly as it found it, apart from `_SURVIVES_A_FAILED_LOAD` (issue
         #1444). It used to leave the refused composition in place, so every
         later load failed with "a composition is already loaded" while the
-        caller had been told its load failed."""
+        caller had been told its load failed.
+
+        `agent_authored` is the authorship the caller's compile reported (the
+        server passes its compile report's `authored`, as a forward swap
+        does). None records it as unknown, which an undo to this generation
+        reads as agent-authored (issue #3293)."""
         self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         checkpoint = _LoadCheckpoint(self)
         try:
-            return self._boot(ir, config, record, origin)
+            state = self._boot(ir, config, record, origin)
         except BaseException as exc:
             checkpoint.restore(self)
             if checkpoint.had_no_loop and self._driver is None:
@@ -1448,6 +1483,10 @@ class Session:
                 self._close_loop()
             _name_the_candidate(exc, ir)
             raise
+        # issue #3293: the generation `_boot` just recorded says who wrote it
+        if agent_authored is not None and self._history:
+            self._history[-1]["agentAuthored"] = bool(agent_authored)
+        return state
 
     def _boot(self, ir: dict, config: dict | None, record: bool,
               origin: dict | None) -> dict:
@@ -2115,15 +2154,17 @@ class Session:
         # inherit live operator instance state by default. Run the gate for
         # every agent-authored successor; an operator swap (agent_authored
         # False) keeps generational migration.
-        # Issue #3293: an undo (`handoff_back`) passes the restored
-        # generation's authorship so the multi-realm rule in
-        # `_restore_provider_state` applies, but it does not run this gate:
-        # it captures no instances, and it carries a provider only across a
-        # hand-off whose restored shape accepts the running one
-        # (`_handoff_back_pairs`), so nothing this gate refuses can cross, and
-        # an undo stays the escape hatch rather than a refusable change.
-        if migrate == "declared" or (agent_authored
-                                     and migrate != "handoff_back"):
+        # Issue #3293: an undo (`handoff_back`) and a rollback (`respawn`)
+        # pass the restored generation's authorship, so the multi-realm rule
+        # in `_restore_provider_state` applies and the history records who
+        # wrote the code, but neither runs this gate. Neither captures
+        # instances; a rollback captures no provider state at all, and an undo
+        # carries a provider only across a hand-off whose restored shape
+        # accepts the running one (`_handoff_back_pairs`). Nothing this gate
+        # refuses can cross, and both stay escape hatches rather than
+        # refusable changes.
+        if migrate == "declared" or (
+                agent_authored and migrate not in ("respawn", "handoff_back")):
             self._enforce_declared_disclosure(old_ir, ir)
         # issue #1446: render the successor while the running generation is still
         # up. The emitter's refusal is raised here, so a document the py tier
@@ -2193,8 +2234,10 @@ class Session:
         old_ir, new_map = plan.old_ir, plan.new_map
         pre, handoff_pre = plan.pre, plan.handoff_pre
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
+        saved_previous_authored = self.previous_agent_authored
         self.previous = self.ir
         self.previous_origin = self.origin
+        self.previous_agent_authored = self._running_agent_authored()
         # item 473: the generation ends HERE — the teardown below is the point of
         # no return, and every earlier exit from `swap` is a refusal that leaves
         # gen N running and so must NOT seal it. Sealed before the dispose so the
@@ -2246,9 +2289,11 @@ class Session:
             # activation failure is an answer; anything else is still re-raised
             # as the fault it is, after the rollback.
             self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
-                             handoff_pre)
-            self._record_generation(agent_authored=bool(
-                self._history and self._history[-1].get("agentAuthored")))
+                             handoff_pre,
+                             saved_previous_authored=saved_previous_authored)
+            self._record_generation(agent_authored=(
+                self._history[-1].get("agentAuthored")
+                if self._history else None))
             if not isinstance(exc, _activation_error()):
                 raise
             raise SessionError(
@@ -2269,7 +2314,8 @@ class Session:
                 # instance state, so a rejected migration leaves nothing changed
                 # and nothing half-migrated.
                 self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
-                                 handoff_pre)
+                                 handoff_pre,
+                                 saved_previous_authored=saved_previous_authored)
                 raise SessionError(
                     f"swap rejected: a live instance's state cannot migrate onto "
                     f"the successor — {exc}. The running composition is untouched "
@@ -2287,7 +2333,8 @@ class Session:
                 # provider whose resource vector diverges from its declaration
                 # still rolls the whole swap back rather than dropping state.
                 self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
-                                 handoff_pre)
+                                 handoff_pre,
+                                 saved_previous_authored=saved_previous_authored)
                 raise SessionError(
                     f"swap rejected: a provider's hand-off state cannot cross onto "
                     f"the successor — {exc}. The running composition is untouched "
@@ -2512,7 +2559,8 @@ class Session:
     def _abort_swap(self, old_ir: dict, pre: dict,
                     saved_previous: dict | None,
                     saved_previous_origin: dict | None,
-                    handoff_pre: dict | None = None) -> None:
+                    handoff_pre: dict | None = None, *,
+                    saved_previous_authored: bool = True) -> None:
         """Undo a swap whose migration was rejected: tear down the rejected
         successor, reload the predecessor, and re-seat the captured state —
         both spawned-instance state and provider hand-off state — onto the
@@ -2523,6 +2571,7 @@ class Session:
         driver.ir = self.ir = old_ir
         self.origin = self.previous_origin
         self.previous, self.previous_origin = saved_previous, saved_previous_origin
+        self.previous_agent_authored = saved_previous_authored
         self._generation += 1
         self._slo_begin_generation()
         # item 245: the reloaded predecessor is a fresh generation — install its
@@ -2937,8 +2986,12 @@ class Session:
         # today's teardown semantics for instances (no cross-generation state
         # migration back), so it stays byte-identical to the pre-item-10 path.
         try:
+            # issue #3293: the restored code keeps its own authorship, so the
+            # generation this records says who wrote it, and a later undo to
+            # it applies the same agent-authored hand-off rules.
             result = self.swap(restored, origin=restored_origin,
-                               migrate="respawn", agent_authored=False)
+                               migrate="respawn",
+                               agent_authored=self.previous_agent_authored)
         except Exception as error:  # noqa: BLE001 - re-raised below
             # The generation counter moves at the teardown and nowhere before
             # it, so a failure that left it alone left the running generation
@@ -3363,7 +3416,7 @@ class Session:
     # -- generation history and undo (roadmap item 65) ---------------------
 
     def _record_generation(self, readmittable: bool = True, *,
-                           agent_authored: bool = False) -> None:
+                           agent_authored: bool | None = None) -> None:
         """Append the now-live generation to the retained history.
 
         The entry is a *re-admittable snapshot* (item 15's persist bundle) plus
@@ -3378,10 +3431,11 @@ class Session:
         `origin` reproducing the *pre-apply* sources, which must never stand in
         as the post-apply generation's re-admission bundle.
 
-        `agent_authored` is the authorship the admitting swap ran under
-        (`_SwapPlan.agent_authored`); an undo to this generation restores the
-        same code, so it applies the same agent-authored hand-off rules
-        (issue #3293)."""
+        `agent_authored` is the authorship the admitting change ran under
+        (`_SwapPlan.agent_authored`, or the load's compile report); an undo
+        to this generation restores the same code, so it applies the same
+        agent-authored hand-off rules (issue #3293). None leaves it unknown:
+        the entry has no `agentAuthored`, which reads as agent-authored."""
         from .persist import build_snapshot  # noqa: PLC0415 — lazy
 
         # best-effort: a files-based origin materializes by reading the source
@@ -3396,17 +3450,26 @@ class Session:
                                       self.recorder is not None)
             except OSError:
                 snap = None
-        self._history.append({
+        entry = {
             "generation": self._generation,
             "snapshot": snap,
             "ir": self.ir,
             "origin": self.origin,
-            "agentAuthored": agent_authored,
-        })
+        }
+        if agent_authored is not None:
+            entry["agentAuthored"] = bool(agent_authored)
+        self._history.append(entry)
         # bounded retention: the oldest generations age out. `undo --to` below
         # the floor is refused (see `undo`) instead of reaching for one gone.
         if len(self._history) > HISTORY_LIMIT:
             del self._history[:-HISTORY_LIMIT]
+
+    def _running_agent_authored(self) -> bool:
+        """The running generation's authorship as its history entry records
+        it (issue #3293). Fails closed: an entry without the key, or no
+        history at all, reads as agent-authored."""
+        entry = self._history[-1] if self._history else {}
+        return bool(entry.get("agentAuthored", True))
 
     def history_document(self) -> dict:
         """The retained history as a portable document: the generation numbers
@@ -3435,7 +3498,8 @@ class Session:
     def _component_names(self, ir: dict | None) -> list[str]:
         return [c.get("name") for c in (ir or {}).get("components") or []]
 
-    def _undo_dossier(self, current: dict, target: dict) -> dict:
+    def _undo_dossier(self, current: dict, target: dict,
+                      live: tuple[list[str], str | None]) -> dict:
         """The undo plan/dossier — computed like any other change (item 65).
 
         An undo is a swap to the target generation's shape, so its delta is
@@ -3491,7 +3555,7 @@ class Session:
             "admissible": p["admissible"],
             "unloads": p["cascade"]["withdrawn"],
             "stateDropped": self._undo_state_dropped(p, target["generation"],
-                                                     target["ir"]),
+                                                     target["ir"], live),
             "cascade": p["cascade"],
             "provisions": p["provisions"],
             "unemittableCrossings": unemittable,
@@ -3512,8 +3576,8 @@ class Session:
             return []
         return [name for name in held if name in back]
 
-    def _undo_state_dropped(self, p: dict, to: int,
-                            target_ir: dict | None) -> dict:
+    def _undo_state_dropped(self, p: dict, to: int, target_ir: dict | None,
+                            live: tuple[list[str], str | None]) -> dict:
         """The dossier's `stateDropped` (issues #2346 and #3293). An undo
         carries a provider's live state back across a `handoff` both the
         running and the restored generation declare on the same slot, when
@@ -3521,12 +3585,13 @@ class Session:
         (`_handoff_back_pairs`). Every other running component that holds live
         state still starts cold, as the target's withdrawn components do, and
         is named here with a note that says so. A failure to read the live
-        state is said in the note, and never stops the undo."""
+        state is said in the note, and never stops the undo. `live` is the
+        running components' state as `_live_state_or_reason` read it.
+
+        This is the plan, read before the undo runs. A completed undo settles
+        it against what really crossed (`_settle_undo_carry`)."""
         back = _handoff_back_pairs(self.ir, target_ir or {})
-        try:
-            held, unread = self.live_state_components(), None
-        except Exception as exc:  # noqa: BLE001 - a report, never a fault
-            held, unread = [], f"{type(exc).__name__}: {exc}"
+        held, unread = live
         carried = [name for name in held if name in back]
         dropped = [name for name in held if name not in back]
         out = {
@@ -3591,7 +3656,9 @@ class Session:
                 f"replay (it is not rehydrated past the gate)")
 
         # the dossier is computed against the *pre-undo* live composition
-        dossier = self._undo_dossier(current, target)
+        live = self._live_state_or_reason()
+        dossier = self._undo_dossier(current, target, live)
+        back = _handoff_back_pairs(self.ir, target["ir"] or {})
 
         # the gate: re-admit the target's sources exactly as a swap would. A
         # rejected recompile is a *result* (the running system is untouched),
@@ -3647,11 +3714,14 @@ class Session:
         try:
             state = self.swap(target_ir, origin=origin,
                               migrate="handoff_back",
-                              agent_authored=bool(target.get("agentAuthored")))
+                              agent_authored=bool(
+                                  target.get("agentAuthored", True)))
         except ApprovalRequired as error:
             error.host_bodies = list(
                 origin.get(AUTHORED_HOST_BODIES_KEY) or [])
             raise
+        _settle_undo_carry(dossier["stateDropped"], live[0], back,
+                           state.get("handoff"), target["generation"])
         return {
             "undone": True,
             "toGeneration": target["generation"],
@@ -5280,6 +5350,7 @@ class Session:
         self.previous = None
         self.origin = None
         self.previous_origin = None
+        self.previous_agent_authored = True
         self.draft = None
         self._generation = 0
         # item 473: a fresh session has measured nothing. The PAUSE is not
