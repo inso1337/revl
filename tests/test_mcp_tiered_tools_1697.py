@@ -86,7 +86,10 @@ def test_every_verb_initialize_names_is_in_the_core_tier():
 
 
 def test_the_core_tier_stays_small():
-    assert len(disclosure.CORE) <= 14
+    # Issue #2625 promoted `revl_export` on a measurement: about 235 schema
+    # tokens bought about 15,000 fewer input tokens per task. A verb joins on a
+    # measurement like that, so the bound moves by one and no further.
+    assert len(disclosure.CORE) <= 15
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
 
 

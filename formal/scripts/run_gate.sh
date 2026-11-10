@@ -81,6 +81,10 @@ python3 scripts/axioms_gate.py \
   RevL.G3.self_provision_refused \
   RevL.G3.mutual_cycle_refused \
   RevL.G3.layering_exists_for_admitted \
+  RevL.Lemmas.linkOK_append_tail \
+  RevL.Lemmas.linkOK_append_of_admittedOver \
+  RevL.Lemmas.append_compose_witness \
+  RevL.Lemmas.append_conflict_refused \
   RevL.G4.inverse_or_emit \
   RevL.G5.teardown_registers_nothing \
   RevL.G6.confinement \

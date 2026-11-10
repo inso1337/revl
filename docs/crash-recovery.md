@@ -759,6 +759,36 @@ reused only for the same processes and components; recover a different
 placement's run first, or name a new path. `--restore` does not apply to a
 placement run.
 
+### 5e. Settling a stranded deploy participant (issue #2725)
+
+`revl deploy` drives one participant process per deploy-map process, each with
+its own WAL, and writes ONE durable decision next to its deploy state
+(`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`). A conductor killed after
+deciding and before telling a peer leaves that record, and the stranded
+participant is settled against it, not against a guess:
+
+```
+revl recover --wal <participant>.wal --decision decision.jsonl
+```
+
+The record is read by `deploy.settle_stranded`, which applies `recovery.py`'s
+existing rule:
+
+- `federation-commit-approved` (present): the step committed. The participant's
+  WAL is given the `commit-approved` marker recovery already keys roll-forward
+  off, so it rolls forward and replays no inverse.
+- `federation-abort-decided`, `federation-decision-pending` (written when a
+  newer run started and has not decided), or no file at all: the step did not
+  commit for this run. The WAL is recovered unchanged and rolls back LIFO.
+- an unreadable record: fails closed as `unresolved` and settles nothing.
+  Guessing between forward and back is the split-brain the record exists to
+  prevent.
+
+This is a settlement of one participant's recorded effects, not global
+atomicity. A participant the conductor could not reach is still reported
+`unresolved` by the deploy verdict, and recovering its WAL is a separate step
+that the deploy never claims to have performed.
+
 ### Recovering a session that was forked (item 250)
 
 Two WALs read differently once a session has been forked.

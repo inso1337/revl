@@ -83,7 +83,8 @@ owns. None of them is a new gate, and none of them reads a candidate's prose:
     artifact-stability    tools/regen_goldens.py --all --check
     formal                formal/scripts/{nonvacuity,layering}_gate.py, PLUS a
                           read of the theorem ledger against `base`
-    scope                 the changed-file set against the declared scope
+    scope                 the changed-file set against the declared scope AND
+                          the operator's allow set
     documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
     reach                 tools/promotion_evidence.py: the audit of every
                           conformance case at `base` and at head, put through
@@ -146,7 +147,7 @@ gate rather than read one.
 
 USAGE
 -----
-    python3 tools/evolution_reward.py --candidate candidate.json
+    python3 tools/evolution_reward.py --candidate candidate.json --allow 'src/**,tests/**'
     python3 tools/evolution_reward.py --candidate candidate.json --json out.json
 
 The candidate record is a JSON object. Exactly three keys are read:
@@ -159,7 +160,29 @@ reader of the scorecard can see that the candidate's narrative was present and
 was not consulted. The held-out seed is NOT a record key: it arrives in
 `REVL_HELDOUT_SEED_FILE`, the path to an owner-only file outside the candidate
 tree, because a candidate that could name its own seed would choose the draw it
-is judged on. Exit status is 0 only when the trajectory is retained.
+is judged on.
+
+THE EDITABLE SET IS THE OPERATOR'S, NOT THE CANDIDATE'S
+-------------------------------------------------------
+The candidate declares a `scope`, and until issue #2803 that declaration was
+the whole bound: a scope of `**` bounded nothing and verified. The editable set
+now also has to come from whoever starts the run, as `--allow` (repeatable, or a
+comma-separated list) or in `REVL_EDIT_ALLOW`, and NEVER as a record key. The
+two check different things:
+
+  * the declared scope is the candidate's claim about its own work;
+  * the operator's allow set is the grant that claim is checked against.
+
+`probe_scope` verifies only when every measured path matches BOTH, and it refuses
+by name when no allow set was supplied at all. That is default deny: a run with
+no grant names nothing as editable, so it can retain nothing. A declared scope
+that names a fenced evaluator path, or that admits every path in the tree (`**`,
+`***`, `**/**`), is a declaration that bounds nothing and is refused too. The
+measured diff is fenced as well: a change to an evaluator file is refused even
+when a directory glob in the grant covers it, because the grant names the
+subject and the fence is the judge.
+
+Exit status is 0 only when the trajectory is retained.
 """
 
 from __future__ import annotations
@@ -230,6 +253,43 @@ HELDOUT_DRAW = 200
 # owner-readable only; the scorer checks both properties and refuses otherwise.
 HELDOUT_SEED_FILE_ENV = "REVL_HELDOUT_SEED_FILE"
 
+# The operator's editable set, and NOT a record key. `RECORD_KEYS` is the
+# whitelist that keeps a candidate from naming what it may edit; this arrives on
+# the command line (`--allow`) or in this variable, so it belongs to whoever
+# starts the run. A run with neither supplies no grant at all, and a missing
+# grant is a failed `scope` verdict, never a default of "anything".
+ALLOW_ENV = "REVL_EDIT_ALLOW"
+
+# The files that decide what the reward measures, taken from the SAME single
+# enumeration the controller and the held-out scorer use (issue #2802):
+# `EVALUATOR_PATHS` in `src/revl/kernel_boundary.py`, through its `authority`
+# and `held_out` views. Resolved lazily through `_evaluator_protocol()` so
+# importing this module never pulls in `revl/__init__.py` (and with it the
+# compiler). A declared scope that NAMES one of them (an exact path in the
+# list, not merely a directory that contains it) is refused by name before the
+# diff is read: a candidate that says it may edit its own judge has said
+# enough. The measured diff is checked against the same set with a
+# segment-prefix match, as `kernel_boundary` and the controller match it. This
+# is not the deny list the operator allow set replaces; it is the
+# declaration-side and measured-diff check on the candidate's own footprint.
+def evaluator_fence(name: str) -> tuple:
+    """One view of the evaluator enumeration, without importing `revl`."""
+    return _evaluator_protocol().evaluator_fence(name)
+
+
+def _evaluator_fence() -> tuple:
+    """`AUTHORITY_FENCE + HELD_OUT_FENCE`, de-duplicated, in order."""
+    protocol = _evaluator_protocol()
+    return tuple(dict.fromkeys(
+        protocol.AUTHORITY_FENCE + protocol.HELD_OUT_FENCE))
+
+
+def __getattr__(name: str):
+    """Lazy `EVALUATOR_FENCE` so import never loads the compiler."""
+    if name == "EVALUATOR_FENCE":
+        return _evaluator_fence()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
 # of the candidate's change, which is the half of the item's "can only shrink in
 # a diff somebody reads" that no tool performed.
@@ -276,7 +336,36 @@ def verified(component: str, reason: str, evidence=()) -> Verdict:
 # The ONLY keys read off a candidate record. The whitelist is the mechanism that
 # makes "no component reads the candidate's prose" structural rather than a
 # convention: a key that is not here never reaches a probe, whatever it says.
+# `allow` is deliberately NOT here: the editable set belongs to the operator.
 RECORD_KEYS = ("tree", "base", "scope")
+
+
+def parse_allow(entries) -> tuple:
+    """The operator's allow set, normalised into path globs.
+
+    Accepts a string, a comma-separated string, or a sequence of either, so the
+    CLI (``--allow`` may repeat) and the environment variable (one string) use
+    the same reader. Empty pieces are dropped rather than treated as "the whole
+    tree": an empty grant is no grant, and `probe_scope` refuses that by name.
+    """
+    if entries is None:
+        return ()
+    if isinstance(entries, str):
+        entries = [entries]
+    out = []
+    for entry in entries:
+        for part in str(entry).split(","):
+            part = part.strip().replace("\\", "/").strip("/")
+            while part.startswith("./"):
+                part = part[2:]
+            if part:
+                out.append(part)
+    return tuple(out)
+
+
+def allow_from_env() -> tuple:
+    """The allow set in `ALLOW_ENV`, or `()` when the operator set none."""
+    return parse_allow(os.environ.get(ALLOW_ENV, ""))
 
 
 @dataclass(frozen=True)
@@ -286,14 +375,19 @@ class Candidate:
     tree: Path
     base: str
     scope: tuple = ()
+    allow: tuple = ()
     prose_ignored: tuple = ()
 
 
-def load_candidate(record: dict) -> Candidate:
+def load_candidate(record: dict, allow=()) -> Candidate:
     """Build a `Candidate` from a record, dropping every other key by name.
 
     Refuses rather than guesses: a record with no `tree`, no `base` or no `scope`
     cannot be scored, and an unscorable candidate is not a passing one.
+
+    `allow` is the OPERATOR's grant and is passed in by the caller, never read
+    off the record. A record carrying an `allow` key is reported under
+    `prose_ignored` like any other key the candidate tried to supply.
     """
     missing = [k for k in RECORD_KEYS if k not in record]
     if missing:
@@ -306,6 +400,7 @@ def load_candidate(record: dict) -> Candidate:
         tree=Path(record["tree"]),
         base=str(record["base"]),
         scope=tuple(str(s) for s in scope),
+        allow=parse_allow(allow),
         prose_ignored=tuple(sorted(k for k in record if k not in RECORD_KEYS)),
     )
 
@@ -407,8 +502,16 @@ def changed_files(candidate: Candidate):
 
     Committed and uncommitted changes both count, because a trajectory is scored
     on the tree it produced and not on how tidily it was committed.
+
+    `--no-renames` so a move is reported under BOTH of its paths. With rename
+    detection on, `git diff --name-only` prints only the destination, so
+    `git mv src/a.py tools/a.py` would look like one addition inside the grant
+    and the path it left would never be judged against the declared scope, the
+    operator grant or the fence. The measured set is what the grant is meant to
+    be default deny over, so neither half of a move can be hidden.
     """
-    ok, out = run_git(candidate, ["diff", "--name-only", candidate.base])
+    ok, out = run_git(candidate,
+                      ["diff", "--no-renames", "--name-only", candidate.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -615,17 +718,57 @@ def probe_documentation(candidate: Candidate) -> Verdict:
 
 
 def probe_scope(candidate: Candidate) -> Verdict:
-    """The changed-file set against the declared scope.
+    """The measured change set against the declared scope AND the operator grant.
 
-    Fail-closed in three directions. An empty scope declaration cannot be
-    satisfied, because a candidate that declares nothing has not constrained
-    itself. An empty change set cannot be satisfied either: there is no work to
-    retain. And a path matching no declared glob fails, listing the paths, so the
-    verdict is readable without re-running git.
+    The declared scope is the candidate's claim about its own work; the operator
+    allow set (`--allow` / `ALLOW_ENV`) is the grant that claim is checked
+    against. A probe that read only the claim would let a candidate declare
+    `**` and bound nothing, which is issue #2803. Fail-closed in six
+    directions:
+
+      * no operator allow set: nothing is named as editable, and default deny
+        is not a pass;
+      * no declared scope: a candidate that declares nothing has not
+        constrained itself;
+      * a declared scope that NAMES a fenced evaluator path: a candidate that
+        declares it may edit its own judge is refused before the diff is read;
+      * no change at all: there is no work to retain;
+      * a measured path outside the operator grant or the declared scope:
+        refused and listed, so the verdict is readable without re-running git;
+      * a measured path that CHANGES a fenced evaluator: refused even when the
+        declaration and the grant both admit the directory, because the grant
+        names the subject and the fence is the judge.
+
+    A declared whole-tree scope is refused by name too, whatever its spelling:
+    the check tests whether the scope admits every probe path, so `***` and
+    `**/**` are refused with the literal `**`. It is checked after the measured
+    grant so that when a whole-tree candidate's diff ALSO leaves the grant, the
+    verdict names the path rather than only the pattern: the declaration fails
+    either way, and the path is the actionable reason.
+
+    The diff is the MEASURED one. A declared change set is never consulted, for
+    the same reason the controller refuses one: it is the candidate's account
+    of itself.
     """
     name = "scope"
+    fence = _evaluator_fence()
+    if not candidate.allow:
+        return failed(
+            name,
+            f"no operator allow set was supplied (--allow or {ALLOW_ENV}), so "
+            "nothing names what this candidate may edit. Default deny is not a "
+            "pass: the editable set belongs to whoever starts the run")
     if not candidate.scope:
         return failed(name, "the candidate declared no scope, so nothing bounds it")
+    fenced = _declared_fence(candidate.scope)
+    if fenced:
+        return failed(
+            name,
+            "the declared scope names fenced evaluator path(s): "
+            + ", ".join(fenced)
+            + ". A candidate that declares it may edit its own judge is "
+            "refused before the diff is read",
+            ["fence=" + ";".join(fence)])
     refusal = base_refusal(candidate)
     if refusal:
         return failed(name, refusal)
@@ -634,17 +777,100 @@ def probe_scope(candidate: Candidate) -> Verdict:
         return failed(name, f"the changed-file set could not be read: {paths}")
     if not paths:
         return failed(name, f"no file changed against {candidate.base}")
+    outside_allow = [p for p in paths if not _in_scope(p, candidate.allow)]
+    if outside_allow:
+        return failed(
+            name,
+            f"{len(outside_allow)} changed path(s) outside the operator allow "
+            f"set ({';'.join(candidate.allow)}): "
+            + ", ".join(outside_allow[:6]),
+            [f"git diff --no-renames --name-only {candidate.base}",
+             "allow=" + ";".join(candidate.allow)])
+    measured_fence = [p for p in paths
+                      if any(_under(p, prefix) for prefix in fence)]
+    if measured_fence:
+        return failed(
+            name,
+            f"{len(measured_fence)} measured change(s) reach fenced evaluator "
+            "path(s): " + ", ".join(measured_fence[:6])
+            + ". The operator grant names the subject; the fence is the judge, "
+            "and a change to it is refused even when a directory glob in the "
+            "grant covers it",
+            [f"git diff --no-renames --name-only {candidate.base}",
+             "fence=" + ";".join(fence)])
+    if _whole_tree(candidate.scope):
+        return failed(
+            name,
+            "the declared scope ("
+            + ";".join(candidate.scope)
+            + ") admits every path this check probes for, so it is a whole-tree "
+            "declaration and bounds nothing. Spelling it `**`, `***` or "
+            "`**/**` does not change that. The operator allow set is the bound "
+            "now, and a declaration that does not narrow it is refused by name",
+            [f"git diff --no-renames --name-only {candidate.base}",
+             "scope=" + ";".join(candidate.scope)])
     stray = [p for p in paths if not _in_scope(p, candidate.scope)]
     if stray:
         return failed(
             name,
             f"{len(stray)} changed path(s) outside the declared scope: "
             + ", ".join(stray[:6]),
-            [f"git diff --name-only {candidate.base}"])
+            [f"git diff --no-renames --name-only {candidate.base}"])
     return verified(
         name,
-        f"{len(paths)} changed path(s), all inside the declared scope",
-        [f"git diff --name-only {candidate.base}", "scope=" + ";".join(candidate.scope)])
+        f"{len(paths)} changed path(s), all inside the declared scope and the "
+        "operator allow set",
+        [f"git diff --no-renames --name-only {candidate.base}",
+         "scope=" + ";".join(candidate.scope),
+         "allow=" + ";".join(candidate.allow)])
+
+
+def _norm_pattern(pattern) -> str:
+    """One glob in the shape `_in_scope` and the declaration checks compare."""
+    norm = str(pattern).strip().replace("\\", "/").strip("/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
+def _under(path: str, prefix: str) -> bool:
+    """Segment-wise prefix match, so `formal` does not match `formalise.py`.
+
+    The same match `kernel_boundary` and the controller use for the evaluator
+    enumeration: an entry like `crates/revl-gate` covers the whole tree beneath
+    it, not only the directory itself.
+    """
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+
+
+def _declared_fence(scope):
+    """The fenced evaluator paths a declared scope NAMES, in order.
+
+    Exact entries only: `tools/**` names the subject directory and is the
+    operator's to grant or withhold through the allow set, while
+    `tools/evolution_reward.py` names the judge itself.
+    """
+    fence = set(_evaluator_fence())
+    return sorted({_norm_pattern(p) for p in scope} & fence)
+
+
+#: Paths a declared scope must admit if it is to be refused as covering the
+#: whole tree. They are all NESTED on purpose: `**/**` admits every nested path
+#: without admitting a top-level file, and the literal `**`, `***` and `**/**`
+#: all tie on this set, which is the property the refusal is about. A
+#: top-level-only wildcard such as `*` still bounds the nested tree and is not
+#: this rule's target.
+WHOLE_TREE_SENTINELS = ("a/b", "a/b/c", ".github/x", "x/y/z")
+
+
+def _whole_tree(scope) -> bool:
+    """Whether a declared scope admits every path this check probes for.
+
+    Comparing the string `**` misses other spellings that cover the same paths:
+    `***` compiles to a pattern that matches everything, and `**/**` covers
+    every nested path. Test the property rather than the spelling.
+    """
+    return all(_in_scope(path, scope) for path in WHOLE_TREE_SENTINELS)
 
 
 def _glob_to_regex(pattern: str):
@@ -1802,6 +2028,7 @@ class Scorecard:
             "prose_ignored": list(self.candidate.prose_ignored),
             "base": self.candidate.base,
             "scope": list(self.candidate.scope),
+            "allow": list(self.candidate.allow),
             # Issue #2802. The scorer's own protocol identity, taken from THIS
             # checkout and not the candidate's: a scorecard from two rounds that
             # carry the same digest names the same scorer, component list and
@@ -1822,6 +2049,8 @@ class Scorecard:
     def render(self) -> str:
         lines = [f"evolution reward over {self.candidate.tree}",
                  f"base {self.candidate.base}",
+                 "allow " + (";".join(self.candidate.allow)
+                             if self.candidate.allow else "(none: default deny)"),
                  f"protocol {self._protocol_identity() or 'unavailable'}", ""]
         for v in self.verdicts:
             mark = "ok  " if v.verified else "FAIL"
@@ -1879,7 +2108,13 @@ def main(argv=None) -> int:
     ap.add_argument("--candidate", type=Path, required=True,
                     help="JSON record with tree/base/scope; every other key is ignored")
     ap.add_argument("--json", type=Path, help="write the scorecard here")
+    ap.add_argument("--allow", action="append", metavar="GLOB", default=None,
+                    help="a path glob the operator allows the candidate to "
+                         "edit; repeatable or comma-separated, and falls back "
+                         f"to {ALLOW_ENV}. No allow set fails `scope`")
     args = ap.parse_args(argv)
+    allow = (parse_allow(args.allow) if args.allow is not None
+             else allow_from_env())
 
     try:
         record = json.loads(args.candidate.read_text(encoding="utf-8"))
@@ -1887,7 +2122,7 @@ def main(argv=None) -> int:
         print(f"evolution_reward: cannot read {args.candidate}: {exc}", file=sys.stderr)
         return 1
     try:
-        candidate = load_candidate(record)
+        candidate = load_candidate(record, allow=allow)
     except ValueError as exc:
         print(f"evolution_reward: {exc}", file=sys.stderr)
         return 1
