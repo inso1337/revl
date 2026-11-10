@@ -109,6 +109,9 @@ BENCH_DEPENDENT_TESTS = (
     # `bench/results/answer-ledger.md`, and the module checks that the
     # committed table reproduces, so a bench change must re-run it.
     "tests/test_answer_ledger_2859.py",
+    # Drives bench/run.py's attempt loop with the mock runner and checks that
+    # the compiler's verified edits are applied before the model is re-asked.
+    "tests/test_bench_autofix.py",
     # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
     # loaders and checks they leave one `revl` in the process.
     "tests/test_bench_compiler_reload_keeps_one_revl.py",
