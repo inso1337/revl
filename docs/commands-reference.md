@@ -744,13 +744,15 @@ question.
   arguments.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if
   the new generation ADDS boundary crossings not in `PREV.json`, or if a
-  crossing's derived `inverse` class WEAKENS
+  stable crossing weakens or widens: a weaker reach or `inverse` class, a
+  wider capability scope, a new host backend body, a dropped or weakened
+  recovery, a weakened register floor, or a raised emission ceiling
   ([audit-diff.md](audit-diff.md)).
-- `--accept CROSSING` - acknowledge one added crossing, or one weakened
-  `inverse:<name>` token, so it no longer fails `--diff` (the token printed
-  after `+`); repeatable.
-- `--accept-all` - acknowledge every added crossing or weakened inverse under
-  `--diff`.
+- `--accept CROSSING` - acknowledge one gated token (an added crossing, or a
+  token such as `inverse:<name>`, `scope:<component>:<label>` or
+  `backend:<extern>:<backend>`), so it no longer fails `--diff` (the token
+  printed after `+`); repeatable.
+- `--accept-all` - acknowledge every gated token under `--diff`.
 - `--policy POLICY` - boundary-policy gate (roadmap item 33): evaluate a
   policy file over the audit graph and REFUSE admission (nonzero) if any
   component reaches a capability it may not ([boundary-policy.md](boundary-policy.md)).
