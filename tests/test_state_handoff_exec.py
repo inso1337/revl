@@ -186,6 +186,11 @@ def test_changed_record_under_one_name_is_refused_state_intact():
             session.swap(compile_source(moved, "cache.rvl"),
                          origin={"source": moved}, agent_authored=True)
         assert caught.value.code == "STATE_UNDISCLOSED"
+        # for this reason and no other: the declarations, both printed
+        said = str(caught.value)
+        assert "declared hand-off types are not" in said, said
+        assert "`St = {a: Int}`" in said, said
+        assert "`St = {a: Int, b: Int}`" in said, said
 
         # the predecessor still serves its own code, its state untouched
         assert session.call("cache", "version", [])["result"] == 1

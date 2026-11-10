@@ -101,10 +101,16 @@ declared names under it are still compared.
 It is deliberately strict, as the state hand-off check is (it shares the
 declaration comparison): declarations are compared for identity, so a harmless
 widening of a record is refused and has to be migrated explicitly. A name the
-candidate does not declare keeps the running meaning. A running manifest with
-no `types` cannot prove any name the candidate declares unchanged, so those are
-refused. `revl migrate` applies the same comparison per consumer (a changed
-record reads as a reshaped provision and the consumer is not `movable`).
+candidate does not declare keeps the running meaning. A running manifest that
+records no declaration for a name cannot say what it meant, so a candidate
+that declares it is refused, and the hint then gives the two ways through:
+compile the running sources again where they declare the name, leave it
+undeclared or give the new type another name where they do not (see
+docs/state-handoff.md). Under another name the signature keeps its running
+spelling: respelled with the new name it is another type, and that is refused
+as any narrowing is. `revl migrate` applies the same comparison per
+consumer (a changed record reads as a reshaped provision and the consumer is
+not `movable`).
 
 A document compiled against a manifest, and the composition `revl apply`
 installs, carry the running declarations next to the candidate's own (the

@@ -370,6 +370,8 @@ def test_kept_handoff_redeclared_differently_is_refused():
     assert {step.kind for step in exc.why.steps} == {"export", "redeclare"}
     redeclare = next(s for s in exc.why.steps if s.kind == "redeclare")
     assert (redeclare.name, redeclare.file, redeclare.line) == ("St", "c.rvl", 1)
+    assert "leave the declaration unchanged" in exc.hint, exc.hint
+    assert "records no declaration" not in exc.hint, exc.hint
 
 
 def test_kept_handoff_redeclared_differently_is_refused_by_plan():
@@ -466,6 +468,12 @@ def test_kept_handoff_without_running_types_fails_closed():
     old.pop("types")
     exc = _kept_refusal(old, decl + "\n" + _HELLO)
     assert _KEPT in str(exc) and "`St` is not declared" in str(exc)
+    assert "records no declaration for `St`" in exc.hint, exc.hint
+    assert "compile the running sources again" in exc.hint, exc.hint
+    assert "leave the declaration unchanged" not in exc.hint, exc.hint
+    # and it does work: the same sources compiled again record `St`
+    compile_source(decl + "\n" + _HELLO, "c.rvl",
+                   manifest=compile_source(_with_decls(decl, "St"), "c.rvl"))
     # a candidate that says nothing about `St` leaves its meaning alone
     compile_source(_HELLO, "c.rvl", manifest=old)
 
@@ -560,6 +568,8 @@ def test_nominal_drift_hint_does_not_say_widen():
     exc = _refusal(_with_decls("type St = { a: Int }", "St"),
                    _with_decls("type St = { a: Int, b: Int }", "St", version=2))
     assert "widen" not in exc.hint and "declaration" in exc.hint
+    assert "keep the declaration unchanged" in exc.hint, exc.hint
+    assert "records no declaration" not in exc.hint, exc.hint
 
 
 def test_missing_running_types_refuses_even_an_unchanged_declaration():
@@ -574,3 +584,139 @@ def test_missing_running_types_refuses_even_an_unchanged_declaration():
         compile_source(_with_decls(decl, "St", version=2), "c.rvl",
                        manifest=old, replacing=("Cache",))
     _assert_drift(info.value)
+    # the way out it names is one that works: the declaration did not change,
+    # so "keep the declaration unchanged" would leave the author stuck
+    hint = info.value.hint
+    assert "records no declaration for `St`" in hint, hint
+    assert "compile the running sources again" in hint, hint
+    assert "keep the declaration unchanged" not in hint, hint
+    # and it does work: the same sources compiled again record `St`
+    compile_source(_with_decls(decl, "St", version=2), "c.rvl",
+                   manifest=compile_source(_with_decls(decl, "St"), "c.rvl"),
+                   replacing=("Cache",))
+
+
+# A running manifest may also lack a declaration because the running sources
+# never had one: a name used as a type without a declaration is accepted, and
+# a program that declares no record or variant has no `types` at all.
+# Compiling those sources again records nothing more, so the refusal names the
+# way out that works for this history as well.
+
+_ANOTHER = "leave it undeclared, or declare the new type under another name"
+_UNDECLARED = [("", "St"), ("type St = { a: Inner }", "Inner")]
+_UNDECLARED_IDS = ["no table at all", "a table that lacks the nested name"]
+
+
+@pytest.mark.parametrize("decl,name", _UNDECLARED, ids=_UNDECLARED_IDS)
+def test_declaring_a_name_the_running_sources_left_undeclared_is_refused(
+        decl, name):
+    old = compile_source(_with_decls(decl, "St"), "c.rvl")
+    assert name not in (old.get("types") or {})
+    declared = f"type {name} = {{ a: Int }}\n"
+    with pytest.raises(RevlError) as info:
+        compile_source(_with_decls(declared + decl, "St", version=2), "c.rvl",
+                       manifest=old, replacing=("Cache",))
+    _assert_drift(info.value)
+    hint = info.value.hint
+    assert f"records no declaration for `{name}`" in hint, hint
+    assert _ANOTHER in hint, hint
+    assert "and keep the hand-off spelled as it runs" in hint, hint
+    assert "keep the declaration unchanged" not in hint, hint
+    # both ways out work: the name left undeclared, or the new type named
+    # otherwise
+    compile_source(_with_decls(decl, "St", version=2), "c.rvl",
+                   manifest=old, replacing=("Cache",))
+    other = f"type {name}2 = {{ a: Int }}\n"
+    compile_source(_with_decls(other + decl, "St", version=2), "c.rvl",
+                   manifest=old, replacing=("Cache",))
+    # respelled with the new name the hand-off is another type, refused on its
+    # own, which is why the hint says to keep the spelling
+    respelt = _with_decls(other + decl.replace(name, name + "2"),
+                          "St".replace(name, name + "2"), version=2)
+    assert f"{name}2" in respelt.replace(other, "")
+    with pytest.raises(RevlError) as info:
+        compile_source(respelt, "c.rvl", manifest=old, replacing=("Cache",))
+    _assert_drift(info.value)
+
+
+@pytest.mark.parametrize("decl,name", _UNDECLARED, ids=_UNDECLARED_IDS)
+def test_kept_handoff_over_a_name_the_running_sources_left_undeclared(
+        decl, name):
+    old = compile_source(_with_decls(decl, "St"), "c.rvl")
+    assert name not in (old.get("types") or {})
+    exc = _kept_refusal(old, f"type {name} = {{ a: Int }}\n" + _HELLO)
+    assert _KEPT in str(exc) and f"`{name}` is not declared" in str(exc)
+    assert f"records no declaration for `{name}`" in exc.hint, exc.hint
+    assert _ANOTHER in exc.hint, exc.hint
+    # a kept hand-off is not the candidate's to respell
+    assert "spelled as it runs" not in exc.hint, exc.hint
+    assert "leave the declaration unchanged" not in exc.hint, exc.hint
+    # both ways out work
+    compile_source(_HELLO, "c.rvl", manifest=old)
+    compile_source(f"type {name}2 = {{ a: Int }}\n" + _HELLO, "c.rvl",
+                   manifest=old)
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["replaced", "kept"])
+def test_a_partly_recorded_table_refuses_the_name_it_lacks(kept):
+    # what a `revl apply` onto a composition from before it carried the
+    # declarations along leaves behind: a table with the candidate's
+    # declarations and none of those already running. The running sources do
+    # declare `St`, so compiling them again is the way out, and the hint has
+    # to say so although the manifest does carry a table
+    import copy
+
+    decl = "type St = { a: Int }\ntype Other = { o: Int }"
+    fresh = compile_source(_with_decls(decl, "St"), "c.rvl")
+    part = copy.deepcopy(fresh)
+    part["types"].pop("St")
+    assert sorted(part["types"]) == ["Other"]
+    src = decl + "\n" + _HELLO if kept else _with_decls(decl, "St", version=2)
+    replacing = () if kept else ("Cache",)
+    with pytest.raises(RevlError) as info:
+        compile_source(src, "c.rvl", manifest=part, replacing=replacing)
+    hint = info.value.hint
+    assert "records no declaration for `St`" in hint, hint
+    assert "compile the running sources again" in hint, hint
+    compile_source(src, "c.rvl", manifest=fresh, replacing=replacing)
+
+
+_WIDEN = "widen the accepted type or migrate the shape explicitly"
+_AS_WELL = "the declarations shown differ as well"
+_APART = [("", True), ("type St = { a: Int, b: Int }", True),
+          ("type St = { a: Int }", False)]
+
+
+@pytest.mark.parametrize("running,differs", _APART,
+                         ids=["unrecorded", "moved", "same"])
+def test_handoff_types_that_differ_as_spelled_are_told_to_widen_first(
+        running, differs):
+    # the running version exports `Map[Str, St]` and the candidate accepts
+    # `St`. No declaration makes those two agree, so "leave it undeclared" and
+    # "keep the declaration unchanged" are not ways through, whatever the
+    # declarations behind `St` are
+    old = compile_source(_with_decls(running, "Map[Str, St]"), "c.rvl")
+    decl = "type St = { a: Int }"
+    with pytest.raises(RevlError) as info:
+        compile_source(_with_decls(decl, "St", version=2), "c.rvl",
+                       manifest=old, replacing=("Cache",))
+    _assert_drift(info.value)
+    hint = info.value.hint
+    assert _WIDEN in hint, hint
+    assert "records no declaration" not in hint, hint
+    assert "keep the declaration unchanged" not in hint, hint
+    assert (_AS_WELL in hint) == differs, hint
+    # the declarations are still shown where they differ
+    assert ("`St = {a: Int}`" in str(info.value)) == differs
+    if not differs:
+        return
+    # widened to the running spelling, the declaration is what is left, and
+    # the advice is then about it
+    with pytest.raises(RevlError) as info:
+        compile_source(_with_decls(decl, "Map[Str, St]", version=2), "c.rvl",
+                       manifest=old, replacing=("Cache",))
+    hint = info.value.hint
+    assert _WIDEN not in hint and _AS_WELL not in hint, hint
+    expected = ("keep the declaration unchanged" if running
+                else "records no declaration for `St`")
+    assert expected in hint, hint

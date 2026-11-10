@@ -90,6 +90,27 @@ to `U` is no change; variant cases are compared in order, because the WIT export
 numbers them by position, so a reorder is refused. The agent-authored swap path
 (`revl_propose`/`revl_swap`) and `revl migrate` apply the same check.
 
+A running manifest may record no declaration for a name the hand-off reaches.
+Either the running sources never declared it (a name used as a type without a
+declaration is accepted, and a program that declares no record or variant has
+no `types` at all), or they did and the manifest was written without it: by
+hand, or by a `revl apply` from before it carried the declarations along. An
+apply onto such a composition records the candidate's declarations and none of
+those already running, so the table can also be there and lack the name. The
+gate cannot tell the two histories apart, so a candidate that declares the
+name is refused, and the hint gives both ways through in place of the usual
+advice. Where the running sources declare the name, compiling them again gives
+a manifest that records it, and admitting against that one is decided on the
+declarations as usual. Where they do not, declaring it is the change: leave it
+undeclared, or give the new type another name and keep the hand-off spelled as
+it runs (respelled with the new name it is another type, refused on its own).
+
+All of that is advice about a declaration, and it is given only where the two
+hand-off types agree as spelled. Where they do not (the running version
+exports `Map[Str, St]` and the candidate accepts `St`), no declaration makes
+them agree. The hint is then the usual one, to widen the accepted type or
+migrate, and it adds that the declarations shown differ as well.
+
 Refusing is the sound move: silently dropping the predecessor's state on a swap
 would be **residue**, which G7/the erase-report forbid.
 
