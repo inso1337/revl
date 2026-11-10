@@ -21,7 +21,10 @@ WHAT IS CHECKED, and the named failure for each:
   claim-unknown-id               the id is not an entry in `claims.toml`.
   claim-witness-missing          `test:` file or function absent, a file
                                  pytest does not collect, a test that is
-                                 unconditionally skipped, a `[param]` that is
+                                 unconditionally skipped (`skip`,
+                                 `xfail(run=False)`), a decorator or
+                                 `pytestmark` not spelled `pytest.mark.<name>`
+                                 (refused as unreadable), a `[param]` that is
                                  not one of the function's parameter ids (or
                                  whose ids cannot be read statically), a
                                  `docgen:` block absent, or a `claim:` chain
@@ -315,6 +318,30 @@ def _self_test() -> int:
              selected=lambda _p: {"tests/helper_comp.py"},
              toml='[claims]\nknown = "test:tests/helper_comp.py::test_ok"\n'
                   'block = "docgen:guarantees"\n')
+        case("aliased-skip-is-unreadable", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest as pt\n@pt.mark.skip\n" + _GOOD_TEST)
+        case("class-pytestmark-skip", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\nclass TestK:\n    pytestmark = pytest.mark.skip\n"
+                  "    def test_ok(self):\n        pass\n")
+        case("class-pytestmark-parametrize", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\nclass TestK:\n    pytestmark = "
+                  "pytest.mark.parametrize('y', [1, 2])\n"
+                  "    @pytest.mark.parametrize('x', ['a'])\n"
+                  "    def test_p(self, x, y):\n        pass\n",
+             toml='[claims]\nknown = "test:tests/test_comp.py::TestK::test_p[a]"\n'
+                  'block = "docgen:guarantees"\n')
+        case("malformed-parametrize", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\n@pytest.mark.parametrize('x', 5)\n"
+                  "def test_p(x):\n    pass\n",
+             toml='[claims]\nknown = "test:tests/test_comp.py::test_p[a]"\n'
+                  'block = "docgen:guarantees"\n')
+        case("odd-backtick-before-a-heading-comment", expected={"claim-unknown-id"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             md="# A ` tick\n<!-- revl:claim ghost -->\nmore ` text\n")
         case("unnamed-entry-dead-witness", expected={"claim-witness-missing"},
              selected=lambda _p: {"tests/test_comp.py"},
              toml=_GOOD_TOML + 'dead = "test:tests/gone.py"\n')

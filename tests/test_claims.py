@@ -498,3 +498,83 @@ def test_an_entry_on_an_annotation_s_chain_is_reported_once(tmp_path):
     findings = check([ClaimSite("src/a.rvl", 1, "a")], registry, root)
     assert [(f.code, f.where) for f in findings] == \
         [("claim-witness-missing", "src/a.rvl:1")]
+
+
+# ------------------------------------- fail closed on marks it cannot read
+
+_GOOD_FN = "def test_ok():\n    assert True\n"
+
+
+@pytest.mark.parametrize("body,target", [
+    ("import pytest as pt\n@pt.mark.skip\n" + _GOOD_FN, "test_ok"),
+    ("from pytest import mark as m\n@m.skip\n" + _GOOD_FN, "test_ok"),
+    ("import pytest\nskip = pytest.mark.skip\n@skip\n" + _GOOD_FN, "test_ok"),
+    ("import pytest\nclass TestK:\n    pytestmark = pytest.mark.skip\n"
+     "    def test_ok(self):\n        pass\n", "TestK::test_ok"),
+    ("import pytest\n@pytest.mark.xfail(run=False)\n" + _GOOD_FN, "test_ok"),
+    ("import functools\n@functools.lru_cache\n" + _GOOD_FN, "test_ok"),
+    ("import pytest as pt\npytestmark = pt.mark.skip\n" + _GOOD_FN, "test_ok"),
+], ids=["aliased-module", "aliased-mark", "mark-in-a-variable",
+        "class-pytestmark-skip", "xfail-run-false", "other-decorator",
+        "aliased-pytestmark"])
+def test_a_skip_or_mark_the_check_cannot_read_refuses_the_witness(
+        tmp_path, body, target):
+    root = _test_file(tmp_path, "test_s.py", body)
+    for node in (f"tests/test_s.py::{target}", "tests/test_s.py"):
+        findings = _witness_findings(root, node)
+        assert [finding.code for finding in findings] == \
+            ["claim-witness-missing"], node
+
+
+def test_literal_non_skipping_marks_are_accepted(tmp_path):
+    root = _test_file(
+        tmp_path, "test_s.py",
+        "import pytest\npytestmark = [pytest.mark.slow]\n"
+        "@pytest.mark.xfail(run=True)\n@pytest.mark.timeout(5)\n" + _GOOD_FN)
+    assert _witness_findings(root, "tests/test_s.py::test_ok") == []
+
+
+@pytest.mark.parametrize("body,node", [
+    ("import pytest\nclass TestK:\n    pytestmark = pytest.mark.parametrize("
+     "'y', [1, 2])\n    @pytest.mark.parametrize('x', ['a'])\n"
+     "    def test_p(self, x, y):\n        pass\n", "TestK::test_p[a]"),
+    ("import pytest\nimport pytest as pt\n@pt.mark.parametrize('y', [1])\n"
+     "@pytest.mark.parametrize('x', ['a'])\ndef test_p(x, y):\n    pass\n",
+     "test_p[a]"),
+    ("import pytest\n@pytest.mark.parametrize('y', [1, 2])\nclass TestK:\n"
+     "    @pytest.mark.parametrize('x', ['a'])\n"
+     "    def test_p(self, x, y):\n        pass\n", "TestK::test_p[a]"),
+], ids=["class-pytestmark", "aliased-stacked", "class-decorator"])
+def test_a_parametrization_not_on_the_function_refuses_a_bracketed_witness(
+        tmp_path, body, node):
+    root = _test_file(tmp_path, "test_p.py", body)
+    findings = _witness_findings(root, f"tests/test_p.py::{node}")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+
+
+@pytest.mark.parametrize("decorator", [
+    "@pytest.mark.parametrize('x', 5)",
+    "@pytest.mark.parametrize(5, ['a'])",
+    "@pytest.mark.parametrize('x', ['a'], ids=sorted(5))",
+    "@pytest.mark.parametrize('x', sorted([1, 'a']))",
+], ids=["argvalues-int", "argnames-int", "ids-sorted-int", "sorted-mixed"])
+def test_a_malformed_parametrize_is_unreadable_not_a_crash(tmp_path, decorator):
+    root = _test_file(tmp_path, "test_p.py",
+                      f"import pytest\n{decorator}\ndef test_p(x):\n    pass\n")
+    findings = _witness_findings(root, "tests/test_p.py::test_p[a]")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+    assert "cannot be read statically" in findings[0].detail
+
+
+@pytest.mark.parametrize("text", [
+    "Use the ` key.\n<!-- revl:claim real -->\nThe `x` thing.\n",
+    "# A ` tick\n<!-- revl:claim real -->\nmore ` text\n",
+    "- a ` tick\n- <!-- revl:claim real -->\n- b ` tick\n",
+], ids=["paragraph-line", "heading", "list-items"])
+def test_an_odd_backtick_does_not_hide_a_comment_that_opens_a_block(text):
+    assert [s.id for s in parse_markdown_claims("d.md", text)] == ["real"]
+
+
+def test_a_code_span_may_still_cross_a_plain_line_break():
+    text = "a `<!-- revl:claim ghost\n--> still code` here\n"
+    assert parse_markdown_claims("d.md", text) == []

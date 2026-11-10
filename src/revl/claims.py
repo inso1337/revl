@@ -42,17 +42,22 @@ unnoticed; it does not replace review of the sentence itself.
 
 The witness is judged by reading the test file, not by collecting it (the lint
 job that runs the gate has no pytest): the file must be one pytest collects
-(`test_*.py` or `*_test.py`, the defaults this repository keeps), the test must
-not be unconditionally skipped (`@pytest.mark.skip`, a `skip` in `pytestmark`,
+(`test_*.py` or `*_test.py`, the defaults this repository keeps), every
+decorator on the test and its class and every module or class `pytestmark`
+must be a mark spelled literally `pytest.mark.<name>` (any other decorator or
+spelling, an alias such as `import pytest as pt` included, is refused as
+unreadable: the check fails closed rather than follow it), the test must not
+be unconditionally skipped (`pytest.mark.skip`, `pytest.mark.xfail(run=False)`,
 a module-level `pytest.skip(...)`), and a `[param]` must be one of the ids the
-function's `@pytest.mark.parametrize` produces. Those ids are read from the
+function's own `@pytest.mark.parametrize` produces. Those ids are read from the
 call when it is a literal (or a module-level literal, `sorted`/`list` of one,
 its `.items()`/`.keys()`), with `ids=` or pytest's plain-text default ids; any
 other shape (stacked or class-level parametrizations, parametrized fixtures,
 `pytest_generate_tests`, an id pytest would escape) is refused, and the fix is
 to name the function without the parameter. A conditional `skipif` is NOT
 decided: its condition is evaluated when pytest runs, so a witness skipped by
-one on every runner still passes this check.
+one on every runner still passes this check. A `pytest.skip()` call inside the
+test body is not detected either.
 
 Claims are OPTIONAL. A comment without `revl:claim` is unaffected, so adoption
 is incremental; the generated-block contract in `tools/docgen.py` is the model
@@ -231,7 +236,21 @@ def _mask_fenced_code(text: str) -> str:
 
 
 _BACKTICKS = re.compile(r"`+")
-_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
+#: Where an inline code span must have closed: a blank line, or a line that
+#: opens a block of its own (an HTML comment, an ATX heading, a list item).
+_SPAN_END = re.compile(
+    r"\n[ \t]*(?:\n|<!--|#{1,6}(?:[ \t]|$)|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))",
+    re.MULTILINE)
+
+
+def _span_limit(text: str, start: int, end: int) -> int:
+    """The offset an inline code span opened at `start` must close before."""
+    line_start = text.rfind("\n", 0, start) + 1
+    if re.match(r"[ \t]*#{1,6}(?:[ \t]|$)", text[line_start:]):
+        line_end = text.find("\n", end)
+        return len(text) if line_end < 0 else line_end
+    found = _SPAN_END.search(text, end)
+    return found.start() if found is not None else len(text)
 
 
 def _html_comments(text: str):
@@ -240,8 +259,10 @@ def _html_comments(text: str):
     Read left to right as Markdown does: whichever of a `<!--` and a backtick
     run starts first owns the text, so a comment inside a code span is code,
     and a backtick inside a comment is comment. A code span closes at the next
-    backtick run of the same length within its paragraph; a run with no closer
-    is a literal backtick.
+    backtick run of the same length before a blank line or a line that opens
+    a block (`<!--`, a `#` heading, a list marker); a run with no closer there
+    is a literal backtick. A heading is one line, so a run on a heading line
+    closes on that line or not at all.
     """
     index = 0
     while True:
@@ -251,8 +272,7 @@ def _html_comments(text: str):
             return
         if ticks is not None and ticks.start() < comment.start():
             width = len(ticks.group())
-            end = _PARAGRAPH_BREAK.search(text, ticks.end())
-            limit = end.start() if end is not None else len(text)
+            limit = _span_limit(text, ticks.start(), ticks.end())
             closer = next((run for run in _BACKTICKS.finditer(text, ticks.end(), limit)
                            if len(run.group()) == width), None)
             index = closer.end() if closer is not None else ticks.end()
@@ -348,11 +368,6 @@ def load_registry(path: str | Path) -> dict[str, Witness]:
     return registry
 
 
-def _is_test_function(node: ast.stmt) -> bool:
-    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-        and node.name.startswith("test")
-
-
 #: The pytest defaults (`python_files`); the repository configures no other
 #: pattern, so a test function in any other file is never collected.
 _COLLECTED_FILE = re.compile(r"(test_.*|.*_test)\.py")
@@ -363,19 +378,17 @@ def _is_test_function(node: ast.stmt) -> bool:
         and node.name.startswith("test")
 
 
-def _mark_name(decorator: ast.expr) -> str | None:
-    """`skip` for `@pytest.mark.skip`, `@pytest.mark.skip(...)` or
-    `@mark.skip`; None for anything that is not a pytest mark."""
-    if isinstance(decorator, ast.Call):
-        decorator = decorator.func
-    if not isinstance(decorator, ast.Attribute):
-        return None
-    owner = decorator.value
-    if isinstance(owner, ast.Attribute) and owner.attr == "mark" \
-            and isinstance(owner.value, ast.Name) and owner.value.id == "pytest":
-        return decorator.attr
-    if isinstance(owner, ast.Name) and owner.id == "mark":
-        return decorator.attr
+def _literal_mark(mark: ast.expr) -> str | None:
+    """`skip` for a mark spelled literally `pytest.mark.skip` or
+    `pytest.mark.skip(...)`; None for any other spelling. An alias
+    (`import pytest as pt`, `from pytest import mark`, `skip =
+    pytest.mark.skip`) is not followed: the caller refuses it as unreadable."""
+    if isinstance(mark, ast.Call):
+        mark = mark.func
+    if isinstance(mark, ast.Attribute) and isinstance(mark.value, ast.Attribute) \
+            and mark.value.attr == "mark" and isinstance(mark.value.value, ast.Name) \
+            and mark.value.value.id == "pytest":
+        return mark.attr
     return None
 
 
@@ -386,35 +399,91 @@ def _marks(node: ast.expr) -> list[ast.expr]:
     return [node]
 
 
-def _module_marks(tree: ast.Module) -> list[ast.expr]:
-    marks: list[ast.expr] = []
-    for item in tree.body:
+def _pytestmark_values(body: list[ast.stmt]) -> list[ast.expr]:
+    """The values assigned to `pytestmark` directly in a module or class body."""
+    values = []
+    for item in body:
         if isinstance(item, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "pytestmark" for t in item.targets):
-            marks.extend(_marks(item.value))
+            values.append(item.value)
         elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) \
                 and item.target.id == "pytestmark" and item.value is not None:
-            marks.extend(_marks(item.value))
-    return marks
+            values.append(item.value)
+    return values
+
+
+class _Marks:
+    """Every mark that applies to one test, read without importing it.
+
+    `unreadable` is set when a decorator or a `pytestmark` is not a mark
+    spelled literally `pytest.mark.<name>`: the check fails closed on it rather
+    than resolve aliases. `own` are the function's decorators, `inherited` the
+    class decorators and the class and module `pytestmark` values.
+    """
+
+    def __init__(self, tree: ast.Module, function: ast.stmt, cls: ast.stmt | None):
+        self.unreadable: str | None = None
+        inherited: list[ast.expr] = []
+        for value in _pytestmark_values(tree.body):
+            inherited.extend(_marks(value))
+        if cls is not None:
+            inherited.extend(cls.decorator_list)
+            for value in _pytestmark_values(cls.body):
+                inherited.extend(_marks(value))
+        assigned = sum(1 for node in ast.walk(tree)
+                       if isinstance(node, ast.Name) and node.id == "pytestmark"
+                       and isinstance(node.ctx, (ast.Store, ast.Del)))
+        direct = len(_pytestmark_values(tree.body)) + sum(
+            len(_pytestmark_values(item.body)) for item in tree.body
+            if isinstance(item, ast.ClassDef))
+        if assigned != direct:
+            self.unreadable = "`pytestmark` is assigned in a shape the check cannot read"
+        self.own = list(function.decorator_list)
+        self.inherited = inherited
+        for mark in self.own + self.inherited:
+            if _literal_mark(mark) is None and self.unreadable is None:
+                self.unreadable = (f"`{ast.unparse(mark)}` is not a mark spelled "
+                                   "`pytest.mark.<name>`, so the check cannot read it")
+
+    def named(self, name: str, *, own_only: bool = False) -> list[ast.expr]:
+        marks = self.own if own_only else self.own + self.inherited
+        return [mark for mark in marks if _literal_mark(mark) == name]
+
+
+def _run_reason(tree: ast.Module, function: ast.stmt, cls: ast.stmt | None) -> str | None:
+    """Why one collected test does not run or cannot be read, or None.
+
+    Refused: an unreadable mark, `pytest.mark.skip`, and
+    `pytest.mark.xfail(run=False)` (a `run=` that is not a literal is
+    unreadable). NOT decided: `pytest.mark.skipif`, whose condition runs only
+    under pytest, and a `pytest.skip()` call inside the test body.
+    """
+    marks = _Marks(tree, function, cls)
+    if marks.unreadable is not None:
+        return marks.unreadable
+    if marks.named("skip"):
+        return "it is unconditionally skipped"
+    for mark in marks.named("xfail"):
+        run = next((k.value for k in mark.keywords if k.arg == "run"), None) \
+            if isinstance(mark, ast.Call) else None
+        if run is None:
+            continue
+        if not isinstance(run, ast.Constant):
+            return "`pytest.mark.xfail(run=...)` is not a literal the check can read"
+        if not run.value:
+            return "it is marked `xfail(run=False)`, so it never runs"
+    return None
 
 
 def _skips_the_module(tree: ast.Module) -> bool:
-    """A top-level `pytest.skip(...)` statement, or a `pytestmark` that holds
-    an unconditional `skip`: no test in the file runs."""
+    """A top-level `pytest.skip(...)` statement: no test in the file runs."""
     for item in tree.body:
         if isinstance(item, ast.Expr) and isinstance(item.value, ast.Call):
             func = item.value.func
             if isinstance(func, ast.Attribute) and func.attr == "skip" \
                     and isinstance(func.value, ast.Name) and func.value.id == "pytest":
                 return True
-    return any(_mark_name(mark) == "skip" for mark in _module_marks(tree))
-
-
-def _skipped(*nodes: ast.stmt) -> bool:
-    """An unconditional `skip` mark on the function or its class. A `skipif`
-    condition is not decided here: it is evaluated when pytest runs."""
-    return any(_mark_name(decorator) == "skip"
-               for node in nodes for decorator in node.decorator_list)
+    return False
 
 
 def _tests(tree: ast.Module):
@@ -428,12 +497,19 @@ def _tests(tree: ast.Module):
                     yield f"{item.name}::{member.name}", member, item
 
 
-def _has_a_test(tree: ast.Module) -> bool:
-    """True when the module defines a top-level `test_*`, or a `Test*` class
-    with one, that is not unconditionally skipped: a witness file with no test
-    left to run is not a witness."""
-    return any(not _skipped(function, *([cls] if cls else []))
-               for _name, function, cls in _tests(tree))
+def _file_reason(tree: ast.Module, file: str) -> str | None:
+    """None when the module has a test that runs and can be read; otherwise
+    why not (the first test's reason): a witness file with no test left to
+    run is not a witness."""
+    reasons = []
+    for name, function, cls in _tests(tree):
+        reason = _run_reason(tree, function, cls)
+        if reason is None:
+            return None
+        reasons.append(f"{name}: {reason}")
+    if not reasons:
+        return f"test file {file!r} defines no test function"
+    return f"test file {file!r} has no test that runs ({reasons[0]})"
 
 
 class _Unreadable(Exception):
@@ -517,9 +593,22 @@ def _parameter_ids(call: ast.Call, tree: ast.Module) -> set[str]:
     values_node = _argument(call, 1, "argvalues")
     if names_node is None or values_node is None:
         raise _Unreadable("the parametrize call has no argnames/argvalues")
+    try:
+        return _read_ids(names_node, values_node, call, tree)
+    except (TypeError, ValueError, AttributeError) as exc:
+        # a malformed call (`parametrize("x", 5)`, `ids=sorted(5)`) is refused
+        # as unreadable; pytest itself would fail to collect it
+        raise _Unreadable(f"the parametrize call is malformed: {exc}") from None
+
+
+def _read_ids(names_node: ast.expr, values_node: ast.expr, call: ast.Call,
+              tree: ast.Module) -> set[str]:
     names = _static(names_node, tree)
     if isinstance(names, str):
         names = [n.strip() for n in names.split(",") if n.strip()]
+    if not isinstance(names, (list, tuple)) or not names \
+            or not all(isinstance(n, str) for n in names):
+        raise _Unreadable("the argnames are not a string or a list of strings")
     values = list(_static(values_node, tree))
     ids_node = next((k.value for k in call.keywords if k.arg == "ids"), None)
     if ids_node is not None:
@@ -542,11 +631,6 @@ def _parameter_ids(call: ast.Call, tree: ast.Module) -> set[str]:
 
 def _bad_id(value) -> str:
     raise _Unreadable(f"`ids` entry {value!r} is not a string")
-
-
-def _parametrize_calls(*nodes: ast.stmt) -> list[ast.expr]:
-    return [decorator for node in nodes for decorator in node.decorator_list
-            if _mark_name(decorator) == "parametrize"]
 
 
 def _fixture_params(tree: ast.Module) -> bool:
@@ -578,9 +662,11 @@ def _parameter_reason(tree: ast.Module, function: ast.stmt, cls: ast.stmt | None
     """Why `<function>[param]` is not one of the function's real parameter
     ids, or None when it is. The ids are read from the parametrize call; a
     shape whose ids cannot be computed exactly is refused, never guessed."""
-    calls = _parametrize_calls(function, *([cls] if cls else []))
-    if any(_mark_name(mark) == "parametrize" for mark in _module_marks(tree)):
-        return "a module `pytestmark` parametrizes it; name the function instead"
+    marks = _Marks(tree, function, cls)
+    if len(marks.named("parametrize")) != len(marks.named("parametrize", own_only=True)):
+        return ("a class or module mark parametrizes it; name the function "
+                "instead")
+    calls = marks.named("parametrize", own_only=True)
     hooks = [tree]
     for conftest in _conftests(root, file):
         try:
@@ -616,8 +702,9 @@ def _node_reason(tree: ast.Module, node: str, root: Path, file: str) -> str | No
     for name, function, cls in _tests(tree):
         if name != bare:
             continue
-        if _skipped(function, *([cls] if cls else [])):
-            return f"test {bare!r} in {file} is unconditionally skipped"
+        reason = _run_reason(tree, function, cls)
+        if reason is not None:
+            return f"test {bare!r} in {file}: {reason}"
         if bracket:
             reason = _parameter_reason(tree, function, cls, param, root, file)
             if reason is not None:
@@ -666,9 +753,7 @@ def _resolve(witness: Witness, registry: dict[str, Witness], root: Path,
     if _skips_the_module(tree):
         return f"test file {file!r} is unconditionally skipped"
     if not separator:
-        if _has_a_test(tree):
-            return None
-        return f"test file {file!r} defines no test function that runs"
+        return _file_reason(tree, file)
     return _node_reason(tree, node, root, file)
 
 

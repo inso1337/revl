@@ -387,13 +387,18 @@ each failure in a synthetic tree. Claims are optional: a comment without an
 annotation is unaffected.
 
 The check reads the test file instead of collecting it, so the lint job needs
-no pytest. A witness in a file pytest does not collect (not `test_*.py` or
-`*_test.py`), an unconditionally skipped test, and a parameter id the
-function's `@pytest.mark.parametrize` does not produce are refused. Parameter
+no pytest, and it fails closed: every decorator on the witness test and its
+class, and every `pytestmark`, must be a mark spelled literally
+`pytest.mark.<name>`, and any other spelling (an alias, a mark stored in a
+variable) refuses the witness. A witness in a file pytest does not collect (not
+`test_*.py` or `*_test.py`), a test marked `pytest.mark.skip` or
+`pytest.mark.xfail(run=False)`, and a parameter id the function's own
+`@pytest.mark.parametrize` does not produce are refused. Parameter
 ids are read from the call, so give it `ids=` when the default ids are long or
 not plain text; a shape whose ids cannot be read exactly is refused, and naming
-the function without the parameter always works. A `skipif` is not decided:
-its condition runs only under pytest. A `.rvl` claim under `examples/` gets a
+the function without the parameter always works. A `skipif` is not decided
+(its condition runs only under pytest), and a `pytest.skip()` call in the test
+body is not detected. A `.rvl` claim under `examples/` gets a
 FULL affected selection, so the selection half is satisfied by the full run.
 
 The gate can prove the witness exists and runs. It cannot prove the sentence
