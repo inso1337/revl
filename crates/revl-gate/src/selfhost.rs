@@ -5492,7 +5492,7 @@ fn tests_use_advance(ir: Value) -> bool {
     return false;
 }
 
-fn revl_teardown_preamble() -> Vec<String> {
+fn revl_teardown_preamble_() -> Vec<String> {
     let mut o: Vec<String> = vec![];
     o.push(String::from("/// item 243 / docs/design/teardown-contract.md: the per-activation"));
     o.push(String::from("/// three-entry-kind teardown accumulator (transactional + compensation)."));
@@ -5640,7 +5640,7 @@ fn revl_teardown_preamble() -> Vec<String> {
     return o;
 }
 
-fn revl_timer_preamble() -> Vec<String> {
+fn revl_timer_preamble_() -> Vec<String> {
     let mut o: Vec<String> = vec![];
     o.push(String::from("/// clock coeffect + timer scheduler (item 57, docs/time-coeffect.md):"));
     o.push(String::from("/// the rust mirror of backends/python/runtime.py's Clock/TimerHandle."));
@@ -7894,7 +7894,7 @@ fn needs_realm_helper(components: Vec<Value>) -> bool {
     return false;
 }
 
-fn revl_realm_helper(components: Vec<Value>) -> Vec<String> {
+fn revl_realm_helper_(components: Vec<Value>) -> Vec<String> {
     let seen = collect_realm_labels(components.clone());
     let labels = list_sort({ let mut ks: std::vec::Vec<String> = seen.keys().cloned().collect(); ks.sort(); ks });
     let mut out: Vec<String> = vec![];
@@ -9072,7 +9072,7 @@ pub fn emit_rust_src(ir: Value) -> String {
     out.extend((emit_service_traits(services.clone(), tables.tn.clone())).iter().cloned());
     out.extend((emit_host_stubs(ir.clone())).iter().cloned());
     if (uses_timer(value_list(value_field(ir.clone(), String::from("components")))) || tests_use_advance(ir.clone())) {
-        out.extend((revl_timer_preamble()).iter().cloned());
+        out.extend((revl_timer_preamble_()).iter().cloned());
     }
     if uses_stdlib(ir.clone()) {
         out.extend((stdlib_helpers()).iter().cloned());
@@ -9080,10 +9080,10 @@ pub fn emit_rust_src(ir: Value) -> String {
     }
     let components = value_list(value_field(ir.clone(), String::from("components")));
     if needs_realm_helper(components.clone()) {
-        out.extend((revl_realm_helper(components.clone())).iter().cloned());
+        out.extend((revl_realm_helper_(components.clone())).iter().cloned());
     }
     if uses_teardown(ir.clone()) {
-        out.extend((revl_teardown_preamble()).iter().cloned());
+        out.extend((revl_teardown_preamble_()).iter().cloned());
     }
     out.extend((declared_compensate_marker(ir.clone())).iter().cloned());
     for comp in components.clone() {

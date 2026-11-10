@@ -498,12 +498,16 @@ def _mangle(name: str, extra: frozenset = frozenset()) -> str:
 #                        a JS keyword (`static`) is already broken on ts for
 #                        exactly that reason; a scaffolding-named case would join
 #                        it. Fixing the construction site is a separate change.
-#   "type name", "service", "component", "extern name", "secret name",
+#   "type name", "service", "component", "secret name",
 #   "ref symbol"      -> a type/binding the emitter DERIVES from the name, or a
 #                        name it also emits as a string; a rename needs a
 #                        derivation-aware reservation (the still-open xfail in
 #                        tests/test_cluster_c_emitter_hijack_553.py), not this
 #                        ladder
+#
+# "extern name" left this list with issue #3127: an extern is bound inside the
+# emitted module and nothing on the host resolves it by name, so `_ident`
+# renames it through the module family (`_mangle_module`) instead.
 #
 # The injected type names (`RevlSecretShape`, `RevlResult`, `RevlActivation`,
 # `RevlFrame`, `RevlSpawnHandle`, java's `Pool`/`Map`) are NOT in
