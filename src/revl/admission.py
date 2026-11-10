@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 
 from .errors import RevlError
+from .model_answer import ANSWER_TYPES
 from .parser import Program, ServiceDecl
 from .typecheck import compatible
 from .why import CHAIN, SET, TraceStep, WhyTrace
@@ -487,10 +488,14 @@ def _decl_differs(name: str, mine: dict, theirs: dict,
     """Does `name` mean something different on the two sides: declared on one
     only, declared differently, or declared alike over a declaration it uses
     that differs? A name declared on NEITHER side is an opaque nominal and
-    means itself. `seen` makes a recursive type terminate (a revisit adds no
-    difference the first visit did not already find)."""
+    means itself. So does a type the language provides (`ANSWER_TYPES`): no
+    program can declare one, and a table holds its entry only when the program
+    names it applied, so its presence on one side is not a declaration that
+    moved (`manifest._decl_rows` leaves it off the wire for the same reason).
+    `seen` makes a recursive type terminate (a revisit adds no difference the
+    first visit did not already find)."""
     seen = set() if seen is None else seen
-    if name in seen:
+    if name in seen or name in ANSWER_TYPES:
         return False
     seen.add(name)
     a, b = mine.get(name), theirs.get(name)
@@ -516,7 +521,14 @@ def _changed_names(accepted: str | None, exported: str | None,
 def _own_differences(names: list[str], mine: dict, theirs: dict) -> list[str]:
     """The declarations, among `names` and everything they reach, that differ
     on their own: the ones worth showing, since a name whose body is spelled
-    the same but reaches a changed one differs only through it."""
+    the same but reaches a changed one differs only through it.
+
+    The walk follows the RUNNING side's references (`theirs`) only. A name
+    reached through a declaration that is itself unchanged is reached on both
+    sides alike, and a name only the candidate's changed declaration reaches
+    is already explained by that declaration, which is shown. It also keeps
+    this text a function of what the running hand-off reaches, which is all
+    the manifest wire carries to the self-host gate (`manifest._decl_rows`)."""
     out: set[str] = set()
     todo, seen = list(names), set()
     while todo:
@@ -526,12 +538,11 @@ def _own_differences(names: list[str], mine: dict, theirs: dict) -> list[str]:
         seen.add(n)
         if _decl_key(mine.get(n)) != _decl_key(theirs.get(n)):
             out.add(n)
-        for side in (mine, theirs):
-            spec = side.get(n)
-            if spec:
-                params = set(spec.get("params") or ())
-                todo += [r for t in _decl_refs(spec)
-                         for r in _spelling_names(t) - params]
+        spec = theirs.get(n)
+        if spec:
+            params = set(spec.get("params") or ())
+            todo += [r for t in _decl_refs(spec)
+                     for r in _spelling_names(t) - params]
     return sorted(out)
 
 
@@ -660,7 +671,7 @@ def _service_type_drift(old: ServiceDecl, candidate_types: dict | None,
         used = ", ".join(f"`{n}`" for n in changed)
         return _Drift(
             mname, "signature",
-            f"`{mname}` uses {used}, whose declaration differs ({both}) — a "
+            f"`{mname}` uses {used}, whose declaration differs ({both}); a "
             f"running consumer or provider was checked against the running "
             f"declaration")
     return None
@@ -761,7 +772,7 @@ def _handoff_error(program: Program, comp: dict, key: str,
         # "widen the accepted type" would not change the verdict
         hint = ("a successor's `handoff` must hold everything the running "
                 "provider's `handoff` exports (state compatibility, the §5 "
-                "relation pointed at state — docs/state-handoff.md), and a "
+                "relation pointed at state, docs/state-handoff.md), and a "
                 "record or variant it names must be declared exactly as the "
                 "running version declares it: keep the declaration unchanged, "
                 "or migrate the shape explicitly")
@@ -778,6 +789,72 @@ def _handoff_error(program: Program, comp: dict, key: str,
     ]
     why = WhyTrace(kind="state-handoff-drift", subject=key, shape=SET, steps=steps)
     return RevlError(program.filename, line, message, hint=hint, why=why)
+
+
+def _admit_retained_handoffs(program: Program, ambient: dict,
+                             types: dict | None = None) -> None:
+    """Hold every state hand-off this admission KEEPS to the declarations its
+    state was built against.
+
+    `_admit_handoff_replacement` reads a candidate that accepts the state. A
+    candidate that leaves the stateful provider alone and declares a type name
+    its `handoff` reaches over another record never gets there, and the
+    document it produces carries the candidate's declaration under the kept
+    spelling. The kept state would then be described by a record it was never
+    checked against, and the next swap of that provider to that record would
+    read as no change. A composition has one declaration per name, so the
+    name has to mean what the running manifest says while a hand-off that
+    reaches it is kept.
+
+    The comparison is the replacement check's own, pointed at one spelling
+    under two tables: the running declarations, and the running declarations
+    with the candidate's laid over them (what would stand next). The first
+    kept component, by name, that reaches a changed declaration is refused."""
+    kept = ambient.get("retained_handoffs") or []
+    if not kept:
+        return
+    running_types = ambient.get("handoff_types") or {}
+    effective = {**running_types, **(types or {})}
+    for old in sorted(kept, key=lambda h: h.get("component") or ""):
+        exported = old.get("type")
+        changed = _changed_names(exported, exported, effective, running_types)
+        if changed:
+            raise _retained_handoff_error(program, old, changed, effective,
+                                          running_types)
+
+
+def _retained_handoff_error(program: Program, old: dict, changed: list[str],
+                            effective: dict, running_types: dict) -> RevlError:
+    key, exported = old.get("key"), old.get("type")
+    old_name = old.get("component") or "the running provider"
+    shown = _own_differences(changed, effective, running_types)
+    accepted_at, exported_at = (
+        " (" + "; ".join(_render_decl(n, side.get(n)) for n in shown) + ")"
+        if shown else "" for side in (effective, running_types))
+    message = (f"state hand-off on `{key}` differs from the running manifest: "
+               f"`{old_name}` is kept and exports `{exported}`{exported_at}, "
+               f"but the candidate redeclares a type that spelling names"
+               f"{accepted_at}; `{old_name}` holds state built against the "
+               f"running declaration, and a composition has one declaration "
+               f"per name")
+    hint = ("a record or variant that a running component's `handoff` names "
+            "must stay declared exactly as the running manifest declares it "
+            "while that component is kept: leave the declaration unchanged, "
+            "give the new type another name, or replace the component in the "
+            "same admission and migrate its state explicitly "
+            "(docs/state-handoff.md)")
+    name = shown[0] if shown else changed[0]
+    decl = next((d for d in program.type_decls if d.name == name), None)
+    steps = [
+        TraceStep(f"{old_name}.{key}", "export", None, None,
+                  f"kept provider exports state `{exported}`{exported_at}"),
+        TraceStep(name, "redeclare",
+                  program.decl_files.get(id(decl), program.filename),
+                  decl.line if decl is not None else None,
+                  f"candidate declares {_render_decl(name, effective.get(name))}"),
+    ]
+    why = WhyTrace(kind="state-handoff-drift", subject=key, shape=SET, steps=steps)
+    return RevlError(program.filename, 0, message, hint=hint, why=why)
 
 
 # ------------------------------- withdrawn provisions (§5, item 186 / issue #86)

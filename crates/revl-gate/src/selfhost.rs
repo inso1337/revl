@@ -29827,7 +29827,7 @@ fn hd_own_diffs(names: Vec<String>, mine: &[HdDecl], theirs: &[HdDecl]) -> Vec<S
             if (hd_key(a.clone()) != hd_key(b.clone())) {
                 out.push(n.clone());
             }
-            todo = hd_push_refs(hd_push_refs(todo.clone(), a.clone()), b.clone());
+            todo = hd_push_refs(todo.clone(), b.clone());
         }
     }
     return sort_strs(&out);
@@ -29900,6 +29900,62 @@ fn handoff_refusals(comps: &[CompD], hands: &[MHand], poisoned: &[String], al: s
     return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &accepted, &old.comp, &old.ty, &det.atx, &det.exx)), c.line)];
 }
 
+fn hd_overlay(mine: Vec<HdDecl>, theirs: &[HdDecl]) -> Vec<HdDecl> {
+    let mut out = mine.clone();
+    let mut i = 0i64;
+    while (i < theirs.revl_length()) {
+        if (hd_find(&mine, &(theirs)[(i) as usize].name).name == "") {
+            out.push((theirs)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn retained_drift_msg(key: &str, oldName: &str, exported: &str, atx: &str, exx: &str) -> String {
+    return ((((((((((((String::from("state hand-off on `").revl_concat(&key)).revl_concat("` differs from the running manifest: `")).revl_concat(&oldName)).revl_concat("` is kept and exports `")).revl_concat(&exported)).revl_concat("`")).revl_concat(&exx)).revl_concat(", but the candidate redeclares a type that spelling names")).revl_concat(&atx)).revl_concat("; `")).revl_concat(&oldName)).revl_concat("` holds state built against the running declaration, and a ")).revl_concat("composition has one declaration per name");
+}
+
+fn mhand_of(hands: &[MHand], comp: &str) -> MHand {
+    let mut i = 0i64;
+    while (i < hands.revl_length()) {
+        if ((hands)[(i) as usize].comp == comp) {
+            return (hands)[(i) as usize].clone();
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return MHand { comp: String::from(""), key: String::from(""), ty: String::from("") };
+}
+
+fn retained_handoff_refusals(hands: &[MHand], drop: &[String], mine: Vec<HdDecl>, theirs: &[HdDecl]) -> Vec<Verd> {
+    if ((hands.revl_length() == 0i64) || (mine.revl_length() == 0i64)) {
+        return vec![];
+    }
+    let eff = hd_overlay(mine.clone(), theirs);
+    let mut kept: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < hands.revl_length()) {
+        if (!contains__m2(drop, &(hands)[(i) as usize].comp)) {
+            kept.push((hands)[(i) as usize].comp.clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let order = sort_strs(&kept);
+    let mut k = 0i64;
+    while (k < order.revl_length()) {
+        let h = mhand_of(hands, &(order)[(k) as usize]);
+        let changed = hd_changed(&h.ty, &h.ty, &eff, theirs);
+        if (changed.revl_length() > 0i64) {
+            let shown = hd_own_diffs(changed.clone(), &eff, theirs);
+            let atx = if (shown.revl_length() > 0i64) { hd_render_all(&shown, &eff) } else { String::from("") };
+            let exx = if (shown.revl_length() > 0i64) { hd_render_all(&shown, theirs) } else { String::from("") };
+            return vec![mk_verd(tagged("G2", &retained_drift_msg(&h.key, &h.comp, &h.ty, &atx, &exx)), 0i64)];
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return vec![];
+}
+
 pub fn admit_ambient(src: String, manifest: String) -> String {
     let man = parse_manifest(manifest.clone());
     if (man.bad != "") {
@@ -29951,7 +30007,8 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
         return rfold;
     }
     let lost = lost_provs(&split_provs(&man.provs, &drop, true, 0i64, vec![]), &live_provs(&live, 0i64, keptProvs.clone()), 0i64, vec![]);
-    let nl = collect_nonlink(ts.clone(), pg.clone(), &man.hands, &withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64), &man.svcs, manifest_svcs_known(man.clone()), &man.svcOps, &man.decls);
+    let ownDecls = if (man.hands.revl_length() > 0i64) { types_decls(ts.clone(), 0i64, vec![], alias_map(ts.clone())) } else { vec![] };
+    let nl = collect_nonlink(ts.clone(), pg.clone(), &man.hands, &append_verds(retained_handoff_refusals(&man.hands, &drop, ownDecls, &man.decls), &withdrawal_refusals(&keptReqs, &lost, &pg.comps, 0i64)), &man.svcs, manifest_svcs_known(man.clone()), &man.svcOps, &man.decls);
     if nl.done {
         return pick_min(&nl.refs);
     }

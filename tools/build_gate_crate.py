@@ -1803,7 +1803,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
             return None;
         }
         if let Some(spec) = row.strip_prefix('~') {
-            // `~T~record~f:Ty~..` / `~T[P]~variant~A~B:Ty` — a running
+            // `~T~record~f:Ty~..` / `~T[P]~variant~A~B:Ty`: a running
             // record or variant a handoff spelling reaches. The fold reads the
             // members against the candidate's own declarations; this surface
             // counts it as nothing, like the handoff row it accompanies, and

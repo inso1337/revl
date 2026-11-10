@@ -93,6 +93,31 @@ numbers them by position, so a reorder is refused. The agent-authored swap path
 Refusing is the sound move: silently dropping the predecessor's state on a swap
 would be **residue**, which G7/the erase-report forbid.
 
+### A hand-off the admission keeps
+
+The same rule covers a running component the admission does **not** replace.
+Its state stays where it is, built against the running declarations, and a
+composition has one declaration per name. So a candidate that redeclares
+differently a name a kept component's exported shape reaches is refused, even
+when the candidate has nothing to do with that component:
+
+```
+state hand-off on `db` differs from the running manifest: `Store` is kept and
+exports `St` (`St = {a: Int}`), but the candidate redeclares a type that
+spelling names (`St = {a: Int, b: Int}`); `Store` holds state built against the
+running declaration, and a composition has one declaration per name
+```
+
+Redeclaring the name identically is admitted, and so is a candidate that does
+not declare it. A type the language provides, such as `Answer[T]`, is never a
+redeclaration: no program can declare one, so a candidate that starts naming it
+changes nothing, and only the declared names under it are compared (`Answer[St]`
+is held to `St`). The ways through are the hint's: leave the declaration alone,
+give the new type another name, or replace the component in the same
+admission, where the replacement check above decides what happens to its state.
+A component the admission withdraws is not held to this rule for that reason.
+With several kept components the refusal names the first by component name.
+
 ### What is *not* a conflict
 
 * **A successor that declares no hand-off** opts out of inheriting the state.
@@ -166,6 +191,9 @@ the running composition is left exactly as if the swap had never been attempted.
   `_admit_handoff_replacement`, `_handoff_error`), wired in
   `src/revl/lower.py::check_and_lower`; the running provider's exported shape is
   threaded into the ambient by `src/revl/compiler.py::_running_handoffs`;
+* the kept half: `src/revl/admission.py` (`_admit_retained_handoffs`), fed by
+  `src/revl/compiler.py::_retained_handoffs`, and `retained_handoff_refusals`
+  in `selfhost/lower.rvl`, which prints the same refusal byte for byte;
 * the warm-start threading — `src/revl/mcp/session.py` (`_capture_provider_state`,
   `_restore_provider_state`, and the extended `_abort_swap`);
 * tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime)

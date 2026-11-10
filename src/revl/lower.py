@@ -9531,6 +9531,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _collect(_admit_handoff_replacement, program, live_components, ambient,
              types=types)
 
+    # the other half of the same rule: a hand-off this admission KEEPS. Its
+    # provider is not in `live_components`, so the check above never reads
+    # it, and a candidate that declares a type name it reaches over another
+    # record would change what the kept state is said to be. No-op unless a
+    # kept running component hands state off.
+    _collect(_admit_retained_handoffs, program, ambient, types=types)
+
     # withdrawn-provision admission (roadmap item 186 / issue #86): a
     # replacement that drops a provision a RETAINED running component still
     # requires is refused, rather than admitted into a composition where that
@@ -9830,6 +9837,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         "manifest": manifest,
     }
     user_types = {name: spec for name, spec in types.items() if not name.startswith("__")}
+    # `services` above carries the running services next to the candidate's
+    # own, so the running declarations their signatures are spelled against
+    # are carried too: a document compiled against a manifest can then stand
+    # as the next running manifest, where a running name with no declaration
+    # is refused (`admission._admit_service_types`). The candidate's own
+    # declaration of a name wins, as it does in that check.
+    user_types = {**(ambient.get("handoff_types") or {}), **user_types}
     if user_types:
         result["types"] = user_types
     if fns:
@@ -9904,6 +9918,7 @@ from .admission import (  # noqa: E402,F401
     _Drift,
     _Touchers,
     _admit_handoff_replacement,
+    _admit_retained_handoffs,
     _admit_provision_withdrawal,
     _admit_service_replacement,
     _admit_service_types,

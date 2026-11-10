@@ -6950,6 +6950,52 @@ def test_handoff_nominal_record_changed_gate_matches_the_reference(
                          replacing=("Store",)) == ref
 
 
+#: The same question one layer over: a record changed behind a running SERVICE
+#: signature, the spelling `Rec` unchanged. The reference reads the name
+#: against both versions' declarations and refuses for the running consumer
+#: (`admission._admit_service_types`). The gate does not run the service
+#: compatibility relation on a redeclared service at all (the comment above
+#: the manifest fold in `selfhost/lower.rvl`), so it has nothing to hang the
+#: declared-type comparison on and admits. That is the direction the gate is
+#: allowed to err in, and it is pinned here so that closing it is a visible
+#: change, not a silent one.
+_SV_PROVIDER = ("component P provides s: S {\n"
+                "  provide s { fn get(k) { return %s } }\n}\n")
+_SV_OLD = ("type Rec = { a: Int }\nservice S { fn get(k: Str) -> Rec }\n"
+           + _SV_PROVIDER % "{ a: 1 }")
+_SV_NEW = ("type Rec = { a: Int, b: Int }\n"
+           "service S { fn get(k: Str) -> Rec }\n"
+           + _SV_PROVIDER % "{ a: 1, b: 2 }")
+_SV_RUNNING = _SV_OLD + "component C requires s: S { }\n"
+
+
+def test_service_declared_type_unchanged_agrees(admit_ambient):
+    """The control for the gap below: the same record on both sides admits on
+    the gate and on the reference."""
+    assert _gate_ambient(admit_ambient, _SV_OLD, _SV_RUNNING,
+                         replacing=("P",)) == ""
+    assert _ref_ambient(_SV_OLD, _SV_RUNNING, replacing=("P",)) == ""
+
+
+def test_service_declared_type_changed_is_refused_by_the_reference():
+    """The reference half of the gap below: if the reference stops refusing,
+    this goes red on its own."""
+    ref = _ref_ambient(_SV_NEW, _SV_RUNNING, replacing=("P",))
+    assert ("|service `S` differs from the running manifest in a way that "
+            "breaks `C`: `get` uses `Rec`, whose declaration differs (") in ref, ref
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "KNOWN GAP: the self-host gate does not run the service compatibility "
+    "relation on a redeclared service, so a declaration changed behind a "
+    "running service signature is admitted where the reference refuses "
+    "(docs/service-compat.md). Under-refusing; remove this marker when the "
+    "relation is ported."))
+def test_service_declared_type_changed_is_refused_by_the_gate(admit_ambient):
+    assert _gate_ambient(admit_ambient, _SV_NEW, _SV_RUNNING,
+                         replacing=("P",)) != ""
+
+
 #: (name, running spelling, incoming spelling, running declarations, incoming
 #: declarations, refused?). Every row is checked on BOTH legs of oracle B and
 #: the expectation is a third witness: a refusal is the hand-off drift, an
@@ -6989,6 +7035,12 @@ _HANDOFF_DECL_CORPUS = (
      "type V = A | B(Str)\n", True),
     ("an alias to a changed record", "St", "S", "type St = { a: Int }\n",
      "type St = { a: Int, b: Int }\ntype S = St\n", True),
+    ("a changed record reaching a type the running hand-off never reached",
+     "St", "St", "type St = { a: Int }\ntype Other = { x: Int }\n",
+     "type St = { a: Int, o: Other }\ntype Other = { x: Int }\n", True),
+    ("a changed record reaching a type only the candidate declares",
+     "St", "St", "type St = { a: Int }\n",
+     "type St = { a: Int, o: Other }\ntype Other = { x: Int }\n", True),
     ("an unchanged record", "St", "St", "type St = { a: Int }\n",
      "type St = { a: Int }\n", False),
     ("an unchanged nested record", "Map[Str, List[St]]", "Map[Str, List[St]]",
@@ -7010,6 +7062,10 @@ _HANDOFF_DECL_CORPUS = (
      "type St = { a: Int }\ntype Other = { x: Str }\n", False),
     ("an alias to an unchanged record", "St", "S", "type St = { a: Int }\n",
      "type St = { a: Int }\ntype S = St\n", False),
+    ("a provided type the successor names elsewhere", "Answer[Int]",
+     "Answer[Int]", "", "type Q = { a: Answer[Int] }\n", False),
+    ("a record under a provided type", "Answer[St]", "Answer[St]",
+     "type St = { a: Int }\n", "type St = { a: Int, b: Int }\n", True),
 )
 
 _H_DRIFT_HEAD = ("G2|state hand-off on `db` differs from the running "
@@ -7084,6 +7140,154 @@ def test_handoff_declared_shape_without_running_declarations_fails_closed(
         ref = _classify(error) + "|" + error.message
     assert got.startswith(_H_DRIFT_HEAD), got
     assert got == ref
+
+
+# A hand-off the admission KEEPS. The rows above replace `Store`; here `Store`
+# stays and the incoming text adds an unrelated provider while declaring a
+# name `Store`'s hand-off reaches. Both legs hold that name to the running
+# declaration: the document that stands next has one declaration per name, and
+# the kept state was built against the running one.
+#
+# FAILURE DIRECTION: fail-CLOSED, and narrow. Only a declaration that DIFFERS,
+# under a name a KEPT hand-off reaches, is refused. The controls pin the rest:
+# the same declaration again, another name, and a provider that leaves in this
+# admission all admit.
+
+_K_NEW = ("service E { fn r(s: Str) -> Int }\n"
+          "component Fresh provides aux: E {\n"
+          "  provide aux { fn r(s) { let x = s   return 0 } }\n}\n")
+_K_HEAD = ("G2|state hand-off on `db` differs from the running manifest: "
+           "`Store` is kept and exports `")
+
+#: (name, running hand-off spelling, running declarations, incoming
+#: declarations, refused?), `Store` kept in every row.
+_KEPT_HANDOFF_CORPUS = (
+    ("a field added", "St", "type St = { a: Int }\n",
+     "type St = { a: Int, b: Int }\n", True),
+    ("a field retyped", "St", "type St = { a: Int }\n",
+     "type St = { a: Str }\n", True),
+    ("a Secret field becoming Str", "St", "type St = { a: Secret[Str] }\n",
+     "type St = { a: Str }\n", True),
+    ("nested under Map and List", "Map[Str, List[St]]",
+     "type St = { a: Int }\n", "type St = { a: Int, b: Int }\n", True),
+    ("a change reached through another record", "Outer",
+     "type St = { a: Int }\ntype Outer = { s: St }\n",
+     "type St = { a: Int, b: Int }\n", True),
+    ("the outer record changed, the inner one not redeclared", "Outer",
+     "type St = { a: Int }\ntype Outer = { s: St }\n",
+     "type Outer = { s: St, n: Int }\n", True),
+    ("a generic gaining a field", "Box[Int]", "type Box[T] = { v: T }\n",
+     "type Box[T] = { v: T, w: Int }\n", True),
+    ("a variant gaining a case", "V", "type V = A | B(Int)\n",
+     "type V = A | B(Int) | C\n", True),
+    ("the same declaration again", "St", "type St = { a: Int }\n",
+     "type St = { a: Int }\n", False),
+    ("the same declarations again, nested", "Outer",
+     "type St = { a: Int }\ntype Outer = { s: St }\n",
+     "type St = { a: Int }\ntype Outer = { s: St }\n", False),
+    ("record fields reordered", "St", "type St = { a: Int, b: Str }\n",
+     "type St = { b: Str, a: Int }\n", False),
+    ("a generic parameter renamed", "Box[Int]", "type Box[T] = { v: T }\n",
+     "type Box[U] = { v: U }\n", False),
+    ("a name the hand-off does not reach", "St",
+     "type St = { a: Int }\ntype Other = { x: Int }\n",
+     "type Other = { x: Str }\n", False),
+    ("a new name", "St", "type St = { a: Int }\n",
+     "type Other = { x: Str }\n", False),
+    ("no declaration at all", "St", "type St = { a: Int }\n", "", False),
+    ("a builtin spelling", "Map[Str, Int]", "",
+     "type St = { a: Int }\n", False),
+    ("a provided type the candidate names", "Answer[Int]", "",
+     "type Q = { a: Answer[Int] }\n", False),
+    ("a record under a provided type", "Answer[St]", "type St = { a: Int }\n",
+     "type St = { a: Int, b: Int }\n", True),
+)
+
+
+@pytest.mark.parametrize("name,ty,old_decl,new_decl,refused",
+                         _KEPT_HANDOFF_CORPUS,
+                         ids=[c[0] for c in _KEPT_HANDOFF_CORPUS])
+def test_oracle_b_kept_handoff_declared_shape(admit_ambient, name, ty,
+                                              old_decl, new_decl, refused):
+    """ORACLE B over a hand-off the admission keeps: the gate refuses exactly
+    when the reference does, in the reference's words."""
+    running = _h_comp("Store", ty, extra=old_decl)
+    incoming = new_decl + _K_NEW
+    got = _gate_ambient(admit_ambient, incoming, running)
+    ref = _ref_ambient(incoming, running)
+    assert got == ref, name
+    if refused:
+        assert got.startswith(_K_HEAD), got
+    else:
+        assert got == "", got
+
+
+def test_kept_handoff_refusal_names_both_declarations(admit_ambient):
+    got = _gate_ambient(admit_ambient, "type St = { a: Int, b: Int }\n" + _K_NEW,
+                        _H_NOMINAL_OLD)
+    assert got == (
+        "G2|state hand-off on `db` differs from the running manifest: "
+        "`Store` is kept and exports `St` (`St = {a: Int}`), but the "
+        "candidate redeclares a type that spelling names "
+        "(`St = {a: Int, b: Int}`); `Store` holds state built against the "
+        "running declaration, and a composition has one declaration per name")
+
+
+def test_kept_handoff_withdrawn_provider_is_not_held(admit_ambient):
+    """`Store` leaves in this admission (named in `replacing`, or redeclared
+    without a hand-off), so nothing kept is spelled against `St` any more and
+    both legs admit the changed declaration."""
+    changed = "type St = { a: Int, b: Int }\n"
+    for incoming, replacing in (
+            (changed + _K_NEW, ("Store",)),
+            (changed + _h_comp("Store", None), ())):
+        got = _gate_ambient(admit_ambient, incoming, _H_NOMINAL_OLD,
+                            replacing=replacing)
+        assert got == "" == _ref_ambient(incoming, _H_NOMINAL_OLD,
+                                         replacing=replacing), got
+
+
+def test_kept_handoff_names_the_first_kept_component_by_name(admit_ambient):
+    """Two kept providers reach the changed name: both legs name the same
+    one, the smallest component name, whatever the declaration order."""
+    decl = "type St = { a: Int }\n"
+    zed = _h_comp("Zed", "St", key="zdb")
+    abe = _h_comp("Abe", "St", key="adb").replace(_H_SVC, "")
+    for running in (decl + zed + abe, decl + zed.replace("Zed", "Abe").replace(
+            "zdb", "adb") + abe.replace("Abe", "Zed").replace("adb", "zdb")):
+        incoming = "type St = { a: Int, b: Int }\n" + _K_NEW
+        got = _gate_ambient(admit_ambient, incoming, running)
+        assert got == _ref_ambient(incoming, running)
+        assert got.startswith(
+            "G2|state hand-off on `adb` differs from the running manifest: "
+            "`Abe` is kept and exports `St`"), got
+
+
+def test_kept_handoff_without_running_declarations_fails_closed(admit_ambient):
+    """A running document with no `types` cannot prove a name the candidate
+    declares is the one the kept state was built as: both legs refuse it, and
+    both admit a candidate that says nothing about the name."""
+    from revl import manifest_wire
+    ir = compile_source(_H_NOMINAL_OLD, "running.rvl")
+    wire = manifest_wire(ir)
+    bare = ";".join(row for row in wire.split(";") if not row.startswith("~"))
+    assert bare != wire
+    ir.pop("types")
+
+    def ref(src: str) -> str:
+        try:
+            compile_source(src, "diff.rvl", manifest=ir)
+            return ""
+        except RevlErrors as error:
+            return _classify(error.errors[0]) + "|" + error.errors[0].message
+        except RevlError as error:
+            return _classify(error) + "|" + error.message
+
+    declares = "type St = { a: Int }\n" + _K_NEW
+    got = admit_ambient(declares, bare)
+    assert got.startswith(_K_HEAD) and "`St` is not declared" in got, got
+    assert got == ref(declares)
+    assert admit_ambient(_K_NEW, bare) == "" == ref(_K_NEW)
 
 
 @pytest.mark.parametrize("row", [

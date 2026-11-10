@@ -32,10 +32,10 @@ the withdrawn set of a REPLACEMENT admission, so the wire says exactly what
 ``compile_files(paths, manifest=IR(M), replacing=R)`` says on the reference
 side. The handoff row (``C=k:T``) carries the state shape each running provider
 EXPORTS (item 53), which is what the gate compares a replacement's ACCEPTED
-shape against — the port of `admission._admit_handoff_replacement`. The
-declaration rows (``~T~record~…``) carry what the names in those shapes MEAN in
-the running version, which `_handoff_compatible` reads each side's spelling
-against; see `_decl_rows`.
+shape against — the port of `admission._admit_handoff_replacement`.
+The declaration rows (``~T~record~…``) carry what the names in those shapes
+MEAN in the running version, which `_handoff_compatible` reads each side's
+spelling against; see `_decl_rows`.
 
 The SERVICE BLOCK (issue #346) says which services the running composition
 DECLARES, and its header is the load-bearing half. The service names are what

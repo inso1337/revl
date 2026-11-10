@@ -21550,8 +21550,9 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
     ci += 1
   }
   // the AMBIENT post-passes sit HERE, between the component loop and the spawn
-  // bounds: `_admit_handoff_replacement` and then `_admit_provision_withdrawal`
-  // are collected at exactly this point in `check_and_lower`, in that order.
+  // bounds: `_admit_handoff_replacement`, `_admit_retained_handoffs` and then
+  // `_admit_provision_withdrawal` are collected at exactly this point in
+  // `check_and_lower`, in that order (`wrefs` carries the last two).
   // Empty for `admit_src` and for any admission that neither swaps state nor
   // withdraws anything, so all of those stay byte-identical.
   // the SUCCESSOR's declarations are the program's own (`types_decls`, the
@@ -24534,7 +24535,7 @@ fn ho_compatible(expected: Str, actual: Str) -> Bool {
 // `_handoff_compatible`, one for one.
 
 // One piece of a type spelling: an identifier run that is a NAME (the reference's
-// `_IDENT`, a word not followed by `:` — a `name:` is a label), or any other
+// `_IDENT`, a word not followed by `:`, since a `name:` is a label), or any other
 // text. `ho_toks` concatenated is the spelling back.
 type HoTok = { s: Str, name: Bool }
 
@@ -24652,7 +24653,7 @@ fn hd_push_refs(todo: List[Str], d: HdDecl) -> List[Str] {
   return out
 }
 
-// `_decl_differs`: does `name` mean something different on the two sides —
+// `_decl_differs`: does `name` mean something different on the two sides:
 // declared on one only, declared differently, or declared alike over a
 // declaration it uses that differs? A name declared on NEITHER side is an
 // opaque nominal and means itself. The walk follows the successor's references
@@ -24709,7 +24710,9 @@ fn hd_compatible(accepted: Str, exported: Str, mine: List[HdDecl],
 }
 
 // `_own_differences`: the declarations, among `names` and everything they reach
-// on either side, that differ on their own — the ones worth showing.
+// on the RUNNING side, that differ on their own (the ones worth showing). A name
+// only the candidate's changed declaration reaches is explained by that
+// declaration, which is shown, and the wire carries the running closure only.
 fn hd_own_diffs(names: List[Str], mine: List[HdDecl],
                 theirs: List[HdDecl]) -> List[Str] {
   var out: List[Str] = []
@@ -24724,7 +24727,7 @@ fn hd_own_diffs(names: List[Str], mine: List[HdDecl],
     if (!contains(seen, n) && (a.name != "" || b.name != "")) {
       seen = seen.push(n)
       if (hd_key(a) != hd_key(b)) { out = out.push(n) }
-      todo = hd_push_refs(hd_push_refs(todo, a), b)
+      todo = hd_push_refs(todo, b)
     }
   }
   return sort_strs(out)
@@ -24840,6 +24843,78 @@ fn handoff_refusals(comps: List[CompD], hands: List[MHand],
                                                  det.exx)), c.line)]
 }
 
+// The KEPT half of the hand-off rule (`_admit_retained_handoffs`). A running
+// component this admission does not withdraw keeps its live state, built
+// against the running declarations. A composition has one declaration per
+// name, so a candidate that redeclares differently a name such a component's
+// exported spelling reaches would change the meaning of state nobody migrates.
+//
+// `hd_overlay` is the reference's `{**running_types, **types}`: the candidate's
+// declarations, then every running one the candidate does not redeclare.
+fn hd_overlay(mine: List[HdDecl], theirs: List[HdDecl]) -> List[HdDecl] {
+  var out = mine
+  var i = 0
+  while (i < theirs.length()) {
+    if (hd_find(mine, theirs[i].name).name == "") { out = out.push(theirs[i]) }
+    i += 1
+  }
+  return out
+}
+
+fn retained_drift_msg(key: Str, oldName: Str, exported: Str, atx: Str,
+                      exx: Str) -> Str {
+  return "state hand-off on `".concat(key)
+    .concat("` differs from the running manifest: `").concat(oldName)
+    .concat("` is kept and exports `").concat(exported).concat("`").concat(exx)
+    .concat(", but the candidate redeclares a type that spelling names")
+    .concat(atx).concat("; `").concat(oldName)
+    .concat("` holds state built against the running declaration, and a ")
+    .concat("composition has one declaration per name")
+}
+
+fn mhand_of(hands: List[MHand], comp: Str) -> MHand {
+  var i = 0
+  while (i < hands.length()) {
+    if (hands[i].comp == comp) { return hands[i] }
+    i += 1
+  }
+  return { comp: "", key: "", ty: "" }
+}
+
+// At most ONE refusal, on the first kept component BY NAME whose exported
+// spelling names a redeclared type, as the reference walks them sorted. It
+// carries no line (the offender is a running component, which has none here),
+// so it sorts ahead of every refusal anchored in the incoming text. A candidate
+// that declares no type cannot redeclare one, and a wire with no declaration
+// rows cannot prove a declared name unchanged, so that case refuses.
+fn retained_handoff_refusals(hands: List[MHand], drop: List[Str],
+                             mine: List[HdDecl],
+                             theirs: List[HdDecl]) -> List[Verd] {
+  if (hands.length() == 0 || mine.length() == 0) { return [] }
+  let eff = hd_overlay(mine, theirs)
+  var kept: List[Str] = []
+  var i = 0
+  while (i < hands.length()) {
+    if (!contains(drop, hands[i].comp)) { kept = kept.push(hands[i].comp) }
+    i += 1
+  }
+  let order = sort_strs(kept)
+  var k = 0
+  while (k < order.length()) {
+    let h = mhand_of(hands, order[k])
+    let changed = hd_changed(h.ty, h.ty, eff, theirs)
+    if (changed.length() > 0) {
+      let shown = hd_own_diffs(changed, eff, theirs)
+      let atx = shown.length() > 0 ? hd_render_all(shown, eff) : ""
+      let exx = shown.length() > 0 ? hd_render_all(shown, theirs) : ""
+      return [mk_verd(tagged("G2", retained_drift_msg(h.key, h.comp, h.ty, atx,
+                                                      exx)), 0)]
+    }
+    k += 1
+  }
+  return []
+}
+
 // Admit `src` against a running `manifest`. The INTERNAL refusals (a component
 // that refuses on its own text, a module-fn twin, a spawn/boot violation) are
 // collected exactly as the single-source path collects them — an ambient
@@ -24926,8 +25001,14 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   // running table goes IN rather than its verdicts, because that pass reads
   // `live_components` and so has to know which components the loop poisoned
   // (issue #1127); the withdrawal reads the FULL list and so is computed here.
+  // The KEPT hand-off check (`_admit_retained_handoffs`) is collected between
+  // the two on the reference, and needs no poisoned set either: it reads the
+  // running components this admission keeps against the program's declarations.
+  let ownDecls = man.hands.length() > 0
+    ? types_decls(ts, 0, [], alias_map(ts)) : []
   let nl = collect_nonlink(ts, pg, man.hands,
-    withdrawal_refusals(keptReqs, lost, pg.comps, 0),
+    append_verds(retained_handoff_refusals(man.hands, drop, ownDecls, man.decls),
+                 withdrawal_refusals(keptReqs, lost, pg.comps, 0)),
     man.svcs, manifest_svcs_known(man), man.svcOps, man.decls)
   if (nl.done) { return pick_min(nl.refs) }
   let wrefs = nl.refs
@@ -35454,7 +35535,7 @@ fn hd_event_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> HdDeclR {
   if (bend == 0 - 1) { return { d: hd_none(), i: hi } }
   let fields = hd_fields(ts, j + 1, bend - 1, al)
   // the reference refuses a field-less `event`, so an empty table is not the
-  // empty-variant shape `hd_type_decl` reads it as — no entry is produced.
+  // empty-variant shape `hd_type_decl` reads it as: no entry is produced.
   if (fields.length() == 0) { return { d: hd_none(), i: hi } }
   return { d: { name: nm, kind: "record", params: [], mems: fields }, i: bend }
 }

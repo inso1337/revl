@@ -1705,6 +1705,14 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             # name the candidate declares cannot be proved the same, so the
             # gate refuses it (`admission._handoff_compatible`, fail closed).
             "handoff_types": manifest.get("types") or {},
+            # the hand-offs this admission KEEPS: one entry per running
+            # component that is neither replaced nor redeclared, so its state
+            # stays live under the running declarations. `handoffs` above is
+            # keyed by provided key and keeps the withdrawn providers too, so
+            # it cannot say which exporter stays; this list can, and the gate
+            # refuses a candidate that redeclares a type one of them names
+            # (`admission._admit_retained_handoffs`).
+            "retained_handoffs": _retained_handoffs(manifest, dropped),
             # item 186 / issue #86: what this admission WITHDRAWS from the
             # running composition — `replacing=` plus every running component
             # the candidate redeclares by name. `components` above is the
@@ -2612,3 +2620,22 @@ def _running_handoffs(manifest: dict) -> dict[str, dict]:
             handoffs[h["key"]] = {"type": h.get("type"),
                                   "component": comp.get("name")}
     return handoffs
+
+
+def _retained_handoffs(manifest: dict, dropped: set[str]) -> list[dict]:
+    """The state hand-off of every running component this admission KEEPS
+    (`{"component", "key", "type"}`), read off the same full IR `components`
+    as `_running_handoffs`.
+
+    One entry per kept component rather than per key: the key map above keeps
+    a withdrawn provider's entry (a replacement is compared against it) and
+    lets a later component win a shared key, so it cannot answer "whose state
+    stays live". A bare-manifest caller yields an empty list."""
+    kept: list[dict] = []
+    for comp in manifest.get("components") or []:
+        h = comp.get("handoff")
+        if (isinstance(h, dict) and h.get("key")
+                and comp.get("name") not in dropped):
+            kept.append({"component": comp.get("name"), "key": h["key"],
+                         "type": h.get("type")})
+    return kept
