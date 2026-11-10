@@ -19,7 +19,7 @@ The escape hatch is what makes the claim true. `revl_verbs` is listed, so the
 model can call it; given `name` (a verb) and `args` (that verb's arguments) it
 stops being a lookup and IS that call — the same handler, the same gates, the
 same payload. Every verb is therefore one listed tool away, and the tier budget
-is untouched: the hatch is `DISCOVERY`'s role, not a fifteenth `CORE` member.
+is untouched: the hatch is `DISCOVERY`'s role, not one more `CORE` member.
 
 A client that wants the whole list says so when the server starts:
 `revl mcp serve --all-tools`, or `REVL_MCP_ALL_TOOLS=1` in its environment.
@@ -39,13 +39,15 @@ DISCOVERY = "revl_verbs"
 #: here (tests/test_mcp_tiered_tools_1697.py holds the two together):
 #:
 #: * the authoring loop `initialize` names (#1704), in its order: reuse
-#:   (resolve), scaffold, fill (edit), withdraw-safety (query_withdraw), check,
-#:   admit, plan before a swap, and explain a diagnostic code;
+#:   (resolve), ground (context, promoted on the rounds-to-green run in
+#:   docs/context.md), scaffold, fill (edit), withdraw-safety
+#:   (query_withdraw), check, admit, plan before a swap, and explain a
+#:   diagnostic code;
 #: * running it: load, call, swap;
 #: * `revl_source` and `revl_change`, listed once they exist (#1741's stack);
 #:   a name with no verb behind it is skipped, not listed;
 #: * the way to everything else, `revl_verbs`.
-CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
+CORE = ("revl_resolve", "revl_context", "revl_scaffold", "revl_edit", "revl_query_withdraw",
         "revl_check", "revl_admit", "revl_plan", "revl_explain",
         "revl_load", "revl_call", "revl_swap",
         "revl_source", "revl_change",
@@ -147,7 +149,7 @@ def listed(advertised: list) -> list:
 
     The tiered list is exactly `CORE`, and stays exactly `CORE`: the hatch
     (#2073) is a second form of `revl_verbs`, which is already in the tier, so
-    every other verb is reachable without a fifteenth listed verb and the tier
+    every other verb is reachable without one more listed verb and the tier
     budget is untouched."""
     return list(advertised) if _ALL_TOOLS else core(advertised)
 

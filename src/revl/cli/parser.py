@@ -240,8 +240,14 @@ def build_parser() -> argparse.ArgumentParser:
     ctx.add_argument("--component", default=None,
                      help="ground this component (default: every declared service)")
     ctx.add_argument("--budget", type=_token_budget, default=None, metavar="TOKENS",
-                     help="shrink the pack to fit: docs off, then collapse, "
-                          "from the last service backwards")
+                     help="shrink the pack to fit: docs off, then the body "
+                          "illustration, then collapse, from the last service "
+                          "backwards")
+    ctx.add_argument("--no-idioms", dest="idioms", action="store_false",
+                     default=None,
+                     help="leave out the compiled illustration of how a "
+                          "provider body is written (on by default with "
+                          "--component)")
     ctx.add_argument("--json", action="store_true", help="machine-readable output")
 
     grammar = sub.add_parser(

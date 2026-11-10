@@ -14,12 +14,12 @@ its base, `has_component: false` — because `revl_export`, the one verb that
 writes the held source out, was reachable by name and not by tool. The failure
 is invisible in token counts.
 
-The remedy is the escape hatch, and it is not a fifteenth listed verb: it is a
+The remedy is the escape hatch, and it is not one more listed verb: it is a
 second FORM of `revl_verbs`, which is already in the tier. `revl_verbs {name,
 args}` is resolved before dispatch to the named verb's OWN name, so it runs the
 whole pipeline and returns what a direct call returns — the same jail, the same
 authoring and operator gates, the same runtime gate, the same handler, the same
-`disk` divergence field, the same `sessionState` footer. The tier stays at 14.
+`disk` divergence field, the same `sessionState` footer. The tier did not grow for it.
 
 The claim in `disclosure.py` — "every verb stays callable by name, listed or
 not" — was true of the transport and false of the model's interface. These
@@ -114,13 +114,13 @@ def test_the_hatch_is_in_the_tool_list_the_model_is_given():
 
 
 def test_the_hatch_does_not_grow_the_tier_or_add_a_verb():
-    """The budget decision: `CORE` is still 14 and the listed set is still
+    """The budget decision: `CORE` is still 15 and the listed set is still
     exactly `CORE`. The hatch is `revl_verbs`' second form, so there is no new
     verb to gate, to plan, to give a topic or to count."""
-    assert len(disclosure.CORE) <= 14
+    assert len(disclosure.CORE) <= 15
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
     names = [t["name"] for t in _list()]
-    assert len(names) == 14
+    assert len(names) == 15
     assert "revl_verb" not in names           # no new listed verb, singular
     assert names.count(disclosure.DISCOVERY) == 1
     # ...and it did not get there by NOT having a hatch: the hatch exists, as

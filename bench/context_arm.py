@@ -24,12 +24,14 @@ The pack is promoted into the authoring loop only if it does not lose rounds
 and still wins on tokens (docs/context.md). `summary.md` states both, for
 every pack arm against raw:
 
-  pack-card     the pack, then a compiled illustration of provider-body
-                idioms (`context_card.rvl`), the same for every task;
-  pack-sibling  the pack, then one providing component of the same
+  pack          `revl context --no-idioms`: the declarations alone;
+  pack-card     `revl context` as it ships: the declarations, then its
+                compiled illustration of how a provider body is written
+                (`revl.context.IDIOMS`), the same for every task;
+  pack-sibling  the declarations, then one providing component of the same
                 composition, verbatim (the provider of a required service
                 first);
-  pack-both     the pack, the card and the sibling.
+  pack-both     the shipped pack and the sibling.
 
 Usage:
   python3 bench/context_arm.py --runner mock                 # pipeline check
@@ -48,14 +50,12 @@ BENCH = Path(__file__).resolve().parent
 ROOT = BENCH.parent
 TASKS = BENCH / "context_tasks.json"
 ARMS = ("raw", "pack", "pack-card", "pack-sibling", "pack-both")
-# A compiled illustration of provider-body idioms, the same text for every
-# task (tests/test_context_arm.py compiles it). The `pack-card` arms read it
-# after the pack.
-CARD = BENCH / "context_card.rvl"
+# The arms that read the pack with its illustration appended.
+CARD_ARMS = ("pack-card", "pack-both")
 
 sys.path.insert(0, str(ROOT / "src"))
 from revl import RevlError, compile_files  # noqa: E402
-from revl.context import context, count_tokens  # noqa: E402
+from revl.context import IDIOMS, context, count_tokens  # noqa: E402
 from revl.lexer import lex  # noqa: E402
 
 
@@ -202,9 +202,6 @@ def raw_reading(piece: dict, pack: dict) -> str:
     return text
 
 
-CARD_READING = ("\n\nHow a provider body is written, as a compiled "
-                "illustration (not part of this composition):\n\n"
-                "```revl\n{text}```")
 SIBLING_READING = ("\n\nAnd one provider body from this composition, "
                    "`{name}`, as written there:\n\n```revl\n{text}```")
 
@@ -213,12 +210,17 @@ def reading(arm: str, piece: dict, pack: dict, task: dict) -> str:
     if arm == "raw":
         return raw_reading(piece, pack)
     text = PACK_READING.format(text=pack["pack"].rstrip("\n") + "\n")
-    if arm in ("pack-card", "pack-both"):
-        text += CARD_READING.format(text=CARD.read_text(encoding="utf-8"))
     if arm in ("pack-sibling", "pack-both"):
         name, block = sibling(task, pack)
         text += SIBLING_READING.format(name=name, text=block)
     return text
+
+
+def pack_for(task: dict, piece: dict, arm: str) -> dict:
+    """What `revl context` answers for this arm: with the illustration for
+    the card arms, the declarations alone otherwise."""
+    return context([str(piece["path"])], component=task["component"],
+                   idioms=arm in CARD_ARMS)
 
 
 def prompt(task: dict, arm: str, piece: dict, pack: dict) -> str:
@@ -257,7 +259,8 @@ def grade(piece: dict, code: str, component: str):
     """(ok, error). The reply must be the component alone; it is then spliced
     and compiled under the composition's own path, so its `use` lines and
     `asset` paths resolve the way the original's do, and nothing is written
-    to disk."""
+    to disk. Paths in the compiler's text are made relative to the repository,
+    so a retry prompt and a recorded row carry no machine's own directory."""
     wrong = shape(component, code)
     if wrong:
         return False, wrong
@@ -268,9 +271,13 @@ def grade(piece: dict, code: str, component: str):
             path: splice(piece["holed"], piece["at"], code)})
         return True, None
     except RevlError as exc:
-        return False, str(exc)
+        return False, _relative(str(exc))
     except Exception as exc:  # a compiler crash is the compiler's, not the model's
-        return False, f"[compiler crash] {type(exc).__name__}: {exc}"
+        return False, _relative(f"[compiler crash] {type(exc).__name__}: {exc}")
+
+
+def _relative(text: str) -> str:
+    return text.replace(str(ROOT) + "/", "")
 
 
 def _mock(task: dict, piece: dict, attempt: int) -> dict:
@@ -292,7 +299,7 @@ def _total(attempts: list, key: str):
 
 def run_cell(task: dict, arm: str, rep: int, args, system: str) -> dict:
     piece = cut(task)
-    pack = context([str(piece["path"])], component=task["component"])
+    pack = pack_for(task, piece, arm)
     first = prompt(task, arm, piece, pack)
     current, attempts = first, []
     for attempt in range(1, args.max_iters + 1):

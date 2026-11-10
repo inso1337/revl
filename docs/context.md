@@ -49,10 +49,22 @@ For `revl context FILES --component C`:
 - A required type no `service` declares (a `Stream[T]` capability, a typo) is
   named as such rather than dropped.
 
+- Last, a fixed illustration of how a provider body is written
+  (`revl.context.IDIOMS`, 509 proxy tokens): a compiled component that keeps
+  a `Map` as an effect with its undo, writes provider methods as plain `fn`,
+  answers with `match` as an expression, calls an emission with `emit`, and
+  uses an emission's value by binding the `emit` expression.
+  Its names (`Log`, `Kv`, `Example`) belong to no composition, and the pack
+  says so. `--no-idioms` (MCP `idioms: false`) leaves it out. The
+  rounds-to-green run below is why it is there: the declarations alone lost
+  rounds because a model reading them had no provider body to copy idioms
+  from.
+
 Without `--component` the pack is every service the given files load, each
-with the clause its provider's key implies.
+with the clause its provider's key implies, and no illustration.
 
 `--json` (and the MCP verb) answers with the same content as rows: `header`,
+`idioms` (whether the illustration is in the pack),
 `services` (`role`, `key`, `service`, `providers`, `module`, `line`, `hash`,
 `clause`, `use`, `operations`, `text`), `pack` (the text above), and
 `tokens: {pack, raw, rawFiles}`: the pack's size beside the files it was cut
@@ -81,7 +93,8 @@ compiled against moved.
 The pack shrinks in a fixed order and is never truncated:
 
 1. doc comments come off, from the last service backwards;
-2. then services collapse to `service X { /* n operation(s), collapsed */ }`,
+2. then the illustration comes off (`idioms off`);
+3. then services collapse to `service X { /* n operation(s), collapsed */ }`,
    again from the last one backwards.
 
 The services keep their order (provides first, then requires), so a provided
@@ -100,7 +113,10 @@ The bar was fixed before this change was measured:
 body.** `tests/test_context.py::test_examples_bar_the_pack_is_under_seventy_percent_and_bodiless`
 holds it over every component of every example under `examples/` (the
 `rejections/` fixtures excluded), with "no body" checked on the lexed pack:
-no `effect`, `undo` or `provide` keyword token.
+no `effect`, `undo` or `provide` keyword token. The bar is about what is cut
+from the sources, so it is measured with `--no-idioms`; the illustration,
+which is a body by design and the same for every component, is counted
+separately below.
 
 Measured on this change, with the tokens-to-green proxy:
 
@@ -115,38 +131,98 @@ raw tokens or fewer, where the pack's header and notes cost about what the file
 does. `tokens.raw` is on every answer so a caller can read the file instead
 when it is the cheaper read.
 
-What this does NOT measure: rounds-to-green with and without the pack. That
-needs paid model runs on a fixed task, the way `bench/run.py` drives
-iterations-to-green, and it is the half that decides whether the pack helps.
-A pack can win on tokens and still lose rounds: a model given less context
-can spend a round retyping an edit the compiler already suggested, so the
-loop the run uses matters as much as the pack. revl's bench loop hands the
-error text back and applies no suggested edit yet. Until that run exists, the
-claim is the token number above and nothing more.
+The illustration is a fixed 509 tokens on every pack for a component, and on
+small files it costs more than the file. With it, the same 98 components come
+to 63,576 pack tokens against 92,558 raw (68.7%, median per component 1.03):
+74 of the 98 are at or above 70% of their file, and the files of 500+ raw
+tokens come to 48.6% (worst 1.24). Those are the reading alone.
+
+Tokens alone do not decide it. A pack can win on tokens and still lose
+rounds-to-green: a model given less context can spend rounds on what the
+files would have shown it. The rounds-to-green run below is the half that
+decides, and it is what the illustration came out of.
+
+## Rounds-to-green
 
 `bench/context_arm.py` is that run. Each of the eight tasks in
 `bench/context_tasks.json` removes one component from a real composition and
 asks for it back. The raw arm reads the composition without the component,
 plus every other file the pack draws a declaration from; the pack arm reads
-`revl context --component C`. Both get the same system prompt, task text,
+`revl context --component C --no-idioms`. Three more arms add to it:
+pack-card reads `revl context --component C` as it ships, illustration
+included; pack-sibling reads the declarations and one providing component
+of the same composition, verbatim; pack-both reads the shipped pack and the
+sibling. Every arm gets the same system prompt, task text,
 header and retry loop. The reply must be the component block alone (an empty
 or renamed reply would otherwise pass wherever nothing depends on the
 component); it is spliced back and the whole file compiled. An unsolved cell
 counts `max_iters + 1` rounds. `summary.md` gives, per task, the rounds of
-each arm and both readings in tokens, then whether the pack loses rounds, its
-share of input tokens, and a verdict: PROMOTE only when it loses no rounds and
+each arm and its reading in tokens, then for each pack arm against raw whether
+it loses rounds, its share of input tokens, and a verdict: PROMOTE only when it loses no rounds and
 reads fewer tokens, HOLD otherwise, and none while a cell was cut short by an
 endpoint error or usage went unreported. `--runner mock` checks the
 pipeline without a model; `--runner local` with `--base-url`, `--model` and
 `--api-key-env` (the NAME of the variable holding the key) runs it against a
 hosted endpoint.
 
-## Where it is listed, and what would move it
+Measured with deepseek-chat on the 8 tasks, `--max-iters 3` (an unsolved
+cell counts 4), 3 reps per cell except the 1-rep pilot, in four runs
+recorded under `bench/results/`:
 
-`revl_context` is NOT in the core tier `tools/list` advertises, and the
-authoring loop `initialize` describes does not name it. It is reached through
-`revl_verbs` under the `author` topic (`src/revl/mcp/disclosure.py`). Promotion
-into the core tier and the loop waits on the rounds-to-green run above: same
-task, same model, with and without the pack. Promote it only if the pack does
-not lose rounds and still wins on tokens. If it loses rounds, it stays where it
-is, a verb an agent can ask for.
+| run | arms | what it showed |
+|---|---|---|
+| `context-arm-deepseek-pilot` | raw, pack | the declarations alone lose rounds |
+| `context-arm-deepseek-arms` | five | an illustration fixes it; a sibling body alone does not |
+| `context-arm-deepseek-shipped-1` | pack-card, pack-both | the illustration inside the pack, first text: one task fails |
+| `context-arm-deepseek-shipped-2` | pack-card, pack-both | the text that ships: promoted |
+
+The two shipped runs reran only the card arms; their raw, pack and
+pack-sibling rows are the five-arm run's. Mean rounds per task against raw,
+and input tokens (system prompt and retries included) as a share of raw's:
+
+| arm | rounds vs raw | input tokens / raw | verdict |
+|---|---|---|---|
+| pack (`--no-idioms`) | +1.38 | 0.88 | HOLD |
+| pack-sibling | +0.88 | 0.84 | HOLD |
+| pack-card, separate card (five-arm run) | -0.04 | 0.60 | PROMOTE |
+| pack-card, shipped, first text | +0.29 | 0.67 | HOLD |
+| pack-card, shipped (`revl context`) | -0.21 | 0.53 | PROMOTE |
+| pack-both, shipped (shipped-2; five-arm run -0.08 / 0.61) | -0.08 | 0.64 | PROMOTE |
+
+The declarations alone lost rounds on 5 of 8 tasks, and the failures were
+about bodies rather than contracts: a bare `match` where a statement was
+expected, a call to an emission without `emit`, an `emission fn` written in
+a provider, a value-returning operation with no `return`. The raw arm
+learned those from the other components in the file. One providing
+component of the same composition (pack-sibling) helped less than a fixed
+illustration: its failures were the same kinds, on the tasks whose sibling
+did not happen to show the idiom needed.
+
+The first shipped text failed payment-gateway in 3 of 3 reps where the
+separate card had passed it in 3 of 3, though the two said the same thing.
+In every rep the model wrote `emit ledger.append(order)` and then
+`return ledger.append(order)`, and kept the second call through every
+retry. The illustration never showed an emission's value being used, and
+its one value-returning emission ended with an unrelated `return`. Binding
+the `emit` expression (`let line = emit log.record(k)`) is the text that
+ships. With it pack-card solved all 24 cells, took more rounds than raw on
+one task (notes-http, 1.67 against 1.00) and fewer on two.
+
+What this does not show. Three reps is a small sample, and the same text
+moved one task from 3 of 3 to 0 of 3, so a difference of a few tenths of a
+round is within the noise. The last fix was made after seeing one task fail,
+on the same eight tasks it was then measured on. It is a general rule (G4),
+not a task's answer, but the eight tasks are no longer held out from it.
+One model. The bench loop hands back the error text and applies no
+suggested edit.
+
+## Where it is listed
+
+`revl_context` is in the core tier `tools/list` advertises
+(`src/revl/mcp/disclosure.py`), and it is step 2 of the authoring loop
+`initialize` describes, "ground", between reuse and scaffold
+(`src/revl/mcp/authoring_loop.py`). It was promoted on the run above: with
+the illustration it lost no rounds and read about half the raw arm's input
+tokens. It is still under the `author` topic of `revl_verbs`. A rerun that
+loses rounds against raw (a new model, a changed illustration, more tasks)
+is the reason to take it out of the loop again.

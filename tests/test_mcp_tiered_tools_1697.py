@@ -86,8 +86,16 @@ def test_every_verb_initialize_names_is_in_the_core_tier():
 
 
 def test_the_core_tier_stays_small():
-    assert len(disclosure.CORE) <= 14
+    assert len(disclosure.CORE) <= 15
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
+
+
+def test_the_declarations_pack_is_core_and_grounds_before_the_scaffold():
+    # promoted on the rounds-to-green run (docs/context.md): read the
+    # declarations the component compiles against before writing it
+    assert "revl_context" in disclosure.CORE
+    assert disclosure.CORE.index("revl_context") \
+        < disclosure.CORE.index("revl_scaffold")
 
 
 def test_initialize_tells_the_client_how_to_find_the_rest():

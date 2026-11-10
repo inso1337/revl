@@ -54,27 +54,28 @@ def test_a_reply_that_is_not_the_component_alone_is_red(task, reply):
 @pytest.mark.parametrize("task", TASKS, ids=[t["id"] for t in TASKS])
 def test_the_arms_differ_only_in_what_they_read(task):
     piece = arm.cut(task)
-    pack = arm.context([str(piece["path"])], component=task["component"])
-    prompts = {a: arm.prompt(task, a, piece, pack) for a in arm.ARMS}
+    packs = {a: arm.pack_for(task, piece, a) for a in arm.ARMS}
+    prompts = {a: arm.prompt(task, a, piece, packs[a]) for a in arm.ARMS}
     # the task, the header and the instructions are the same text in all
     tail = prompts["raw"][prompts["raw"].index("Write the component"):]
     assert all(p.endswith(tail) for p in prompts.values())
-    read = {a: arm.reading(a, piece, pack, task) for a in arm.ARMS}
+    read = {a: arm.reading(a, piece, packs[a], task) for a in arm.ARMS}
     # the pack arm reads no provider body; the others add exactly their part
     assert "provide " not in read["pack"]
-    card = arm.CARD_READING.format(text=arm.CARD.read_text(encoding="utf-8"))
-    name, block = arm.sibling(task, pack)
+    # the card arms read what `revl context` ships, the illustration included
+    assert packs["pack-card"]["pack"] == arm.context(
+        [str(piece["path"])], component=task["component"])["pack"]
+    assert read["pack-card"] == arm.PACK_READING.format(
+        text=packs["pack-card"]["pack"])
+    assert arm.IDIOMS.strip() in read["pack-card"]
+    assert arm.IDIOMS.strip() not in read["pack"]
+    name, block = arm.sibling(task, packs["pack"])
     near = arm.SIBLING_READING.format(name=name, text=block)
-    assert read["pack-card"] == read["pack"] + card
     assert read["pack-sibling"] == read["pack"] + near
-    assert read["pack-both"] == read["pack"] + card + near
-    # and every pack arm reads less than the raw arm
-    assert all(len(read[a]) < len(read["raw"]) for a in arm.ARMS if a != "raw")
-
-
-def test_the_card_compiles_as_shown():
-    from revl import compile_source
-    compile_source(arm.CARD.read_text(encoding="utf-8"), "context_card.rvl")
+    assert read["pack-both"] == read["pack-card"] + near
+    # the declarations read less than the files; the illustration is a fixed
+    # cost that can outweigh the smallest file (docs/context.md)
+    assert len(read["pack"]) < len(read["raw"])
 
 
 @pytest.mark.parametrize("task", TASKS, ids=[t["id"] for t in TASKS])
@@ -96,6 +97,8 @@ def test_a_reply_that_does_not_check_is_graded_red_with_the_compiler_text():
     broken = piece["block"].replace("audit.record(q)", "audit.missing(q)")
     ok, error = arm.grade(piece, broken, task["component"])
     assert not ok and "missing" in error
+    # the path is the repository's, not this machine's
+    assert str(arm.ROOT) not in error and task["file"] in error
 
 
 def test_a_retry_asks_again_for_the_block_alone(tmp_path, monkeypatch):

@@ -4430,7 +4430,7 @@ def _tool_check(arguments: dict) -> dict:
     With no candidate of its own — the bare `revl_check {}`, or the explicit
     `{"session": true}` — it checks the composition the SESSION holds instead
     (issue #2117). Steps 1-4 of the authoring loop mutate that working set, so
-    step 5 of 6 can verify the loop's own artifact without re-sending it: the
+    step 6 of 7 can verify the loop's own artifact without re-sending it: the
     name and the loop position already imply the bare call, and `revl_swap {}`
     and `revl_source {}` read the same set.
 
@@ -7936,7 +7936,7 @@ def handle(message: dict) -> dict | None:
         # lookup but a CALL of the verb it names, resolved here to that verb's
         # own name so the pipeline below cannot tell the difference. The
         # tiered list therefore stays exactly `CORE`: every verb is one listed
-        # tool away without a fifteenth listed verb.
+        # tool away without one more listed verb.
         payload = _unknown_arguments(name, arguments)
         if payload is not None:
             pass

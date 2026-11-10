@@ -44,7 +44,8 @@ def _run_context(args) -> int:
     reading the composition (docs/context.md)."""
     from ..context import context
     try:
-        record = context(args.files, component=args.component, budget=args.budget)
+        record = context(args.files, component=args.component, budget=args.budget,
+                         idioms=args.idioms)
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

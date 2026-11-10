@@ -301,7 +301,7 @@ def test_revl_source_stays_in_the_core_tier(nothing_loaded):
     handler rather than a new tier entry — the cap of 14 that #2073/#2042
     protect is untouched."""
     assert "revl_source" in disclosure.CORE
-    assert len(disclosure.CORE) == 14, disclosure.CORE
+    assert len(disclosure.CORE) == 15, disclosure.CORE
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
 
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
