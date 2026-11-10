@@ -2956,6 +2956,11 @@ class _FlowChecker:
         if step in ("return", "emit", "expr", "fail"):
             self._emit_args = None
             expr = stmt.get("expr") or stmt.get("value")
+            if step == "fail":
+                # a `fail` step carries its message at `message`, not at
+                # `expr`/`value`; without this the walk never saw the value
+                # the error text is built from (issue #3141).
+                expr = stmt.get("message") or expr
             # issue #3122: the statement arm owns an `emit` statement's checks, so
             # the value-form check stands down for exactly this node (its nested
             # argument expressions are ordinary value positions and stay checked).
@@ -2990,6 +2995,29 @@ class _FlowChecker:
                     "(an MCP tool return, or a placement-seam reply - the Err "
                     "half of a Result included, which is marshalled BY VALUE "
                     "like any other return)", None, result, stmt)
+            if step == "fail" and self.enforce and not self.infer:
+                # issue #3141: a `fail` step's message is recorded on the
+                # FAILED fiber and read back as the error text of
+                # `revl_load` / `revl_state` (and prints in the run trace), so
+                # it is a DISCLOSURE SINK. The runtime funnels the built
+                # message through `confidential.redact_text` as a backstop;
+                # this rule refuses the statically visible form so an author
+                # cannot write the disclosure in the first place. A value
+                # DERIVED from a secret is refused too: the taint join carries
+                # the origin through the expression, and redacting the
+                # registered value out of a reformatted sentence is not
+                # guaranteed (a case fold or truncation is a different string).
+                if _carries_secret(result):
+                    self._refuse_secret(
+                        "this fail step",
+                        "the error text a failed activation reports to the "
+                        "caller", None, result, stmt)
+                if _carries_confidential(result):
+                    self._refuse_confidential(
+                        "this fail step",
+                        "the error text a failed activation reports to the "
+                        "caller (`revl_load`, `revl_state`, the run trace)",
+                        None, result, stmt)
             if step == "emit":
                 self._emit_crossing(result, stmt)
                 # the step's `compensate` slot is a crossing too: it runs on an

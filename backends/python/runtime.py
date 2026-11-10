@@ -3385,7 +3385,18 @@ def fail_error(message) -> RuntimeError:
     from any other RuntimeError an activation can raise (a host stub's refusal,
     a runtime guard, a host body's own `raise`). The error is an ordinary
     RuntimeError in every other respect: its type, its traceback line and its
-    pickling are unchanged."""
+    pickling are unchanged.
+
+    The message is funnelled through `confidential.redact_text` before the
+    exception is built (issue #3141). A `fail` step is a disclosure sink: its
+    text is recorded on the FAILED fiber and read back by `revl_load` and
+    `revl_state`, and the lifecycle driver prints it. A remembered `Secret[T]`
+    value is replaced wherever it appears in the sentence, so `fail
+    config.token` and `fail "x" + config.token` both carry the placeholder
+    while the surrounding diagnostic survives. The check is exact-valued, so a
+    `fail` that mentions no registered secret is byte-identical."""
+    if isinstance(message, str):
+        message = confidential.redact_text(message)
     err = RuntimeError(message)
     err._revl_activation_fail = True
     return err

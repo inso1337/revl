@@ -1514,7 +1514,16 @@ def _record_emission_outcome(ref: dict, outcome: str,
         return
     detail = None
     if error is not None:
-        detail = {"type": type(error).__name__, "message": _describe(str(error))}
+        # issue #3142: a host error's text is free-form and may QUOTE a
+        # registered `Secret[T]` value inside a longer sentence (a client
+        # library that puts the URL, header or credential into its message).
+        # `_describe` matches the whole value, so on its own it saw nothing in
+        # "upstream rejected credential <v>"; `redact_text` is the text funnel
+        # that matches the value inside that sentence. Both match exact
+        # registered values, never a pattern, so an ordinary diagnostic is
+        # recorded verbatim.
+        message = confidential.redact_text(_describe(str(error)))
+        detail = {"type": type(error).__name__, "message": message}
         # A ceiling fault carries the token, kind, limit and observed count;
         # name them individually so a reader does not parse the message.
         for field in ("capability", "kind", "limit", "observed"):
