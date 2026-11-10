@@ -10478,11 +10478,19 @@ def _ir_has_approval_edges(ir: dict) -> bool:
 def _fiber_activation_error(fiber) -> dict | None:
     """The error a FAILED fiber's activation raised, as `{type, message}`, or
     None. cordis records it on the fiber (`_error`, fiber.py) and lands the
-    fiber FAILED; it is the only place the exception survives (issue #1895)."""
+    fiber FAILED; it is the only place the exception survives (issue #1895).
+
+    The message is funnelled through the same `confidential` registry the
+    runtime and the bridge read (issue #3142). A host body's exception text is
+    free-form, so it can quote a registered `Secret[T]` value inside a longer
+    sentence; `load()` and `state()` hand this dict back to the caller, and the
+    rollback reason is built from the same reading. The scrub is exact-valued,
+    so an error that quotes no registered secret is unchanged."""
     err = getattr(fiber, "_error", None)
     if err is None:
         return None
-    return {"type": type(err).__name__, "message": str(err)}
+    from .._process_runner import redact_text  # noqa: PLC0415 — lazy: one sink only
+    return {"type": type(err).__name__, "message": redact_text(str(err))}
 
 
 def _component_state(driver, name: str, fiber) -> dict:

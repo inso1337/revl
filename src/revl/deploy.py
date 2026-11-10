@@ -128,6 +128,9 @@ from .errors import RevlError
 
 #: Bundle-relative locations of every facet the chain binds (item 305's layout).
 IR_DOCUMENT = "ir/ir.json"
+#: The conductor's one durable decision, written next to the deploy state
+#: (`<state_dir>/decision.jsonl`) and read by `revl recover --decision`.
+DECISION_FILE = "decision.jsonl"
 EMITTED_ROOT = "emitted"
 #: the bundled `.rvl` sources and the bundle's own manifest — the two the signer
 #: re-runs the frontend over, so an attestation is signed over a composition
@@ -3329,6 +3332,12 @@ def _abort_proof(ledger: list, unresolved: list, residue: list) -> str:
 #: can hand the rule to `recovery.recover` VERBATIM rather than re-deciding it.
 FEDERATION_APPROVED = "federation-commit-approved"
 FEDERATION_ABORTED = "federation-abort-decided"
+#: Written when a deploy run STARTS, before any participant is launched. It
+#: names no outcome; it only says the record belongs to a run that has not
+#: decided yet, so a crash before the decision is never read as the previous
+#: run's approval (issue #2725). Recovery reads a pending record as "no
+#: decision was made", which rolls back.
+FEDERATION_PENDING = "federation-decision-pending"
 
 #: Why a plan is refused admission into a federation update.
 REFUSE_IRREVERSIBLE = "non-deferrable-irreversible-crossing"
@@ -3593,14 +3602,34 @@ def write_abort_decision(path: str, *, federation_id: str, generation: int,
     return record
 
 
+def write_decision_started(path: str, *, federation_id: str,
+                           generation: int) -> dict:
+    """Mark the durable decision file as belonging to a run that has not decided.
+
+    `revl deploy` calls this before it launches a participant, so a conductor
+    killed before writing the approve/abort record cannot be read as the
+    PREVIOUS run's approval. The record names no outcome; `read_decision`
+    treats it as "no decision", the conservative roll-back answer (issue
+    #2725).
+    """
+    record = {"record": FEDERATION_PENDING, "federation": federation_id,
+              "generation": int(generation), "at": attest._now_iso(None)}
+    _fsync_append(path, record)
+    return record
+
+
 def read_decision(path: str) -> tuple[str | None, dict | None]:
     """Read the durable federation decision: `(FEDERATION_APPROVED |
     FEDERATION_ABORTED | None, record)`.
 
-    A file that does not exist is `None` — the decision was never made, which
-    is a definite answer (roll back). A file that exists but cannot be parsed
-    raises: that is NOT a definite answer, and guessing between roll-forward and
-    roll-back is exactly the split-brain the record exists to prevent.
+    The LAST decision-shaped record wins. A `federation-decision-pending`
+    record is decision-shaped too: it says a newer run started and decided
+    nothing yet, so it clears an earlier run's approval (the returned decision
+    is `None`, which is the roll-back answer). A file that does not exist is
+    also `None` — the decision was never made, which is a definite answer
+    (roll back). A file that exists but cannot be parsed raises: that is NOT a
+    definite answer, and guessing between roll-forward and roll-back is exactly
+    the split-brain the record exists to prevent.
     """
     if not os.path.exists(path):
         return None, None
@@ -3613,8 +3642,10 @@ def read_decision(path: str) -> tuple[str | None, dict | None]:
                 continue
             entry = json.loads(line)   # a torn decision record fails closed
             kind = entry.get("record")
-            if kind in (FEDERATION_APPROVED, FEDERATION_ABORTED):
-                decision, record = kind, entry
+            if kind in (FEDERATION_APPROVED, FEDERATION_ABORTED,
+                        FEDERATION_PENDING):
+                decision = None if kind == FEDERATION_PENDING else kind
+                record = entry
     return decision, record
 
 
@@ -3629,9 +3660,11 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
         `commit-approved` marker recovery already keys roll-forward off, and
         `recovery.recover` rolls it forward (replaying no inverse, reporting any
         owed flush honestly).
-      * the record is ABSENT (or an explicit abort decision): the federation did
-        not commit. `recovery.recover` reads the WAL unchanged and rolls back
-        LIFO, reporting residue exactly as it does today.
+      * the record is ABSENT (an explicit abort decision, a
+        `federation-decision-pending` record from a newer run, or no file):
+        the federation did not commit. `recovery.recover` reads the WAL
+        unchanged and rolls back LIFO, reporting residue exactly as it does
+        today.
       * the record is UNREADABLE: there is no definite answer. Fails CLOSED with
         `unresolved` and settles nothing — a guess here is the split-brain.
     """
@@ -4157,8 +4190,23 @@ def _ssh_remote_shape_problem(target: "DeployTarget") -> Optional[str]:
 
 
 def admit_deploy_map(placement: Mapping, *,
-                     seams: Optional[Mapping] = None) -> DeployMapVerdict:
+                     seams: Optional[Mapping] = None,
+                     ir: Optional[Mapping] = None) -> DeployMapVerdict:
     """Admit a deploy map BEFORE any boundary is opened.
+
+    `ir` is the lowered composition the map deploys. When it is supplied, every
+    participant's typed class is derived from the declarations of the
+    components it holds (`revl.participant_classes`, issue #2725) and two
+    plan-time refusals are added:
+
+    * a component the map places but the composition does not declare, because
+      a class derived over partial evidence could read as safe; and
+    * an `irreversible-needs-approval` participant ordered before a participant
+      that can still fail, because a later COMMIT failure would strand a
+      crossing nobody can undo.
+
+    Omitting `ir` leaves the admission byte-identical to before: the class
+    refusals need the declarations and the map alone does not carry them.
 
     `seams` maps a process name to the seam keys it carries across a process
     boundary (what `run_placement` already computes as a process's proxied +
@@ -4355,6 +4403,12 @@ def admit_deploy_map(placement: Mapping, *,
             f"`via = {target.via!r}` is known but has no admission rule in this "
             f"build; refusing rather than falling through."))
 
+    if ir is not None:
+        # Issue #2725: the typed participant classes. Two plan-time refusals
+        # need the declarations, so they only run when an IR is supplied.
+        from . import participant_classes as pc  # noqa: PLC0415 — lazy
+        refusals.extend(pc.plan_refusals(ir, placement))
+
     ok = not refusals
     return DeployMapVerdict(
         ok=ok,
@@ -4382,6 +4436,22 @@ def _load_deploy_map(path: str) -> dict:
     import tomllib  # noqa: PLC0415 — stdlib, py3.11+
 
     return tomllib.loads(text)
+
+
+def _read_bundle_ir(bundle_dir: Path | str) -> dict:
+    """Read the lowered IR an attested bundle carries (`ir/ir.json`).
+
+    `revl deploy --bundle` already admits the chain over the staged bytes; this
+    is the same document, read so the plan can derive participant classes
+    (issue #2725) before any boundary opens. It is used only to REFUSE, never
+    to load anything, so an unreadable or malformed document fails closed at
+    the caller.
+    """
+    path = Path(bundle_dir) / IR_DOCUMENT
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return document
 
 
 def _runtime_versions_from_args(pairs: Optional[Sequence[str]]) -> Optional[dict]:
@@ -4550,7 +4620,7 @@ def deploy_command(args) -> int:
               file=sys.stderr)
         return 1
 
-    verdict = admit_deploy_map(placement)
+    bundle_arg = getattr(args, "bundle", None)
     as_json = getattr(args, "json", False)
     dry_run = getattr(args, "dry_run", False)
 
@@ -4562,7 +4632,6 @@ def deploy_command(args) -> int:
     # of `revl plan` is meant to make observable.
     chain: Optional[dict] = None
     chain_ok = True
-    bundle_arg = getattr(args, "bundle", None)
     if bundle_arg is not None:
         try:
             chain = admit_bundle_chain(
@@ -4576,9 +4645,28 @@ def deploy_command(args) -> int:
             return 1
         chain_ok = chain.get("verdict") == ACCEPT
 
+    # Issue #2725: read the participant declarations only from a bundle whose
+    # chain was admitted. The document is used only to REFUSE (the class and
+    # order checks), and an unverified bundle has no business steering even a
+    # refusal.
+    ir = None
+    if bundle_arg is not None and chain_ok:
+        try:
+            ir = _read_bundle_ir(bundle_arg)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read the bundle IR from {bundle_arg!r}: "
+                  f"{error}", file=sys.stderr)
+            return 1
+
+    verdict = admit_deploy_map(placement, ir=ir)
+
     # The plan-time surface: `--dry-run`, ANY map refusal, or a REFUSED
     # attestation chain reports the admission plan and stops before opening a
     # boundary.
+    classes = None
+    if ir is not None:
+        from . import participant_classes as pc  # noqa: PLC0415 — lazy
+        classes = pc.participant_classes(ir, placement)
     if dry_run or not verdict.ok or not chain_ok:
         if as_json:
             print(json.dumps({
@@ -4588,6 +4676,7 @@ def deploy_command(args) -> int:
                 "refusals": [dict(r) for r in verdict.refusals],
                 "boundaries": verdict.boundaries,
                 "chain": chain,
+                **({"participantClasses": classes} if classes is not None else {}),
             }, indent=2))
         else:
             ok = verdict.ok and chain_ok
@@ -4598,6 +4687,10 @@ def deploy_command(args) -> int:
             print(head)
             for line in verdict.render():
                 print(line)
+            if classes is not None:
+                print("  participant classes:")
+                for line in pc.render(classes, []):
+                    print(line)
             if chain is not None:
                 if chain_ok:
                     print(f"  chain: ADMITTED (backend "
@@ -4616,17 +4709,27 @@ def deploy_command(args) -> int:
 
     state_dir = (Path(wal.default_wal_dir()) / "deploy"
                  / Path(args.map).stem / str(0))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    decision_path = str(state_dir / DECISION_FILE)
+    # Issue #2725: this run owns the decision file's last record from here on.
+    # A crash before the approve/abort record must read as "this run decided
+    # nothing" (roll back), never as the previous run's approval.
+    write_decision_started(decision_path, federation_id=Path(args.map).stem,
+                           generation=0)
     has_ssh = any(t.via == VIA_SSH for t in verdict.targets.values())
     if has_ssh:
         report = deploy_ssh_map(
             placement, local_bundle=bundle_arg,
             backend=getattr(args, "backend", None) or "python",
-            state_dir=state_dir, federation_id=Path(args.map).stem, generation=0,
+            state_dir=state_dir, approval_path=decision_path,
+            federation_id=Path(args.map).stem, generation=0, ir=ir,
             ssh_exe=getattr(args, "ssh_exe", None) or "ssh",
             scp_exe=getattr(args, "scp_exe", None) or "scp")
     else:
         report = deploy_local_map(placement, state_dir=state_dir,
-                                  federation_id=Path(args.map).stem, generation=0)
+                                  approval_path=decision_path,
+                                  federation_id=Path(args.map).stem,
+                                  generation=0, ir=ir)
     if as_json:
         print(json.dumps(report, indent=2))
     else:
@@ -4925,6 +5028,7 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
                      approval_path: Optional[str] = None,
                      federation_id: str = "deploy",
                      generation: int = 0,
+                     ir: Optional[Mapping] = None,
                      python: Optional[str] = None,
                      on_event: Optional[Callable[[str, str, dict], None]] = None
                      ) -> dict:
@@ -4949,7 +5053,7 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
     or a `DEPLOY_REFUSED` report when admission refuses or a participant will not
     even spawn (a PREPARE-time refusal: nothing committed, nothing to undo).
     """
-    verdict = admit_deploy_map(placement)
+    verdict = admit_deploy_map(placement, ir=ir)
     if not verdict.ok:
         return {
             "protocol": PROTOCOL,
@@ -5111,6 +5215,7 @@ def deploy_ssh_map(placement: Mapping, *, local_bundle: Path | str,
                    backend: str = "python", state_dir: Path | str,
                    approval_path: Optional[str] = None,
                    federation_id: str = "deploy", generation: int = 0,
+                   ir: Optional[Mapping] = None,
                    ssh_exe: str = "ssh", scp_exe: str = "scp",
                    python: Optional[str] = None,
                    on_event: Optional[Callable[[str, str, dict], None]] = None
@@ -5133,7 +5238,7 @@ def deploy_ssh_map(placement: Mapping, *, local_bundle: Path | str,
     one. A staging or admission refusal is a PREPARE-time refusal (nothing
     committed) and returns a `DEPLOY_REFUSED` report.
     """
-    verdict = admit_deploy_map(placement)
+    verdict = admit_deploy_map(placement, ir=ir)
     if not verdict.ok:
         return {
             "protocol": PROTOCOL,

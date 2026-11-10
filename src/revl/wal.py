@@ -54,6 +54,11 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
   "sealed and refused". They ride ON this record rather than on a record of
   their own, so the ``(component, stepIndex)`` index below reaches the
   observation and the account together and no second correlation exists.
+* ``determinism`` — ``{seed, clock}``; the RNG seed and clock readings a run
+  recorded (issue #2713). Absent by default, so a WAL written before the record
+  existed is byte-identical and a re-run can say the determinism was never
+  captured instead of assuming one. Consumes no seq: it names a fact, not an
+  effect. :func:`determinism` reads it for `revl simulate swap`.
 * ``activation-complete`` — the terminal marker. Its PRESENCE is roll-forward,
   its ABSENCE (the crash) is roll-back. The whole decision.
 """
@@ -70,6 +75,7 @@ import tempfile
 import uuid
 import warnings
 from dataclasses import dataclass
+from typing import Optional
 
 from ._paths import backends_root
 
@@ -234,6 +240,25 @@ def model_decisions(records: list) -> dict:
             continue
         out[(record.get("component"), record.get("stepIndex"))] = record
     return out
+
+
+#: The record a run writes to make a value re-run SOUND (issue #2713): the RNG
+#: seed and the clock readings the recording ran under. Absent by default, so a
+#: WAL written before the record existed is byte-identical and reads as
+#: "determinism not captured", which `revl simulate swap` reports as the
+#: `seedsAndClock` fact rather than guessing at a diff.
+RECORD_DETERMINISM = "determinism"
+
+
+def determinism(records: list) -> Optional[dict]:
+    """The WAL's `determinism` record, or None when it carries none.
+
+    None is an answer, not a failure: no recorder writes the seed or clock
+    readings today, so a value diff over that recording would rest on a
+    determinism it does not establish. A reader that returned an empty record
+    here would make "not captured" indistinguishable from "captured empty"."""
+    return next((r for r in records if r.get("record") == RECORD_DETERMINISM),
+                None)
 
 
 #: The approval spend and its emission, as ``replay.WriteAheadLog`` writes them.

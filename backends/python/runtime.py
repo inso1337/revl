@@ -298,6 +298,21 @@ def _json_type_ok(value, json_type: str) -> bool:
     return True
 
 
+def _json_schema_key(key) -> str:
+    """Render one model-chosen object key for a validation fault (issue #3120).
+
+    A JSON object key is untrusted response content just like a value: a model
+    can echo a secret the program's own prompt fed it back out as a key. The
+    key reaches the fault message directly (an unexpected property under a closed
+    object) and, under `additionalProperties` as a schema, becomes part of the
+    PATH a nested error is built from. The same exact-value scrub the const/enum
+    branches apply to the observed value applies here; an ordinary key still
+    renders verbatim, so a developer sees the real malformed response."""
+    if confidential.is_secret_value(key):
+        return confidential.REDACTED
+    return str(key)
+
+
 def _json_schema_error(value, schema, path: str = "$"):
     """Validate ``value`` against the derived JSON-Schema subset the revl mapping
     emits (item 257, §3). Returns an error string for the FIRST violation, or
@@ -355,13 +370,16 @@ def _json_schema_error(value, schema, path: str = "$"):
         extra = schema.get("additionalProperties", True)
         for key, item in value.items():
             if key in props:
-                err = _json_schema_error(item, props[key], f"{path}.{key}")
+                err = _json_schema_error(item, props[key],
+                                         f"{path}.{_json_schema_key(key)}")
                 if err is not None:
                     return err
             elif extra is False:
-                return f"{path}: unexpected property {key!r}"
+                return (f"{path}: unexpected property "
+                        f"{_json_schema_key(key)!r}")
             elif isinstance(extra, dict):
-                err = _json_schema_error(item, extra, f"{path}.{key}")
+                err = _json_schema_error(item, extra,
+                                         f"{path}.{_json_schema_key(key)}")
                 if err is not None:
                     return err
 
@@ -523,8 +541,13 @@ def grammar_honoured_error(value, schema, path: str = "$"):
         declared = list(schema["properties"])
         observed = list(value)
         if observed != declared:
+            # item 416c / issue #3120: `observed` is the model's own member
+            # list, so a member name the program's prompt fed the model can
+            # come back here as a key; the path may already carry one from a
+            # Map above. Both are scrubbed, exactly like the schema fault.
+            rendered = [_json_schema_key(k) for k in observed]
             return (f"{path}: the stated grammar pins the members "
-                    f"{declared!r}; the completion has {observed!r}")
+                    f"{declared!r}; the completion has {rendered!r}")
         for name, sub in schema["properties"].items():
             err = grammar_honoured_error(value[name], sub, f"{path}.{name}")
             if err is not None:
@@ -533,7 +556,8 @@ def grammar_honoured_error(value, schema, path: str = "$"):
     extra = schema.get("additionalProperties")
     if isinstance(extra, dict) and isinstance(value, dict):
         for name, item in value.items():
-            err = grammar_honoured_error(item, extra, f"{path}.{name}")
+            err = grammar_honoured_error(item, extra,
+                                         f"{path}.{_json_schema_key(name)}")
             if err is not None:
                 return err
         return None
@@ -3361,7 +3385,18 @@ def fail_error(message) -> RuntimeError:
     from any other RuntimeError an activation can raise (a host stub's refusal,
     a runtime guard, a host body's own `raise`). The error is an ordinary
     RuntimeError in every other respect: its type, its traceback line and its
-    pickling are unchanged."""
+    pickling are unchanged.
+
+    The message is funnelled through `confidential.redact_text` before the
+    exception is built (issue #3141). A `fail` step is a disclosure sink: its
+    text is recorded on the FAILED fiber and read back by `revl_load` and
+    `revl_state`, and the lifecycle driver prints it. A remembered `Secret[T]`
+    value is replaced wherever it appears in the sentence, so `fail
+    config.token` and `fail "x" + config.token` both carry the placeholder
+    while the surrounding diagnostic survives. The check is exact-valued, so a
+    `fail` that mentions no registered secret is byte-identical."""
+    if isinstance(message, str):
+        message = confidential.redact_text(message)
     err = RuntimeError(message)
     err._revl_activation_fail = True
     return err

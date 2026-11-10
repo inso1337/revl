@@ -600,11 +600,14 @@ before.
 
 ### `revl simulate`
 
-Simulate a change against a recorded run (roadmap item 468). `simulate` has
-one subcommand, `policy-diff`, which reads two boundary policies and one
-write-ahead log and computes the newly-allowed and newly-denied action sets the
-change would have made over the crossings that run actually recorded, plus a
-blast-radius summary bounded by that recorded action set.
+Simulate a change against a recorded run (roadmap item 468, issue #2713).
+`simulate` has two subcommands. `policy-diff` reads two boundary policies and
+one write-ahead log and computes the newly-allowed and newly-denied action sets
+the change would have made over the crossings that run actually recorded, plus a
+blast-radius summary bounded by that recorded action set. `swap` re-runs the
+recorded calls into ONE component against a changed version of it, and reports
+the first returned value that moved. Both are previews: neither admits, refuses
+or mutates, and neither gives live effect authority to the change.
 
 This is not `revl audit --diff`, which re-audits a generation and fails when it
 adds boundary crossings but keeps no policy on its path. It is also not
@@ -672,6 +675,94 @@ revl simulate policy-diff prod.policy next.policy --history run.wal --json
 revl simulate policy-diff loose.policy tight.policy --history run.wal --composition app.rvl
 ```
 
+#### `revl simulate swap`
+
+Re-run a recorded history against a changed component (issue #2713).
+`simulate policy-diff` regrades what was recorded; `simulate swap` asks what the
+recorded calls into ONE component would have returned if that component had been
+the version in NEW. The history supplies the calls and their recorded outcomes;
+the changed version supplies the code that is executed against them. The same
+component must be declared in OLD and NEW, and the invocation is:
+
+```bash
+revl simulate swap old/counter.rvl new/counter.rvl --history run.wal
+revl simulate swap old/counter.rvl new/counter.rvl --history run.wal --json
+```
+
+The command runs in two slices, and the first is a preflight that runs nothing:
+when any of the following is missing it names the fact, prints how to read the
+refusal, and exits non-zero without executing a step.
+
+- `complete` - the history is whole. A torn tail (the crash itself), a recording
+  with no `activation-complete` record, or one that finished activation but
+  carries no `run-complete` shutdown marker is refused: the last is a
+  steady-state kill whose post-activation crossings were never accounted, and
+  it leaves no torn tail to mark it. A value diff over a prefix cannot report
+  the steps it never saw.
+- `hostResponses` - every recorded crossing into the swapped component carries
+  its recorded outcome. The WAL journals a fenced crossing's `begin` before it
+  dispatches and its `complete` with the returned value after, so a `begin`
+  with no `complete` is a call whose value is not on the record. The refusal
+  names the exact crossing (decision, ordinal, receiver, method), never a count.
+- `seedsAndClock` - the history carries a `determinism` record with a seed and
+  the clock readings. The record is a precondition on the history, not a value
+  this executor reads: the pure subset has no clock or RNG reach, so no
+  replayed step can consume it. It is required because the soundness rule is
+  stated over the history, and a recorder that writes it is what will make a
+  WAL a live run wrote re-runnable; that producer is the next slice.
+- `callArgs` - a recorded method takes no parameters. The journal records the
+  receiver and the method, not the arguments, so a parameterized method cannot
+  be re-run from the record; the refusal names the method and its parameters.
+- `recordedSteps` - the history records at least one crossing into the swapped
+  component. A history with no such crossing has no recorded call to re-run;
+  the command refuses rather than reporting an empty diff as a clean change.
+- `purity` - the swapped component is inside the subset this command can
+  execute offline: it requires no service, carries no config, its activation
+  body is nothing but `provide` steps, and every provided method body is a
+  `return` of a pure expression (literals, arithmetic, fields, and calls to
+  user-declared `fn`s). A component that would need a host response, an effect,
+  an emission, an await or a clock is refused with the reason named, because
+  the command has no live world to supply it and must not acquire one.
+
+Only when the preflight is clean does the re-run happen. Each recorded crossing
+into the component is executed in recorded order, OLD first: if OLD cannot
+reproduce the recorded outcome the history is not a replay of that version, and
+that is reported (`not-reproducible`) rather than papered over. Then NEW is
+executed and its returned value compared with the recording. The first step
+whose value moved is named (`firstDifference`, with the recorded and new values)
+and the re-run STOPS there; dependency tracking between a changed value and a
+later crossing is not defined yet, so nothing downstream is claimed. A value
+difference exits `1`.
+
+The execution is the emitted py backend run in-process against a stub context
+that can only provide, set and get: no cordis, no fiber, no workspace, no file,
+no socket, no clock, no subprocess. That is why the purity gate is a refusal and
+not a warning: the command must never dispatch a host call. The history is read
+and never written, and `--json` carries the same document a caller can gate on
+(`replayable`, `missing`, `steps`, `firstDifference`, `blastRadius`).
+
+The report also carries a static surface diff of OLD against NEW (provided keys
+and methods, required keys, the audit graph's emissions and capabilities, and
+the activation lifecycle), computed without running the component, so a
+lifecycle or capability change is visible even when the preflight refused to
+execute. The command cannot say whether a newly declared capability would be
+ALLOWED or DENIED, because the history carries no per-crossing admission verdict
+and the policy is not an input here; `simulate policy-diff` answers that over
+the recorded action set.
+
+- `OLD` - the component version that produced the recording (a `.rvl` source,
+  required).
+- `NEW` - the changed component version, same accepted form (required).
+- `--history FILE` - the write-ahead log to re-run (required).
+- `--component NAME` - the component to swap when OLD or NEW declares more than
+  one; without it each document must declare exactly one component.
+- `--json` - machine-readable swap report.
+
+Exit status: `0` when the history is replayable, OLD reproduces every recorded
+step and NEW changes nothing; `1` when the preflight names a missing fact or the
+first difference is found (including an outcome OLD could not reproduce); `2` on
+a usage, read or compile error.
+
 ### `revl audit`
 
 The composition manifest plus the G8 boundary surface: which emissions each
@@ -719,6 +810,19 @@ document is the audited unit), and a layer document (a layer is a delta over
 the composition that stacks it, so it has no boundary surface of its own; audit
 the composition instead).
 
+`--deploy-map MAP` (issue #2725) adds the participant-class view for a deploy
+map: one line per process with the class derived from the declarations of the
+components it holds (`prepare-reversible`, `deferred-irreversible`,
+`recoverable-forward`, `compensable`, `irreversible`,
+`irreversible-needs-approval`, or `no-crossing`). A participant with several
+crossings takes the worst class. The command REFUSES (nonzero) a plan that
+orders an `irreversible-needs-approval` participant before a participant that
+can still fail, naming both; the same derivation is what `revl deploy` appends
+to its plan-time admission, so the report and the gate cannot disagree.
+`--json` carries the table under `participantClasses` (plus `participantRefusals`
+when refused), additively and only when the flag is given. Not accepted with
+`--policy` or `--diff`.
+
 A composition is admitted whole, never as a layer delta, so no row is skipped
 out of the surface being counted, and a non-first-party stack-layer row is
 compiled under its own untrusted-author profile. Both are the over-refusing
@@ -744,13 +848,15 @@ question.
   arguments.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if
   the new generation ADDS boundary crossings not in `PREV.json`, or if a
-  crossing's derived `inverse` class WEAKENS
+  stable crossing weakens or widens: a weaker reach or `inverse` class, a
+  wider capability scope, a new host backend body, a dropped or weakened
+  recovery, a weakened register floor, or a raised emission ceiling
   ([audit-diff.md](audit-diff.md)).
-- `--accept CROSSING` - acknowledge one added crossing, or one weakened
-  `inverse:<name>` token, so it no longer fails `--diff` (the token printed
-  after `+`); repeatable.
-- `--accept-all` - acknowledge every added crossing or weakened inverse under
-  `--diff`.
+- `--accept CROSSING` - acknowledge one gated token (an added crossing, or a
+  token such as `inverse:<name>`, `scope:<component>:<label>` or
+  `backend:<extern>:<backend>`), so it no longer fails `--diff` (the token
+  printed after `+`); repeatable.
+- `--accept-all` - acknowledge every gated token under `--diff`.
 - `--policy POLICY` - boundary-policy gate (roadmap item 33): evaluate a
   policy file over the audit graph and REFUSE admission (nonzero) if any
   component reaches a capability it may not ([boundary-policy.md](boundary-policy.md)).
@@ -1422,6 +1528,13 @@ LIFO), ending in a checked verdict + residue proof
   Each acknowledgement is appended to the WAL as it is validated, so an invalid
   sequence number leaves the earlier ones applied. Not accepted on a placement
   index: resolve a crossing on its process WAL (exit 2).
+- `--decision FILE` (issue #2725) - settle this participant's WAL against the
+  conductor's ONE durable decision for a multi-node step: the `decision.jsonl`
+  `revl deploy` writes next to its state. A commit-approved record rolls
+  forward; an abort record, a `federation-decision-pending` record or an absent
+  file rolls back; an unreadable record fails closed as `unresolved` rather
+  than guessing. Not accepted with `--restore`, `--forward`,
+  `--operator-resolved` or a placement index (exit 2).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
 - `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the
