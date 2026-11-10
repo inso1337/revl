@@ -425,7 +425,9 @@ The target set is computed **before** the action runs, from the session's IR:
   approval questions, their blast radius and their history are the same
   authority as answering them, so a bystander cannot enumerate what a crossing
   would reach and who is being asked. A `show` hash scopes to its crossing
-  component; `list`/`stats` name no one component and need `may approve on *`.
+  component; `list`/`stats` name no one component and need `may approve on *`,
+  whatever other target keys the call carries. A refused `show` reads the same
+  for another component's ticket as for an unknown hash.
 * **override** (item 471) — the crossing component, exactly as `approve` is: an
   override decides ONE question about one candidate, so it must not widen to the
   whole composition. It is `revl_override`'s verb and nothing else's, and it is

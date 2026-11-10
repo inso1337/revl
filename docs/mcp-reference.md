@@ -2088,7 +2088,10 @@ It reads the session's own fields and writes nothing. It is gated by the
 `approve` operator verb (unlike `revl_quorum`): enumerating the pending
 questions and their blast radius is the same authority as answering them, and a
 `show` hash scopes to its crossing component while `list`/`stats` name no one
-component and need the literal `may approve on *`. There is no model
+component and need the literal `may approve on *`, whatever other target keys
+the call carries. A scoped operator's `show` of another component's ticket gets
+the same refusal as an unknown hash, so the refusal does not reveal which
+tickets exist. There is no model
 recommendation for approvals anywhere in the tree, so `advice.model` is `null`
 and says so; the actions are the deterministic next steps the facts support.
 

@@ -432,7 +432,9 @@ an E-Stop *authority*, not a side effect.
   (`estop: true`, the operator who halted, the reason). The votes already cast
   stay recorded and stop counting. A question already past its deadline is
   left to the expiry vocabulary instead: writing `revoked` over a timeout would
-  retract the distinction the two outcomes exist to keep.
+  retract the distinction the two outcomes exist to keep. The sweep closes it
+  with the ordinary `quorum-expired` row (written once), so the log never ends
+  on a bare `quorum-open`.
 * Every pending single-party asking is refused, and each ticket gets ONE
   durable `ticket-revoked` row naming its binding, the operator, the reason and
   the proposers whose asking it refused. An unspent grant minted for one of
@@ -444,7 +446,12 @@ an E-Stop *authority*, not a side effect.
   the next one.
 
 The sweep is after the latch flips, so it can only close what the halt already
-made unanswerable. A failure in one revocation is reported in the halt result
+made unanswerable. The order has a cost: a process that dies between the latch
+and the sweep writes no revoked rows. `revl recover` then shows an open
+multi-party question as its bare `quorum-open` row, and a pending single-party
+ticket not at all, since a ticket has no durable record at issue time. Nothing
+can answer either question after such a crash (the session that asked it is
+gone), but the log does not say that the halt withdrew it. A failure in one revocation is reported in the halt result
 (`revocationErrors`) rather than hidden and never undoes the halt. `revl
 recover` reports both row families as `REVOKED`, kept distinct from `expired`:
 an expired question ran out of time and can be asked afresh, a revoked one was

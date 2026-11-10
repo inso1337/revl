@@ -4495,7 +4495,8 @@ class Session:
         The sweep runs AFTER the latch flips, so it can never widen the halt: it
         only closes what the halt already made unanswerable. Its failures are
         reported in `revocationErrors` rather than hidden, and never undo the
-        halt."""
+        halt. A crash between the latch and the sweep therefore leaves no
+        revoked rows (docs/design/443-estop.md)."""
         driver = self._require()
         halt = driver.runtime.estop(reason, operator=operator or "unknown")
         self._halted = True
@@ -4580,7 +4581,10 @@ class Session:
         """Close the CURRENT round's decision graph as revoked, if it is still
         open to votes and not already past its deadline. A lapsed question is
         left to the expiry vocabulary: writing `revoked` over a timeout would
-        retract the distinction the two outcomes exist to keep."""
+        retract the distinction the two outcomes exist to keep. It is closed
+        with the ordinary `quorum-expired` row (`_lapse_quorum`, written once),
+        so the durable log never holds a bare `quorum-open` that `revl recover`
+        could read as neither revoked nor expired."""
         ticket_hash = ticket["hash"]
         record = self._quorums.get(self._quorum_request_id(ticket_hash))
         if record is None or record.get("outcome") is not None \
@@ -4588,6 +4592,7 @@ class Session:
             return None
         if record.get("expiresAt") is not None \
                 and now > int(record["expiresAt"]):
+            self._lapse_quorum(record)
             return None
         record["outcome"] = "revoked"
         record["resolvedAt"] = now

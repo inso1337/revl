@@ -232,17 +232,35 @@ def test_show_refuses_an_unknown_hash_and_list_refuses_another_session(tmp_path)
         approvals_surface.list_approvals(session, session_id="another-session")
 
 
+_APPROVAL_TABLES = ("_tickets", "_ticket_rounds", "_ticket_pending_raisers",
+                    "_ticket_refusals", "_quorums", "_ledger",
+                    "_approval_records", "_ticket_proposers", "_grants")
+
+
+def _approval_state(session) -> tuple:
+    tables = {name: copy.deepcopy(getattr(session, name, None))
+              for name in _APPROVAL_TABLES}
+    wal = Path(session._approval_wal().path)
+    return tables, wal.read_bytes() if wal.exists() else None
+
+
 def test_the_tool_is_read_only_and_returns_the_list_shape(tmp_path, monkeypatch):
-    session = _harness(tmp_path)
-    _ticket(session)
+    session = _harness(tmp_path, rules=[_quorum_rule()])
+    ticket = _ticket(session)
     monkeypatch.setattr(server, "SESSION", session)
-    before = copy.deepcopy(session._tickets)
+    for name in _APPROVAL_TABLES[:7]:          # the tables the surface reads
+        assert hasattr(session, name), name
+    before = _approval_state(session)
 
     out = server._tool_approvals({"action": "list"})
-
     assert out["ok"] is True and out["action"] == "list"
     assert out["count"] == 1
-    assert session._tickets == before
+    assert _approval_state(session) == before
+    for args in ({"action": "list", "pending": True},
+                 {"action": "show", "hash": ticket["hash"], "diff": True},
+                 {"action": "stats"}):
+        assert server._tool_approvals(args)["ok"] is True, args
+        assert _approval_state(session) == before, args
 
 
 def test_the_tool_is_gated_on_the_approve_verb(tmp_path):
@@ -258,6 +276,106 @@ def test_the_tool_is_gated_on_the_approve_verb(tmp_path):
     session.operator = denied
     decision = op.decide(session, "revl_approvals", {"action": "list"})
     assert decision.gated is True and decision.allowed is False
+
+
+# Two components, each with its own class-(c) emission, so a ticket, a grant,
+# a capability and a distillation rule can each resolve to exactly ONE of them.
+_TWO_SOURCE = _SOURCE + (
+    "extern emission fn wire(dest: Str, amount: Str) = @py {\n"
+    "    return\n"
+    "}\n"
+    "service Pay {\n"
+    "  emission fn pay(dest: Str, amount: Str)\n"
+    "}\n"
+    "component Bank provides pay: Pay {\n"
+    "  provide pay {\n"
+    "    fn pay(dest, amount) { emit wire(dest, amount) }\n"
+    "  }\n"
+    "}\n"
+)
+
+_SCOPED = "operator bob may approve on Agent"
+
+
+def _two_component_harness(tmp_path):
+    session = _harness(tmp_path)
+    ir = copy.deepcopy(compile_source(_TWO_SOURCE, "approvals2991two.rvl"))
+    session.recorder = _replay.Recorder(copy.deepcopy(ir))
+    session.ir = ir
+    session._class_map = ClassMap(ir)
+    tickets = {}
+    for service, method in (("ops", "shout"), ("pay", "pay")):
+        with pytest.raises(ApprovalRequired) as caught:
+            session._approval_decide_call(service, method, ["x.log", "m"])
+        tickets[caught.value.ticket["component"]] = caught.value.ticket["hash"]
+    return session, tickets
+
+
+class _Offer:
+    class rule:  # noqa: N801 - the shape `_distillation_targets` reads
+        component = "Agent"
+
+
+def _agent_target_arguments(session, tickets) -> dict:
+    """One argument per key `_approve_targets` reads, each resolving to Agent."""
+    session._grants.append({"requestId": "grant-agent-1", "component": "Agent"})
+    session._offer_by_id = lambda offer_id: _Offer if offer_id == "offer-1" \
+        else None
+    return {"hash": tickets["Agent"], "requestId": "grant-agent-1",
+            "capability": "announce", "offerId": "offer-1",
+            "rule": "component Agent may auto-approve announce"}
+
+
+@pytest.mark.parametrize("action", ["list", "stats"])
+@pytest.mark.parametrize("key", ["hash", "requestId", "capability", "offerId",
+                                 "rule"])
+def test_list_and_stats_need_the_whole_composition_whatever_key_is_added(
+        tmp_path, action, key):
+    """`list` and `stats` read every component's tickets, so a grant scoped to
+    one component never authorizes them, even when the arguments carry a key
+    that would scope a `revl_approve` to that component."""
+    session, tickets = _two_component_harness(tmp_path)
+    value = _agent_target_arguments(session, tickets)[key]
+    agent = [t[0] for t in op._approve_targets(session, {key: value}) or []]
+    assert agent == ["Agent"]   # the key alone WOULD scope an approve to Agent
+
+    session.operator = op.parse_profile(_SCOPED).get("bob")
+    decision = op.decide(session, "revl_approvals",
+                         {"action": action, key: value})
+    assert decision.gated is True and decision.allowed is False
+
+    session.operator = session.operator_registry.get("alice")  # `on *`
+    assert op.decide(session, "revl_approvals",
+                     {"action": action, key: value}).allowed is True
+
+
+def test_show_scopes_to_the_ticket_component_and_hides_other_tickets(tmp_path):
+    """A scoped operator may `show` a ticket of its own component. A ticket of
+    another component is refused with exactly the refusal an unknown hash gets,
+    so the refusal is no oracle for which tickets exist or whose they are."""
+    session, tickets = _two_component_harness(tmp_path)
+    session.operator = op.parse_profile(_SCOPED).get("bob")
+
+    own = op.decide(session, "revl_approvals",
+                    {"action": "show", "hash": tickets["Agent"]})
+    assert own.allowed is True
+
+    other = op.decide(session, "revl_approvals",
+                      {"action": "show", "hash": tickets["Bank"]})
+    unknown = op.decide(session, "revl_approvals",
+                        {"action": "show", "hash": "sha256:" + "0" * 64})
+    assert other.allowed is False and unknown.allowed is False
+    assert other.message == unknown.message
+    assert other.why.to_json() == unknown.why.to_json()
+    assert "Bank" not in other.message
+    assert "Bank" not in repr(other.why.to_json())
+    # the other keys do not widen `show` either
+    extra = _agent_target_arguments(session, tickets)
+    for key in ("requestId", "capability", "offerId", "rule"):
+        widened = op.decide(session, "revl_approvals",
+                            {"action": "show", "hash": tickets["Bank"],
+                             key: extra[key]})
+        assert widened.allowed is False and widened.message == unknown.message
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +522,16 @@ def test_a_lapsed_quorum_is_expired_not_revoked(tmp_path):
     assert halt["revokedApprovals"] == []
     shown = approvals_surface.show_approval(session, ticket["hash"])
     assert shown["ticket"]["state"]["state"] == "expired"
+    # ... and closes it durably as expired, so `revl recover` does not read a
+    # bare `quorum-open` as a question neither revoked nor expired
+    from revl.wal import expired_tickets, revoked_tickets
+    records = _records(session)
+    assert _kinds(session).count("quorum-expired") == 1
+    assert "quorum-revoked" not in _kinds(session)
+    assert [row["hash"] for row in expired_tickets(records)] == [ticket["hash"]]
+    assert revoked_tickets(records) == []
+    _halt(session)                      # a second halt writes nothing more
+    assert _kinds(session).count("quorum-expired") == 1
 
 
 # ---------------------------------------------------------------------------
