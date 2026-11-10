@@ -397,8 +397,11 @@ variable) refuses the witness. A witness in a file pytest does not collect (not
 ids are read from the call, so give it `ids=` when the default ids are long or
 not plain text; a shape whose ids cannot be read exactly is refused, and naming
 the function without the parameter always works. A `skipif` is not decided
-(its condition runs only under pytest), and a `pytest.skip()` call in the test
-body is not detected. A `.rvl` claim under `examples/` gets a
+(its condition runs only under pytest). Not detected either: a `pytest.skip()`
+call in the test body, a skip from a fixture (through `usefixtures` or an
+autouse fixture), and a conftest `pytest_collection_modifyitems` that adds a
+skip. A witness class must inherit from nothing, `object` or
+`unittest.TestCase`, since a base class can carry marks. A `.rvl` claim under `examples/` gets a
 FULL affected selection, so the selection half is satisfied by the full run.
 
 The gate can prove the witness exists and runs. It cannot prove the sentence

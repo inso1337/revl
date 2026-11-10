@@ -56,8 +56,13 @@ other shape (stacked or class-level parametrizations, parametrized fixtures,
 `pytest_generate_tests`, an id pytest would escape) is refused, and the fix is
 to name the function without the parameter. A conditional `skipif` is NOT
 decided: its condition is evaluated when pytest runs, so a witness skipped by
-one on every runner still passes this check. A `pytest.skip()` call inside the
-test body is not detected either.
+one on every runner still passes this check. Not detected either: a
+`pytest.skip()` call inside the test body, a skip raised by a fixture
+(`usefixtures` or autouse), and a conftest `pytest_collection_modifyitems` that
+adds a skip. A witness class with a base other than `object` or
+`unittest.TestCase` is refused, since a base can carry marks; any `pytestmark`
+reference that is not a plain module or class assignment, and a mark passed
+`**` keywords, are refused as unreadable.
 
 Claims are OPTIONAL. A comment without `revl:claim` is unaffected, so adoption
 is incremental; the generated-block contract in `tools/docgen.py` is the model
@@ -412,6 +417,43 @@ def _pytestmark_values(body: list[ast.stmt]) -> list[ast.expr]:
     return values
 
 
+def _pytestmark_references(tree: ast.Module) -> int:
+    """Every mention of `pytestmark`: a name in any context, an attribute, or
+    a string (`globals()["pytestmark"]`)."""
+    return sum(1 for node in ast.walk(tree)
+               if (isinstance(node, ast.Name) and node.id == "pytestmark")
+               or (isinstance(node, ast.Attribute) and node.attr == "pytestmark")
+               or (isinstance(node, ast.Constant) and node.value == "pytestmark"))
+
+
+def _direct_pytestmark_assignments(tree: ast.Module) -> int:
+    """The `pytestmark = ...` statements this check reads: one plain target,
+    in the module body or a top-level class body."""
+    def plain(body: list[ast.stmt]) -> int:
+        return sum(1 for item in body
+                   if (isinstance(item, ast.Assign) and len(item.targets) == 1
+                       and isinstance(item.targets[0], ast.Name)
+                       and item.targets[0].id == "pytestmark")
+                   or (isinstance(item, ast.AnnAssign) and item.value is not None
+                       and isinstance(item.target, ast.Name)
+                       and item.target.id == "pytestmark"))
+    return plain(tree.body) + sum(plain(item.body) for item in tree.body
+                                  if isinstance(item, ast.ClassDef))
+
+
+def _base_reason(cls: ast.ClassDef) -> str | None:
+    """A class inherits marks from its bases (a base's `pytestmark` or class
+    decorator), so only `object` and `unittest.TestCase` are read."""
+    if cls.keywords:
+        return f"class {cls.name} passes class keywords the check cannot read"
+    for base in cls.bases:
+        spelled = ast.unparse(base)
+        if spelled not in ("object", "unittest.TestCase"):
+            return (f"class {cls.name} inherits from `{spelled}`, whose marks the "
+                    "check cannot read")
+    return None
+
+
 class _Marks:
     """Every mark that applies to one test, read without importing it.
 
@@ -430,20 +472,24 @@ class _Marks:
             inherited.extend(cls.decorator_list)
             for value in _pytestmark_values(cls.body):
                 inherited.extend(_marks(value))
-        assigned = sum(1 for node in ast.walk(tree)
-                       if isinstance(node, ast.Name) and node.id == "pytestmark"
-                       and isinstance(node.ctx, (ast.Store, ast.Del)))
-        direct = len(_pytestmark_values(tree.body)) + sum(
-            len(_pytestmark_values(item.body)) for item in tree.body
-            if isinstance(item, ast.ClassDef))
-        if assigned != direct:
-            self.unreadable = "`pytestmark` is assigned in a shape the check cannot read"
+        if _pytestmark_references(tree) != _direct_pytestmark_assignments(tree):
+            self.unreadable = ("`pytestmark` is referenced in a shape the check "
+                               "cannot read (only a plain module or class "
+                               "assignment is read)")
+        if cls is not None and self.unreadable is None:
+            self.unreadable = _base_reason(cls)
         self.own = list(function.decorator_list)
         self.inherited = inherited
         for mark in self.own + self.inherited:
-            if _literal_mark(mark) is None and self.unreadable is None:
+            if self.unreadable is not None:
+                break
+            if _literal_mark(mark) is None:
                 self.unreadable = (f"`{ast.unparse(mark)}` is not a mark spelled "
                                    "`pytest.mark.<name>`, so the check cannot read it")
+            elif isinstance(mark, ast.Call) and any(
+                    k.arg is None for k in mark.keywords):
+                self.unreadable = (f"`{ast.unparse(mark)}` passes `**` keywords, "
+                                   "so the check cannot read it")
 
     def named(self, name: str, *, own_only: bool = False) -> list[ast.expr]:
         marks = self.own if own_only else self.own + self.inherited

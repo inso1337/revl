@@ -578,3 +578,45 @@ def test_an_odd_backtick_does_not_hide_a_comment_that_opens_a_block(text):
 def test_a_code_span_may_still_cross_a_plain_line_break():
     text = "a `<!-- revl:claim ghost\n--> still code` here\n"
     assert parse_markdown_claims("d.md", text) == []
+
+
+@pytest.mark.parametrize("body,extra", [
+    ("import pytest\nclass Base:\n    pytestmark = pytest.mark.skip\n"
+     "class TestK(Base):\n    def test_ok(self):\n        pass\n", None),
+    ("import pytest\n@pytest.mark.skip\nclass Base:\n    pass\n"
+     "class TestK(Base):\n    def test_ok(self):\n        pass\n", None),
+    ("from tests.helper import Base\nclass TestK(Base):\n"
+     "    def test_ok(self):\n        pass\n",
+     "import pytest\n@pytest.mark.skip\nclass Base:\n    pass\n"),
+], ids=["base-pytestmark", "base-decorator", "imported-base"])
+def test_a_witness_class_with_a_base_that_can_carry_marks_is_refused(
+        tmp_path, body, extra):
+    root = _test_file(tmp_path, "test_k.py", body)
+    if extra is not None:
+        (root / "tests" / "helper.py").write_text(extra, encoding="utf-8")
+    findings = _witness_findings(root, "tests/test_k.py::TestK::test_ok")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+    assert "inherits from" in findings[0].detail
+
+
+def test_a_unittest_or_object_base_is_read(tmp_path):
+    root = _test_file(
+        tmp_path, "test_k.py",
+        "import unittest\nclass TestK(unittest.TestCase):\n"
+        "    def test_ok(self):\n        pass\nclass TestJ(object):\n"
+        "    def test_ok(self):\n        pass\n")
+    for node in ("TestK::test_ok", "TestJ::test_ok"):
+        assert _witness_findings(root, f"tests/test_k.py::{node}") == [], node
+
+
+@pytest.mark.parametrize("body", [
+    "import pytest\npytestmark = []\npytestmark.append(pytest.mark.skip)\n",
+    "import pytest\nglobals()['pytestmark'] = pytest.mark.skip\n",
+    "import pytest\npytestmark = []\npytestmark += [pytest.mark.skip]\n",
+    "import pytest\n@pytest.mark.xfail(**{'run': False})\n",
+], ids=["append", "globals", "augmented", "star-star-keywords"])
+def test_a_pytestmark_reference_or_mark_keywords_it_cannot_read_refuse(
+        tmp_path, body):
+    root = _test_file(tmp_path, "test_s.py", body + _GOOD_FN)
+    findings = _witness_findings(root, "tests/test_s.py::test_ok")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]

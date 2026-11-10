@@ -342,6 +342,17 @@ def _self_test() -> int:
         case("odd-backtick-before-a-heading-comment", expected={"claim-unknown-id"},
              selected=lambda _p: {"tests/test_comp.py"},
              md="# A ` tick\n<!-- revl:claim ghost -->\nmore ` text\n")
+        case("base-class-carries-a-skip", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\nclass Base:\n    pytestmark = pytest.mark.skip\n"
+                  "class TestK(Base):\n    def test_ok(self):\n        pass\n")
+        case("pytestmark-append", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\npytestmark = []\n"
+                  "pytestmark.append(pytest.mark.skip)\n" + _GOOD_TEST)
+        case("mark-with-star-star-keywords", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\n@pytest.mark.xfail(**{'run': False})\n" + _GOOD_TEST)
         case("unnamed-entry-dead-witness", expected={"claim-witness-missing"},
              selected=lambda _p: {"tests/test_comp.py"},
              toml=_GOOD_TOML + 'dead = "test:tests/gone.py"\n')
