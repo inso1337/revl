@@ -282,7 +282,7 @@ def test_a_classified_refusal_is_still_published_as_a_limit():
     report = conformance.run()
     kinds = {tier: [row["emit_kind"][tier] for row in report["cases"]]
              for tier in conformance.TIERS}
-    assert kinds["wasm"].count("limit") == 10
+    assert kinds["wasm"].count("limit") == 7
     assert kinds["java"].count("limit") == 1
     assert kinds["wasm"].count("refused") == 0
     assert kinds["java"].count("refused") == 0

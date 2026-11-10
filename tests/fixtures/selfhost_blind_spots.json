@@ -359,6 +359,9 @@
         "method=set",
         "method=size"
       ],
+      "Float is a native f64 on the WASM reference since issue #3295, which lowers an Int or Int32 to Float widening as f64.convert_i64_s or f64.convert_i32_s. selfhost/emit_wasm.rvl still carries only the scalar Int/Bool slice with no f64 lowering at all (it names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>>), so a Float document is a named port gap rather than a byte-agreement case and no CORPUS document can reach this marker until the port learns f64.": [
+        "widen=Float"
+      ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
         "kind=match",
         "pattern=_",

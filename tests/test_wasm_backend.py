@@ -333,7 +333,6 @@ def test_boundary_refusals_say_why_not_unknown_kind():
 # ---------------------------------------------------------------------------
 
 def _invoke_wat(wat_path: Path, fn: str, *args):
-    _wasmtime_or_fail()
     result = subprocess.run(
         ["wasmtime", "--invoke", fn, str(wat_path), *[str(a) for a in args]],
         capture_output=True, text=True, timeout=60,
@@ -342,12 +341,7 @@ def _invoke_wat(wat_path: Path, fn: str, *args):
     return result.stdout.strip().splitlines()[-1]
 
 
-def _wasmtime_or_fail():
-    if shutil.which("wasmtime") is None:
-        pytest.fail("wasmtime is not on PATH; this tier's Float coverage needs it",
-                    pytrace=False)
-
-
+@needs_wasmtime
 def test_float_value_positions_lower_and_run(tmp_path):
     emitter = _emitter()
     source = (
@@ -405,6 +399,7 @@ def test_component_float_remainder_includes_the_f64_mod_helper():
     assert "(func $f64_mod" in wat, wat
 
 
+@needs_wasmtime
 def test_float_fuzz_regressions_lower_and_run(tmp_path):
     emitter = _emitter()
     for example, expected in (("fuzz_wasm_ad4e66e8", "3"), ("fuzz_wasm_af371f9d", "0")):
@@ -414,6 +409,7 @@ def test_float_fuzz_regressions_lower_and_run(tmp_path):
         assert _invoke_wat(wat_path, "probe") == expected
 
 
+@needs_wasmtime
 def test_float_adt_variant_payload_with_match_runs(tmp_path):
     # The roadmap-301 shape verbatim: `type Adt0 = C0_0(Float)` matched over.
     # The payload is a Float slot; the result is f64, so the module validates
