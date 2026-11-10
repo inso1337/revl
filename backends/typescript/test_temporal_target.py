@@ -437,6 +437,36 @@ def test_component_named_an_unread_js_global_emits():
     assert "export async function fetch(): Promise<void>" in got
 
 
+def _bracket_src(undo: str, acquire: str = "r_open") -> str:
+    return (
+        f"extern pure fn {undo}(h: RHandle) = @ts {{ return }}\n"
+        f"extern acquire fn {acquire}(n: Int) -> RHandle undo {undo}(result)"
+        ' = @ts { return "h" }\n'
+        "component Pay {\n"
+        f"  let h = effect {acquire}(0) undo {undo}(h)\n"
+        "}\n"
+    )
+
+
+@pytest.mark.parametrize("name", ["fetch", "console", "process"])
+def test_pure_extern_named_a_host_global_refused(name):
+    """A pure extern is never declared in the workflow module: `undo fetch(h)`
+    renders as a bare `fetch(h)`, which would call the host's `fetch` instead
+    of the extern. So a name the module reads free avoids every host global,
+    not only the ones the scaffolding reads."""
+    ir = compile_source(_bracket_src(name), f"{name}_pure.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", ["setTimeout", "fetch"])
+def test_acquire_extern_named_a_host_global_refused(name):
+    ir = compile_source(_bracket_src("r_close", acquire=name),
+                        f"{name}_acquire.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
 # ------------------------------- reserved names derived from the emitted module
 
 # Every author-chosen name in this workflow starts with `zq`, so whatever else
@@ -549,6 +579,46 @@ def _scaffolding_identifiers():
         and not (name in sealed_local and only_in(sealed, positions))
     }
     return frozenset(externs), frozenset(externs - workflow_local)
+
+
+def _free_author_names() -> frozenset:
+    """The probe's own `zq` names the emitted module reads but never binds:
+    no destructuring, declaration, parameter or function names them, so each
+    one resolves to whatever the host has under that spelling."""
+    code = _strip_ts_comments_and_strings(EMIT.emit(
+        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal"))
+    bound = _declared_in(code)
+    bound |= set(re.findall(
+        rf"\b(?:function|interface|type)\s+({_TS_IDENT})", code))
+    for group in re.findall(r"const\s*\{([^}]*)\}\s*=\s*proxyActivities", code):
+        bound |= {name.strip() for name in group.split(",")}
+    read = set()
+    for m in re.finditer(r"(?<![\w$.])[zZ]q[\w$]*", code):
+        if not re.match(r"\s*\??:", code[m.end():]):
+            read.add(m.group(0))
+    return frozenset(read - bound)
+
+
+def test_every_author_name_read_free_is_refused_as_a_host_global():
+    """The derived tests above skip the probe's own names, so they cannot see
+    an author name the module reads free. This one finds those names in the
+    emitted module (externs rendered as a bare call and never declared) and
+    respells each as the host global `fetch`, which the scaffolding never
+    reads: each respelling must be refused, since the bare call would reach
+    the host's `fetch`."""
+    free = _free_author_names()
+    assert {"zqClose", "zqOpen", "zqDrop", "zqLease"} <= free  # positive control
+    emitted = []
+    for name in sorted(free):
+        src = re.sub(rf"\b{name}\b", "fetch", _SCAFFOLDING_PROBE)
+        try:
+            EMIT.emit(compile_source(src, f"{name}_as_fetch.rvl"), target="temporal")
+        except EMIT.EmitError as exc:
+            if "reserves" not in str(exc):
+                emitted.append(f"{name}: {exc}")
+        else:
+            emitted.append(name)
+    assert not emitted, f"free author names that may take a host global: {emitted}"
 
 
 def test_scaffolding_identifier_collector_sees_every_kind_of_name():

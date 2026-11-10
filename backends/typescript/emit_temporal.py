@@ -78,6 +78,7 @@ from typing import Any
 # shared module, keeping a single copy of the emitter machinery (`EmitError`
 # identity, the `_Ctx` counter cell) no matter which entry point dispatched.
 from emit import (  # type: ignore[import-not-found]  # noqa: E402
+    JS_GLOBAL_RESERVED,
     EmitError,
     _Ctx,
     _Scope,
@@ -179,9 +180,18 @@ TEMPORAL_MODULE_RESERVED = frozenset({
 # destructured as `Date`, or a component declared as
 # `export async function Date()`, would shadow the global for the whole module,
 # so the abort path would throw before the drain loop and no compensation or
-# residue record would run. Exactly the globals the template reads are
-# reserved; any other host global (`fetch`, `process`, ...) stays a legal
-# activity or component name, since nothing in this module reads it.
+# residue record would run.
+#
+# Which globals an author name must avoid depends on how the module uses it.
+# A name the module BINDS (an emission extern, destructured as an activity
+# out of `proxyActivities`, and a component, declared as its workflow
+# function) shadows a global, so it is checked against this module scope:
+# the module's own names plus exactly the globals the template reads. Any
+# other host global (`fetch`, `process`, ...) stays a legal activity or
+# component name. A name the module READS FREE (every other extern class,
+# rendered as a bare call to its own name and never declared here) resolves
+# to the host global of that spelling, so it must avoid every host global
+# (`JS_GLOBAL_RESERVED`) as well; see `_check_temporal_names`.
 # `test_temporal_target.py` derives the read set from the emitted module, so a
 # global the template starts reading fails there until it is listed here.
 TEMPORAL_GLOBALS_READ = frozenset({
@@ -248,8 +258,16 @@ def _check_temporal_names(ir: dict) -> frozenset:
         if name in residue_names:
             _refuse_reserved(name, "a component")
     for ext in ir.get("externs") or []:
-        if ext.get("name") in reserved:
-            _refuse_reserved(ext.get("name"), "an extern")
+        name = ext.get("name")
+        if name in reserved:
+            _refuse_reserved(name, "an extern")
+        # Only an emission extern is bound in this module. Every other class
+        # (pure, acquire, witnessed, local) is rendered as a bare call and
+        # never declared, so its name is read free and a host-global spelling
+        # (`undo fetch(h)`) would call the host's own function.
+        if ext.get("class") != "emission" and name in JS_GLOBAL_RESERVED:
+            _refuse_reserved(
+                name, f"a {ext.get('class')} extern, called by its bare name,")
     return frozenset(reserved | set(component_names) | set(residue_names))
 
 

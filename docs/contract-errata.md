@@ -454,11 +454,16 @@ This goes in the compiler spec, not the runtimes.
     the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers,
     `undefined`, and `Promise`/`Record` in its types): exactly those are
     reserved there too (`TEMPORAL_GLOBALS_READ`), since an extern destructured
-    as `Date` made the abort path throw before any compensation ran. A host
-    global the module does not read (`fetch`, `process`) stays a legal
-    activity or component name. A config field stays allowed: it is only a
-    property key (`input.<field>`), never a bare identifier, so it cannot
-    shadow the scaffolding.
+    as `Date` made the abort path throw before any compensation ran. The
+    check depends on how the module uses the name. A name it binds (an
+    emission extern, destructured as an activity, and a component) is checked
+    against that module scope, so `fetch` or `process` stays a legal activity
+    or component name. A name it reads free (a pure, acquire, witnessed or
+    local extern, rendered as a bare call and never declared) is also checked
+    against every host global (`JS_GLOBAL_RESERVED`), since `undo fetch(h)`
+    would otherwise call the host's `fetch`. A config field stays allowed: it
+    is only a property key (`input.<field>`), never a bare identifier, so it
+    cannot shadow the scaffolding.
   - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
     `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
     flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding
