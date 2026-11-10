@@ -53,6 +53,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
@@ -478,49 +479,47 @@ def _stop_group(process) -> None:
         pass
 
 
-def _reap(process) -> None:
-    process.wait()
-    for stream in (process.stdout, process.stderr):
-        if stream is not None:
-            stream.close()
-
-
 def _run_probe(argv: Sequence[str], cwd: str, timeout: float) -> dict:
     """Run one probe in its own process group and judge it by its exit code.
+
+    The probe's own exit is what is waited for. Its output goes to unnamed
+    temporary files rather than pipes, so a child it leaves behind holding
+    them cannot turn a finished probe into a timeout; the group is killed on
+    every way out, so that child does not keep running either.
 
     What the probe printed is counted, never copied: the report goes to a
     terminal, a `--json` pipeline or a log, and a probe's output may carry a
     credential the operator never meant to publish.
     """
-    try:
-        process = subprocess.Popen(  # noqa: S603 (argv list, no shell)
-            list(argv), cwd=cwd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True)
-    except FileNotFoundError as error:
-        return {"ok": False, "exit": None,
-                "reason": f"the probe could not be started: {error}"}
-    except OSError as error:
-        return {"ok": False, "exit": None,
-                "reason": f"the probe could not be run: {error}"}
-    out = err = None
-    try:
-        out, err = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        pass
-    finally:
-        # On every way out (exit, timeout, an interrupt) the whole group goes,
-        # so a timed-out probe's children do not keep running.
-        _stop_group(process)
-        _reap(process)
-    if out is None:
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            process = subprocess.Popen(  # noqa: S603 (argv list, no shell)
+                list(argv), cwd=cwd, stdin=subprocess.DEVNULL,
+                stdout=out, stderr=err, start_new_session=True)
+        except FileNotFoundError as error:
+            return {"ok": False, "exit": None,
+                    "reason": f"the probe could not be started: {error}"}
+        except OSError as error:
+            return {"ok": False, "exit": None,
+                    "reason": f"the probe could not be run: {error}"}
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            # On every way out (exit, timeout, an interrupt) the whole group
+            # goes, so nothing the probe started keeps running.
+            _stop_group(process)
+            process.wait()
+        size = os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size
+    if timed_out:
         return {"ok": False, "exit": None,
                 "reason": (f"the probe did not finish within {timeout:g}s; "
                            "its process group was killed")}
     code = process.returncode
     if code == 0:
         return {"ok": True, "exit": code}
-    size = len(out or b"") + len(err or b"")
     return {"ok": False, "exit": code,
             "reason": (f"the probe exited {code}"
                        + (f"; its {size} byte(s) of output are not copied "
@@ -673,7 +672,9 @@ def _generation_lock(state: Path) -> Iterator[bool]:
 
     It does not wait: a second apply on one generation directory is an
     operator error to report, and once the first finishes the directory holds
-    a decision record, which refuses the second anyway.
+    a decision record, which refuses the second anyway. The lock covers one
+    generation directory, not the federation: two applies of different
+    generations of one federation are not serialized by it.
     """
     fd = os.open(str(state / LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
     try:
@@ -766,7 +767,9 @@ def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
                 "world files")))
             return report
         decision_path = state / deploy.DECISION_FILE
-        if decision_path.exists():
+        # `lexists`, not `exists`: a dangling symlink in the decision file's
+        # place would otherwise read as fresh and be written through.
+        if os.path.lexists(decision_path):
             report.update(_refused_before_launch("generation", (
                 f"{decision_path} already holds a decision record, so "
                 f"{state} was already used by an apply. A generation "

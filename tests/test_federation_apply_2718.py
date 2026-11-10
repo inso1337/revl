@@ -521,11 +521,20 @@ F.apply_federation_plan(F.load_federation_plan(plan), state_dir=state)
 """
 
 
-@posix_only
-def test_a_conductor_killed_after_the_first_commit_settles_back(tmp_path):
-    """The conductor is SIGKILLed after alpha commits and before beta does.
-    The pending record written before the first launch is the last record, so
-    the stranded alpha settles against "no decision", never an approval."""
+#: The settle verdict for a participant whose own commit completed. Today
+#: `recovery.recover` rolls forward any WAL that reached `activation-complete`,
+#: whatever the federation decision record says, so a stranded slice of an
+#: update that was never approved stays live. Whether `settle_stranded` should
+#: read the record first is an open design question (the WAL carries no
+#: federation identity to tie it to its record); these tests turn green, and
+#: fail as XPASS, the day it does.
+settle_reads_the_record = pytest.mark.xfail(
+    strict=True,
+    reason=("settle_stranded rolls forward a WAL that reached "
+            "activation-complete whatever the decision record says"))
+
+
+def _kill_after_first_commit(tmp_path: Path) -> Path:
     plan = _probe_plan(tmp_path, 1, beta_code=0)
     state = tmp_path / "state" / "1"
     script = _write(tmp_path / "conductor.py", CONDUCTOR)
@@ -544,7 +553,16 @@ def test_a_conductor_killed_after_the_first_commit_settles_back(tmp_path):
         assert not _wait_gone(pids), "a participant outlived its conductor"
     finally:
         _kill_all(pids)
+    return state
 
+
+@posix_only
+def test_a_conductor_killed_after_the_first_commit_leaves_no_approval(
+        tmp_path):
+    """The conductor is SIGKILLed after alpha commits and before beta does.
+    The pending record written before the first launch is the last record, so
+    the stranded alpha settles against "no decision", never an approval."""
+    state = _kill_after_first_commit(tmp_path)
     assert _world(state, "alpha") == {"alpha:Alpha": True}   # stranded
     assert _world(state, "beta") == {}                       # never committed
     kind, record = _last_decision(state)
@@ -554,6 +572,15 @@ def test_a_conductor_killed_after_the_first_commit_settles_back(tmp_path):
     settled = deploy.settle_stranded(str(state / "alpha.wal"),
                                      str(state / "decision.jsonl"))
     assert settled["federationDecision"] == "none", settled
+
+
+@posix_only
+@settle_reads_the_record
+def test_a_conductor_killed_after_the_first_commit_settles_back(tmp_path):
+    state = _kill_after_first_commit(tmp_path)
+    settled = deploy.settle_stranded(str(state / "alpha.wal"),
+                                     str(state / "decision.jsonl"))
+    assert settled["verdict"] == "rolled-back", settled
 
 
 def test_reapplying_a_generation_into_its_own_directory_is_refused(tmp_path):
@@ -701,11 +728,7 @@ health_probe = ["true\\u0000x"]
         load_federation_plan(path)
 
 
-def test_an_interrupted_abort_still_unwinds_the_other_participants(
-        tmp_path, monkeypatch):
-    """beta's probe fails, so beta then alpha are asked to unwind. An interrupt
-    while beta unwinds is recorded, alpha is still unwound, and the interrupt
-    is re-raised; beta settles against the abort decision."""
+def _interrupt_beta_abort(tmp_path: Path, monkeypatch) -> Path:
     real_abort = deploy.ProcessParticipant.abort
 
     def abort(self):
@@ -719,12 +742,30 @@ def test_an_interrupted_abort_still_unwinds_the_other_participants(
         apply_federation_plan(
             load_federation_plan(_probe_plan(tmp_path, 1, beta_code=1)),
             state_dir=state)
+    return state
+
+
+def test_an_interrupted_abort_still_unwinds_the_other_participants(
+        tmp_path, monkeypatch):
+    """beta's probe fails, so beta then alpha are asked to unwind. An interrupt
+    while beta unwinds is recorded, alpha is still unwound, and the interrupt
+    is re-raised; beta is stranded under the abort decision."""
+    state = _interrupt_beta_abort(tmp_path, monkeypatch)
     assert _world(state, "alpha") == {}
     assert _world(state, "beta") == {"beta:Beta": True}      # stranded
     assert _last_decision(state)[0] == deploy.FEDERATION_ABORTED
     settled = deploy.settle_stranded(str(state / "beta.wal"),
                                      str(state / "decision.jsonl"))
     assert settled["federationDecision"] == deploy.FEDERATION_ABORTED, settled
+
+
+@settle_reads_the_record
+def test_a_participant_stranded_under_the_abort_decision_settles_back(
+        tmp_path, monkeypatch):
+    state = _interrupt_beta_abort(tmp_path, monkeypatch)
+    settled = deploy.settle_stranded(str(state / "beta.wal"),
+                                     str(state / "decision.jsonl"))
+    assert settled["verdict"] == "rolled-back", settled
 
 
 def test_a_second_apply_on_a_locked_state_dir_is_refused(tmp_path,
@@ -840,3 +881,117 @@ def test_a_failed_commit_writes_the_abort_before_any_abort_message(
     kind, record = _last_decision(state)
     assert kind == deploy.FEDERATION_ABORTED and record["failed"] == "beta"
     assert _world(state, "alpha") == {}
+
+
+GROUP_INTERRUPT_CONDUCTOR = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from revl import deploy, federation_apply as F
+
+plan, state, pidfile = sys.argv[2:5]
+real_launch = deploy.launch_local_participant
+
+
+def launch(target, **kwargs):
+    participant, error = real_launch(target, **kwargs)
+    if participant is not None:
+        with open(pidfile, "a", encoding="utf-8") as handle:
+            handle.write(f"{participant.process.pid}\\n")
+    return participant, error
+
+
+deploy.launch_local_participant = launch
+try:
+    F.apply_federation_plan(F.load_federation_plan(plan), state_dir=state,
+                            probe_timeout=60)
+except KeyboardInterrupt:
+    sys.exit(130)
+sys.exit(0)
+"""
+
+GROUP_INTERRUPTING_PROBE = """
+import os, signal, time
+# A terminal's Ctrl-C: SIGINT to the conductor's whole process group, which
+# holds the conductor and its participants (this probe has its own session).
+os.killpg(os.getpgid(os.getppid()), signal.SIGINT)
+time.sleep(60)
+"""
+
+
+@posix_only
+def test_a_ctrl_c_to_the_whole_process_group_still_unwinds(tmp_path):
+    """The conductor runs in a process group of its own, as a terminal's
+    foreground job does; the probe sends SIGINT to that whole group. The
+    participants must survive it, so the conductor can ask them to unwind."""
+    plan = _one_probe_plan(tmp_path, "probe_group", GROUP_INTERRUPTING_PROBE)
+    state = tmp_path / "state" / "1"
+    script = _write(tmp_path / "group_conductor.py", GROUP_INTERRUPT_CONDUCTOR)
+    pidfile = tmp_path / "participants.pid"
+    conductor = subprocess.Popen(
+        [sys.executable, str(script), str(ROOT / "src"), str(plan),
+         str(state), str(pidfile)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    try:
+        _, err = conductor.communicate(timeout=120)
+    finally:
+        try:
+            os.killpg(conductor.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        conductor.wait()
+    pids = ([int(line) for line in pidfile.read_text(encoding="utf-8").split()]
+            if pidfile.exists() else [])
+    _kill_all(pids)
+    assert conductor.returncode == 130, err
+    assert len(pids) == 2
+    assert _decision_kinds(state) == [deploy.FEDERATION_PENDING,
+                                      deploy.FEDERATION_ABORTED]
+    assert _world(state, "alpha") == {} and _world(state, "beta") == {}
+
+
+def test_a_dangling_symlink_in_place_of_the_decision_file_is_refused(
+        tmp_path):
+    state = tmp_path / "state" / "1"
+    state.mkdir(parents=True)
+    target = tmp_path / "elsewhere.jsonl"
+    try:
+        (state / "decision.jsonl").symlink_to(target)
+    except (OSError, NotImplementedError):  # pragma: no cover
+        pytest.skip("this platform cannot make a symlink here")
+    report = apply_federation_plan(
+        load_federation_plan(_probe_plan(tmp_path, 1, beta_code=0)),
+        state_dir=state)
+    assert report["verdict"] == deploy.DEPLOY_REFUSED, report
+    assert report["phase"] == "generation"
+    assert not target.exists(), "the apply wrote through the symlink"
+
+
+LINGERING_CHILD_PROBE = """
+import subprocess, sys
+# Exit 0 at once, leaving a child that inherited stdout and stderr.
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                         stdin=subprocess.DEVNULL)
+with open("lingering.pid", "w", encoding="utf-8") as handle:
+    handle.write(str(child.pid))
+"""
+
+
+@posix_only
+def test_a_probe_that_exits_0_leaving_a_child_is_healthy(tmp_path):
+    """The probe's own exit decides, not the end of its output: a child that
+    still holds the output does not turn a passed probe into a timeout, and
+    it is killed with the probe's group."""
+    plan = load_federation_plan(
+        _one_probe_plan(tmp_path, "probe_linger", LINGERING_CHILD_PROBE))
+    pidfile = tmp_path / "lingering.pid"
+    lingering: list[int] = []
+    try:
+        report = apply_federation_plan(plan, state_dir=tmp_path / "state" / "1",
+                                       probe_timeout=5)
+        if pidfile.exists():
+            lingering = [int(pidfile.read_text(encoding="utf-8"))]
+        assert report["verdict"] == deploy.DEPLOY_APPLIED, report
+        assert lingering and not _wait_gone(lingering, 5.0)
+    finally:
+        _kill_all(lingering)

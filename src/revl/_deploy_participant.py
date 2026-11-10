@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -359,6 +360,13 @@ class _Participant:
 
 
 def main() -> None:
+    # A terminal's Ctrl-C goes to the whole foreground process group, and this
+    # process is the conductor's child in that group. Dying from it would
+    # strand a committed slice exactly when the conductor, which handles the
+    # same SIGINT, is about to ask for its unwind. The conductor decides what
+    # an interrupt means; this process ends when its control channel closes.
+    if hasattr(signal, "SIGINT"):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     participant = _Participant(spec)
     ops = {"prepare": participant.prepare, "commit": participant.commit,

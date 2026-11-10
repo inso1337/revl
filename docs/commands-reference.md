@@ -2508,10 +2508,14 @@ The run has the deploy protocol's shape:
    every composition on its prior generation.
 2. **Lock and freshness.** The generation's state directory is locked
    (`<state-dir>/lock`) for the whole run; a second apply on the same
-   directory is refused while the first holds it. A directory that already
-   holds a decision record (`decision.jsonl`) is refused before anything is
-   written: a generation directory is used once, so give a new update a new
-   `generation` or a new `--state-dir`.
+   directory is refused while the first holds it. The lock covers that one
+   directory, not the federation: applies of two different generations of one
+   federation are not serialized. A directory that already holds a decision
+   record (`decision.jsonl`, or any entry in its place, a dangling symlink
+   included) is refused before anything is written: a generation directory is
+   used once, so give a new update a new `generation` or a new `--state-dir`.
+   A run that got past this point uses the generation up even when PREPARE
+   refuses or a participant cannot be launched.
 3. **Commit** through the coordinated PREPARE/COMMIT/ABORT protocol over one
    local participant per composition. The decision records are the ones
    `revl deploy` writes, in its order: `federation-decision-pending` before the
@@ -2520,19 +2524,25 @@ The run has the deploy protocol's shape:
    committed and every declared probe passed. A conductor killed before that
    leaves the pending record or the abort decision last, so `revl recover
    --decision` never reads an approval for the run. Recovery still rolls
-   forward a participant whose own WAL reached `activation-complete`; the
-   record decides a participant stranded mid-commit.
+   forward a participant whose own WAL reached `activation-complete`, whatever
+   the record says: a conductor killed during the probes leaves the committed
+   participants on the new generation. The record decides only a participant
+   stranded mid-commit.
 4. **Health probes** declared per composition, run after the commit. A probe is
    an argv list run in the plan's directory in a process group of its own;
    exit 0 is healthy, and a composition that declares none is reported as not
    declared, not failed. A probe that runs past `--probe-timeout` fails and its
-   whole process group is killed. What a probe prints is not copied into the
+   whole process group is killed. The probe's own exit decides: a child it
+   leaves holding its output does not delay the verdict, and is killed with its
+   group. What a probe prints is not copied into the
    report (only its exit code and the size of its output), since the report may
    be logged.
 5. **Unwind the update.** A probe that fails, times out or raises (Ctrl-C on a
    hung probe included) writes the durable abort decision first, then every
    committed participant runs its own local LIFO unwind of this generation; an
-   interrupt is re-raised after that. Each generation has its own state
+   interrupt is re-raised after that. Participants ignore SIGINT, so a
+   terminal's Ctrl-C, which reaches the whole foreground process group, stops
+   only the conductor, which then asks them to unwind. Each generation has its own state
    directory and a directory is used once, so the update never writes the
    previous generation's WAL or world files.
 

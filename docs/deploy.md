@@ -480,8 +480,11 @@ and refuses one that already holds a decision record, writes the
 rule), and writes `federation-commit-approved` only after every participant
 committed and every declared health probe passed. A probe that fails, times
 out or raises writes the durable abort decision first and then asks every
-committed participant to run its own local LIFO unwind, the same settle rule a
-stranded participant gets. Each generation has its own state directory (the
+committed participant to run its own local LIFO unwind. That is the roll-back
+a stranded participant gets only if it was stranded mid-commit: `recover`
+rolls forward a WAL that reached `activation-complete` whatever the decision
+record says, so a conductor killed during the probes leaves the committed
+participants on the new generation. Each generation has its own state directory (the
 command's default is `<wal-dir>/federation/<federation>/<generation>`), so
 restoring the prior generation is observable: the failed generation's
 directory unwinds to empty while the previous generation's directory is
