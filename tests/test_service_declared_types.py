@@ -73,6 +73,28 @@ def _refused(old: dict, new_src: str, replacing=("Cache",)) -> RevlError:
     return info.value
 
 
+def _opaque(decl: str = "", *, reader: bool = False, version: int = 1) -> str:
+    """As `_prog`, over a signature that names `Opq`, a type the program
+    leaves undeclared unless `decl` declares it."""
+    out = decl + ("service Store {\n  fn get(k: Str) -> Int\n"
+                  "  fn put(k: Str, v: Opq)\n  fn version() -> Int\n}\n")
+    if reader:
+        out += "service Look { fn read(k: Str) -> Int }\n"
+    out += f"""component Cache provides cache: Store {{
+  let m = effect Map.new() undo m.drop()
+  provide cache {{
+    fn get(k) = 1
+    fn put(k, v) {{ effect m.insert(k, v) undo m.remove(k) }}
+    fn version() = {version}
+  }}
+}}
+"""
+    if reader:
+        out += ("component Reader requires cache: Store provides look: Look {\n"
+                "  provide look { fn read(k) = cache.get(k) }\n}\n")
+    return out
+
+
 def _assert_drift(exc: RevlError) -> None:
     assert BREAKS in str(exc)
     assert "`Reader`" in str(exc)
@@ -84,6 +106,8 @@ def _assert_drift(exc: RevlError) -> None:
 def test_record_gaining_a_field_is_refused():
     exc = _refused(_running(), _prog("{ a: Int, b: Int }", version=2))
     _assert_drift(exc)
+    assert "interface drift" in exc.hint, exc.hint
+    assert "records no declaration" not in exc.hint, exc.hint
 
 
 def test_field_retyped_with_the_service_redeclared_is_refused():
@@ -208,6 +232,40 @@ def test_a_running_manifest_without_types_refuses_a_declared_name():
     old.pop("types")
     exc = _refused(old, _prog(version=2))
     assert BREAKS in str(exc)
+    # the way out it names is one that works: the candidate changed no
+    # interface, so "do not break it" would leave the author stuck
+    assert "records no declaration for `Rec`" in exc.hint, exc.hint
+    assert "compile the running sources again" in exc.hint, exc.hint
+    assert "interface drift" not in exc.hint, exc.hint
+    # and it does work: the same sources compiled again record `Rec`
+    _swap(_running(), _prog(version=2))
+
+
+def test_declaring_a_name_a_running_signature_left_undeclared_is_refused():
+    # the other history behind a manifest with no declaration for a name: the
+    # running sources never declared `Opq`, so compiling them again records
+    # nothing more, and the hint names the way out that works here too
+    old = compile_source(_opaque(reader=True), "c.rvl")
+    assert "types" not in old
+    exc = _refused(old, _opaque("type Opq = { a: Int }\n", version=2))
+    assert BREAKS in str(exc) and "`Opq` is not declared" in str(exc)
+    assert "records no declaration for `Opq`" in exc.hint, exc.hint
+    assert ("leave it undeclared, or declare the new type under another name"
+            in exc.hint), exc.hint
+    assert "and keep the signature spelled as it runs" in exc.hint, exc.hint
+    assert "interface drift" not in exc.hint, exc.hint
+    # both ways out work: the name left undeclared, or the new type named
+    # otherwise
+    _swap(old, _opaque(version=2))
+    _swap(old, _opaque("type Opq2 = { a: Int }\n", version=2))
+    # respelled with the new name the signature is another type, refused as
+    # any narrowing is, which is why the hint says to keep the spelling
+    respelt = _opaque("type Opq2 = { a: Int }\n", version=2).replace(
+        "v: Opq)", "v: Opq2)")
+    assert "narrows from `Opq` to `Opq2`" in str(_refused(old, respelt))
+    # a candidate that redeclares the reader as well withdraws it: nothing it
+    # keeps was checked against the running meaning of `Opq`
+    _swap(old, _opaque("type Opq = { a: Int }\n", reader=True, version=2))
 
 
 def test_widening_a_parameter_type_is_still_admitted_control():

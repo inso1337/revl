@@ -7066,6 +7066,18 @@ _HANDOFF_DECL_CORPUS = (
      "Answer[Int]", "", "type Q = { a: Answer[Int] }\n", False),
     ("a record under a provided type", "Answer[St]", "Answer[St]",
      "type St = { a: Int }\n", "type St = { a: Int, b: Int }\n", True),
+    ("a field leaving a provided type", "St", "St",
+     "type St = { a: Answer[Int] }\n", "type St = { a: Int }\n", True),
+    ("a field becoming a provided type", "St", "St", "type St = { a: Int }\n",
+     "type St = { a: Answer[Int] }\n", True),
+    ("a name only the candidate declares", "St", "St", "",
+     "type St = { a: Int }\n", True),
+    ("an unchanged record reaching a name only the candidate declares",
+     "St", "St", "type St = { a: Inner }\n",
+     "type Inner = { a: Int }\ntype St = { a: Inner }\n", True),
+    ("a name only the running sources declare", "St", "St",
+     "type St = { a: Int }\n", "", True),
+    ("a name neither side declares", "St", "St", "", "", False),
 )
 
 _H_DRIFT_HEAD = ("G2|state hand-off on `db` differs from the running "
@@ -7201,6 +7213,15 @@ _KEPT_HANDOFF_CORPUS = (
      "type Q = { a: Answer[Int] }\n", False),
     ("a record under a provided type", "Answer[St]", "type St = { a: Int }\n",
      "type St = { a: Int, b: Int }\n", True),
+    ("a field leaving a provided type", "St",
+     "type St = { a: Answer[Int] }\n", "type St = { a: Int }\n", True),
+    ("a field becoming a provided type", "St", "type St = { a: Int }\n",
+     "type St = { a: Answer[Int] }\n", True),
+    ("a name only the candidate declares", "St", "",
+     "type St = { a: Int }\n", True),
+    ("an unchanged record reaching a name only the candidate declares", "St",
+     "type St = { a: Inner }\n", "type Inner = { a: Int }\n", True),
+    ("a name neither side declares", "St", "", "", False),
 )
 
 
@@ -7231,6 +7252,45 @@ def test_kept_handoff_refusal_names_both_declarations(admit_ambient):
         "candidate redeclares a type that spelling names "
         "(`St = {a: Int, b: Int}`); `Store` holds state built against the "
         "running declaration, and a composition has one declaration per name")
+
+
+# One admission, two hand-offs that drift. `Store` is replaced over a changed
+# `St` while `Keep` stays and the incoming text redeclares the `Kt` its
+# hand-off names. Each leg reports one verdict, so the two must pick the same
+# one whichever declaration the incoming text states first.
+
+_BOTH_KEEP = ("component Keep provides kv: D {\n"
+              "  handoff kv: Kt\n"
+              "  provide kv { fn q(s) { let x = s   return 0 } }\n}\n")
+_BOTH_RUNNING = "type St = { a: Int }\ntype Kt = { k: Int }\n"
+_BOTH_KEPT_HEAD = ("G2|state hand-off on `kv` differs from the running "
+                   "manifest: `Keep` is kept and exports `")
+
+
+@pytest.mark.parametrize("kept_first", [True, False],
+                         ids=["the kept declaration first",
+                              "the replacement first"])
+def test_oracle_b_replaced_and_kept_handoffs_both_drift(admit_ambient,
+                                                        kept_first):
+    running = _h_comp("Store", "St", extra=_BOTH_RUNNING) + _BOTH_KEEP
+    st, kt = "type St = { a: Int, b: Int }\n", "type Kt = { k: Str }\n"
+
+    def verdicts(decls_before: str, decls_after: str) -> tuple[str, str]:
+        incoming = _h_comp("Store", "St", extra=decls_before) + decls_after
+        return (_gate_ambient(admit_ambient, incoming, running,
+                              replacing=("Store",)),
+                _ref_ambient(incoming, running, replacing=("Store",)))
+
+    # each drift alone is refused for its own reason, on both legs
+    got, ref = verdicts(st + "type Kt = { k: Int }\n", "")
+    assert got == ref and got.startswith(_H_DRIFT_HEAD), (got, ref)
+    got, ref = verdicts("type St = { a: Int }\n" + kt, "")
+    assert got == ref and got.startswith(_BOTH_KEPT_HEAD), (got, ref)
+
+    # both at once: the kept hand-off is the one reported, whichever
+    # declaration the incoming text states first, on both legs
+    got, ref = verdicts(kt + st, "") if kept_first else verdicts(st, kt)
+    assert got == ref and got.startswith(_BOTH_KEPT_HEAD), (got, ref)
 
 
 def test_kept_handoff_withdrawn_provider_is_not_held(admit_ambient):

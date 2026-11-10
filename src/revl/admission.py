@@ -132,6 +132,7 @@ class _Drift:
     method: str | None      # the offending method, or None for a service-wide clash
     kind: str               # added | removed | signature | emission | witnessed | commutative
     reason: str             # human-readable "what and why"
+    hint: str | None = None  # the way out, where it is not the usual one
 
 
 def _caps_widen(old_caps: tuple | None, new_caps: tuple | None) -> bool:
@@ -391,9 +392,10 @@ def _drift_error(program: Program, new: ServiceDecl, drift: _Drift,
     # structured-diagnostics table classifies it as an admission (G2) rejection
     message = (f"service `{new.name}` differs from the running manifest in a "
                f"way that breaks {who}: {drift.reason}")
-    hint = ("an admitted component may add methods and widen an interface, but "
-            "it may not break a running consumer's or provider's use of it "
-            "(interface drift, DESIGN §6.6)")
+    hint = drift.hint or (
+        "an admitted component may add methods and widen an interface, but "
+        "it may not break a running consumer's or provider's use of it "
+        "(interface drift, DESIGN §6.6)")
     steps = [
         TraceStep(new.name, "service", program.filename, new.line,
                   f"{drift.kind}: {drift.reason}"),
@@ -528,12 +530,19 @@ def _own_differences(names: list[str], mine: dict, theirs: dict) -> list[str]:
     sides alike, and a name only the candidate's changed declaration reaches
     is already explained by that declaration, which is shown. It also keeps
     this text a function of what the running hand-off reaches, which is all
-    the manifest wire carries to the self-host gate (`manifest._decl_rows`)."""
+    the manifest wire carries to the self-host gate (`manifest._decl_rows`).
+
+    A type the language provides (`ANSWER_TYPES`) is passed over, as
+    `_decl_differs` passes over it: no program declares one, a table holds
+    its entry only when the program names it applied, and the wire leaves it
+    out. Shown, it would read as a declaration that moved (`Answer` is not
+    declared) under a record that stopped naming it."""
     out: set[str] = set()
     todo, seen = list(names), set()
     while todo:
         n = todo.pop()
-        if n in seen or (n not in mine and n not in theirs):
+        if n in seen or n in ANSWER_TYPES \
+                or (n not in mine and n not in theirs):
             continue
         seen.add(n)
         if _decl_key(mine.get(n)) != _decl_key(theirs.get(n)):
@@ -561,6 +570,57 @@ def _render_decl(name: str, spec: dict | None) -> str:
     return f"`{head} = {{{fields}}}`"
 
 
+def _unrecorded_hint(shown: list[str], running_types: dict | None,
+                     spelled: str | None = None) -> str | None:
+    """The hint for a refusal in which the running manifest declares NONE of
+    the declarations that differ (`shown`), else `None`.
+
+    Two histories end here, and the manifest cannot tell them apart. The
+    running sources declare the name and the document was written without it
+    (by hand, or by a `revl apply` that did not carry the declarations into
+    the document it wrote): compiling those sources again gives a manifest
+    that records it. Or the running sources never declared it (a name used as
+    a type without a declaration is accepted, and a program that declares no
+    record or variant has no `types` at all): compiling them again records
+    nothing more, and the way through is to leave the name undeclared or to
+    give the new type another name. The usual advice (keep the declaration
+    unchanged) fits neither, since the candidate may not have changed
+    anything, so the hint states both ways through.
+
+    `spelled` names what the candidate could respell with the new name (the
+    hand-off, the signature). Respelled it is another type, refused on its
+    own, so the second way through says to keep the running spelling. A kept
+    hand-off is not the candidate's to respell, and that path passes nothing."""
+    theirs = running_types or {}
+    if not shown or any(n in theirs for n in shown):
+        return None
+    which = ", ".join(f"`{n}`" for n in shown)
+    it, decl, other = (
+        ("it", "the declaration", "the new type under another name")
+        if len(shown) == 1 else
+        ("them", "the declarations", "the new types under other names"))
+    keep = f" and keep {spelled} spelled as it runs" if spelled else ""
+    return (f"the running manifest records no declaration for {which}, so "
+            f"this admission cannot tell what the running version meant by "
+            f"{it} and refuses. Where the running sources declare {it}, the "
+            f"manifest was written without {decl} (by hand, or by a `revl "
+            f"apply` that did not record {it}): compile the running sources "
+            f"again and admit against the manifest that gives. Where they do "
+            f"not, declaring {it} now is the change: leave {it} undeclared, "
+            f"or declare {other}{keep} (docs/state-handoff.md)")
+
+
+def _handoff_shown(accepted: str | None, exported: str | None,
+                   accepted_types: dict | None,
+                   exported_types: dict | None) -> list[str]:
+    """The declarations a hand-off refusal shows: among the names both
+    spellings mention and everything they reach, the ones that differ on
+    their own."""
+    mine, theirs = accepted_types or {}, exported_types or {}
+    return _own_differences(
+        _changed_names(accepted, exported, mine, theirs), mine, theirs)
+
+
 def _handoff_detail(accepted: str | None, exported: str | None,
                     accepted_types: dict | None,
                     exported_types: dict | None) -> tuple[str, str]:
@@ -569,8 +629,7 @@ def _handoff_detail(accepted: str | None, exported: str | None,
     difference, which is every case that spells a nominal the same way and
     declares it alike)."""
     mine, theirs = accepted_types or {}, exported_types or {}
-    shown = _own_differences(
-        _changed_names(accepted, exported, mine, theirs), mine, theirs)
+    shown = _handoff_shown(accepted, exported, mine, theirs)
     if not shown:
         return "", ""
     return tuple(  # type: ignore[return-value]
@@ -602,10 +661,13 @@ def _handoff_compatible(accepted: str | None, exported: str | None,
       renamed: equal spellings are equal, as before.
     * A name declared on only ONE side is a changed name and is refused, even
       if its spelling is unchanged. That includes a running document that
-      carries no `types` at all (a hand-built or older manifest) meeting a
-      candidate that declares the name: the predecessor's declaration cannot
-      be read, so sameness cannot be proved and the gate fails closed. The
-      remedy is to supply the running document with its `types`.
+      records no declaration for a name the candidate declares: what the name
+      meant there cannot be read, so sameness cannot be proved and the gate
+      fails closed. Either the running sources declare it and the document was
+      written without it (by hand, or by an older `revl apply`), and compiling
+      them again gives one that records it; or they never declared it, and the
+      candidate leaves it undeclared or gives the new type another name. The
+      refusal states both (`_unrecorded_hint`).
     * With no table on either side nothing is renamed and this is
       `compatible(accepted, exported)` unchanged.
     * A manifest projection with no `components` exports no hand-off, so this
@@ -673,7 +735,8 @@ def _service_type_drift(old: ServiceDecl, candidate_types: dict | None,
             mname, "signature",
             f"`{mname}` uses {used}, whose declaration differs ({both}); a "
             f"running consumer or provider was checked against the running "
-            f"declaration")
+            f"declaration",
+            hint=_unrecorded_hint(shown, theirs, "the signature"))
     return None
 
 
@@ -748,14 +811,22 @@ def _admit_handoff_replacement(program: Program, components: list[dict],
         line = next((c.line for c in program.components
                      if c.name == comp.get("name")), 0)
         detail = _handoff_detail(accepted, exported, types, running_types)
+        # the two types disagree as spelled, before any declaration is read:
+        # no advice about a declaration is a way through until they agree
+        apart = not _handoff_compatible(accepted, exported)
+        unrecorded = None if apart else _unrecorded_hint(
+            _handoff_shown(accepted, exported, types, running_types),
+            running_types, "the hand-off")
         raise _handoff_error(program, comp, key, accepted, exported, old, line,
-                             detail)
+                             detail, unrecorded, apart)
 
 
 def _handoff_error(program: Program, comp: dict, key: str,
                    accepted: str | None, exported: str | None,
                    old: dict, line: int = 0,
-                   detail: tuple[str, str] = ("", "")) -> RevlError:
+                   detail: tuple[str, str] = ("", ""),
+                   unrecorded: str | None = None,
+                   apart: bool = False) -> RevlError:
     accepted_at, exported_at = detail
     old_name = old.get("component") or "the running provider"
     new_name = comp.get("name") or "the replacement"
@@ -767,7 +838,11 @@ def _handoff_error(program: Program, comp: dict, key: str,
                f"`{old_name}` exports `{exported}`{exported_at} — the successor "
                f"cannot hold the predecessor's state, and dropping it on the "
                f"swap would be residue")
-    if accepted_at or exported_at:
+    if unrecorded:
+        # the running manifest cannot say what the name meant, so "keep the
+        # declaration unchanged" would not change the verdict either
+        hint = unrecorded
+    elif (accepted_at or exported_at) and not apart:
         # the spellings agree and the declaration behind a name moved, so
         # "widen the accepted type" would not change the verdict
         hint = ("a successor's `handoff` must hold everything the running "
@@ -781,6 +856,11 @@ def _handoff_error(program: Program, comp: dict, key: str,
                 "running provider's `handoff` exports (state compatibility, "
                 "the §5 relation pointed at state — docs/state-handoff.md); "
                 "widen the accepted type or migrate the shape explicitly")
+        if accepted_at or exported_at:
+            # the types disagree as spelled (`apart`), which is the first
+            # thing to settle; say that the declarations are a second one
+            hint += ("; the declarations shown differ as well, and that is "
+                     "refused on its own once the two types agree")
     steps = [
         TraceStep(f"{new_name}.{key}", "accept", program.filename, line,
                   f"accepts state `{accepted}`{accepted_at}"),
@@ -837,12 +917,13 @@ def _retained_handoff_error(program: Program, old: dict, changed: list[str],
                f"{accepted_at}; `{old_name}` holds state built against the "
                f"running declaration, and a composition has one declaration "
                f"per name")
-    hint = ("a record or variant that a running component's `handoff` names "
-            "must stay declared exactly as the running manifest declares it "
-            "while that component is kept: leave the declaration unchanged, "
-            "give the new type another name, or replace the component in the "
-            "same admission and migrate its state explicitly "
-            "(docs/state-handoff.md)")
+    hint = _unrecorded_hint(shown, running_types) or (
+        "a record or variant that a running component's `handoff` names "
+        "must stay declared exactly as the running manifest declares it "
+        "while that component is kept: leave the declaration unchanged, "
+        "give the new type another name, or replace the component in the "
+        "same admission and migrate its state explicitly "
+        "(docs/state-handoff.md)")
     name = shown[0] if shown else changed[0]
     decl = next((d for d in program.type_decls if d.name == name), None)
     steps = [
