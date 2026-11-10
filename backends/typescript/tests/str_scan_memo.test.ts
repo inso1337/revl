@@ -236,50 +236,61 @@ describe('#2313: a scan stays linear whatever else the loop body reads', () => {
     expect(codePointsMaterialised(() => { agree_three(a, b, c) })).toBe(expected)
   })
 
-  // Wall-clock check on the issue's reproducer shape, with ASCII text as in
-  // the issue. A 4x larger input should cost about 4x when linear and 16x when
-  // quadratic; the bound is 8x, the geometric midpoint, so either side has a
-  // factor of two of headroom. Each size is timed over enough repetitions to
-  // pass 20 ms, and the MINIMUM of five trials is used: load on a shared box
-  // only ever adds time, so the minimum is the least disturbed sample.
-  // These are not duplicates of the count cases above: an ASCII string
-  // materialises no array at all, so its count is 0 whether the scan is linear
-  // or not, and only the clock can see a quadratic BMP-only scan.
-  function growth(run: (n: number) => () => void, n: number): number {
-    const small = run(n)
-    const large = run(4 * n)
-    let reps = 0
-    const t0 = performance.now()
-    while (performance.now() - t0 < 20) { small(); reps++ }
-    const timed = (f: () => void) => {
-      const t = performance.now()
-      for (let r = 0; r < reps; r++) f()
-      return performance.now() - t
+  // Deterministic growth check on the issue's reproducer shape, with ASCII
+  // text as in the issue. An ASCII string materialises no array at all, so
+  // `codePointsMaterialised` above is 0 for it whether the scan is linear or
+  // not; what a scan that decodes per index does re-read is the string's
+  // UTF-16 units, once per helper call instead of once per scan. Counting the
+  // units read therefore measures the same property a wall clock did, with no
+  // clock: one scan of a 4x larger input reads 4x the units when the decode is
+  // memoised and 16x when it is not. These cases used to be timed, and the
+  // clock ratio kept flaking on loaded CI runners (8.3x against an 8x bound,
+  // #3096) because a shared box only ever adds time to either side of a ratio;
+  // a count has no such noise. These are not duplicates of the count cases
+  // above: those pin the decode to one per string, these bound the work of a
+  // whole scan whatever shape the loop takes.
+  function unitReads(run: () => void): number {
+    const realFrom = Array.from
+    const realCharCodeAt = String.prototype.charCodeAt
+    let seen = 0
+    Array.from = function (...args: Parameters<typeof Array.from>) {
+      const out = (realFrom as any).apply(Array, args)
+      seen += out.length
+      return out
+    } as typeof Array.from
+    String.prototype.charCodeAt = function (this: string, index: number) {
+      seen += 1
+      return realCharCodeAt.call(this, index)
+    } as typeof String.prototype.charCodeAt
+    try {
+      run()
+    } finally {
+      Array.from = realFrom
+      String.prototype.charCodeAt = realCharCodeAt
     }
-    let bestSmall = Infinity
-    let bestLarge = Infinity
-    for (let trial = 0; trial < 5; trial++) {
-      bestSmall = Math.min(bestSmall, timed(small))
-      bestLarge = Math.min(bestLarge, timed(large))
-    }
-    return bestLarge / bestSmall
+    return seen
   }
 
-  it('count_marks costs well under 16x for a 4x larger input', () => {
-    const ratio = growth((n) => {
+  function readGrowth(run: (n: number) => () => void, n: number): number {
+    return unitReads(run(4 * n)) / unitReads(run(n))
+  }
+
+  it('count_marks reads a linear number of string units for a 4x larger input', () => {
+    const ratio = readGrowth((n) => {
       const text = '<p>hello</p> '.repeat(Math.ceil(n / 13)).slice(0, n)
       return () => { count_marks(text) }
     }, 2048)
-    expect(ratio, `4x input cost ${ratio.toFixed(1)}x`).toBeLessThan(8)
-  }, 120_000)
+    // linear is 4x, a decode per index is 16x, so the midpoint has no noise
+    expect(ratio, `4x input read ${ratio.toFixed(2)}x the units`).toBeLessThan(8)
+  })
 
-  it('a round-robin scan of three long strings costs well under 16x for a 4x larger input', () => {
-    const ratio = growth((n) => {
+  it('a round-robin scan of three long strings reads a linear number of string units for a 4x larger input', () => {
+    const ratio = readGrowth((n) => {
       const a = ascii(n, `tA${n}`), b = ascii(n, `tB${n}`), c = ascii(n, `tC${n}`)
       return () => { agree_three(a, b, c) }
     }, 2048)
-    expect(ratio, `4x input cost ${ratio.toFixed(1)}x`).toBeLessThan(8)
-  }, 120_000)
+    expect(ratio, `4x input read ${ratio.toFixed(2)}x the units`).toBeLessThan(8)
+  })
 
   it('answers in code points on astral strings and lone surrogates, cached or not', () => {
     const seeds = [

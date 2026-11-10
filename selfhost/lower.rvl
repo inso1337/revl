@@ -25147,6 +25147,35 @@ fn taint_top_qualifier(ty: Str) -> Str {
   return ""
 }
 
+// Whether a `want` qualifier head sits anywhere the value itself reaches: the
+// outermost head or a container argument, never a function type's arguments.
+// The reference's `taint._holds_qualifier`.
+fn taint_holds_qualifier(ty: Str, want: Str) -> Bool {
+  if (ty == "" || !taint_has_qualifier(ty)) { return false }
+  if (taint_top_qualifier(ty) == want) { return true }
+  let p = ty_parse(ty)
+  if (p.head == "->" || p.head == "Fn") { return false }
+  var i = 0
+  while (i < p.args.length()) {
+    if (taint_holds_qualifier(p.args[i], want)) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The primary qualifier a declared return mints a source from (`Untrusted`,
+// then `Secret`), read inside a container too (issue #3192), else "": the
+// reference's `taint.source_qualifier`. An outermost `Trusted` or `Retained`
+// head decides on its own and mints nothing here.
+fn taint_source_qualifier(ty: Str) -> Str {
+  let top = taint_top_qualifier(ty)
+  if (top == "Untrusted" || top == "Secret") { return top }
+  if (top != "" || ty == "" || ty_parse(ty).head == "Retained") { return "" }
+  if (taint_holds_qualifier(ty, "Untrusted")) { return "Untrusted" }
+  if (taint_holds_qualifier(ty, "Secret")) { return "Secret" }
+  return ""
+}
+
 // A service operation's `params` list: `ir_params_json` plus the issue #1937
 // stamps `"trusted": true` / `"untrusted": true`, read off the DECLARED types
 // `raw` (before alias substitution, as the reference's `extract_and_normalize`
@@ -25346,8 +25375,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    let rq = taint_top_qualifier(tr.ty)
-    if (rq == "Untrusted" || rq == "Secret") { retQual = rq }
+    retQual = taint_source_qualifier(tr.ty)
     rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"

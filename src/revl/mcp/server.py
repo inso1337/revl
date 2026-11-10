@@ -2632,15 +2632,14 @@ _DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 
 def _export_next() -> dict:
-    """The call a disk note's prose names (issue #2537): `revl_export`, through
-    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb:
-    the server serves it by name, but some clients will not emit a direct call
-    to an unlisted name, and the hatch is the one form that reaches it for
-    every client (issue #2581). Ready: a disk note exists only for a
-    composition loaded from files, whose export takes no arguments."""
-    return _remedy.call(_disclosure.DISCOVERY,
-                        {_disclosure.HATCH_NAME: "revl_export",
-                         _disclosure.HATCH_ARGS: {}})
+    """The call a disk note's prose names (issues #2537, #2625): `revl_export`,
+    a listed verb since #2625, so the note hands over the direct call. It went
+    through the `revl_verbs` hatch (#2073, #2581) while the verb was outside the
+    tier, because some clients will not emit a call to a name they were not
+    shown; listing the verb removed the indirection for every client. Ready: a
+    disk note exists only for a composition loaded from files, whose export
+    takes no arguments."""
+    return _remedy.call("revl_export", {})
 
 
 def _export_next_if_owed() -> dict | None:
@@ -3598,7 +3597,8 @@ def _tool_approve(arguments: dict) -> dict:
                               "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
         return {"ok": True, **SESSION.approve_ticket(
-            ticket_hash, vote=vote or "approve", as_token=as_token,
+            ticket_hash, vote=vote or "approve",
+            proposer=arguments.get("proposer"), as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
         return _session_error(error)
@@ -6762,6 +6762,15 @@ TOOLS = [
                           "description": "item 344: how long (ms) the standing "
                                          "grant stays live; checked at the "
                                          "crossing against the session clock"},
+                "proposer": {"type": "string",
+                             "description": "issue #3216: the operator whose "
+                                            "call this yes lets through, one "
+                                            "of the ticket's `proposers`. A "
+                                            "yes is spent only by the operator "
+                                            "it names. Required only when more "
+                                            "than one operator raised the same "
+                                            "call; otherwise it defaults to "
+                                            "the one that did"},
                 "vote": {"type": "string", "enum": ["approve", "deny"],
                          "description": "item 471: a ticket whose rule demands a "
                                         "QUORUM takes votes, not a yes/no, so it "
@@ -7919,7 +7928,7 @@ def handle(message: dict) -> dict | None:
         # lookup but a CALL of the verb it names, resolved here to that verb's
         # own name so the pipeline below cannot tell the difference. The
         # tiered list therefore stays exactly `CORE`: every verb is one listed
-        # tool away without a fifteenth listed verb.
+        # tool away, and the hatch itself adds no listed verb.
         payload = _unknown_arguments(name, arguments)
         if payload is not None:
             pass

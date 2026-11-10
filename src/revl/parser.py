@@ -1078,12 +1078,12 @@ class RemoteRowDecl:
     `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
     source text"), applied to a callee that is in no manifest at all.
 
-    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
-    CONTEXTUAL keywords,
-    recognised only in this one position inside a `composition` block. The
-    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
-    no program using any of those words as an ordinary name is broken. `in` and
-    `realm` are already keywords and are reused verbatim from `isolate`.
+    `remote`, `at`, `host`, `through`, `on_failure`, `redirect`, `pinned` and
+    `long_running` are CONTEXTUAL keywords, recognised only in this one position
+    inside a `composition` block. The lexer's KEYWORDS set is untouched, so the
+    self-host lexer needs no sync and no program using any of those words as an
+    ordinary name is broken. `in` and `realm` are already keywords and are
+    reused verbatim from `isolate`.
     """
     label: str
     key: str                       # the provision key the row claims
@@ -1118,6 +1118,16 @@ class RemoteRowDecl:
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
+    # Issue #2719: `pinned "<sha256-hex>"` — the FULL SHA-256 hex of the peer's
+    # TLS leaf SubjectPublicKeyInfo, the key the wire already presents. The pin
+    # adds no signature to the canonical envelope and no revocation source: a
+    # peer presenting any other key is a transport fault naming both
+    # fingerprints. `None` == the clause was not written, so a row with no pin
+    # behaves exactly as it did before this clause existed. `pinned` is a
+    # CONTEXTUAL keyword read only here, so the lexer's KEYWORDS set is
+    # untouched (docs/composition-rows.md).
+    pin: str | None = None
+    pin_line: int = 0
 
 
 @dataclass
@@ -5973,8 +5983,9 @@ class Parser:
         return out
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
-        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
-        [redirect(refuse|same_origin)] [long_running]`
+        at host("h:port") [pinned "<sha256-hex>"] [through <ident>]
+        [on_failure(withdraw|result)] [redirect(refuse|same_origin)]
+        [long_running]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
@@ -6035,6 +6046,8 @@ class Parser:
         redirect_line = line
         long_running = False
         long_running_line = line
+        pin: str | None = None
+        pin_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -6070,6 +6083,22 @@ class Parser:
                 host = self.next().value
                 host_line = tok.line
                 self.expect(")")
+            elif self.at("ident", "pinned"):
+                pline = self.next().line
+                if pin is not None:
+                    raise self.err(pline, f"duplicate `pinned` clause on "
+                                          f"remote row `@{label}`")
+                tok = self.peek()
+                if tok.kind != "string":
+                    raise self.err(
+                        tok.line,
+                        "a pinned identity is a static string literal",
+                        hint='write `pinned "<64 hex characters>"` — the FULL '
+                             "SHA-256 hex of the peer's TLS leaf "
+                             "SubjectPublicKeyInfo, the key the wire presents "
+                             "(issue #2719)")
+                pin = self.next().value
+                pin_line = tok.line
             elif self.at("ident", "through"):
                 tline = self.next().line
                 if transport is not None:
@@ -6138,7 +6167,7 @@ class Parser:
                              redirect=redirect, redirect_line=redirect_line,
                              long_running=long_running,
                              long_running_line=long_running_line,
-                             host_line=host_line)
+                             host_line=host_line, pin=pin, pin_line=pin_line)
 
     def host_row_decl(self, composition: str) -> HostRowDecl:
         """`host @label provides <key>: <Service> [in realm("r")]`

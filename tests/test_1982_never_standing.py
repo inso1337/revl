@@ -101,11 +101,12 @@ def _session(policy: str = NEVER, profile: str = UNBOUNDED_OPS) -> Session:
 
 
 def _ticket(session, caps, component="Agent"):
-    """An outstanding class-(c) ticket, the shape `_issue_ticket` stores."""
+    """An outstanding class-(c) ticket, raised through `_issue_ticket` so it
+    records who asked (issue #3216), as every gate's ticket does."""
     body = {"hash": "h1", "component": component, "candidateHash": "h0",
             "capabilities": list(caps), "classCCapabilities": list(caps),
             "realm": "", "taintOrigins": []}
-    session._tickets["h1"] = body
+    session._issue_ticket(body)
     return "h1"
 
 
@@ -268,10 +269,10 @@ def test_a_per_call_approval_for_the_same_capability_still_succeeds():
     out = session.approve_ticket(ticket_hash)
     assert out == {"approved": True, "hash": "h1", "component": "Agent",
                    "key": None, "method": None, "kind": None,
-                   "candidateHash": "h0"}
+                   "candidateHash": "h0", "proposers": ["ops"]}
     # a single-use entry, not a grant: the standing shape is what is forbidden
     assert session._grants == []
-    assert session._ledger_entry_for_ticket(ticket_hash) is not None
+    assert session._ledger_entry_for_ticket(ticket_hash, "ops") is not None
 
 
 def test_an_unmarked_capability_can_still_be_granted_standing():

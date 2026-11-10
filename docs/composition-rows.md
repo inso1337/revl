@@ -297,8 +297,10 @@ does not have.
 callee, and there is no "verified remote" badge to be had: item 337 requires the
 RECEIVER to re-compile from its own independently held source, and a client is
 the sender. What is bounded is local and only local — the reach, the capability
-and the failure mode. If both sides are revl and both want a mutual guarantee,
-that is `revl contract export` / `revl contract check`, or 337's seam.
+and the failure mode. A `pinned` clause narrows the address to one TLS key; it is
+still not an admission of what the peer runs. If both sides are revl and both
+want a mutual guarantee, that is `revl contract export` / `revl contract check`,
+or 337's seam.
 
 The generated source carries all of this in its header, so the statement travels
 with the artifact rather than living only here.
@@ -372,6 +374,62 @@ declining to be the declared endpoint at all.
 The same policy, and the per-tier defaults behind it, are in
 `src/revl/crossing_redirect.py`; `revl import a2a` carries it too, under
 `--follow-redirects`.
+
+### `pinned`
+
+| clause | meaning |
+|---|---|
+| `pinned "<sha256-hex>"` | the FULL SHA-256 hex of the peer's TLS leaf SubjectPublicKeyInfo. The crossing refuses a peer presenting any other key. |
+
+A remote row names an address, and an address does not by itself say who is
+expected to answer there. `pinned` binds the row to the key the TLS wire already
+presents:
+
+```revl
+composition Shop {
+  use "services.rvl"
+
+  remote @billing provides billing: Billing
+    at host("billing.internal:8443")
+    pinned "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+}
+```
+
+The ordinary chain and hostname check runs first, unchanged; only after it
+succeeds does the synthesized body hash the leaf certificate's
+SubjectPublicKeyInfo (SPKI) and compare it with the pin. The pin is an ADDITIONAL
+constraint on a verified connection, never a replacement for the CA or the name.
+
+The value is the full digest: 64 hex characters (upper case is accepted and
+normalised). A short digest is refused at admission rather than padded, and the
+admitted value is recorded in the row's admission facts as `remote.pin`, so
+`revl audit` and the manifest show what the crossing enforces.
+
+On a mismatch the transport raises a fault naming BOTH fingerprints, expected and
+presented, and the row's `on_failure` settles it: the default
+`on_failure(withdraw)` makes it a `TransportFault` that withdraws the provider;
+`on_failure(result)` returns the same diagnostic in band as `Err`. A rotated or
+revoked key is exactly such a mismatch, so it follows the row's failure mode
+rather than a second channel. No signature is added to the canonical envelope and
+the envelope is unchanged:
+
+```text
+remote: TLS leaf public key does not match the pinned identity: expected
+sha256:<expected>, presented sha256:<presented>
+```
+
+Compute the pin from the peer's certificate:
+
+```sh
+openssl x509 -in peer.crt -pubkey -noout \
+  | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256
+```
+
+Directory-backed revocation (a live identity directory consulted while a session
+runs) is deferred to a design note. So is any reading of the pin as an admission
+of what the peer runs: D-424c.8 is unchanged, and the pin says only which TLS key
+answers at this address.
 
 ### Two peers of one service are two realms
 
@@ -506,8 +564,8 @@ in the artifact itself.
 
 ### The one thing `remote` costs the lexer: nothing
 
-`remote`, `at`, `host`, `through`, `on_failure` and `redirect` are CONTEXTUAL
-keywords,
+`remote`, `at`, `host`, `pinned`, `through`, `on_failure` and `redirect` are
+CONTEXTUAL keywords,
 recognised only in this one position inside a `composition` block. The lexer's
 `KEYWORDS` set is untouched, so the self-host lexer needs no sync and a program
 using any of those words as a provision key, a require alias or a config field
@@ -681,6 +739,7 @@ A `remote` row carries the admission facts the wiring deliberately does not:
     "serviceSource": "services.rvl",
     "capability": "net.billing_internal",
     "onFailure": "withdraw",
+    "pin": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
     "redirect": "refuse",
     "inverse": null
   }
@@ -778,7 +837,11 @@ component does not declare is a refusal there, not a silent no-op.
 
 A `configure` that moves a `reach`-bounded field to a value whose host is
 outside the bound is a refusal at resolution ("widen the bound in your site
-layer, or refuse the layer"). One recorded deviation from §8.3's sketch: the
+layer, or refuse the layer"). The host is read with a URL parser
+(`urllib.parse.urlsplit`), so an `@` or `:` in a path, query or fragment does
+not count as the authority. A value whose host cannot be read (a backslash,
+whitespace, an empty host, a port that does not parse, a non-string value) is
+refused on a bounded field too: it fails closed rather than passing unchecked. One recorded deviation from §8.3's sketch: the
 `reach` clause is keyed by CONFIG FIELD, not by extern name. Resolution is
 header-only and cannot trace a value from a field to the extern it feeds
 without lowering the body; the operator-facing bound is naturally written on the

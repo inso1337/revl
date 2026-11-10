@@ -246,7 +246,7 @@
 
 ["function", "the-named-call-an-inverse-or-a-compensation-writes-into-its", "_inert", 2, 2]
 
-["function", "the-named-call-an-inverse-or-a-compensation-writes-into-its", "_named_call_kwarg", 3, 3]
+["function", "the-named-call-an-inverse-or-a-compensation-writes-into-its", "named_call_target", 2, 2]
 
 ["reason", "unknown-generic-annotation-fallback-py-type-erases-arguments", "Unknown generic annotation fallback: _py_type erases arguments of non-List/Map/Opt/Result generic names to Any. Both sources retain this compatibility path; frontend-supported builtins/function types and nominal annotations are exercised by types/branches, rather than inventing an undeclared generic type."]
 

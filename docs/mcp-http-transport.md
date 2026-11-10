@@ -142,9 +142,12 @@ Everything that already reads the session's operator therefore sees the caller:
   commit confirm and abort of a leased component are refused (the #1450
   fences), and only the holder can release it;
 - **approval tickets** (item 246): the proposer is the operator that made the
-  call, and `revl_approve` is authorized against the approver's own grants. Give
-  `approve` only to the human's operator and the agent cannot answer its own
-  tickets. At start, the server warns about any operator that may both `call`
+  call, and the ticket lists the waiting ones as `proposers`. A yes is minted
+  for one proposer and spent only by that operator: another operator's
+  byte-identical call gets its own ticket, and when two operators raised the
+  same call `revl_approve` needs `proposer` to say which (issue #3216).
+  `revl_approve` is authorized against the approver's own grants. Give `approve` only to the
+  human's operator and the agent cannot answer its own tickets. At start, the server warns about any operator that may both `call`
   and `approve`;
 - **quorum votes** (item 471): each vote is the caller's own. A cast whose
   `asToken` names another operator is refused before dispatch, even with that
