@@ -4,7 +4,7 @@ title: "Testing Recovery Claims: Exhaustive Fault Sweeps and Inverse Round-Trips
 theme: effects-replay
 kind: empirical
 maturity: partial
-status: "Fault sweep, cross-tier sweep and round-trip tests are shipped with tests. A seeded-defect saga corpus (bench/saga_defects, issue #2736) reports the sweep's corpus-wide result: 3 of 16 seeded defects are caught only by the sweep and 5 are missed; no mutation analysis or baseline comparison yet."
+status: "Fault sweep, cross-tier sweep and round-trip tests are shipped with tests. A seeded-defect saga corpus (bench/saga_defects, issue #2736) reports the sweep's corpus-wide result: 4 of 16 seeded rows are caught only by the sweep, 4 are missed, and 8 are refused at compile (7 by a checker rule, 1 by a parse error; two rows are one defect kind at two call sites); no mutation analysis or baseline comparison yet."
 fused_with: P17
 ---
 
@@ -70,7 +70,7 @@ Tree: revl main at commit 45bec431f.
 - Example sweep output: "swept 5 step(s) across 2 component(s): 5 passed, 0 failed, 0 unreachable" is a documentation illustration (`docs/fault-tests.md:346-365`), not a measurement.
 - Cross-tier tests assert 4 fault points agreeing on py and go (`tests/test_fault_sweep_cross_tier.py:441-456`).
 - Test function counts (not re-run): fault_tests 58, cross-tier 31, verified_effect 23, idempotent_309 25.
-- No measured bug-detection rate, no mutation score, no runtime cost. The seeded-defect saga corpus (`bench/saga_defects`, issue #2736) reports the sweep's corpus-wide result: 16 rows, 3 caught only by the sweep, 5 missed by both; the rows are the authors' own and the Temporal comparison is not run.
+- No measured bug-detection rate, no mutation score, no runtime cost. The seeded-defect saga corpus (`bench/saga_defects`, issue #2736) reports the sweep's corpus-wide result: 16 rows (`missing-undo-hold` and `missing-undo-auth` are one defect kind at two call sites), 8 refused at compile (7 by a checker rule, 1 by a parse error), 4 caught only by the sweep, 4 missed by both; the rows are the authors' own and the Temporal comparison is not run.
 
 ## Paper outline
 1. Introduction: from "an inverse exists" to "the inverse works".

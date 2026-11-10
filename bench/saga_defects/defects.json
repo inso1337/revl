@@ -23,7 +23,7 @@
       "kind": "missing-undo",
       "saga": "checkout",
       "file": "sagas/missing_undo_hold.rvl",
-      "description": "The inventory hold carries no undo, so a failed checkout would leave the reservation standing.",
+      "description": "The inventory hold carries no undo, so a failed checkout would leave the reservation standing. Same defect kind as `missing-undo-auth` (an `effect` with no `undo`), seeded at the other call site of the same saga: the two rows are one defect kind at two call sites, not two defects.",
       "expected": "compile",
       "expectedCode": "G4"
     },
@@ -33,7 +33,7 @@
       "kind": "missing-undo",
       "saga": "checkout",
       "file": "sagas/missing_undo_auth.rvl",
-      "description": "The payment authorization carries no undo, so a failed checkout would keep the charge.",
+      "description": "The payment authorization carries no undo, so a failed checkout would keep the charge. Same defect kind as `missing-undo-hold` (an `effect` with no `undo`), seeded at the other call site of the same saga: the two rows are one defect kind at two call sites, not two defects.",
       "expected": "compile",
       "expectedCode": "G4"
     },
@@ -83,9 +83,10 @@
       "kind": "emission-with-undo",
       "saga": "checkout",
       "file": "sagas/emission_with_undo.rvl",
-      "description": "The call site gives an irreversible settlement an `undo` instead of a `compensate`; the parser refuses the `undo` keyword there, so this is a parse refusal, not a G6 reversibility check.",
+      "description": "The call site gives an irreversible settlement an `undo` instead of a `compensate`; the parser refuses the `undo` keyword there, so this is a parse refusal, not a G6 reversibility check. Its message is the parser's generic `expected a statement` error, which any typo would also earn, so it is counted as a parse refusal apart from the checker refusals.",
       "expected": "compile",
-      "expectedCode": "G6"
+      "expectedCode": "G6",
+      "refusal": "parse"
     },
     {
       "id": "dependency-cycle",
@@ -153,8 +154,8 @@
       "kind": "partial-inverse",
       "saga": "checkout",
       "file": "sagas/partial_refund.rvl",
-      "description": "The charge is undone by a refund of half the amount: the inverse is present and well-shaped but reverts only part of the effect.",
-      "expected": "missed",
+      "description": "The charge is undone by a refund of half the amount: the inverse is present and well-shaped but reverts only part of the effect. The ledger provider keeps the charged amount in a `Map` and a refund subtracts from it, so half a refund leaves the other half behind; the sweep's host-residue check sees that residue (with a full refund the same saga passes every sweep unit).",
+      "expected": "fault-test",
       "component": "Checkout"
     },
     {

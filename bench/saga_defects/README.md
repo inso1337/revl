@@ -31,12 +31,37 @@ results file says so rather than guessing their column.
 
 | verdict | meaning |
 |---|---|
-| `compile` | the checker refused the saga, so the defect cannot reach a run |
+| `compile` | the compiler refused the saga, so the defect cannot reach a run |
 | `fault-test` | the saga compiled and the fault sweep failed at a seeded fault |
-| `missed` | the saga compiled and every sweep unit passed |
+| `missed` | the saga compiled, the sweep ran at least one step, and every sweep unit passed |
+
+A `compile` verdict is reported as one of two refusals, and the totals count
+them apart:
+
+- a **checker refusal**: a named rule refused the saga (G3, G4, G5 and so on).
+  Some rules run in the parser (the G4 missing-undo refusal does); they are
+  still checker refusals, because the message names the rule.
+- a **parse refusal**: the parser's generic syntax error (`expected ...,
+  found ...`), the shape `revl.diagnostics.classify` maps to `SYNTAX`. It
+  names no rule and any typo would earn it, so it is not evidence that a
+  reversibility check fired. `emission-with-undo` is the one such row; it
+  records `"refusal": "parse"`, and the runner fails if the measured kind
+  disagrees with the row.
 
 `missed` is a result, not a failure of the runner. The corpus exists to record
-what the checker and the sweep do not catch as much as what they do.
+what the checker and the sweep do not catch as much as what they do. A sweep
+that ran zero steps, a crash of the sweep driver, and a row that does not
+finish within `--timeout` are runner errors (exit 1), never `missed` or
+`fault-test`.
+
+### Rows that are one defect kind
+
+Two rows can carry the same defect kind at different sites. `missing-undo-hold`
+and `missing-undo-auth` are one defect kind (an `effect` with no `undo`) at the
+two call sites of the same checkout saga. They are kept as two rows, so the
+checker-refusal count is a count of rows, not of distinct defects; the results
+file reports the distinct defect kinds next to each count and names the rows
+that share one.
 
 ## Run it
 
@@ -46,7 +71,8 @@ runtime at the pin in `backends/python/setup.sh`:
 ```sh
 sh backends/python/setup.sh          # or a virtual environment with the pinned cordis-py
 python3 bench/saga_defects/run.py     # measure and print
-python3 bench/saga_defects/run.py --write   # measure and refresh the table
+python3 bench/saga_defects/run.py --write   # measure, and refresh the table if no row drifted
+python3 bench/saga_defects/run.py --timeout 60   # stop any row that runs longer (default 300 s)
 python3 bench/saga_defects/run.py --list    # rows only, no measurement
 python3 bench/saga_defects/run.py --only wrong-release-sku
 ```
@@ -55,9 +81,10 @@ Without cordis-py the command exits 2 and says why. It never reports the
 runtime rows as a pass it did not measure.
 
 The command exits 1 when a row has no verdict, when a measured verdict
-disagrees with `expected`, or when `expectedCode` disagrees with the refusal
-code. That is deliberate: the expected catch point is the corpus's ground
-truth, so a checker improvement that starts catching a `missed` row fails the
+disagrees with `expected`, when `expectedCode` disagrees with the refusal
+code, or when `refusal` disagrees with the measured refusal kind. With
+`--write`, a drifting run leaves the results file as it was. That is
+deliberate: the expected catch point is the corpus's ground truth, so a checker improvement that starts catching a `missed` row fails the
 command until the row is updated. Do not update it without re-reading the
 saga and stating in the row what now catches it.
 
@@ -81,9 +108,13 @@ saga and stating in the row what now catches it.
   most sagas the inventory and payment stores are `Map`-backed, so a wrong
   undo that leaves a key behind is residue the sweep can read.
   `wrong-refund-order` uses an opaque host-body provider and the same kind of
-  wrong target is missed. A caught row is therefore optimistic for an
-  external service; the pair of rows is there to show the boundary rather
-  than hide it.
+  wrong target is missed. `partial-refund` is caught only because its ledger
+  keeps the charged amount in the `Map` and a refund subtracts from it, so
+  half a refund leaves the other half behind; with a full refund the same
+  saga passes every sweep unit. A provider that only records that an order
+  was charged could not express a partial refund at all. A caught row is
+  therefore optimistic for an external service; the pairs of rows are there
+  to show the boundary rather than hide it.
 - **G3 here is component dependency acyclicity**, not a check on the order of
   steps inside a saga. The `dependency-cycle` row is a composition-level
   defect. A wrong LIFO order cannot be written in revl source: teardown order

@@ -7,40 +7,45 @@ revl 2.0.0; cordis-py @ 1c5e6f17abf5; macOS-26.2-arm64-arm-64bit.
 
 Each saga is a small composition with one known saga defect, seeded
 from the row's description before the saga was written. `compile`
-means the checker refused the saga; `fault-test`
-means the saga compiled and the fault sweep failed at a seeded fault;
-`missed` means it compiled and every sweep unit passed. The verdict is
-the catch point for the defect, not a statement that the saga is
-otherwise correct.
+means the compiler refused the saga, either by a checker rule or by a
+parse error; a parse error is the parser's generic syntax refusal,
+which names no rule and which any typo would also earn, so it is
+counted apart. `fault-test` means the saga compiled and the fault sweep
+failed at a seeded fault; `missed` means it compiled and every sweep
+unit passed. The verdict is the catch point for the defect, not a
+statement that the saga is otherwise correct.
 
 Failure model: One failure is injected after a top-level step of the saga component completes, in program order (the `revl test --sweep` model; docs/fault-tests.md section 9). The sequential, single-fault model does not cover concurrency, clock or random coeffects.
 
 | defect | group | kind | expected | verdict | evidence |
 |---|---|---|---|---|---|
-| `missing-undo-hold` | project | missing-undo | compile | **compile** | G4: effect has no `undo` and `inventory.reserve` is not pure |
-| `missing-undo-auth` | project | missing-undo | compile | **compile** | G4: effect has no `undo` and `payments.charge` is not pure |
-| `unmarked-settle` | project | unmarked-emission | compile | **compile** | G4: call to emission `payments.settle` must be marked `emit` (G4) |
-| `emit-plain-method` | project | emit-plain-method | compile | **compile** | G4: `emit` on `inventory.reserve`, which is not declared `emission` |
-| `undo-not-release` | project | undo-not-release | compile | **compile** | G4: the `undo` of `let spill = effect Map.new(...)` must release THAT handle: write `undo spill.drop()` |
-| `manual-teardown` | project | manual-teardown | compile | **compile** | G5: the `undo` of this bracket calls `notify`, a fn that reaches an emission `send` (through notify -> send) — a bracket inverse runs in teardown and may not cross a boundary (G5) |
-| `emission-with-undo` | project | emission-with-undo | compile | **compile** | G6: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `provide`), found 'undo' |
-| `dependency-cycle` | project | dependency-cycle | compile | **compile** | G3: dependency cycle: OrderBook -> InvoiceBook -> OrderBook (G3) |
+| `missing-undo-hold` | project | missing-undo | compile | **compile** | checker refusal, G4: effect has no `undo` and `inventory.reserve` is not pure |
+| `missing-undo-auth` | project | missing-undo | compile | **compile** | checker refusal, G4: effect has no `undo` and `payments.charge` is not pure |
+| `unmarked-settle` | project | unmarked-emission | compile | **compile** | checker refusal, G4: call to emission `payments.settle` must be marked `emit` (G4) |
+| `emit-plain-method` | project | emit-plain-method | compile | **compile** | checker refusal, G4: `emit` on `inventory.reserve`, which is not declared `emission` |
+| `undo-not-release` | project | undo-not-release | compile | **compile** | checker refusal, G4: the `undo` of `let spill = effect Map.new(...)` must release THAT handle: write `undo spill.drop()` |
+| `manual-teardown` | project | manual-teardown | compile | **compile** | checker refusal, G5: the `undo` of this bracket calls `notify`, a fn that reaches an emission `send` (through notify -> send) — a bracket inverse runs in teardown and may not cross a boundary (G5) |
+| `emission-with-undo` | project | emission-with-undo | compile | **compile** | parse refusal, G6: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `provide`), found 'undo' |
+| `dependency-cycle` | project | dependency-cycle | compile | **compile** | checker refusal, G3: dependency cycle: OrderBook -> InvoiceBook -> OrderBook (G3) |
 | `failing-inverse` | project | failing-inverse | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `fail_refund` of `Checkout` raised (RuntimeError: refund service down) |
 | `failing-compensation` | project | failing-compensation | fault-test | **fault-test** | residue recorded by the teardown: compensation-residue — the inverse `erase_receipt` of `Checkout` raised (RuntimeError: receipt store down) |
 | `missing-compensate` | project | missing-compensate | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `wrong-refund-order` | project | wrong-inverse-target | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
-| `wrong-release-sku` | project | wrong-inverse-target | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#18 key 'sku-1' held absent before the first bracketed `insert` of it and 1 when it unloaded: an undo did not reverse its write) |
-| `partial-refund` | project | partial-inverse | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
+| `wrong-release-sku` | project | wrong-inverse-target | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#1 key 'sku-1' held absent before the first bracketed `insert` of it and 1 when it unloaded: an undo did not reverse its write) |
+| `partial-refund` | project | partial-inverse | fault-test | **fault-test** | residue recorded by the teardown: bracket-fault — the inverse `insert` of `Checkout` raised (NotReversed: map#4 key 'order-1' held absent before the first bracketed `insert` of it and 2100 when it unloaded: an undo did not reverse its write) |
 | `noop-compensation` | project | noop-compensation | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 | `double-release` | project | double-release | missed | **missed** | compiled; every sweep unit for Checkout passed (3 step(s)) |
 
-**16 rows: 8 refused at compile, 3 caught by a fault test, 5 missed by both (11/16 caught).**
+**16 rows: 8 refused at compile (7 by a checker rule, 1 by a parse error), 4 caught by a fault test, 4 missed by both (12/16 caught).**
 
-| catch point | rows |
-|---|---|
-| refused at compile time | 8 |
-| caught only by a fault test | 3 |
-| missed by both | 5 |
+| catch point | rows | defect kinds |
+|---|---|---|
+| refused at compile by a checker rule | 7 | 6 |
+| refused at compile by a parse error | 1 | 1 |
+| caught only by a fault test | 4 | 4 |
+| missed by both | 4 | 4 |
+
+`missing-undo-hold` and `missing-undo-auth` are one defect kind (`missing-undo`) seeded at 2 call sites of the `checkout` saga, so the 7 checker refusals cover 6 defect kinds.
 
 ## What the numbers are not
 
@@ -59,8 +64,10 @@ Failure model: One failure is injected after a top-level step of the saga compon
 - Provider state is visible to the sweep only where the provider is a
   revl `Map`. `wrong-release-sku` is caught because its provider keeps the
   sku in a Map; `wrong-refund-order` is the same kind of wrong target
-  behind an opaque host body and is missed. A caught row is therefore
-  optimistic for an external service.
+  behind an opaque host body and is missed. `partial-refund` is caught
+  because its ledger keeps the charged amount in a Map, so half a refund
+  leaves the other half behind. A caught row is therefore optimistic for
+  an external service.
 
 ## Reproduce
 

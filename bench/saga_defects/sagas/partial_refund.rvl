@@ -1,7 +1,10 @@
 // partial_refund - the inverse refunds part of the charge
 //
 // Seeded defect: the charge for 4200 cents is undone by a refund of 2100 cents; the inverse is present and well-shaped but reverts only half the effect.
-// Expected catch: missed
+// The ledger keeps the charged amount and a refund subtracts from it, so half a
+// refund leaves 2100 behind, which the fault sweep's host-residue check reads.
+// With a refund of 4200 the same saga passes every sweep unit.
+// Expected catch: fault-test
 // Corpus index: bench/saga_defects/defects.json (issue #2736)
 
 service Inventory {
@@ -28,7 +31,16 @@ component Ledger provides payments: Payments {
   let rows = effect Map.new() undo rows.drop()
   provide payments {
     fn charge(order, cents) = rows.insert(order, cents)
-    fn refund(order, cents) = rows.remove(order)
+    fn refund(order, cents) {
+      let held = match rows.get(order) {
+        Some(amount) => amount,
+        None => 0,
+      }
+      if (held == cents) {
+        return rows.remove(order)
+      }
+      return rows.insert(order, held - cents)
+    }
     fn settle(order, cents) = rows.insert(order, cents)
     fn reverse(order, cents) = rows.remove(order)
   }
