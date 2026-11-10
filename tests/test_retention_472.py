@@ -106,6 +106,28 @@ def test_expired_retained_value_is_refused_at_a_persistence_sink_by_name():
     assert "may not be written to durable storage" in err.message
 
 
+@pytest.mark.parametrize("cap", ["db(calls=3)", "fs(calls=1)", "kv(size=10)"])
+def test_a_resource_ceiling_does_not_hide_a_bare_persistence_sink_head(cap):
+    """A resource ceiling is a budget on the crossing, not a different scope
+    (#3194). `db(calls=3)` still declares a `db` sink, so the past-deadline
+    value is refused exactly as it is for the unceilinged spelling."""
+    err = _refuses(PAST + FLOW.format(cap=cap))
+    assert err.code == "G-RETAIN"
+    assert "`sink`" in err.message, err.message
+    assert f"`{cap.split('(', 1)[0]}` crossing" in err.message
+    assert "may not be written to durable storage" in err.message
+
+
+def test_every_persistence_scope_reads_its_head_through_a_ceiling():
+    """The unit half of #3194, on the whole set: the ceiling is stripped before
+    the head split, so every scope in the set is still recognised bare and
+    through a dotted verb, and a non-sink stays a non-sink with a ceiling too."""
+    for scope in sorted(R.PERSISTENCE_SINK_SCOPES):
+        assert R.persistence_sink_of([f"{scope}(calls=1)"]) == scope
+        assert R.persistence_sink_of([f"{scope}.insert(calls=1)"]) == scope
+    assert R.persistence_sink_of(["log(calls=1)"]) is None
+
+
 def test_the_refusal_names_the_policy_and_the_deadline_it_missed():
     err = _refuses(PAST + FLOW.format(cap="db.insert"))
     assert "customer_pii" in err.message
@@ -116,6 +138,16 @@ def test_a_declared_persistence_sink_parameter_is_refused_on_the_declaration():
     """The declaration half: a crossing that DECLARES it persists a retained
     value is refused off the declaration alone, with no call site needed."""
     err = _refuses(PAST + DECLARED_SINK.format(t="Retained[Str, customer_pii]"))
+    assert err.code == "G-RETAIN"
+    assert "`db_put` declares a persistence sink (`db`)" in err.message
+
+
+def test_a_ceiling_on_the_declared_sink_scope_does_not_hide_the_refusal():
+    """The declaration half reads the same `persistence_sink_of`, so a ceiling
+    on a bare sink head must not turn the declaration check off either."""
+    src = DECLARED_SINK.replace("emission[db.insert]", "emission[db(calls=3)]")
+    assert "emission[db(calls=3)]" in src, "the ceiling substitution did not land"
+    err = _refuses(PAST + src.format(t="Retained[Str, customer_pii]"))
     assert err.code == "G-RETAIN"
     assert "`db_put` declares a persistence sink (`db`)" in err.message
 
