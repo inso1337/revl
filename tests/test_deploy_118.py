@@ -1770,6 +1770,55 @@ def test_a_stranded_participant_rolls_back_on_an_explicit_abort_record(tmp_path)
     assert verdict["federationDecision"] == deploy.FEDERATION_ABORTED
 
 
+def _settle_complete(tmp_path, write_record):
+    """A participant whose own activation completed (`activation-complete`) is
+    stranded, and the conductor's record is whatever `write_record` leaves."""
+    wal = str(tmp_path / "p.wal")
+    decision = str(tmp_path / "decision.jsonl")
+    _stranded_wal(wal, complete=True)
+    write_record(decision)
+    return deploy.settle_stranded(wal, decision)
+
+
+def test_a_completed_participant_rolls_back_on_an_abort_record(tmp_path):
+    """Its own `activation-complete` says the participant finished its slice,
+    not that the federation committed: the abort record decides (#2725)."""
+    verdict = _settle_complete(tmp_path, lambda path: deploy.write_abort_decision(
+        path, federation_id="fed", generation=1, reason="peer failed",
+        failed="edge"))
+    assert verdict["verdict"] == "rolled-back"
+    assert verdict["federationDecision"] == deploy.FEDERATION_ABORTED
+
+
+def test_a_completed_participant_rolls_back_on_a_pending_record(tmp_path):
+    verdict = _settle_complete(tmp_path, lambda path: deploy.write_decision_started(
+        path, federation_id="fed", generation=1))
+    assert verdict["verdict"] == "rolled-back"
+    assert verdict["federationDecision"] == "none"
+
+
+def test_a_completed_participant_rolls_back_when_the_record_is_absent(tmp_path):
+    verdict = _settle_complete(tmp_path, lambda path: None)
+    assert verdict["verdict"] == "rolled-back"
+    assert verdict["federationDecision"] == "none"
+
+
+def test_a_completed_participant_rolls_forward_on_an_approval(tmp_path):
+    verdict = _settle_complete(tmp_path, lambda path: deploy.write_commit_approval(
+        path, federation_id="fed", generation=1, participants=["billing"]))
+    assert verdict["verdict"] == "rolled-forward"
+    assert verdict["federationDecision"] == deploy.FEDERATION_APPROVED
+
+
+def test_plain_recover_still_rolls_a_completed_wal_forward(tmp_path):
+    """No decision record handed in: the WAL's own marker decides, as before."""
+    from revl.recovery import recover
+
+    wal = str(tmp_path / "p.wal")
+    _stranded_wal(wal, complete=True)
+    assert recover(wal)["verdict"] == "rolled-forward"
+
+
 def test_an_unreadable_decision_record_fails_closed(tmp_path):
     """No guess. Guessing between roll-forward and roll-back IS the split-brain
     the durable record exists to prevent."""

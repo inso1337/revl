@@ -3663,8 +3663,11 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
       * the record is ABSENT (an explicit abort decision, a
         `federation-decision-pending` record from a newer run, or no file):
         the federation did not commit. `recovery.recover` reads the WAL
-        unchanged and rolls back LIFO, reporting residue exactly as it does
-        today.
+        unchanged and rolls back LIFO (`committed=False`), reporting residue
+        exactly as it does today. That holds even when the WAL carries
+        `activation-complete`: the marker says this participant finished its
+        own slice, not that the federation committed, so it cannot outvote the
+        record.
       * the record is UNREADABLE: there is no definite answer. Fails CLOSED with
         `unresolved` and settles nothing — a guess here is the split-brain.
     """
@@ -3693,7 +3696,7 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
         settled = recover(wal_path, world=world)
         settled["federationDecision"] = FEDERATION_APPROVED
         return settled
-    settled = recover(wal_path, world=world)
+    settled = recover(wal_path, world=world, committed=False)
     settled["federationDecision"] = decision or "none"
     return settled
 

@@ -298,7 +298,8 @@ def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
             reissue: Optional[str] = None,
             forward_admissions: bool = False,
-            callers: Optional[dict] = None) -> dict:
+            callers: Optional[dict] = None,
+            committed: Optional[bool] = None) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -323,6 +324,13 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     ``backends/python/replay.py`` so recover reads a WAL produced by any tier's
     runtime — the py in-process driver or a non-py (go/rust/java/wasm)
     subprocess — with no backend on the path.
+
+    ``committed=False`` (issue #2725) is a caller holding a durable answer that
+    the multi-participant step this WAL belongs to did NOT commit (an abort or
+    pending federation decision, or none at all): the WAL is rolled back LIFO
+    even when it carries ``activation-complete``, because that marker settles
+    this participant's own activation, not the step. ``None``, the default,
+    leaves the WAL's own markers to decide, so a plain recover is unchanged.
 
     ``callers`` (issue #1889) is placement recover's map of every OTHER process
     of the run to the effect seqs its WAL holds, ``{process: {seq, ...}}``. A
@@ -358,7 +366,9 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         return _with_world(_fork_retired(wal, frozen), world, tally)
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
-    if wal["complete"]:
+    if committed is False:
+        report = _roll_back(wal, world=bound(), wal_path=wal_path)
+    elif wal["complete"]:
         report = _roll_forward(wal, session=session, snapshot=snapshot)
     elif approved is not None:
         # item 245, Decision 3, the approved-to-discharged window: a crash after

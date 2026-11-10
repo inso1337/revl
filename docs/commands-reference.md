@@ -2523,11 +2523,8 @@ The run has the deploy protocol's shape:
    message, and `federation-commit-approved` only after every participant
    committed and every declared probe passed. A conductor killed before that
    leaves the pending record or the abort decision last, so `revl recover
-   --decision` never reads an approval for the run. Recovery still rolls
-   forward a participant whose own WAL reached `activation-complete`, whatever
-   the record says: a conductor killed during the probes leaves the committed
-   participants on the new generation. The record decides only a participant
-   stranded mid-commit.
+   --decision` never reads an approval for the run and rolls every stranded
+   participant back, including one whose own commit finished.
 4. **Health probes** declared per composition, run after the commit. A probe is
    an argv list run in the plan's directory in a process group of its own;
    exit 0 is healthy, and a composition that declares none is reported as not

@@ -728,9 +728,7 @@ def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
 
     A conductor killed at any point before step 5 leaves the pending record or
     the abort decision last, so `deploy.settle_stranded` never reads an
-    approval for this run. (Recovery's own rule still rolls forward a
-    participant whose WAL reached `activation-complete`, whatever the record
-    says; the record decides a participant stranded mid-commit.)
+    approval for this run and settles every stranded participant back.
 
     `state_dir` is the exact directory for THIS generation's participant state
     (the CLI derives `<wal-dir>/federation/<federation>/<generation>`).

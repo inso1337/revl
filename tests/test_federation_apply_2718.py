@@ -521,19 +521,6 @@ F.apply_federation_plan(F.load_federation_plan(plan), state_dir=state)
 """
 
 
-#: The settle verdict for a participant whose own commit completed. Today
-#: `recovery.recover` rolls forward any WAL that reached `activation-complete`,
-#: whatever the federation decision record says, so a stranded slice of an
-#: update that was never approved stays live. Whether `settle_stranded` should
-#: read the record first is an open design question (the WAL carries no
-#: federation identity to tie it to its record); these tests turn green, and
-#: fail as XPASS, the day it does.
-settle_reads_the_record = pytest.mark.xfail(
-    strict=True,
-    reason=("settle_stranded rolls forward a WAL that reached "
-            "activation-complete whatever the decision record says"))
-
-
 def _kill_after_first_commit(tmp_path: Path) -> Path:
     plan = _probe_plan(tmp_path, 1, beta_code=0)
     state = tmp_path / "state" / "1"
@@ -575,7 +562,6 @@ def test_a_conductor_killed_after_the_first_commit_leaves_no_approval(
 
 
 @posix_only
-@settle_reads_the_record
 def test_a_conductor_killed_after_the_first_commit_settles_back(tmp_path):
     state = _kill_after_first_commit(tmp_path)
     settled = deploy.settle_stranded(str(state / "alpha.wal"),
@@ -759,7 +745,6 @@ def test_an_interrupted_abort_still_unwinds_the_other_participants(
     assert settled["federationDecision"] == deploy.FEDERATION_ABORTED, settled
 
 
-@settle_reads_the_record
 def test_a_participant_stranded_under_the_abort_decision_settles_back(
         tmp_path, monkeypatch):
     state = _interrupt_beta_abort(tmp_path, monkeypatch)
@@ -995,3 +980,48 @@ def test_a_probe_that_exits_0_leaving_a_child_is_healthy(tmp_path):
         assert lingering and not _wait_gone(lingering, 5.0)
     finally:
         _kill_all(lingering)
+
+
+PARENT_KILLING_PROBE = """
+import os, signal
+# The conductor is SIGKILLed while it waits for this probe: no approval was
+# written, and no participant was told to unwind.
+os.kill(os.getppid(), signal.SIGKILL)
+"""
+
+
+@posix_only
+def test_a_conductor_killed_during_the_probes_settles_every_participant_back(
+        tmp_path):
+    from revl.recovery import DictWorld
+
+    plan = _one_probe_plan(tmp_path, "probe_kill", PARENT_KILLING_PROBE)
+    state = tmp_path / "state" / "1"
+    script = _write(tmp_path / "group_conductor.py", GROUP_INTERRUPT_CONDUCTOR)
+    pidfile = tmp_path / "participants.pid"
+    pids: list[int] = []
+    try:
+        done = subprocess.run(
+            [sys.executable, str(script), str(ROOT / "src"), str(plan),
+             str(state), str(pidfile)],
+            capture_output=True, text=True, timeout=120, check=False)
+        if pidfile.exists():
+            pids = [int(line) for line in
+                    pidfile.read_text(encoding="utf-8").split()]
+        assert done.returncode == -signal.SIGKILL, done.stderr
+        assert len(pids) == 2
+        assert not _wait_gone(pids), "a participant outlived its conductor"
+    finally:
+        _kill_all(pids)
+
+    assert _decision_kinds(state) == [deploy.FEDERATION_PENDING]
+    for identity in ("alpha", "beta"):
+        # both committed: their own WALs reached activation-complete
+        assert _world(state, identity) == {f"{identity}:{identity.title()}": True}
+        world = DictWorld()
+        settled = deploy.settle_stranded(str(state / f"{identity}.wal"),
+                                         str(state / "decision.jsonl"),
+                                         world=world)
+        assert settled["verdict"] == "rolled-back", settled
+        assert settled["residue"]["clean"] is True, settled
+        assert world.remaining() == []

@@ -355,3 +355,31 @@ def test_a_stranded_peer_settles_against_the_conductor_abort_decision(
     assert settled["verdict"] == "rolled-back"
     assert settled["federationDecision"] == deploy.FEDERATION_ABORTED
     assert rc in (0, 3)
+
+
+def test_a_committed_participant_settles_back_under_an_abort_decision(tmp_path):
+    """A real participant runs its whole commit, so its WAL carries
+    `activation-complete`; the conductor then decides ABORT and dies before
+    sending it. The record decides: roll back, every referent removed."""
+    from revl import _deploy_participant as dp
+    from revl.recovery import DictWorld
+
+    wal = tmp_path / "db.wal"
+    participant = dp._Participant({
+        "identity": "db",
+        "world": str(tmp_path / "db.world.json"),
+        "wal": str(wal),
+        "effects": [{"name": "row1", "reversible": True},
+                    {"name": "row2", "reversible": True}],
+    })
+    assert participant.commit()["ok"] is True
+    assert '"activation-complete"' in wal.read_text(encoding="utf-8")
+    decision = tmp_path / "decision.jsonl"
+    deploy.write_abort_decision(str(decision), federation_id="app",
+                               generation=0, reason="edge failed",
+                               failed="edge")
+    world = DictWorld()
+    settled = deploy.settle_stranded(str(wal), str(decision), world=world)
+    assert settled["verdict"] == "rolled-back", settled
+    assert settled["residue"]["clean"] is True, settled
+    assert world.remaining() == []
