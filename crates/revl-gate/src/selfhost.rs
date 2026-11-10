@@ -19537,6 +19537,10 @@ fn cfg_tparams(ts: &[Token], i: i64) -> Vec<String> {
     return out;
 }
 
+fn cfg_field_next(start: i64, cursor: i64) -> i64 {
+    return if (cursor > start) { cursor } else { (start).checked_add(1i64).expect("revl: Int overflow") };
+}
+
 fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgField> {
     let mut k = lo;
     let mut out: Vec<CfgField> = vec![];
@@ -19545,7 +19549,7 @@ fn cfg_rec_fields(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgField> {
             let nm = tkc(&ts, k).text;
             let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
             out.push(CfgField { name: nm.clone(), ty: taint_strip(tr.ty.clone()), line: tkc(&ts, k).line });
-            k = tr.i;
+            k = cfg_field_next(k, tr.i);
             if atk(&ts, k, ",") {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
             }
@@ -19567,7 +19571,7 @@ fn cfg_var_cases(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgCaseD> {
             if atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "(") {
                 let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
                 payload = taint_strip(tr.ty.clone());
-                nk = tr.i;
+                nk = cfg_field_next(k, tr.i);
                 if atk(&ts, nk, ")") {
                     nk = (nk).checked_add(1i64).expect("revl: Int overflow");
                 }
@@ -19888,12 +19892,37 @@ fn cfg_fields_in(ts: Vec<Token>, lo: i64, hi: i64) -> Vec<CfgFld> {
             let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
             let dfl = ir_config_default(ts.clone(), tr.i);
             out.push(CfgFld { fname: nm.clone(), fty: taint_strip(tr.ty.clone()), line: tkc(&ts, k.clone()).line });
-            k = dfl.i;
+            k = cfg_field_next(k.clone(), dfl.i);
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
     return out;
+}
+
+fn cfg_config_type_verd(ts: Vec<Token>, lo: i64, hi: i64) -> Verd {
+    let mut j = lo;
+    while ((j < hi) && (!(atw(&ts, j, "config") && atk(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "{")))) {
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (j >= hi) {
+        return no_verd();
+    }
+    let ce = close_brace(&ts, (j).checked_add(1i64).expect("revl: Int overflow"));
+    let cend = if (ce == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { hi } else { (ce).checked_sub(1i64).expect("revl: Int overflow") };
+    let mut k = (j).checked_add(2i64).expect("revl: Int overflow");
+    while (k < cend) {
+        if (atk(&ts, k.clone(), "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) {
+            let t = sg_type(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
+            if (t.i == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return mk_verd(tagged("BAD", &t.why), t.line);
+            }
+            k = if (t.i > k) { t.i } else { (k).checked_add(1i64).expect("revl: Int overflow") };
+        } else {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return no_verd();
 }
 
 fn cfg_comp_owner(ts: Vec<Token>, i: i64) -> CfgOwner {
@@ -28782,8 +28811,64 @@ fn sg_scan(ts: Vec<Token>) -> Verd {
     return no_verd();
 }
 
+fn config_type_parse_scan(ts: Vec<Token>) -> Verd {
+    let mut j = 0i64;
+    let mut depth = 0i64;
+    let mut best = no_verd();
+    while ((j < ts.revl_length()) && (!atk(&ts, j, "eof"))) {
+        let k = tkc(&ts, j).kind;
+        if (k == "{") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if (k == "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                if (depth > 0i64) {
+                    j = (j).checked_add(1i64).expect("revl: Int overflow");
+                } else {
+                    if at_boot(&ts, j) {
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    } else {
+                        if atw(&ts, j, "component") {
+                            let mut b = j;
+                            while (((b < ts.revl_length()) && (!atk(&ts, b, "{"))) && (!atk(&ts, b, "eof"))) {
+                                b = (b).checked_add(1i64).expect("revl: Int overflow");
+                            }
+                            if atk(&ts, b, "{") {
+                                let e = close_brace(&ts, b);
+                                let stop = if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { ts.revl_length() } else { e };
+                                let v = cfg_config_type_verd(ts.clone(), (b).checked_add(1i64).expect("revl: Int overflow"), (stop).checked_sub(1i64).expect("revl: Int overflow"));
+                                if (v.v != "") {
+                                    best = first_parse_verd(best.clone(), v.clone());
+                                }
+                                j = stop.clone();
+                            } else {
+                                j = (j).checked_add(1i64).expect("revl: Int overflow");
+                            }
+                        } else {
+                            if atw(&ts, j, "extern") {
+                                let se = p_extern(ts.clone(), j, empty_prog());
+                                let v = cfg_config_type_verd(ts.clone(), j, se.i);
+                                if (v.v != "") {
+                                    best = first_parse_verd(best.clone(), v.clone());
+                                }
+                                j = if (se.i > j) { se.i } else { (j).checked_add(1i64).expect("revl: Int overflow") };
+                            } else {
+                                j = (j).checked_add(1i64).expect("revl: Int overflow");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
 fn stmt_parse_scan(ts: Vec<Token>) -> Verd {
-    let tv = pt_types_scan(ts.clone());
+    let tv = first_parse_verd(config_type_parse_scan(ts.clone()), pt_types_scan(ts.clone()));
     if (tv.v != "") {
         return tv;
     }
@@ -32067,7 +32152,7 @@ fn comp_config_fields(ts: Vec<Token>, i: i64) -> CfgFields {
             if (dfl.js == "null") {
                 req.push(nm.clone());
             }
-            k = if (dfl.i == tr.i) { tr.i } else { dfl.i };
+            k = cfg_field_next(k.clone(), dfl.i);
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -32094,7 +32179,7 @@ fn comp_config_struct(ts: Vec<Token>, lo: i64, hi: i64, al: std::collections::Ha
             let dfl = ir_config_default(ts.clone(), tr.i);
             let e = (nm.revl_concat(": ")).revl_concat(&taint_strip(alias_subst(tr.ty.clone(), al.clone())));
             out = if (out == "") { e.clone() } else { (out.revl_concat(", ")).revl_concat(&e) };
-            k = if (dfl.i == tr.i) { tr.i } else { dfl.i };
+            k = cfg_field_next(k.clone(), dfl.i);
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -34433,7 +34518,7 @@ fn ir_config(ts: Vec<Token>, lo: i64, hi: i64, al: std::collections::HashMap<Str
             }
             entry.push_str("}");
             out = if (out == "") { entry.clone() } else { (out.revl_concat(", ")).revl_concat(&entry) };
-            k = dfl.i;
+            k = cfg_field_next(k.clone(), dfl.i);
         } else {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
