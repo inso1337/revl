@@ -1069,9 +1069,13 @@ def _snapshot_targets(snap: dict | None) \
 
     Unprofiled by the same rule as :func:`_compile_candidate`: it derives names
     and realms, lowers no host body and boots nothing, and the handler's own
-    compile under the authoring profile still runs. ``None`` when the document
-    has no sources or does not compile — an *undecidable* target set, which
-    :func:`decide` fails closed on."""
+    compile under the authoring profile still runs. That profile may only
+    REFUSE a compile, never reshape the composition a successful one produces,
+    so it cannot change the target set here; the unprofiled derivation accepts
+    everything the profiled one does. ``None`` when the document names no
+    sources or does not compile — an *undecidable* target set, which
+    :func:`decide` fails closed on. An empty composition compiles to no targets
+    and is scoped to the whole composition too (:func:`_live_targets`)."""
     if not isinstance(snap, dict):
         return [("*", frozenset({WHOLE}))]
     from .persist import recompile_snapshot  # noqa: PLC0415 — lazy, no cycle

@@ -144,6 +144,52 @@ def test_the_gate_reads_realms_from_the_compiled_composition():
     assert "TenantBCache" in outside.message
 
 
+def test_the_gate_scopes_the_components_the_handler_compiles():
+    """The gate derives targets from the snapshot's sources through the same
+    `recompile_snapshot` the handler loads. The handler compiles under the
+    session's authoring profile; a profile may refuse that compile but must
+    not reshape a successful one, so a document both accept scopes to the same
+    component set."""
+    from revl.mcp import persist
+
+    alice = parse_profile("operator alice may restore on Store").get("alice")
+    snap = _snapshot(PURE, claimed="tenant_a_shell",
+                     meta_components=["Store"])
+    decision = decide(_FakeSession(alice), "revl_restore", {"snapshot": snap})
+    handler_ir = persist.recompile_snapshot(
+        snap, profile=server.AUTHORING.profile())
+    handler_names = tuple(sorted(
+        entry.get("name")
+        for entry in (handler_ir.get("manifest") or {}).get("components") or []))
+    assert decision.allowed is True
+    assert decision.subjects == handler_names == ("Store",)
+
+
+def test_a_snapshot_that_does_not_compile_fails_closed():
+    """An undecidable target set scopes to the whole composition: a
+    subject-scoped operator is refused, and the error stays the handler's to
+    report to whoever holds the whole-composition grant."""
+    snap = _snapshot("service Broken {", claimed="tenant_a_shell",
+                     meta_components=[])
+    alice = parse_profile(PROFILE).get("alice")
+    root = parse_profile("operator root may restore on *").get("root")
+    refused = decide(_FakeSession(alice), "revl_restore", {"snapshot": snap})
+    allowed = decide(_FakeSession(root), "revl_restore", {"snapshot": snap})
+    assert refused.gated is True and refused.allowed is False
+    assert "the whole composition" in refused.message
+    assert allowed.allowed is True
+
+
+def test_a_snapshot_with_no_sources_fails_closed():
+    """A document that names no sources has nothing to compile, so its target
+    set is undecidable rather than empty."""
+    snap = {"sources": {}, "manifest": {"components": []}, "meta": {}}
+    alice = parse_profile(PROFILE).get("alice")
+    decision = decide(_FakeSession(alice), "revl_restore", {"snapshot": snap})
+    assert decision.gated is True and decision.allowed is False
+    assert "the whole composition" in decision.message
+
+
 # ------------------------------------------------------ through the server
 
 
