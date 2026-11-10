@@ -1123,6 +1123,23 @@ def violation_census(roster: "Roster") -> dict[str, dict[str, int]]:
     return tally
 
 
+def _terminal_safe(text: str) -> str:
+    """``text`` with every non-printable character written as its Python
+    escape (``\\x1b``, ``\\n``, ``\\u2028``) and backslashes doubled, so a
+    stored field cannot move the cursor, recolour the operator's terminal or
+    forge a second status line. For the rendered view only: the stored record
+    keeps the bytes it was given."""
+    out = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch.isprintable():
+            out.append(ch)
+        else:
+            out.append(ch.encode("unicode_escape").decode("ascii"))
+    return "".join(out)
+
+
 def _violation_note(roster: "Roster", peer_id: str) -> str:
     recorded = violations_of(roster, peer_id)
     return f" violations={len(recorded)}" if recorded else ""
@@ -1997,11 +2014,13 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
     if recorded:
         lines.append(f"  violations {len(recorded)}")
         for event in recorded:
-            detail = str(event.get("detail", ""))
+            # Every field is escaped: ``detail`` carries part of the peer's own
+            # signed ``artifact_digest``, which nothing checks is hex.
+            detail = _terminal_safe(str(event.get("detail", "")))
             lines.append(
-                f"    {event.get('peer_id', '')}  "
-                f"{event.get('violation', '')}  "
-                f"at {event.get('at', '')}"
+                f"    {_terminal_safe(str(event.get('peer_id', '')))}  "
+                f"{_terminal_safe(str(event.get('violation', '')))}  "
+                f"at {_terminal_safe(str(event.get('at', '')))}"
                 + (f"  {detail}" if detail else ""))
     if roster.revoked:
         lines.append(f"  withdrawn {', '.join(sorted(roster.revoked))}")

@@ -1574,14 +1574,25 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
     return outcome
 
 
-#: Refusal links that are a member breaking its terms, rather than a malformed
-#: record handed in by somebody else. A receipt for another artifact and an
-#: attestation that rejects a result are the two events `peer_pool`'s closed
-#: violation list names and this settlement path can observe; offer drift and
-#: unanswered probes are observed outside a delivery and get their records from
-#: their own detection sites.
 def _violation_for_receipt_refusal(receipt_link: str,
                                    attestation_verdict: str) -> str:
+    """The violation kind a refused receipt names, or "" when it names none.
+
+    Only refusal links that are a member breaking its terms map to a kind,
+    rather than a malformed record handed in by somebody else. Offer drift and
+    unanswered probes are observed outside a delivery and get their records
+    from their own detection sites.
+
+    Of the two delivery events mapped here, only ``receipt-artifact-mismatch``
+    has a detection site today. ``attestation-rejected`` has none yet:
+    :func:`verify_delivery` makes the attestation itself with
+    ``pool_receipt.attest_receipt`` and its default verdict ``admitted``, so
+    the verdict that reaches this mapping is always ``admitted`` and the
+    second branch cannot fire from a settlement. The detection site would be
+    that ``attest_receipt`` call in :func:`verify_delivery`, once the operator's
+    attesting step can decide a verdict other than ``admitted`` and passes it
+    as ``verdict=``. The branch is kept so that event maps to the closed list
+    the moment it exists."""
     if receipt_link == pool_receipt.LINK_RECEIPT_ARTIFACT:
         return peer_pool.VIOLATION_RECEIPT_ARTIFACT
     if (receipt_link == pool_receipt.LINK_ATTESTATION_AUTHORITY

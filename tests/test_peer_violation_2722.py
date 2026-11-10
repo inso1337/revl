@@ -360,3 +360,26 @@ def test_a_record_survives_the_withdrawal_that_removes_the_member(tmp_path):
     # broke a term.
     rendered = pp.render_status(record, reread)
     assert f"{WORKER}  {pp.VIOLATION_RECEIPT_ARTIFACT}" in rendered
+
+
+def test_pool_status_escapes_control_characters_in_a_detail(tmp_path):
+    """A detail holds part of the peer's signed artifact digest, which nothing
+    checks is hex. The rendered line escapes it; the stored record does not."""
+    pool_dir, record, roster = pool_on_disk(tmp_path)
+    hostile = "\x1b[2J\x1b[31mred\nviolations 0"
+    pp.record_violation(roster, WORKER, pp.VIOLATION_RECEIPT_ARTIFACT,
+                        detail=hostile)
+    pp.save_roster(pool_dir, roster)
+
+    _charter, reread = pp.load_pool(pool_dir)
+    rendered = pp.render_status(record, reread)
+    assert "\x1b" not in rendered
+    assert "\\x1b[2J\\x1b[31mred\\nviolations 0" in rendered
+    # The newline did not forge a second line.
+    assert not any(line.startswith("violations 0")
+                   for line in rendered.splitlines())
+
+    # The JSON file and the --json view keep the bytes as recorded.
+    events = status_json(pool_dir)["roster"]["events"]
+    assert [event["detail"] for event in events
+            if event.get("kind") == pp.VIOLATION_KIND] == [hostile]
