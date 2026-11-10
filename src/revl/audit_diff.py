@@ -599,7 +599,27 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     can carry, and invisible to every crossing/reach/interface differ. An entry
     whose idempotency `register` WEAKENS (a lower `_REGISTER_RANK`, or lost
     entirely) is a weakened recovery. A newly-appearing entry is a GAINED recovery
-    (safe). Buckets are sorted, so the diff is deterministic over the unhashable
+    (safe).
+
+    A name that still has a recovery of SOME kind on the new side is not
+    dropped when only its kind moved (`compensation` to `inverse`, or back;
+    issue #3182). The effect can still be put back or offset, and which way
+    the move goes is the inverse-provenance question `diff_inverses` answers:
+    a weaker kind is its `inverse:<name>` token, a stronger one passes. Read
+    here as a drop, one kind change gated twice and a strengthening failed.
+    A lost kind is suppressed only when `diff_inverses` actually emits an
+    `inverse:<name>` token for that name (the class moved) and the name still
+    has an entry on the new side. Otherwise it stays dropped: a recovery that
+    disappears entirely (even when its class moved, for example
+    `compensation` to `irreversible`), an extern with both kinds
+    that loses one while its class stays put, and a kind change on an extern
+    that lacks `inverse` on either side (a baseline captured before that field
+    existed, which `diff_inverses` skips). Across a move the extern's
+    `register` is still compared: a new-kind entry whose register is weaker
+    than the one the lost kind carried is a weakened recovery, so a move that
+    strengthens the class but loses its idempotency floor does not pass as a
+    plain strengthening; that entry is reported weakened, not gained.
+    Buckets are sorted, so the diff is deterministic over the unhashable
     `list[dict]` surface without ever hashing a dict.
     """
     from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
@@ -610,10 +630,24 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     dropped: list[str] = []
     weakened: list[str] = []
     added: list[str] = []
+    inverses = diff_inverses(prev, new)
+    # a move needs both: the class moved, and the name still has an entry.
+    moved = {token.split(":", 1)[1]
+             for bucket in ("inverse_weakened", "inverse_strengthened")
+             for token in inverses[bucket]} & {name for name, _kind in new_r}
+    lost_rank: dict[str, int] = {}
     for name, kind in prev_r.keys() - new_r.keys():
-        dropped.append(f"recovery:{name}:{kind}")
+        if name in moved:
+            rank = _REGISTER_RANK.get(prev_r[(name, kind)], -1)
+            lost_rank[name] = max(rank, lost_rank.get(name, -1))
+        else:
+            dropped.append(f"recovery:{name}:{kind}")
     for name, kind in new_r.keys() - prev_r.keys():
-        added.append(f"recovery:{name}:{kind}")
+        if (name in lost_rank and
+                _REGISTER_RANK.get(new_r[(name, kind)], -1) < lost_rank[name]):
+            weakened.append(f"recovery:{name}:{kind}")
+        else:
+            added.append(f"recovery:{name}:{kind}")
     for key in prev_r.keys() & new_r.keys():
         before = _REGISTER_RANK.get(prev_r[key], -1)
         after = _REGISTER_RANK.get(new_r[key], -1)
@@ -709,43 +743,102 @@ def diff_cardinality(prev: dict, new: dict) -> dict:
             "cardinality_tightened": sorted(tightened)}
 
 
+# issue #3182: the buckets the drift gate fails on, in report order. Each pair
+# is (the `widening_from_audits` key, the differ bucket it reads). This is the
+# one gated set: `evaluate` (`revl audit --diff`) and the MCP update path's
+# acknowledgement decision both read it, so a widening one of them catches
+# cannot pass the other. The safe-direction buckets (removed, tightened,
+# strengthened, gained) are reported but never gate.
+GATED_BUCKETS: tuple[tuple[str, str], ...] = (
+    ("added", "added"),
+    ("reachWeakened", "reach_weakened"),
+    ("inverseWeakened", "inverse_weakened"),
+    ("scopesWidened", "scope_widened"),
+    ("backendsAdded", "backends_added"),
+    ("recoveryDropped", "recovery_dropped"),
+    ("recoveryWeakened", "recovery_weakened"),
+    ("registersWeakened", "registers_weakened"),
+    ("cardinalityWidened", "cardinality_widened"),
+)
+
+
+def drift(prev: dict, new: dict) -> dict:
+    """Every differ's buckets between two audits, merged into one dict.
+
+    The eight differs: the crossing set and its reach, inverse provenance,
+    per-emission capability scopes, host backends, recovery inverses,
+    capability registers and emission cardinality. Their bucket names are
+    disjoint, so the merge loses nothing.
+    """
+    return {
+        **diff_crossings(prev, new),
+        **diff_inverses(prev, new),
+        **diff_capability_scopes(prev, new),
+        **diff_backends(prev, new),
+        **diff_recovery(prev, new),
+        **diff_registers(prev, new),
+        **diff_cardinality(prev, new),
+    }
+
+
+def widening_from_audits(before: dict, after: dict,
+                         buckets: dict | None = None) -> dict:
+    """Every authority axis that widened between two audits.
+
+    A release can widen any axis while adding no crossing (a new backend host
+    body, a scope widened on a stable crossing, a dropped recovery inverse, a
+    weakened register floor, a raised emission ceiling), so every gated bucket
+    feeds the decision. `buckets` is a `drift` result already computed for the
+    same pair.
+    """
+    found = buckets if buckets is not None else drift(before, after)
+    out = {key: list(found[bucket]) for key, bucket in GATED_BUCKETS}
+    return {"widened": any(out.values()), **out}
+
+
 def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
              accept_all: bool = False) -> dict:
-    """The gate decision. `unacknowledged` are the additions and the weakened
-    authority facts (a loosened reach, a weaker inverse class) that fail.
+    """The gate decision. `unacknowledged` are the gated tokens (every
+    `GATED_BUCKETS` bucket: an added crossing or a weakened or widened
+    authority fact) that no `--accept` covers.
 
     exit-code contract: 0 iff `unacknowledged` is empty (a clean or fully
     acknowledged diff); nonzero otherwise.
     """
     accepted = accepted or set()
-    delta = diff_crossings(prev, new)
-    # issue #2692: a WEAKER inverse provenance is the same dangerous direction
-    # as a reach weakening: the crossing still exists, but the exact inverse
-    # that could put it back is gone. Its `inverse:<name>` token is
+    # issue #3182: the gate reads the same buckets the MCP update path does.
+    # Before, it read only added crossings, reach weakenings (item 373) and
+    # inverse weakenings (#2692), so a new backend host body or a scope widened
+    # on a stable crossing printed clean and exited 0. Every gated token is
     # acknowledged through the same `--accept`/`--accept-all` path.
-    inverses = diff_inverses(prev, new)
-    # item 373: a reach WEAKENING fails the gate the same way a new crossing
-    # does — it is the authority axis loosening without a new token appearing.
-    # Its `reach-weakened:<name>` token is acknowledged through the same
-    # `--accept`/`--accept-all` path as an added crossing.
-    gated = delta["added"] + delta["reach_weakened"] + inverses["inverse_weakened"]
+    buckets = drift(prev, new)
+    widening = widening_from_audits(prev, new, buckets)
+    gated = [token for key, _bucket in GATED_BUCKETS for token in widening[key]]
     if accept_all:
         unacknowledged: list[str] = []
     else:
         unacknowledged = [c for c in gated if c not in accepted]
     return {
-        "added": delta["added"],
-        "removed": delta["removed"],
-        "unchanged": delta["unchanged"],
-        "reach_weakened": delta["reach_weakened"],
-        "reach_tightened": delta["reach_tightened"],
-        "inverse_weakened": inverses["inverse_weakened"],
-        "inverse_strengthened": inverses["inverse_strengthened"],
+        **{bucket: buckets[bucket] for bucket in _REPORTED_BUCKETS},
         "acknowledged": sorted(c for c in gated
                                if accept_all or c in accepted),
         "unacknowledged": unacknowledged,
         "widened": bool(unacknowledged),
     }
+
+
+# The buckets `evaluate` returns, gated and safe-direction alike, in the order
+# `render` prints them.
+_REPORTED_BUCKETS: tuple[str, ...] = (
+    "added", "removed", "unchanged",
+    "reach_weakened", "reach_tightened",
+    "inverse_weakened", "inverse_strengthened",
+    "scope_widened", "scope_tightened",
+    "backends_added", "backends_removed",
+    "recovery_dropped", "recovery_weakened", "recovery_added",
+    "registers_weakened", "registers_strengthened",
+    "cardinality_widened", "cardinality_tightened",
+)
 
 
 def render(result: dict, prev_label: str) -> str:
@@ -756,8 +849,8 @@ def render(result: dict, prev_label: str) -> str:
     tightened = result.get("reach_tightened") or []
     inverse_weakened = result.get("inverse_weakened") or []
     inverse_strengthened = result.get("inverse_strengthened") or []
-    if not added and not result["removed"] and not weakened and not tightened \
-            and not inverse_weakened and not inverse_strengthened:
+    if not any(result.get(bucket) for bucket in _REPORTED_BUCKETS
+               if bucket != "unchanged"):
         return (f"authority-drift: clean — the G8 boundary surface is "
                 f"unchanged from {prev_label}.")
 
@@ -833,6 +926,18 @@ def render(result: dict, prev_label: str) -> str:
         for token in inverse_strengthened:
             lines.append(f"  - {token}")
 
+    # issue #3182: the five axes a crossing-set diff cannot see. Each widened
+    # bucket fails the gate like an addition and is acknowledged through the
+    # same `--accept` token; each safe bucket is listed only.
+    for bucket, title in _WIDENED_SECTIONS:
+        _render_gated(lines, result, bucket, title, acked)
+    for bucket, title in _SAFE_SECTIONS:
+        tokens = result.get(bucket) or []
+        if tokens:
+            lines.append("")
+            lines.append(f"{title}: {len(tokens)}")
+            lines.extend(f"  - {token}" for token in tokens)
+
     if result["removed"]:
         lines.append("")
         lines.append(
@@ -841,3 +946,43 @@ def render(result: dict, prev_label: str) -> str:
             lines.append(f"  - {crossing}")
 
     return "\n".join(lines)
+
+
+_WIDENED_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("scope_widened", "capability scope WIDENED (a stable emission reaches "
+     "more capabilities)"),
+    ("backends_added", "host backend ADDED (new host code an extern can run)"),
+    ("recovery_dropped", "recovery DROPPED (a reversible effect lost its "
+     "inverse)"),
+    ("recovery_weakened", "recovery WEAKENED (a recovery entry lost "
+     "idempotency strength)"),
+    ("registers_weakened", "idempotency register WEAKENED (a capability "
+     "floor dropped)"),
+    ("cardinality_widened", "emission cardinality WIDENED (more crossings per "
+     "activation)"),
+)
+
+_SAFE_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("scope_tightened", "capability scope tightened (safe)"),
+    ("backends_removed", "host backend removed (safe: host code given up)"),
+    ("recovery_added", "recovery gained (safe)"),
+    ("registers_strengthened", "idempotency register strengthened (safe)"),
+    ("cardinality_tightened", "emission cardinality tightened (safe)"),
+)
+
+
+def _render_gated(lines: list[str], result: dict, bucket: str, title: str,
+                  acked: set[str]) -> None:
+    tokens = result.get(bucket) or []
+    if not tokens:
+        return
+    lines.append("")
+    lines.append(f"{title}: {len(tokens)}")
+    for token in tokens:
+        mark = "  ~ " if token in acked else "  + "
+        suffix = "  (acknowledged)" if token in acked else ""
+        lines.append(f"{mark}{token}{suffix}")
+    if any(t in result["unacknowledged"] for t in tokens):
+        lines.append(
+            "This is a widening: acknowledge with --accept <token> or "
+            "--accept-all.")

@@ -440,16 +440,29 @@ def host_body_entry(extern: dict) -> dict:
     The server's live-body reader and the applied-generation provenance below
     both produce this record, so the fields a ticket names have one
     definition rather than one per producer.
+
+    `digests` maps each backend to the lowercase hex sha256 of the verbatim
+    body string in `extern["bodies"][backend]`, encoded as UTF-8 with no
+    normalisation, so a one-byte change moves that backend's digest. Its keys
+    are in the same sorted order as `backends`. Comparing two records by
+    equality therefore sees a replaced host body as a changed record, which
+    is the point: without it a body whose text changed under the same extern
+    name, class and backends read as unchanged.
     """
+    bodies = extern.get("bodies") or {}
+    backends = sorted(bodies)
     return {"extern": extern.get("name"),
             "classification": extern.get("class"),
-            "backends": sorted(extern.get("bodies") or {})}
+            "backends": backends,
+            "digests": {backend: hashlib.sha256(
+                bodies[backend].encode("utf-8")).hexdigest()
+                for backend in backends}}
 
 
 def host_body_entries(ir: dict | None) -> list:
     """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends}`. This is the surface G8 does not
-    check inside (item 24) and the item-246 classifier never looks at."""
+    `{extern, classification, backends, digests}`. This is the surface G8 does
+    not check inside (item 24) and the item-246 classifier never looks at."""
     out = []
     for extern in (ir or {}).get("externs") or []:
         if extern.get("bodies"):
@@ -10478,11 +10491,19 @@ def _ir_has_approval_edges(ir: dict) -> bool:
 def _fiber_activation_error(fiber) -> dict | None:
     """The error a FAILED fiber's activation raised, as `{type, message}`, or
     None. cordis records it on the fiber (`_error`, fiber.py) and lands the
-    fiber FAILED; it is the only place the exception survives (issue #1895)."""
+    fiber FAILED; it is the only place the exception survives (issue #1895).
+
+    The message is funnelled through the same `confidential` registry the
+    runtime and the bridge read (issue #3142). A host body's exception text is
+    free-form, so it can quote a registered `Secret[T]` value inside a longer
+    sentence; `load()` and `state()` hand this dict back to the caller, and the
+    rollback reason is built from the same reading. The scrub is exact-valued,
+    so an error that quotes no registered secret is unchanged."""
     err = getattr(fiber, "_error", None)
     if err is None:
         return None
-    return {"type": type(err).__name__, "message": str(err)}
+    from .._process_runner import redact_text  # noqa: PLC0415 — lazy: one sink only
+    return {"type": type(err).__name__, "message": redact_text(str(err))}
 
 
 def _component_state(driver, name: str, fiber) -> dict:

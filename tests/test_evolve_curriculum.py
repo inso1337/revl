@@ -260,7 +260,11 @@ def test_probe_tasks_come_from_the_census_out_of_slice_bucket(curriculum):
                for line in (ROOT / program).read_text(encoding="utf-8").splitlines())
     }
     expected = {program for program, _ in records} - use_bearing
-    assert len(probes) == 20
+    # 22 out-of-slice rejection records at this revision; the count is a
+    # non-vacuity guard, and the set comparison below is the real assertion.
+    # It moved from 20 when issue #3110's two `G-SECRET-FLOW`/`G-SECRET`
+    # closure fixtures joined the out-of-slice bucket.
+    assert len(probes) == 22
     assert {task.artifact for task in probes} == expected
     for task in probes:
         record = task.locator.split(" buckets[", 1)[0]

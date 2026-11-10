@@ -341,6 +341,39 @@ def _run_policy(args) -> int:
     return 1 if result["refused"] else 0
 
 
+def _run_simulate_swap(args) -> int:
+    """`revl simulate swap OLD NEW --history RUN.wal` (issue #2713) — re-run a
+    recorded history against a changed component.
+
+    Slice 1 is the preflight: read the history, name every fact that keeps it
+    from being re-runnable (a torn or unfinished recording, a crossing with no
+    recorded outcome, no `determinism` record, a parameterized method whose
+    arguments are not on the record, a component outside the pure subset), and
+    run nothing while one is missing. Slice 2 runs only when the preflight is
+    clean: OLD must reproduce every recorded outcome, NEW is executed for each
+    recorded call, and the first returned value that moved is named and stops
+    the run. The execution is offline against a stub host, so no effect fires
+    and the recording is untouched.
+
+    Exit 0 when the history is replayable, OLD reproduces every step and NEW
+    changes nothing; 1 when the preflight names a missing fact or the first
+    difference is found (including a value OLD could not reproduce); 2 on a
+    usage, read or compile error."""
+    from .simulate_swap import SwapError, ok, render, swap
+
+    try:
+        document = swap(args.old, args.new, args.history,
+                        component=getattr(args, "component", None))
+    except SwapError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(document, indent=2))
+    else:
+        print(render(document))
+    return 0 if ok(document) else 1
+
+
 def _run_simulate(args) -> int:
     """`revl simulate policy-diff OLD NEW --history RUN.wal` (item 468 / issue
     #820) — the bounded preview a policy change over recorded history opens.
@@ -367,6 +400,8 @@ def _run_simulate(args) -> int:
     one, or could not read the history whole (a torn tail, or a recording that
     never reached its `activation-complete` record) does not report the change
     clean; 2 on a usage, parse or read error."""
+    if args.simulate_command == "swap":
+        return _run_simulate_swap(args)
     from .policy import PolicyError, component_realms, load_policy
     from .policy_diff import PolicyDiffError, diff, load_history, render, widened
 
@@ -478,7 +513,22 @@ def _runtime_ceiling_surface(wal_path: str) -> dict:
 
 def _run_audit(args, ir: dict) -> int:
     """`revl audit` — composition manifest + G8 boundary surface, with the
-    item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
+    item-33 policy gate (`--policy`), the authority-drift gate (`--diff`), and
+    the issue-#2725 participant-class plan view (`--deploy-map`)."""
+    deploy_map_path = getattr(args, "deploy_map", None)
+    if deploy_map_path is not None:
+        if getattr(args, "policy", None) or getattr(args, "diff", None):
+            print("error: `--deploy-map` cannot be combined with `--policy` or "
+                  "`--diff`", file=sys.stderr)
+            return 2
+        try:
+            participant_surface = _participant_surface(deploy_map_path, ir)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read deploy map {deploy_map_path!r}: {error}",
+                  file=sys.stderr)
+            return 2
+    else:
+        participant_surface = None
     runtime_ceilings = None
     if getattr(args, "wal", None):
         if not args.json or getattr(args, "policy", None) or getattr(args, "diff", None):
@@ -651,8 +701,15 @@ def _run_audit(args, ir: dict) -> int:
              **_generated_surface(ir)})
         if runtime_ceilings is not None:
             document["runtime_ceilings"] = runtime_ceilings
+        if participant_surface is not None:
+            classes, refusals = participant_surface
+            # Issue #2725: additive, and only when `--deploy-map` was given, so
+            # every existing `revl audit --json` body is byte-identical.
+            document["participantClasses"] = classes
+            if refusals:
+                document["participantRefusals"] = refusals
         print(json.dumps(document, indent=2))
-        return 0
+        return 1 if participant_surface is not None and participant_surface[1] else 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for row in ir.get("generated_from") or []:
         print(f"generated: {row['file']} from {row['model']} "
@@ -897,7 +954,31 @@ def _run_audit(args, ir: dict) -> int:
     if getattr(args, "recovery", None):
         for line in _recovery_audit_view(ir):
             print(line)
+    if participant_surface is not None:
+        classes, refusals = participant_surface
+        from . import participant_classes  # noqa: PLC0415 — lazy, CLI-only
+        print(f"\nparticipant classes (deploy map {deploy_map_path}):")
+        for line in participant_classes.render(classes, refusals):
+            print(line)
+        if refusals:
+            return 1
     return 0
+
+
+def _participant_surface(path: str, ir: dict) -> tuple[dict, list]:
+    """The `revl audit --deploy-map` view: one typed class per participant and
+    the plan-time refusals those classes raise (issue #2725).
+
+    The map is the SAME deploy map `revl deploy` reads, and the class derivation
+    is the same `participant_classes.plan_refusals` deploy admission appends, so
+    the reporting surface and the gate cannot disagree about a plan.
+    """
+    from . import participant_classes  # noqa: PLC0415 — lazy, CLI-only
+    from .deploy import _load_deploy_map  # noqa: PLC0415 — same reader as deploy
+
+    placement = _load_deploy_map(path)
+    return (participant_classes.participant_classes(ir, placement),
+            participant_classes.plan_refusals(ir, placement))
 
 
 def _retention_surface_rows(ir: dict) -> list:
@@ -1304,6 +1385,10 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
                   f"reach `{info['capability']}`  "
                   f"on_failure {info['onFailure']}  "
                   f"redirect {info.get('redirect', 'refuse')}")
+            if info.get("pin"):
+                # Issue #2719: the admission fact the run-time check enforces.
+                print(f"  {'':<24}   pinned TLS leaf "
+                      f"sha256:{info['pin']}")
             print(f"  {'':<24}   synthesized from service "
                   f"`{info['service']}` ({info['serviceSource']}); "
                   "NO inverse — a remote effect survives unwind")
@@ -1552,6 +1637,12 @@ def _dispatch(args) -> int:
     if args.command == "pool":
         from .peer_pool import pool_command  # noqa: PLC0415 — lazy
         return pool_command(args)
+    # issue #2757: export and verify signed action-receipt chains. Routed
+    # before the shared compile step because both verbs read a JSON document,
+    # not `.rvl` sources.
+    if args.command == "receipts":
+        from .cli.receipts import _run_receipts  # noqa: PLC0415
+        return _run_receipts(args)
     if args.command == "attest":
         return _run_attest(args)
     if args.command == "dash":
