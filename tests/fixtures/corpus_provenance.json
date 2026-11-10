@@ -1302,6 +1302,8 @@
    "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
   ],
   "1": [
+   "admission:near_miss_dunder_implemented_method",
+   "admission:near_miss_dunder_service_method",
    "examples/app/private_notes.rvl",
    "examples/rejections/a5_compensatable_without_compensate.rvl",
    "examples/rejections/a5_no_inverse_declares_compensate.rvl",
