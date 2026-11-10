@@ -246,7 +246,28 @@ def _live_reading(live) -> tuple:
     return values, reasons
 
 
-def detect(admitted, live=None) -> dict:
+def _changed_reading(changed) -> dict:
+    """`{(role, name): reason}` from a `changed` mapping of role to subject to
+    the account of how the admitted subject changed shape."""
+    if changed is None:
+        return {}
+    if not isinstance(changed, dict):
+        raise DriftError(
+            f"the changed reading must be a mapping of role to subject to reason, "
+            f"got {type(changed).__name__}"
+        )
+    out = {}
+    for role, subjects in changed.items():
+        if not isinstance(subjects, dict):
+            raise DriftError(
+                f"the changed reading: role {role!r} must map subject name to a reason"
+            )
+        for name, reason in subjects.items():
+            out[(role, name)] = str(reason)
+    return out
+
+
+def detect(admitted, live=None, changed=None) -> dict:
     """The drift verdict over a re-measurement of an admitted identity.
 
     `admitted` is the manifest of digests admission bound, as
@@ -259,15 +280,27 @@ def detect(admitted, live=None) -> dict:
     verified and nothing unexpected is live; `drifted` when any measured
     difference exists; `unverified` otherwise, which is a live system that may
     well match but was not shown to.
+
+    `changed` maps an admitted subject the reader found but could no longer
+    measure as the kind it was admitted as (a file turned into a symlink, an
+    unreadable file, a tree turned into a file) to the reader's account of it.
+    Such a subject is `drifted`: its kind or readability differs from what
+    admission bound, which is evidence of a change, not a blind spot. A key in
+    `changed` that admission never named is ignored here; the reader keeps it
+    unverified.
     """
     rows = _manifest_rows(admitted, "the admitted manifest")
     values, reasons = _live_reading(live)
+    shape_changes = _changed_reading(changed)
 
     subjects = []
     for key in sorted(rows, key=_order):
         role, name = key
         admitted_digest = rows[key]
-        if key in reasons:
+        if key in shape_changes:
+            status = STATUS_DRIFTED
+            reason = shape_changes[key]
+        elif key in reasons:
             status = STATUS_UNVERIFIED
             reason = reasons[key]
         elif key not in values:

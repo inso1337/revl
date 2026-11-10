@@ -22,12 +22,16 @@ takes.
 THE UNVERIFIED RULE IS IN THE READING, NOT ONLY IN THE VERDICT. `detect` can
 only tell "measured and absent" (`None`) from "not measured" (key absent) if
 the producer keeps them apart. This monitor does: a declared path that is gone
-is `None` (an admitted subject the world no longer has), a path that exists but
-cannot be measured (a symlink, an empty tree, an unreadable file, a tree
-replaced by a file) is left OUT of the reading and reported in `unmeasured` with
-its cause, so the subject is `unverified` and is never read as a match. A
-hosted model that exposes no hash is therefore not silently passed: it has no
-declaration it can be measured through, and the pass reports it unverified.
+is `None` (an admitted subject the world no longer has), and a path that exists
+but can no longer be measured as the kind it was admitted as (a symlink, an
+empty tree, an unreadable file, a tree replaced by a file) is left OUT of the
+digest reading and passed to `detect` as `changed`, with its cause also in
+`unmeasured`, so the subject is `drifted` and earns `onDrift`. Admission
+measured it, so a change of kind or readability is evidence of drift, never a
+blind spot. `unverified` is kept for a subject that was never declared
+measurable: a hosted model that exposes no hash has no declaration it can be
+measured through, so it is not silently passed, and the pass reports it
+unverified.
 
 WHAT THIS SLICE ACTUATES, AND WHAT IT REFUSES. Only the two responses that
 narrow authority are carried out:
@@ -62,6 +66,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,8 +105,9 @@ READ_ONLY_LATCH_ENV = "REVL_READ_ONLY_LATCH"
 MONITOR_GUARANTEE = (
     "a declared local subject is re-measured on every pass; a measured digest "
     "that differs from the admitted one is drift; a declared subject whose path "
-    "is gone is missing; a subject that could not be measured is unverified and "
-    "is never reported as matched; the monitor carries out only read-only and "
+    "is gone is missing; an admitted subject that can no longer be measured as "
+    "the kind it was admitted as is drift; a subject never declared measurable "
+    "is unverified and is never reported as matched; the monitor carries out only read-only and "
     "suspend, and a response it cannot carry out is recorded as unapplied rather "
     "than downgraded."
 )
@@ -130,7 +136,7 @@ class DriftActuationError(DriftMonitorError):
 class _SubjectAbsent(Exception):
     """The declared subject is not present at its path. This is the measured
     absence `detect` reads as `missing`, distinct from a subject that is present
-    but cannot be measured (`unverified`)."""
+    but can no longer be measured as its admitted kind (`drifted`)."""
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +221,10 @@ def _digest_subject(row, *, where: str) -> str:
     """The digest of one declared subject, or a refusal.
 
     `_SubjectAbsent` is raised only when the path is genuinely absent. Anything
-    else that stops a measurement is a `DriftMonitorError`, which the caller
-    reports as unverified with its cause rather than as a match or a mismatch.
+    else that stops a measurement is a `DriftMonitorError`. Admission refuses
+    the subject on it; a live reading reports the admitted subject `drifted`
+    with that cause, because its kind or readability is no longer what
+    admission measured.
     """
     path = Path(row["path"])
     label = _label(row)
@@ -298,16 +306,18 @@ def admit(declarations) -> dict:
 def measure(document) -> dict:
     """Re-measure the declared subjects and build the live reading.
 
-    Returns `{live, unmeasured, declarations}`. `live` is the reading
+    Returns `{live, changed, unmeasured, declarations}`. `live` is the reading
     :func:`revl.drift.detect` takes: a declared subject whose path is gone is
-    `None`, and a subject that could not be measured is absent from `live` and
-    carries its cause in `unmeasured`. A manifest subject with no declaration at
-    all is also absent from `live`, so the verdict reports it `unverified` rather
-    than passing it.
+    `None`. An admitted subject that exists but can no longer be measured as
+    its declared kind is absent from `live`, named in `changed` (detect's
+    `changed` argument, so it is `drifted`) and carries its cause in
+    `unmeasured`. A manifest subject with no declaration at all is absent from
+    both, so the verdict reports it `unverified` rather than passing it.
     """
     manifest = _manifest(document)
     rows = _declarations(document.get("subjects"))
     live = {}
+    changed = {}
     unmeasured = []
     declared = set()
     for row in rows:
@@ -326,8 +336,18 @@ def measure(document) -> dict:
                 }
             )
         except DriftMonitorError as error:
+            if row["name"] in manifest.get(row["role"], {}):
+                reason = (
+                    f"{error}; admission measured this subject as a "
+                    f"{row['kind']}, so a change of kind or readability is drift"
+                )
+                changed.setdefault(row["role"], {})[row["name"]] = reason
+                status = "drifted"
+            else:
+                reason = str(error)
+                status = "unverified"
             unmeasured.append(
-                {"subject": _label(row), "status": "unverified", "reason": str(error)}
+                {"subject": _label(row), "status": status, "reason": reason}
             )
         else:
             live.setdefault(row["role"], {})[row["name"]] = value
@@ -344,7 +364,12 @@ def measure(document) -> dict:
                         "stays unverified rather than passing",
                     }
                 )
-    return {"live": live, "unmeasured": unmeasured, "declarations": rows}
+    return {
+        "live": live,
+        "changed": changed,
+        "unmeasured": unmeasured,
+        "declarations": rows,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +521,26 @@ def arm_suspend(
     return {"armed": True, "latch": path, **record}
 
 
+def _runtime_latch_path() -> str | None:
+    """The read-only latch path the py runtime reads: the one armed in this
+    process with `arm_read_only_latch` when the runtime is loaded, else the
+    ambient `REVL_READ_ONLY_LATCH` it falls back to."""
+    runtime = sys.modules.get("runtime")
+    reader = getattr(runtime, "read_only_latch_path", None)
+    if callable(reader):
+        return reader()
+    return os.environ.get(READ_ONLY_LATCH_ENV) or None
+
+
+def _runtime_reads_latch(latch: str) -> bool:
+    """Whether the runtime's read-only latch is exactly `latch`. A hold the
+    running process never reads is armed, not applied."""
+    path = _runtime_latch_path()
+    if not path:
+        return False
+    return os.path.realpath(path) == os.path.realpath(latch)
+
+
 def apply_response(
     response,
     *,
@@ -537,13 +582,16 @@ def apply_response(
             latch, reason=reason, at=at, generation=generation, detail=detail
         )
         is_armed = bool(armed.get("armed") or armed.get("alreadyArmed"))
-        enforced = bool(tier in TIERS_WITH_READ_ONLY) if tier else False
+        enforced = bool(
+            tier in TIERS_WITH_READ_ONLY and _runtime_reads_latch(latch)
+        ) if tier else False
         return {
             "response": response,
             # The latch is ARMED whether or not a runtime watches this path.
-            # `applied` is the stronger claim: the named tier's runtime reads
-            # the latch. A host that has not pointed the runtime at it (no
-            # REVL_READ_ONLY_LATCH) has narrowed nothing yet.
+            # `applied` is the stronger claim: the named tier honours the latch
+            # AND the runtime is pointed at THIS path. A host that has not
+            # pointed the runtime at it (REVL_READ_ONLY_LATCH unset or naming
+            # another file) has narrowed nothing yet.
             "armed": is_armed,
             "enforced": enforced,
             "applied": is_armed and enforced,
@@ -556,9 +604,9 @@ def apply_response(
                     "the read-only latch is armed and the named tier reads it; "
                     "every new effectful crossing refuses, reads still proceed"
                     if enforced
-                    else "the read-only latch is armed, but this pass named no "
-                    "tier that reads it; a host must point its runtime at "
-                    "REVL_READ_ONLY_LATCH before the narrowing is enforced"
+                    else "the read-only latch is armed, but no named tier's "
+                    "runtime reads this path; a host must point its runtime's "
+                    "REVL_READ_ONLY_LATCH at it before the narrowing is enforced"
                 )
             ),
             "honors": sorted(TIERS_WITH_READ_ONLY),
@@ -707,7 +755,7 @@ def run_pass(
         raise DriftMonitorError("a monitor pass needs a `wal_path` to record to")
     manifest = _manifest(document)
     reading = measure(document)
-    report = drift.detect(manifest, reading["live"])
+    report = drift.detect(manifest, reading["live"], reading["changed"])
     if generation is None:
         generation = _generation(wal_path)
     if (

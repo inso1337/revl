@@ -91,10 +91,12 @@ lowercase sha256 hex, the spelling `deploy.artifact_digest` and
 `attest.canonical_hash` already produce, so a producer and the re-measurement
 cannot disagree about the encoding.
 
-`detect(admitted, live)` is the verdict over a re-measurement:
+`detect(admitted, live, changed=None)` is the verdict over a re-measurement:
 
 * `matched`: the live subject hashes to the admitted digest;
-* `drifted`: it was re-measured and does not;
+* `drifted`: it was re-measured and does not, or the reader names it in
+  `changed` (it is present but its kind or readability is no longer what
+  admission measured);
 * `missing`: the reading reports an admitted subject absent;
 * `unexpected`: the live composition holds a subject admission never named;
 * `unverified`: the reading did not produce this subject at all, or produced
@@ -183,12 +185,17 @@ verdict. The reading keeps the distinction the `unverified` row depends on:
 
 * a declared path that is gone is `None`, the measured absence `detect` reads as
   `missing` (drift, suspend by default);
-* a path that exists but cannot be measured (a symlink, an empty tree, an
-  unreadable file, a tree replaced by a file) is left OUT of the reading and
-  carries its cause, so the subject is `unverified` and never a match;
+* a path that exists but can no longer be measured as the kind it was admitted
+  as (a symlink, an empty tree, an unreadable file, a tree replaced by a file)
+  is left OUT of the digest reading and passed as `changed` with its cause, so
+  the subject is `drifted` and earns `onDrift`. Admission measured it, so the
+  change of kind or readability is evidence of drift, not a blind spot; the
+  cheapest way to change an admitted artifact must not be the one that fires
+  nothing;
 * an admitted subject with no declaration at all - a hosted model that exposes no
   hash, for instance - is also left out and reported unverified with the reason,
-  so the monitor says so loudly instead of passing it.
+  so the monitor says so loudly instead of passing it. `unverified` is kept for
+  a subject that was never declared measurable.
 
 `drift_monitor.run_pass` writes one `drift-detected` record for every
 non-matched pass (a matched pass writes nothing, so a loop does not fill the
@@ -226,16 +233,34 @@ Only the two responses that narrow authority are carried out:
 * `read-only` arms a durable latch beside the WAL (`<wal>.read-only`). The py
   runtime reads it at every NEW effectful crossing seam (extern crossings
   through `estop_gated` and `extern_emit`, effect acquisition, deferred emit,
-  approval crossing and deferred fire), so a component may still read but may
-  no longer start a world-changing crossing, and the refusal happens before the
-  host body runs. Teardown, inverse registration and recovery paths are not
+  approval crossing, deferred fire, and a remote call through the placement
+  bridge), so a component may still read locally but may no longer start a
+  world-changing crossing, and the refusal happens before the host body runs
+  or, for a remote call, before anything is encoded or sent. The caller cannot
+  see whether a peer's method writes, so under the hold every remote call
+  refuses, reads included. Teardown, inverse registration and recovery paths are not
   narrowed, because a read-only hold must not strand cleanup. The runtime must
   be pointed at the exact latch path with `arm_read_only_latch` or the ambient
   `REVL_READ_ONLY_LATCH`; the actuator reports which tiers honour it, and this
   slice wires the py reference runtime only. The record distinguishes `armed`
   (the latch is on disk) from `applied` (a named tier's runtime reads it), so a
   host that has not pointed the runtime at the path is never told the narrowing
-  is enforced.
+  is enforced: `applied` holds only when the runtime's latch path (its
+  `arm_read_only_latch` path, else `REVL_READ_ONLY_LATCH`) is the path the
+  monitor wrote.
+
+  The rule for crossings already under way and for lifting the hold:
+
+  - The latch is read at the check, once per crossing. A crossing whose check
+    ran before the latch was written completes: the hold refuses NEW
+    crossings, it does not interrupt one in flight or undo one that finished.
+    The drift record says when the hold was armed, so a post-mortem can tell
+    the crossings that ran before it from the ones it refused.
+  - The hold is lifted by the operator, by removing the latch file. Nothing
+    re-measures on the way out: the next crossing after the unlink proceeds.
+    Before lifting it, the operator is the one who has to have re-admitted or
+    rolled back the drifted subject; a later monitor pass that still finds
+    drift arms the latch again.
 * `suspend` arms the item-443 E-Stop latch beside the WAL (`<wal>.estop`, via
   `estop.latch_path` / `estop.read_latch`), so the runtime, the conductor and
   `revl estop --report` observe it with no reader change, and the per-tier

@@ -7,9 +7,9 @@ three things the item's Exit line needs:
 
   * a monitor that re-measures local subjects and builds the reading the verdict
     takes. A tool is an emitted artifact tree (hashed by deploy's own
-    `artifact_digest`), a policy is a file (hashed by `drift.digest`). A
-    declaration whose bytes cannot be measured is reported unverified with its
-    cause, never silently compared as a match;
+    `artifact_digest`), a policy is a file (hashed by `drift.digest`). An
+    admitted subject whose bytes can no longer be measured as its declared kind
+    is reported drifted with its cause, never silently compared as a match;
   * actuators that carry out only the two responses that NARROW authority:
     `read-only` arms a latch the py runtime checks at every effectful crossing,
     and `suspend` arms the item-443 E-Stop latch. `re-admit` and `rollback`
@@ -21,9 +21,11 @@ The load-bearing distinctions this file is written to break if they are
 weakened:
 
   * a deleted path is `missing` (a measured absence, drift, suspend by default),
-    while a subject that is present but unmeasurable, or an admitted subject
-    with no declaration at all, is `unverified` (a blind spot, no response by
-    default) - absence of evidence is not drift;
+    and an admitted subject that is present but no longer measurable as its
+    kind (a symlink swap, an unreadable file, a tree turned into a file, an
+    emptied tree) is `drifted`, while an admitted subject with no declaration at
+    all is `unverified` (a blind spot, no response by default) - absence of
+    evidence is not drift, but a changed kind or readability is;
   * a response is a downgrade: the monitor never fires more than the policy
     granted, never replaces a response it cannot carry out with a different one,
     and never widens authority.
@@ -31,6 +33,8 @@ weakened:
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -251,21 +255,71 @@ def test_a_subject_missing_from_the_reading_is_unverified_with_no_response(tmp_p
     )
 
 
-def test_an_unmeasurable_subject_is_unverified_not_matched(tmp_path):
+def _assert_changed_is_drift(result, w, subject, cause):
+    """An admitted subject that can no longer be measured as its kind is
+    drifted, earns the default `onDrift` (suspend), and carries its cause."""
+    assert result["verdict"] == drift.VERDICT_DRIFTED
+    row = {row["subject"]: row for row in result["report"]["subjects"]}[subject]
+    assert row["status"] == drift.STATUS_DRIFTED
+    assert cause in row["reason"]
+    assert result["response"] == drift.RESPONSE_SUSPEND
+    assert result["applied"] is True
+    assert estop.read_latch(w + ".estop") is not None
+    unmeasured = {row["subject"]: row for row in result["reading"]["unmeasured"]}
+    assert unmeasured[subject]["status"] == "drifted"
+    assert cause in unmeasured[subject]["reason"]
+
+
+def test_an_emptied_tree_is_drifted_not_unverified(tmp_path):
     document, tool, _policy = _document(tmp_path)
     w = str(tmp_path / "run.wal")
     # Present but no longer measurable AS A TREE: an empty artifact is refused
-    # by deploy's digest, so the monitor has no reading for it.
+    # by deploy's digest. Admission measured a non-empty tree, so this is drift.
     (tool / "tool.py").unlink()
 
     result = drift_monitor.run_pass(document, wal_path=w)
-    assert result["verdict"] == drift.VERDICT_UNVERIFIED
-    assert result["response"] == drift.RESPONSE_NONE
-    assert not Path(w + ".estop").exists()
-    row = {row["subject"]: row for row in result["report"]["subjects"]}["tool:checker"]
-    assert row["status"] == drift.STATUS_UNVERIFIED
-    unmeasured = {row["subject"]: row for row in result["reading"]["unmeasured"]}
-    assert "empty" in unmeasured["tool:checker"]["reason"]
+    _assert_changed_is_drift(result, w, "tool:checker", "empty")
+
+
+def test_a_file_swapped_for_a_symlink_is_drifted(tmp_path):
+    document, _tool, policy = _document(tmp_path)
+    w = str(tmp_path / "run.wal")
+    # The symlink points at the SAME bytes: the hash would match, which is
+    # exactly why the swap must not be read as a blind spot.
+    target = tmp_path / "elsewhere.json"
+    target.write_bytes(policy.read_bytes())
+    policy.unlink()
+    policy.symlink_to(target)
+
+    result = drift_monitor.run_pass(document, wal_path=w)
+    _assert_changed_is_drift(result, w, "policy:main", "symlink")
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root reads a mode-000 file, so the subject stays readable",
+)
+def test_an_unreadable_file_is_drifted(tmp_path):
+    document, _tool, policy = _document(tmp_path)
+    w = str(tmp_path / "run.wal")
+    policy.chmod(0)
+    try:
+        result = drift_monitor.run_pass(document, wal_path=w)
+    finally:
+        policy.chmod(0o644)
+    _assert_changed_is_drift(result, w, "policy:main", "cannot be read")
+
+
+def test_a_tree_replaced_by_a_file_is_drifted(tmp_path):
+    document, tool, _policy = _document(tmp_path)
+    w = str(tmp_path / "run.wal")
+    data = (tool / "tool.py").read_bytes()
+    (tool / "tool.py").unlink()
+    tool.rmdir()
+    tool.write_bytes(data)
+
+    result = drift_monitor.run_pass(document, wal_path=w)
+    _assert_changed_is_drift(result, w, "tool:checker", "tool:checker")
 
 
 def test_a_deleted_path_is_missing_drift_not_a_blind_spot(tmp_path):
@@ -298,10 +352,11 @@ def test_the_actuator_refuses_the_responses_that_change_what_runs(tmp_path):
     assert not list(tmp_path.glob("*.read-only"))
 
 
-def test_a_narrowing_response_never_arms_the_other_latch(tmp_path):
+def test_a_narrowing_response_never_arms_the_other_latch(tmp_path, monkeypatch):
     document, tool, _policy = _document(tmp_path)
     w = str(tmp_path / "run.wal")
     (tool / "tool.py").write_bytes(b"tool:checker@2\n")
+    monkeypatch.setenv(drift_monitor.READ_ONLY_LATCH_ENV, w + ".read-only")
 
     read_only = drift_monitor.run_pass(
         document,
@@ -423,12 +478,8 @@ def test_the_py_runtime_refuses_an_effectful_crossing_while_read_only_is_armed(
     assert "checker.send" in str(caught.value)
     assert caught.value.record["reason"] == "drift control: tool:checker drifted"
 
-    # A read is not an effectful crossing, so it is not gated: the narrowing is
-    # "no new world-changing crossing", not a second E-Stop.
-    def read():
-        return "still readable"
-
-    assert read() == "still readable"
+    # That a read still proceeds is pinned on a compiled component below
+    # (test_a_compiled_read_method_proceeds_under_read_only_and_its_write_refuses).
 
     latch.unlink()
     assert py_runtime.read_only_engaged() is False
@@ -613,3 +664,145 @@ def test_every_wired_effectful_seam_refuses_under_read_only(tmp_path, monkeypatc
     for label, call in seams.items():
         with pytest.raises(py_runtime.ReadOnlyRefused):
             call()
+
+
+# ---------------------------------------------------------------------------
+# applied only when the runtime reads the latch the monitor wrote
+# ---------------------------------------------------------------------------
+
+
+def test_read_only_is_not_applied_when_the_runtime_reads_another_latch(
+    tmp_path, monkeypatch
+):
+    document, tool, _policy = _document(tmp_path)
+    w = str(tmp_path / "run.wal")
+    (tool / "tool.py").write_bytes(b"tool:checker@2\n")
+    control = {"onDrift": drift.RESPONSE_READ_ONLY}
+
+    monkeypatch.delenv(drift_monitor.READ_ONLY_LATCH_ENV, raising=False)
+    unset = drift_monitor.run_pass(document, wal_path=w, control=control, tier="py")
+    assert unset["actuation"]["armed"] is True
+    assert unset["actuation"]["enforced"] is False
+    assert unset["applied"] is False
+    assert unset["unapplied"] is True
+
+    monkeypatch.setenv(
+        drift_monitor.READ_ONLY_LATCH_ENV, str(tmp_path / "other.read-only")
+    )
+    other = drift_monitor.run_pass(document, wal_path=w, control=control, tier="py")
+    assert other["applied"] is False
+    assert other["actuation"]["enforced"] is False
+
+    monkeypatch.setenv(drift_monitor.READ_ONLY_LATCH_ENV, w + ".read-only")
+    named = drift_monitor.run_pass(document, wal_path=w, control=control, tier="py")
+    assert named["applied"] is True
+    assert named["actuation"]["enforced"] is True
+
+
+def test_read_only_follows_the_runtime_explicit_latch_over_the_ambient_one(
+    tmp_path, monkeypatch
+):
+    document, tool, _policy = _document(tmp_path)
+    w = str(tmp_path / "run.wal")
+    (tool / "tool.py").write_bytes(b"tool:checker@2\n")
+    monkeypatch.setenv(drift_monitor.READ_ONLY_LATCH_ENV, w + ".read-only")
+    # The runtime in this process is armed on a different path, so it never
+    # reads the latch the monitor writes, whatever the environment says.
+    py_runtime.arm_read_only_latch(str(tmp_path / "explicit.read-only"))
+    result = drift_monitor.run_pass(
+        document,
+        wal_path=w,
+        control={"onDrift": drift.RESPONSE_READ_ONLY},
+        tier="py",
+    )
+    assert result["applied"] is False
+
+
+# ---------------------------------------------------------------------------
+# a remote call through the placement bridge honours the hold
+# ---------------------------------------------------------------------------
+
+
+def test_a_remote_bridge_call_is_refused_under_read_only_before_it_is_encoded(
+    tmp_path, monkeypatch
+):
+    import bridge
+
+    latch = tmp_path / "run.read-only"
+    drift_monitor.arm_read_only(str(latch), reason="remote row")
+    monkeypatch.setenv(drift_monitor.READ_ONLY_LATCH_ENV, str(latch))
+    py_runtime.arm_read_only_latch(None)
+
+    # This client has no socket, and an opaque argument raises SeamMarshalError
+    # at encode: reaching either would fail differently from the refusal.
+    client = object.__new__(bridge._Client)
+    with pytest.raises(py_runtime.ReadOnlyRefused, match="db.execute"):
+        client.call("db", "execute", [object()])
+
+    # A suspend is never masked by the read-only hold.
+    py_runtime.estop("drill", operator="ops")
+    with pytest.raises(py_runtime.EstopHalted):
+        client.call("db", "execute", [object()])
+
+
+# ---------------------------------------------------------------------------
+# a compiled component: reads proceed, writes refuse
+# ---------------------------------------------------------------------------
+
+
+_COMPILED = """
+extern emission fn record(t: Str) -> Unit = @py {
+    import os
+    with open(os.environ['REVL_RO_COUNT'], 'a', encoding='utf-8') as f:
+        f.write('record' + chr(10))
+    return None
+}
+service Ledger {
+  fn peek(t: Str) -> Str
+  emission fn write(t: Str)
+}
+component Book provides ledger: Ledger {
+  provide ledger {
+    fn peek(t) { return t }
+    fn write(t) { emit record(t) }
+  }
+}
+"""
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="drives a live cordis-py composition; install the pinned fork with "
+    "`sh backends/python/setup.sh`",
+)
+def test_a_compiled_read_method_proceeds_under_read_only_and_its_write_refuses(
+    tmp_path, monkeypatch
+):
+    from revl.compiler import compile_source
+    from revl.mcp.session import Session
+
+    count = tmp_path / "count.log"
+    monkeypatch.setenv("REVL_RO_COUNT", str(count))
+    latch = tmp_path / "run.read-only"
+    session = Session()
+    session.load(compile_source(_COMPILED, "read_only_2758.rvl"))
+    runtime = session._driver.runtime
+    try:
+        runtime.arm_read_only_latch(str(latch))
+        drift_monitor.arm_read_only(str(latch), reason="compiled read")
+        assert runtime.read_only_engaged() is True
+
+        # The read goes through the same compiled dispatch as the write, so a
+        # hold that refused reads would raise here.
+        assert session.call("ledger", "peek", ["page"])["result"] == "page"
+
+        with pytest.raises(runtime.ReadOnlyRefused, match="record"):
+            session.call("ledger", "write", ["entry"])
+        assert not count.exists(), "the refused write ran its host body"
+
+        latch.unlink()
+        session.call("ledger", "write", ["entry"])
+        assert count.read_text(encoding="utf-8").splitlines() == ["record"]
+    finally:
+        runtime.arm_read_only_latch(None)
+        session._reset()
