@@ -1,4 +1,4 @@
-"""`revl receipts` — export and verify signed action-receipt chains.
+"""`revl receipts`: export and verify signed action-receipt chains.
 
 Design note: `docs/design/570-action-receipt-chain.md`.
 
@@ -127,7 +127,7 @@ def _verify(args) -> int:
 
 
 def _run_receipts(args) -> int:
-    """`revl receipts` — export a receipt chain, or check one."""
+    """`revl receipts`: export a receipt chain, or check one."""
     if args.receipts_command == "export":
         return _export(args)
     if args.receipts_command == "verify":

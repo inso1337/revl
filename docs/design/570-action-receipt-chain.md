@@ -99,6 +99,10 @@ member rather than reading a future field as decoration, and the MAC is
 recomputed from every member present, so an added member is caught even if a
 future verifier would have ignored it.
 
+The same holds inside `approval`: an export that gives it a member beyond
+`request_id` and `use` is refused, not trimmed, so nothing a caller supplied is
+dropped without a word.
+
 ## 3. Why a chain, and what each tampering fails
 
 A receipt's `digest` is SHA-256 over every member but `digest` and `signature`,

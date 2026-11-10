@@ -47,12 +47,12 @@ The commitments
 
 ``mode`` is one of :data:`COMMITMENT_MODES`.
 
-  * ``salted`` — ``value`` is a SHA-256 over a domain tag, the chain's salt,
+  * ``salted``: ``value`` is a SHA-256 over a domain tag, the chain's salt,
     the commitment's label (``input`` or ``result``) and the canonical spelling
     of the value. The salt makes two chains non-comparable and defeats
     precomputed tables. It does NOT hide a low-entropy value from a reader who
     holds the salt, so it is not a confidentiality mechanism.
-  * ``suppressed`` — there is no value and ``reason`` names which origin
+  * ``suppressed``: there is no value and ``reason`` names which origin
     caused the suppression. A commitment over a ``secret`` or ``confidential``
     value would be a confirmation oracle: an adversary who can guess a
     candidate value can confirm it against the digest. The tree already
@@ -265,6 +265,14 @@ class Verdict:
 # ---------------------------------------------------------------------------
 # primitives
 # ---------------------------------------------------------------------------
+
+def _require_key(key: Any, what: str = "a receipt key") -> bytes:
+    """The key as bytes, or a refusal: an empty or non-bytes key would sign (or
+    verify) with a MAC anyone can compute, so no entry point accepts one."""
+    if not isinstance(key, (bytes, bytearray)) or not key:
+        raise ValueError(f"{what} must be non-empty bytes")
+    return bytes(key)
+
 
 def key_id(key: bytes) -> str:
     """A non-secret fingerprint of a signing key.
@@ -583,6 +591,15 @@ def _sealed_receipt(key: bytes, *, session: str, seq: int, prev: Optional[str],
                     issued_at: str) -> dict:
     """Build, validate and sign one receipt. Raises :class:`RevlError` on a
     malformed body so an unaccountable receipt is never minted."""
+    if isinstance(approval, Mapping):
+        extra = sorted(str(name) for name in approval
+                       if name not in ("request_id", "use"))
+        if extra:
+            raise RevlError(
+                "<action-receipt>", 0,
+                f"approval has member(s) {extra} beyond request_id and use; "
+                "an approval is recorded whole, never thinned by dropping a "
+                "member")
     body = {
         "kind": RECEIPT_KIND,
         "version": RECEIPT_VERSION,
@@ -634,8 +651,7 @@ def make_receipt(key: bytes, *, session: str, seq: int,
     disagrees with the origins it recorded. ``prev`` is the previous receipt's
     :func:`receipt_digest`, or None for the first receipt of a chain.
     """
-    if not isinstance(key, (bytes, bytearray)) or not key:
-        raise ValueError("a receipt key must be non-empty bytes")
+    _require_key(key)
     for name, value, allowed in (
         ("receipt_kind", receipt_kind, RECEIPT_KINDS),
         ("session_verdict", session_verdict, SESSION_VERDICTS),
@@ -673,12 +689,13 @@ def export_chain(key: bytes, *, session: str, actions: Iterable[Mapping],
     arguments here rather than per action. The chain is returned as a JSON
     document; the caller decides where to write it.
     """
+    key = _require_key(key, "the chain key")
     if session_verdict not in SESSION_VERDICTS:
         raise ValueError(
             f"session_verdict must be one of {list(SESSION_VERDICTS)}, "
             f"got {session_verdict!r}")
     if salt is None:
-        import os  # noqa: PLC0415 — lazy; only the random-salt path needs it
+        import os  # noqa: PLC0415 lazy; only the random-salt path needs it
         salt = os.urandom(32).hex()
     if not isinstance(salt, str) or not _HEX64.match(salt):
         raise ValueError("salt must be 64 lowercase hex characters")
@@ -753,11 +770,14 @@ def _keyring(keys: Any) -> dict:
     mapping into a keyring. A duplicate fingerprint with different bytes is a
     caller error, not a precedence question."""
     if isinstance(keys, (bytes, bytearray)):
-        return {key_id(bytes(keys)): bytes(keys)}
+        key = _require_key(keys, "a verification key")
+        return {key_id(key): key}
     if isinstance(keys, Mapping):
-        items = dict(keys).items()
+        items = ((kid, _require_key(key, "a verification key"))
+                 for kid, key in dict(keys).items())
     elif isinstance(keys, Iterable):
-        items = ((key_id(bytes(key)), bytes(key)) for key in keys)
+        items = ((key_id(key), key) for key in
+                 (_require_key(key, "a verification key") for key in keys))
     else:
         raise TypeError("keys must be bytes, an iterable of bytes or a mapping")
     out: dict = {}
@@ -977,7 +997,7 @@ def resolve_keys(paths: Optional[Sequence[str]], *, env=None,
     refusal on the verify path, never a key the tree assumed.
     """
     if env is None:
-        import os  # noqa: PLC0415 — lazy so the module has no import side effect
+        import os  # noqa: PLC0415 lazy so the module has no import side effect
         env = os.environ
     keys: list[bytes] = [attest.load_key(path) for path in (paths or [])]
     if not keys:

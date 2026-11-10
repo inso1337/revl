@@ -136,6 +136,20 @@ def test_truncating_the_tail_is_detected():
     assert verdict.link in {"chain-order", "chain-head", "chain-signature"}
 
 
+def test_a_consistent_truncation_fails_the_chain_signature():
+    """Tail truncation with count, digests and head edited to agree, and no
+    re-sign: every body-level count agrees, so only the envelope MAC can
+    refuse it. It does, and the refusal names that check."""
+    chain = _chain()
+    chain["receipts"].pop()
+    chain["count"] = len(chain["receipts"])
+    chain["digests"] = chain["digests"][:-1]
+    chain["head"] = chain["digests"][-1]
+    verdict = R.verify_chain(chain, KEY)
+    assert not verdict.ok
+    assert verdict.link == "chain-signature"
+
+
 def test_every_receipt_member_is_covered():
     """The issue's "alters one field" clause, walked over the whole body: a
     member added to the record later is covered without editing this test."""
@@ -330,6 +344,41 @@ def test_an_omitted_action_member_is_refused_at_export():
     action = _action()
     del action["capability"]
     with pytest.raises(RevlError, match="capability"):
+        _chain(actions=[action])
+
+
+def test_export_refuses_an_empty_chain_key():
+    with pytest.raises(ValueError, match="non-empty bytes"):
+        R.export_chain(b"", session="s", actions=[], salt=SALT, now=NOW)
+
+
+@pytest.mark.parametrize("key", ["a-str-key", 12345, None, ["k"]])
+def test_export_refuses_a_non_bytes_chain_key(key):
+    with pytest.raises(ValueError, match="non-empty bytes"):
+        R.export_chain(key, session="s", actions=[], salt=SALT, now=NOW)
+
+
+def test_the_keyring_refuses_an_empty_key():
+    for keys in (b"", [b""], [KEY, b""], {"0" * 16: b""}):
+        with pytest.raises(ValueError, match="non-empty bytes"):
+            R._keyring(keys)
+
+
+def test_verifying_with_an_empty_key_is_a_refusal():
+    chain = _chain()
+    for keys in (b"", [b""]):
+        verdict = R.verify_chain(chain, keys)
+        assert not verdict.ok
+        assert verdict.link == "key-unknown"
+        verdict = R.verify_receipt(chain["receipts"][0], keys)
+        assert not verdict.ok
+        assert verdict.link == "key-unknown"
+
+
+def test_an_approval_with_extra_members_is_refused_at_export():
+    action = _action(approval={"request_id": "req-1", "use": "confirm",
+                               "note": "unbound"})
+    with pytest.raises(RevlError, match="note"):
         _chain(actions=[action])
 
 
