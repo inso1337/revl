@@ -9,8 +9,8 @@
 2. The MCP HTTP transport read the operator profile once, at start, so a
    `revoked` line took effect only on restart. It now re-reads the file when it
    changes, checked on every request, and a profile that no longer parses
-   refuses every request (503, naming the error) instead of serving on under
-   the old one.
+   refuses every request (503, with a fixed text; the reason goes to the
+   server's stderr log) instead of serving on under the old one.
 """
 
 import hashlib
