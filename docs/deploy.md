@@ -131,9 +131,16 @@ flag per rule, and all of them are opt-in:
 | `--recheck-source` | `recheck_source` | `source-or-ir-hash` unless the host's own frontend admits the staged source and reproduces the staged IR |
 
 A runner that names none of them keeps Slice 1's behaviour: the rules default
-to off, and an unconfigured host still admits what a trusted key signed. Behind
-`via = ssh`, the same flags reach the far runner through the deploy map's
-`extra_args` (the allowlist there is exactly the runner's own flags):
+to off, and an unconfigured host still admits what a trusted key signed.
+
+Two checks run when the runner starts. `--max-age` and `--not-before` each take
+one value, so giving either one twice is refused with a message naming the flag
+(a repeat would otherwise let the later value quietly replace the earlier one).
+`--revoked-key` refuses an empty id and an id that matches no key loaded with
+`--key`, so a typo cannot leave the signer trusted without a signal.
+
+Behind `via = ssh`, the same flags arrive through the deploy map's `extra_args`
+(the allowlist there is exactly the runner's own flags):
 
 ```toml
 [processes.worker.deploy]
@@ -146,6 +153,16 @@ extra_args      = ["--key", "/etc/revl/deploy/trust.key",
                    "--max-age", "604800",
                    "--not-before", "2026-01-01T00:00:00+00:00"]
 ```
+
+That map is the conductor's file. A conductor the host does not control can
+leave these flags out, and the far runner then starts with none of the rules
+set. A host that needs its rules to hold whatever the conductor sends pins them
+itself: an sshd forced command (`command=` on the conductor's key in
+`authorized_keys`, or `ForceCommand`) or a host-side wrapper script that runs
+`revl deploy-admit` with the flags already on its command line. A wrapper
+that also forwards the conductor's arguments gets one more guard: a second
+`--max-age` or `--not-before` is refused at startup, so it cannot replace the
+one the wrapper set. A rule the wrapper does not carry stays off.
 
 The local `revl deploy --bundle` check (`admit_bundle_chain`) is the conductor
 verifying a bundle on its own disk; it takes the keys, the backend and the two

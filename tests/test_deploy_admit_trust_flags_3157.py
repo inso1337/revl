@@ -238,6 +238,26 @@ def test_a_negative_max_age_is_rejected_before_serving(
     assert "--max-age" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flag,first,second", [
+    ("--max-age", "600", "1e9"),
+    ("--not-before", "1700000000", "1"),
+])
+def test_a_repeated_single_value_rule_flag_is_refused_at_startup(
+        keys, capsys, flag, first, second):
+    """Last-wins would let a later, weaker value (appended after a host-side
+    wrapper's own) replace the one the host pinned, so a repeat is a usage
+    error that names the flag, never a silent override."""
+    from revl.cli.parser import build_parser
+
+    with pytest.raises(SystemExit) as stop:
+        build_parser().parse_args(
+            ["deploy-admit",
+             *_trust_argv(keys, flag, first, flag, second)])
+    assert stop.value.code != 0
+    err = capsys.readouterr().err
+    assert flag in err and "more than once" in err, err
+
+
 # ---------------------------------------------------------------------------
 # capability ceiling: what a pushed composition may reach
 # ---------------------------------------------------------------------------
@@ -276,6 +296,36 @@ def test_revoked_key_refuses_the_signer(monkeypatch, keys, bundle):
     assert receipt["verdict"] == deploy.REFUSE, receipt
     assert receipt["link"] == deploy.LINK_SIGNER, receipt
     assert "REVOKED" in receipt["reason"], receipt
+
+
+def test_an_empty_revoked_key_id_is_rejected_before_serving(
+        monkeypatch, keys, capsys):
+    from revl.cli.parser import build_parser
+
+    args = build_parser().parse_args(
+        ["deploy-admit", *_trust_argv(keys, "--revoked-key", "")])
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    rc = deploy.deploy_admit_command(args)
+    assert rc == 1
+    assert "--revoked-key" in capsys.readouterr().err
+
+
+def test_a_revoked_key_id_matching_no_loaded_key_is_rejected_before_serving(
+        monkeypatch, keys, capsys):
+    """A typo in the id leaves the signer trusted, so it is refused when the
+    runner starts instead of admitting the bundle with no signal."""
+    from revl import attest
+    from revl.cli.parser import build_parser
+
+    args = build_parser().parse_args(
+        ["deploy-admit", *_trust_argv(keys, "--revoked-key", "nosuchkey")])
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    rc = deploy.deploy_admit_command(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--revoked-key" in err and "nosuchkey" in err, err
+    # The message offers the id form the chain check uses.
+    assert attest.key_id(SIGNER_KEY) in err, err
 
 
 # ---------------------------------------------------------------------------

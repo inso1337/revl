@@ -4495,8 +4495,8 @@ def _max_age_seconds(value) -> Optional[float]:
 def _not_before_instant(value) -> Optional[float]:
     """Normalize the runner's `--not-before` to a unix instant, or None.
 
-    The CLI accepts the same two spellings :class:`TrustStore` does — a unix
-    timestamp or an ISO-8601 instant — and resolves the string ONCE here, so a
+    The CLI accepts the same two spellings :class:`TrustStore` does, a unix
+    timestamp or an ISO-8601 instant, and resolves the string ONCE here, so a
     typo is a startup error instead of an `evidence-stale` refusal on every
     request the host ever serves."""
     if value is None:
@@ -4529,21 +4529,48 @@ def _capability_ceiling(value) -> Optional[frozenset]:
     return ceiling
 
 
-def _revoked_keys(value) -> frozenset:
-    """The runner's repeatable `--revoked-key` as one revocation set."""
-    return frozenset(str(key_id) for key_id in (value or ()))
+def _revoked_keys(value, key_paths: Sequence[str] = ()) -> frozenset:
+    """The runner's repeatable `--revoked-key` as one revocation set.
+
+    A revocation that names nothing the host trusts is a typo, and a typo here
+    leaves the signer it meant to revoke trusted with no signal, so an empty id
+    and an id that matches no loaded `--key` are refused before serving. The id
+    form is the one the chain check compares: :func:`attest.key_id` of the key
+    file read by :func:`_load_key`, exactly as :func:`serve_admit_request`
+    derives it. A `--key` file that cannot be read has no id to compare, so the
+    match check is skipped then and the unreadable key is reported, per request,
+    as it always was."""
+    revoked = frozenset(str(key_id) for key_id in (value or ()))
+    if "" in revoked:
+        raise ValueError(
+            "--revoked-key takes a key id; an empty id revokes nothing")
+    if not revoked:
+        return revoked
+    loaded: set[str] = set()
+    for path in key_paths:
+        try:
+            loaded.add(attest.key_id(_load_key(path)))
+        except (OSError, RevlError):
+            return revoked
+    unknown = sorted(revoked - loaded)
+    if unknown:
+        raise ValueError(
+            f"--revoked-key {unknown[0]!r} matches no key loaded with --key "
+            f"(loaded ids: {', '.join(sorted(loaded)) or 'none'}); a revocation "
+            f"that names no trusted key would leave the signer trusted")
+    return revoked
 
 
 def deploy_admit_command(args) -> int:
     """`revl deploy-admit [--key PATH]... [--host-key PATH] [--require-gauntlet]
     [--require-conformance] [--max-age SECONDS] [--not-before INSTANT]
     [--capability-ceiling NAME]... [--revoked-key KEY_ID]... [--recheck-source]
-    [--runtime-version NAME=VER]...` — the far-side runner of the deploy
-    orchestration channel (design §1.3 steps 4–5 / step 7).
+    [--runtime-version NAME=VER]...`, the far-side runner of the deploy
+    orchestration channel (design §1.3 steps 4-5 / step 7).
 
     It reads one JSON request per line off stdin, serves each with the host's OWN
     trust configuration (the key files, evidence floor and receiver-side rules
-    named on THIS command line, never anything the request carries — the S2.4
+    named on THIS command line, never anything the request carries; the S2.4
     trust inversion), and writes one JSON reply per line to stdout. A PREPARE
     admit-request runs the chain verify (:func:`serve_admit_request`); a COMMIT
     commit-request runs the load-time measurement (:func:`serve_commit_request`);
@@ -4606,7 +4633,11 @@ def deploy_admit_command(args) -> int:
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    revoked = _revoked_keys(getattr(args, "revoked_key", None))
+    try:
+        revoked = _revoked_keys(getattr(args, "revoked_key", None), key_paths)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     recheck_source = bool(getattr(args, "recheck_source", False))
 
     for raw in sys.stdin:
