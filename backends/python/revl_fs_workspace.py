@@ -955,7 +955,10 @@ def resolve_within(path: str) -> str:
         raise ConfinementError(
             "EOUTSIDE",
             "path escapes the session workspace root",
-            real,
+            # the CALLER's spelling, never `real`: the resolved path expands
+            # every symlink outside the root, a fact about what lives there
+            # (#3184)
+            _sanitized(path),
         )
     return real
 

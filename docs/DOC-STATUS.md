@@ -52,10 +52,10 @@ regenerated rather than edited.
 | README.md | needs-work | 0 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 75 |  |
+| arithmetic.md | needs-work | 6 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 0 |  |
-| audit-diff.md | needs-work | 14 |  |
+| audit-diff.md | needs-work | 12 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
 | backend-go-v3.md | needs-work | 14 | yes |
@@ -84,7 +84,7 @@ regenerated rather than edited.
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
-| design-v2-instances.md | needs-work | 86 |  |
+| design-v2-instances.md | needs-work | 0 |  |
 | design-v2-realms.md | needs-work | 17 |  |
 | distribution-model.md | stale-fixed | 7 |  |
 | environment-binding.md | needs-work | 0 |  |
@@ -147,7 +147,7 @@ regenerated rather than edited.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 81 |  |
+| rejections.md | needs-work | 11 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-anchor.md | current | 0 | written with issue #2723 |
@@ -165,7 +165,7 @@ regenerated rather than edited.
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 89 | yes |
+| stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 13 |  |

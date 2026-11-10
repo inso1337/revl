@@ -1355,8 +1355,28 @@ export class Frame {
     return { type: 'Error', message: String(err) }
   }
 
+  /** One argument of a residue referent as text. `Int` is a `bigint` on this
+   *  tier and `JSON.stringify` THROWS on one, so a bigint renders as its
+   *  decimal digits (no `n`, no quotes: the text the config echo and the other
+   *  tiers write), at any depth. Anything the encoder still cannot render
+   *  falls back to `String(...)`, so recording a residue never throws. */
+  private static showArg(value: unknown): string {
+    try {
+      if (typeof value === 'bigint') return value.toString()
+      if (Array.isArray(value)) return `[${value.map(Frame.showArg).join(',')}]`
+      if (value !== null && typeof value === 'object'
+          && Object.getPrototypeOf(value) === Object.prototype) {
+        const o = value as Record<string, unknown>
+        return `{${Object.keys(o).map((k) => `${JSON.stringify(k)}:${Frame.showArg(o[k])}`).join(',')}}`
+      }
+      return JSON.stringify(value) ?? String(value)
+    } catch {
+      try { return String(value) } catch { return '<unprintable>' }
+    }
+  }
+
   private static referentOf(crossing: Crossing): string {
-    const args = crossing.args.map((a) => JSON.stringify(a)).join(', ')
+    const args = crossing.args.map(Frame.showArg).join(', ')
     return `${crossing.key}.${crossing.method}(${args})`
   }
 

@@ -30138,6 +30138,44 @@ fn taint_top_qualifier(ty: String) -> String {
     return String::from("");
 }
 
+fn taint_holds_qualifier(ty: String, want: &str) -> bool {
+    if ((ty == "") || (!taint_has_qualifier(&ty))) {
+        return false;
+    }
+    if (taint_top_qualifier(ty.clone()) == want) {
+        return true;
+    }
+    let p = ty_parse(ty.clone());
+    if ((p.head == "->") || (p.head == "Fn")) {
+        return false;
+    }
+    let mut i = 0i64;
+    while (i < p.args.revl_length()) {
+        if taint_holds_qualifier((p.args)[(i) as usize].clone(), want) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn taint_source_qualifier(ty: String) -> String {
+    let top = taint_top_qualifier(ty.clone());
+    if ((top == "Untrusted") || (top == "Secret")) {
+        return top;
+    }
+    if (((top != "") || (ty == "")) || (ty_parse(ty.clone()).head == "Retained")) {
+        return String::from("");
+    }
+    if taint_holds_qualifier(ty.clone(), "Untrusted") {
+        return String::from("Untrusted");
+    }
+    if taint_holds_qualifier(ty.clone(), "Secret") {
+        return String::from("Secret");
+    }
+    return String::from("");
+}
+
 fn ir_service_params_json(ps: &[ParamN], raw: &[ParamN]) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -30308,10 +30346,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
-        let rq = taint_top_qualifier(tr.ty.clone());
-        if ((rq == "Untrusted") || (rq == "Secret")) {
-            retQual = rq.clone();
-        }
+        retQual = taint_source_qualifier(tr.ty.clone());
         rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
         if (rawRet == "Criterion") {
             term = String::from("criterion");

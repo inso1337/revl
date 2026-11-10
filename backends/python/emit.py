@@ -6524,6 +6524,29 @@ def _inert(node: Any) -> bool:
     return node.get("kind") in _INERT_ARG_KINDS
 
 
+def named_call_target(node: Any) -> Optional[tuple]:
+    """``(receiver, method)`` the WAL descriptor of the inverse or compensation
+    ``node`` records (`_named_call_kwarg`), or ``None`` for a shape that names
+    no call. `revl recover` reads its declared-inverse set through this same
+    function (`recover_binding.declared_inverses`, issue #3149), so the calls
+    the emitter records and the calls recover accepts cannot drift apart."""
+    if not isinstance(node, dict):
+        return None
+    kind = node.get("kind")
+    if kind == "call" and isinstance(node.get("target"), dict):
+        if node["target"].get("kind") != "req":
+            return None
+        receiver, method = node["target"].get("name"), node.get("method")
+    elif kind == "call" and isinstance(node.get("callee"), dict) \
+            and node["callee"].get("kind") == "var":
+        receiver, method = None, node["callee"].get("name")
+    elif kind == "fn":
+        receiver, method = None, node.get("name")
+    else:
+        return None
+    return (receiver, method) if isinstance(method, str) else None
+
+
 def _named_call_kwarg(node: Any, render: Callable[[dict], str],
                       witness: Optional[str] = None) -> str:
     """The named call an inverse or compensation makes, as the `call=` keyword
@@ -6548,23 +6571,10 @@ def _named_call_kwarg(node: Any, render: Callable[[dict], str],
     inverse, so `compensate tickets.withdraw(t)` was recorded as receiver
     `Agent`, method `tickets`, args `[]`. An unrecognised shape adds nothing and
     keeps that best-effort naming."""
-    if not isinstance(node, dict):
+    target = named_call_target(node)
+    if target is None:
         return ""
-    kind = node.get("kind")
-    receiver = None
-    if kind == "call" and isinstance(node.get("target"), dict):
-        if node["target"].get("kind") != "req":
-            return ""
-        receiver, method = node["target"].get("name"), node.get("method")
-    elif kind == "call" and isinstance(node.get("callee"), dict) \
-            and node["callee"].get("kind") == "var":
-        method = node["callee"].get("name")
-    elif kind == "fn":
-        method = node.get("name")
-    else:
-        return ""
-    if not isinstance(method, str):
-        return ""
+    receiver, method = target
     args = node.get("args") or []
     listed = ", ".join(render(a) for a in args)
     if witness is not None:

@@ -190,6 +190,43 @@ def test_web_taint_to_net_hard_rule_refuses_even_with_approval():
     assert vios and vios[0].kind == "taint-flow"
 
 
+def _value_sender(send: str) -> str:
+    """`_sender` with the tainted send written in VALUE position (issue #3128).
+
+    Lowering erases the `emit` marker on a call written as a value, so the audit
+    edge used to be recorded only for the statement form. The same flow must be
+    refused in every spelling an author can write."""
+    return (
+        _SEND
+        + "component Agent requires s: Sink provides ops: Ops {\n"
+        + "  provide ops {\n"
+        + "    fn go(url) { let page = emit fetch(url)\n"
+        + send
+        + "\n return 0 }\n"
+        + "  }\n"
+        + "}\n"
+    )
+
+
+@pytest.mark.parametrize("send", [
+    "let r = emit s.send(page)",
+    "let r = 1 + (emit s.send(page))",
+    'let r = url == "a" ? emit s.send(page) : 0',
+    'let f = (a: Str) => page\n let r = emit s.send(f("z"))',
+])
+def test_web_taint_to_net_refuses_when_the_emission_is_a_value(send):
+    """Issue #3128: the D2 policy edge is the tainted value reaching the
+    emission, whichever position the emission is written in. Only the
+    statement-arm writer recorded it, so a binding, a nested expression, a
+    ternary arm and a closure-carried value were all admitted under a policy
+    that forbids the flow."""
+    audit = audit_report(compile_source(_value_sender(send), "d2_value.rvl"))
+    pol = parse_policy("web-taint may not reach net", "p.rvl")
+    vios = evaluate(pol, audit)
+    assert vios and vios[0].kind == "taint-flow"
+    assert vios[0].component == "Agent"
+
+
 def test_taint_flow_rule_parses_from_dsl_and_json():
     dsl = parse_policy("model-taint may not reach fs", "p.rvl")
     assert len(dsl.taint_flow_rules) == 1
