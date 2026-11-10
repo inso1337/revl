@@ -1,4 +1,4 @@
-# Int32 — an implemented proposal
+# Int32: an implemented proposal
 
 **Status: implemented on all six tiers.** `Int32` shipped in 954a31eb4 ("Add
 Int32: 32-bit sized integer with trapping overflow, all six tiers"), with the
@@ -189,7 +189,7 @@ with C/TypeScript precedence and a shift count taken mod 32
 
 **Not built:** `%` and the named `div_*` / `mod` on `Int32`; mixed-width
 arithmetic (`Int32 + Int` is refused, so the widening happens only at
-value-flow positions); `Int32` variants of `checked_div_*`; the `Int32`
+value-flow positions and comparison operands); `Int32` variants of `checked_div_*`; the `Int32`
 literal-range diagnostic; flat-storage guarantees for `Int32` arrays; the
 OpenAPI `format: int32` mapping; and the wasm measurement the proposal asks
 for. Each remains a task for a later pass, not a prerequisite of the shipped
