@@ -177,8 +177,6 @@ class _TlsPeer:
     """One loopback HTTPS peer, with its own certificate and key."""
 
     def __init__(self, cert: str, key: str, value: str):
-        peer = self
-
         class _Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
