@@ -34,8 +34,6 @@ the regression of #317), so it has no install step and no path to resolve at
 runtime.
 """
 
-from __future__ import annotations
-
 import sys
 
 # issue #3158 (the regression of #317): `python -c` puts the inherited working
@@ -46,6 +44,11 @@ import sys
 # opened cannot run as the developer. Only `sys.path[0]` is touched, and only
 # the `-c` spelling: a working directory the user put on `PYTHONPATH` themselves
 # is deliberate and is left alone.
+#
+# NOTHING may run before this but `import sys` (a builtin, already loaded by the
+# interpreter): every other import, `from __future__ import ...` included, is a
+# real module import and would resolve from the workspace first. That is why
+# this file carries no `__future__` import; its annotations do not need one.
 if not sys.flags.safe_path and sys.path and sys.path[0] == "":
     del sys.path[0]
 

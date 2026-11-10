@@ -98,15 +98,9 @@ fn the_server_does_not_import_a_revl_package_from_the_repository_it_opens() {
 }
 
 /// The reproduction the issue text gives: the worker source itself, run with
-/// `python3 -c` from a directory holding a `json.py`, with no `-P` to lean on.
-#[test]
-fn the_worker_source_does_not_import_a_json_module_from_its_working_directory() {
-    let Some(reference) = Reference::new() else {
-        return;
-    };
-    let workspace = Scratch::new();
-    workspace.write("json.py", SHADOW);
-
+/// `python3 -c` from the workspace, with no `-P` to lean on. Returns the
+/// version reply and whether the workspace shadow ran.
+fn run_worker_source(reference: &Reference, workspace: &Scratch) -> (String, bool) {
     let mut child = Command::new(&reference.python)
         .arg("-c")
         .arg(WORKER_SOURCE)
@@ -131,13 +125,53 @@ fn the_worker_source_does_not_import_a_json_module_from_its_working_directory() 
         .read_to_end(&mut output)
         .expect("cannot read the worker's reply");
     let _ = child.wait();
+    (
+        String::from_utf8_lossy(&output).to_string(),
+        workspace.ran("HIJACKED"),
+    )
+}
+
+#[test]
+fn the_worker_source_does_not_import_a_json_module_from_its_working_directory() {
+    let Some(reference) = Reference::new() else {
+        return;
+    };
+    let workspace = Scratch::new();
+    workspace.write("json.py", SHADOW);
+
+    let (reply, shadow_ran) = run_worker_source(&reference, &workspace);
 
     assert!(
-        !workspace.ran("HIJACKED"),
+        !shadow_ran,
         "the working directory's json.py ran before the worker's first import \
          (issue #3158, regression of #317)"
     );
-    let reply = String::from_utf8_lossy(&output);
+    assert!(
+        reply.contains("\"ok\": true"),
+        "the worker did not answer a version request from its working \
+         directory: {reply}"
+    );
+}
+
+/// `from __future__ import annotations` is a real module import, and a prelude
+/// in front of the scrub is a second way into the workspace: a `__future__.py`
+/// there ran before the first `sys.path` statement. The worker must not carry
+/// any import above the scrub but the builtin `sys`.
+#[test]
+fn the_worker_source_does_not_import_a_dunder_future_module_from_its_working_directory() {
+    let Some(reference) = Reference::new() else {
+        return;
+    };
+    let workspace = Scratch::new();
+    workspace.write("__future__.py", SHADOW);
+
+    let (reply, shadow_ran) = run_worker_source(&reference, &workspace);
+
+    assert!(
+        !shadow_ran,
+        "the working directory's __future__.py ran before the sys.path scrub \
+         (issue #3158, regression of #317)"
+    );
     assert!(
         reply.contains("\"ok\": true"),
         "the worker did not answer a version request from its working \
