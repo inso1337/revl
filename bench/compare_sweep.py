@@ -13,48 +13,58 @@ Reuses the field groups from compare_runs.py so the two tools cannot drift:
     timing fields    excluded, because they carry warmup rather than outcome
     empty in both    excluded rather than counted as agreement
     token fields     reported per position, never folded into the verdict
-    call_log         compared as a sequence and included in the verdict
+    call_log         compared as a sequence and included in the verdict; at a
+                     position where one record carries it and the other does
+                     not, the position did not reproduce
 
 Reports each position separately and never one aggregate pass. A sweep with
 positions present in only one file is INCOMPLETE (exit 2): a partial sweep
-cannot answer a control defined over all K positions. A position with no
-populated outcome field is refused rather than counted as reproduced.
+cannot answer a control defined over all K positions. Two files that lack the
+SAME position cannot be told apart from complete ones without the expected
+count, so `--reps K` refuses (exit 2) when either file does not cover
+range(K); without it the output says the rep count was not checked. A
+position with no populated outcome field is refused rather than counted as
+reproduced.
 
-Freshness is checked, not asserted: the same file twice or two names for one
-byte-identical file are refused. The tool cannot prove the runs did not
-overlap, and says so.
+Freshness is checked, not asserted: the same file twice, two names for one
+byte-identical file, or a run stamp shared across the two files are refused.
+The tool cannot prove the runs did not overlap, and says so. The driver writes
+`proc_id` once per process and `started_at` per rep at one-second resolution
+(see compare_runs.py for the file and lines), so two reps of one sweep share
+`proc_id` by design and may share `started_at`. Stamps are therefore compared
+only between a record of the original and a record of the fresh sweep, never
+between two records of one file.
 
 Usage:
   python3 bench/compare_sweep.py --orig ORIGINAL.jsonl --fresh FRESH.jsonl
+  python3 bench/compare_sweep.py --orig ORIGINAL.jsonl --fresh FRESH.jsonl \
+      --reps 8
 
 Exit codes:
   0  every shared position reproduced
   1  at least one position did not reproduce (report per position)
-  2  refused: unreadable or duplicate positions, no shared position, the same
-     file or identical bytes, an identity field absent or different, or a
+  2  refused: unreadable or duplicate positions, a line that is not a JSON
+     object, no shared position, a position missing from one file or (with
+     --reps) from range(K), the same file or identical bytes, a run stamp
+     shared across the two files, an identity field absent or different, or a
      position with nothing populated to compare
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from compare_runs import (  # noqa: E402
     ADVISORY, CALL_SEQ, FIELD_SET_NAME, IDENTITY, OUTCOME, TOKENS,
-    distinct_files, file_digest, is_empty, stamp_refusal)
+    distinct_files, file_digest, has_sequence, is_empty, stamp_refusal)
+from compare_runs import load as load_records  # noqa: E402
 
 
 def load(path):
-    try:
-        with open(path, encoding="utf-8") as fh:
-            recs = [json.loads(line) for line in fh if line.strip()]
-    except (OSError, ValueError) as exc:
-        sys.stderr.write("cannot read %s: %s\n" % (path, exc))
-        sys.exit(2)
+    recs = load_records(path)
     if not recs:
         sys.stderr.write("%s holds no records\n" % path)
         sys.exit(2)
@@ -69,6 +79,27 @@ def load(path):
             sys.exit(2)
         by_rep[rep] = rec
     return by_rep
+
+
+def cross_stamp_refusal(orig, fresh, orig_name, fresh_name):
+    """Refuse a run stamp shared between a record of each file.
+
+    Records of one file are never compared with each other: one sweep is one
+    process, so its reps share `proc_id`, and `started_at` is per rep at
+    one-second resolution, so two of its reps can share that too.
+    """
+    for i, ro in sorted(orig.items(), key=lambda item: str(item[0])):
+        for j, rf in sorted(fresh.items(), key=lambda item: str(item[0])):
+            refusal = stamp_refusal(
+                [ro, rf], ["%s rep %r" % (orig_name, i),
+                           "%s rep %r" % (fresh_name, j)])
+            if refusal:
+                return refusal
+    return None
+
+
+def uncovered(by_rep, reps):
+    return [i for i in range(reps) if i not in by_rep]
 
 
 def has_stamps(by_rep):
@@ -93,7 +124,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--orig", required=True, help="the original sweep jsonl")
     ap.add_argument("--fresh", required=True, help="the fresh sweep jsonl")
+    ap.add_argument("--reps", type=int, default=None,
+                    help="the expected rep count K; refuse unless both files "
+                         "cover range(K)")
     a = ap.parse_args(argv)
+    if a.reps is not None and a.reps < 1:
+        sys.stderr.write("refusing: --reps must be at least 1\n")
+        return 2
 
     refusal = distinct_files([a.orig, a.fresh])
     if refusal:
@@ -103,12 +140,18 @@ def main(argv=None):
     orig = load(a.orig)
     fresh = load(a.fresh)
 
-    positions = sorted(set(orig) & set(fresh), key=str)
-    all_records = ([orig[i] for i in positions]
-                   + [fresh[i] for i in positions])
-    labels = (["%s rep %r" % (Path(a.orig).name, i) for i in positions]
-              + ["%s rep %r" % (Path(a.fresh).name, i) for i in positions])
-    refusal = stamp_refusal(all_records, labels)
+    if a.reps is not None:
+        for name, by_rep in ((a.orig, orig), (a.fresh, fresh)):
+            gaps = uncovered(by_rep, a.reps)
+            if gaps:
+                sys.stderr.write(
+                    "refusing: %s does not cover range(%d); reps missing: %s. "
+                    "A partial sweep cannot answer the control.\n"
+                    % (name, a.reps, gaps))
+                return 2
+
+    refusal = cross_stamp_refusal(orig, fresh, Path(a.orig).name,
+                                  Path(a.fresh).name)
     if refusal:
         sys.stderr.write("refusing: %s\n" % refusal)
         return 2
@@ -122,6 +165,11 @@ def main(argv=None):
     print("run stamps: %s" % stamp_ids(orig, "orig"))
     print("            %s" % stamp_ids(fresh, "fresh"))
     print("positions in both sweeps: %s" % positions)
+    if a.reps is None:
+        print("rep count: not checked; pass --reps K to refuse a sweep that "
+              "does not cover range(K)")
+    else:
+        print("rep count: both sweeps cover range(%d)" % a.reps)
     if missing:
         print("POSITIONS PRESENT IN ONLY ONE SWEEP: %s" % missing)
     if not positions:
@@ -162,9 +210,11 @@ def main(argv=None):
                   "in both runs" % (i,))
             continue
 
-        seq_present = not (is_empty(ro.get(CALL_SEQ))
-                           or is_empty(rf.get(CALL_SEQ)))
-        seq_matched = seq_present and ro.get(CALL_SEQ) == rf.get(CALL_SEQ)
+        seq_present = has_sequence(ro) or has_sequence(rf)
+        seq_lacking = [name for name, rec in (("orig", ro), ("fresh", rf))
+                       if seq_present and not has_sequence(rec)]
+        seq_matched = (seq_present and not seq_lacking
+                       and ro.get(CALL_SEQ) == rf.get(CALL_SEQ))
         if seq_present:
             sequence_present += 1
             if seq_matched:
@@ -189,8 +239,11 @@ def main(argv=None):
         for f, x, y in differed:
             print("  DIFFERED %-24s orig=%r fresh=%r" % (f, x, y))
         if not seq_present:
-            print("  call sequence: not present in both records, so it is not "
+            print("  call sequence: not present in either record, so it is not "
                   "compared")
+        elif seq_lacking:
+            print("  DIFFERED call_log                 recorded in one run and "
+                  "absent in %s" % seq_lacking[0])
         elif seq_matched:
             print("  call sequence: identical")
         else:
@@ -214,11 +267,11 @@ def main(argv=None):
     print("\n%d of %d positions reproduced across the two sweeps."
           % (reproduced, len(positions)))
     if sequence_present:
-        print("Call sequence reproduced at %d of %d positions where both "
-              "records carry it." % (sequence_reproduced, sequence_present))
+        print("Call sequence reproduced at %d of %d positions where either "
+              "record carries it." % (sequence_reproduced, sequence_present))
     else:
-        print("Call sequence: no position carries it in both records, so it is "
-              "not compared.")
+        print("Call sequence: no position carries it in either record, so it "
+              "is not compared.")
     if has_stamps(orig) and has_stamps(fresh):
         print("Freshness: distinct files and digests; no run stamp is shared "
               "across the two")

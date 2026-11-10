@@ -18,7 +18,11 @@ Field groups:
   call_log   compared as a sequence and included in the verdict, so a different
              action order is a behavioural difference even when the counters
              match; when the sequence is identical and only `turns` moved, the
-             tool says the calls were packed into different responses
+             tool says the calls were packed into different responses. A
+             sequence recorded in one run and absent (missing or null) in
+             another is a difference, not a skip; the sequence is left out only
+             when no run carries it. A recorded empty list is a value: a run
+             that made no call differs from one that made calls.
 
 A field empty or null in EVERY run is excluded rather than counted as matching.
 Two empty fields agree perfectly and measure nothing, so including them would
@@ -29,6 +33,18 @@ refuses (exit 2) rather than reporting a vacuous reproduction.
 Freshness is checked, not asserted: the same file twice, two names for one
 byte-identical file, or the same recorded run stamp are all refused. The tool
 cannot prove two processes did not overlap, and says so.
+
+What the run stamp is. The withdraw driver that writes these records
+(withdraw_k8_xmodel_resume.py, which is not in this repository) sets
+`PROC_ID = f"{os.getpid()}_{int(_PROC_T0)}"` once per process at line 99 and,
+inside the per-rep loop, `res["proc_id"] = PROC_ID` at line 119 and
+`res["started_at"]` from that rep's own start time `t0` at lines 120-121,
+at one-second resolution. So `proc_id` is per process and `started_at` is per
+rep. Two records from different processes never share `proc_id`, so a shared
+(`proc_id`, `started_at`) pair across two run files is one run recorded twice.
+Two reps of ONE process share `proc_id` by design and can share `started_at`
+when a rep ends within the second it started, so stamps are never compared
+between records of the same file.
 
 Report form is "index N reproduced across M fresh runs on all K compared
 outcome fields", never "the determinism control passed": agreement here is
@@ -42,9 +58,10 @@ Usage:
 Exit codes:
   0  every compared outcome field and the call sequence reproduced
   1  at least one compared outcome field or the call sequence moved
-  2  refused: unreadable or ambiguous input, the same file or identical bytes
-     twice, a repeated run stamp, an identity field absent or different, or a
-     field set with nothing populated to compare
+  2  refused: unreadable or ambiguous input (including a line that is valid
+     JSON but not an object), the same file or identical bytes twice, a
+     repeated run stamp, an identity field absent or different, or a field set
+     with nothing populated to compare
 """
 
 from __future__ import annotations
@@ -80,12 +97,29 @@ FIELD_SET_NAME = "withdraw-cell outcome fields"
 
 
 def load(path):
+    """Every record in a jsonl file, or exit 2 naming the file and line."""
+    records = []
     try:
         with open(path, encoding="utf-8") as fh:
-            return [json.loads(line) for line in fh if line.strip()]
+            for lineno, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError as exc:
+                    sys.stderr.write("cannot read %s line %d: %s\n"
+                                     % (path, lineno, exc))
+                    sys.exit(2)
+                if not isinstance(record, dict):
+                    sys.stderr.write(
+                        "cannot read %s line %d: expected a JSON object, got "
+                        "%s\n" % (path, lineno, type(record).__name__))
+                    sys.exit(2)
+                records.append(record)
     except (OSError, ValueError) as exc:
         sys.stderr.write("cannot read %s: %s\n" % (path, exc))
         sys.exit(2)
+    return records
 
 
 def pick(records, index, path):
@@ -114,6 +148,36 @@ def pick(records, index, path):
 
 def is_empty(value):
     return value is None or value == "" or value == [] or value == {}
+
+
+def has_sequence(record):
+    """True when the record carries a call sequence, even an empty one.
+
+    An empty list is a recorded value (the run made no call), so only a
+    missing key or null counts as absent.
+    """
+    return record.get(CALL_SEQ) is not None
+
+
+def compare_sequences(records, labels):
+    """Compare call sequences; None when no record carries one.
+
+    Otherwise a dict with `matched`, `calls` and `lacking`, the labels of the
+    records that do not carry the sequence while another does. A sequence
+    present on one side and absent on the other is a difference.
+    """
+    lacking = [label for record, label in zip(records, labels)
+               if not has_sequence(record)]
+    if len(lacking) == len(records):
+        return None
+    if lacking:
+        return {"matched": False, "calls": None, "lacking": lacking}
+    first_seq = records[0].get(CALL_SEQ)
+    return {
+        "matched": all(r.get(CALL_SEQ) == first_seq for r in records[1:]),
+        "calls": len(first_seq) if isinstance(first_seq, list) else None,
+        "lacking": [],
+    }
 
 
 def same_file(first, second):
@@ -185,8 +249,10 @@ def run_stamps(records, paths):
     } for record, path in zip(records, paths)]
 
 
-def compare(records, fields):
+def compare(records, fields, labels=None):
     """Return (matched, differed, skipped, identity_bad, sequence)."""
+    if labels is None:
+        labels = ["run %d" % i for i in range(len(records))]
     identity_bad = []
     for field in IDENTITY:
         values = [r.get(field) for r in records]
@@ -202,15 +268,7 @@ def compare(records, fields):
     if identity_bad:
         return [], [], [], identity_bad, None
 
-    sequence = None
-    if all(not is_empty(r.get(CALL_SEQ)) for r in records):
-        first_seq = records[0].get(CALL_SEQ)
-        sequence = {
-            "present": True,
-            "matched": all(r.get(CALL_SEQ) == first_seq
-                           for r in records[1:]),
-            "calls": len(first_seq) if isinstance(first_seq, list) else None,
-        }
+    sequence = compare_sequences(records, labels)
 
     matched, differed, skipped = [], [], []
     for field in fields:
@@ -320,7 +378,7 @@ def main(argv=None):
         field_set = "%s (%d fields)" % (FIELD_SET_NAME, len(fields))
 
     matched, differed, skipped, identity_bad, sequence = compare(
-        records, fields)
+        records, fields, [os.path.basename(p) for p in args.runs])
     if identity_bad:
         for field, values in identity_bad:
             rendered = " ".join(
@@ -362,8 +420,12 @@ def main(argv=None):
 
     sequence_moved = False
     if sequence is None:
-        print("call sequence: not present in every record, so it is not "
+        print("call sequence: not present in any record, so it is not "
               "compared")
+    elif sequence["lacking"]:
+        sequence_moved = True
+        print("DIFFERED  call_log                 recorded in some runs and "
+              "absent in %s" % ", ".join(sequence["lacking"]))
     elif sequence["matched"]:
         calls = (" (%d calls)" % sequence["calls"]
                  if sequence["calls"] is not None else "")

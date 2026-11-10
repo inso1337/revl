@@ -110,8 +110,9 @@ BENCH_DEPENDENT_TESTS = (
     # committed table reproduces, so a bench change must re-run it.
     "tests/test_answer_ledger_2859.py",
     # The run comparison protocol: imports `bench/compare_runs.py` and
-    # `bench/compare_sweep.py` by path and pins the agreement reports they
-    # print, so a bench change can change its verdict.
+    # `bench/compare_sweep.py` by path and checks their exit codes and report
+    # lines on synthetic fixture records (it does not re-derive the committed
+    # receipt's figures), so a bench change can change its verdict.
     "tests/test_bench_compare_runs.py",
     # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
     # loaders and checks they leave one `revl` in the process.

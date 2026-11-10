@@ -17,11 +17,17 @@ honest:
   6. Token movement is reported separately and never decides the verdict.
   7. The action sequence is compared and decides the verdict. A turn-count
      difference with an identical sequence is called a packing difference, and
-     an absent sequence is never called identical.
+     an absent sequence is never called identical. A sequence recorded on one
+     side and absent on the other moved, and an empty recorded sequence is a
+     value, not absence.
   8. A comparison with no populated outcome field is refused rather than
      reported as a vacuous reproduction.
   9. The sweep compares index to index and reports per position, never one
-     aggregate pass; an incomplete sweep is refused.
+     aggregate pass; an incomplete sweep is refused, including (with --reps)
+     two files that lack the same rep.
+ 10. Run stamps are compared across the two sweep files, never between two
+     reps of one process, and a line that is not a JSON object is refused
+     with its line number.
 """
 
 import json
@@ -246,7 +252,7 @@ def test_absent_call_sequence_is_not_called_identical(tmp_path, capsys):
 
     assert compare_runs.main(["--runs", a, b, "--index", "0"]) == 1
     out = capsys.readouterr().out
-    assert "not present in every record" in out
+    assert "not present in any record" in out
     assert "call sequence is IDENTICAL" not in out
 
 
@@ -417,3 +423,132 @@ def test_sweep_duplicate_position_is_refused(tmp_path, capsys):
         compare_sweep.main(["--orig", orig, "--fresh", fresh])
     assert exc.value.code == 2
     assert "holds 2 records for rep=0" in capsys.readouterr().err
+
+
+def test_call_sequence_on_one_side_only_is_a_difference(tmp_path, capsys):
+    a = write(tmp_path, "a.jsonl", [record()])
+    lacking = record()
+    del lacking["call_log"]
+    b = write(tmp_path, "b.jsonl", [lacking])
+
+    assert compare_runs.main(["--runs", a, b, "--index", "0"]) == 1
+    out = capsys.readouterr().out
+    assert "DIFFERED  call_log" in out
+    assert "absent in b.jsonl" in out
+    assert "NOT reproduced" in out
+
+
+def test_empty_recorded_call_sequence_is_a_value(tmp_path, capsys):
+    a = write(tmp_path, "a.jsonl", [record(call_log=[])])
+    b = write(tmp_path, "b.jsonl", [record()])
+
+    assert compare_runs.main(["--runs", a, b, "--index", "0"]) == 1
+    out = capsys.readouterr().out
+    assert "the action sequence changed" in out
+
+
+def test_sweep_call_sequence_on_one_side_only_is_a_difference(
+        tmp_path, capsys):
+    orig = write(tmp_path, "orig.jsonl", [record(rep=0)])
+    fresh = write(tmp_path, "fresh.jsonl", [record(rep=0, call_log=None)])
+
+    assert compare_sweep.main(["--orig", orig, "--fresh", fresh]) == 1
+    out = capsys.readouterr().out
+    assert "absent in fresh" in out
+    assert "0 of 1 positions reproduced" in out
+
+
+def test_sweep_empty_recorded_call_sequence_is_a_value(tmp_path, capsys):
+    orig = write(tmp_path, "orig.jsonl", [record(rep=0, call_log=[])])
+    fresh = write(tmp_path, "fresh.jsonl", [record(rep=0)])
+
+    assert compare_sweep.main(["--orig", orig, "--fresh", fresh]) == 1
+    out = capsys.readouterr().out
+    assert "DIFFERED call_log" in out
+    assert "0 of 1 positions reproduced" in out
+
+
+def test_sweep_reps_refuses_a_rep_missing_from_both_files(tmp_path, capsys):
+    orig = write(tmp_path, "orig.jsonl", [record(rep=0), record(rep=1)])
+    fresh = write(tmp_path, "fresh.jsonl", [record(rep=0), record(rep=1)])
+
+    assert compare_sweep.main(
+        ["--orig", orig, "--fresh", fresh, "--reps", "3"]) == 2
+    err = capsys.readouterr().err
+    assert "does not cover range(3)" in err
+    assert "reps missing: [2]" in err
+
+
+def test_sweep_reps_covered_is_checked_and_named(tmp_path, capsys):
+    orig = write(tmp_path, "orig.jsonl", [record(rep=0), record(rep=1)])
+    fresh = write(tmp_path, "fresh.jsonl", [record(rep=0), record(rep=1)])
+
+    assert compare_sweep.main(
+        ["--orig", orig, "--fresh", fresh, "--reps", "2"]) == 0
+    assert "rep count: both sweeps cover range(2)" in capsys.readouterr().out
+
+
+def test_sweep_without_reps_says_the_count_was_not_checked(tmp_path, capsys):
+    orig = write(tmp_path, "orig.jsonl", [record(rep=0)])
+    fresh = write(tmp_path, "fresh.jsonl", [record(rep=0)])
+
+    assert compare_sweep.main(["--orig", orig, "--fresh", fresh]) == 0
+    assert "rep count: not checked" in capsys.readouterr().out
+
+
+def test_sweep_two_reps_of_one_process_are_not_one_run(tmp_path, capsys):
+    # The driver writes proc_id once per process and started_at per rep at
+    # one-second resolution, so two reps of one sweep can carry the same pair.
+    same = {"proc_id": "4242_1760900000",
+            "started_at": "2026-10-19T19:40:29+00:00"}
+    orig = write(tmp_path, "orig.jsonl",
+                 [record(rep=0, **same), record(rep=1, **same)], stamp=False)
+    fresh = write(tmp_path, "fresh.jsonl", [record(rep=0), record(rep=1)])
+
+    assert compare_sweep.main(["--orig", orig, "--fresh", fresh]) == 0
+    captured = capsys.readouterr()
+    assert "same run stamp" not in captured.err
+    assert "2 of 2 positions reproduced" in captured.out
+
+
+def test_sweep_stamp_shared_across_files_at_another_position_is_refused(
+        tmp_path, capsys):
+    same = {"proc_id": "1_2", "started_at": "2026-10-19T19:40:29+00:00"}
+    orig = write(tmp_path, "orig.jsonl",
+                 [record(rep=0, **same), record(rep=1)], stamp=False)
+    fresh = write(tmp_path, "fresh.jsonl",
+                  [record(rep=0), record(rep=1, **same)], stamp=False)
+
+    assert compare_sweep.main(["--orig", orig, "--fresh", fresh]) == 2
+    assert "same run stamp" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("line", ["[]", "5", '"text"', "null"])
+def test_pair_non_object_line_is_refused_with_its_line_number(
+        tmp_path, capsys, line):
+    a = write(tmp_path, "a.jsonl", [record()])
+    b = tmp_path / "b.jsonl"
+    b.write_text(json.dumps(record(tokens_out=1)) + "\n" + line + "\n",
+                 encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        compare_runs.main(["--runs", a, str(b), "--index", "0"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "b.jsonl line 2" in err
+    assert "expected a JSON object" in err
+
+
+def test_sweep_non_object_line_is_refused_with_its_line_number(
+        tmp_path, capsys):
+    orig = write(tmp_path, "orig.jsonl", [record(rep=0)])
+    fresh = tmp_path / "fresh.jsonl"
+    fresh.write_text("[]\n" + json.dumps(record(rep=0, tokens_out=1)) + "\n",
+                     encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        compare_sweep.main(["--orig", orig, "--fresh", str(fresh)])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "fresh.jsonl line 1" in err
+    assert "expected a JSON object" in err
