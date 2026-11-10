@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -316,33 +317,62 @@ def _source_digests(root: Path) -> dict[str, str]:
             for path in files}
 
 
-def staged_intact(staged: "StagedRelease") -> bool:
-    """Whether a staged tree still holds exactly the files extracted from the
-    verified archive.
+def _extract_source(archive: Path, work: Path) -> Path:
+    """Extract ``archive`` under ``work`` and return its source root.
 
-    The archive's sha256 is checked once, at staging; the extracted files are
-    what compiles, so a reused staging is trusted only when every file still
-    has the digest recorded then, and no file was added or removed. A staging
-    that recorded no digests (an older updater's) is not trusted.
+    A release archive with one top-level directory is staged as that
+    directory's contents, so the source root is the same whether the archive
+    wraps its tree or not.
     """
-    recorded = (staged.provenance.get("sources") or {}).get("files")
-    if not isinstance(recorded, dict):
-        return False
+    extracted = work / "extract"
+    extract_archive(archive, extracted)
+    entries = list(extracted.iterdir())
+    source_root = work / "source"
+    if len(entries) == 1 and entries[0].is_dir():
+        entries[0].rename(source_root)
+    else:
+        extracted.rename(source_root)
+    return source_root
+
+
+def staged_intact(staged: "StagedRelease") -> bool:
+    """Whether a staged tree still holds exactly the files of its archive.
+
+    The extracted files are what compiles, so a reused staging is trusted
+    only when its tree is the one the kept archive extracts to: the archive is
+    copied out of the staging, the copy is hashed against ``staged.digest``
+    and the copy is extracted again, so the bytes compared are the bytes that
+    were hashed. The tree is never compared with the digests in
+    ``provenance.json``: a local writer who can edit a source file can edit
+    that record too. A caller still checks ``staged.digest`` itself against
+    the signed manifest. A planted link, an added, removed or edited file, or
+    an archive that no longer extracts is not intact.
+    """
+    archive = staged.directory / _safe_name(staged.artifact_name)
     try:
+        if not archive.is_file() or archive.is_symlink():
+            return False
         if _walk_files(staged.source_root)[1]:
             return False
-        return _source_digests(staged.source_root) == recorded
-    except OSError:
+        with tempfile.TemporaryDirectory(prefix="revl-staged-check-") as scratch:
+            work = Path(scratch)
+            copy = work / "artifact"
+            shutil.copyfile(archive, copy, follow_symlinks=False)
+            if _sha256(copy) != staged.digest:
+                return False
+            expected = _source_digests(_extract_source(copy, work))
+        return _source_digests(staged.source_root) == expected
+    except (OSError, UpdateError, tarfile.TarError, zipfile.BadZipFile,
+            EOFError):
         return False
 
 
 def staged_artifact_intact(staged: "StagedRelease") -> bool:
     """Whether the staging still holds the artifact archive it recorded.
 
-    The downloaded archive is kept beside the extracted sources. A local
-    writer who can rewrite the extracted tree and ``provenance.json`` can make
-    those two agree; re-hashing the kept archive against the declared sha256,
-    which the signed manifest authenticates, is what catches the substitution.
+    The downloaded archive is kept beside the extracted sources. This checks
+    the archive alone; whether the extracted tree is still that archive's is
+    :func:`staged_intact`, which extracts the archive again and compares.
     """
     path = staged.directory / _safe_name(staged.artifact_name)
     try:
@@ -409,14 +439,7 @@ def stage_release(release: ResolvedRelease, *, home_dir: str | os.PathLike | Non
                 f"{artifact.sha256}, got {actual}",
                 fix="do not retry blindly; the feed or the mirror served "
                     "different bytes than the release names")
-        extracted = work / "extract"
-        extract_archive(artifact_path, extracted)
-        entries = [entry for entry in extracted.iterdir()]
-        source_root = work / "source"
-        if len(entries) == 1 and entries[0].is_dir():
-            entries[0].rename(source_root)
-        else:
-            extracted.rename(source_root)
+        source_root = _extract_source(artifact_path, work)
         files = _rvl_files(source_root)
         manifest_digest = release.manifest.digest() if release.manifest else None
         provenance = {

@@ -584,8 +584,10 @@ def _stage_for_apply(resolved, cfg: dict, journal: Journal):
                 if staged.tag_fallback or staged.digest != artifact.sha256:
                     continue
             # the extracted files are what compiles, so they are checked
-            # against the digests recorded when the verified archive was
-            # extracted; a staging edited since is fetched again, not used
+            # against the kept archive, extracted again once its bytes hash
+            # to the digest the signed manifest declares (checked above);
+            # never against provenance.json, which a writer who edits the
+            # tree can edit too. A staging that differs is fetched again.
             if not staged_intact(staged):
                 journal.append("refusal", stage="reuse",
                                project=staged.project, version=staged.version,
@@ -594,9 +596,7 @@ def _stage_for_apply(resolved, cfg: dict, journal: Journal):
             if (resolved.manifest is not None
                     and not staged_artifact_intact(staged)):
                 # the kept archive no longer hashes to the sha256 the signed
-                # manifest declares: the extracted tree and its provenance can
-                # agree with each other and still not be what the release
-                # published, so the staging is fetched again
+                # manifest declares, so the staging is fetched again
                 journal.append("refusal", stage="reuse-archive",
                                project=staged.project, version=staged.version,
                                directory=str(staged.directory))

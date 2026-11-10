@@ -252,3 +252,37 @@ def test_a_staging_whose_kept_archive_was_rewritten_is_fetched_again(tmp_path):
         feed.close()
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == second.digest
     assert (second.source_root / "app.rvl").is_file()
+
+
+def _rewrite_source_and_its_provenance(staged, name: str, body: str) -> None:
+    """A local writer edits a staged source and the digest recorded for it,
+    and leaves the kept archive alone."""
+    (staged.source_root / name).write_text(body, encoding="utf-8")
+    record = staged.directory / "provenance.json"
+    provenance = json.loads(record.read_text(encoding="utf-8"))
+    provenance["sources"]["files"][name] = hashlib.sha256(
+        body.encode("utf-8")).hexdigest()
+    record.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+                      encoding="utf-8")
+
+
+def test_a_source_rewritten_with_its_provenance_digest_is_not_reused(tmp_path):
+    from revl.update.fetch import staged_intact
+
+    feed = serve_feed(version="1.2.0")
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        first = stage_release(release, home_dir=str(tmp_path))
+        original = (first.source_root / "app.rvl").read_text(encoding="utf-8")
+        _rewrite_source_and_its_provenance(
+            first, "app.rvl", "service Planted { fn x() -> Int }\n")
+        found = find_staged(tmp_path, project="app")[0]
+        # the archive is untouched, so it still hashes to the signed sha256
+        assert staged_artifact_intact(found) is True
+        assert staged_intact(found) is False
+        second = stage_release(release, home_dir=str(tmp_path))
+    finally:
+        feed.close()
+    assert (second.source_root / "app.rvl").read_text(
+        encoding="utf-8") == original
+    assert staged_intact(second) is True

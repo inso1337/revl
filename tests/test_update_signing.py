@@ -211,3 +211,42 @@ def test_keygen_refuses_a_key_inside_the_repository(tmp_path):
     assert refused.returncode != 0
     assert "inside the repository" in refused.stderr
     assert not target.exists()
+
+
+def test_keygen_refuses_an_existing_target_and_leaves_it_alone(tmp_path):
+    target = tmp_path / "release-key.json"
+    target.write_text("an existing key\n", encoding="utf-8")
+    target.chmod(0o644)
+    refused = subprocess.run(
+        [sys.executable, str(TOOL), "keygen",
+         "--private-key-out", str(target), "--force"],
+        cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
+    assert refused.returncode == 2
+    assert "refusing to overwrite" in refused.stderr
+    assert "rotation" in refused.stderr
+    assert target.read_text(encoding="utf-8") == "an existing key\n"
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_an_exclusive_private_identity_write_never_opens_an_existing_file(
+        tmp_path):
+    from revl.peer_identity import write_private_identity
+
+    target = tmp_path / "release-key.json"
+    target.write_text("an existing key\n", encoding="utf-8")
+    target.chmod(0o644)
+    with pytest.raises(FileExistsError):
+        write_private_identity(target, IDENTITY, exclusive=True)
+    assert target.read_text(encoding="utf-8") == "an existing key\n"
+    assert target.stat().st_mode & 0o777 == 0o644
+    # a link at the path is not followed to a file elsewhere
+    elsewhere = tmp_path / "elsewhere.json"
+    link = tmp_path / "linked-key.json"
+    link.symlink_to(elsewhere)
+    with pytest.raises(FileExistsError):
+        write_private_identity(link, IDENTITY, exclusive=True)
+    assert not elsewhere.exists()
+    fresh = tmp_path / "fresh-key.json"
+    write_private_identity(fresh, IDENTITY, exclusive=True)
+    assert fresh.stat().st_mode & 0o777 == 0o600
+    assert load_private_identity(fresh).key_id == IDENTITY.key_id

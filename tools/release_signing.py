@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,7 +97,8 @@ def keygen(private_key_out: str | Path, *, peer_id: str = DEFAULT_PEER_ID,
 
     Returns the entry that belongs in :data:`release_keys.RELEASE_KEYS`. The
     private scalar is written only by ``write_private_identity`` and is never
-    returned or printed.
+    returned or printed. An existing file or link at the target is refused,
+    ``--force`` included, and the file is created with ``O_EXCL``.
     """
     target = Path(private_key_out).expanduser()
     if _inside_repository(target) and not force:
@@ -104,6 +106,11 @@ def keygen(private_key_out: str | Path, *, peer_id: str = DEFAULT_PEER_ID,
             f"refusing to write a private signing key inside the repository "
             f"({ROOT}); choose a path outside it, or pass --force if you "
             f"really mean to keep a test key here")
+    if os.path.lexists(target):
+        raise ValueError(
+            f"refusing to overwrite {target}: a release key that exists is "
+            f"never replaced in place. A lost or retired key is a rotation: "
+            f"generate the new key at a new path and pin it beside the old one")
     started = _utc_now()
     not_before_at = (_parse_instant(not_before, field="--not-before")
                      if not_before is not None else started)
@@ -114,7 +121,7 @@ def keygen(private_key_out: str | Path, *, peer_id: str = DEFAULT_PEER_ID,
             f"--not-before {_format_instant(not_before_at)} is later than "
             f"--not-after {_format_instant(not_after_at)}")
     identity = generate_identity(peer_id)
-    write_private_identity(target, identity)
+    write_private_identity(target, identity, exclusive=True)
     entry = {
         "keyId": identity.key_id,
         "publicKey": identity.public_key.hex(),

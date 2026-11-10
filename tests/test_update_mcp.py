@@ -7,7 +7,9 @@ the widening gate, the tag fallback refusal) still run everywhere.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -585,6 +587,34 @@ def test_a_reused_staging_is_checked_file_by_file(tmp_path):
         assert refusal is None
         source = first.source_root / "cache.rvl"
         source.write_text(CACHE_V2.replace("43", "99"), encoding="utf-8")
+        second, refusal = update_tools._stage_for_apply(
+            release, cfg, Journal(str(tmp_path)))
+    finally:
+        feed.close()
+    assert refusal is None
+    assert (second.source_root / "cache.rvl").read_text(
+        encoding="utf-8") == CACHE_V2
+
+
+def test_a_reused_staging_is_checked_against_its_archive_not_provenance(
+        tmp_path):
+    feed = _release_feed()
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        cfg = {"home": str(tmp_path), "trust_tags": False,
+               "api_base": feed.base_url, "token_env": None}
+        first, refusal = update_tools._stage_for_apply(
+            release, cfg, Journal(str(tmp_path)))
+        assert refusal is None
+        # a local writer edits a source and its digest in provenance.json and
+        # leaves the kept archive, which still matches the signed sha256
+        edited = CACHE_V2.replace("43", "99")
+        (first.source_root / "cache.rvl").write_text(edited, encoding="utf-8")
+        record = first.directory / "provenance.json"
+        provenance = json.loads(record.read_text(encoding="utf-8"))
+        provenance["sources"]["files"]["cache.rvl"] = hashlib.sha256(
+            edited.encode("utf-8")).hexdigest()
+        record.write_text(json.dumps(provenance), encoding="utf-8")
         second, refusal = update_tools._stage_for_apply(
             release, cfg, Journal(str(tmp_path)))
     finally:

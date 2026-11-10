@@ -96,10 +96,12 @@ and Python requirements. Exit codes are stable for automation:
 sha256 and declared size, extracts it safely under the update home
 (`$REVL_UPDATE_HOME`, default `~/.revl/updates`) and writes a
 `provenance.json` beside the sources, with the sha256 of every extracted
-file. A staging is reused only while every file still has that digest and
-none was added or removed, no link was planted in the tree, and the kept
-artifact archive still hashes to the signed manifest's declared sha256;
-otherwise the release is fetched and extracted again. Nothing is compiled and
+file. A staging is reused only while the kept artifact archive still hashes
+to the signed manifest's declared sha256, no link was planted in the tree, and
+the tree holds exactly the files that archive extracts to, byte for byte: the
+archive is extracted again to compare, so an edit to a source file is caught
+even when the digest in `provenance.json` was edited with it. Otherwise the
+release is fetched and extracted again. Nothing is compiled and
 nothing is executed. Extraction refuses absolute paths, `..`, backslashes,
 drive paths, links and device entries, and bounds the archive at 300 MB and
 50,000 files.
@@ -161,7 +163,7 @@ incompatible release or a widening.
    | argument | consents to |
    | --- | --- |
    | `force` | planning the release the composition already runs, again |
-   | `acceptUnknownVersion` | a release that cannot be ordered against the running composition, including the first apply to a composition never updated (`UPDATE_VERSION_UNKNOWN` otherwise); a release older than the last applied one still needs `allowDowngrade` |
+   | `acceptUnknownVersion` | a release that cannot be ordered against the running composition, including the first apply to a composition never updated (`UPDATE_VERSION_UNKNOWN` otherwise); a release older than the last applied one still needs `allowDowngrade`. When no retained generation records an applied release, as after a plain restart, the updater cannot order the release at all and this grant also admits an older release, a replayed older signed manifest included, without `allowDowngrade` |
    | `allowDowngrade` | a release older than the running one (`force` alone is `UPDATE_DOWNGRADE`) |
    | `acceptNotLive` | a release whose manifest says `live: false` (`UPDATE_NOT_LIVE` otherwise) |
    | `acceptIncompatible` | a release whose declared gate, language or Python requirements this host does not meet (`UPDATE_INCOMPATIBLE` otherwise); the running gate still admits or refuses it |
@@ -215,8 +217,9 @@ replaces the gate:
    escape for a manifest that carries no signature at all, never for one whose
    signature fails);
 2. the artifact must hash to the manifest's sha256;
-3. a reused staging's kept archive must still hash to that sha256, so a
-   rewritten staging and provenance pair is fetched again;
+3. a reused staging's kept archive must still hash to that sha256, and its
+   tree must be what that archive extracts to, so a source file rewritten
+   together with its `provenance.json` digest is fetched again;
 4. the running compiler and admission gate must accept the release sources
    before any swap is planned;
 5. the operator surface that applies a staged release is a two-stage call
