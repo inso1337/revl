@@ -27,18 +27,18 @@
 // externs, the same mechanism stdlib/fs.rvl's witnessed externs use.
 //
 // VALUES are always BOUND parameters (`?` + a tuple); a value never becomes
-// statement text. IDENTIFIERS (table and column names) cannot be bound, so the
-// driver validates every identifier it names against the DECLARED model before
-// it builds the schema from them: an identifier outside the declaration, or
-// one that is not a plain SQL name, is refused at open rather than
-// interpolated (see `sq_open`).
+// statement text. IDENTIFIERS (table and column names) cannot be bound, so
+// every statement in the driver takes its identifiers from `conn.ident`, which
+// checks each one against the DECLARED model: a table the declaration does not
+// name, a column it does not declare for that table, or a name that is not a
+// plain SQL name is refused rather than interpolated (see `sq_open`).
 //
 // Every persistence MUTATION is still lowered as a revertible `effect` whose
 // inverse is the EXACT CRUD counterpart: `create` (an INSERT) undoes to DELETE;
 // `update` (an overwrite) restores the value the row held BEFORE the write;
 // `delete` (a DELETE) re-inserts the row it removed. A row written, edited or
 // removed during activation therefore reverts in LIFO order on teardown or
-// ABORT — residue-free, on the new driver. The `abort` lifecycle tests below
+// ABORT, residue-free, on the new driver. The `abort` lifecycle tests below
 // inject a fault after each kind of write and assert the composition reverts
 // with nothing left behind; the file-backed teeth test in the suite observes
 // that the inverses actually ran, not merely that teardown reported clean.
@@ -68,37 +68,46 @@ service Store {
 // driver's `@py` bodies (Minato keeps SQL inside its `sqlite` driver package,
 // never in the model). `sq_open` is an `acquire` extern: it validates the
 // declared identifiers, opens the embedded database and returns the live
-// connection handle, whose site-declared inverse closes it, so the resource is
+// connection handle (which carries the identifier check as `conn.ident`), whose site-declared inverse closes it, so the resource is
 // released on teardown.
 extern acquire fn sq_open() -> Conn undo sq_close(result) = @py {
     import re
     import sqlite3
 
     # A bound parameter protects a VALUE. An identifier (a table or column
-    # name) cannot be bound, so a driver must validate it against the DECLARED
-    # model before it can reach statement text. The declaration below is this
-    # driver's model: table `notes` with columns `id`/`body` (the `type Note`
-    # fields) and the `seq` table `create` draws keys from. An identifier
-    # outside that declaration, or one that is not a plain SQL name, is refused
-    # here rather than interpolated.
+    # name) cannot be bound, so it reaches statement text only through
+    # `conn.ident(table, *columns)`, which checks it against the DECLARED model
+    # below: table `notes` with columns `id`/`body` (the `type Note` fields) and
+    # the `seq` table `create` draws keys from. A table outside that
+    # declaration, a column the declaration does not give that table, or a name
+    # that is not a plain SQL name is refused rather than interpolated. Every
+    # statement in this driver, here and in the externs below, builds its
+    # identifiers through `conn.ident`.
     declared = {"notes": ("id", "body"), "seq": ("n",)}
     plain = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
-    def ident(name):
-        if not plain.match(name):
-            raise ValueError("refused table or column identifier: " + repr(name))
-        return name
+    def refuse(name):
+        raise ValueError("refused table or column identifier: " + repr(name))
 
     for table, columns in declared.items():
         for name in (table,) + tuple(columns):
-            ident(name)
+            if not plain.match(name):
+                refuse(name)
 
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE " + ident("notes") + " ("
-                 + ident("id") + " TEXT PRIMARY KEY, "
-                 + ident("body") + " TEXT)")
-    conn.execute("CREATE TABLE " + ident("seq") + " ("
-                 + ident("n") + " INTEGER PRIMARY KEY AUTOINCREMENT)")
+    class DeclaredConn(sqlite3.Connection):
+        def ident(self, table, *columns):
+            if table not in declared:
+                refuse(table)
+            for column in columns:
+                if column not in declared[table]:
+                    refuse(table + "." + column)
+            return [table] + list(columns)
+
+    conn = sqlite3.connect(":memory:", factory=DeclaredConn)
+    t, i, b = conn.ident("notes", "id", "body")
+    conn.execute("CREATE TABLE " + t + " (" + i + " TEXT PRIMARY KEY, " + b + " TEXT)")
+    s, n = conn.ident("seq", "n")
+    conn.execute("CREATE TABLE " + s + " (" + n + " INTEGER PRIMARY KEY AUTOINCREMENT)")
     conn.commit()
     return conn
 }
@@ -115,7 +124,8 @@ extern pure fn sq_close(conn: Conn) -> Unit = @py {
 // reused, while the `:memory:` example still starts at 0 because the connection
 // closes. (The memory driver's sequence is activation state and drops with it.)
 extern pure fn sq_next_id(conn: Conn) -> Str = @py {
-    cur = conn.execute("INSERT INTO seq DEFAULT VALUES")
+    s = conn.ident("seq")[0]
+    cur = conn.execute("INSERT INTO " + s + " DEFAULT VALUES")
     conn.commit()
     return "note-" + str(cur.lastrowid - 1)
 }
@@ -123,7 +133,9 @@ extern pure fn sq_next_id(conn: Conn) -> Str = @py {
 // A typed point read: the row for `id`, or `None`. `Opt[Note]` crosses the host
 // boundary as the value itself (Some) or `None`.
 extern pure fn sq_get(conn: Conn, id: Str) -> Opt[Note] = @py {
-    row = conn.execute("SELECT id, body FROM notes WHERE id = ?", (id,)).fetchone()
+    t, i, b = conn.ident("notes", "id", "body")
+    row = conn.execute("SELECT " + i + ", " + b + " FROM " + t + " WHERE " + i + " = ?",
+                       (id,)).fetchone()
     if row is None:
         return None
     return {"id": row[0], "body": row[1]}
@@ -132,28 +144,33 @@ extern pure fn sq_get(conn: Conn, id: Str) -> Opt[Note] = @py {
 // The driver-owned listing: a real `SELECT` answers the same `list` verb the
 // memory driver folds by hand. Ascending by `id` keeps the order deterministic.
 extern pure fn sq_list(conn: Conn) -> List[Note] = @py {
-    rows = conn.execute("SELECT id, body FROM notes ORDER BY id").fetchall()
+    t, i, b = conn.ident("notes", "id", "body")
+    rows = conn.execute("SELECT " + i + ", " + b + " FROM " + t + " ORDER BY " + i).fetchall()
     return [{"id": r[0], "body": r[1]} for r in rows]
 }
 
 // The row write and its natural inverse. `sq_insert` is the INSERT; `sq_remove`
 // is the DELETE the `create` effect declares as its `undo`.
 extern pure fn sq_insert(conn: Conn, id: Str, body: Str) -> Unit = @py {
-    conn.execute("INSERT INTO notes (id, body) VALUES (?, ?)", (id, body))
+    t, i, b = conn.ident("notes", "id", "body")
+    conn.execute("INSERT INTO " + t + " (" + i + ", " + b + ") VALUES (?, ?)", (id, body))
     conn.commit()
     return
 }
 
 extern pure fn sq_remove(conn: Conn, id: Str) -> Unit = @py {
-    conn.execute("DELETE FROM notes WHERE id = ?", (id,))
+    t, i = conn.ident("notes", "id")
+    conn.execute("DELETE FROM " + t + " WHERE " + i + " = ?", (id,))
     conn.commit()
     return
 }
 
 // The typed UPDATE: one row, by key, with the new body. The changed value is a
-// BOUND parameter; the statement text carries only the declared identifiers.
+// BOUND parameter; the statement text carries only identifiers `conn.ident`
+// admitted.
 extern pure fn sq_update(conn: Conn, id: Str, body: Str) -> Unit = @py {
-    conn.execute("UPDATE notes SET body = ? WHERE id = ?", (body, id))
+    t, i, b = conn.ident("notes", "id", "body")
+    conn.execute("UPDATE " + t + " SET " + b + " = ? WHERE " + i + " = ?", (body, id))
     conn.commit()
     return
 }
@@ -162,7 +179,9 @@ extern pure fn sq_update(conn: Conn, id: Str, body: Str) -> Unit = @py {
 // inverse of `update` (put the previous body back) and of `delete` (put the
 // removed row back). Its value is bound, never interpolated.
 extern pure fn sq_restore(conn: Conn, id: Str, body: Str) -> Unit = @py {
-    conn.execute("INSERT OR REPLACE INTO notes (id, body) VALUES (?, ?)", (id, body))
+    t, i, b = conn.ident("notes", "id", "body")
+    conn.execute("INSERT OR REPLACE INTO " + t + " (" + i + ", " + b + ") VALUES (?, ?)",
+                 (id, body))
     conn.commit()
     return
 }
@@ -170,7 +189,8 @@ extern pure fn sq_restore(conn: Conn, id: Str, body: Str) -> Unit = @py {
 // The typed DELETE: one row, by key. Its inverse is `sq_restore`, with the
 // value the read observed before the delete.
 extern pure fn sq_delete(conn: Conn, id: Str) -> Unit = @py {
-    conn.execute("DELETE FROM notes WHERE id = ?", (id,))
+    t, i = conn.ident("notes", "id")
+    conn.execute("DELETE FROM " + t + " WHERE " + i + " = ?", (id,))
     conn.commit()
     return
 }
@@ -203,7 +223,10 @@ component SqliteStore provides store: Store {
     // the write, put back by another plain UPDATE (never `sq_remove`, which
     // would drop a row that existed, and never `INSERT OR REPLACE`, which is
     // delete+insert). A missing key is a typed no-op: `None` in, `None` out,
-    // and no effect registered.
+    // and no effect registered. The row returned is built from the key and the
+    // new body, not read back after the write: the read above and the write
+    // commit separately, so this example does not claim the two see one
+    // snapshot.
     fn update(id, draft) {
       let cur = sq_get(db, id)
       if (cur == None) {

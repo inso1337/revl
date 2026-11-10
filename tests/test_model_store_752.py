@@ -38,7 +38,7 @@ Two check layers, mirroring the split used elsewhere in the suite:
 * the lifecycle assertion runs on the real cordis-py runtime when it is
   installed (`sh backends/python/setup.sh`), proving the rows are created,
   read, overwritten, deleted and listable under their store-assigned keys and
-  that teardown reverts them residue-free — the same driver harness as
+  that teardown reverts them residue-free, with the same driver harness as
   tests/test_lifecycle_exec.py.
 """
 
@@ -152,7 +152,7 @@ def test_list_is_a_driver_owned_typed_listing():
 
 def test_update_lowers_to_an_overwrite_effect_that_restores_the_previous_value():
     """Issue #3001: `update` is an overwrite, so its inverse is the value the
-    row held BEFORE the write — admitted as the `Opt` match issue #1980 proves
+    row held BEFORE the write, admitted as the `Opt` match issue #1980 proves
     exact (`Some(v)` restores, `None` removes), never `remove` on its own."""
     ir = compile_files([str(EXAMPLE)])
     update = _provide_method(ir, "MemoryStore", "store", "update")
