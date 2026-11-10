@@ -118,7 +118,10 @@ startup error (`error: revl mcp proxy cannot gate ...: refused the upstream
 `capabilities` in the pin is the client's declared scope. A tool the server
 attests but the pin does not grant is listed as excluded (`outside the pinned
 capability scope`) and cannot be called, so a proxied call can never exceed
-what the client declared for that origin. The scope only narrows: a pinned
+what the client declared for that origin. An empty list grants the whole
+attested manifest, because the pin a server writes carries an empty list and
+the operator narrows it by editing it; a `capabilities` that is not a list of
+tool names is refused when the pin is read. The scope only narrows: a pinned
 tool the server no longer attests, or an attested manifest that differs from
 the pinned one, is still refused as above.
 
@@ -149,8 +152,9 @@ read a relayed record as proof that the responder holds the key now.
 
 The record's expiry is re-checked on every use, not only at connect: a
 long-lived proxy stops relaying a record that expired since, and a pinned proxy
-refuses `initialize`, `tools/list` and `tools/call` rather than keep presenting
-a statement about a moment that has passed.
+refuses `initialize`, `tools/list`, `tools/call` and the forwarded
+`resources/*`, `prompts/*`, `completion/complete` and `logging/setLevel`
+rather than keep presenting a statement about a moment that has passed.
 
 ### The answer is untrusted data
 

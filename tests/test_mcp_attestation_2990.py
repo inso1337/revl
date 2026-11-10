@@ -142,6 +142,32 @@ def test_a_pin_without_a_manifest_is_refused(tmp_path):
     assert "tools" in str(caught.value)
 
 
+@pytest.mark.parametrize("capabilities", ["list_notes", ["list_notes", 3]])
+def test_a_pin_whose_capabilities_are_not_a_list_of_names_is_refused(
+        tmp_path, capabilities):
+    """Review of 6f5f68262: a string scope matched by substring, so a tool
+    named `list` was proxied under `"capabilities": "list_notes"`."""
+    target = tmp_path / "scope.pin.json"
+    att.write_pin(target, dict(_pin(), capabilities=capabilities))
+    with pytest.raises(att.AttestationError) as caught:
+        att.load_pin(target)
+    assert "capabilities" in str(caught.value)
+    assert repr(capabilities) in str(caught.value)
+
+
+def test_a_pin_with_an_empty_capability_list_grants_the_whole_manifest(
+        tmp_path):
+    target = tmp_path / "all.pin.json"
+    att.write_pin(target, _pin())
+    pin = att.load_pin(target)
+    assert pin["capabilities"] == []
+    proxy = _proxy(pin=pin)
+    proxy.manifest = {"tools": TOOLS}
+    proxied, excluded = proxy._classify()
+    assert [t["name"] for t in proxied] == ["list_notes", "delete_note"]
+    assert excluded == []
+
+
 def test_a_manifest_that_lists_one_tool_twice_is_refused():
     twice = [TOOLS[0], dict(TOOLS[0])]
     with pytest.raises(att.AttestationError) as caught:

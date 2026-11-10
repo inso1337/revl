@@ -338,6 +338,18 @@ def load_pin(path) -> dict:
                 "<mcp>", 0,
                 f"the attestation pin {path} has a non-string tool digest",
                 code="MCP-ATTESTATION")
+    # `capabilities` scopes what a pinned proxy serves by tool NAME. A string
+    # in its place would match by substring (`"list" in "list_notes"`), which
+    # widens the scope, so anything but a list of strings is refused.
+    capabilities = document.get("capabilities")
+    if capabilities is not None and (
+            not isinstance(capabilities, list)
+            or not all(isinstance(c, str) for c in capabilities)):
+        raise AttestationError(
+            "<mcp>", 0,
+            f"the attestation pin {path} has capabilities that are not a list "
+            f"of tool names: found {capabilities!r}",
+            code="MCP-ATTESTATION")
     return document
 
 
