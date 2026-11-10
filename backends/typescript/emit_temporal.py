@@ -78,6 +78,7 @@ from typing import Any
 # shared module, keeping a single copy of the emitter machinery (`EmitError`
 # identity, the `_Ctx` counter cell) no matter which entry point dispatched.
 from emit import (  # type: ignore[import-not-found]  # noqa: E402
+    JS_GLOBAL_RESERVED,
     EmitError,
     _Ctx,
     _Scope,
@@ -171,6 +172,20 @@ TEMPORAL_MODULE_RESERVED = frozenset({
     "RevlActivities",
 })
 
+# The module scope an author name may not take is wider than the names the
+# module declares: the scaffolding also READS the host's own globals
+# (`Date.now()` for the compensation budget in the abort path, `String(...)`,
+# `new Set()`, `Array.isArray` and `Object.values` in the redaction helpers).
+# An extern destructured as `Date`, or a component declared as
+# `export async function Date()`, would shadow the global for the whole module,
+# so the abort path would throw before the drain loop and no compensation or
+# residue record would run. `JS_GLOBAL_RESERVED` is the emitter's own list of
+# those globals (`emit.py`), reserved here for this target's module scope,
+# together with the TS lib type `Record` the `Residue` type reads (reserved
+# like the module's own type names above).
+TEMPORAL_MODULE_SCOPE = (TEMPORAL_MODULE_RESERVED | JS_GLOBAL_RESERVED
+                         | frozenset({"Record"}))
+
 # The names the emitted activation body binds for itself: `saga` is the
 # compensation stack the body pushes to, `input` is the config object every
 # `config` read goes through, and `residue`/`step` are the drain's own
@@ -211,19 +226,19 @@ def _check_temporal_names(ir: dict) -> frozenset:
     A config FIELD needs no reservation: it is only ever a property key
     (`input.<field>` and the `{Component}Input` interface), a namespace the
     scaffolding never occupies."""
-    reserved = set(TEMPORAL_MODULE_RESERVED) | set(TEMPORAL_BODY_RESERVED)
+    reserved = set(TEMPORAL_MODULE_SCOPE) | set(TEMPORAL_BODY_RESERVED)
     components = ir.get("components") or []
     component_names = [_ident(comp.get("name"), "component")
                        for comp in components]
     residue_names = {f"{name}Residue": name for name in component_names}
     for comp in components:
         name = _ident(comp.get("name"), "component")
-        if name in TEMPORAL_MODULE_RESERVED:
+        if name in TEMPORAL_MODULE_SCOPE:
             _refuse_reserved(name, "a component")
         residue = f"{name}Residue"
         # the component's `defineQuery` const; it shares module scope with the
         # workflow functions and residue queries of every other component.
-        if residue in TEMPORAL_MODULE_RESERVED or residue in component_names:
+        if residue in TEMPORAL_MODULE_SCOPE or residue in component_names:
             _refuse_reserved(residue, f"the residue query for component {name!r}")
         if name in residue_names:
             _refuse_reserved(name, "a component")

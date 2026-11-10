@@ -430,7 +430,7 @@ This goes in the compiler spec, not the runtimes.
     The self-hosted `selfhost/emit_ts.rvl` does not port the rule yet (pinned
     by `tests/test_selfhost_emit_ts.py::
     test_local_helper_rename_is_a_recorded_port_divergence`).
-  - **temporal target — CLOSED (issue #3187).** The emitted workflow module
+  - **temporal target: CLOSED (issue #3187).** The emitted workflow module
     binds its own scaffolding at module scope (`proxyActivities`,
     `ApplicationFailure`, `setHandler`, `defineQuery`, the retry policies, the
     `recordResidue` sink, the residue types and redaction helpers,
@@ -449,9 +449,14 @@ This goes in the compiler spec, not the runtimes.
     `step`; an activity is destructured at module scope but called inside the
     workflow function, where the generated `const saga`, `const residue` and
     `input` parameter shadow it), any component that would collide with the
-    module scope, and any binding spelled one of the body names. A config
-    field stays allowed: it is only a property key (`input.<field>`), never a
-    bare identifier, so it cannot shadow the scaffolding.
+    module scope, and any binding spelled one of the body names. The module
+    scope also covers the host globals the scaffolding reads (`Date.now()` in
+    the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers):
+    `JS_GLOBAL_RESERVED` and the TS `Record` type are reserved there too, since
+    an extern destructured as `Date` made the abort path throw before any
+    compensation ran. A config field stays allowed: it is only a property key
+    (`input.<field>`), never a bare identifier, so it cannot shadow the
+    scaffolding.
   - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
     `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
     flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding

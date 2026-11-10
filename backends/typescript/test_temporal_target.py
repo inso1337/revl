@@ -21,6 +21,7 @@ saga on a real dev server); Slice 1 goldens the generated code SHAPE.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -383,6 +384,182 @@ def test_near_miss_binding_does_not_shadow_the_saga_stack():
     assert "let saga_: unknown = undefined" in got
     assert "saga_ = await r_open(0n)" in got
     assert 'saga.push({ name: "saga_.undo"' in got
+
+
+# The host globals the scaffolding reads (`Date.now()` in the abort path,
+# `String`/`Set`/`Array`/`Object` in the redaction helpers) plus the ones an
+# extern or component would shadow for every `@ts`-adjacent read in the module.
+_JS_GLOBALS_AT_MODULE_SCOPE = [
+    "Date", "String", "Set", "Promise", "Object", "Array", "Error", "JSON",
+    "Math",
+]
+
+
+@pytest.mark.parametrize("name", _JS_GLOBALS_AT_MODULE_SCOPE)
+def test_extern_named_a_js_global_refused(name):
+    """An extern destructured as `Date` out of `proxyActivities` replaces the
+    global for the whole module: the abort path's `Date.now()` then calls the
+    activity proxy and throws before the drain loop, so no compensation runs
+    and `recordResidue` is never reached."""
+    ir = compile_source(_extern_crossing_src(name), f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", _JS_GLOBALS_AT_MODULE_SCOPE)
+def test_component_named_a_js_global_refused(name):
+    """A component is declared `export async function <name>()` at module
+    scope, so a component named `String` or `Set` shadows the global the
+    redaction helper calls the first time a compensation fails."""
+    ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+# ------------------------------- reserved names derived from the emitted module
+
+# Every author-chosen name in this workflow starts with `zq`, so whatever else
+# the emitted module names is the target's own scaffolding. It exercises the
+# whole template: a service crossing with a compensation, a keyed extern (the
+# second retry group), an acquire bracket, and a config read.
+_SCAFFOLDING_PROBE = (
+    "service ZqLedger { emission fn zqCharge(zqCard: Str) -> Str\n"
+    "                   emission fn zqRefund(zqCard: Str) -> Str }\n"
+    "extern emission idempotent(key: zqCard) fn zqSettle(zqCard: Str) -> Str\n"
+    "  = @ts { return zqCard }\n"
+    "extern pure fn zqClose(zqH: RHandle) = @ts { return }\n"
+    "extern acquire fn zqOpen(zqN: Int) -> RHandle undo zqClose(result)"
+    ' = @ts { return "h" }\n'
+    "component ZqPay requires zqLedger: ZqLedger {\n"
+    '  config { zqLevel: Str = "x" }\n'
+    "  let zqH = effect zqOpen(0) undo zqClose(zqH)\n"
+    '  emit zqLedger.zqCharge("visa") compensate zqLedger.zqRefund("visa")\n'
+    "  emit zqSettle(config.zqLevel)\n"
+    "}\n"
+)
+
+_TS_IDENT = r"[A-Za-z_$][\w$]*"
+
+# Syntax, not bindings: JS keywords plus the TS/contextual words the template
+# writes. Nothing an author can name shadows one of these.
+_TS_SYNTAX = frozenset(EMIT.JS_RESERVED) | {
+    "as", "async", "from", "of", "type", "interface", "string", "number",
+    "boolean", "bigint", "unknown", "any", "never",
+}
+
+
+def _strip_ts_comments_and_strings(code: str) -> str:
+    return re.sub(
+        r"//[^\n]*|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`",
+        lambda m: " " * len(m.group(0)), code)
+
+
+def _brace_span(code: str, start: int) -> tuple[int, int]:
+    """[start, end) from `start` through the brace that closes the first `{`
+    after it."""
+    depth = 0
+    for j in range(code.index("{", start), len(code)):
+        depth += {"{": 1, "}": -1}.get(code[j], 0)
+        if depth == 0:
+            return start, j + 1
+    raise AssertionError("unbalanced braces in the emitted module")
+
+
+def _declared_in(text: str) -> set:
+    names = set(re.findall(rf"\b(?:const|let|var)\s+({_TS_IDENT})", text))
+    names |= set(re.findall(rf"\bcatch\s*\(\s*({_TS_IDENT})", text))
+    params = (re.findall(rf"\bfunction\s+{_TS_IDENT}\s*\(([^()]*)\)", text)
+              + re.findall(r"\(([^()]*)\)\s*=>", text))
+    for group in params:
+        for param in group.split(","):
+            names |= set(re.findall(rf"^\s*({_TS_IDENT})", param))
+    return names
+
+
+def _scaffolding_identifiers():
+    """(names an extern must not take, names a component must not take),
+    read off the emitted module rather than a hand list.
+
+    Collected: every bare identifier in code (not a comment or string, not a
+    `.property`, not an object key or annotated name), minus syntax and the
+    probe's own `zq` names. Left out: names DECLARED in a sealed scope (the
+    redaction helpers and each workflow's catch block) and used nowhere else;
+    no author code is emitted there, so an author name cannot meet them. A
+    component also may take a name the workflow function binds for itself
+    (`saga`, `input`, ...): its function is never called from its own body."""
+    code = _strip_ts_comments_and_strings(EMIT.emit(
+        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal"))
+    seen: dict = {}
+    for m in re.finditer(rf"(?<![\w$])({_TS_IDENT})", code):
+        before = code[:m.start()]
+        if before.endswith(".") and not before.endswith("..."):
+            continue  # a property access, not a binding
+        if re.match(r"\s*\??:", code[m.end():]):
+            continue  # an object/type key or an annotated name
+        seen.setdefault(m.group(1), []).append(m.start())
+    sealed = [_brace_span(code, m.start())
+              for m in re.finditer(r"(?m)^function\s", code)]
+    sealed += [_brace_span(code, m.start())
+               for m in re.finditer(r"\bcatch\s*\(err\)", code)]
+    workflows = [_brace_span(code, m.start())
+                 for m in re.finditer(r"(?m)^export async function\s", code)]
+
+    def only_in(spans, positions):
+        return all(any(a <= pos < b for a, b in spans) for pos in positions)
+
+    sealed_local = set().union(*(_declared_in(code[a:b]) for a, b in sealed))
+    workflow_local = set().union(*(_declared_in(code[a:b]) for a, b in workflows))
+    externs = {
+        name for name, positions in seen.items()
+        if name not in _TS_SYNTAX and not name.lower().startswith("zq")
+        and not (name in sealed_local and only_in(sealed, positions))
+    }
+    return frozenset(externs), frozenset(externs - workflow_local)
+
+
+def test_scaffolding_identifier_collector_sees_every_kind_of_name():
+    """Positive control for the derived tests below: the collector finds an
+    SDK import, a module helper, a host global read only in the abort path, a
+    workflow-body binding, and it leaves out the catch-local `deadline`."""
+    externs, components = _scaffolding_identifiers()
+    assert {"proxyActivities", "redactResidueError", "Date", "String", "Set",
+            "recordResidue", "saga", "input"} <= externs
+    assert "deadline" not in externs and "zqSettle" not in externs
+    assert "Date" in components and "saga" not in components
+
+
+def test_every_scaffolding_identifier_is_refused_as_an_extern_name():
+    """An identifier the emitted module reads or binds where an extern's
+    activity is destructured (module scope) or called (the workflow body) is
+    refused as an extern name. Derived from the emitted module, so a name the
+    template starts using later fails here until it is reserved."""
+    externs, _ = _scaffolding_identifiers()
+    emitted = []
+    for name in sorted(externs):
+        ir = compile_source(_extern_crossing_src(name), f"{name}.rvl")
+        try:
+            EMIT.emit(ir, target="temporal")
+        except EMIT.EmitError as exc:
+            if "reserves" not in str(exc):
+                emitted.append(f"{name}: {exc}")
+        else:
+            emitted.append(name)
+    assert not emitted, f"scaffolding names an extern can still take: {emitted}"
+
+
+def test_every_module_scope_scaffolding_identifier_is_refused_as_a_component():
+    _, components = _scaffolding_identifiers()
+    emitted = []
+    for name in sorted(components):
+        ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
+        try:
+            EMIT.emit(ir, target="temporal")
+        except EMIT.EmitError as exc:
+            if "reserves" not in str(exc):
+                emitted.append(f"{name}: {exc}")
+        else:
+            emitted.append(name)
+    assert not emitted, f"scaffolding names a component can still take: {emitted}"
 
 
 # --------------------------------------------------------------- residue-error redaction (item 421 F7)
