@@ -387,15 +387,20 @@ def _render_report(results: list, report: str, function_specs: list | None = Non
     return json.dumps(payload, indent=2)
 
 
-def _function_spec_report(prop_entries: list,
+def _function_spec_report(ir: dict, prop_entries: list,
                           prop_dossier: dict) -> list:
     """The `function_specs` section of a `revl test --report json` run.
 
     One row per fn whose `ensures` clause this run checked, carrying the spec
     and that run's result. `revl audit --spec-results` reads this section to
     list a function's spec next to its last recorded result
-    (docs/function-specs.md)."""
+    (docs/function-specs.md). Each row carries the digest of the function,
+    clause and file it checked, which the audit recomputes before it shows the
+    recorded result."""
+    from .audit_diff import function_spec_digest  # noqa: PLC0415
+
     by_name = {p.get("name"): p for p in prop_dossier.get("properties") or []}
+    ir_units = {u.get("name"): u for u in ir.get("prop_tests") or []}
     rows = []
     for unit in prop_entries:
         function = unit.get("spec_of")
@@ -404,7 +409,9 @@ def _function_spec_report(prop_entries: list,
         result = by_name.get(unit.get("name")) or {}
         row = {"function": function, "spec": unit.get("spec"),
                "property": unit.get("name"),
-               "status": result.get("status") or "unrun"}
+               "status": result.get("status") or "unrun",
+               "digest": function_spec_digest(
+                   ir, ir_units.get(unit.get("name")) or unit)}
         if result.get("counterexample"):
             row["counterexample"] = result["counterexample"]
         rows.append(row)
@@ -570,7 +577,7 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
             f"{prop_total - prop_failures} of {prop_total} prop test(s) held")
         # issue #2705: the `--report json` record a `revl audit --spec-results`
         # reads back, one row per fn whose `ensures` clause this run checked.
-        function_specs = _function_spec_report(prop_entries, prop_dossier)
+        function_specs = _function_spec_report(ir, prop_entries, prop_dossier)
 
     if report is not None:
         print(_render_report(results, report,

@@ -27,6 +27,10 @@ token is exactly the string printed after the `+` for each addition.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+
 from .cardinality import cardinality
 from .distribute import distributability
 from .inverse import inverse_class, inverse_rank
@@ -220,11 +224,36 @@ def spec_results_from_report(report: dict) -> dict:
         if not function:
             continue
         entry = {"status": row.get("status") or "unrun",
-                 "spec": row.get("spec")}
+                 "spec": row.get("spec"),
+                 "digest": row.get("digest")}
         if row.get("counterexample"):
             entry["counterexample"] = row["counterexample"]
         results[function] = entry
     return results
+
+
+def function_spec_digest(ir: dict, unit: dict) -> str:
+    """The identity a recorded spec result is bound to (issue #2705).
+
+    A sha256 over the function's lowered signature and body (its `functions`
+    entry), the clause, the generated property body and the absolute path of
+    the file the function is declared in. `revl test --report json` records it
+    and `function_specs_table` recomputes it from the program being audited,
+    so a result recorded before the body, the clause or the file changed is
+    never attributed to what the audit is showing now.
+    """
+    function = unit.get("spec_of")
+    entry = next((fn for fn in ir.get("functions") or []
+                  if fn.get("name") == function), None)
+    spec_file = unit.get("spec_file")
+    document = {
+        "file": os.path.abspath(spec_file) if spec_file else None,
+        "function": entry,
+        "spec": unit.get("spec") or "",
+        "property": unit.get("body"),
+    }
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def function_specs_table(ir: dict, results: dict | None = None) -> list:
@@ -246,6 +275,11 @@ def function_specs_table(ir: dict, results: dict | None = None) -> list:
         # a record from a different spelling of the clause is not this spec's
         # result; report `unrun` rather than attributing another claim's check
         if result.get("spec") is not None and result["spec"] != (unit.get("spec") or ""):
+            result = {}
+        # a record is this spec's result only when its digest is the one the
+        # audited program has now: an edited body, a record from another file
+        # with a fn of the same name, or a record with no digest reads `unrun`
+        if result and result.get("digest") != function_spec_digest(ir, unit):
             result = {}
         row = {
             "function": function,

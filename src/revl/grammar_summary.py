@@ -148,7 +148,7 @@ acquire   := 'let' IDENT '=' 'effect' (expr | '{' stmt* expr '}'
              | 'spawn' IDENT ['with' record_literal])   -- spawn: dynamic instance
              ['undo' expr]                             -- G5: undo has no stmt position
 emit_stmt := 'emit' expr ['compensate' expr]            -- also legal in expr position
-fail_stmt := 'fail' STRING                              -- deliberate L-Raise (A8)
+fail_stmt := 'fail' STRING  -- deliberate L-Raise (A8)
 isolate   := 'isolate' IDENT 'in' 'realm(' STRING ')'
 intercept := 'intercept' IDENT 'with' record_literal
 provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))* '}'

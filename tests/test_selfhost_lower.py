@@ -7448,6 +7448,26 @@ def test_a_defaulted_parameter_list_is_marked_sigd_so_its_arity_is_not_counted(a
     assert "argument(s)" not in got, got
 
 
+def test_a_fn_spec_is_a_named_refusal_not_a_parse_error_or_a_dropped_fn(ns, admit):
+    """Issue #2705: the reference accepts `ensures` on a `fn` and lowers it to a
+    generated `prop test`, a section the self-host producer does not emit. The
+    gate refuses the program BY NAME, under UNSUPPORTED, where it used to answer
+    `BAD|expected { after fn signature` while `lower_to_ir` dropped the fn. The
+    controls pin that only the clause is refused: the same fn without it, and
+    `ensures` as an ordinary name, are admitted by both stages."""
+    spec = "fn f(x: Int) -> Int ensures result == x { return x }\n"
+    assert _ref(spec) == ("", "")
+    expected = ("UNSUPPORTED|a function spec (`ensures`) is not supported by "
+                "the self-host compiler")
+    assert admit(spec) == expected
+    assert ns["parse_refusal"](spec) == expected
+    for control in ("fn f(x: Int) -> Int { return x }\n",
+                    "fn ensures(x: Int) -> Int { let ensures = x\n"
+                    "  return ensures }\n"):
+        assert _ref(control) == ("", ""), control
+        assert admit(control) == "", control
+
+
 def test_the_call_layer_stays_silent_where_it_cannot_prove_the_premise(admit):
     """The companion bound: the shapes this slice must NOT decide, each with the
     reason it cannot. A refusal appearing here is a false rejection waiting to

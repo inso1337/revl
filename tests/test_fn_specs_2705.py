@@ -101,11 +101,31 @@ def test_the_spec_can_call_the_function_by_name_instead_of_using_result():
      "needs at least one parameter"),
     ("fn id[T](x: Int) -> Int ensures result == x { return x }",
      "needs concrete parameter types"),
+    # `result` would name the function itself inside the generated property,
+    # which then fails at run time instead of at compile time
+    ("fn result(x: Int) -> Int ensures result == x { return x }",
+     "a function with a spec cannot be named `result`"),
 ])
 def test_a_spec_shape_the_expansion_cannot_express_is_refused(source, message):
     with pytest.raises(RevlError) as excinfo:
         compile_source(source, "t.rvl")
     assert message in str(excinfo.value)
+
+
+@pytest.mark.parametrize("source, where", [
+    ("service S { fn f(x: Int) -> Int ensures result == x }", "a service operation"),
+    ("service S { fn f(x: Int) -> Int }\n"
+     "component C provides s: S {\n"
+     "  provide s { fn f(x) ensures result == x { return x } }\n"
+     "}", "a provided method"),
+    ("extern pure fn f(x: Int) -> Int ensures result == x = @py { return x }",
+     "an extern"),
+])
+def test_a_spec_outside_a_top_level_fn_is_refused_by_name(source, where):
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(source, "t.rvl")
+    assert ("a spec (`ensures`) is only supported on a top-level `fn`, "
+            f"not on {where}") in str(excinfo.value)
 
 
 def test_a_user_prop_test_cannot_share_the_generated_property_name():
@@ -244,6 +264,91 @@ def test_a_recorded_result_from_a_different_spec_spelling_is_not_attributed():
     rows = audit_report(compile_source(PASSING, "t.rvl"),
                         spec_results_from_report(report))["function_specs"]
     assert next(row for row in rows if row["function"] == "min0")["last_result"] == "unrun"
+
+
+CLAMP = """
+fn clamp(x: Int) -> Int ensures result <= 0 {
+  if (x < 0) {
+    return x
+  }
+  return 0
+}
+"""
+
+
+def _record(tmp_path, capsys, name: str, source: str):
+    """Write ``source`` to ``name``, run `revl test --report json` on it and
+    return (source path, report path)."""
+    from revl.__main__ import main
+
+    src = tmp_path / name
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(source, encoding="utf-8")
+    code = main(["test", "--report", "json", str(src)])
+    report = src.with_suffix(".report.json")
+    report.write_text(capsys.readouterr().out, encoding="utf-8")
+    return code, src, report
+
+
+def _audit_line(capsys, src, report) -> str:
+    from revl.__main__ import main
+
+    assert main(["audit", "--spec-results", str(report), str(src)]) == 0
+    return next(line.strip() for line in capsys.readouterr().out.splitlines()
+                if line.strip().startswith("fn clamp ensures"))
+
+
+def test_a_recorded_pass_is_not_shown_after_the_body_changes(tmp_path, capsys):
+    from revl.__main__ import main
+
+    code, src, report = _record(tmp_path, capsys, "spec.rvl", CLAMP)
+    assert code == 0
+    assert _audit_line(capsys, src, report).endswith("(last result: pass)")
+    # the same signature and clause over a body that now breaks the spec
+    src.write_text(CLAMP.replace("return 0", "return 5"), encoding="utf-8")
+    assert main(["test", str(src)]) == 1
+    capsys.readouterr()
+    assert _audit_line(capsys, src, report).endswith("(last result: unrun)")
+
+
+def test_a_record_from_another_file_with_the_same_fn_does_not_match(tmp_path, capsys):
+    code, _, report = _record(tmp_path, capsys, "a/spec.rvl", CLAMP)
+    assert code == 0
+    other = tmp_path / "b" / "spec.rvl"
+    other.parent.mkdir()
+    other.write_text(CLAMP, encoding="utf-8")
+    assert _audit_line(capsys, other, report).endswith("(last result: unrun)")
+
+
+def test_a_record_without_a_digest_does_not_match(tmp_path, capsys):
+    code, src, report = _record(tmp_path, capsys, "spec.rvl", CLAMP)
+    assert code == 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    row = next(r for r in payload["function_specs"] if r["function"] == "clamp")
+    assert row["status"] == "pass"
+    row.pop("digest", None)
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    assert _audit_line(capsys, src, report).endswith("(last result: unrun)")
+
+
+def test_the_ts_tier_compiles_a_spec_fn_and_ignores_the_clause(tmp_path):
+    """Only the py reference tier checks a spec (it runs `prop_tests`). The ts
+    tier emits the fn and the file's tests exactly as it would without the
+    clause: the module is byte-identical."""
+    from revl.__main__ import main
+
+    plain = CLAMP.replace(" ensures result <= 0", "")
+    assert plain != CLAMP
+    outputs = []
+    for name, source in (("spec.rvl", CLAMP), ("plain.rvl", plain)):
+        src = tmp_path / name
+        src.write_text(source + 'test "t" { assert clamp(-1) == -1 }\n',
+                       encoding="utf-8")
+        out = tmp_path / (name + ".ts")
+        assert main(["emit", "--backend", "ts", "-o", str(out), str(src)]) == 0
+        outputs.append(out.read_text(encoding="utf-8"))
+    assert "export function clamp(" in outputs[0]
+    assert outputs[0] == outputs[1]
 
 
 def test_spec_results_is_refused_with_the_policy_and_diff_gates(tmp_path, capsys):

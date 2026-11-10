@@ -2793,10 +2793,29 @@ fn inverse_slots(ts: List[Token], i: Int, depth: Int, acc: Str, fresh: Bool) -> 
   return inverse_slots(ts, i + 1, depth + up - down, acc, false)
 }
 
+// The named refusal for a `fn` that states a spec (issue #2705). Every
+// verdict entry reports it under the UNSUPPORTED tag, the family of the other constructs
+// the reference admits and this compiler does not mirror.
+fn fn_spec_unsupported() -> Str {
+  return "a function spec (`ensures`) is not supported by the self-host compiler"
+}
+
+// A parse-stage refusal as a verdict: BAD, except the named spec refusal.
+fn bad_verdict(msg: Str) -> Str {
+  return tagged(msg == fn_spec_unsupported() ? "UNSUPPORTED" : "BAD", msg)
+}
+
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, i + 1).text
   let ps = fn_params_at(ts, fn_params_i(ts, i))
   var rti = ret_at(ts, ps.i)
+  // issue #2705: the `ensures` clause the reference accepts here is lowered
+  // to a generated `prop test`, a section this producer does not emit. It is
+  // refused BY NAME rather than read as a missing `{`, so the gap is a named
+  // refusal and never a misleading parse error or a silently dropped fn.
+  if (ati(ts, rti, "ensures")) {
+    return mk_step(bad_prog(pg, fn_spec_unsupported()), rti)
+  }
   let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
   if (cachePure) { rti += 2 }
   if (!atk(ts, rti, "{")) {
@@ -23353,7 +23372,7 @@ pub fn parse_refusal(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return pps.v }
   let rph = realm_placeholder_scan(ts)
@@ -23530,7 +23549,7 @@ pub fn admit_src(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   // issue #1897 (`verified` heading anything but `effect`) and issue #1963
   // (an undo-less dotted `effect`): parser refusals, the earlier line first.
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
@@ -23580,7 +23599,7 @@ pub fn admit_all(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  if (pg.bad != "") { return fmt_all([mk_verd(bad_verdict(pg.bad), 0)]) }
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return fmt_all([mk_verd(pps.v, 0)]) }
   let rph = realm_placeholder_scan(ts)
@@ -24502,7 +24521,7 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   // issues #1897 and #1963, as in `admit_src`: parser refusals.
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return pps.v }

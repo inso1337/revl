@@ -11171,10 +11171,21 @@ fn inverse_slots(ts: &[Token], i: i64, depth: i64, acc: String, fresh: bool) -> 
     return inverse_slots(ts, (i).checked_add(1i64).expect("revl: Int overflow"), ((depth).checked_add(up).expect("revl: Int overflow")).checked_sub(down).expect("revl: Int overflow"), acc, false);
 }
 
+fn fn_spec_unsupported() -> String {
+    return String::from("a function spec (`ensures`) is not supported by the self-host compiler");
+}
+
+fn bad_verdict(msg: &str) -> String {
+    return tagged(&(if (msg == fn_spec_unsupported()) { String::from("UNSUPPORTED") } else { String::from("BAD") }), msg);
+}
+
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = fn_params_at(ts.clone(), fn_params_i(&ts, i));
     let mut rti = ret_at(ts.clone(), ps.i);
+    if ati(&ts, rti, "ensures") {
+        return mk_step(bad_prog(pg, fn_spec_unsupported()), rti);
+    }
     let cachePure = (ati(&ts, rti, "cache") && atw(&ts, (rti).checked_add(1i64).expect("revl: Int overflow"), "pure"));
     if cachePure {
         rti = (rti).checked_add(2i64).expect("revl: Int overflow");
@@ -28929,7 +28940,7 @@ pub fn parse_refusal(src: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return tagged("BAD", &pg.bad);
+        return bad_verdict(&pg.bad);
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {
@@ -29080,7 +29091,7 @@ pub fn admit_src(src: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return tagged("BAD", &pg.bad);
+        return bad_verdict(&pg.bad);
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {
@@ -29124,7 +29135,7 @@ pub fn admit_all(src: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return fmt_all(&(vec![mk_verd(tagged("BAD", &pg.bad), 0i64)]));
+        return fmt_all(&(vec![mk_verd(bad_verdict(&pg.bad), 0i64)]));
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {
@@ -29602,7 +29613,7 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return tagged("BAD", &pg.bad);
+        return bad_verdict(&pg.bad);
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {

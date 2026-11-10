@@ -6377,7 +6377,8 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
         stmts = [LetStmt("result", call, False, spec.line),
                  AssertStmt(spec.expr, spec.line)]
         units.append(_unit(name, fn.params, stmts, decl_file, callables,
-                           {"spec_of": fn.name, "spec": spec.text}))
+                           {"spec_of": fn.name, "spec": spec.text,
+                            "spec_file": decl_file}))
     return units
 
 

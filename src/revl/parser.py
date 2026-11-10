@@ -1833,7 +1833,7 @@ def _tokens_text(toks: list) -> str:
 
 @dataclass
 class EnsuresClause:
-    """`ensures <expr>` on a `fn` (issue #2705) — the function's spec.
+    """`ensures <expr>` on a `fn` (issue #2705): the function's spec.
 
     The clause is a pure boolean expression over the fn's parameters, plus the
     name `result` for the value the body returns. It is SUGAR: lowering
@@ -3683,6 +3683,8 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        if self.at("ident", "ensures"):
+            raise self._spec_outside_fn("an extern")
         # item 310: the `cache` trailing clause, after the return type and before
         # the teardown clauses (design §Surface: "before `=` or `undo`"). Grammar-
         # legal but admission-refused for externs until the interior-crossing slice
@@ -4797,6 +4799,8 @@ class Parser:
                     )
                 termination = "criterion" if returns == "Criterion" else "guard"
                 returns = "Opt[Bool]"
+            if self.at("ident", "ensures"):
+                raise self._spec_outside_fn("a service operation")
             # item 310: the `cache` trailing clause, after the return type. `cache`
             # is a contextual keyword recognised only here, so a method with no
             # cache clause is byte-identical and a service using `cache` as a key
@@ -8175,7 +8179,7 @@ class Parser:
         # (docs/function-specs.md).
         ensures = None
         if self.at("ident", "ensures"):
-            ensures = self._ensures_clause(params, type_params)
+            ensures = self._ensures_clause(name, line, params, type_params)
         # item 310: the `cache` trailing clause, between the return type and the
         # body. Only `cache pure` is legal on a plain `fn` (checked in lower); the
         # clause slot is unambiguous (a fn body opens with `{`, never `cache`).
@@ -8219,7 +8223,7 @@ class Parser:
                       idents=_idents_between(self.toks, start, self.pos))
 
 
-    def _ensures_clause(self, params: list[FnParam],
+    def _ensures_clause(self, fn_name: str, fn_line: int, params: list[FnParam],
                         type_params: list[str]) -> EnsuresClause:
         """Parse `ensures <expr>` (issue #2705), the fn's spec.
 
@@ -8236,6 +8240,12 @@ class Parser:
             raise self.err(line, "`ensures` needs an expression",
                            hint="write the claim the function must satisfy over its "
                                 "parameters, e.g. `ensures result == a + b`")
+        if fn_name == "result":
+            raise self.err(
+                fn_line,
+                "a function with a spec cannot be named `result`",
+                hint="`result` names the value the function returns inside its "
+                     "`ensures` clause; rename the function")
         for param in params:
             if param.name == "result":
                 raise self.err(
@@ -8259,6 +8269,17 @@ class Parser:
                      "calls the generic one")
         return EnsuresClause(expr, text, line)
 
+
+    def _spec_outside_fn(self, where: str) -> RevlError:
+        """The refusal for `ensures` after a signature that is not a top-level
+        `fn` (issue #2705). A spec is checked as a `prop test` that calls the
+        function with generated inputs, which only a top-level `fn` can be; say
+        so rather than let the clause fall through to a grammar complaint."""
+        return self.err(
+            self.peek().line,
+            f"a spec (`ensures`) is only supported on a top-level `fn`, not on {where}",
+            hint="state the claim on a top-level `fn` and call that from here "
+                 "(docs/function-specs.md)")
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
@@ -9906,6 +9927,8 @@ class Parser:
             if self.at("arrow"):
                 self.next()
                 returns = self.type_()
+            if self.at("ident", "ensures"):
+                raise self._spec_outside_fn("a provided method")
             if self.at("="):
                 eq = self.next()
                 # issue #2187: `fn m(..) = { <statement> … }` is a block body

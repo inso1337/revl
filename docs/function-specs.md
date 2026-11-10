@@ -48,7 +48,15 @@ than silently skipped:
   parameter types);
 - the parameter types must be generatable, exactly as a `prop test`'s are;
 - a generic function is refused, because a spec needs the concrete parameter
-  types the generator derives values from.
+  types the generator derives values from;
+- a function named `result` is refused, for the same reason a parameter of
+  that name is.
+
+A spec is only supported on a **top-level `fn`**. `ensures` on a service
+operation, a provided method or an extern is refused by name: the check is a
+`prop test` that calls the function with generated inputs, which only a
+top-level `fn` can be. To state a claim about a method, write it on a top-level
+`fn` and call that from the method.
 
 ## 2. What it checks
 
@@ -98,6 +106,13 @@ function specs (last recorded result):
   fn min0 ensures result <= 0  (last result: pass)
   fn min1 ensures result <= 0  (last result: fail)
 ```
+
+Each recorded row carries a `digest`: a sha256 over the function's signature
+and body, the clause and the path of the file it is declared in. The audit
+recomputes it from the program it is auditing and shows a recorded result only
+when the two agree. A record taken before the body or the clause changed, a
+record for a function of the same name in another file, and a record with no
+digest all read `unrun`, never the old result.
 
 Without `--spec-results`, every spec is listed with `last result: unrun`.
 `unrun` is not a failure and not a pass; it says no recorded run has checked the
