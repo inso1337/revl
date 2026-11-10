@@ -1670,7 +1670,14 @@ class _Generator:
             returns = f" -> {operation.returns}" if operation.returns else ""
             head = f"{operation.method.upper()} {operation.path}"
 
-            ops.append(f"  // {head}" + (f" — {operation.summary}" if operation.summary else ""))
+            # the path is the raw key of `paths` and, unlike the metadata in
+            # the header and the stub bodies, it reached this `//` comment
+            # unresolved: force the operation line single-line so a line
+            # terminator in a path key cannot end the comment and inject
+            # compiled source (item 416f).
+            ops.append(f"  // {_comment_safe(head)}"
+                       + (f" — {_comment_safe(operation.summary)}"
+                          if operation.summary else ""))
             ops.append(f"  // {operation.reason}")
             if operation.idempotent:
                 # the delivery claim, stated as a claim — same footing as the

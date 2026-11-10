@@ -11,7 +11,7 @@ import json
 import re
 
 
-_COMMENT_LINE_BREAK = re.compile("[\r\n  ]+")
+_COMMENT_LINE_BREAK = re.compile(r"[\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]+")
 
 
 def _comment_safe(text: object) -> str:
@@ -31,11 +31,14 @@ def _comment_safe(text: object) -> str:
     `info.title`, `info.version`, `openapi` and `servers[].url`.
 
     A comment is single-line by construction, so the fix is to make every
-    document-derived value that reaches a comment single-line too: CR, LF and
-    the Unicode line separators U+2028/U+2029/U+0085 (honoured by some readers
-    and by `str.splitlines`) all become a space. This only narrows the comment
-    text; it changes nothing about the typed boundary the importer generates,
-    which never interpolates these strings."""
+    document-derived value that reaches a comment single-line too: everything
+    `str.splitlines` treats as a line boundary (CR, LF, VT, FF, FS, GS, RS,
+    U+0085, U+2028, U+2029) becomes a space. All of these are line boundaries
+    for `str.splitlines`, which the emitters use to split a verbatim body;
+    leaving any of them in a comment would let the emitted module execute text
+    the `.rvl` source shows as a comment (issue #3131). This only narrows the
+    comment text; it changes nothing about the typed boundary the importer
+    generates, which never interpolates these strings."""
     return _COMMENT_LINE_BREAK.sub(" ", str(text))
 
 
