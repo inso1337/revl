@@ -42,9 +42,10 @@ six-tier fault on a `to_int32` out of range.
        element, variant payload, comparison/equality operand, `.to_str()`
        receiver and service-boundary value (docs/wasm-capabilities.md). The
        rendering fence is unchanged: `$f64_to_str` renders NaN, Infinity and
-       integer-valued finites, and non-integer finites are still refused
-       because the canonical shortest-round-trip renderer is not implemented
-       there (docs/strings.md).
+       integer-valued finites; a non-integer finite now emits and TRAPS at
+       run time (`unreachable`), because the canonical shortest-round-trip
+       renderer is not implemented there (docs/strings.md,
+       docs/wasm-capabilities.md).
 
     3. `?.to_int()` / `?.to_str()` / `?.to_int32()` on ts  **TypeError at run time**
 

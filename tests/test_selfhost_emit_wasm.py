@@ -43,7 +43,7 @@ variants — string literals pool into ``data`` and move ``heap_start``, and eac
 value threads ``$alloc``/``_str_ptr``/the nested scratch-pointer stack); Float
 end to end (the REFERENCE lowers it as a native f64 since issue #3295, but this
 port's scalar slice still names ``/`` as ``<<UNSUPPORTED-TRUE-DIVISION:Float>>``
-and carries no ``f64`` lowerings — a named port gap, not a reference refusal; a
+and carries no ``f64`` lowerings: a named port gap, not a reference refusal; a
 ``${aFloat}`` part also pulls in ``$f64_to_str``); every
 ``builtin``/``len`` node
 (``.to_int()`` widening is a ``builtin``, not a bare ``widen`` marker) and the
@@ -96,7 +96,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -520,6 +520,10 @@ def test_true_division_lowers_on_the_reference_but_is_a_named_port_gap(
     assert "(f64.div)" in joined, joined
     assert "(i64.div_s" not in joined, (
         "`/` went back to the silent integer quotient: it must be f64 division")
+    remainder = reference.emit(compile_source(
+        "fn rem(a: Int, b: Int) -> Int { return a % b }"))["functions"]
+    assert "(i64.rem_s)" in remainder, (
+        "integer `%` must stay the trapping i64.rem_s, not move to f64 with `/`")
     got = emitted["emit_wasm_src"](ir)
     assert [line.strip() for line in got.splitlines() if "<<" in line] == [
         "<<UNSUPPORTED-TRUE-DIVISION:Float>>",

@@ -62,7 +62,7 @@ regenerated rather than edited.
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 0 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 42 |  |
+| backends-roadmap.md | needs-work | 41 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
@@ -185,7 +185,7 @@ regenerated rather than edited.
 | verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 0 |  |
-| wasm-capabilities.md | needs-work | 43 | yes |
+| wasm-capabilities.md | needs-work | 39 | yes |
 | webapp-competitiveness-report.md | needs-work | 33 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |

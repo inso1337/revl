@@ -20,7 +20,7 @@ Lowering — the paper's §6.7 state machine, literally:
   the linker binding itself, alive through this component's whole teardown.
 
 Widths: `Int` is **i64** — 64-bit two's complement with trapping overflow, as
-docs/arithmetic.md specifies for every tier — and `Float` is the native **f64**.
+docs/arithmetic.md specifies for every tier, and `Float` is the native **f64**.
 Linear-memory *addresses* stay i32 (wasm32 addressing is 32-bit), as do Bool,
 Int32 and the internal counters, so this emitter deliberately uses several
 widths and `_wasm_ty` is the single place that decides which.

@@ -116,11 +116,12 @@ export class CordisHost {
   unload(name) {
     const record = this.#components.get(name);
     if (!record) return false;
-    if (record.state === "active") {
-      if (typeof record.exports.deactivate === "function") record.exports.deactivate();
-      for (const [opKey, provider] of this.#providers) {
-        if (provider.component === name) this.#providers.delete(opKey);
-      }
+    if (record.state === "active" && typeof record.exports.deactivate === "function") {
+      record.exports.deactivate();
+    }
+    // withdrawn in every state, so no provision can outlive its component
+    for (const [opKey, provider] of this.#providers) {
+      if (provider.component === name) this.#providers.delete(opKey);
     }
     this.#components.delete(name);
     return true;
@@ -173,17 +174,25 @@ export class CordisHost {
         }
       }
     }
-    record.state = "active";
-    record.missing = [];
+    // Every provision is checked for a conflict BEFORE any is published, so a
+    // component that fails here leaves nothing registered for another
+    // component to activate against or call into.
+    const provisions = [];
     for (const [exportName, fn] of Object.entries(instance.exports)) {
       if (!exportName.startsWith(PROVIDE_PREFIX)) continue;
       const opKey = exportName.slice(PROVIDE_PREFIX.length);
       const existing = this.#providers.get(opKey);
       if (existing) {
         record.state = "failed";
+        if (typeof instance.exports.deactivate === "function") instance.exports.deactivate();
         throw new Error(
           `provision conflict on ${opKey}: ${existing.component} already provides it`);
       }
+      provisions.push([opKey, fn]);
+    }
+    record.state = "active";
+    record.missing = [];
+    for (const [opKey, fn] of provisions) {
       this.#providers.set(opKey, { component: record.name, fn });
     }
     this.#log(`active ${record.name}`);
@@ -192,7 +201,9 @@ export class CordisHost {
 
   #resolve(key, op) {
     const host = this.#hostCoeffects.get(key);
-    if (host && typeof host[op] === "function") return host[op];
+    // own properties only: an inherited `constructor` or `toString` is a
+    // function on every object, not an op the host provided
+    if (host && Object.hasOwn(host, op) && typeof host[op] === "function") return host[op];
     const provider = this.#providers.get(`${key}.${op}`);
     return provider ? provider.fn : null;
   }

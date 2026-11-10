@@ -293,12 +293,12 @@ def test_a_classification_expires_when_the_refusal_is_reworded():
     for a cell. A rewritten refusal drops back to unclassified instead of
     inheriting it, which is what stops this table becoming a place to silence
     a cell once and forget it."""
-    case = "wasm::expr/true division"
+    case = "wasm::type/Map service"
     entry = conformance.tier_limits()[case]
     assert conformance.classify_refusal(
-        "wasm", "expr/true division", entry["message_prefix"] + " ...") == "limit"
+        "wasm", "type/Map service", entry["message_prefix"] + " ...") == "limit"
     assert conformance.classify_refusal(
-        "wasm", "expr/true division", "a completely different refusal") == "refused"
+        "wasm", "type/Map service", "a completely different refusal") == "refused"
 
 
 def test_every_classification_names_a_real_case_and_a_reason():
@@ -311,3 +311,17 @@ def test_every_classification_names_a_real_case_and_a_reason():
         assert case in labels, f"{key} names no case in the corpus"
         assert len(entry.get("reason", "")) > 40, key
         assert entry.get("message_prefix"), key
+
+
+def test_every_classification_still_licenses_a_refusing_cell():
+    """An entry whose cell now emits is a licence nobody needs any more, and it
+    is worse than dead: if that tier regressed into the same refusal, the cell
+    would read as a deliberate `lim` instead of an unclassified refusal. So
+    every entry must still match a cell the tier actually refuses."""
+    report = conformance.run()
+    for key in conformance.tier_limits():
+        tier, _, case = key.partition("::")
+        row = next(row for row in report["cases"] if row["case"] == case)
+        assert row["emit_kind"][tier] == "limit", (
+            f"{key} classifies a cell the tier no longer refuses "
+            f"({row['emit_kind'][tier]}): delete the entry")

@@ -33,7 +33,7 @@ per element, exported through the module's `memory` so a host can read results.
 | variant / `Opt[T]` / `Result[T, E]` | `i32` pointer to a `[u32 tag][pad][payload]` cell | yes, as a pointer |
 | `Unit` (void op) | no slot | yes (absent) |
 | `Float` | native `f64` value; in an 8-byte slot its IEEE-754 bit pattern (`i64.reinterpret_f64`) | yes, by value |
-| `Map[K, V]` | **stays out** — a persistent map needs a richer value model than the canonical ABI (see "Why Map stays out") | no |
+| `Map[K, V]` | **stays out**: a persistent map needs a richer value model than the canonical ABI (see "Why Map stays out") | no |
 | function types | **no representation** (wasm MVP: no closures/function references) — arrows called where they are bound still lower, inlined at the call site | no |
 
 The gate is `_check_type` in `backends/wasm/emit.py`: it accepts
@@ -53,6 +53,19 @@ has. Arithmetic and comparison are the native `f64.*` instructions
 (docs/arithmetic.md), `/` is true division over Ints too, and `%` is an exact
 `$f64_mod` (C fmod).
 
+### Limitation: rendering a non-integer Float traps at run time
+
+Turning a Float into text goes through `$f64_to_str`, which renders NaN,
+Infinity and integer-valued finites only; the shortest round-trip renderer for
+other finites is not implemented on this tier (docs/strings.md). Before Float
+lowered, a document that rendered `7 / 2` was refused when the module was
+built. Now it emits, and the render traps at run time instead: both
+`` `${7 / 2}` `` and `(7 / 2).to_str()` validate and then execute `unreachable`,
+while `` `${8 / 2}` `` renders without trapping. A module that renders a
+Float should therefore be run on its real inputs, not only validated. A failed `assert` on
+this tier traps in every case and carries no left/right report, so a failing
+Float comparison reads as a wasm trap there as any failed assertion does.
+
 ### Why Map stays out
 
 `Map[K, V]` is still refused, by name, and this is a design decision rather
@@ -60,8 +73,8 @@ than an unimplemented case. The tier's values are canonical-ABI cells: a u32
 count then one 8-byte slot per element, addressed positionally, with no
 representable key hash, no persistent-tree node, and no per-key comparison an
 untagged slot could perform (`List.indexOf` is refused for the same reason).
-A persistent map therefore needs a new value model — key equality, hashing and
-structural sharing — not just another slot encoding. Components that need one
+A persistent map therefore needs a new value model (key equality, hashing and
+structural sharing), not just another slot encoding. Components that need one
 should use a hosted backend (or express the state through coeffects on this
 tier). `Map.new`/`Pool.open` host builtins stay refused with it.
 
@@ -395,7 +408,7 @@ instead of only on the Python cordis-wasm runtime:
 - a module's `coeffect:<key>` imports are bound to host operations
   (`host.provideHost(key, ops)`) or to another loaded component's
   `provide:<key>.<op>` export;
-- a component whose imports do not resolve is **gated** — its module is
+- a component whose imports do not resolve is **gated**: its module is
   compiled but no instance is created. Supplying the op activates it;
 - `activate_step()` drives activation, `deactivate()` runs the compiled
   inverses on unload, and provisions are published only after activation;

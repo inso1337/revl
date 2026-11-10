@@ -39,3 +39,72 @@ assert.equal(host.state("Cart"), "absent");
 assert.throws(() => host.call("Cart", "provide:motion.step", 0), /not loaded/);
 
 console.log("browser host: ok");
+
+// ---------------------------------------------------------------------------
+// Gating and provision edge cases, over tiny modules built byte by byte here
+// (node has no WAT parser). Every function has type () -> i32 and either
+// returns a constant or calls a function index.
+
+function wasmModule({ imports = [], funcs = [] }) {
+  const text = (s) => [s.length, ...new TextEncoder().encode(s)];
+  const section = (id, items) => {
+    const body = [items.length, ...items.flat()];
+    return [id, body.length, ...body];
+  };
+  const code = funcs.map((f) => {
+    const ops = "call" in f ? [0x10, f.call] : [0x41, f.value];
+    const body = [0x00, ...ops, 0x0b];
+    return [body.length, ...body];
+  });
+  return new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    ...section(1, [[0x60, 0x00, 0x01, 0x7f]]),
+    ...section(2, imports.map(([mod, name]) => [...text(mod), ...text(name), 0x00, 0x00])),
+    ...section(3, funcs.map(() => [0x00])),
+    ...section(7, funcs.map((f, i) => [...text(f.export), 0x00, imports.length + i])),
+    ...section(10, code),
+  ]);
+}
+
+// An inherited property of the ops object is not a provided op: `constructor`
+// and `toString` are functions on every object, and must stay refused.
+{
+  const edge = new CordisHost();
+  edge.provideHost("clock", { frame_dt: () => 0 });
+  for (const op of ["constructor", "toString"]) {
+    const bytes = wasmModule({
+      imports: [["coeffect:clock", op]],
+      funcs: [{ export: "probe", call: 0 }],
+    });
+    await edge.load(`Inherit_${op}`, bytes);
+    assert.equal(edge.state(`Inherit_${op}`), "gated",
+      `an inherited ${op} must not satisfy the coeffect:clock import`);
+    assert.deepEqual(edge.missing(`Inherit_${op}`), [`clock.${op}`]);
+  }
+}
+
+// A component that fails on a provision conflict publishes NONE of its
+// provisions, so nothing can activate against it or call into it.
+{
+  const edge = new CordisHost();
+  await edge.load("A", wasmModule({ funcs: [{ export: "provide:m.b", value: 1 }] }));
+  assert.equal(edge.state("A"), "active");
+  await assert.rejects(
+    edge.load("B", wasmModule({ funcs: [
+      { export: "provide:m.c", value: 2 },
+      { export: "provide:m.b", value: 3 },
+    ] })),
+    /provision conflict on m\.b/);
+  assert.equal(edge.state("B"), "failed");
+  await edge.load("U", wasmModule({
+    imports: [["coeffect:m", "c"]],
+    funcs: [{ export: "probe", call: 0 }],
+  }));
+  assert.equal(edge.state("U"), "gated",
+    "U must not activate against a provision of the failed component B");
+  assert.deepEqual(edge.missing("U"), ["m.c"]);
+  assert.equal(edge.unload("B"), true);
+  assert.equal(edge.state("U"), "gated");
+}
+
+console.log("browser host edge cases: ok");
