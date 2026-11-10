@@ -90,6 +90,97 @@ def test_refused_at_an_llm_prompt():
     _refuses(_agent("      let t = emit charge(u)\n      let r = emit prompt(t)"))
 
 
+def test_refused_through_a_closure_capture_at_a_log():
+    """Issue #3110: a closure CAPTURE is a carrier. `f("z")` is called with a
+    clean literal, but the callee VALUE holds the `Secret[T]`. The callee value's
+    taint joins for every indirect call, INDEPENDENT of `any_sink`, so this
+    sink-free program (it declares no `Trusted[T]` sink) refuses."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => t\n"
+        "      let x = emit logit(f(\"z\"))"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_through_a_closure_capture_at_an_llm_prompt():
+    """The same carrier at the prompt crossing: the captured value reaches the
+    model context through a clean argument list."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => t\n"
+        "      let r = emit prompt(f(\"z\"))"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_through_a_closure_that_concatenates_the_capture():
+    """The capture is joined through the arrow's body, so a prefix does not
+    launder it: `"p" + t` inside the arrow is still the token."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => \"p\" + t\n"
+        "      let x = emit logit(f(\"z\"))"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_at_the_provide_return_through_a_closure_capture():
+    """The return half of the same carrier: a `Secret[T]` captured by an arrow
+    and returned as `f("q")` crosses the service / MCP bridge."""
+    src = (
+        _PRELUDE
+        + "service Ops { emission fn go(u: Str) -> Str }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u) {\n"
+        + "      let t = emit charge(u)\n"
+        + "      let f = (a: Str) => t\n"
+        + "      return f(\"q\")\n"
+        + "    }\n  }\n}\n")
+    err = _refuses(src)
+    assert "MCP tool return" in err.message
+
+
+def test_refused_through_a_closure_minted_by_a_fn():
+    """An arrow returned by a fn carries its captures out through the fn's
+    return: the inferred signature makes `mk(t)` carry the token even though the
+    arrow is never written at the call site."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = mk(t)\n"
+        "      let x = emit logit(f(\"z\"))",
+        extra="fn mk(s: Str) -> (Str) -> Str { return (x: Str) => s }\n"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_through_a_closure_passed_to_a_helper_fn():
+    """The indirect call is inside the helper: `apply` calls its parameter, and
+    the inferred signature flows the closure value to `apply`'s return."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => t\n"
+        "      let x = emit logit(apply(f))",
+        extra="fn apply(f: (Str) -> Str) -> Str { return f(\"q\") }\n"))
+    assert "disclosure sink" in err.message
+
+
+def test_a_closure_over_a_clean_value_is_admitted_at_a_log():
+    """The control that keeps the join exact: the closure carries its captured
+    value's ACTUAL taint, so a closure over a trusted value still compiles."""
+    compile_source(_agent(
+        "      let d = \"safe\"\n"
+        "      let f = (x: Str) => d\n"
+        "      let x = emit logit(f(\"z\"))"), "flow.rvl")
+
+
+def test_a_closure_parameter_shadowing_a_tainted_binding_is_clean():
+    """A parameter SHADOWS an outer binding of the same name, so the body reads
+    the parameter and not the captured token. The capture join seeds the arrow's
+    parameters clean; without that seed, the closure is tainted by a value its
+    body never reads and the program is refused."""
+    compile_source(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (t: Str) => t\n"
+        "      let x = emit logit(f(\"z\"))"), "flow.rvl")
+
+
 def test_refused_at_an_mcp_tool_return():
     """The value a `provide` method returns crosses the service / MCP bridge to a
     client that never declared a `Secret[T]` receiver — refused at the return."""
