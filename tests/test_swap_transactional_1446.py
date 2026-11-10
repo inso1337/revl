@@ -305,6 +305,9 @@ def test_a_ticket_a_swap_raised_stays_answerable(tmp_path):
                     compile_source(candidate, "ticket-1446.rvl")["externs"]
                     if extern["name"] == "announce")
     assert ticket["unreviewedHostCode"] == [host_body_entry(announce)]
+    assert [{key: value for key, value in entry.items() if key != "digests"}
+            for entry in ticket["unreviewedHostCode"]] == [
+        {"extern": "announce", "classification": "emission", "backends": ["py"]}]
     assert _next()["result"] == 7
     assert server._AUTHORED_HOST_BODIES == before["_AUTHORED_HOST_BODIES"]
     assert ticket["hash"] in server.SESSION._tickets

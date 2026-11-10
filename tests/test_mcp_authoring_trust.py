@@ -205,6 +205,9 @@ def test_under_trusted_authoring_the_ticket_says_what_it_carries(tmp_path):
     notify = next(extern for extern in server.SESSION.ir["externs"]
                   if extern["name"] == "notify")
     assert ticket["unreviewedHostCode"] == [host_body_entry(notify)]
+    assert [{key: value for key, value in entry.items() if key != "digests"}
+            for entry in ticket["unreviewedHostCode"]] == [
+        {"extern": "notify", "classification": "emission", "backends": ["py"]}]
     assert "not a bound on what the bodies do" in \
         ticket["unreviewedHostCodeWarning"]
     assert ticket["hash"].startswith("sha256:")
