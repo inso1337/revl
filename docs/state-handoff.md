@@ -155,9 +155,18 @@ restore-ward. Those providers start warm on the restored generation. Every
 other one still starts cold, with the `stateDropped` report naming it (and the
 swap report's `handoff` entry carrying `migrated: false, reason:
 "incompatible"` when a restored hand-off exists but does not accept the running
-state). The instance layer is deliberately not carried by an undo: the
+state). The restored code's authorship counts as it did on the forward swap
+to it: an undo to an agent-authored generation applies the multi-realm rule
+above, so a frame spanning realms starts cold with `reason: "multi-realm"`.
+The resource-vector check of step 2 does not refuse an undo: a carried
+provider whose runtime resources differ in count or type starts cold with
+`reason: "resources"` and the undo completes, where a forward swap is rolled
+back whole. The instance layer is deliberately not carried by an undo: the
 `handoff_back` policy leaves it at `respawn` semantics. `revl_rollback` stays
-cold-start (the F4 rule above); only `revl_undo` runs the reverse hand-off.
+cold-start: it re-admits through `respawn`, which captures no provider state
+at all, so a rollback never carries the generation it leaves into the one it
+returns to (the `respawn` rule `Session.swap` documents). Only `revl_undo`
+runs the reverse hand-off.
 
 ## Files
 

@@ -121,7 +121,7 @@ Because an undo is a change, its plan is computed like any change:
   a template's live instances (an undo deliberately keeps the instance layer
   at `respawn`). `note` says what is lost, and the undo's result carries the
   same `handoff` report a forward swap does. A refused undo reports the
-  plan's `components` but omits both the note and `carried`, because nothing
+  plan's `components` and `carried` but omits the note, because nothing
   ran. The forward call that offered the undo says the same in its `undoNote`:
   it names only the components whose state the undo would really drop, is
   absent when the undo carries it all back, and names the carried ones when a

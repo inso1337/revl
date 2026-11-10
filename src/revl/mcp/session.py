@@ -847,6 +847,23 @@ def _handoff_cold_report(successors: dict, pre: dict) -> dict:
     return report
 
 
+def _resource_mismatch(key: str, resources: list, captured: list) -> str | None:
+    """Why a captured resource vector cannot be re-seated onto `resources`
+    (a different count, or a resource of a different type at some position),
+    or None when it can. The defence-in-depth half of item 53's check: the
+    declared shapes are already proved compatible."""
+    if len(resources) != len(captured):
+        return (f"provider of {key!r} held {len(captured)} stateful "
+                f"resource(s); the successor acquires {len(resources)}, so "
+                f"state cannot migrate without dropping or inventing one")
+    for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
+        if type(res) is not old_type:
+            return (f"provider of {key!r}: resource #{pos} was "
+                    f"{old_type.__name__}, the successor acquires "
+                    f"{type(res).__name__}, and retyped state cannot migrate")
+    return None
+
+
 def _handoff_acceptors(ir: dict) -> dict:
     """`{slot: [component, ...]}` for every non-template component in `ir` that
     declares a `handoff` (item 53), keyed like `_capture_provider_state`'s
@@ -2009,7 +2026,7 @@ class Session:
           (F4) NO provider hand-off capture either — a cold start carries nothing
           across, so a rollback through `respawn` cannot launder the generation
           it rolls back FROM into the one it rolls back TO.
-        * ``"handoff_back"`` — an undo's policy (issue #3293): the instance
+        * ``"handoff_back"``, an undo's policy (issue #3293). The instance
           layer starts cold as under ``"respawn"``, but a provider's live state
           crosses BACK across a `handoff` both generations declare on the same
           key when the restored generation's shape accepts the running state
@@ -2098,7 +2115,15 @@ class Session:
         # inherit live operator instance state by default. Run the gate for
         # every agent-authored successor; an operator swap (agent_authored
         # False) keeps generational migration.
-        if migrate == "declared" or agent_authored:
+        # Issue #3293: an undo (`handoff_back`) passes the restored
+        # generation's authorship so the multi-realm rule in
+        # `_restore_provider_state` applies, but it does not run this gate:
+        # it captures no instances, and it carries a provider only across a
+        # hand-off whose restored shape accepts the running one
+        # (`_handoff_back_pairs`), so nothing this gate refuses can cross, and
+        # an undo stays the escape hatch rather than a refusable change.
+        if migrate == "declared" or (agent_authored
+                                     and migrate != "handoff_back"):
             self._enforce_declared_disclosure(old_ir, ir)
         # issue #1446: render the successor while the running generation is still
         # up. The emitter's refusal is raised here, so a document the py tier
@@ -2222,7 +2247,8 @@ class Session:
             # as the fault it is, after the rollback.
             self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
                              handoff_pre)
-            self._record_generation()
+            self._record_generation(agent_authored=bool(
+                self._history and self._history[-1].get("agentAuthored")))
             if not isinstance(exc, _activation_error()):
                 raise
             raise SessionError(
@@ -2268,7 +2294,7 @@ class Session:
                     f"(rolled back to the previous generation, state intact). "
                     f"Dropping it would be residue (docs/state-handoff.md)."
                 ) from None
-        self._record_generation()
+        self._record_generation(agent_authored=plan.agent_authored)
         # item 246: the new generation's class map goes live atomically with the
         # composition, and the outstanding-ticket table is replaced (a ticket
         # issued against the previous generation is gone, not stale — its hash
@@ -2858,17 +2884,20 @@ class Session:
             captured = info["captured"]
             fiber = self._driver.fibers.get(comp["name"])
             resources = self._frame_resources(fiber)
-            if len(resources) != len(captured):
-                raise runtime.StateIncompatible(
-                    f"provider of {key!r} held {len(captured)} stateful "
-                    f"resource(s); the successor acquires {len(resources)} — "
-                    f"state cannot migrate without dropping or inventing one")
-            for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
-                if type(res) is not old_type:
-                    raise runtime.StateIncompatible(
-                        f"provider of {key!r}: resource #{pos} was "
-                        f"{old_type.__name__}, the successor acquires "
-                        f"{type(res).__name__} — retyped state cannot migrate")
+            mismatch = _resource_mismatch(key, resources, captured)
+            if mismatch is not None:
+                if carry_slots is None:
+                    raise runtime.StateIncompatible(mismatch)
+                # issue #3293: an undo is the escape hatch. The declared types
+                # accept the running state, but the runtime resource vector
+                # does not match, so this slot starts cold and the undo still
+                # restores the code; a forward swap refuses it whole (above).
+                report[_handoff_label(slot)] = _handoff_entry(slot, {
+                    "component": comp["name"], "migrated": False,
+                    "reason": "resources",
+                    "note": (f"{mismatch}. An undo does not refuse on this: "
+                             f"the restored provider starts cold")})
+                continue
             plan.append((slot, comp["name"], resources, captured))
         for slot, cname, resources, captured in plan:
             for res, (_old_type, snap) in zip(resources, captured):
@@ -3333,7 +3362,8 @@ class Session:
 
     # -- generation history and undo (roadmap item 65) ---------------------
 
-    def _record_generation(self, readmittable: bool = True) -> None:
+    def _record_generation(self, readmittable: bool = True, *,
+                           agent_authored: bool = False) -> None:
         """Append the now-live generation to the retained history.
 
         The entry is a *re-admittable snapshot* (item 15's persist bundle) plus
@@ -3346,7 +3376,12 @@ class Session:
         `readmittable=False` forces the snapshot to None even when an origin is
         present — the apply path uses it, because a plan-artifact apply leaves
         `origin` reproducing the *pre-apply* sources, which must never stand in
-        as the post-apply generation's re-admission bundle."""
+        as the post-apply generation's re-admission bundle.
+
+        `agent_authored` is the authorship the admitting swap ran under
+        (`_SwapPlan.agent_authored`); an undo to this generation restores the
+        same code, so it applies the same agent-authored hand-off rules
+        (issue #3293)."""
         from .persist import build_snapshot  # noqa: PLC0415 — lazy
 
         # best-effort: a files-based origin materializes by reading the source
@@ -3366,6 +3401,7 @@ class Session:
             "snapshot": snap,
             "ir": self.ir,
             "origin": self.origin,
+            "agentAuthored": agent_authored,
         })
         # bounded retention: the oldest generations age out. `undo --to` below
         # the floor is refused (see `undo`) instead of reaching for one gone.
@@ -3575,11 +3611,11 @@ class Session:
             check_no_realm_removal(self.ir, target_ir, profile)
         except RevlError as error:
             diag = classify(error)
-            # nothing ran, so no state was dropped and none crossed: the list
-            # stays as the plan, but neither the note saying it "is dropped"
-            # nor the carried list of a completed undo applies
+            # nothing ran, so no state was dropped: the lists (`components`
+            # and `carried`) stay as the plan of what would have dropped and
+            # what would have crossed, but the note saying it "is dropped"
+            # does not apply
             dossier["stateDropped"].pop("note", None)
-            dossier["stateDropped"].pop("carried", None)
             return {
                 "undone": False,
                 "refused": True,
@@ -3605,9 +3641,13 @@ class Session:
         if AUTHORED_HOST_BODIES_KEY in target_origin:
             origin[AUTHORED_HOST_BODIES_KEY] = list(
                 target_origin[AUTHORED_HOST_BODIES_KEY] or [])
+        # issue #3293: an undo now carries running state into the restored
+        # code, so the code's authorship decides the agent-authored hand-off
+        # rules (the multi-realm one), exactly as the forward swap to it did.
         try:
             state = self.swap(target_ir, origin=origin,
-                              migrate="handoff_back", agent_authored=False)
+                              migrate="handoff_back",
+                              agent_authored=bool(target.get("agentAuthored")))
         except ApprovalRequired as error:
             error.host_bodies = list(
                 origin.get(AUTHORED_HOST_BODIES_KEY) or [])

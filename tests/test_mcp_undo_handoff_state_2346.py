@@ -211,8 +211,9 @@ def test_an_unreadable_live_state_says_so_and_the_undo_still_runs(monkeypatch):
 
 @needs_runtime
 def test_a_refused_undo_keeps_the_state_and_claims_no_drop(monkeypatch):
-    """A refused undo changed nothing: the dossier carries no note and no
-    carried list (nothing crossed), and the state is still there."""
+    """A refused undo changed nothing: the dossier keeps the plan, so
+    `carried` still names what would have crossed, but carries no note saying
+    anything was dropped, and the state is still there."""
     from revl.errors import RevlError
     from revl.mcp import persist
 
@@ -225,6 +226,7 @@ def test_a_refused_undo_keeps_the_state_and_claims_no_drop(monkeypatch):
     refused = _call("revl_undo", {})
     assert refused["ok"] is False and refused["refused"] is True, refused
     dropped = refused["dossier"]["stateDropped"]
-    assert dropped["components"] == [] and "carried" not in dropped, dropped
+    assert dropped["components"] == [], dropped
+    assert dropped["carried"] == ["MeterBook"], dropped
     assert "note" not in dropped, dropped
     assert _meter_call("get", "l1")["result"] == "l1"

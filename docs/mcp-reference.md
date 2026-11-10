@@ -1817,7 +1817,7 @@ starts cold, and is listed in `dossier.stateDropped.components` with a `note`
 (issue #2346) - a component with no such hand-off, a shape that cannot accept
 the state in the restore direction, or a template's live instance (the undo
 keeps the instance layer at `respawn`). A refused undo reports the plan's
-`components` but omits both the note and `carried`, because nothing ran. A
+`components` and `carried` but omits the note, because nothing ran. A
 forward `revl_change` with `replace` that re-applies the earlier source keeps
 the state a declared `handoff` (or a template's live instances) carries; any
 other component starts cold either way.
