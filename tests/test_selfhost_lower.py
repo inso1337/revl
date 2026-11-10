@@ -4428,6 +4428,31 @@ fn helper() -> Str {
 """)
 
 
+def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
+    """Issue #2981: an `event` field is one of the positions the reference
+    seeds from, because its parser adds every event to `program.type_decls`.
+
+    The reference refuses this program on G4 (no JSON-Schema derivation for
+    `Aggregate[Str]`), a check the gate does not run; the gate refuses it on
+    the missing `Agreed` case only because its provided-type walk reads event
+    fields. Without that arm the gate admits a program the reference refuses.
+    """
+    src = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
+
+fn settle(v: Voted) -> Str {
+  return match v.a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+"""
+    # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
+    assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
+                         "has no JSON-Schema derivation, so its delivered "
+                         "items cannot be checked against a schema")
+    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
+
+
 def test_issue_2842_scope_and_non_emission_controls_stay_admitted(admit):
     shadowed = """extern emission fn send(x: Str) -> Int = @py { return 1 }
 service Ops { emission fn invoke(send: (Str) -> Int) -> Int }
