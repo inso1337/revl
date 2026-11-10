@@ -616,6 +616,8 @@ that does not cover embeddings refuses AT THE DERIVATION; a covered class with a
 future deadline compiles; each malformed clause (unknown class, missing
 parameter, a source that is not `Retained`, a `Retained` return plus a clause)
 is refused by name; the receipt built from `retention.declared_derivatives`
-lists the row; and a program with and without the clause lowers to the same IR.
+lists the row; and a program with and without the clause lowers to the same IR
+except the component's `taint.reaches` list, which gains exactly the one
+derivation origin (the clause changes no emitted code).
 The tests are written before the parser accepts the clause, so they fail on the
 previous revision with a parse error, not a weak assertion.

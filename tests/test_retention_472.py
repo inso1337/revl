@@ -22,6 +22,7 @@ document say two things about one row.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -486,13 +487,33 @@ def test_a_retained_return_and_a_derivation_are_refused_as_two_claims():
         in err.message, err.message
 
 
-def test_the_derivation_declaration_does_not_move_the_ir():
-    """The clause is a declaration the checker reads, not a new emitter input:
-    the same program with and without it lowers to the same IR."""
+DERIVE_STATEMENT_EMIT = ('      let n = emit db_put(v)\n      return n\n',
+                         '      emit db_put(v)\n      return 0\n')
+
+
+def _reach_and_rest(src: str):
+    ir = copy.deepcopy(compile_source(src, "retain.rvl"))
+    reach = ir["components"][0]["taint"].pop("reaches")
+    return reach, ir
+
+
+@pytest.mark.parametrize("form", ["value", "statement"])
+def test_the_derivation_declaration_adds_one_origin_to_the_reach_list(form):
+    """The clause changes no emitted code: with and without it the IR is equal
+    everywhere except the component's reach list, which gains exactly the one
+    derivation origin. Pinned for a value-form and a statement-form emission."""
     with_clause = DERIVE_FUTURE + DERIVE_SOURCES + DERIVE_FN
+    if form == "statement":
+        with_clause = with_clause.replace(*DERIVE_STATEMENT_EMIT)
+        assert DERIVE_STATEMENT_EMIT[1] in with_clause
     without = with_clause.replace(" derives embedding of x", "")
-    assert compile_source(with_clause, "retain.rvl") == \
-        compile_source(without, "retain.rvl")
+    assert without != with_clause
+    reach_with, rest_with = _reach_and_rest(with_clause)
+    reach_without, rest_without = _reach_and_rest(without)
+    assert reach_without == ["retained:customer_pii"]
+    assert reach_with == ["retained:customer_pii",
+                          "retained:customer_pii!embedding@embed.x"]
+    assert rest_with == rest_without
 
 
 # The clause ADDS a retention origin; it must never REPLACE the provenance a
