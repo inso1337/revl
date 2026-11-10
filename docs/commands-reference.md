@@ -2517,12 +2517,12 @@ The run has the deploy protocol's shape:
    A run that got past this point uses the generation up even when PREPARE
    refuses or a participant cannot be launched.
 3. **Commit** through the coordinated PREPARE/COMMIT/ABORT protocol over one
-   local participant per composition. The decision records are the ones
-   `revl deploy` writes, each tagged `"writer": "federation-apply"`, in its
-   order: `federation-decision-pending` before the
+   local participant per composition. The decision records are the same ones
+   `revl deploy` writes, in its order: `federation-decision-pending` before the
    first participant is launched, `federation-abort-decided` before any abort
    message, and `federation-commit-approved` only after every participant
-   committed and every declared probe passed. A conductor killed before that
+   committed and every declared probe passed. federation-apply tags each with
+   `"writer": "federation-apply"`. A conductor killed before that
    leaves the pending record or the abort decision last, so `revl recover
    --decision` never reads an approval for the run and returns `rolled-back`
    for every stranded participant, including one whose own commit finished
