@@ -86,6 +86,8 @@ failure with a NAMED code:
     the declared diff understates the tree -> DIFF_DISAGREES
     the diff reaches the lifecycle's rules -> FENCE_TOUCHED
     the diff reaches the admission kernel  -> KERNEL_INTERSECTION
+    a changed policy document drops or
+    weakens an approval requirement         -> APPROVAL_WEAKENED
     a non-empty capability/taint/budget or
     retention diff                         -> AUTHORITY_WIDENED
     the controller cannot name its own
@@ -147,6 +149,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -196,8 +199,10 @@ SUPPLIED_BY = {
                "Candidate{tree, base, scope})",
     "admit": "the standalone self-extension compile and the FORBIDDEN_GRANT "
              "rule (item 334, Gate.propose in src/revl/gate.py)",
-    "authority": "the attenuation product plus this module's fence and kernel "
-                 "enumeration (item 543 issue #1222, item 544 issue #1223)",
+    "authority": "the attenuation product, this module's fence and kernel "
+                 "enumeration, and the change classifier over approval "
+                 "requirements (item 543 issue #1222, item 544 issue #1223, "
+                 "issue #2752)",
     "shadow": "a draw the candidate could not read (item 537, "
               "tools/heldout_scoring.py)",
     "canary": "the SLO contracts (docs/design/473-slo-contracts.md)",
@@ -466,7 +471,8 @@ def measured_diff(proposal: Proposal):
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", proposal.base])
+    ok, out = _git(tree, ["diff", "--name-only", "--no-renames",
+                          proposal.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -488,6 +494,312 @@ def fence_hits(changed, fence=AUTHORITY_FENCE):
 
 def kernel_hits(changed, kernel=KERNEL_PATHS):
     return sorted(p for p in changed if any(_under(p, k) for k in kernel))
+
+
+# -------------------------------------------------------- the change classes
+
+#: The two classes a candidate change can fall into (issue #2752). Item 540's
+#: boundary is that a system may evolve its BEHAVIOUR and not the rules that
+#: govern its AUTHORITY, so every measured change is asked which of the two it
+#: is before activation.
+SAFE_ADAPTIVE = "safe-adaptive"
+AUTHORITY_EVOLVING = "authority-evolving"
+
+#: The surface this slice refuses on the diff. Issue #2752's table numbers the
+#: seven; this is the one the design note calls the weakest, because a policy
+#: digest only lets a verifier who already holds the old value detect the move.
+SURFACE_APPROVAL = "4 (removing an approval requirement)"
+
+#: The module that defines and evaluates approval rules. A change to it is
+#: classified authority-evolving rather than parsed as a policy document: it is
+#: the vocabulary this classifier reads, so a candidate that edits it can change
+#: what `requires approval` means before the classifier looks. It is not in
+#: `KERNEL_PATHS`, which is the finding the design note records for surface 4.
+POLICY_MODULE = "src/revl/policy.py"
+
+#: Changed documents larger than this are not read as policy. A boundary policy
+#: is an operator-written rule file, far below this; the cap is here so a
+#: candidate cannot make the classifier walk a large file it changed.
+POLICY_DOCUMENT_LIMIT = 256 * 1024
+
+
+@dataclass(frozen=True)
+class Classification:
+    """One change's class, the surface it touches, and the evidence for it."""
+
+    kind: str
+    surface: str
+    reason: str
+    evidence: tuple = ()
+
+
+def _parse_policy_document(text):
+    """The parsed `Policy` for `text`, or None when it is not a policy document.
+
+    A changed file is not required to be a policy. The tree holds sources,
+    tests and prose too, so "this parses as a boundary policy" is how the
+    classifier identifies one without a path convention: an operator may name a
+    policy file anything, and a refusal that only reads `*.policy` is a refusal
+    a rename walks past.
+    """
+    from revl.policy import parse_policy  # noqa: PLC0415
+
+    try:
+        return parse_policy(text)
+    except Exception:  # noqa: BLE001 - a changed file need not be a policy
+        # The tree holds sources, tests and prose too. A malformed policy the
+        # candidate wrote is not silently read as one: `new_policy` is None, and
+        # a base document that carried approval rules is then classified
+        # authority-evolving because the rules cannot be shown preserved.
+        return None
+
+
+def _policy_text(raw):
+    """Decode a policy candidate, or None for binary/undecodable input."""
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return None if "\0" in text else text
+
+
+#: `_base_policy_text` answers three different things and they must not collapse
+#: into one `None`: a path absent at the base commits an ADDED document (safe),
+#: while a document that is present but cannot be read has UNKNOWN rules and a
+#: candidate that rewrites it into a rule-free policy must not be read as the
+#: harmless add. This is the fail-closed distinction the classifier needs.
+_ABSENT = object()
+_UNREADABLE = object()
+
+
+def _base_policy_text(tree: Path, base: str, path: str):
+    """`path` at `base`: its text, `_ABSENT`, or `_UNREADABLE`.
+
+    The three cases are kept apart on purpose. An absent path is a document the
+    candidate added, which drops nothing. A present path that is too large,
+    binary or unreadable is a document whose approval rules cannot be shown
+    preserved, so `classify_change` fails closed on it rather than treating it
+    as an add.
+    """
+    ok, _ = _git(tree, ["cat-file", "-e", f"{base}:{path}"])
+    if not ok:
+        return _ABSENT
+    ok, out = _git(tree, ["cat-file", "-s", f"{base}:{path}"])
+    if not ok:
+        return _UNREADABLE
+    try:
+        size = int(out.strip())
+    except ValueError:
+        return _UNREADABLE
+    if size > POLICY_DOCUMENT_LIMIT:
+        return _UNREADABLE
+    try:
+        ok, blob = _git(tree, ["show", f"{base}:{path}"])
+    except UnicodeDecodeError:
+        return _UNREADABLE
+    if not ok or "\0" in blob:
+        return _UNREADABLE
+    return blob
+
+
+def _tree_policy_text(tree: Path, path: str):
+    """The working-tree text of `path`, or None when absent or too large.
+
+    Symlinks are refused rather than followed and the read is BOUNDED: a
+    candidate controls this tree, and a link to an endless device would turn a
+    size check into a read that never returns. A policy document the candidate
+    ships is a regular file under the cap.
+    """
+    target = tree / path
+    try:
+        if target.is_symlink():
+            return None
+        if target.stat().st_size > POLICY_DOCUMENT_LIMIT:
+            return None
+        with target.open("rb") as handle:
+            raw = handle.read(POLICY_DOCUMENT_LIMIT + 1)
+    except OSError:
+        return None
+    if len(raw) > POLICY_DOCUMENT_LIMIT:
+        return None
+    return _policy_text(raw)
+
+
+def _rule_text(rule) -> str:
+    clauses = [f"capability {rule.pattern} requires approval"]
+    if rule.ttl_ms is not None:
+        clauses.append(f"ttl {rule.ttl_ms}ms")
+    if rule.require != 1 or rule.approvers:
+        clauses.append(
+            f"require {rule.require} of {{{', '.join(rule.approvers)}}}")
+    return " ".join(clauses)
+
+
+def _preserves_approval(rule, candidate) -> bool:
+    """Whether `candidate` is at least as strong as `rule` for the same pattern.
+
+    Strength is the conservative read of the rule's own clauses, not a guess at
+    glob inclusion. A rule whose pattern changes at all does not preserve the
+    old one here: proving that one glob covers another over the token space is
+    not attempted, and a change this classifier cannot prove stronger is routed
+    to a human rather than passed. The same fail-closed choice governs the
+    clauses: a TTL may only shrink, a quorum may only grow, and the approver set
+    must be identical (adding an approver widens who may answer, so it is not a
+    strengthening).
+    """
+    if candidate.pattern != rule.pattern:
+        return False
+    if rule.ttl_ms is None:
+        if candidate.ttl_ms is not None:
+            return False
+    elif candidate.ttl_ms is None or candidate.ttl_ms > rule.ttl_ms:
+        return False
+    if candidate.require < rule.require:
+        return False
+    if tuple(sorted(candidate.approvers)) != tuple(sorted(rule.approvers)):
+        return False
+    return True
+
+
+def _effective_approval(pattern, rules):
+    """The rule the policy actually applies to `pattern`, or None.
+
+    `Policy.approval_rule_for` returns the FIRST rule that covers a token, so a
+    candidate that reorders equal-pattern rules can make the effective rule
+    weaker while every old rule still has a stronger counterpart later in the
+    list. This walks the candidate rules in order and returns the first that
+    could cover the base pattern; `classify_policy_change` requires THAT rule to
+    preserve the base one. A different earlier pattern is therefore fenced when
+    it could shadow the rule, which is the conservative direction.
+    """
+    for candidate in rules:
+        if fnmatchcase(pattern, candidate.pattern):
+            return candidate
+    return None
+
+
+def _kept(rule, new_policy) -> bool:
+    """Whether `new_policy` keeps `rule` at the strength it had.
+
+    A missing policy (deleted, unreadable or unparsable document) keeps
+    nothing. Otherwise the EFFECTIVE rule for the pattern decides, not any rule
+    that happens to appear later in the list: `Policy.approval_rule_for` stops
+    at the first cover, so order is part of the strength.
+    """
+    if new_policy is None:
+        return False
+    candidate = _effective_approval(rule.pattern, new_policy.approval_rules)
+    return candidate is not None and _preserves_approval(rule, candidate)
+
+
+def classify_policy_change(before, after, *, source="<policy>") -> Classification:
+    """Classify one boundary-policy document's change (issue #2752).
+
+    `before` and `after` are the document's text at the base ref and in the
+    candidate tree; either is None for an added or deleted document. The
+    authority-evolving class is a `requires approval` rule that the candidate
+    drops or weakens: a pattern whose rule disappeared, a longer TTL, a lower
+    quorum, a changed approver set, or a document that no longer parses while it
+    carried approval rules before. Everything else a policy can change (a wasm
+    limit, a capability route, an added approval rule) is safe-adaptive for this
+    surface, which is why the classifier has two classes rather than a refusal
+    for every policy edit.
+
+    A refusal here is a FENCE, not a freeze: the change is routed to a human.
+    """
+    old_policy = None
+    if before is not None:
+        old_policy = _parse_policy_document(before)
+    new_policy = None
+    if after is not None:
+        new_policy = _parse_policy_document(after)
+    if old_policy is None and new_policy is None:
+        raise ValueError(f"{source} parses as no boundary policy")
+
+    if old_policy is None:
+        return Classification(
+            SAFE_ADAPTIVE, SURFACE_APPROVAL,
+            f"{source} adds a boundary policy; no approval requirement is "
+            f"dropped or weakened",
+            (f"{source}: added",))
+
+    weakened = [rule for rule in old_policy.approval_rules
+                if not _kept(rule, new_policy)]
+    if not weakened:
+        return Classification(
+            SAFE_ADAPTIVE, SURFACE_APPROVAL,
+            f"{source} keeps every approval requirement at or above its old "
+            f"strength",
+            (f"{source}: {len(old_policy.approval_rules)} approval rule(s) "
+             f"preserved",))
+    return Classification(
+        AUTHORITY_EVOLVING, SURFACE_APPROVAL,
+        f"{source} drops or weakens "
+        f"{len(weakened)} approval requirement(s): "
+        + "; ".join(_rule_text(rule) for rule in weakened)
+        + ". Surface " + SURFACE_APPROVAL + " is refused on the diff rather "
+          "than left to a policy digest; a fenced change is routed to a human",
+        tuple(f"{source}: {_rule_text(rule)}" for rule in weakened))
+
+
+def classify_change(tree: Path, base: str, changed) -> list:
+    """Classify each changed path, returning `(path, Classification)` pairs.
+
+    Every changed document is READ rather than matched against a path list: an
+    operator names a policy file, so a convention is a hole a rename walks
+    through. `POLICY_MODULE` is the one path-classified case, because the parser
+    that gives the classifier its vocabulary is itself an authority.
+    """
+    classified = []
+    for path in sorted(changed):
+        if _under(path, POLICY_MODULE):
+            classified.append((path, Classification(
+                AUTHORITY_EVOLVING, SURFACE_APPROVAL,
+                f"{path} defines and evaluates the `requires approval` rules, "
+                f"so a candidate that edits it can change what an approval "
+                f"requirement means before this classifier reads one. Surface "
+                + SURFACE_APPROVAL + " is refused on the diff; a fenced change "
+                  "is routed to a human",
+                (f"{path}: the approval-rule vocabulary",))))
+            continue
+        before = _base_policy_text(tree, base, path)
+        after = _tree_policy_text(tree, path)
+        before_text = before if isinstance(before, str) else None
+        old_policy = (_parse_policy_document(before_text)
+                      if before_text is not None else None)
+        new_policy = _parse_policy_document(after) if after is not None else None
+        if before is _UNREADABLE:
+            # A document present at the base whose rules cannot be read is
+            # unknown authority, not an added policy. A candidate that rewrites
+            # it must not be read as having dropped nothing.
+            if new_policy is not None:
+                classified.append((path, Classification(
+                    AUTHORITY_EVOLVING, SURFACE_APPROVAL,
+                    f"{path} is present at {base} but could not be read as a "
+                    f"policy, and the candidate rewrites it into one; the "
+                    f"approval rules the old document may have carried cannot "
+                    f"be shown preserved. Surface " + SURFACE_APPROVAL
+                    + " is refused on the diff; a fenced change is routed to a "
+                      "human",
+                    (f"{path}: unreadable at {base}",))))
+            continue
+        if old_policy is None and new_policy is None:
+            continue
+        classified.append(
+            (path, classify_policy_change(before_text, after, source=path)))
+    return classified
+
+
+def authority_evolving(proposal: Proposal, changed):
+    """`(path, Classification)` for the first authority-evolving change, else
+    None. The lifecycle asks this before any measured stage is read."""
+    for path, classification in classify_change(
+            proposal.tree, proposal.base, changed):
+        if classification.kind == AUTHORITY_EVOLVING:
+            return path, classification
+    return None
 
 
 def authority_moved(record: dict):
@@ -735,7 +1047,7 @@ def judge_admit(proposal: Proposal) -> Verdict:
 def judge_authority(proposal: Proposal) -> Verdict:
     """The authority diff. A PRECONDITION, and the reason this module exists.
 
-    Four checks, every one of them computed by the controller rather than read
+    Five checks, every one of them computed by the controller rather than read
     off the record, because a proposal that can hand in a green authority
     record and be believed has not had its authority checked.
 
@@ -750,7 +1062,12 @@ def judge_authority(proposal: Proposal) -> Verdict:
          invariant turned into a check.
       3. THE KERNEL. A diff reaching `KERNEL_PATHS` is refused by name, citing
          the guarantee it defends, per issue #1223's exit test.
-      4. THE AXES. A non-empty capability, taint, budget, realm or retention
+      4. THE APPROVAL FLOOR. Issue #2752 (item 540): a changed boundary-policy
+         document whose parsed `requires approval` rules are dropped or
+         weakened is refused by name on the DIFF, not left to a policy digest.
+         A change to `src/revl/policy.py`, the vocabulary the classifier reads,
+         is refused the same way.
+      5. THE AXES. A non-empty capability, taint, budget, realm or retention
          diff is refused by name, per issue #1222's exit test. An axis that is
          absent from the record counts as moved, not as empty.
     """
@@ -801,6 +1118,21 @@ def judge_authority(proposal: Proposal) -> Verdict:
               "setting)",
             (f"kernel={';'.join(KERNEL_PATHS)}",))
 
+    evolving = authority_evolving(proposal, measured)
+    if evolving is not None:
+        path, classification = evolving
+        return failed(
+            "authority", "APPROVAL_WEAKENED",
+            f"the measured diff changes an authority surface in `{path}`: "
+            f"{classification.reason}. The change classifier calls this "
+            f"`{classification.kind}` rather than `{SAFE_ADAPTIVE}`; a digest "
+            f"would only let a verifier who already holds the old value detect "
+            f"it after the fact, which is detection, not a refusal",
+            classification.evidence
+            + (f"git diff --name-only {proposal.base}",
+               f"class={classification.kind}",
+               f"surface={classification.surface}"))
+
     moved, why = authority_moved(record)
     if moved:
         return failed(
@@ -819,7 +1151,8 @@ def judge_authority(proposal: Proposal) -> Verdict:
     return verified(
         "authority",
         f"authority diff empty on all {len(AUTHORITY_AXES)} axes; "
-        f"{len(measured)} measured path(s), none in the fence or the kernel",
+        f"{len(measured)} measured path(s), none in the fence, the kernel, or "
+        f"the approval floor",
         base.evidence + (f"git diff --name-only {proposal.base}",
                          f"axes={';'.join(AUTHORITY_AXES)}"))
 

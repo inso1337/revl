@@ -400,25 +400,48 @@ who already holds the expected value detect it afterwards.
 | 1 | granting a capability | `FORBIDDEN_GRANT` in `src/revl/gate.py` over `_DECIDER_SERVICES`, restated as `DECIDER_SERVICES` in `tools/evolution_controller.py`; the spawn-attenuation fold in `src/revl/lower.py` | refusal |
 | 2 | disabling a taint check | `src/revl/taint.py` is in `KERNEL_PATHS`, so a candidate whose measured diff reaches it is `KERNEL_INTERSECTION`; `taint` is in `RULESET_MODULES`, so its bytes move `ruleset_digest()` | refusal on the diff, plus a digest |
 | 3 | widening secret access | `G-SECRET-FLOW`, and the taint module above | digest, plus a refusal only where the change edits the fenced module |
-| 4 | removing an approval requirement | the `policy` facet of `chain_bindings` in `src/revl/deploy.py`, and `policy_digest` inside item 517's record | digest only |
+| 4 | removing an approval requirement | `APPROVAL_WEAKENED` in `tools/evolution_controller.py`: the authority stage classifies every changed boundary-policy document and refuses one whose parsed `requires approval` rules are dropped or weakened, and refuses a change to `src/revl/policy.py`; the `policy` facet of `chain_bindings` in `src/revl/deploy.py` and `policy_digest` inside item 517's record remain digests | refusal on the diff, plus a digest |
 | 5 | changing rollback semantics | `lower` is in `RULESET_MODULES`, so a change to the G4 fixed point moves the ruleset digest | digest only |
 | 6 | replacing the admission kernel | `src/revl/admission.py` and `src/revl/admit_profile.py` are in `KERNEL_PATHS` | refusal on the diff |
 | 7 | altering what "committed" means | none found | none |
 
 Four findings follow, and each is checkable from the table.
 
-**Only surfaces 1, 2 and 6 are refused.** The other four rest on a digest, which
-is detection by a verifier holding an expected value, which is P2's problem
-handed to the consumer.
+**Surfaces 1, 2, 4 and 6 are refused by name.** Surface 3 is refused only where
+the change edits the fenced module; surface 5 rests on a digest, and surface 7 on
+nothing. A digest is detection by a verifier holding an expected value, which is
+P2's problem handed to the consumer.
 
 **Surface 4 is the weakest, and it is the one the review's sentence leans on
-hardest.** `src/revl/policy.py` is in neither `KERNEL_PATHS` nor
-`RULESET_MODULES`, and an operator's policy file is not in `KERNEL_PATHS`
-either, so a proposal that removes a `requires approval` rule is refused by
-nothing and moves the ruleset digest not at all. It moves the deploy chain's
-`policy` facet, so a receiver re-verifying a bundle against a previously known
-chain detects it, and it moves `policy_digest` in a model decision record. Both
-are after the fact and both require a holder of the earlier value.
+hardest.** Before issue #2752, `src/revl/policy.py` was in neither `KERNEL_PATHS`
+nor `RULESET_MODULES`, and an operator's policy file was in neither list either,
+so a proposal that removed a `requires approval` rule was refused by nothing and
+moved the ruleset digest not at all. It moved the deploy chain's `policy` facet,
+so a receiver re-verifying a bundle against a previously known chain detected it,
+and it moved `policy_digest` in a model decision record. Both are after the fact
+and both require a holder of the earlier value.
+
+Issue #2752's first slice refuses it on the diff. The authority stage of the
+evolution controller (`tools/evolution_controller.py`) classifies every changed
+document that parses as a boundary policy, and refuses with `APPROVAL_WEAKENED`
+before activation when a `requires approval` rule is dropped or weakened: a rule
+whose pattern disappeared, one moved behind a weaker rule for the same pattern,
+a longer TTL, a lower quorum, a changed approver set, or a document that carried
+approval rules and no longer parses or was deleted. The measured diff is read
+with renames disabled, so a renamed policy is a deletion plus an addition and
+its old rules are classified rather than hidden. A change to
+`src/revl/policy.py`, the parser that defines what an approval rule is, is
+refused the same way; that path was the design note's other finding. A change
+the classifier cannot prove at least as strong (a pattern change, for instance)
+is fenced rather than passed, and a refusal here routes the change to a human
+rather than forbidding it for ever.
+
+Two limits are honest. An operator policy file kept outside the candidate tree
+is still covered only by the digest, because the measured diff cannot reach a
+file the candidate does not carry; the refusal applies to a policy document the
+candidate ships. And a `requires approval` declaration in `.rvl` source is not
+classified here, only the policy document and the policy module. Those are the
+next slices, not claims this one makes.
 
 **Surface 7 has nothing.** `src/revl/session_commit.py` is in neither list, and
 the runtime half of the commit protocol lives under `backends/`, which
@@ -434,8 +457,9 @@ structural answer, and it is right that a diff check "cannot refuse a candidate
 that changes kernel behaviour through a path that touches no enumerated file".
 Its token set covers admission, attestation, taint, retention, the gate crate,
 the census and `formal`. It does not add a token for the approval policy or for
-the commit protocol, so surfaces 4 and 7 remain where this table puts them after
-it lands.
+the commit protocol. Surface 4 is refused by the controller's change classifier
+since issue #2752, not by an attenuation token; surface 7 remains where this
+table puts it.
 
 ---
 
