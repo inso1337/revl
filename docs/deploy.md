@@ -558,6 +558,68 @@ unreachable daemon, an image that does not resolve) is likewise a refusal before
 launch, never a downgrade to running the participant unconfined on the
 conductor's own kernel.
 
+## 6. Participant classes and one durable decision (issue #2725)
+
+A participant's finishability is already implicit in the declarations its
+components' crossings carry. `revl.participant_classes` reads those declarations
+and derives **one class per participant**; it invents no new syntax and adds no
+distributed protocol. The vocabulary is closed:
+
+| class | declaration it reads | what it means |
+| --- | --- | --- |
+| `prepare-reversible` | `undo` | an exact inverse; ABORT replays it |
+| `deferred-irreversible` | `deferred` | ABORT drops it, COMMIT flushes it once |
+| `recoverable-forward` | `witnessed` (or a deferred emission with an idempotency register) | recovery goes through the recorded witness or register, not a bare inverse |
+| `compensable` | `compensate` | a best-effort offset, not a restoration; residue is possible |
+| `irreversible` | an immediate emission with no declared finish | nothing can be undone |
+| `irreversible-needs-approval` | `requires approval`, or a `with` edge | nothing can be undone, so it must commit last |
+| `no-crossing` | none | the participant crosses no boundary |
+
+A participant with several crossings takes the **worst** class, because the
+weakest finish is the one that decides what can be settled.
+
+```sh
+revl audit app.rvl --deploy-map deploy.toml
+```
+
+prints one line per process (and `--json` carries the same table under
+`participantClasses`). A deploy map is a placement map, so it is read by the same
+loader `revl deploy` uses.
+
+### The plan-time refusal
+
+An `irreversible-needs-approval` participant may not be ordered before a
+participant that can still fail. If a later participant fails at COMMIT, the
+approved crossing is already out and cannot be undone. `admit_deploy_map(...,
+ir=...)` refuses such a plan at admission, and the diagnostic names both
+participants. `revl deploy deploy.toml --bundle B --dry-run` runs the same
+check when the bundle's IR is available (the declarations are not in the map
+alone), and `revl audit --deploy-map` reports the same refusal and exits
+nonzero. The commit order is the order `run_deploy` sends COMMIT in, which the
+local and ssh entry points build as `sorted(processes)`.
+
+### One durable decision
+
+`revl deploy` writes **one decision file** next to its deploy state,
+`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`:
+
+* `federation-decision-pending` at the start of the run, so a conductor killed
+  before deciding is never read as the previous run's approval;
+* `federation-commit-approved` after every participant applied;
+* `federation-abort-decided` before any ABORT message goes out on a failure.
+
+`revl recover --wal <participant.wal> --decision <decision.jsonl>` reads that
+record and settles the participant through `recovery.py`'s existing rule, not a
+second one: a commit-approved record rolls forward, an abort/pending/absent
+record rolls back LIFO, and an unreadable record fails closed as `unresolved`
+rather than guessing between the two.
+
+This is still not global atomicity. The class is a property of one participant's
+declarations, and the file is one durable record, not a replicated WAL or a
+quorum coordinator. A peer the conductor cannot reach remains `unresolved`,
+never `rolled-back`, and `revl recover` settling a stranded participant is a
+separate step from the deploy verdict.
+
 ## Not landed yet
 
 * an **ABORT leg for a remote host**: the runner protocol carries PREPARE and

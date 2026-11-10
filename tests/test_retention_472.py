@@ -106,16 +106,101 @@ def test_expired_retained_value_is_refused_at_a_persistence_sink_by_name():
     assert "may not be written to durable storage" in err.message
 
 
+@pytest.mark.parametrize("cap", ["db(calls=3)", "fs(calls=1)", "kv(size=10)"])
+def test_a_resource_ceiling_does_not_hide_a_bare_persistence_sink_head(cap):
+    """A resource ceiling is a budget on the crossing, not a different scope
+    (#3194). `db(calls=3)` still declares a `db` sink, so the past-deadline
+    value is refused exactly as it is for the unceilinged spelling."""
+    err = _refuses(PAST + FLOW.format(cap=cap))
+    assert err.code == "G-RETAIN"
+    assert "`sink`" in err.message, err.message
+    assert f"`{cap.split('(', 1)[0]}` crossing" in err.message
+    assert "may not be written to durable storage" in err.message
+
+
+def test_every_persistence_scope_reads_its_head_through_a_ceiling():
+    """The unit half of #3194, on the whole set: the ceiling is stripped before
+    the head split, so every scope in the set is still recognised bare and
+    through a dotted verb, and a non-sink stays a non-sink with a ceiling too."""
+    for scope in sorted(R.PERSISTENCE_SINK_SCOPES):
+        assert R.persistence_sink_of([f"{scope}(calls=1)"]) == scope
+        assert R.persistence_sink_of([f"{scope}.insert(calls=1)"]) == scope
+    assert R.persistence_sink_of(["log(calls=1)"]) is None
+
+
 def test_the_refusal_names_the_policy_and_the_deadline_it_missed():
     err = _refuses(PAST + FLOW.format(cap="db.insert"))
     assert "customer_pii" in err.message
     assert "2020-01-01T00:00:00Z" in err.hint
 
 
+def test_a_retained_value_carried_out_of_a_closure_is_refused():
+    """Issue #3110: a closure CAPTURE is a carrier for `Retained[T, P]` too.
+    `f("z")` carries a clean literal, but the callee VALUE holds the retained
+    origin; the callee value's taint joins for every indirect call, INDEPENDENT
+    of `any_sink` (this program declares no `Trusted[T]` sink)."""
+    src = PAST + FLOW.format(cap="db.insert").replace(
+        "      let row = load(k)\n      let n = emit sink(row)",
+        "      let row = load(k)\n"
+        "      let f = (a: Str) => row\n"
+        "      let n = emit sink(f(\"z\"))")
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "may not be written to durable storage" in err.message
+    assert "load() -> f() -> sink" in err.message, err.message
+
+
+def test_a_live_retained_value_carried_out_of_a_closure_compiles():
+    """The control that keeps the closure join exact: a value whose policy has
+    NOT expired is admitted at the same persistence sink, including when a
+    closure carries it there."""
+    src = FUTURE + FLOW.format(cap="db.insert").replace(
+        "      let row = load(k)\n      let n = emit sink(row)",
+        "      let row = load(k)\n"
+        "      let f = (a: Str) => row\n"
+        "      let n = emit sink(f(\"z\"))")
+    compile_source(src, "retain.rvl")
+
+
+def test_a_retained_value_passed_to_a_closure_that_writes_it_is_refused():
+    """A parameter that shadows the retained binding still reaches the sink
+    INSIDE the arrow body: the seeded walk computes the closure's value, and the
+    body is also walked against the enclosing environment as it always was, so
+    `(row: Str) => db_put(row)` called with the retained `row` refuses. The seed
+    must not hide a write behind a shadowing parameter."""
+    src = PAST + '''extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+service Ops { emission fn go(k: Str) -> Int }
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let f = (row: Str) => emit db_put(row)
+      let n = f(row)
+      return n
+    }
+  }
+}
+'''
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "may not be written to durable storage" in err.message
+
+
 def test_a_declared_persistence_sink_parameter_is_refused_on_the_declaration():
     """The declaration half: a crossing that DECLARES it persists a retained
     value is refused off the declaration alone, with no call site needed."""
     err = _refuses(PAST + DECLARED_SINK.format(t="Retained[Str, customer_pii]"))
+    assert err.code == "G-RETAIN"
+    assert "`db_put` declares a persistence sink (`db`)" in err.message
+
+
+def test_a_ceiling_on_the_declared_sink_scope_does_not_hide_the_refusal():
+    """The declaration half reads the same `persistence_sink_of`, so a ceiling
+    on a bare sink head must not turn the declaration check off either."""
+    src = DECLARED_SINK.replace("emission[db.insert]", "emission[db(calls=3)]")
+    assert "emission[db(calls=3)]" in src, "the ceiling substitution did not land"
+    err = _refuses(PAST + src.format(t="Retained[Str, customer_pii]"))
     assert err.code == "G-RETAIN"
     assert "`db_put` declares a persistence sink (`db`)" in err.message
 

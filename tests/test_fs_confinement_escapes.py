@@ -481,3 +481,49 @@ def test_an_unraced_write_still_returns_ok_and_is_reversible(workspace):
     mod.restore(created.value)
     assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v1"
     assert not (workspace / "brand-new.txt").exists()
+
+
+# ===========================================================================
+# #3184: the EOUTSIDE refusal carries the caller's own path, never a fact about
+# what lives outside the root (existence by case folding, symlink targets)
+# ===========================================================================
+
+def test_outside_refusal_path_is_the_callers_spelling_3184(workspace, outside, tmp_path):
+    """The boundary refusal used to carry `os.path.realpath(target)`, so a path
+    through a symlink came back as its resolved target. A refusal for an outside
+    path that exists and one for a path that does not must be the same form: the
+    caller's own path, nothing resolved."""
+    link = tmp_path / "alias"
+    link.symlink_to(outside, target_is_directory=True)
+    existing = str(link / "canary.txt")       # exists, behind a symlink
+    missing = str(link / "no_such_file.txt")  # does not exist
+    for given in (existing, missing):
+        with pytest.raises(ws.ConfinementError) as ei:
+            ws.resolve_within(given)
+        assert ei.value.code == "EOUTSIDE"
+        assert ei.value.message == "path escapes the session workspace root"
+        assert ei.value.path == given
+        assert str(outside) not in ei.value.path
+
+
+def test_outside_refusal_through_the_stdlib_body_3184(workspace, outside, tmp_path):
+    mod = _fs_module()
+    link = tmp_path / "alias2"
+    link.symlink_to(outside, target_is_directory=True)
+    seen = []
+    for name in ("canary.txt", "no_such_file.txt"):
+        given = str(link / name)
+        r = mod.lexists(given)
+        assert r.kind == "Err" if hasattr(r, "kind") else True
+        err = r.value if hasattr(r, "value") else r
+        code = err["code"] if isinstance(err, dict) else err.code
+        path = err["path"] if isinstance(err, dict) else err.path
+        assert code == "EOUTSIDE"
+        assert path == given
+        seen.append(path.replace(name, "N"))
+    assert seen[0] == seen[1]
+
+
+def test_inside_resolution_is_unchanged_3184(workspace):
+    got = ws.resolve_within("artifact.txt")
+    assert got == os.path.join(os.path.realpath(str(workspace)), "artifact.txt")
