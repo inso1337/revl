@@ -12,11 +12,11 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  update  version
-migrate  contract  erase-report  retention-receipt  plan  apply  undo
-canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
-import  export  sourcemap  serve  run  dev  recover  act  estop  slo
-branch  compare  replay  why  metrics  trace  profile  pool  attest
-dash  repair  bundle  emit  verify  deploy  deploy-admit
+migrate  contract  erase-report  retention-receipt  receipts  plan
+apply  undo  canary  promote  query  fmt  quarantine  analyze  test  mcp
+gen-types  import  export  sourcemap  serve  run  dev  recover  act
+estop  slo  branch  compare  replay  why  metrics  trace  profile  pool
+attest  dash  repair  bundle  emit  verify  deploy  deploy-admit
 federation-apply  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -899,6 +899,14 @@ For each mode - `exact`, `tool-only`, `model-substitute`, `counterfactual` - it
 reports whether the WAL's durable model decisions carry enough to inform that
 mode and what a live executor would still need. It reads the record and runs
 nothing, the same offline-reader contract as `revl branch` and `revl compare`.
+
+For each verified decision it also reports two per-entry replay verdicts
+(issue #2808): `fromRecord` (the recorded answer can be served without calling
+the model, true only when the evidence retained the completion) and
+`rederivable` (the answer can be reproduced from the prompt, false when the
+host returned only a summary or kept the reasoning span hidden). The plan
+names which crossings had an opaque reasoning span and how many; the span
+itself is never written, only its visibility and the host-reported size.
 
 - `WAL` - a write-ahead log, ideally one written by a Slice-3a runtime that
   recorded its model decisions (required).
@@ -1971,10 +1979,15 @@ for the key lifecycle and what the signature binds.
   (`outstanding=N`) and its liveness: `health=live@<instant>`,
   `health=unreachable` or `health=unverified` with `since`, `failures`, the
   link and `last-live`, or `health=unknown` if nothing ever contacted it.
+  A member with a recorded violation also carries `violations=N` on its row,
+  and a `violations` block below the members lists each record: the member, the
+  closed kind (`receipt-artifact-mismatch`, `attestation-rejected`,
+  `offer-drift`, `probe-unanswered`), the instant and the refusal detail.
+  Recording one is not an action: it moves no tier and removes nobody.
   Needs no key.
   - `--dir DIR`
   - `--json` - the charter, the roster with its event ledger, the identity
-    directory and the health record.
+    directory, the violation census and the health record.
   - `--require-live SECONDS` - a health check: exit 1, naming the members on
     stderr, if any member's most recent contact was not a verified heartbeat
     or delivery within SECONDS. It withdraws nobody.
@@ -2146,6 +2159,42 @@ policy at all are each exit `1` with nothing on stdout. Verifying: a receipt
 that IS presented and does not verify is exit `1` naming the one reason -
 including when no key can be resolved, because "could not check it" is never
 "valid". An ABSENT receipt is not a refusal here at all; that is the issue path.
+
+### `revl receipts`
+
+Signed, chained receipts for consequential actions (issue #2757). `export` signs
+one receipt per action and chains them; `verify` checks a chain somebody
+presents. Each receipt binds the bundle and policy digests, the approval used,
+the capability crossed, a commitment to the input and a commitment to the
+result, the worker identity, the session verdict and the previous receipt's
+digest, so a receipt that is removed, reordered or altered breaks a link. A
+value carrying a `secret` or `confidential` origin is committed to as a
+suppressed commitment with the reason, never as a digest a reader could use as
+a confirmation oracle. The design note, including key custody, rotation and the
+anchoring option, is [design/570-action-receipt-chain.md](design/570-action-receipt-chain.md).
+
+- `--actions FILE` - the actions to sign, as JSON: a bare list, or
+  `{"actions": [...], "session_verdict": "committed"|"aborted"}`. Each action
+  names `receipt_kind` (`effect-crossing` or `approval-use`), `task`,
+  `component`, `capability`, `worker`, `input` and `result`; `bundle`,
+  `policy`, `approval` and the two origins lists are optional.
+- `--session NAME` - the session the chain belongs to (required).
+- `--session-verdict VERDICT` - `committed` or `aborted`, bound into every
+  receipt. Absence of the session commit marker is the abort verdict.
+- `--key PATH` - the signing key file; falls back to `REVL_RECEIPT_KEY_FILE` (a
+  path) then `REVL_RECEIPT_KEY` (the secret), never a default in the tree.
+- `--salt HEX` - the 64-hex commitment salt; random when omitted.
+- `--out FILE` - write the chain here instead of stdout.
+- `CHAIN` (for `verify`) - the chain document to check.
+- `--key PATH` (for `verify`) - a verification key; repeat after a rotation,
+  because every receipt names the fingerprint of the key that signed it.
+- `--json` (for `verify`) - machine-readable verdict.
+
+Exit codes: `verify` exits `0` only on a full pass and `1` on any refusal,
+naming the check that fired; a chain this process cannot check, including one
+presented with no key resolvable, is a refusal and never "valid". `export` is
+the opposite direction: a chain that cannot be signed is never printed, so an
+unresolvable key or a malformed action is exit `1` with nothing on stdout.
 
 ### `revl dash`
 
@@ -2444,11 +2493,27 @@ own local trust store, rather than the conductor checking in its own process.
 - `--require-gauntlet` / `--require-conformance` - refuse a chain that binds no
   item-31 gauntlet or item-306 conformance evidence. The host is the floor: a
   request may add either requirement but never turn one off.
+- `--max-age SECONDS` - refuse an attestation whose signed timestamp is more
+  than SECONDS old (the receiver's freshness TTL). Off by default.
+- `--not-before INSTANT` - refuse an attestation signed before INSTANT, a unix
+  timestamp or an ISO-8601 instant, typically the last deploy this host
+  accepted. An independent anchor, so replaying old-but-in-window evidence
+  still fails.
+- `--capability-ceiling NAME` - refuse a staged composition that reaches a
+  capability outside these names; repeatable. Measured from the signature-bound
+  `ir/ir.json`, not from `policy.json`.
+- `--revoked-key KEY_ID` - refuse a chain signed by KEY_ID; repeatable. Revokes
+  one signer while the other key files this host trusts stay in force.
+- `--recheck-source` - re-run THIS host's frontend over the staged source and
+  refuse unless it admits and reproduces the staged IR, instead of trusting the
+  signer's gate run.
 - `--runtime-version NAME=VER` - a runtime this host reports on its verdicts
   (e.g. `python=3.14`); repeatable.
 
 The trust configuration is the runner's own, never anything the request carries:
 a request can ASK for admission but cannot supply the trust that would grant it.
+Behind a `via = ssh` deploy map the same flags reach the far runner through the
+target's `extra_args` (the allowlist there is exactly the runner's own flags).
 Locally the conductor spawns the `revl deploy-admit` runner as a local child
 process and speaks to it over stdin/stdout (`deploy.StdioRunnerTransport`);
 across a machine boundary it

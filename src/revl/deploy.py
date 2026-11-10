@@ -107,6 +107,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -1527,6 +1528,11 @@ def serve_admit_request(request_wire: Mapping, *,
                         host_key: Optional[bytes] = None,
                         require_gauntlet: bool = False,
                         require_conformance: bool = False,
+                        revoked: Iterable[str] = (),
+                        capability_ceiling: Optional[Iterable[str]] = None,
+                        evidence_ttl_seconds: Optional[float] = None,
+                        not_before: Optional[float | str] = None,
+                        recheck_source: bool = False,
                         runtime_versions: Optional[Mapping[str, str]] = None,
                         now=None) -> dict:
     """Runner side of §1.3 steps 4–5: read one request off the orchestration
@@ -1535,6 +1541,16 @@ def serve_admit_request(request_wire: Mapping, *,
     is PREPARE. Returns a response WIRE dict (what `revl deploy-admit` writes
     back); the transport moves it, the conductor reads it with
     :meth:`AdmitResponse.from_wire`.
+
+    Every receiver-side rule the trust store carries can be supplied here, and
+    all of them are the HOST's: `revoked`, `capability_ceiling`,
+    `evidence_ttl_seconds`, `not_before` and `recheck_source` are the
+    revocation, authority, freshness and source-re-check policy
+    :class:`TrustStore` documents. The request supplies none of them, so a
+    conductor can ask for admission but can never lift a bound the host stands
+    on (S2.4); issue #3157 records the window in which they existed on the trust
+    store but were unreachable from the runner's own command line, so this path
+    admitted any past attested bundle a trusted key had ever signed.
 
     Two host-authority properties the design (S2.4) requires are enforced here,
     not left to the request:
@@ -1577,6 +1593,12 @@ def serve_admit_request(request_wire: Mapping, *,
         keys[attest.key_id(raw)] = raw
     trust = TrustStore(
         keys=keys, backend=request.backend,
+        revoked=frozenset(revoked),
+        capability_ceiling=(None if capability_ceiling is None
+                            else frozenset(capability_ceiling)),
+        evidence_ttl_seconds=evidence_ttl_seconds,
+        not_before=not_before,
+        recheck_source=bool(recheck_source),
         # The host is the floor: it may add a requirement the conductor did not
         # ask for, but the conductor cannot subtract one the host stands on.
         require_gauntlet=bool(require_gauntlet) or request.require_gauntlet,
@@ -1592,6 +1614,11 @@ def serve_deploy_request(request_wire: Mapping, *,
                          host_key: Optional[bytes] = None,
                          require_gauntlet: bool = False,
                          require_conformance: bool = False,
+                         revoked: Iterable[str] = (),
+                         capability_ceiling: Optional[Iterable[str]] = None,
+                         evidence_ttl_seconds: Optional[float] = None,
+                         not_before: Optional[float | str] = None,
+                         recheck_source: bool = False,
                          runtime_versions: Optional[Mapping[str, str]] = None,
                          now=None) -> dict:
     """Route ONE request off the orchestration channel to the phase runner that
@@ -1608,8 +1635,10 @@ def serve_deploy_request(request_wire: Mapping, *,
     a load-time measurement, and the reverse would skip the measurement).
 
     The host's trust configuration (`key_paths`, `host_key`, the evidence floor,
-    `runtime_versions`) is the RUNNER's, never the request's (design S2.4): a
-    request can ask for admission but never carry the trust that grants it.
+    the receiver-side rules, `runtime_versions`) is the RUNNER's, never the
+    request's (design S2.4): a request can ask for admission but never carry the
+    trust that grants it. The receiver rules reach the PREPARE runner only; a
+    commit-request measures bytes at load time and never re-runs the chain.
     """
     kind = request_wire.get("kind") if isinstance(request_wire, Mapping) else None
     if kind == COMMIT_REQUEST_KIND:
@@ -1619,6 +1648,11 @@ def serve_deploy_request(request_wire: Mapping, *,
                                host_key=host_key,
                                require_gauntlet=require_gauntlet,
                                require_conformance=require_conformance,
+                               revoked=revoked,
+                               capability_ceiling=capability_ceiling,
+                               evidence_ttl_seconds=evidence_ttl_seconds,
+                               not_before=not_before,
+                               recheck_source=recheck_source,
                                runtime_versions=runtime_versions, now=now)
 
 
@@ -1635,8 +1669,8 @@ class InProcessTransport:
     exercises the identical serialization a real transport puts on the channel —
     a field that does not survive json round-trips fails here, in a unit test,
     rather than on the wire between two machines. It holds the runner-side trust
-    configuration (the host's keys and evidence floor), exactly the state a real
-    far host owns and the conductor never sees.
+    configuration (the host's keys, evidence floor and receiver-side rules),
+    exactly the state a real far host owns and the conductor never sees.
 
     One channel carries BOTH phases, exactly as a real orchestration channel
     does: `send` dispatches on the request `kind`, routing an admit-request to
@@ -1651,11 +1685,22 @@ class InProcessTransport:
                  host_key: Optional[bytes] = None,
                  require_gauntlet: bool = False,
                  require_conformance: bool = False,
+                 revoked: Iterable[str] = (),
+                 capability_ceiling: Optional[Iterable[str]] = None,
+                 evidence_ttl_seconds: Optional[float] = None,
+                 not_before: Optional[float | str] = None,
+                 recheck_source: bool = False,
                  runtime_versions: Optional[Mapping[str, str]] = None) -> None:
         self._key_paths = list(key_paths)
         self._host_key = host_key
         self._require_gauntlet = require_gauntlet
         self._require_conformance = require_conformance
+        self._revoked = frozenset(revoked)
+        self._capability_ceiling = (None if capability_ceiling is None
+                                    else frozenset(capability_ceiling))
+        self._evidence_ttl_seconds = evidence_ttl_seconds
+        self._not_before = not_before
+        self._recheck_source = bool(recheck_source)
         self._runtime_versions = (dict(runtime_versions)
                                   if runtime_versions is not None else None)
 
@@ -1672,6 +1717,11 @@ class InProcessTransport:
             on_far_side, key_paths=self._key_paths, host_key=self._host_key,
             require_gauntlet=self._require_gauntlet,
             require_conformance=self._require_conformance,
+            revoked=self._revoked,
+            capability_ceiling=self._capability_ceiling,
+            evidence_ttl_seconds=self._evidence_ttl_seconds,
+            not_before=self._not_before,
+            recheck_source=self._recheck_source,
             runtime_versions=self._runtime_versions, now=now)
         return json.loads(json.dumps(response_wire))
 
@@ -1728,6 +1778,11 @@ class ProcessRunnerTransport:
               host_key_path: Optional[Path | str] = None,
               require_gauntlet: bool = False,
               require_conformance: bool = False,
+              revoked: Iterable[str] = (),
+              capability_ceiling: Optional[Iterable[str]] = None,
+              evidence_ttl_seconds: Optional[float] = None,
+              not_before: Optional[float | str] = None,
+              recheck_source: bool = False,
               runtime_versions: Optional[Mapping[str, str]] = None,
               python: Optional[str] = None,
               env: Optional[Mapping[str, str]] = None) -> "ProcessRunnerTransport":
@@ -1739,6 +1794,12 @@ class ProcessRunnerTransport:
         its own disk anyway (design R5). This is the conductor-side helper a
         `via = local` cross-process staging step would call; the SSH form is the
         same argv with an ``ssh <host>`` prefix and remote paths.
+
+        The receiver-side rules (`revoked`, `capability_ceiling`,
+        `evidence_ttl_seconds`, `not_before`, `recheck_source`) are passed as
+        their CLI spellings, so the child is configured through exactly the
+        flags a far host's operator would use and there is no second, only-in-
+        Python way to set a rule the runner does not document (issue #3157).
         """
         argv = [python or sys.executable, "-m", "revl", "deploy-admit"]
         for path in key_paths:
@@ -1749,6 +1810,16 @@ class ProcessRunnerTransport:
             argv.append("--require-gauntlet")
         if require_conformance:
             argv.append("--require-conformance")
+        if evidence_ttl_seconds is not None:
+            argv += ["--max-age", str(evidence_ttl_seconds)]
+        if not_before is not None:
+            argv += ["--not-before", str(not_before)]
+        for name in sorted(capability_ceiling or ()):
+            argv += ["--capability-ceiling", str(name)]
+        for key_id in sorted(revoked):
+            argv += ["--revoked-key", str(key_id)]
+        if recheck_source:
+            argv.append("--recheck-source")
         for name, version in (runtime_versions or {}).items():
             argv += ["--runtime-version", f"{name}={version}"]
         return cls(argv, env=env)
@@ -4218,9 +4289,11 @@ def _process_name_problem(pname: Any) -> Optional[str]:
 #: * `remote_bundle` and `runner` are one shell-safe word (letters, digits and
 #:   `_ @ % + = : , . / ~ -`) that does not start with `-`;
 #: * `extra_args` carries only the far runner's own flags (`--key`,
-#:   `--host-key`, `--runtime-version`, `--require-gauntlet`,
-#:   `--require-conformance`), each value a shell-safe word not starting with
-#:   `-`; anything else, including any ssh or scp option, is refused;
+#:   `--host-key`, `--runtime-version`, `--max-age`, `--not-before`,
+#:   `--capability-ceiling`, `--revoked-key`, `--require-gauntlet`,
+#:   `--require-conformance`, `--recheck-source`), each value a shell-safe word
+#:   not starting with `-`; anything else, including any ssh or scp option, is
+#:   refused;
 #: * `port` is an integer in 1..65535;
 #: * the local `known_hosts` path reaches ssh as `-o UserKnownHostsFile=...`,
 #:   whose value ssh splits on whitespace and expands for `%` and `~`, so it
@@ -4231,8 +4304,11 @@ _SSH_HOST_SHAPE = re.compile(
     r"(?:[A-Za-z0-9_][A-Za-z0-9._-]*@)?"
     r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
 _KNOWN_HOSTS_UNSAFE = re.compile(r"[\s'\"%~$\\\0]")
-_RUNNER_VALUE_FLAGS = frozenset({"--key", "--host-key", "--runtime-version"})
-_RUNNER_SWITCH_FLAGS = frozenset({"--require-gauntlet", "--require-conformance"})
+_RUNNER_VALUE_FLAGS = frozenset({
+    "--key", "--host-key", "--runtime-version", "--max-age", "--not-before",
+    "--capability-ceiling", "--revoked-key"})
+_RUNNER_SWITCH_FLAGS = frozenset({
+    "--require-gauntlet", "--require-conformance", "--recheck-source"})
 
 
 def _safe_word(value: Any) -> bool:
@@ -4583,20 +4659,114 @@ def _runtime_versions_from_args(pairs: Optional[Sequence[str]]) -> Optional[dict
     return versions
 
 
+def _max_age_seconds(value) -> Optional[float]:
+    """Normalize the runner's `--max-age` to a fresh evidence TTL, or None.
+
+    A window is a count of seconds and nothing else: a negative or non-finite
+    window is a configuration mistake, refused before the runner serves a
+    request rather than turning into a refusal reason per request."""
+    if value is None:
+        return None
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError(
+            f"--max-age must be a finite, non-negative number of seconds, got "
+            f"{value!r}")
+    return seconds
+
+
+def _not_before_instant(value) -> Optional[float]:
+    """Normalize the runner's `--not-before` to a unix instant, or None.
+
+    The CLI accepts the same two spellings :class:`TrustStore` does, a unix
+    timestamp or an ISO-8601 instant, and resolves the string ONCE here, so a
+    typo is a startup error instead of an `evidence-stale` refusal on every
+    request the host ever serves."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        instant = float(text)
+    except ValueError:
+        instant = _parse_timestamp(text)
+    if instant is None or not math.isfinite(instant):
+        raise ValueError(
+            f"--not-before must be a unix timestamp or an ISO-8601 instant, "
+            f"got {value!r}")
+    return instant
+
+
+def _capability_ceiling(value) -> Optional[frozenset]:
+    """The runner's repeatable `--capability-ceiling` as one ceiling, or None.
+
+    None is "no ceiling configured" (the field's off default); a ceiling that
+    names no capability is written `--capability-ceiling ""` and refused,
+    because an empty name is not a capability any composition reaches."""
+    if not value:
+        return None
+    ceiling = frozenset(str(name) for name in value)
+    if "" in ceiling:
+        raise ValueError(
+            "--capability-ceiling takes a capability name; an empty name cannot "
+            "be a ceiling")
+    return ceiling
+
+
+def _revoked_keys(value, key_paths: Sequence[str] = ()) -> frozenset:
+    """The runner's repeatable `--revoked-key` as one revocation set.
+
+    A revocation that names nothing the host trusts is a typo, and a typo here
+    leaves the signer it meant to revoke trusted with no signal, so an empty id
+    and an id that matches no loaded `--key` are refused before serving. The id
+    form is the one the chain check compares: :func:`attest.key_id` of the key
+    file read by :func:`_load_key`, exactly as :func:`serve_admit_request`
+    derives it. A `--key` file that cannot be read has no id to compare, so the
+    match check is skipped then and the unreadable key is reported, per request,
+    as it always was."""
+    revoked = frozenset(str(key_id) for key_id in (value or ()))
+    if "" in revoked:
+        raise ValueError(
+            "--revoked-key takes a key id; an empty id revokes nothing")
+    if not revoked:
+        return revoked
+    loaded: set[str] = set()
+    for path in key_paths:
+        try:
+            loaded.add(attest.key_id(_load_key(path)))
+        except (OSError, RevlError):
+            return revoked
+    unknown = sorted(revoked - loaded)
+    if unknown:
+        raise ValueError(
+            f"--revoked-key {unknown[0]!r} matches no key loaded with --key "
+            f"(loaded ids: {', '.join(sorted(loaded)) or 'none'}); a revocation "
+            f"that names no trusted key would leave the signer trusted")
+    return revoked
+
+
 def deploy_admit_command(args) -> int:
     """`revl deploy-admit [--key PATH]... [--host-key PATH] [--require-gauntlet]
-    [--require-conformance] [--runtime-version NAME=VER]...` — the far-side runner
-    of the deploy orchestration channel (design §1.3 steps 4–5 / step 7).
+    [--require-conformance] [--max-age SECONDS] [--not-before INSTANT]
+    [--capability-ceiling NAME]... [--revoked-key KEY_ID]... [--recheck-source]
+    [--runtime-version NAME=VER]...`, the far-side runner of the deploy
+    orchestration channel (design §1.3 steps 4-5 / step 7).
 
     It reads one JSON request per line off stdin, serves each with the host's OWN
-    trust configuration (the key files and evidence floor named on THIS command
-    line, never anything the request carries — the S2.4 trust inversion), and
-    writes one JSON reply per line to stdout. A PREPARE admit-request runs the
-    chain verify (:func:`serve_admit_request`); a COMMIT commit-request runs the
-    load-time measurement (:func:`serve_commit_request`); the routing is
-    :func:`serve_deploy_request`, the same dispatch :class:`InProcessTransport`
-    uses, so this process and the one-host stub behave identically. One process
-    serves BOTH phases over its lifetime, exactly as a real channel does.
+    trust configuration (the key files, evidence floor and receiver-side rules
+    named on THIS command line, never anything the request carries; the S2.4
+    trust inversion), and writes one JSON reply per line to stdout. A PREPARE
+    admit-request runs the chain verify (:func:`serve_admit_request`); a COMMIT
+    commit-request runs the load-time measurement (:func:`serve_commit_request`);
+    the routing is :func:`serve_deploy_request`, the same dispatch
+    :class:`InProcessTransport` uses, so this process and the one-host stub
+    behave identically. One process serves BOTH phases over its lifetime, exactly
+    as a real channel does.
+
+    `--max-age`, `--not-before`, `--capability-ceiling`, `--revoked-key` and
+    `--recheck-source` are the receiver's freshness, authority, revocation and
+    source-re-check policy (:class:`TrustStore`). They are opt-in: a runner that
+    names none keeps the Slice 1 behaviour, and a request can never set or lift
+    one.
 
     This is the process a live transport spawns: locally as
     ``python -m revl deploy-admit ...`` (see :meth:`StdioRunnerTransport.local`),
@@ -4638,6 +4808,20 @@ def deploy_admit_command(args) -> int:
         return 1
     require_gauntlet = bool(getattr(args, "require_gauntlet", False))
     require_conformance = bool(getattr(args, "require_conformance", False))
+    try:
+        evidence_ttl_seconds = _max_age_seconds(getattr(args, "max_age", None))
+        not_before = _not_before_instant(getattr(args, "not_before", None))
+        capability_ceiling = _capability_ceiling(
+            getattr(args, "capability_ceiling", None))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        revoked = _revoked_keys(getattr(args, "revoked_key", None), key_paths)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    recheck_source = bool(getattr(args, "recheck_source", False))
 
     for raw in sys.stdin:
         line = raw.strip()
@@ -4662,6 +4846,11 @@ def deploy_admit_command(args) -> int:
                         request_wire, key_paths=key_paths, host_key=host_key,
                         require_gauntlet=require_gauntlet,
                         require_conformance=require_conformance,
+                        revoked=revoked,
+                        capability_ceiling=capability_ceiling,
+                        evidence_ttl_seconds=evidence_ttl_seconds,
+                        not_before=not_before,
+                        recheck_source=recheck_source,
                         runtime_versions=runtime_versions)
                 except _HostKeyMaterialError as error:
                     # A `--key` file on THIS command line is unreadable, so the
