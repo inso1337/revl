@@ -431,6 +431,11 @@ _DETERMINISTIC_BUILTIN_ALLOWLIST = frozenset({
     "to_char",
     "div_trunc", "div_floor", "div_euclid", "mod", "checked_div_trunc",
     "checked_div_floor", "checked_div_euclid", "checked_mod",
+    # Total Int `+`/`-`/`*` (docs/arithmetic.md). The ts tier lowers each to a
+    # `revlCheckedAdd`/`Sub`/`Mul` helper: one bigint operation and a bound
+    # check against the REVL_I64_MIN/MAX constants, no clock, randomness or
+    # host state.
+    "checked_add", "checked_sub", "checked_mul",
 })
 
 
