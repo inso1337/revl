@@ -2516,6 +2516,43 @@ def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
         f"GENERIC_VARIANT_SILENT_ADMITS.")
 
 
+# Issue #3107: two fn spellings the reference parser admits and the gate's
+# parser refuses before any later stage runs, so a gate test cannot be written
+# in either form (the #2981 regression cases above use the long `{ ... }` body
+# for that reason). These are fail-closed differences: the gate refuses a
+# program the reference admits. Each is pinned to the exact refusal so the day
+# the gate parser admits the spelling, the pin fails and is DELETED, and the
+# #2981 cases can be added in that spelling too.
+GATE_PARSER_REFUSALS_ISSUE_3107: dict[str, tuple[str, str]] = {
+    "shorthand_fn_body": ("fn inc(x: Int) -> Int = x + 1\n",
+                          "BAD|expected { after fn signature"),
+    "verified_fn": ("verified fn inc(x: Int) -> Int {\n  return x + 1\n}\n",
+                    "BAD|unexpected declaration"),
+}
+
+
+def _assert_gate_parser_refusal_issue_3107(admit, name):
+    source, expected = GATE_PARSER_REFUSALS_ISSUE_3107[name]
+    compile_source(source)  # the reference admits it
+    got = admit(source)
+    assert got == expected, (
+        f"{name}: pinned as the gate parser's refusal {expected!r} (issue "
+        f"#3107), now {got!r}. If the gate admits this spelling, DELETE the "
+        f"pin and add the #2981 cases in this spelling.")
+
+
+def test_shorthand_fn_body_is_a_known_gate_parser_refusal(admit):
+    """Issue #3107: the reference admits `fn f(...) -> T = expr` and the gate's
+    parser refuses it fail-closed. Fails the day #3107 lands."""
+    _assert_gate_parser_refusal_issue_3107(admit, "shorthand_fn_body")
+
+
+def test_verified_fn_is_a_known_gate_parser_refusal(admit):
+    """Issue #3107: the reference admits a `verified fn` declaration and the
+    gate's parser refuses it fail-closed. Fails the day #3107 lands."""
+    _assert_gate_parser_refusal_issue_3107(admit, "verified_fn")
+
+
 # The four checking positions a transparent type alias has to be erased at, plus
 # the ones that must not move. Issue #1148's own fix erased at every LOWERING
 # site and left the ADMISSION walk seeding its type environment from the RAW
