@@ -122,10 +122,10 @@ expr      := literal | IDENT | expr '.' IDENT | expr '?.' IDENT | expr '??' expr
              | expr ('+'|'-'|'*'|'/'|'%') expr | expr ('=='|'!='|'<'|'<='|'>'|'>=') expr
              | expr ('&&'|'||') expr | '!' expr | expr '?' expr ':' expr
              | `template ${expr} text`  | 'match' expr '{' (pattern '=>' expr ',')+ '}'
-             | 'hole' ['[' type ']'] [STRING]         -- typed obligation (docs/holes.md)
-             | 'asset' STRING                         -- external file, resolved + jailed +
-                                                         sha256-pinned at compile time
-                                                         (docs/frontend-assets.md)
+             | 'hole' ['[' type ']'] [STRING] -- typed obligation (docs/holes.md)
+             | 'asset' STRING                 -- external file, resolved + jailed +
+                                                 sha256-pinned at compile time
+                                                 (docs/frontend-assets.md)
 -- == and === are one operator (canonicalized to == in IR); same for != / !==.
 -- EXCLUDED (named in diagnostics): class, new, this, function, import, export,
 -- typeof, delete, try/catch, ++/--, compound-assign on non-var, async arrows
@@ -164,8 +164,8 @@ row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' ID
              ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
 place     := 'place' address 'on' 'process' STRING ['backend' IDENT]   -- which process runs the row
 grant     := 'grant' address 'with' '{' IDENT (',' IDENT)* '}'          -- the `requires` keys a row may reach
-stack     := 'stack' STRING          -- a level-1 peer layer; conflicts REFUSE
-site      := 'site' STRING           -- the level-2 layer; exactly one, resolves
+stack     := 'stack' STRING -- a level-1 peer layer; conflicts REFUSE
+site      := 'site' STRING  -- the level-2 layer; exactly one, resolves
 remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Service
              ['in' 'realm(' STRING ')']     -- two peers of one service = two realms
              'at' 'host(' STRING ')'        -- bare authority; userinfo REFUSED
@@ -213,7 +213,7 @@ extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' ty
 -- config is resolved once at plug time, bound as `_revl_config` in the body.
 
 --- other declarations (CONTEXTUAL keywords: each heads a decl only in this shape) ---
-secret    := 'secret' IDENT 'for' CAP            -- CAP: dotted capability token, e.g. net.send
+secret    := 'secret' IDENT 'for' CAP -- CAP: dotted capability token, e.g. net.send
 -- binds a NAME to one capability. The value is never in source: it is supplied
 -- at plug and read as a local of the host body of each `extern emission[CAP]`.
 -- It reaches no other extern and no revl construct; a secret with no
