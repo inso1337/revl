@@ -512,6 +512,10 @@ NOT_A_RULE = {
     "peer_offer": "the federation offer surface, reached from `placement`.",
     "sandbox_runtime": "the child-process sandbox `placement` launches.",
     "synthesize": "`revl synthesize`, a generator rather than a checker.",
+    "tls_pin": "the pinned TLS leaf SPKI check a synthesized `remote` row's "
+               "emitted body installs (issue #2719). It admits no program: the "
+               "pin's form is refused by `composition` and `synthesize`, and "
+               "this module only normalises and hashes what they admitted.",
     "tee_attestation": "TEE quote verification at run time.",
     "model_schedule": "item 515's model scheduler, reached from `placement`'s "
                       "conductor after the frontend has admitted the "

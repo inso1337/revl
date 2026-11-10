@@ -85,6 +85,7 @@ site      := 'site' STRING           -- the level-2 layer; exactly one, resolves
 remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Service
              ['in' 'realm(' STRING ')']     -- two peers of one service = two realms
              'at' 'host(' STRING ')'        -- bare authority; userinfo REFUSED
+             ['pinned' STRING]              -- FULL sha256 of the TLS leaf SPKI
              ['through' IDENT]              -- transport name, recorded on the row
              ['on_failure(' ('withdraw' | 'result') ')']   -- default: withdraw
              ['redirect(' ('refuse' | 'same_origin') ')']  -- default: refuse
@@ -95,10 +96,10 @@ remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Servic
 -- service plus the peer address, so consumers keep `requires key: Service`
 -- unchanged and remoteness is an ADMISSION fact, not a wiring fact. Every method
 -- must declare an emission bound (G4 at the client); no inverse is synthesized
--- and a remote effect survives unwind. `remote`/`at`/`host`/`through`/
+-- and a remote effect survives unwind. `remote`/`at`/`host`/`pinned`/`through`/
 -- `on_failure`/`redirect` are CONTEXTUAL keywords: the lexer's KEYWORDS set is
--- untouched. A redirect is REFUSED by default: the peer address is what the row
--- promises, so a transport that followed `Location` elsewhere would make it false.
+-- untouched. A redirect is REFUSED by default; the address is the promise. A
+-- pin is the FULL SHA-256 of the peer's TLS leaf SPKI.
 
 --- layers (a patch over a row table; docs/composition-layers.md) ---
 layer     := ['site'] 'layer' IDENT 'for' IDENT '{' (touches | op)* '}'  -- contextual

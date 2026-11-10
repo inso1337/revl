@@ -36,6 +36,15 @@ import RevL
 #print axioms RevL.G3.mutual_cycle_refused
 #print axioms RevL.G3.layering_exists_for_admitted
 
+-- G2/G3 composition: admitted work stays admitted when later work is
+-- withdrawn (tail closure), and a part each of whose components is
+-- admitted over an admitted base composes with it (extension). The
+-- witnesses pin both the applying and the refusing shape.
+#print axioms RevL.Lemmas.linkOK_append_tail
+#print axioms RevL.Lemmas.linkOK_append_of_admittedOver
+#print axioms RevL.Lemmas.append_compose_witness
+#print axioms RevL.Lemmas.append_conflict_refused
+
 -- G4: every admitted mutation carries an inverse or an emit marker.
 #print axioms RevL.G4.inverse_or_emit
 
