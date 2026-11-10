@@ -360,7 +360,11 @@ _BUCKET_AXIS = {
     "host_added": "capability",
     "scope_widened": "capability",
     "backends_added": "capability",
+    "secret_added": "capability",
+    "env_added": "capability",
     "emit_added": "taint",
+    "taint_added": "taint",
+    "declassify_added": "taint",
     "reach_weakened": "realm",
     "cardinality_widened": "budget",
     "retention_added": "retention",
@@ -376,6 +380,34 @@ if _UNKNOWN_AXES:
     raise RuntimeError(
         "canary: drift bucket(s) labelled with an axis "
         f"`promotion_barrier.AUTHORITY_AXES` does not carry: {_UNKNOWN_AXES}")
+
+#: Which drift bucket each `audit_diff.crossings` token kind lands in, keyed
+#: by the token's prefix (issue #3206). Every kind `crossings` emits is
+#: claimed here, because a kind no bucket claimed was dropped before this
+#: table existed: a newly routed `taint:`, a new `declassify:`, a new
+#: `secret:` binding and a new or loosened `env:` contract all read as "no
+#: widening" while `revl audit --diff` reported one on the same pair.
+_CROSSING_BUCKET = {
+    "host": "host_added",
+    "emit": "emit_added",
+    "taint": "taint_added",
+    "declassify": "declassify_added",
+    "secret": "secret_added",
+    "env": "env_added",
+}
+
+#: An added crossing token whose prefix `_CROSSING_BUCKET` does not claim. A
+#: future token kind carries some authority nobody mapped, and which axis it
+#: belongs to is exactly what is unknown, so it is counted on EVERY axis
+#: rather than on a guessed neighbour or on none. That reads as moved
+#: everywhere, which is the fail-closed direction.
+_UNCLAIMED_BUCKET = "unclaimed_added"
+
+_UNBUCKETED = sorted(set(_CROSSING_BUCKET.values()) - set(_BUCKET_AXIS))
+if _UNBUCKETED:
+    raise RuntimeError(
+        "canary: crossing bucket(s) with no authority axis: "
+        f"{_UNBUCKETED}")
 
 _AXIS_OF_BUCKET = {
     axis: tuple(b for b, a in _BUCKET_AXIS.items() if a == axis)
@@ -407,6 +439,106 @@ def _retention_added(prev: dict, new: dict) -> list:
     return sorted(_tokens(new) - _tokens(prev))
 
 
+def _crossing_buckets(added) -> dict:
+    """The added crossing tokens, sorted into their drift buckets by prefix.
+
+    Every bucket `_CROSSING_BUCKET` names is present, empty or not, and a token
+    whose prefix none of them claims goes to `_UNCLAIMED_BUCKET` instead of
+    being dropped (issue #3206).
+    """
+    out = {bucket: [] for bucket in _CROSSING_BUCKET.values()}
+    out[_UNCLAIMED_BUCKET] = []
+    for token in sorted(added):
+        prefix = token.partition(":")[0] if isinstance(token, str) else None
+        out[_CROSSING_BUCKET.get(prefix, _UNCLAIMED_BUCKET)].append(token)
+    return out
+
+
+def _env_bound_narrower(old, new) -> bool:
+    """Whether every value the `new` contract bound admits, the `old` one
+    admitted too, so the field's authority only shrank (issue #3206).
+
+    Three shapes are provable and nothing else is, so anything else (a bound
+    of another kind, `under` to `in`, `in` to `under`, a bound removed) reads
+    as not narrower, which keeps the token an added widening:
+
+      * `*` (unbounded) to any bound: an unbounded field admits every value;
+      * `under=p` to `under=q`: `q` is admitted by `p` under the same lexical
+        check the boot preflight applies to an injected value
+        (`run._under_violation`: path SEGMENTS, never a string prefix, so
+        `/a/bc` is not inside `/a/b`, and a `..` segment is refused). Anything
+        inside `q` is then inside `p`;
+      * `in=S` to `in=S'`: every value of `S'` is in `S`, by the same
+        membership test the preflight makes.
+    """
+    if not new:
+        return False
+    if not old:
+        return True
+    kind = old.get("kind")
+    if kind != new.get("kind"):
+        return False
+    if kind == "under":
+        from ..run import _under_violation  # noqa: PLC0415 - the one enforcer
+        p, q = old.get("prefix"), new.get("prefix")
+        return (isinstance(p, str) and bool(p)
+                and _under_violation(q, p) is None)
+    if kind == "in":
+        old_values = old.get("values") or []
+        new_values = new.get("values") or []
+        return bool(new_values) and all(v in old_values for v in new_values)
+    return False
+
+
+def _env_narrowed(prev: dict, new: dict, delta: dict) -> set:
+    """The added `env:` tokens that only tightened a field's bound.
+
+    `audit_diff.crossings` fingerprints a contract field's bound into its
+    token, so a tightened bound shows up as one added `env:N:B'` paired with
+    one removed `env:N:B`. Read alone the added token is a widening, and
+    canary has no accept path, so hardening a bound could never promote. Each
+    added token is paired with the field's row on both sides (the structured
+    bound, not a re-parse of the token, whose `in=` join cannot carry a value
+    holding `|`), and dropped from the added set only when exactly one row
+    names the field on each side, the two rows agree on everything but the
+    bound (type, secrecy, requiredness), the old token is among the removed
+    ones, and `_env_bound_narrower` proves the new bound narrower. Anything else
+    stays an added widening.
+    """
+    from ..audit_diff import _bound_token  # noqa: PLC0415 - read-only reuse
+
+    def _rows(audit):
+        out: dict = {}
+        for row in (audit.get("env") or {}).get("fields") or []:
+            out.setdefault(row.get("name"), []).append(row)
+        return out
+
+    removed = set(delta.get("removed") or [])
+    prev_rows, new_rows = _rows(prev), _rows(new)
+    narrowed = set()
+    for token in delta.get("added") or []:
+        if not (isinstance(token, str) and token.startswith("env:")):
+            continue
+        name = token.split(":", 2)[1]
+        before, after = prev_rows.get(name) or [], new_rows.get(name) or []
+        if len(before) != 1 or len(after) != 1:
+            continue
+        # the bound is the ONLY thing allowed to move: a type change (`Int`
+        # to `Float` or `Bool` widens what passes the same `in` test) or a
+        # field ceasing to be a `Secret` rides in the same token otherwise
+        if ({k: v for k, v in before[0].items() if k != "bound"}
+                != {k: v for k, v in after[0].items() if k != "bound"}):
+            continue
+        old_bound, new_bound = before[0].get("bound"), after[0].get("bound")
+        if token != f"env:{name}:{_bound_token(new_bound)}":
+            continue
+        if f"env:{name}:{_bound_token(old_bound)}" not in removed:
+            continue
+        if _env_bound_narrower(old_bound, new_bound):
+            narrowed.add(token)
+    return narrowed
+
+
 def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     """The authority diff between two generations, per
     `promotion_barrier.AUTHORITY_AXES`.
@@ -416,15 +548,27 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     `placement.swap_admission` rather than writing a second admission check.
     The buckets map onto the axes as follows:
 
-      capability   a new `host:` crossing, a widened per-emission capability
-                   scope, or a host body appearing on a backend it was not on
-      taint        a new `emit:` crossing, which is a new boundary edge out
+      capability   a new `host:` crossing, a new `secret:` binding, a new
+                   `env:` contract field or one whose bound is not provably
+                   narrower, a widened per-emission capability scope, or a
+                   host body appearing on a backend it was not on
+      taint        a new `emit:` crossing, which is a new boundary edge out,
+                   a new `taint:` crossing (an untrusted origin newly
+                   reaching an emission), or a new `declassify:` (an added
+                   `endorse`)
       realm        a reach bound that loosened or moved (`confined(T)` to
                    `unconfined`, or to a different bound)
       budget       a per-capability emission ceiling that widened, including
                    a bounded count becoming `unbounded`
       retention    a new declared position where a resource handle leaves
                    revl's sight (`resources.retention_surface`)
+
+    An added crossing token of a kind none of these claims is counted on
+    every axis, so a token kind added to `audit_diff.crossings` later fails
+    closed until it is mapped (issue #3206). A tightened `env:` bound is not
+    an addition: `_env_narrowed` pairs it with the token it replaced and drops
+    it when the new bound is provably narrower, so hardening a contract still
+    promotes.
 
     All five axes of `promotion_barrier.AUTHORITY_AXES` are measured, and the
     return says which: an axis this function could not compare would be named
@@ -438,17 +582,19 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
 
     prev, new = audit_report(running_ir), audit_report(candidate_ir)
     delta = diff_crossings(prev, new)
-    buckets = {
-        "host_added": sorted(c for c in delta["added"] if c.startswith("host:")),
-        "emit_added": sorted(c for c in delta["added"] if c.startswith("emit:")),
+    narrowed = _env_narrowed(prev, new, delta)
+    buckets = _crossing_buckets(t for t in delta["added"] if t not in narrowed)
+    buckets.update({
         "reach_weakened": list(delta["reach_weakened"]),
         "scope_widened": list(diff_capability_scopes(prev, new)["scope_widened"]),
         "backends_added": list(diff_backends(prev, new)["backends_added"]),
         "cardinality_widened": list(
             diff_cardinality(prev, new)["cardinality_widened"]),
         "retention_added": _retention_added(prev, new),
-    }
-    diff = {axis: sorted(t for bucket in names for t in buckets[bucket])
+    })
+    unclaimed = buckets[_UNCLAIMED_BUCKET]
+    diff = {axis: sorted([t for bucket in names for t in buckets[bucket]]
+                         + unclaimed)
             for axis, names in _AXIS_OF_BUCKET.items()}
     unmeasured = sorted(set(AUTHORITY_AXES) - set(diff))
     return {"diff": diff, "unmeasured": unmeasured, "buckets": buckets,

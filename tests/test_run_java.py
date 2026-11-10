@@ -49,6 +49,13 @@ MATCH = str(ROOT / "examples" / "java_match.rvl")
 # throw at runtime; the composition must now boot and tear down cleanly.
 EMPTY_RESET = str(ROOT / "examples" / "java_empty_reset.rvl")
 
+# issue #3095: a provider whose host `let-effect` bind is named `ctx`, so the
+# activation local is the binding ladder's `ctx__` rather than the emitter's
+# own `ctx`. The provider constructor must receive that escaped local; the
+# emitted module then compiles and boots against the real cordis4j runtime.
+CTX_BIND = str(ROOT / "tests" / "fixtures" / "emit_java_corpus" /
+               "comp_provide_ctx_bind.rvl")
+
 _JAVA_REASON = java_runtime_reason()
 needs_jdk = pytest.mark.skipif(
     _JAVA_REASON is not None,
@@ -226,6 +233,26 @@ def test_run_java_once_boots_a_match_composition():
     down_svc = out.index("swap  | Halver ")
     assert down_user < down_svc, "consumer must tear down before its provider"
 
+    assert "0 service(s) still provided" in out
+    assert "NO-RESIDUE" in out
+    assert "[run] DOWN" in out
+
+
+@needs_jdk
+def test_run_java_once_boots_a_provider_bind_named_like_scaffolding():
+    """issue #3095: a `let-effect` bind the binding ladder escapes (`ctx` ->
+    `ctx__`) must reach the provider constructor as the user's local. The raw
+    IR spelling named no local in `apply`, so the composition failed javac;
+    this drives the whole once round-trip: emit -> javac 21 -> boot -> LIFO
+    teardown -> no-residue proof -> exit 0."""
+    result = _run_cli([CTX_BIND, "--backend", "java", "--once"], input_text="")
+    assert result.returncode == 0, result.stderr + result.stdout
+    out = result.stdout
+
+    assert "== load composition (java tier) ==" in out
+    assert "Ledger" in out
+    assert "state=Active" in out
+    assert "[run] UP" in out
     assert "0 service(s) still provided" in out
     assert "NO-RESIDUE" in out
     assert "[run] DOWN" in out

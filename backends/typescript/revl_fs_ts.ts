@@ -434,7 +434,10 @@ function rawResolveWithin(p: string): string {
     throw new ConfinementError(
       'EOUTSIDE',
       'path escapes the session workspace root',
-      real,
+      // the CALLER's spelling, never `real`: the resolved path is the on-disk
+      // case and the target of every symlink, which would answer "does this
+      // exist" for any path outside the root (#3184)
+      sanitized(p),
     )
   }
   return real

@@ -429,12 +429,19 @@ class Operator:
         """
         return bool(self.mints)
 
-    def allows(self, verb: str, labels: frozenset[str]) -> tuple[bool, Grant | None]:
+    def allows(self, verb: str, labels: frozenset[str],
+               deny_labels: frozenset[str] | None = None,
+               ) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
-        exist for the pair or it is refused (closed by default)."""
+        exist for the pair or it is refused (closed by default).
+
+        `deny_labels`, when given, is the label set a `may not` is matched
+        against, and `labels` the set an allow is matched against. A swap
+        passes a wider deny set (see `ChangedLabels`)."""
+        deny_on = labels if deny_labels is None else deny_labels
         for grant in self.grants:
             if not grant.allow and grant.covers_verb(verb) \
-                    and grant.covers_subject(labels):
+                    and grant.covers_subject(deny_on):
                 return False, grant  # explicit prohibition
         for grant in self.grants:
             if grant.allow and grant.covers_verb(verb) \
@@ -967,6 +974,32 @@ def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
     return frozenset({name}) | frozenset(realms)
 
 
+class ChangedLabels(frozenset):
+    """The labels of a component a swap changes (issue #3188).
+
+    As a set it is the labels an ALLOW is matched against: the name plus the
+    realms the candidate puts the component in (the running manifest's realms
+    when the swap removes it). `deny` is the set a `may not` is matched
+    against: those labels plus the realms the running manifest puts it in, so
+    a deny applies to where the component was as well as where it goes.
+
+    The two differ on purpose. Matching an allow against the union would let
+    the realm a component is leaving satisfy an allow it does not satisfy
+    where it goes."""
+
+    deny: frozenset[str]
+
+    def __new__(cls, labels, deny):
+        self = super().__new__(cls, labels)
+        self.deny = frozenset(deny) | self
+        return self
+
+
+def deny_labels_of(labels: frozenset[str]) -> frozenset[str]:
+    """The label set a `may not` is matched against for one target."""
+    return labels.deny if isinstance(labels, ChangedLabels) else labels
+
+
 def _live_targets(ir: dict | None) -> list[tuple[str, frozenset[str]]] | None:
     """Every live component as a (name, labels) target, labels being its name
     plus every realm it is isolated into. None when nothing is loaded (the
@@ -996,7 +1029,14 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
         -> list[tuple[str, frozenset[str]]]:
     """The components a swap actually touches: those added, removed, or whose
     IR entry differs (modulo provenance) between the running composition and
-    the candidate. Realms come off whichever side declares the component."""
+    the candidate.
+
+    Each label set is a `ChangedLabels`: the allow labels come off whichever
+    side declares the component, preferring the candidate; the deny labels add
+    the running manifest's realms (issue #3188). Reading only the candidate
+    for a deny let the swap itself choose the labels the gate saw, so a
+    candidate that moved a component out of a realm escaped a `may not` rule
+    written against that realm."""
     from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
 
     old = {c["name"]: _semantic(c) for c in old_ir.get("components") or []}
@@ -1009,8 +1049,9 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
             continue  # untouched by this swap
         man = new_man if name in new else old_man
         source_ir = new_ir if name in new else old_ir
-        changed.append((name, _labels_for(source_ir, name,
-                                          component_realms(man, name))))
+        allow = _labels_for(source_ir, name, component_realms(man, name))
+        was = component_realms(old_man, name) if name in old else frozenset()
+        changed.append((name, ChangedLabels(allow, deny=was)))
     return changed
 
 
@@ -1271,6 +1312,8 @@ def _refusal(operator: Operator, verb: str,
              offender: tuple[str, frozenset[str]], grant: Grant | None,
              ) -> tuple[WhyTrace, str]:
     name, labels = offender
+    if grant is not None:  # a deny matched the deny labels; name those
+        labels = deny_labels_of(labels)
     subject = name if name != WHOLE else "the whole composition"
     named = sorted(l for l in labels if l != WHOLE) or ["*"]
     if grant is not None:  # an explicit `may not`
@@ -1480,7 +1523,7 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
 
     for offender in targets:
         _name, labels = offender
-        allowed, grant = operator.allows(verb, labels)
+        allowed, grant = operator.allows(verb, labels, deny_labels_of(labels))
         if not allowed:
             why, message = _refusal(operator, verb, offender, grant)
             return Decision(gated=True, allowed=False, operator=operator.token,
