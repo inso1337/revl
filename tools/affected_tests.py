@@ -121,6 +121,9 @@ BENCH_DEPENDENT_TESTS = (
     # Issue #1462: runs `bench/structured_output_bench.py` against a fake
     # server.
     "tests/test_constrained_decoding_1462.py",
+    # Issue #2709, second slice: loads `bench/cross_tier_kernels/harness.py`,
+    # emits its kernels and pins the checksums the cross-tier table gates on.
+    "tests/test_cross_tier_kernels_2709.py",
     "tests/test_demand_ranking.py",
     # Issue #2709: measures a host extern call on the Python tier by running
     # `bench/extern_call_cost.py`'s arms, so a bench change must re-run it.
@@ -149,6 +152,10 @@ BENCH_DEPENDENT_TESTS = (
     # committed median, so a bench change to that artifact can change its verdict.
     "tests/test_mcp_admission_walkthrough_2748.py",
     "tests/test_mcp_edit.py",
+    # Issue #2939: imports `bench/mcp_response_size.py` by path and pins the
+    # per-verb response-size ceilings recorded from it, so a bench change must
+    # re-run it.
+    "tests/test_mcp_response_size.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
     # endpoint clients send through the runtime adapters.
@@ -337,8 +344,8 @@ PROGRESS_COUNTER_SOURCES |= {
 # files name is classified fence, subject or unreached. That test is what turns
 # a new dependency into a red, so it has to be SELECTED when one of them moves.
 #
-# DERIVED from the tool, by AST rather than by import: a copy here is exactly
-# the drift the selection exists to catch. Issue #1307 landed because
+# DERIVED from the tools' own source, not copied: a copy here is exactly the
+# drift the selection exists to catch. Issue #1307 landed because
 # `tools/gate_reference_census.py` began naming `tools/corpus_provenance.py`
 # and the tests selected for that file did not include the one that holds the
 # classification, so main went red on a path nobody ran.
@@ -346,10 +353,10 @@ _FENCE_CACHE: dict[Path, frozenset] = {}
 
 
 def held_out_fence(root: Path) -> frozenset[str]:
-    """`HELD_OUT_FENCE` as written in `tools/heldout_scoring.py`.
+    """The `held_out` view of the evaluator enumeration (issue #2802).
 
     An empty result is returned rather than raised: the caller treats it as "no
-    fence file changed", and the tool's own suite holds the parse. A scorer
+    fence file changed", and the tool's own suite holds the derivation. A scorer
     file that is renamed away is a rename the generic rules still cover.
 
     Cached per root, same shape and same reason as `_READ_CACHE` below: this
@@ -363,22 +370,59 @@ def held_out_fence(root: Path) -> frozenset[str]:
 
 
 def _held_out_fence(root: Path) -> frozenset[str]:
-    source = root / "tools" / "heldout_scoring.py"
+    """The `held_out` view of `_EVALUATOR` in `src/revl/kernel_boundary.py`.
+
+    Since issue #2802 the fence is a view of one enumeration. The selector
+    cannot call the derivation without executing the tree it is selecting
+    against, so it reads the table by AST: each row is a `(path, tags)` tuple,
+    and a row tagged `held_out` is a fenced path. That keeps the answer
+    derived from the one list rather than copied, and keeps this tool free of
+    the modules it is measuring.
+
+    An empty result is the fail-safe for a table that cannot be read, the same
+    answer the selector gave when the fence was a tuple literal it could not
+    parse: a scorer file that is renamed away is a rename the generic rules
+    still cover, and a synthetic root in this module's own tests has no
+    enumeration at all.
+    """
+    source = root / "src" / "revl" / "kernel_boundary.py"
     try:
         tree = ast.parse(source.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return frozenset()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+        # An ANNOTATED assignment (`_EVALUATOR: tuple[...] = (...)`) is an
+        # `AnnAssign`, not an `Assign`; reading only the latter is how a parser
+        # like this one goes quiet.
+        if isinstance(node, ast.AnnAssign):
+            if not (isinstance(node.target, ast.Name)
+                    and node.target.id == "_EVALUATOR"):
+                continue
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            if not any(isinstance(t, ast.Name) and t.id == "_EVALUATOR"
+                       for t in node.targets):
+                continue
+            value = node.value
+        else:
             continue
-        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        if "HELD_OUT_FENCE" not in names:
-            continue
-        if not isinstance(node.value, (ast.Tuple, ast.List)):
+        if not isinstance(value, (ast.Tuple, ast.List)):
             return frozenset()
-        return frozenset(
-            e.value for e in node.value.elts
-            if isinstance(e, ast.Constant) and isinstance(e.value, str))
+        out = set()
+        for row in value.elts:
+            if not isinstance(row, ast.Tuple) or len(row.elts) != 2:
+                continue
+            path, tags = row.elts
+            if not (isinstance(path, ast.Constant)
+                    and isinstance(path.value, str)):
+                continue
+            if not isinstance(tags, ast.Tuple):
+                continue
+            named = {t.value for t in tags.elts
+                     if isinstance(t, ast.Constant) and isinstance(t.value, str)}
+            if "held_out" in named:
+                out.add(path.value)
+        return frozenset(out)
     return frozenset()
 
 

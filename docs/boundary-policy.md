@@ -95,6 +95,10 @@ realm billing may reach db, ledger
 # reach a common named boundary are refused; their isolation is not real
 tenants never reach each other
 
+# a PAIR rule (issue #2686): each capability is accepted alone, but no single
+# component may hold both. One glob on each side of `together with`
+component Agent*   may not reach fs.read together with network.call
+
 # the MCP / agent sandbox — the profile for agent-generated code admitted
 # through the MCP session: "agent output may reach [llm, kv*] and nothing else"
 mcp may reach llm, kv*
@@ -125,6 +129,8 @@ The JSON form parses to the same policy:
   ],
   "realms": [{"realm": "billing", "allow": ["db", "ledger"]}],
   "tenants": {"neverReachEachOther": true},
+  "pairs": [{"component": "Agent*",
+             "together": ["fs.read", "network.call"]}],
   "mcp": {"allow": ["llm", "kv*"]},
   "approvalCeilings": {"refuseUnbounded": true},
   "neverStanding": ["mail.send", "shell.*"],
@@ -151,6 +157,19 @@ The JSON form parses to the same policy:
   is excluded from this check — an unnameable reach is caught by the
   allow-lists, and it would pair every tenant with every other for no
   actionable reason.
+* **`may not reach X together with Y` (pair rule, issue #2686).** A component
+  matched by the `component` glob that holds BOTH capability patterns is
+  refused; each capability is admitted alone. The two sides are read over the
+  component's reach set: emission capabilities and reached host externs, the
+  same set the allow/deny legs read, and must be two **distinct** reached
+  tokens: one token matching both patterns is one capability, not the pair.
+  `together with` names exactly two patterns, one on each side; a comma list,
+  an allow form and a `realm` subject are refused at parse time. A
+  composition-wide form (a pair split across components or realms) is a later
+  slice and is not this rule: two realms holding X and Y separately must not
+  trip the per-component pair. Like a deny-list, the pair rule does not match
+  an unbounded `*` reach, so a component reaching `fs.read` plus an unnameable
+  dispatch is admitted unless an allow-list catches it.
 * **`mcp` / `agent` (the sandbox).** An allow-list that applies only to
   components admitted through the MCP session (see below). Everywhere else it
   is inert.
@@ -215,6 +234,17 @@ The JSON form parses to the same policy:
   filled in silently. With no policy the conservative defaults still apply, so
   a generated component is confined by default.
 
+### The pair rule: admitted and refused
+
+With `component Agent* may not reach fs.read together with network.call` in
+force:
+
+* **Admitted.** `AgentSummarize` reaches `fs.read` and nothing else;
+  `AgentSender` reaches `network.call` and nothing else. Each holds one side of
+  the pair, and the rule accepts both components.
+* **Refused.** `AgentExfiltrate` reaches both capabilities, so admission is
+  refused with the two reach chains named (see [The refusal](#the-refusal)).
+
 ### What a capability token may be
 
 The capability vocabulary is CLOSED. A token in a reach rule is a capability
@@ -236,6 +266,9 @@ particular:
 * `component Agent* may reach llm kv*` is refused for the same reason. It used
   to parse and then grant nothing: the fail-closed direction, but still a
   no-op nobody was told about.
+* `component Agent* may not reach fs.read together with network.call shell.run`
+  is refused: a pair rule names exactly two patterns, one on each side of
+  `together with`.
 * `except` is **not** part of the reach grammar, and `component * may not reach
   mail.send except the send kit` is refused with a diagnostic saying so. A
   reach rule carries no carve-out slot: the supported way to say "this crossing
@@ -250,7 +283,10 @@ boundary is `mail.send`). Nothing at parse time can tell those apart, so
 `evaluate` warns (`InertDenyPolicyWarning`) when a `may not reach` rule selected
 a component in the audit and no reach of that component matched any of its
 patterns. Such a rule is not protecting anything, and without the warning
-enforcing it reads exactly like a clean pass.
+enforcing it reads exactly like a clean pass. The pair rule gets the same
+enforce-time warning (`InertPairPolicyWarning`) when its two patterns each match
+a reach somewhere but never both in one component, because a per-component pair
+rule protects only when the component holds the pair.
 
 ## The refusal
 
@@ -281,6 +317,21 @@ is not real; admission refused (boundary policy, item 33)
     TenantBJob  policy_tenants.rvl  realm tenantB, reaches `bus`
 ```
 
+For a pair rule the trace is the two reach chains as co-equal exhibits (a set,
+not a chain; neither reach causes the other):
+
+```
+policy violation: components matching `Agent*` may not reach `fs.read`
+together with `network.call`, but `AgentExfiltrate` reaches both `fs.read` and
+`network.call`: one component holding the pair is forbidden; admission refused
+(boundary policy, issue #2686)
+  why `AgentExfiltrate` was rejected:
+    AgentExfiltrate  agents.rvl  reaches `fs.read` via emission `files.read`
+    fs.read                      boundary crossed [fs.read]
+    AgentExfiltrate  agents.rvl  reaches `network.call` via emission `net.call`
+    network.call                 boundary crossed [network.call]
+```
+
 ## The CLI
 
 ```
@@ -294,6 +345,21 @@ policy over it, prints the report, and returns nonzero if any component
 breaches it. `--mcp-scope COMPONENT` (repeatable, or `*` for all) marks
 components as MCP/agent-admitted so the policy's `mcp` sandbox applies to them
 from the CLI, mirroring what the MCP session does automatically.
+
+`revl run <files...> --policy revl.policy` applies the same gate before boot,
+on every backend (py, rust, ts, java, go, wasm) and under `--placement`: any
+violation `revl audit --policy` reports (with `approval_admission`, no
+`--mcp-scope`, no evidence inputs) refuses the run at the admission stage with
+the audit's own report, and nothing is booted. Under `--watch` an edit the
+policy refuses is rejected and the running generation is kept. With
+`--backend wasm` the item-289 least-authority chain over the emitted host
+imports runs as well, and it reads the policy's deny rules as well as its
+allow-lists (issue #3185); it does not run for wasm components placed by
+`--placement`, where only the gate above applies.
+
+A policy with evidence rules always refuses `revl run`: run takes no
+`--evidence` or `--key`, so every evidence clause is evaluated against absent
+evidence. Check such a policy with `revl audit --policy --evidence` instead.
 
 ## The MCP / agent sandbox
 

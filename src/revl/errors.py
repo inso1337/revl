@@ -14,7 +14,9 @@ class RevlError(Exception):
                  code: str | None = None, category: str | None = None,
                  expected: str | None = None, actual: str | None = None,
                  why: WhyTrace | None = None, navigate: dict | None = None,
-                 fix: str | None = None, repair: dict | None = None):
+                 fix: str | None = None, repair: dict | None = None,
+                 acquire: dict | None = None, declared_class: dict | None = None,
+                 repairs: list[dict] | None = None):
         self.filename = filename
         self.line = line
         self.message = message
@@ -40,6 +42,13 @@ class RevlError(Exception):
         # explicit `known: False` when it knows none. Also a structured field
         # only, so every rendered message stays byte-identical.
         self.repair = repair
+        # issue #2684: the acquisition a G4 missing-undo refusal names, the
+        # class the checker derived for it, and the ordered repairs. Structured
+        # fields only, like `navigate` and `repair`: a rejection that carries
+        # none renders byte-identically to what it did before.
+        self.acquire = acquire
+        self.declared_class = declared_class
+        self.repairs = repairs
         # the derivation behind the verdict, where the check ran a search
         # (G4's fixed point, G3's cycle, G2's provider table) — see why.py.
         # It is appended *after* the message and hint so the first line of
@@ -82,7 +91,9 @@ class RevlErrors(RevlError):
         super().__init__(first.filename, first.line, first.message,
                          hint=first.hint, code=first.code, category=first.category,
                          expected=first.expected, actual=first.actual, why=first.why,
-                         navigate=first.navigate, repair=repair)
+                         navigate=first.navigate, repair=repair,
+                         acquire=first.acquire, declared_class=first.declared_class,
+                         repairs=first.repairs)
 
     def __str__(self) -> str:
         # A single refusal renders exactly as a plain `RevlError` would: no

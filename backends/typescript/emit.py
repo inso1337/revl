@@ -45,6 +45,7 @@ import math
 import re
 import sys
 import textwrap
+from contextvars import ContextVar
 from typing import Any, Optional
 
 __all__ = ["emit", "EmitError"]
@@ -515,9 +516,104 @@ _SCAFFOLDING_RENAMABLE_ROLES = frozenset({
 })
 
 
+# Issue #3179: the roles that name a function-LOCAL value (a `let`, a
+# parameter, a match/loop binder, a lambda parameter, a capture) and `local`,
+# the read of one (`_v3_var` and the component-body `name` read). Such a name is
+# a JS binding inside the emitted function, so a user `let revlI64 = ...` or a
+# parameter named `undefined` would replace, in that function, the helper or
+# global the emitted code calls for checked Int arithmetic, an index bound or an
+# `Opt` test. These roles take the wider `_reserved_for_locals` family on top of
+# the `_SCAFFOLDING_RENAMABLE_ROLES` ladder. Module-level names (`function`,
+# `function name`, `name` at a fn-reference) are issue #3127 and keep their
+# spelling; an `extern parameter name` keeps it too, because the verbatim `@ts`
+# body refers to the parameter by its source spelling.
+_LOCAL_ROLES = frozenset({
+    "binding", "loop binding", "match bind", "capture", "inverse capture",
+    "arrow parameter", "parameter", "parameter name", "lifecycle binding",
+    "local",
+})
+
+# The non-`revl` names the emitted module binds at module scope through an
+# import (`_runtime_imports`, `_emit_v1`/`_emit_v3` headers). The emitter's own
+# helpers are covered by `_TS_HELPER_PREFIX_RE` and `TS_HELPER_NAMES`;
+# backends/typescript/test_local_helper_shadow_ts.py emits a corpus and asserts
+# every module-scope binding of the output is in this family, so a new helper
+# or import cannot be added without it. vitest's `it` is the one import left
+# out: it is only ever called around a `test` block at module scope, never
+# from inside a body, so a local `it` cannot shadow it (see the `expect` note
+# in src/revl/lower.py).
+_TS_IMPORTED_NAMES = frozenset({
+    "host", "Frame", "record", "uiCrossing", "uiCrossingAsync", "realmLabel",
+    "spawn", "Context", "expect", "AsyncLocalStorage",
+})
+
+# Module-scope names a local cannot shadow (see `_TS_IMPORTED_NAMES`).
+_TS_UNSHADOWABLE_IMPORTS = frozenset({"it"})
+
+# Every emitted helper is spelled `revl<Upper>...`, `REVL_...`, `_revl...` or
+# `_REVL_...`, so any user local of that shape is renamed (the issue's
+# "any user name of the form `revl` + upper-case letter").
+_TS_HELPER_PREFIX_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
+
+# The user's module-level value names of the document being emitted (fns,
+# externs, components, ADT cases) and the rung `_mangle_local` escapes by, set
+# by `emit`. A local named EXACTLY like one of them takes the spelling the
+# module name's own read takes, because a read of that name cannot tell the
+# local from the module binding (`_v3_var` resolves a module name first); the
+# module binding's own collision with a helper or global is issue #3127.
+_MODULE_NAMES: ContextVar[tuple] = ContextVar("_MODULE_NAMES", default=(frozenset(), 1))
+
+
+def _module_scope(module: frozenset, cases: frozenset = frozenset()) -> tuple:
+    """`(module, rung)` for `_MODULE_NAMES`. An escaped local gains `rung`
+    trailing `_`, one more than any module name or its emitted spelling ends
+    with, so an escaped local never lands on a module binding the same
+    function may read. `rung` is 1 unless a module name ends in `_`, so a
+    document whose module names do not is unaffected."""
+    # every spelling a module name can be emitted under: a read, and an ADT
+    # case's declaration (which also escapes `JS_GLOBAL_RESERVED`)
+    spelled = set(module) | {_mangle(n, EMITTER_RESERVED) for n in module} | {
+        _mangle(n, EMITTER_RESERVED | JS_GLOBAL_RESERVED) for n in cases}
+    tail = max((len(n) - len(n.rstrip("_")) for n in spelled), default=0)
+    return (module, tail + 1)
+
+
+def _reserved_for_locals(root: str) -> bool:
+    """Whether a function-local binding spelled *root* would shadow a name the
+    emitted code refers to bare inside that function (issue #3179)."""
+    return (root in JS_GLOBAL_RESERVED or root in _TS_IMPORTED_NAMES
+            or root in TS_HELPER_NAMES
+            or _TS_HELPER_PREFIX_RE.match(root) is not None)
+
+
+def _mangle_local(name: str, extra: frozenset) -> str:
+    """`_mangle`'s injective ladder over the local family: JS keywords,
+    `extra`, `EMITTER_RESERVED` and `_reserved_for_locals`. A name that IS one
+    of the document's module-level names takes exactly the module read's
+    spelling (see `_MODULE_NAMES`). Any other escaped name gains the
+    document's `rung` of `_`, which no module spelling reaches. The family and
+    the rung are fixed for one emit, so the map stays injective (a uniform
+    suffix over a ladder is), and a declaration and every read of it agree
+    because both go through here."""
+    module, rung = _MODULE_NAMES.get()
+    if name in module:
+        return _mangle(name, extra | EMITTER_RESERVED)
+    root = name
+    while root:
+        if (root in JS_RESERVED or root in extra or root in EMITTER_RESERVED
+                or _reserved_for_locals(root)):
+            return name + "_" * rung
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
+
+
 def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
+    if role in _LOCAL_ROLES:
+        return _mangle_local(name, extra)
     if role in _SCAFFOLDING_RENAMABLE_ROLES:
         # `EMITTER_RESERVED` joins the ladder as a position-INDEPENDENT family:
         # it is passed at the declaration AND at every use, so the two agree by
@@ -1138,7 +1234,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                 f"method body, but no component scope is in effect"
             )
         if kind == "name":
-            name = _ident(node.get("id"), "name")
+            name = _ident(node.get("id"), "local")
             if name not in scope.locals:
                 raise EmitError(
                     f"reference to unbound name {name!r} in component "
@@ -3091,6 +3187,12 @@ _TS_V3_TYPE = {
     # fell through to `_ident` and emitted a bare `Any` that `tsc` rejects with
     # `Cannot find name 'Any'` in every non-signature position (roadmap 79).
     "Any": "any",
+    # `Value` (stdlib/value.rvl, docs/stdlib-value.md) is the NAMED erased-
+    # dynamic builtin, never a DECLARED type: a record field or service
+    # signature naming it fell through to `_ident` and emitted a bare `Value`
+    # that `tsc` rejects with `Cannot find name 'Value'` (issue #3019). It is
+    # the same host erasure `Any` takes, so it is TS's `any` in every position.
+    "Value": "any",
     # `Never` is the empty type; TS spells it `never`.
     "Never": "never",
 }
@@ -3402,9 +3504,10 @@ def _v3_var(node: dict, ctx: "_Ctx") -> str:
     # a keyword-named local/function/case is renamed at its *use* the same way
     # `_ident` renamed it at its declaration; the host roots take the
     # `host.<name>` branch (their names are never keywords) (item 165)
-    mangled = _ident(name, "name")
     if name in ctx.function_names or name in ctx.extern_names or name in ctx.case_names:
-        return mangled
+        return _ident(name, "name")
+    # anything else is a local: a `let`, a parameter, a binder (issue #3179)
+    mangled = _ident(name, "local")
     if name in _HOST_ROOTS:
         return f"host.{name}"
     if name == "None":
@@ -5716,13 +5819,18 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         # whole file failed to parse and the run reported `Tests no tests`
         # instead of naming the binding. tests/test_2975_lifecycle_driver_locals.py
         # derives this set from the emitted source and fails on a bare local.
+        #
+        # issue #3053: the runtime helpers the driver calls (`plug`,
+        # `snapshotRuntime`, `assertNoResidue`, `frameForCtx`) come in under the
+        # same sigil from `_runtime_imports`, so they are driver references too
+        # and a user binding of one of those spellings cannot shadow them.
         body.append("  const $revl_root = new Context()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
             # item 102: the clock coeffect is a module-global; reset it so this
             # test's `advance` steps start from t=0 and see only its own timers,
             # independent of any earlier lifecycle test in the file.
             body.append("  host.clockReset()")
-        body.append("  const $revl_baseline = snapshotRuntime($revl_root)")
+        body.append("  const $revl_baseline = $revl_snapshotRuntime($revl_root)")
         body.append("  const $revl_fibers = new Map<string, any>()")
         for step in test.get("body") or []:
             kind = step.get("step")
@@ -5733,9 +5841,13 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
                     for field, value in cfg.items())
                 body.append("  {")
-                body.append(f"    const _f = plug($revl_root, {component}, {{{cfg_items}}})")
-                body.append("    await _f")
-                body.append(f"    $revl_fibers.set({_string(component)}, await _f)")
+                # issue #3053: the load block's own fiber handle carries the
+                # `$revl_` sigil too. A bare `_f` shadowed a lifecycle `let _f`
+                # for the whole block, so a config expression that read the
+                # binding (in the initializer's own TDZ) threw a ReferenceError.
+                body.append(f"    const $revl_f = $revl_plug($revl_root, {component}, {{{cfg_items}}})")
+                body.append("    await $revl_f")
+                body.append(f"    $revl_fibers.set({_string(component)}, await $revl_f)")
                 body.append("    await _revl_settle()")
                 body.append("  }")
             elif kind == "unload":
@@ -5776,7 +5888,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
             elif kind == "assert_no_residue":
                 body.append("  // R4 + R1: same introspection the py reference")
                 body.append("  // tier's `assert no_residue` performs.")
-                body.append("  assertNoResidue($revl_root, $revl_baseline)")
+                body.append("  $revl_assertNoResidue($revl_root, $revl_baseline)")
             elif kind == "abort":
                 # issue #1911 (the py reference tier's item 377): drive the
                 # enclosing session's 245 abort. `Frame.abort()` is this tier's
@@ -5791,7 +5903,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 body.append("  // mark every live activation aborting, so its teardown")
                 body.append("  // reverts rather than commits (item 245).")
                 body.append("  for (const _fiber of Array.from($revl_fibers.values())) {")
-                body.append("    frameForCtx(_fiber.ctx)?.abort()")
+                body.append("    $revl_frameForCtx(_fiber.ctx)?.abort()")
                 body.append("  }")
                 body.append("  for (const _fiber of Array.from($revl_fibers.values()).reverse()) {")
                 body.append("    try {")
@@ -5963,12 +6075,23 @@ def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
     if _uses_spawn(ir):
         names.append("spawn")
     if _uses_lifecycle_tests(ir):
-        names += ["plug", "snapshotRuntime", "assertNoResidue"]
+        # issue #3053: the lifecycle driver is the only code that calls these
+        # runtime helpers, and it calls them on ITS OWN behalf, so each is
+        # imported under the `$revl_` sigil the driver's locals already carry
+        # (issue #2975). `$` is not in revl's identifier alphabet, so a
+        # lifecycle `let plug = call ...` / `let snapshotRuntime = ...` emits a
+        # bare user binding beside a driver that never spells that bare name.
+        # The plain imports made the user's `const snapshotRuntime` the only
+        # `snapshotRuntime` in the driver's scope, so the driver's earlier call
+        # hit the temporal dead zone.
+        names += ["plug as $revl_plug",
+                  "snapshotRuntime as $revl_snapshotRuntime",
+                  "assertNoResidue as $revl_assertNoResidue"]
         if _uses_lifecycle_abort(ir):
             # issue #1911: only a test that drives an `abort` step reaches the
             # runtime's session-level reject seam (`frameForCtx` -> `Frame.abort`),
             # so an abort-free document imports exactly what it did before.
-            names.append("frameForCtx")
+            names.append("frameForCtx as $revl_frameForCtx")
     return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
 
 
@@ -6356,6 +6479,37 @@ def _emit_temporal(ir: dict) -> str:
             _sys.path.remove(here)
 
 
+# A module-scope declaration in an emitted helper source.
+_TS_MODULE_DECL_RE = re.compile(
+    r"^(?:export\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+"
+    r"([A-Za-z_$][A-Za-z0-9_$]*)", re.M)
+
+# Issue #3179: every name the helper sources above declare at module scope
+# (`revlI64`, `REVL_I64_MIN`, `revlIndex`, ...), read off the sources
+# themselves so the local family cannot drift from what the emitter defines.
+TS_HELPER_NAMES: frozenset = frozenset(
+    decl
+    for const, src in list(globals().items())
+    if isinstance(src, str) and re.match(r"^_(?:REVL|TS)_\w*(?:HELPER|SRC)$", const)
+    for decl in _TS_MODULE_DECL_RE.findall(src)
+)
+
+
+def _case_names(ir: dict) -> frozenset:
+    return frozenset(
+        c.get("name") for spec in (ir.get("types") or {}).values()
+        if isinstance(spec, dict) and spec.get("kind") == "variant"
+        for c in spec.get("cases") or []
+        if isinstance(c, dict) and isinstance(c.get("name"), str))
+
+
+def _module_value_names(ir: dict) -> frozenset:
+    """The user's module-level value names of *ir* (see `_MODULE_NAMES`)."""
+    names = {n.get("name") for key in ("functions", "externs", "components")
+             for n in ir.get(key) or [] if isinstance(n, dict)}
+    return frozenset(n for n in names if isinstance(n, str)) | _case_names(ir)
+
+
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
          target: str = "cordis") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md).
@@ -6388,10 +6542,14 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
     # The unified `_Ctx` carrying the document type context is built inside
     # each _emit_* pass and threaded into every body (component and 2.0),
     # replacing the former module-global context stack.
-    if version in (1, 2):
-        return _emit_v1(ir, runtime_import=runtime_import)
-    if version == 3:
-        return _emit_v3(ir, runtime_import=runtime_import)
+    token = _MODULE_NAMES.set(_module_scope(_module_value_names(ir), _case_names(ir)))
+    try:
+        if version in (1, 2):
+            return _emit_v1(ir, runtime_import=runtime_import)
+        if version == 3:
+            return _emit_v3(ir, runtime_import=runtime_import)
+    finally:
+        _MODULE_NAMES.reset(token)
     raise EmitError(f"unsupported ir_version: {version!r}")
 
 

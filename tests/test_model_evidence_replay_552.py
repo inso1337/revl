@@ -124,6 +124,7 @@ def _declaration(**overrides):
         placement_digest=D("h100 / bf16"),
         prompt_binding={"mode": "content-addressed",
                         "value": D("classify this ticket"), "reason": None},
+        template_digest=D("classify {ticket}"),
         origins=["input"],
         candidates=[D("candidate a"), D("candidate b"), D("candidate c")],
         chosen=1,

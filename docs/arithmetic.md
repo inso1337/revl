@@ -1,4 +1,4 @@
-# Arithmetic — what `/`, `%` and the named integer operations mean
+# Arithmetic: what `/`, `%` and the named integer operations mean
 
 revl's arithmetic is **specified**, not inherited. That distinction is the
 whole point of this document: every tier used to compute whatever its host
@@ -18,7 +18,7 @@ In TypeScript, `7 / 2` is `3.5`. So in revl:
 
 **`Int / Int` is `Float`.** This is not a concession to two backends; it is
 what `/` says. The checker used to type it `Int` while python and TypeScript
-produced `3.5`, which made the declared type and the runtime value disagree —
+produced `3.5`, which made the declared type and the runtime value disagree:
 a soundness break, and the reason `Int`-returning division "worked" only on
 rust. Rust was the tier out of step with the syntax, not the other two.
 
@@ -30,7 +30,7 @@ Float; use `div_trunc` / `div_floor` / `div_euclid` there.
 
 ## Integer division has names
 
-Because `/` is true division, integer division needs its own spelling — and
+Because `/` is true division, integer division needs its own spelling, and
 once you are naming it, there is no excuse for a default. The three
 conventions disagree only on negatives, which is exactly where bugs live, so
 revl makes you say which one you mean:
@@ -45,8 +45,8 @@ revl makes you say which one you mean:
 
 `%` is the **truncated remainder**, taking the sign of the *dividend*. On
 `Float` that is C `fmod`, including at a zero divisor, where it is `NaN` rather
-than a fault — see "Float division by zero" below. That is
-what `%` means in TypeScript, so §0 requires it — but it is also the choice
+than a fault: see "Float division by zero" below. That is
+what `%` means in TypeScript, so §0 requires it, but it is also the choice
 that makes the surface coherent, because every remainder pairs with a division:
 
 > **The pairing law.** For any `a` and non-zero `b`:
@@ -54,7 +54,7 @@ that makes the surface coherent, because every remainder pairs with a division:
 > `a.div_euclid(b) * b + a.mod(b) == a`.
 
 `div_floor` deliberately has no remainder partner. What people reach for a
-floored `%` to get is index safety, and `mod` gives that **strictly better** —
+floored `%` to get is index safety, and `mod` gives that **strictly better**:
 non-negative for *either* sign of the divisor, where floored is only
 non-negative when the divisor is positive.
 
@@ -89,7 +89,7 @@ than inheriting a host rule:
 |---|---|---|---|---|
 | python | built (`//` floors) | native `//` | built | `a % abs(b)` |
 
-`%` itself is built on python for the same reason — its native `%` floors.
+`%` itself is built on python for the same reason: its native `%` floors.
 | typescript | native `/` (BigInt truncates) | built | built | built |
 | rust | native `/` | built | `div_euclid` | built on `rem_euclid` |
 | java | native `/` | `revlDivFloor` | `revlDivEuclid` | `revlMod` |
@@ -142,7 +142,7 @@ free, each the same family as a bug already closed on another tier:
   through `revlDiv(a, b float64)`: a call is not a constant expression, so it
   is an ordinary runtime float division.
 - **Constant arithmetic is folded exactly, typed or not.** `0.1 + 0.2` folds to
-  exactly `0.3` at compile time and compares equal to it — which is *not*
+  exactly `0.3` at compile time and compares equal to it, which is *not*
   IEEE 754 binary64. Typing each literal `float64(...)` stopped the *untyped*
   fold, and was believed to be the whole of it. It is not: a TYPED constant
   expression is still a constant expression, and a Go constant has neither a
@@ -152,7 +152,7 @@ free, each the same family as a bug already closed on another tier:
   `constant 1e+309 of type float64 overflows float64`, a **compile error in the
   emitted package**, where the other five tiers answer `+Inf`. A float literal
   is emitted as `revlF(...)` now, an identity call, because a call is not a
-  constant expression — the same move `revlDiv` makes one line above. This one
+  constant expression: the same move `revlDiv` makes one line above. This one
   is unique to Go so far, and it is the kind of divergence only execution
   finds.
 - **`%` is not defined on `float64` at all.** Go is the only target where the
@@ -170,15 +170,15 @@ give.
 An IR `bin` node used to carry `op`, `left` and `right` and nothing else, so no
 backend could distinguish `Int / Int` from `Float / Float`. `/` and `%` now
 carry an `operands` field (`"Int"` or `"Float"`) when the checker can
-determine it. Only those two operators carry it — a comparison or a boolean
+determine it. Only those two operators carry it: a comparison or a boolean
 gains nothing from it, and the IR should not grow a field it does not use.
 
 
 
 ## `Float` is IEEE 754 binary64
 
-Every host revl targets implements it natively — JS `number`, Rust `f64`,
-Java `double`, Python `float` — so the commitment costs nothing to honour and
+Every host revl targets implements it natively (JS `number`, Rust `f64`,
+Java `double`, Python `float`), so the commitment costs nothing to honour and
 there is no better-specified alternative. Rationals and decimals are different
 *types*, not a better `Float`.
 
@@ -196,7 +196,7 @@ a digit follows, so a method call on an integer is never mistaken for one:
 ### Two consequences that touch other guarantees
 
 - **`==` on Float is IEEE, so it is not reflexive.** `NaN != NaN`. §3.4 says
-  revl has "a single equality: structural value equality" — true for records,
+  revl has "a single equality: structural value equality": true for records,
   lists and every other value, and Float is the one place where the *IEEE*
   rule governs instead. This is not a divergence between tiers; every tier
   agrees. It is a caveat on the spec's wording.
@@ -207,7 +207,7 @@ a digit follows, so a method call on an integer is never mistaken for one:
 
 - **`<` on Float is a partial order.** NaN is unordered against everything,
   including itself, so `a < b`, `a == b` and `a > b` can all be false. Any
-  code that assumes a total order — sorting, binary search — is wrong on Float
+  code that assumes a total order (sorting, binary search) is wrong on Float
   unless it excludes NaN first.
 
 #
@@ -218,23 +218,23 @@ stated width and a stated behaviour at the edge of it: **64-bit two's
 complement, and arithmetic that leaves the range faults.** It never wraps and
 never silently widens.
 
-The width costs nothing on the tiers that can express it — rust already mapped
+The width costs nothing on the tiers that can express it: rust already mapped
 `Int` to `i64`, java to `long`, go to `int64`. Only the *check* costs
 anything, and measured on a dependent scalar chain it is about **9%**
 (0.98 → 1.07 ns/iter); on a vectorisable reduction it is much worse, because
 the check defeats auto-vectorisation. revl components index, count and size
-things — the scalar case — so this is the right default, and a future
+things (the scalar case), so this is the right default, and a future
 `Int32` is the answer for numeric kernels rather than making the default
 unsafe.
 
 | tier | how it traps |
 |---|---|
-| python | `_revl_i64` bound check — python is arbitrary precision, so it *imposes* the bound rather than detecting it |
-| typescript | `revlI64` bound check — `Int` is `BigInt`, which is also arbitrary precision, so this tier imposes the bound too |
+| python | `_revl_i64` bound check: python is arbitrary precision, so it *imposes* the bound rather than detecting it |
+| typescript | `revlI64` bound check: `Int` is `BigInt`, which is also arbitrary precision, so this tier imposes the bound too |
 | rust | `checked_add` / `checked_sub` / `checked_mul` (rust's own default only checks in debug builds) |
 | java | `revlAdd` / `revlSub` / `revlMul`: `Math.addExact` / `subtractExact` / `multiplyExact` underneath, re-raised as revl's own text because the JDK's is `long overflow` |
-| go | `revlAdd` / `revlSub` / `revlMul` — Go has no checked arithmetic in std |
-| wasm | `$int_add` / `$int_sub` / `$int_mul` — wasm has no checked arithmetic either, so the sign test is emitted and the fault is `unreachable` |
+| go | `revlAdd` / `revlSub` / `revlMul`: Go has no checked arithmetic in std |
+| wasm | `$int_add` / `$int_sub` / `$int_mul`: wasm has no checked arithmetic either, so the sign test is emitted and the fault is `unreachable` |
 
 Every hosted tier raises the same text, `revl: Int overflow`, so one guarantee
 does not read as four different bugs. **wasm is the exception, and only on the
@@ -256,13 +256,13 @@ now it is one diagnostic instead of a behaviour per tier.
 This is also why `Int.MIN` has no spelling in the surface. Unary minus binds
 to the *positive* literal, so writing `-9223372036854775808` negates an
 out-of-range literal and is refused by the same rule. The negative bound is
-reachable by computation from in-range literals — `0 - 9223372036854775807 -
-1` — which is an ordinary runtime value on every tier, inside the range and
+reachable by computation from in-range literals (`0 - 9223372036854775807 -
+1`), which is an ordinary runtime value on every tier, inside the range and
 checked like any other arithmetic.
 
 A `Float` literal has the same rule for the same reason
 (`examples/rejections/t36_float_literal_range.rvl`). `1e999` is past the
-largest finite binary64, so it folds to IEEE infinity — and revl has no
+largest finite binary64, so it folds to IEEE infinity, and revl has no
 *spelling* for infinity, which meant every emitter printed the host's name for
 it as a bare word: `inf` on python, `inff64` on rust, `infd` on java,
 `float64(inf)` on go. Those are unbound identifiers, so the program failed to
@@ -277,24 +277,24 @@ says, and is a finite value.
 
 ### Every tier holds it
 
-Two did not, and both were closed by the ports written up below — wasm was
+Two did not, and both were closed by the ports written up below: wasm was
 `i32` throughout its emitter, and TypeScript mapped `Int` to an IEEE double
 exact only to 2^53. Neither was a platform limit: WebAssembly has native
 `i64`, and JavaScript has `BigInt`.
 
-Both are asserted by *execution* in `tests/test_cross_tier_execution.py` —
-in-range arithmetic on every bounded tier, and overflow that must fault rather
-than return a value — so neither can regress quietly.
+Both are asserted by *execution* in `tests/test_cross_tier_execution.py`
+(in-range arithmetic on every bounded tier, and overflow that must fault rather
+than return a value), so neither can regress quietly.
 
 Unary minus is arithmetic too: negation is `0 - x`, and `0 - Int.MIN`
 overflows. python imposed the bound on `+`, `-` and `*` but let `-x` lower to
-the host's unary minus, so `-Int.MIN` came back as 2^63 — out of the very
+the host's unary minus, so `-Int.MIN` came back as 2^63: out of the very
 range python imposes a line earlier, silently. It now goes through `_revl_i64`
 like any other subtraction, and the closure is asserted by execution. wasm had
 this right from the start: its emitter spells negation as a subtraction from
 zero through the checked helper. The three tiers that used to wrap or grow now
 follow suit: go emits `revlSub(0, x)`, java `revlNeg(x)` (over `Math.negateExact`), TypeScript
-`revlI64(-x)` — so `-Int.MIN` faults on every tier, asserted by execution
+`revlI64(-x)`, so `-Int.MIN` faults on every tier, asserted by execution
 across py/ts/go/java (`tests/test_cross_tier_execution.py`). No tier wraps.
 
 rust was the last one holding the guarantee by accident. Its bare `-` does
@@ -310,7 +310,7 @@ a panic on a zero divisor.
 
 ### What the wasm port took
 
-wasm was the other entry on that list — `i32` throughout its emitter, narrower
+wasm was the other entry on that list: `i32` throughout its emitter, narrower
 than every other tier and, until recently, undocumented. WebAssembly has
 **native `i64`**, so the i32 was expedience rather than a platform constraint,
 and it is closed: `Int` is i64 there now, and overflow traps.
@@ -318,8 +318,8 @@ and it is closed: `Int` is i64 there now, and overflow traps.
 The port was not a find-and-replace, because that emitter uses i32 for two
 different things and only one of them moved:
 
-- **values** — arithmetic, Int comparisons, Int literals, and every Int-typed
-  parameter, local, result and global — are i64;
+- **values** (arithmetic, Int comparisons, Int literals, and every Int-typed
+  parameter, local, result and global) are i64;
 - **linear-memory addresses** stay i32, because wasm32 addressing is 32-bit.
   So do `Bool`, the string byte-length and list-count prefixes, the variant
   tag, and the loop cursors. `_wasm_ty` in `backends/wasm/emit.py` is the
@@ -327,7 +327,7 @@ different things and only one of them moved:
 
 Memory layout paid the rest of the cost. A record field, a list element and a
 variant's payload used to be a 4-byte slot at `4 * index`; each is now an
-8-byte slot at `8 * index`, always written and read as a whole i64 — a pointer
+8-byte slot at `8 * index`, always written and read as a whole i64: a pointer
 or Bool is zero-extended into the slot and wrapped back out. Uniform width is
 what lets `$list_push`/`$list_concat`/`$list_slice` move elements without
 knowing the element type, and reading a slot whose type the emitter could not
@@ -353,11 +353,11 @@ a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
   they never blur;
 - BigInt and number **do not mix** in JS (`1n + 1` throws `TypeError`), so
   every operation is rendered consistently typed from the IR's `operands`
-  annotation — `Int` arithmetic in bigint, `Float` arithmetic in number;
+  annotation: `Int` arithmetic in bigint, `Float` arithmetic in number;
 - `/` yields `Float` even on two `Int`s, so both operands convert
   (`Number(a) / Number(b)`) and it stays IEEE: a zero divisor gives
   ±`Infinity`/`NaN`, never the `RangeError` BigInt `/` would raise. `Number()`
-  rounds above 2^53, which is inherent to a binary64 result — the same
+  rounds above 2^53, which is inherent to a binary64 result: the same
   rounding rust's `as f64` does;
 - `div_trunc` is native (BigInt `/` truncates toward zero) and `%` is already
   the truncated remainder on bigint; `div_floor`, `div_euclid` and `mod` are
@@ -367,7 +367,7 @@ a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
   through `BigInt(...)`; `xs[i]`, `slice`, `charAt` and `repeat` take an `Int`
   the JS side needs as a `number`, so they go in through `Number(...)`;
 - `JSON.stringify` **throws** on a BigInt, so the assert diagnostics and the
-  host's resolved-config trace render values themselves — a bigint as its
+  host's resolved-config trace render values themselves: a bigint as its
   digits, with no `n` suffix, which is the text every other tier writes for
   the same number;
 - `revlEq` does not bridge an `Int` and a `Float`: `===` is value equality
@@ -380,26 +380,26 @@ a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
 `compatible("Float", "Int")` is true, so `1.5 + 2` and `ident(3)` (for
 `fn ident(x: Float) -> Float`) both type-check. The `bin` node carries
 `operands`, so the *arithmetic* case was always specifiable and every tier
-got it right. The rest — a `call` argument, a `let` value, a `return`
-expression — used to reach every backend as a bare `lit`/`var` with no
+got it right. The rest (a `call` argument, a `let` value, a `return`
+expression) used to reach every backend as a bare `lit`/`var` with no
 declared type on the node, the same shape of gap `operands` was created to
 close for `/`. The tiers that keep `Int` and `Float` apart therefore split
 on `ident(3)`, and not in the same direction:
 
 | tier | before | now |
 |---|---|---|
-| python | `3` and `3.0` are both numbers — absorbed it | `ident(float(3))` |
-| go | `3` is an untyped constant — absorbed it | `ident(float64(3))` |
-| java | `long` -> `double` is an implicit widening (JLS 5.1.2) — absorbed it | `ident(((double) (3L)))` |
+| python | `3` and `3.0` are both numbers: absorbed it | `ident(float(3))` |
+| go | `3` is an untyped constant: absorbed it | `ident(float64(3))` |
+| java | `long` -> `double` is an implicit widening (JLS 5.1.2): absorbed it | `ident(((double) (3L)))` |
 | rust | `ident(3i64)` against `f64` is **E0308**, a compile error | `ident((3i64 as f64))` |
-| typescript | `ident(3n)` against `number`; `3n === 3` is false — a **wrong answer** | `ident(Number(3n))` |
+| typescript | `ident(3n)` against `number`; `3n === 3` is false: a **wrong answer** | `ident(Number(3n))` |
 | wasm | refuses `Float` (the tier lowers `Int`/`Bool` only) | refuses, unchanged |
 
 A refusal was survivable and the wrong answer was not, so the gap was pinned
 in `tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to
 be rediscovered. It is now closed the same way `operands` closed `/`: the
-frontend — the single IR producer, and the only stage that knows both types
-— marks each coercion site on the node itself (`"widen": "Float"`), and
+frontend (the single IR producer, and the only stage that knows both types)
+marks each coercion site on the node itself (`"widen": "Float"`), and
 every backend emits the conversion explicitly instead of letting a host rule
 absorb it. The marker is additive, so no `ir_version` changes and the
 v1/v2/v3 reference documents stay byte-identical.
@@ -418,12 +418,16 @@ because `compatible` is one-way and symmetric, but until issue #2715 no
 conversion was marked on the operand, so the tiers disagreed: TypeScript
 compared `3n === 3` and answered **false**, and go did not build at all
 (`int64` against `float64`). The rule is the same numeric rule the
-declared-`Float` sites already follow — the `Int` operand widens to `Float`
+declared-`Float` sites already follow: the `Int` operand widens to `Float`
 and the two compare by numeric value, with the inherent binary64 rounding
-above 2^53 — so the frontend marks that operand with the same
+above 2^53, so the frontend marks that operand with the same
 `"widen": "Float"`, and Int/Int (`long`/`long`, `bigint`/`bigint`) stays the
 native exact comparison. The executing cross-tier probe covers a parameter, a
 record field and a list element, in both operand orders, for `==` and `!=`.
+A `Map[Str, V]` subscript is a bare operand too: since issue #2949 the map
+read answers its declared value type, so `m["a"] == 3` with a `Float` (or
+`Int32`) value is marked exactly as a list element read is, and an `Int` value
+stays unmarked and byte-identical.
 
 The same mixed-width rule covers the OTHER adjacent pair, `Int32` and `Int`,
 which issue #2715 originally missed. `a: Int32 == 3` is `Int32` against an
@@ -482,14 +486,14 @@ is the related issue #2937.
 
 ## Sized integers: `Int32`
 
-`Int` is the right default — it indexes, counts and sizes things, which is the
+`Int` is the right default: it indexes, counts and sizes things, which is the
 scalar case, and there the 64-bit check costs about 9%. But a *vectorisable*
 loop pays much more, because the overflow branch defeats auto-vectorisation,
 and even without the check an i32 kernel is ~34% faster than i64 because SIMD
 gets twice the lanes. `Int32` is the escape hatch for numeric kernels that want
-the width — not a change to the default, and not a licence to wrap.
+the width, not a change to the default, and not a licence to wrap.
 
-**`Int32` is 32-bit two's complement, and overflow traps** — the same
+**`Int32` is 32-bit two's complement, and overflow traps**: the same
 discipline `Int` has at 64 bits, at half the width. `a + b`, `a - b`, `a * b`
 and `-a` fault at the i32 edge rather than wrapping; the fault is
 `revl: Int32 overflow` on the tiers that can carry a message.
@@ -503,7 +507,7 @@ and `-a` fault at the i32 edge rather than wrapping; the fault is
 | go | `int32` | `revlAddI32/SubI32/MulI32` (compute wide, re-impose the bound) |
 | wasm | `i32` | `$int32_add/sub/mul` (compute in i64, narrow through `$int32_narrow`, `unreachable`) |
 
-wasm is the tier the type is *for* — it has native `i32`, and a slot round-trips
+wasm is the tier the type is *for*: it has native `i32`, and a slot round-trips
 an `Int32` bit-exactly (zero-extended in, wrapped out), so `Int32` lives in
 records and lists there as well as in registers. As with `Int`, the wasm trap
 carries no payload, so it faults without the message.
@@ -511,13 +515,13 @@ carries no payload, so it faults without the message.
 ### The coercion rule: widen implicitly, narrow explicitly
 
 The lattice is `Int32 → Int`, each step lossless. Widening runs that way and is
-**implicit** at every value-flow position — a call argument, a `let`/`return`
-target, a field — exactly as `Int → Float` widens. The IR marks each site
+**implicit** at every value-flow position (a call argument, a `let`/`return`
+target, a field), exactly as `Int → Float` widens. The IR marks each site
 (`"widen": "Int"`, beside the existing `"widen": "Float"`) so the tiers that
 keep the widths apart emit the conversion (`as i64`, `(long)`, `int64(..)`,
 `BigInt(..)`, `i64.extend_i32_s`) instead of letting a host rule absorb it.
 
-Narrowing — `Int → Int32` — can lose bits, so it is **always explicit and
+Narrowing (`Int → Int32`) can lose bits, so it is **always explicit and
 checked**. There is no silent truncation and no `Int32` literal suffix: an
 `Int32` value comes from `.to_int32()`, which re-imposes the 32-bit bound at
 runtime and faults out of range, or from an `Int32`-typed parameter. `.to_int()`
@@ -532,7 +536,7 @@ let back: Int = count.to_int() + 1    // .to_int() makes the widen explicit
 This mirrors the range rule the language already applies: an out-of-range
 literal is a compile error rather than a silent reinterpretation, and a
 narrowing that can lose bits is refused rather than performed quietly. Three
-worked rejections pin it — implicit narrowing
+worked rejections pin it: implicit narrowing
 (`examples/rejections/t21_int32_narrow_implicit.rvl`), width-mixing in
 arithmetic (`t22_int32_width_mix.rvl`), and `%` on `Int32` (`t23`).
 
@@ -610,7 +614,7 @@ divergence rather than close one:
   on TypeScript and an i32 on wasm. Widen with `.to_int()` to take a remainder.
 - **Mixed-width arithmetic.** `Int32 + Int` is refused: the widening is
   implicit at value positions, not inside a binop, so the conversion stays a
-  visible request. (`/` is exempt — it always yields `Float`, so both sides
+  visible request. (`/` is exempt: it always yields `Float`, so both sides
   widen to `Float` and nothing is lost.)
 - **A flat-storage guarantee.** The SIMD argument wants contiguous `Int32`
   arrays; that is a data-layout promise larger than the type, and it is not
@@ -633,7 +637,7 @@ Three edges of that helper, and of the Float `%` beside it, were wrong until
 issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
 
 - **A NaN dividend is not zero and has no sign.** The helper reached its
-  zero-divisor branch for `NaN / 0.0` — `a == 0` is false for a NaN — and read
+  zero-divisor branch for `NaN / 0.0` (`a == 0` is false for a NaN) and read
   the sign off it, answering `Infinity` where IEEE says `NaN`. python is the
   *reference* tier, so this was the one tier disagreeing with the other five.
 - **`%` on `Float` has an IEEE answer at a zero divisor**, `NaN`, where the Int
@@ -641,7 +645,7 @@ issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
   `ZeroDivisionError`. The two are separate helpers now: `x % 0.0` is `NaN` and
   `x % 0` still faults, on every tier.
 - **A zero remainder keeps the dividend's sign.** `(-0.0) % 1.0` is `-0.0`, and
-  the python form — `abs(a) % abs(b) if a >= 0` — took the positive branch,
+  the python form (`abs(a) % abs(b) if a >= 0`) took the positive branch,
   because `-0.0 >= 0` is true. The sign is invisible in `to_str` (both zeros
   render `0`) and visible through a division.
 
@@ -661,13 +665,13 @@ there too, since it yields Float. `div_trunc`, `div_floor`, `div_euclid` and
 
 Integer division and modulo have no value at zero, and every tier said so
 differently: python raises, rust and wasm trap, java throws, and TypeScript
-handed back `Infinity`/`NaN` — a *value*, where the checker had declared
+handed back `Infinity`/`NaN`: a *value*, where the checker had declared
 `Int`. That is the same class of unsoundness as lowering structural `==` to
 JS `===`, and it is closed the same way: TypeScript's integer operations go
 through guarded helpers that throw, so all six tiers now fault (go panics on
 integer division by zero natively).
 
-A **literal** zero divisor never reaches any of them — the checker refuses it
+A **literal** zero divisor never reaches any of them: the checker refuses it
 (`examples/rejections/arith_zero_divisor.rvl`), because it is not a program
 anyone meant to write:
 
@@ -687,11 +691,11 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
 ## Still open
 
 - **TypeScript is still not 64-bit.** `Int` has a stated width everywhere
-  else — python imposes the bound, rust/java/go/wasm are all 64-bit and all
-  fault at the edge — but TypeScript maps it to f64, exact only to 2^53, so
+  else (python imposes the bound, rust/java/go/wasm are all 64-bit and all
+  fault at the edge), but TypeScript maps it to f64, exact only to 2^53, so
   `MAX + 1` silently loses precision there. Closing it means `BigInt`.
 - ~~**An `Int` literal outside the range is not diagnosed.**~~ **Closed.** The
-  checker now refuses an `Int` literal outside `[-2^63, 2^63-1]` — one
+  checker now refuses an `Int` literal outside `[-2^63, 2^63-1]`: one
   diagnostic where the tiers used to disagree (python at arbitrary precision,
   wasm reading an i64 bit pattern). See "A literal outside the range never
   reaches a tier" above; it remains why `Int.MIN` has no spelling.
@@ -704,8 +708,8 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   forms below return `Result[Int, Str]`, so a program handles a zero divisor
   without faulting. `fail` could not serve here: it is a component construct
   (A8) and is refused in a pure `fn`, so making division "fail" would have
-  meant either extending `fail` into the pure stratum — which costs totality,
-  the property `verified` rests on — or a `Result` form. The second is what
+  meant either extending `fail` into the pure stratum (which costs totality,
+  the property `verified` rests on) or a `Result` form. The second is what
   was built.
 
 ## The total division forms
@@ -720,7 +724,7 @@ Each faulting operation has a value-returning counterpart, named by prefixing
 | `a.checked_div_euclid(b)` | `Result[Int, Str]` | Euclidean (as `div_euclid`) |
 | `a.checked_mod(b)` | `Result[Int, Str]` | Euclidean remainder (as `mod`) |
 
-`Ok(quotient)` carries exactly the quotient the faulting operation computes —
+`Ok(quotient)` carries exactly the quotient the faulting operation computes:
 the rounding convention is not a second choice to make. A zero divisor yields
 `Err("revl: division by zero")` instead of the fault:
 
@@ -750,7 +754,7 @@ Two consequences worth stating:
 | tier | Result representation for the Err payload |
 |---|---|
 | python | tagged `Ok`/`Err` classes (emitted when the IR uses Result) |
-| typescript | `{ kind: "Ok" \| "Err", value }` — the built-in Result shape |
+| typescript | `{ kind: "Ok" \| "Err", value }`: the built-in Result shape |
 | rust | std `Result<i64, String>` (`Ok::<i64, String>(..)` turbofish) |
 | java | `RevlResult<Long, String>` sealed interface, static helper methods |
 | go | `RevlResult[int64, string]` (`RevlOk`/`RevlErr` structs) |

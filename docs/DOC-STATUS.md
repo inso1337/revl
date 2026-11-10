@@ -52,10 +52,10 @@ regenerated rather than edited.
 | README.md | needs-work | 0 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 76 |  |
+| arithmetic.md | needs-work | 6 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 0 |  |
-| audit-diff.md | needs-work | 14 |  |
+| audit-diff.md | needs-work | 12 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
 | backend-go-v3.md | needs-work | 14 | yes |
@@ -81,16 +81,16 @@ regenerated rather than edited.
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 9 |  |
-| delivery-semantics.md | needs-work | 7 |  |
+| delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
-| design-v2-instances.md | needs-work | 86 |  |
+| design-v2-instances.md | needs-work | 0 |  |
 | design-v2-realms.md | needs-work | 17 |  |
 | distribution-model.md | stale-fixed | 7 |  |
 | environment-binding.md | needs-work | 0 |  |
 | erase-report.md | needs-work | 22 |  |
 | eval-protocol.md | needs-work | 0 |  |
-| evolve-loop.md | current | 18 |  |
+| evolve-loop.md | current | 14 |  |
 | expressible-iteration.md | needs-work | 14 |  |
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
@@ -115,7 +115,7 @@ regenerated rather than edited.
 | import-wit.md | needs-work | 29 |  |
 | int32-proposal.md | needs-work | 8 |  |
 | integer-proposal.md | needs-work | 20 |  |
-| interchange-format.md | needs-work | 11 |  |
+| interchange-format.md | needs-work | 7 |  |
 | interop-bridge.md | needs-work | 51 |  |
 | label-compile-audit-2563.md | needs-work | 0 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
@@ -124,6 +124,7 @@ regenerated rather than edited.
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 0 |  |
+| mediator.md | needs-work | 0 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 7 |  |
 | namespacing.md | needs-work | 16 |  |
@@ -146,9 +147,10 @@ regenerated rather than edited.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 81 |  |
+| rejections.md | needs-work | 11 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
+| revl-anchor.md | current | 0 | written with issue #2723 |
 | revl-attest.md | current | 9 |  |
 | revl-diff.md | current | 19 |  |
 | revl-metrics.md | current | 16 |  |
@@ -163,7 +165,7 @@ regenerated rather than edited.
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 88 | yes |
+| stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 13 |  |
@@ -176,7 +178,7 @@ regenerated rather than edited.
 | tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
-| token-economy.md | needs-work | 19 |  |
+| token-economy.md | needs-work | 16 |  |
 | truc.md | needs-work | 3 |  |
 | ts-runtime-contract.md | needs-work | 0 |  |
 | updates.md | needs-work | 0 |  |

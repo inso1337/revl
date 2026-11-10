@@ -77,6 +77,16 @@ def _trust_the_author(ir) -> list:
                      f"{step.get('name')}.{m.get('name')}")
     return out
 
+
+def _raiser_name(token: str) -> str:
+    """How a refusal names a ticket's raiser (issue #3216)."""
+    return f"operator `{token}`" if token else "this session"
+
+
+def _raiser_list(tokens) -> str:
+    return ", ".join(_raiser_name(t) for t in sorted(tokens))
+
+
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…).
 
@@ -543,6 +553,8 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # stays answerable, so its raiser has to stay known, or the raiser could
     # approve it.
     "_ticket_proposers",
+    # issue #3216: whose asking of each ticket no yes has answered yet
+    "_ticket_pending_raisers",
     # issue #1781: the per-id spend index rides with the spends it numbers
     "_spend_uses",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
@@ -1054,6 +1066,12 @@ class Session:
         # most one approval PER ROUND. See `_issue_ticket` / `approve_ticket`.
         # Lives and dies with `_ledger` — the rounds index it.
         self._ticket_rounds: dict = {}
+        # issue #3216: ticket hash -> {raiser: round} for every identity whose
+        # asking of it no yes has answered yet. A yes is minted for ONE of them
+        # (`approve_ticket`'s `proposer`) and removes it, so another operator's
+        # byte-identical call is its own question, never a spend of someone
+        # else's approval. Replaced with the outstanding-ticket table.
+        self._ticket_pending_raisers: dict = {}
         # the approval ledger (item 246, Decision 3): granted class-(c) approvals,
         # each bound to its ticket hash and the reach-closure candidate hash,
         # single-use. Persists across swaps (the candidate-hash check invalidates a
@@ -2192,6 +2210,7 @@ class Session:
         self._tickets = {}
         self._ticket_refusals = {}
         self._ticket_proposers = {}
+        self._ticket_pending_raisers = {}   # issue #3216: dies with the table
         # item 251 Slice 2: re-materialize the distilled rules against the new
         # generation. The H1 review bind (`_auto_reviewed`) persists across the
         # swap, so a component the swap moves INTO a rule's glob that was not in the
@@ -5130,6 +5149,7 @@ class Session:
         self._ticket_refusals = {}
         self._ticket_proposers = {}
         self._ticket_rounds = {}   # indexes `_ledger`; dies with it
+        self._ticket_pending_raisers = {}   # issue #3216: dies with the table
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
@@ -6275,10 +6295,19 @@ class Session:
         hash, same reach-closure candidate hash against the LIVE generation, same
         component (invariants 2/4/5). A swap that changed the closure recomputes a
         different candidate hash, so a stale token fails here with no revocation
-        bookkeeping."""
+        bookkeeping.
+
+        Issue #3216: and the same PROPOSER. An entry is spendable only by an
+        identity it was minted for (`proposers`, the raisers of the round the
+        yes answered), so an operator sending the byte-identical call another
+        operator's ticket was approved for gets a ticket of its own. An entry
+        that names no proposers is spendable by nobody (fail closed)."""
+        caller = self._operator_token()
         for entry in self._ledger:
             if entry["consumed"]:
                 continue
+            if caller not in (entry.get("proposers") or ()):
+                continue  # minted for another operator's asking of it
             if entry["hash"] != ticket["hash"]:
                 continue
             if entry["candidateHash"] != ticket["candidateHash"]:
@@ -6956,9 +6985,10 @@ class Session:
                 ttls.append(rule.ttl_ms)
         return min(ttls) if ttls else None
 
-    def _spendable_entry_for_ticket(self, ticket_hash: str) -> dict | None:
-        """A ledger entry for this ticket hash that could still be spent at a
-        crossing: minted, not yet consumed, not expired. Deliberately WEAKER than
+    def _spendable_entry_for_ticket(self, ticket_hash: str,
+                                    raiser: str) -> dict | None:
+        """A ledger entry for this ticket hash that `raiser` could still spend at
+        a crossing: minted for it (issue #3216), not yet consumed, not expired. Deliberately WEAKER than
         `_find_standing_approval` (which also pins the component and the live
         candidate hash before letting a token fire) — this one only asks whether
         an unanswered yes is still standing for the question, which is what the
@@ -6967,6 +6997,8 @@ class Session:
             if entry["hash"] != ticket_hash:
                 continue
             if entry["consumed"]:
+                continue
+            if raiser not in (entry.get("proposers") or ()):
                 continue
             if self._expired(entry):
                 continue
@@ -7015,11 +7047,21 @@ class Session:
             if shortfall is not None:
                 raise SessionError(
                     f"cannot decide `{ticket.get('component')}`: {shortfall}")
+        raiser = self._operator_token()
         self._tickets[h] = ticket
-        self._ticket_proposers.setdefault(h, set()).add(self._operator_token())
-        if self._spendable_entry_for_ticket(h) is None \
-                and not self._quorum_pending(h):
-            self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
+        self._ticket_proposers.setdefault(h, set()).add(raiser)
+        # issue #3216: a yes standing for ANOTHER operator's asking does not
+        # answer this one, so it opens a round of its own, pending until a yes
+        # names this raiser
+        if self._spendable_entry_for_ticket(h, raiser) is None:
+            if not self._quorum_pending(h):
+                self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
+            pending = self._ticket_pending_raisers.setdefault(h, {})
+            round_ = self._ticket_rounds.get(h, 1)
+            if pending.get(raiser) != round_:
+                pending.pop(raiser, None)
+                pending[raiser] = round_
+        self._show_pending_raisers(h)
         # the quorum opens HERE, on the asking, and not on the first vote: the
         # record's `expiresAt` is the deadline every vote is bound to, and it has
         # to run from the question rather than from whoever answers it last.
@@ -7030,23 +7072,39 @@ class Session:
         self._count_posture("c")
         return ticket
 
-    def _ledger_entry_for_ticket(self, ticket_hash: str) -> dict | None:
-        """The entry already minted for the ticket's CURRENT answer round, if any
-        (F5: one ticket round mints AT MOST one approval). Returns it regardless
-        of `consumed` — `approve_ticket`'s idempotent-resend path has to
-        recognize a round that already minted whether or not that mint has fired
-        yet, not only a still-spendable one (that is `_find_standing_approval`'s
-        job, at the crossing).
+    def _show_pending_raisers(self, ticket_hash: str) -> None:
+        """Issue #3216: the card names every operator whose asking of the
+        ticket is still unanswered (`proposers`), so the approver sees whose
+        call a yes would let through and can name one. Written after the hash:
+        the question is the same whoever asks it. With no operator profile there
+        is one unnamed identity and the card is unchanged."""
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None:
+            return
+        names = [t for t in self._ticket_pending_raisers.get(ticket_hash, {}) if t]
+        if names:
+            ticket["proposers"] = names
+        else:
+            ticket.pop("proposers", None)
 
-        Scoped to the round rather than to the hash for all time: a ticket hash
-        is stable across repeats of the same crossing, so a hash-wide match would
-        make the SECOND asking of a question permanently unanswerable — the
-        operator says yes, `approve_ticket` reports the spent entry back as
-        already-approved, and the re-issued call raises the same ticket again
-        forever."""
-        round_ = self._ticket_rounds.get(ticket_hash, 1)
-        for entry in self._ledger:
-            if entry["hash"] == ticket_hash and entry.get("round", 1) == round_:
+    def _ledger_entry_for_ticket(self, ticket_hash: str,
+                                 proposer: str) -> dict | None:
+        """The latest entry minted for `proposer`'s asking of this ticket, if
+        any, consumed or not (F5: one asking mints AT MOST one approval).
+        `approve_ticket`'s idempotent-resend path has to recognize an asking
+        that was already answered whether or not that yes has fired yet, not
+        only a still-spendable one (that is `_find_standing_approval`'s job, at
+        the crossing).
+
+        Scoped to the proposer (issue #3216) as well as to the hash: a yes is
+        minted for one operator's asking, so a resend naming that operator lands
+        on it, and another operator's asking of the same question is answered
+        on its own. A new asking by the same operator after its yes was spent
+        is pending again (`_ticket_pending_raisers`), so it is minted afresh
+        rather than reported back as the spent one."""
+        for entry in reversed(self._ledger):
+            if entry["hash"] == ticket_hash \
+                    and entry.get("proposers") == [proposer]:
                 return entry
         return None
 
@@ -7705,7 +7763,7 @@ class Session:
             **({"override": record["override"]} if record.get("override")
                else {})})
         self._mint_ticket_entry(
-            ticket, operator=actor,
+            ticket, proposer=record["proposer"], operator=actor,
             quorum={"requestId": record["requestId"],
                     "require": record["require"], "counted": counted,
                     "approvers": list(record["approvers"]),
@@ -7963,8 +8021,11 @@ class Session:
         ticket_hash = ticket["hash"]
         by = getattr(getattr(self, "operator", None), "token", None) or ""
         withdrawn = None
-        entry = self._ledger_entry_for_ticket(ticket_hash)
-        if entry is not None and not entry["consumed"]:
+        # issue #3216: a yes is minted per operator's asking, so the NO to the
+        # question withdraws each one still standing for it
+        for entry in self._ledger:
+            if entry["hash"] != ticket_hash or entry["consumed"]:
+                continue
             entry["consumed"] = True
             entry["revoked"] = True
             withdrawn = entry["requestId"]
@@ -8076,7 +8137,8 @@ class Session:
             receipt, self._quorums.get(request_id), entry,
             self._approval_records)
 
-    def _mint_ticket_entry(self, ticket: dict, *, operator: str | None = None,
+    def _mint_ticket_entry(self, ticket: dict, *, proposer: str,
+                           operator: str | None = None,
                            quorum: dict | None = None) -> dict:
         """Mint the single-use ledger entry an answered ticket authorizes, and the
         `approval-granted` WAL record that makes it durable.
@@ -8088,8 +8150,13 @@ class Session:
         the fire. `operator` names who answered (defaulting to the session's bound
         operator); `quorum`, when the decision was multi-party, is spliced into the
         granted record so the audit can see that several votes, or one override,
-        closed it, and never has to infer it."""
+        closed it, and never has to infer it.
+
+        Issue #3216: `proposer` is the one operator whose asking this yes
+        answers and the only one that may spend it. The round is that asking's
+        own, and the asking leaves the pending set."""
         ticket_hash = ticket["hash"]
+        pending = self._ticket_pending_raisers.get(ticket_hash, {})
         now = self._now_ms()
         # item 246, Slice 2: the ttl from the policy rule covering this ticket's
         # capabilities. The tightest (min) ttl over the covered required
@@ -8101,7 +8168,9 @@ class Session:
         # ids or the join cannot say which spend belongs to which decision. Round
         # 1 keeps the bare ticket hash, so the id every existing session and WAL
         # carries is unchanged.
-        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        round_ = pending.pop(proposer, None) \
+            or self._ticket_rounds.get(ticket_hash, 1)
+        self._show_pending_raisers(ticket_hash)
         request_id = ticket_hash if round_ <= 1 \
             else f"{ticket_hash}#r{round_}"
         entry = {
@@ -8115,6 +8184,9 @@ class Session:
             "argsDigest": ticket.get("argsDigest"),
             "kind": ticket.get("kind"),
             "session": self._session_id,   # invariant 5: session-bound
+            # issue #3216: the one operator whose asking this yes answers, and
+            # the only one that may spend it
+            "proposers": [proposer],
             "fields": {},           # the human's evidence (the language path fills)
             "grantedAt": now,
             "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
@@ -8126,6 +8198,8 @@ class Session:
             "candidateHash": entry["candidateHash"],
             "component": entry["component"], "kind": entry["kind"],
             **self._distillation_ledger_fields(ticket, operator=operator)}
+        if any(entry["proposers"]):
+            granted["proposers"] = entry["proposers"]   # issue #3216
         if quorum is not None:
             granted["quorum"] = quorum
         wal = self._approval_wal()
@@ -8141,12 +8215,17 @@ class Session:
         """The answer `approve_ticket` has always returned for a minted approval:
         the hash, the component, the key/method/kind a caller needs to re-issue the
         identical call, and the reach-closure candidate hash it is bound to."""
-        return {"approved": True, "hash": ticket["hash"],
-                "component": ticket["component"], "key": ticket.get("key"),
-                "method": ticket.get("method"), "kind": ticket.get("kind"),
-                "candidateHash": ticket["candidateHash"]}
+        response = {"approved": True, "hash": ticket["hash"],
+                    "component": ticket["component"], "key": ticket.get("key"),
+                    "method": ticket.get("method"), "kind": ticket.get("kind"),
+                    "candidateHash": ticket["candidateHash"]}
+        if any(ticket.get("proposers") or ()):
+            # issue #3216: the operators this yes lets through, and only them
+            response["proposers"] = list(ticket["proposers"])
+        return response
 
     def approve_ticket(self, ticket_hash: str, *, vote: str = "approve",
+                       proposer: str | None = None,
                        as_token: str | None = None,
                        as_secret: str | None = None,
                        as_proof: str | None = None) -> dict:
@@ -8192,7 +8271,13 @@ class Session:
         method uses. That keeps the two paths one protocol with one ledger and one
         set of invariants, and it is why a quorum approval is consumed at the
         crossing by the same `_find_standing_approval` / `_consume_approval` the
-        single-approver path uses."""
+        single-approver path uses.
+
+        Issue #3216: a yes is minted for ONE operator's asking, `proposer`, and
+        only that operator spends it. It defaults to the raiser when a single
+        identity has raised the ticket; when several have, a bare hash is
+        refused (`_approved_proposer`) and the others keep their own asking
+        pending. A resend naming the same proposer is the idempotent no-op."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -8208,22 +8293,57 @@ class Session:
                     f"ticket {ticket_hash} names no approver set and demands no "
                     f"quorum, so it cannot be answered with a vote: approve it "
                     f"plainly (roadmap item 471)")
-            existing = self._ledger_entry_for_ticket(ticket_hash)
-            if ticket_hash in self._ticket_refusals \
-                    or (existing is not None and existing.get("revoked")):
+            proposer = self._approved_proposer(ticket_hash, proposer)
+            existing = self._ledger_entry_for_ticket(ticket_hash, proposer)
+            pending = proposer in self._ticket_pending_raisers.get(ticket_hash, {})
+            if ticket_hash in self._ticket_refusals or (
+                    not pending and existing is not None
+                    and existing.get("revoked")):
                 # issue #1553: a revoke closed this round, so no yes follows it
                 raise SessionError(
                     f"ticket {ticket_hash} was revoked in this round, so it "
                     f"cannot be approved: the re-issue it holds is refused. The "
                     f"next asking of the crossing opens a new round, which can "
                     f"be approved")
-            if existing is not None:
-                return self._ticket_response(existing)
+            if not pending:
+                if existing is not None:
+                    return self._ticket_response(existing)
+                raise SessionError(
+                    f"ticket {ticket_hash} has no asking by "
+                    f"{_raiser_name(proposer)} for a yes to answer (issue "
+                    f"#3216). Re-issue the call for a fresh ticket")
             self._refuse_self_approval(ticket_hash)
-            self._mint_ticket_entry(ticket)
-            return self._ticket_response(ticket)
+            return self._ticket_response(
+                self._mint_ticket_entry(ticket, proposer=proposer))
         return self._cast_vote(ticket, rule, vote=vote, as_token=as_token,
                                as_secret=as_secret, as_proof=as_proof)
+
+    def _approved_proposer(self, ticket_hash: str, proposer: str | None) -> str:
+        """Issue #3216: the one operator whose asking a yes to this ticket
+        answers. A yes is spent only by the operator it names, so when two
+        operators have raised the same call the approver has to say which one;
+        a bare hash is accepted only while a single identity has raised it."""
+        raisers = self._ticket_proposers.get(ticket_hash) or set()
+        if proposer is not None:
+            if proposer not in raisers:
+                raise SessionError(
+                    f"ticket {ticket_hash} was not raised by operator "
+                    f"`{proposer}`, so a yes cannot be minted for it (issue "
+                    f"#3216). Raised by: {_raiser_list(raisers)}")
+            return proposer
+        if len(raisers) == 1:
+            return next(iter(raisers))
+        if not raisers:
+            raise SessionError(
+                f"ticket {ticket_hash} has no recorded raiser, so no operator "
+                f"can be named to spend a yes (issue #3216). Re-issue the call "
+                f"for a fresh ticket")
+        waiting = [t for t in self._ticket_pending_raisers.get(ticket_hash, {})]
+        raise SessionError(
+            f"ticket {ticket_hash} was raised by more than one operator "
+            f"({_raiser_list(raisers)}), and a yes is spent only by the one it "
+            f"names (issue #3216): pass `proposer` naming one of them. Still "
+            f"waiting for a yes: {_raiser_list(waiting) or 'none'}")
 
     def _refuse_self_approval(self, ticket_hash: str) -> None:
         """Issue #1706: under `approval_separation`, the identity that raised a
@@ -10358,11 +10478,19 @@ def _ir_has_approval_edges(ir: dict) -> bool:
 def _fiber_activation_error(fiber) -> dict | None:
     """The error a FAILED fiber's activation raised, as `{type, message}`, or
     None. cordis records it on the fiber (`_error`, fiber.py) and lands the
-    fiber FAILED; it is the only place the exception survives (issue #1895)."""
+    fiber FAILED; it is the only place the exception survives (issue #1895).
+
+    The message is funnelled through the same `confidential` registry the
+    runtime and the bridge read (issue #3142). A host body's exception text is
+    free-form, so it can quote a registered `Secret[T]` value inside a longer
+    sentence; `load()` and `state()` hand this dict back to the caller, and the
+    rollback reason is built from the same reading. The scrub is exact-valued,
+    so an error that quotes no registered secret is unchanged."""
     err = getattr(fiber, "_error", None)
     if err is None:
         return None
-    return {"type": type(err).__name__, "message": str(err)}
+    from .._process_runner import redact_text  # noqa: PLC0415 — lazy: one sink only
+    return {"type": type(err).__name__, "message": redact_text(str(err))}
 
 
 def _component_state(driver, name: str, fiber) -> dict:

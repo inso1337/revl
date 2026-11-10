@@ -332,7 +332,9 @@ fn ts_scalar_type(name: Str) -> Str {
   if (name == "Str") { return "string" }
   if (name == "Bytes") { return "Uint8Array" }
   if (name == "Unit") { return "void" }
-  if (name == "Any") { return "any" }
+  // `Value` (stdlib/value.rvl) is the named erased-dynamic builtin and takes
+  // the same host erasure as the `Any` wildcard (issue #3019).
+  if (name == "Any" || name == "Value") { return "any" }
   if (name == "Never") { return "never" }
   return ""
 }
@@ -4218,11 +4220,18 @@ fn runtime_imports(ir: Any) -> Str {
   if (uses_routes(ir)) { names = names.push("realmLabel") }
   if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
   if (uses_lifecycle_tests(ir)) {
-    names = names.push("plug")
-    names = names.push("snapshotRuntime")
-    names = names.push("assertNoResidue")
+    // issue #3053: the driver calls these runtime helpers on its own behalf,
+    // so they come in under the `$revl_` sigil its locals already use. `$` is
+    // outside revl's identifier alphabet, so a lifecycle `let snapshotRuntime`
+    // cannot shadow the driver's reference (the plain import made the user's
+    // `const snapshotRuntime` the only one in scope, a temporal dead zone at
+    // the driver's earlier call). Mirrors `_runtime_imports` in
+    // backends/typescript/emit.py.
+    names = names.push("plug as $revl_plug")
+    names = names.push("snapshotRuntime as $revl_snapshotRuntime")
+    names = names.push("assertNoResidue as $revl_assertNoResidue")
     // issue #1911: only an `abort` step reaches a live frame.
-    if (uses_lifecycle_abort(ir)) { names = names.push("frameForCtx") }
+    if (uses_lifecycle_abort(ir)) { names = names.push("frameForCtx as $revl_frameForCtx") }
   }
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }
@@ -4496,9 +4505,12 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     }
     return { lines: [
       "  {",
-      `    const _f = plug($revl_root, ${comp_name}, {${items.join(", ")}})`,
-      "    await _f",
-      `    $revl_fibers.set(${json_dumps(comp_name)}, await _f)`,
+      // issue #3053: the load block's fiber handle is `$revl_f`, not `_f`, so
+      // it cannot shadow a lifecycle `let _f` a config expression reads in the
+      // initializer's temporal dead zone.
+      `    const $revl_f = $revl_plug($revl_root, ${comp_name}, {${items.join(", ")}})`,
+      "    await $revl_f",
+      `    $revl_fibers.set(${json_dumps(comp_name)}, await $revl_f)`,
       "    await _revl_settle()",
       "  }"
     ], counter: c }
@@ -4541,7 +4553,7 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     return { lines: [
       "  // R4 + R1: same introspection the py reference",
       "  // tier's `assert no_residue` performs.",
-      "  assertNoResidue($revl_root, $revl_baseline)"
+      "  $revl_assertNoResidue($revl_root, $revl_baseline)"
     ], counter: counter }
   }
   if (kind == "abort") {
@@ -4555,7 +4567,7 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
       "  // mark every live activation aborting, so its teardown",
       "  // reverts rather than commits (item 245).",
       "  for (const _fiber of Array.from($revl_fibers.values())) {",
-      "    frameForCtx(_fiber.ctx)?.abort()",
+      "    $revl_frameForCtx(_fiber.ctx)?.abort()",
       "  }",
       "  for (const _fiber of Array.from($revl_fibers.values()).reverse()) {",
       "    try {",
@@ -4593,7 +4605,7 @@ fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any]) 
       // item 102: the clock coeffect is module-global; reset it so this test's
       // `advance` steps start from t=0 and see only its own timers.
       if (advances) { body = body.push("  host.clockReset()") }
-      body = body.push("  const $revl_baseline = snapshotRuntime($revl_root)")
+      body = body.push("  const $revl_baseline = $revl_snapshotRuntime($revl_root)")
       body = body.push("  const $revl_fibers = new Map<string, any>()")
       for (st of steps) {
         let r = lifecycle_step(st, services, provided, c, acx)

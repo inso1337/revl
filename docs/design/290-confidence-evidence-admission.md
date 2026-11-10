@@ -180,6 +180,24 @@ capability payments.* requires evidence [publisher trusted, attestation valid]
 capability inventory.* requires register keyed
 ```
 
+Issue #2753 adds a SEPARATE advisory form. It evaluates the same closed
+vocabulary and takes the same `self-attested` acknowledgment, but a failing
+clause never becomes a violation; the rule names the operator's graded
+disposition instead:
+
+```
+component <glob>          observe|canary|review on evidence [<facet> <threshold>, ...]
+component registry:<glob> observe|canary|review on evidence [...]
+realm <name>              observe|canary|review on evidence [...]
+mcp                       observe|canary|review on evidence [...]
+capability <glob>         observe|canary|review on evidence [...]
+```
+
+`admit` and `quarantine` are not declarable here: they are computed from the
+hard predicate (every hard clause holds, or one fails). The hard
+`requires evidence` rule above is unchanged, so the gate stays a hard
+predicate.
+
 Subject semantics follow the shipped rules exactly: `component <glob>` selects
 by `fnmatchcase` over the component name, `realm` by isolate membership
 (`component_realms`), `mcp` by MCP-session admission (the same
@@ -282,6 +300,9 @@ Same `Policy`, machine-authored, alongside the existing `components` / `realms`
      "require": {"attestation": "valid", "fault-sweep": "12/12"}},
     {"component": "vendored-*",
      "require": {"fault-sweep": "full"}, "selfAttested": true},
+    {"component": "canary-*",
+     "outcome": "review",
+     "require": {"fault-sweep": "full"}, "selfAttested": true},
     {"capability": "payments.*",
      "require": {"publisher": "trusted", "attestation": "valid"}},
     {"mcp": true, "require": {"gauntlet": "admissible"}}
@@ -295,7 +316,9 @@ Same `Policy`, machine-authored, alongside the existing `components` / `realms`
 
 The `registry:` origin prefix is the same string in JSON; `selfAttested` and
 the policy-level `evidenceRoot` are the section-6.3 acknowledgments (the
-example shows both forms; a real file needs at most one).
+example shows both forms; a real file needs at most one). An `"outcome"` key
+selects the advisory soft form of issue #2753 (`observe`, `canary` or
+`review`); omitted, the entry is the hard `requires evidence` rule.
 
 An unknown facet name, status, or register level is a `PolicyError` at parse
 time (a closed vocabulary, like every other rule family): a typo must not
@@ -660,6 +683,26 @@ floors above `declared` (`keyed`, `strong`) unlocked when
 309's ledger actually records those registers in the IR (they stay
 parse-rejected until then, per section 3.2); distillation (251) taught to
 emit evidence rules stays in 251's own item, unblocked by slice 1.
+
+**Slice 4: graded outcomes (issue #2753).** `policy evaluate` gains an
+advisory outcome section computed from the clause verdicts it already
+collects, and a policy may declare graded dispositions on a SEPARATE soft
+rule family: `<subject> <outcome> on evidence [...]`, where the outcome is
+`observe`, `canary` or `review`. A soft clause never appends a violation and
+never changes the gate, so section 2's hard predicate, fail-closed direction
+and no-partial-credit rule stay untouched: `requires evidence` still refuses
+on every failing clause. `admit` is computed when every selected hard
+evidence or register clause holds and no soft clause fails; a hard failure
+maps to `quarantine` when the policy declares `quarantine required` and to
+the gate's own `refuse` otherwise. The strictest failing soft outcome
+decides, and the report names the clause that decided it. A refusal from a
+reach, approval or tenant rule overrides that component's evidence grade to
+`refuse`. A document-global refusal such as the
+`requires idempotent-teardown` floor forces the overall outcome to `refuse`,
+naming the recovery entry. The outcome therefore never reports `admit` while
+the gate refuses. The facet vocabulary stays the same; the diff-size,
+shadow-agreement, proposer-agreement and proposer-history facets named in the
+issue are a later slice, not silently invented here.
 
 ## 10. Exit tests
 

@@ -4238,6 +4238,75 @@ def test_rejected_programs_agree(admit, case):
     _agree(admit, src)
 
 
+# issue #2968: a block arm may hold two statements written side by side on one
+# line, `Some(v) => { let z = 1  z }`. The reference's recursive descent reads
+# them as two statements; the gate's arm reader read the line as one, so the
+# arm's TAIL became `(let z = 1 z)`, the expression reader could not parse it,
+# and the whole statement holding the arm was skipped, dropping every sibling
+# arm's calls. An unmarked emission in the sibling was then admitted, and the
+# `let r = match ...` shape left `r` unbound for a G1 on the next line.
+_ONE_LINE_BLOCK_ARM_HEADER = """\
+extern emission[net(calls=1)] fn send(x: Str) -> Int = @py { return 1 }
+service Ops { emission fn m() -> Int }
+component C provides ops: Ops { provide ops { fn m() {
+let o = Some(1)
+"""
+
+_ONE_LINE_BLOCK_ARM_FOOTER = """
+} } }
+"""
+
+_ONE_LINE_BLOCK_ARM_CASES = [
+    # the issue's repro: the unmarked call after the block arm
+    ("the unmarked call after the block arm",
+     'return match o { Some(v) => { let z = 1  z }, None => send("x") }',
+     "G4"),
+    # the unmarked call before the block arm
+    ("the unmarked call before the block arm",
+     'return match o { Some(v) => send("x"), None => { let z = 1  z } }',
+     "G4"),
+    # the arm inside a `let` initializer: the statement after it must still be
+    # read, so `r` is bound and the emission is the refusal (main drew G1 on `r`)
+    ("the block arm inside a let initializer",
+     'let r = match o { Some(v) => { let z = 1  z }, None => send("x") }\n'
+     "return r",
+     "G4"),
+    # controls that already refused G4 on main
+    ("a block arm with no let",
+     'return match o { Some(v) => { 1 }, None => send("x") }',
+     "G4"),
+    ("no block arm",
+     'return match o { Some(v) => v, None => send("x") }',
+     "G4"),
+    ("a two-line block arm",
+     'return match o { Some(v) => {\nlet z = 1\nz\n}, None => send("x") }',
+     "G4"),
+]
+
+
+@pytest.mark.parametrize(
+    "name, body, tag", _ONE_LINE_BLOCK_ARM_CASES,
+    ids=[name for name, _, _ in _ONE_LINE_BLOCK_ARM_CASES])
+def test_a_one_line_block_arm_splits_like_the_reference(admit, name, body, tag):
+    source = _ONE_LINE_BLOCK_ARM_HEADER + body + _ONE_LINE_BLOCK_ARM_FOOTER
+    ref_tag, ref_msg = _ref(source)
+    assert ref_tag == tag, \
+        f"corpus bug: reference tag for {name} is {ref_tag!r}, expected {tag!r}"
+    got = admit(source)
+    assert got == f"{tag}|{ref_msg}", f"{name}: selfhost {got!r}"
+
+
+def test_a_one_line_block_arm_without_an_emission_still_admits(admit):
+    source = """service Ops { fn m() -> Int }
+component C provides ops: Ops { provide ops { fn m() {
+let o = Some(1)
+return match o { Some(v) => { let z = 1  z }, None => 0 }
+} } }
+"""
+    assert _ref(source) == ("", "")
+    assert admit(source) == ""
+
+
 def test_generic_variant_exhaustiveness_matches_reference(admit):
     """Issue #2926: both checkers resolve an applied variant to its declared head."""
     _agree(admit, _fixture("t1_generic_variant_match_nonexhaustive"))
@@ -5161,6 +5230,7 @@ def test_a_deep_call_nest_is_decided_without_a_quadratic_scan(admit):
     assert elapsed < 30, f"{elapsed:.1f}s for 20000 nested calls: the scan is quadratic again"
 
 
+@pytest.mark.slow
 def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
     """The fuzz the size bound was standing in for.
 
@@ -7862,19 +7932,6 @@ _NR_LATER_SLICES = (
     # which is a true refusal of the same program and not a gate error. Owned by
     # the type layer, like `payload expects` above.
     "ternary branches disagree",
-    # issue #2544's TYPECHECK rule, and the one NAMED allowance this PR adds:
-    # a call on a binder whose type is definitely not a function, where a
-    # module `fn`/extern or case of the same name exists, is refused by the
-    # reference (`refuse_call_on_non_function`) and the binding is thereby not
-    # silently dropped. The self-host gate does not port that rule yet -- this
-    # PR is `Part of #2544`, not `Closes`, and `selfhost/lower.rvl` still
-    # admits the shape -- so a drawn program carrying this refusal is refused
-    # by the reference while the gate admits it, or reports its own refusal.
-    # Skipping it by name keeps the comparison honest instead of silently
-    # treating the gap as agreement; the port is #2544's next slice, tracked
-    # on the issue. The wording is this rule's alone
-    # (`refuse_call_on_non_function` is its only raiser).
-    "which is not a function",
 )
 
 _NR_TAGS = ("G1", "T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY")
@@ -8063,6 +8120,240 @@ def test_the_provide_method_documents_draw_the_reference_sentence(
     tag, msg = _ref(src)
     assert f"{tag}|{msg}" == expected, "the reference moved: " + name
     assert admit(src) == expected, name
+
+
+# ------------------------------------------- issue #2544: the non-function call
+#
+# `refuse_call_on_non_function` is a TYPECHECK rule: a call on a binder whose
+# declared type is definitely not a function, while a same-named module
+# `fn`/extern or ADT case exists, would name that callable and silently drop
+# the binding. The self-host's `tk_call` decides it in the reference's position
+# (`tk_non_function_call`) and spells the reference's sentence byte for byte.
+#
+# The rule shares a binder with item 445's `_refuse_callable_shadowing`, which
+# raises its G6 sentence BEFORE the type layer. The reference's scan is complete,
+# so for every binder form except a provide method's PARAMETERS (its parameter
+# list is names, not typed nodes) the G6 sentence is the one both compilers must
+# spell. The self-host's token scan of a module `fn` body deliberately stands
+# down on a `=>`, and it does not walk component-method or test scopes, so the
+# typecheck rule must not claim the module-`fn`/extern half in those strata: the
+# guard keys that half on the `mp` marker `mth_param_tys` writes, and only the
+# CASE half (which item 445 does not consider) is decided everywhere.
+#
+# `_NR_LATER_SLICES` used to carry this family by name while the gate admitted
+# the shape. It no longer does; these are the rows that keep the port honest.
+_2544_REFUSED_PROGRAMS = [
+    # the issue's reproducer: a `Str` parameter called as if it were the
+    # same-named module `fn`
+    ("provide_fn", "\n".join([
+        "fn tag(s: Str) -> Str { return s }",
+        "service Cache {",
+        "  fn f(tag: Str) -> Str",
+        "}",
+        "component C provides cache: Cache {",
+        "  provide cache {",
+        '    fn f(tag) = tag("x")',
+        "  }",
+        "}",
+    ]) + "\n"),
+    # the same shape in a brace body: the rule is the call's, not the body form's
+    ("provide_block", "\n".join([
+        "fn tag(s: Str) -> Str { return s }",
+        "service Cache {",
+        "  fn f(tag: Str) -> Str",
+        "}",
+        "component C provides cache: Cache {",
+        "  provide cache {",
+        '    fn f(tag) { return tag("x") }',
+        "  }",
+        "}",
+    ]) + "\n"),
+    # an extern is the same collision: the guard keys on the binder's type, not
+    # on which module callable the name would reach
+    ("provide_extern", "\n".join([
+        "extern pure fn stamp(s: Str) -> Str = @py { return s }",
+        "service Cache {",
+        "  fn f(stamp: Str) -> Str",
+        "}",
+        "component C provides cache: Cache {",
+        "  provide cache {",
+        '    fn f(stamp) = stamp("x")',
+        "  }",
+        "}",
+    ]) + "\n"),
+    # the case half: a `Str` parameter can never construct `Mk`
+    ("provide_case", "\n".join([
+        "type T = Mk(Str)",
+        "service M {",
+        "  fn go(Mk: Str) -> T",
+        "}",
+        "component C provides m: M {",
+        "  provide m {",
+        '    fn go(Mk) = Mk("x")',
+        "  }",
+        "}",
+    ]) + "\n"),
+]
+
+# The refusals the guard must NOT make, each because the reference admits it:
+# the #1823 callable-valued carve-out, the open callable heads, and the
+# callable-existence limit.
+_2544_ADMITTED_PROGRAMS = [
+    # a function-valued parameter IS the callee, even beside a module `fn`
+    ("fn_valued", "fn f(x: Int) -> Int { return x }\n"
+                  "service M { fn go(f: (Int) -> Int, n: Int) -> Int }\n"
+                  "component C provides m: M {\n"
+                  "  provide m { fn go(f, n) = f(n) }\n"
+                  "}\n"),
+    # ... in the generic spelling too
+    ("Fn_valued", "fn f(x: Int) -> Int { return x }\n"
+                  "service M { fn go(f: Fn[Int, Int], n: Int) -> Int }\n"
+                  "component C provides m: M {\n"
+                  "  provide m { fn go(f, n) = f(n) }\n"
+                  "}\n"),
+    # a non-function binder with no same-named module callable names no
+    # fall-through, so the ordinary checks own the call
+    ("no_callee", "service M { fn go(s: Str) -> Str }\n"
+                  "component C provides m: M { provide m { fn go(s) = s(\"x\") } }\n"),
+    # a shared name that is never CALLED is the common, unambiguous shape
+    ("never_called", "fn tag(s: Str) -> Str { return s }\n"
+                     "service M { fn go(tag: Str) -> Str }\n"
+                     "component C provides m: M {\n"
+                     "  provide m { fn go(tag) = \"x\" }\n"
+                     "}\n"),
+    # `Never` is the uninhabited bottom: the call is vacuous, not a fall-through
+    ("never_ty", "fn nv(x: Int) -> Int { return x }\n"
+                 "service M { fn go(nv: Never, n: Int) -> Int }\n"
+                 "component C provides m: M {\n"
+                 "  provide m { fn go(nv, n) = nv(1) }\n"
+                 "}\n"),
+    # `Any` is erased dynamic, not known non-function
+    ("any_ty", "fn f(x: Int) -> Int { return x }\n"
+               "service M { fn go(f: Any) -> Any }\n"
+               "component C provides m: M {\n"
+               "  provide m { fn go(f) = f(1) }\n"
+               "}\n"),
+]
+
+# The strata where item 445's G6 sentence is the reference's answer, so the
+# #2544 guard must not spell its T1 sentence there. The reference's scan is
+# complete; this gate's token scan bails on the `=>` and does not walk
+# component-method or test scopes, so its no-objection is the allowed direction.
+_2544_G6_OWNED_PROGRAMS = [
+    # a module `fn` body with an arrow: the `=>` fence stands the G6 scan down
+    ("fn_arrow_fence", "fn tag(s: Str) -> Str { return s }\n"
+                       "fn f(tag: Str) -> Str {\n"
+                       "  let g: (Int) -> Int = (n: Int) => n\n"
+                       '  return tag("x")\n'
+                       "}\n"),
+    # a provide-method LOCAL: item 445 sees a method `let`, this gate's
+    # component scan does not reach one
+    ("method_let", "fn tag(s: Str) -> Str { return s }\n"
+                   "service Cache { fn f(key: Str) -> Str }\n"
+                   "component C provides cache: Cache {\n"
+                   "  provide cache {\n"
+                   "    fn f(key) {\n"
+                   '      let tag = "x"\n'
+                   "      return tag(key)\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n"),
+    # a method PARAMETER whose name is also bound by a sibling method's `let`:
+    # the reference's component-wide scan answers G6 at the `let`, so the guard
+    # must stand down even though the parameter is the missed binder
+    ("parameter_and_sibling_let",
+     "fn tag(s: Str) -> Str { return s }\n"
+     "service Cache { fn f(tag: Str) -> Str }\n"
+     "component C provides cache: Cache {\n"
+     "  provide cache {\n"
+     '    fn f(tag) = tag("x")\n'
+     "    fn g(key) {\n"
+     '      let tag = "y"\n'
+     "      return key\n"
+     "    }\n"
+     "  }\n"
+     "}\n"),
+    # a test block's local
+    ("test_local", "fn tag(s: Str) -> Str { return s }\n"
+                   'test "t" {\n'
+                   '  let tag = "x"\n'
+                   '  assert tag("y") == "y"\n'
+                   "}\n"),
+]
+
+# The G6-first strata this gate's token scan DOES cover: the guard must leave
+# them to item 445 and the verdicts agree byte for byte.
+_2544_G6_AGREED_PROGRAMS = [
+    # an annotated local in a module `fn` body, no `=>` to stand the scan down
+    ("fn_annotated_let", "fn tag(s: Str) -> Str { return s }\n"
+                         "fn f(g: Int) -> Str {\n"
+                         '  let tag: Str = "z"\n'
+                         '  return tag("x")\n'
+                         "}\n"),
+    ("fn_plain_let", "fn tag(s: Str) -> Str { return s }\n"
+                     "fn f(g: Int) -> Str {\n"
+                     '  let tag = "z"\n'
+                     '  return tag("x")\n'
+                     "}\n"),
+]
+
+
+@pytest.mark.parametrize("case", _2544_REFUSED_PROGRAMS,
+                         ids=[n for n, _ in _2544_REFUSED_PROGRAMS])
+def test_a_call_on_a_non_function_binder_agrees_byte_for_byte(admit, case):
+    """Issue #2544's remaining slice: the reference's own sentence, byte for
+    byte, now that `selfhost/lower.rvl` decides `refuse_call_on_non_function`.
+
+    Each row asserts the reference's tag first, so a program whose reference
+    refusal is some other rule cannot pass as a witness for this one. A gate
+    that still admitted the shape fails `_agree` on the message, which is what
+    the dropped `_NR_LATER_SLICES` allowance used to hide."""
+    _, src = case
+    assert _ref(src)[0] == "T1", src
+    _agree(admit, src)
+
+
+@pytest.mark.parametrize("case", _2544_ADMITTED_PROGRAMS,
+                         ids=[n for n, _ in _2544_ADMITTED_PROGRAMS])
+def test_the_non_function_call_guard_stays_admitted_where_the_reference_does(
+        admit, case):
+    """The guard's limits, on the gate side: the #1823 carve-out, the open
+    callable heads, and the callable-existence rule. A guard that judged the
+    binder without its callable types refuses the two function-valued rows; one
+    that judged `not a function` without the open heads refuses the `Never` and
+    `Any` rows; one that ignored the call position refuses `never_called`; and
+    one without the callable-existence limit refuses `no_callee`."""
+    _, src = case
+    assert _ref(src) == ("", ""), src
+    _agree(admit, src)
+
+
+@pytest.mark.parametrize("case", _2544_G6_OWNED_PROGRAMS,
+                         ids=[n for n, _ in _2544_G6_OWNED_PROGRAMS])
+def test_the_non_function_guard_leaves_the_item_445_strata_to_the_reference(
+        admit, case):
+    """The G6-first strata, pinned against the first cut of this port, which
+    decided a same-named module `fn`/extern here and spelled the T1 sentence
+    where the reference spells G6. The gate's own no-objection on these scopes
+    is the under-refusal it already had; the assertion is that the sentence a
+    reader sees is never a claim the other compiler contradicts."""
+    _, src = case
+    assert _ref(src)[0] == "G6", src
+    got = admit(src)
+    assert got == "", f"gate spells {got!r} where the reference spells G6:\n{src}"
+
+
+@pytest.mark.parametrize("case", _2544_G6_AGREED_PROGRAMS,
+                         ids=[n for n, _ in _2544_G6_AGREED_PROGRAMS])
+def test_the_non_function_guard_leaves_the_item_445_scanned_fns_to_g6(
+        admit, case):
+    """The G6 strata the gate's token scan DOES cover. The item-445 verdict is
+    reached before the type layer and must stay there: a guard placed ahead of
+    it, or one that did not exclude these binder forms, would replace a G6 the
+    reference spells with a T1 it does not."""
+    _, src = case
+    assert _ref(src)[0] == "G6", src
+    _agree(admit, src)
 
 
 # --------------------------------------------------- the differential fuzz

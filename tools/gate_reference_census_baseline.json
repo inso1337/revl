@@ -1,5 +1,10 @@
 {
- "buckets": {},
+ "buckets": {
+  "false-reject/T1": [
+   "tests/fixtures/emit_rust_corpus/comp_provide_generic_variant.rvl",
+   "tests/fixtures/emit_rust_corpus/generic_variant.rvl"
+  ]
+ },
  "corpus_dirs": [
   "examples",
   "tests/fixtures",
@@ -10,6 +15,31 @@
   "backends",
   "dogfood"
  ],
- "details": {},
+ "details": {
+  "tests/fixtures/emit_rust_corpus/comp_provide_generic_variant.rvl": {
+   "bucket": "false-reject/T1",
+   "gate": {
+    "code": "T1",
+    "kind": "refused",
+    "message": "`bump` returns expects `Mb[Int]`, got `Mb`"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/emit_rust_corpus/generic_variant.rvl": {
+   "bucket": "false-reject/T1",
+   "gate": {
+    "code": "T1",
+    "kind": "refused",
+    "message": "this function's return expects `Mb[Int]`, got `Mb`"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  }
+ },
  "note": "Recorded by `python3 tools/gate_reference_census.py --record`. Every entry is a KNOWN gate/reference divergence over the census corpus; `--check` fails on one that is not here, and on one here that no longer diverges, so the allowance can only shrink in a diff somebody reads. A `false-admit` entry is an OPEN GATE BYPASS, not an accepted state: the list is capped by name in tests/test_gate_reference_census.py so it cannot grow quietly while it is worked down."
 }

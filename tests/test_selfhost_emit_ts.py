@@ -110,7 +110,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 
@@ -213,6 +213,7 @@ CORPUS = [
     "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
     "branch_edges.rvl",
     "destructuring.rvl",
+    "module_keyword_names.rvl",  # module fn `class_` -> `class__` and a local of that name (#3179)
     "property_edges.rvl",
     "component_edges.rvl",
     "cas_runtime.rvl",
@@ -699,6 +700,33 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_ts_src"](ir)
 
 
+def test_local_helper_rename_is_a_recorded_port_divergence(emitted, reference):
+    """Issue #3179: the reference renames a function-local name that would
+    shadow an emitted helper or JS global (`backends/typescript/emit.py::
+    _mangle_local`); the port's `ident` is still the JS-keyword ladder only,
+    like the `EMITTER_RESERVED` rename it also defers, and no CORPUS document
+    binds such a name. This pins the divergence so it cannot widen unseen:
+    when the port learns the rule this test fails, and the document joins the
+    CORPUS instead. In the whole-tree survey
+    (`tools/selfhost_differential_survey.py --tiers ts`) the rule moves three
+    documents from agreement to divergence, each a local the reference now
+    renames: tests/fixtures/emit_go_corpus/accumulator_hygiene.rvl
+    (`_revlSB0` -> `_revlSB0_`), tests/fixtures/emit_go_corpus/inference.rvl
+    and tests/fixtures/emit_wasm_corpus/scratch_names.rvl (`record` ->
+    `record_`)."""
+    from revl import compile_source
+    ir = compile_source(
+        "pub fn add(a: Int, b: Int) -> Int {\n"
+        "  let revlI64 = (x: Int) => 7\n"
+        "  return a + b\n"
+        "}\n")
+    want = reference.emit(ir)
+    got = emitted["emit_ts_src"](ir)
+    assert "const revlI64_ = " in want and "const revlI64 = " not in want
+    assert "const revlI64 = " in got
+    assert got.replace("const revlI64 = ", "const revlI64_ = ") == want
+
+
 def test_a_host_identifier_collision_is_refused_by_name(reference):
     """`tests/fixtures/emit_ts_refusals/host_identifier_collision.rvl`: a
     namespaced key and the unqualified key that already spells its mangled
@@ -815,4 +843,47 @@ def test_ts_type_matches_reference_on_structural_types_2297(emitted, reference, 
     of a union, exactly as the reference `_ts_v3_type` does. The corpus document
     `block_arm_records.rvl` covers the lifted-arm signatures end to end."""
     assert emitted["ts_type"](surface) == reference._ts_v3_type(surface)
+
+
+#: issue #3053: the lifecycle driver calls `plug`, `snapshotRuntime`,
+#: `assertNoResidue` and `frameForCtx` on its own behalf, so the reference
+#: imports them under the `$revl_` sigil the driver's locals already carry.
+#: `$` is not in revl's identifier alphabet, so a lifecycle `let
+#: snapshotRuntime = call ...` can no longer shadow the driver's earlier call;
+#: before the fix that binding emitted `const snapshotRuntime` in the driver's
+#: own scope and the call read its temporal dead zone. The port must carry the
+#: same import aliases byte for byte.
+_TS_LIFECYCLE_HELPERS = ("plug", "snapshotRuntime", "assertNoResidue", "frameForCtx")
+
+
+def _a_lifecycle_binding(name: str) -> str:
+    tail = "  abort\n" if name == "frameForCtx" else "  unload BoxC\n"
+    return f"""service Box {{ fn label() -> Str }}
+
+component BoxC provides box: Box {{
+  provide box {{
+    fn label() = "b"
+  }}
+}}
+
+lifecycle test "bind {name}" {{
+  load BoxC
+  let {name} = call box.label()
+  assert {name} == "b"
+{tail}  assert no_residue
+}}
+"""
+
+
+@pytest.mark.parametrize("name", _TS_LIFECYCLE_HELPERS)
+def test_a_lifecycle_binding_named_like_a_runtime_helper_cannot_shadow_the_driver(
+        emitted, reference, name):
+    """issue #3053: the author's spelling stays untouched, the driver reads its
+    `$revl_` alias, and the port emits the reference's bytes."""
+    ir = compile_source(_a_lifecycle_binding(name))
+    want = reference.emit(ir)
+    got = emitted["emit_ts_src"](ir)
+    assert got == want
+    assert f"{name} as $revl_{name}" in want
+    assert f"const {name} = $revl_root.box.label()" in got
 

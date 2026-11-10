@@ -117,7 +117,7 @@ def test_typescript_keeps_the_user_binding_and_reserves_the_driver(name: str):
     source = _emitted("typescript", _program(name))
     assert f"const {name} = $revl_root.box.label()" in source
     assert "const $revl_root = new Context()" in source
-    assert "assertNoResidue($revl_root, $revl_baseline)" in source
+    assert "$revl_assertNoResidue($revl_root, $revl_baseline)" in source
 
 
 # ------------------------------------------- derived: a new local must show here

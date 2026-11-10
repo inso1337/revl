@@ -291,33 +291,13 @@ def _plan_hash(binding: dict) -> str:
 def _widening_from_audits(before: dict, after: dict) -> dict:
     """Every authority axis that widened between two audits.
 
-    `audit_diff` carries seven differs: the crossing set and its reach,
-    per-emission capability scopes, host backends, recovery inverses,
-    capability registers and emission cardinality. A release can widen any of
-    them while adding no crossing, so all of them feed the acknowledgement
-    decision.
+    The gated set lives in `audit_diff.widening_from_audits` (issue #3182), so
+    this acknowledgement decision and the `revl audit --diff` gate read the
+    same buckets.
     """
-    from ..audit_diff import (diff_backends,  # noqa: PLC0415
-                              diff_capability_scopes, diff_cardinality,
-                              diff_recovery, diff_registers, evaluate)
+    from ..audit_diff import widening_from_audits  # noqa: PLC0415
 
-    drift = evaluate(before, after)
-    scopes = diff_capability_scopes(before, after)
-    backends = diff_backends(before, after)
-    recovery = diff_recovery(before, after)
-    registers = diff_registers(before, after)
-    cardinality = diff_cardinality(before, after)
-    buckets = {
-        "added": list(drift["added"]),
-        "reachWeakened": list(drift["reach_weakened"]),
-        "scopesWidened": list(scopes["scope_widened"]),
-        "backendsAdded": list(backends["backends_added"]),
-        "recoveryDropped": list(recovery["recovery_dropped"]),
-        "recoveryWeakened": list(recovery["recovery_weakened"]),
-        "registersWeakened": list(registers["registers_weakened"]),
-        "cardinalityWidened": list(cardinality["cardinality_widened"]),
-    }
-    return {"widened": any(buckets.values()), **buckets}
+    return widening_from_audits(before, after)
 
 
 def _widening(old_ir: dict, files: list[str]) -> dict:

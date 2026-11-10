@@ -53,9 +53,11 @@ def _members(**overrides):
         role="local",
         residence="on_device",
         model_digest=D("nanojev-0.4-weights"),
+        model_digest_basis="declared",
         placement_digest=D("device profile: m4, 4-bit, 2.1GB"),
         prompt_binding={"mode": "content-addressed",
                         "value": D("classify this ticket"), "reason": None},
+        template_digest=D("classify {ticket}"),
         origins=["input", "web"],
         candidates=[D("candidate a"), D("candidate b"), D("candidate c")],
         chosen=1,
@@ -71,6 +73,30 @@ def _members(**overrides):
 
 def sealed(**overrides):
     return me.seal(KEY, **_members(**overrides))
+
+
+def _members_v1(**overrides):
+    """A 1.0 body: the 2.0 claims are absent, and the envelope is explicit.
+
+    Built from the current well-formed body so the two cannot drift on the
+    members they share, then reduced to the frozen 1.0 member set. This is what
+    a record sealed before the version bump looks like; `verify` must still
+    accept it under its own version."""
+    body = dict(_members(**overrides))
+    body.setdefault("retained", None)
+    body.update(kind=me.EVIDENCE_KIND, sign_alg=me.SIGN_ALG,
+                hash_alg=me.HASH_ALG, key_id=me.key_id(KEY),
+                recorded_at="2026-11-03T00:00:00+00:00", version="1.0")
+    body = {k: v for k, v in body.items() if k in me.BODY_MEMBERS_V1}
+    body.update(overrides)
+    return body
+
+
+def sealed_v1(**overrides):
+    """A genuinely sealed 1.0 record, MACed under the 1.0 domain."""
+    body = _members_v1(**overrides)
+    body[me.SIGNATURE_FIELD] = me._sign(body, KEY)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +120,13 @@ def test_the_record_carries_every_member_the_item_names():
     # plus design 531 §9's placement: role name and residence, by value.
     assert record["role"] == "local"
     assert record["residence"] == "on_device"
+    # and issue #2750's three claims: why the ladder moved, which template
+    # produced the prompt, and what the model digest is a claim about.
+    for member in ("fallback_reason", "template_digest",
+                   "template_absence_reason", "model_digest_basis"):
+        assert member in record
     assert set(record) == set(me.BODY_MEMBERS) | {me.SIGNATURE_FIELD}
+    assert record["version"] == me.EVIDENCE_VERSION
 
 
 def test_sealing_is_deterministic_for_one_body():
@@ -285,7 +317,7 @@ def test_a_validly_signed_record_with_an_extra_member_is_refused():
 
 @pytest.mark.parametrize("member,value", [
     ("kind", "revl.attestation"),
-    ("version", "2.0"),
+    ("version", "9.9"),
     ("sign_alg", "ed25519"),
     ("sign_alg", ""),
     ("hash_alg", "sha512"),
@@ -303,6 +335,114 @@ def test_a_validly_signed_record_with_a_wrong_envelope_is_refused(member, value)
     verdict = me.verify(record, KEY)
     assert not verdict.ok
     assert verdict.link in (me.EVIDENCE_ENVELOPE, me.EVIDENCE_SIGNER)
+
+
+# ---------------------------------------------------------------------------
+# versioning: 1.0 still verifies, and neither version can be relabelled
+# ---------------------------------------------------------------------------
+
+def test_an_old_version_record_still_verifies():
+    """The promise the bump makes: an artifact sealed under 1.0 keeps its own
+    body and its own MAC domain, so it still checks out after the members were
+    added. A version bump that broke old records would be a data loss."""
+    record = sealed_v1()
+    assert record["version"] == "1.0"
+    assert set(record) == set(me.BODY_MEMBERS_V1) | {me.SIGNATURE_FIELD}
+    verdict = me.verify(record, KEY)
+    assert verdict.ok, verdict.reason
+
+
+def test_an_old_version_record_reconstructs_without_inventing_new_claims():
+    record = sealed_v1(fallback_depth=2)
+    reading = me.reconstruct(record, KEY)
+    assert reading["verified"] is True
+    decision = reading["decision"]
+    assert decision["version"] == "1.0"
+    assert decision["fallbackDepth"] == 2
+    # 1.0 did not carry the reason, the template or the digest basis; the
+    # reader says so rather than presenting None as if the record claimed it.
+    assert decision["fallbackReason"] is None
+    assert decision["templateDigest"] is None
+    assert decision["templateAbsenceReason"] is None
+    assert decision["modelDigestBasis"] is None
+
+
+def test_a_new_record_cannot_be_downgraded_to_an_old_one():
+    """Relabelling a 2.0 record 1.0 must not turn it into a valid old record:
+    the version is inside the MAC, and even a key holder who re-MACs the
+    relabelled body is holding members 1.0 does not define."""
+    record = sealed()
+    relabelled = dict(record, version="1.0")
+    # a non-holder cannot re-MAC it, so the signature refuses first
+    assert me.verify(relabelled, KEY).link == me.EVIDENCE_SIGNATURE
+    # and a key holder who does re-MAC it is refused by the 1.0 body
+    relabelled[me.SIGNATURE_FIELD] = me._sign(relabelled, KEY)
+    verdict = me.verify(relabelled, KEY)
+    assert not verdict.ok
+    assert verdict.link == me.EVIDENCE_VOCABULARY
+    assert "fallback_reason" in verdict.reason
+
+
+def test_an_old_record_cannot_be_upgraded_by_rewriting_the_version():
+    """The other direction: a 1.0 body presented as 2.0 lacks the claims 2.0
+    requires, even when a key holder re-MACs it under the 2.0 domain."""
+    record = dict(sealed_v1(), version="2.0")
+    record[me.SIGNATURE_FIELD] = me._sign(record, KEY)
+    verdict = me.verify(record, KEY)
+    assert not verdict.ok
+    assert verdict.link == me.EVIDENCE_INCOMPLETE
+    assert "fallback_reason" in verdict.reason
+
+
+def test_each_version_has_its_own_mac_domain():
+    """The domain carries the version, so the same members sealed under one
+    version do not verify under the other even before the body is read."""
+    assert me.SIGN_DOMAINS["1.0"] != me.SIGN_DOMAINS["2.0"]
+    v1 = sealed_v1()
+    body = {k: v for k, v in v1.items() if k != me.SIGNATURE_FIELD}
+    relabelled = dict(body, version="2.0")
+    assert me._sign(body, KEY) != me._sign(relabelled, KEY)
+    # the 1.0 MAC presented on a 2.0 label is refused by the domain, not read
+    cross = dict(relabelled, **{me.SIGNATURE_FIELD: v1[me.SIGNATURE_FIELD]})
+    assert me.verify(cross, KEY).link == me.EVIDENCE_SIGNATURE
+
+
+def test_the_1_0_body_is_frozen():
+    """The compatibility promise rests on this exact member set. Pinning it
+    here means a member added to 1.0 by accident fails a test instead of
+    silently changing what an old record is checked against."""
+    assert set(me.BODY_MEMBERS_V1) == {
+        "kind", "version", "sign_alg", "hash_alg", "key_id", "recorded_at",
+        "component", "step_index", "role", "residence", "model_digest",
+        "placement_digest", "prompt_binding", "origins", "candidates",
+        "chosen", "outcome", "sampling", "policy_digest", "fallback_depth",
+        "retained",
+    }
+
+
+def test_every_accepted_version_has_one_body_and_one_domain():
+    versioned = set(me.EVIDENCE_VERSIONS)
+    assert versioned == set(me.BODY_MEMBERS_BY_VERSION)
+    assert versioned == set(me.SIGN_DOMAINS)
+    assert me.EVIDENCE_VERSION in versioned
+
+
+@pytest.mark.parametrize("member", sorted(me.BODY_MEMBERS_V1))
+def test_every_1_0_covered_member_edited_fails_the_signature(member):
+    """The generated tamper set runs over the CURRENT body above. A record
+    still accepted under 1.0 must keep the same property, or the legacy arm
+    becomes the place an edited field stops failing its digest."""
+    record = sealed_v1()
+    tampered = dict(record)
+    tampered[member] = _a_different_value(member, record[member])
+    assert tampered != record
+    assert me.verify(tampered, KEY).link == me.EVIDENCE_SIGNATURE
+
+
+def test_an_unknown_version_is_refused_rather_than_read_as_1_0():
+    record = dict(sealed(), version="9.9")
+    record[me.SIGNATURE_FIELD] = me._sign(record, KEY)
+    assert me.verify(record, KEY).link == me.EVIDENCE_ENVELOPE
 
 
 # ---------------------------------------------------------------------------
@@ -370,20 +510,132 @@ def test_an_outcome_outside_the_vocabulary_is_refused(outcome):
 
 @pytest.mark.parametrize("depth", [-1, "0", None, True, 1.5])
 def test_a_fallback_depth_that_is_not_a_ladder_depth_is_refused(depth):
-    record = _resign(dict(sealed(), fallback_depth=depth))
+    record = _resign(dict(sealed(), fallback_depth=depth,
+                          fallback_reason="unavailable"))
     verdict = me.verify(record, KEY)
     assert not verdict.ok
     assert verdict.link == me.EVIDENCE_VOCABULARY
+
+
+def test_the_fallback_reason_vocabulary_is_the_ladders_three_kinds():
+    assert set(me.FALLBACK_REASONS) == {"unavailable", "declined", "refused"}
+
+
+@pytest.mark.parametrize("reason", sorted(me.FALLBACK_REASONS))
+def test_a_descent_records_its_reason(reason):
+    record = sealed(fallback_depth=2, fallback_reason=reason)
+    assert me.verify(record, KEY).ok
+    assert me.reconstruct(record, KEY)["decision"]["fallbackReason"] == reason
+
+
+@pytest.mark.parametrize("depth", [1, 2, 7])
+def test_a_descent_without_a_reason_is_refused(depth):
+    """The issue's first acceptance criterion, on both gates. A depth alone was
+    accepted before 2.0 and says nothing about whether the rung above was
+    unavailable, declined or refused."""
+    with pytest.raises(me.EvidenceRefused) as caught:
+        me.seal(KEY, **dict(_members(), fallback_depth=depth,
+                            fallback_reason=None))
+    assert caught.value.link == me.EVIDENCE_VOCABULARY
+    record = _resign(dict(sealed(), fallback_depth=depth,
+                          fallback_reason=None))
+    assert me.verify(record, KEY).link == me.EVIDENCE_VOCABULARY
+
+
+def test_a_first_choice_that_names_a_fallback_reason_is_refused():
+    """The other half of the coherence: a reason claims a descent, and depth
+    zero says there was none."""
+    with pytest.raises(me.EvidenceRefused) as caught:
+        me.seal(KEY, **dict(_members(), fallback_depth=0,
+                            fallback_reason="unavailable"))
+    assert caught.value.link == me.EVIDENCE_VOCABULARY
+
+
+@pytest.mark.parametrize("reason", ["degraded", "", 3,
+                                   "unavailable:the rung timed out"])
+def test_a_fallback_reason_outside_the_vocabulary_is_refused(reason):
+    """The KIND is the closed, comparable part. The detail after the colon is
+    provider-local free text and is deliberately not a member."""
+    record = _resign(dict(sealed(), fallback_depth=2, fallback_reason=reason))
+    assert me.verify(record, KEY).link == me.EVIDENCE_VOCABULARY
 
 
 def test_a_non_zero_fallback_depth_is_a_distinct_record():
     """The member exists so a clean first hit and an answer three rungs down
     the ladder are different claims rather than the same silence."""
     first = sealed(fallback_depth=0)
-    third = sealed(fallback_depth=3,
+    third = sealed(fallback_depth=3, fallback_reason="unavailable",
                    recorded_at=first["recorded_at"])
     assert me.verify(first, KEY).ok and me.verify(third, KEY).ok
     assert first[me.SIGNATURE_FIELD] != third[me.SIGNATURE_FIELD]
+    assert first["fallback_reason"] is None
+    assert third["fallback_reason"] == "unavailable"
+
+
+def test_the_template_digest_is_the_unfilled_template_not_the_prompt():
+    """Two prompts filled from one template share the template digest and
+    differ in their prompt binding, which is the distinction the member exists
+    for."""
+    one = sealed(prompt_binding={"mode": "content-addressed",
+                                 "value": D("ticket 1"), "reason": None},
+                 template_digest=D("classify {ticket}"))
+    two = sealed(prompt_binding={"mode": "content-addressed",
+                                 "value": D("ticket 2"), "reason": None},
+                 template_digest=D("classify {ticket}"),
+                 recorded_at=one["recorded_at"])
+    assert one["template_digest"] == two["template_digest"]
+    assert one["prompt_binding"]["value"] != two["prompt_binding"]["value"]
+    assert one[me.SIGNATURE_FIELD] != two[me.SIGNATURE_FIELD]
+
+
+def test_changing_the_template_digest_after_sealing_is_refused():
+    """The issue's second acceptance criterion. The generated per-member test
+    covers it; this states it in the issue's own terms."""
+    record = sealed()
+    tampered = dict(record, template_digest=D("a different template"))
+    verdict = me.verify(tampered, KEY)
+    assert not verdict.ok
+    assert verdict.link == me.EVIDENCE_SIGNATURE
+
+
+@pytest.mark.parametrize("reason", sorted(me.TEMPLATE_ABSENCE_REASONS))
+def test_an_explicit_template_absence_is_recordable(reason):
+    record = sealed(template_digest=None, template_absence_reason=reason)
+    assert me.verify(record, KEY).ok
+    decision = me.reconstruct(record, KEY)["decision"]
+    assert decision["templateDigest"] is None
+    assert decision["templateAbsenceReason"] == reason
+
+
+@pytest.mark.parametrize("digest,absence", [
+    (None, None),                      # silent about the template
+    ("not-a-digest", None),            # not a digest of anything
+    (10 ** 63, None),                  # 64 digits, but not a string
+    (None, "because"),                 # outside the reason vocabulary
+    (D("classify {ticket}"), "unpublished"),  # both arms at once
+])
+def test_a_template_claim_that_is_neither_arm_is_refused(digest, absence):
+    record = _resign(dict(sealed(), template_digest=digest,
+                          template_absence_reason=absence))
+    assert me.verify(record, KEY).link == me.EVIDENCE_VOCABULARY
+
+
+def test_seal_refuses_to_be_silent_about_the_template():
+    with pytest.raises(me.EvidenceRefused) as caught:
+        me.seal(KEY, **dict(_members(), template_digest=None,
+                            template_absence_reason=None))
+    assert caught.value.link == me.EVIDENCE_VOCABULARY
+
+
+def test_the_model_digest_basis_is_a_closed_claim():
+    assert set(me.MODEL_DIGEST_BASES) == {"declared", "loaded-bytes"}
+    for basis in me.MODEL_DIGEST_BASES:
+        record = sealed(model_digest_basis=basis)
+        assert me.verify(record, KEY).ok
+        assert me.reconstruct(record, KEY)["decision"]["modelDigestBasis"] \
+            == basis
+    bad = _resign(dict(sealed(), model_digest_basis="verified"))
+    assert me.verify(bad, KEY).link == me.EVIDENCE_VOCABULARY
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +667,7 @@ def test_a_ladder_refusal_records_no_choice(outcome):
     """Item 538: an unavailable member is a refusal the ladder consumes, not a
     lower-quality completion. The record has a shape for that."""
     record = sealed(candidates=[], chosen=None, outcome=outcome,
-                    fallback_depth=2)
+                    fallback_depth=2, fallback_reason="unavailable")
     assert me.verify(record, KEY).ok
 
 

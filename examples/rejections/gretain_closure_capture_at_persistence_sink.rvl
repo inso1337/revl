@@ -1,0 +1,46 @@
+// REJECTED — G-RETAIN: a `Retained[T, P]` value whose retention policy's
+// deadline has passed may not reach a PERSISTENCE SINK, even when a closure
+// carries it there.
+//
+// This is the closure-capture shape of `gretain_expired_at_persistence_sink.rvl`
+// (roadmap item 472). `load` hands back a value under `customer_pii`, whose
+// deadline is in the past absolutely, so the value carries the
+// `retained:customer_pii` origin from the moment it enters the value world.
+// `f` captures it, and `f("z")` is called with a clean literal: the indirect
+// call was over-approximated from its ARGUMENTS alone, so a capture-only
+// closure produced the row out of clean arguments and `db_put` — an
+// `emission[db.insert]` crossing into the durable-storage scope `db` — never
+// saw it. The direct spelling, `emit db_put(row)`, is refused today.
+//
+// The callee VALUE's taint is joined for every indirect call, INDEPENDENT of
+// `any_sink`: G-RETAIN is a flow guarantee about the value, and the same
+// `any_sink` gate that hid the `Secret[T]` and bound-key closure shapes hid
+// this one. The deadline is absolutely past, so this file refuses under any
+// clock; a declared legal hold would override it.
+//
+// expected error:
+//   data past its retention deadline may not be written to durable storage
+
+retention customer_pii {
+  until: "2020-01-01T00:00:00Z"
+  residence: "eu"
+  deleters: dpo, subject
+  derivatives: summary, index
+}
+
+extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+
+service Ops { emission fn go(k: Str) -> Int }
+
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let f = (a: Str) => row
+      let n = emit db_put(f("z"))
+      return n
+    }
+  }
+}

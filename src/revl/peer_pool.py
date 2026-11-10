@@ -1463,13 +1463,20 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
             now: Optional[datetime] = None) -> dict:
     """Raise a member's tier, if and only if the evidence for that tier exists.
 
-    ``receipts`` is a sequence of ``(execution_receipt, attestation)`` pairs.
-    They are RECOUNTED here, by :func:`pool_receipt.count_evidence`: each
-    receipt must be signed by the member's own pinned key, be about this pool,
-    this peer and the artifact digest this member was admitted with, be no
-    older than that admission, and carry an attestation signed by a key the
-    charter names in ``attest_key_ids``. A peer cannot attest its own
-    promotion, and neither can an operator who holds only admit authority.
+    ``receipts`` is a sequence of ``(execution_receipt, attestation)`` pairs,
+    or ``(execution_receipt, attestation, task)`` triples. They are RECOUNTED
+    here, by :func:`pool_receipt.count_evidence`: each receipt must be signed
+    by the member's own pinned key, be about this pool, this peer and the
+    artifact digest this member was admitted with, be no older than that
+    admission, and carry an attestation signed by a key the charter names in
+    ``attest_key_ids``. A peer cannot attest its own promotion, and neither can
+    an operator who holds only admit authority.
+
+    Since issue #2720 the count also REQUIRES the authority binding: a version
+    1.1 receipt must answer the operator-signed task it is presented with, and
+    a version 1.0 receipt verifies but does not count. A promotion that raised
+    a peer on a receipt naming no grant or policy would be the same fail-open
+    this function closed for counts, one level down.
 
     There is no parameter through which an evidence COUNT can be supplied.
     That was the fail-open this closes: ``Membership.evidence`` was an integer

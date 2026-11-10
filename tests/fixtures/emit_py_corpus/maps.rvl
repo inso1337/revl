@@ -23,3 +23,16 @@ fn passed_on(m: Map[Str, Int], k: Str) -> Int { return by_variable(m, k) + m[k] 
 // rather than by the container would move these nodes too.
 fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }
 fn positional_literal(xs: List[Str]) -> Str { return xs[0] }
+
+// Issue #2949: a map read is a bare operand of `==`, so the value's width must
+// reach the equality marker exactly as a `List` element read's does. A `Float`
+// or `Int32` value widens the `Int` literal (or the `Int32` read); an `Int`
+// value stays unmarked and byte-identical. Both operand orders are here so a
+// one-sided widening cannot pass.
+fn float_value_against_an_int(m: Map[Str, Float]) -> Bool { return m["a"] == 3 }
+fn int_against_a_float_value(m: Map[Str, Float]) -> Bool { return 3 == m["a"] }
+fn int32_value_against_an_int(m: Map[Str, Int32]) -> Bool { return m["a"] == 3 }
+fn int_against_an_int32_value(m: Map[Str, Int32]) -> Bool { return 3 == m["a"] }
+fn int_value_against_an_int(m: Map[Str, Int]) -> Bool { return m["a"] == 3 }
+fn int_value_against_a_float(m: Map[Str, Int]) -> Bool { return m["a"] == 3.0 }
+

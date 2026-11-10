@@ -1745,7 +1745,7 @@ document the **fully-native** chain does not reproduce is therefore a
 they are named document by document in
 [`LOWER_GAP_DOCS`](../tests/test_selfhost_compile.py).
 
-Tiers whose whole corpus survives the fully-native chain: `py`, `ts`, `java`, `wasm`.
+Tiers whose whole corpus survives the fully-native chain: `py`, `ts`, `wasm`.
 
 The per-tier counts are not stored here, because they move with every
 corpus document a pull request adds. Print them with
@@ -1786,15 +1786,20 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 `go`:
 
 - `generic_fn.rvl`
+- `../emit_rust_corpus/generic_variant.rvl`
+- `../emit_rust_corpus/comp_provide_generic_variant.rvl`
+- `comp_provide_empty_list.rvl`
 
 `java`:
 
-- none; the fully-native chain reproduces the whole corpus.
+- `comp_provide_ctx_bind.rvl`
 
 `rust`:
 
 - `method_control_flow.rvl`
 - `generic_fn.rvl`
+- `generic_variant.rvl`
+- `comp_provide_generic_variant.rvl`
 
 `wasm`:
 

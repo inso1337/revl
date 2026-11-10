@@ -3,9 +3,10 @@
 Issue #1990 taught the checker that a local binder occupies its name even when
 its type is unknown (`typecheck.bind_local`): an absent name falls through to
 item 380's rule, which types a bare top-level `fn` name as a function value.
-Lowering kept the old habit. A match arm whose payload type it cannot read (an
-applied generic variant such as `Mb[Str]`: `_arm_payload_type` looks the
-scrutinee up by its whole spelling) and an arrow parameter with no type both
+Lowering kept the old habit. A match arm whose payload type it could not read
+(an applied generic variant such as `Mb[Str]` before issue #2325 substituted
+the selector's type arguments: `_arm_payload_type` looked the scrutinee up by
+its whole spelling) and an arrow parameter with no type both
 DROPPED the binder from the lowering type environment. The lowering checks
 that run on the arm or arrow body then typed the binder as any top-level `fn`
 of the same name in the compile. In a multi-file run that includes a private

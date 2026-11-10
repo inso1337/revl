@@ -386,6 +386,14 @@ CORPUS = [
                              #   later use reads or assigns is annotated
                              #   `Vec<()>`, so rustc is not left with `Vec<_>`
                              #   (E0282). The port carries the same rule.
+    # issue #2494: a user generic variant as `pub enum Mb<T>`, `Mb<i64>` at
+    # every use site and the substituted payload, with two parameters, a
+    # phantom parameter (the hidden `PhantomData` case) and unpinned list
+    # literals. The document the old port-gap pin was replaced by.
+    "generic_variant.rvl",
+    # issue #2494: the same variant on the component tier, in a service
+    # signature and in provide methods
+    "comp_provide_generic_variant.rvl",
 ]
 
 
@@ -777,6 +785,26 @@ def test_selfhosted_emitter_reserved_names_at_declarations_and_uses(emitted):
     for declaration in ("let ctx_ = root_;", "let ctx__ = root__;",
                         "let config__ = ctx__;"):
         assert declaration in src
+
+
+def test_selfhosted_emitter_unbuilt_same_shape_record_is_a_twin_alias(emitted, reference):
+    """issue #2797 item 1: the document the differential survey flagged. The
+    reference emits ONE canonical struct per field->type shape and lowers an
+    unbuilt same-shape twin (`UnusedCell`, same shape as `Cell`) to
+    `pub type UnusedCell = Cell;`; materializing it as a second struct was the
+    silent divergence.
+
+    The document lives in another tier's corpus, and the gate crate's admit
+    oracle reads this module's `CORPUS` as basenames of `emit_rust_corpus/`, so
+    it is NOT added there: this test compares the whole document byte for byte
+    itself."""
+    ir = compile_files(
+        [str(ROOT / "tests" / "fixtures" / "emit_java_corpus" / "branch_shapes.rvl")])
+    src = emitted["emit_rust_src"](ir)
+    assert src == reference.emit(ir)
+    assert "pub struct Cell {" in src
+    assert "pub type UnusedCell = Cell;" in src
+    assert "pub struct UnusedCell" not in src
 
 
 def test_selfhosted_emitter_output_scaffold(emitted):
@@ -1545,6 +1573,12 @@ NAMED_REFUSALS = [
     ("emit_rust_refusals/nested_empty_list.rvl",
      "an untyped nested empty list literal needs an element type",
      "<<UNSUPPORTED-EMPTY-LIST-TYPE:xs>>"),
+    # issue #2494: a payload-less case of a generic variant that nothing pins
+    # and nothing reads later is refused by name; without a later read rustc
+    # has no type argument to infer (E0282).
+    ("emit_rust_refusals/unpinned_generic_variant.rvl",
+     "has no type argument for T",
+     "<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:Nn>>"),
 ]
 
 
@@ -1613,37 +1647,24 @@ def test_a_refusal_before_a_fault_test_keeps_the_reference_order(
     assert markers[0] == first, markers
 
 
-# Issue #2471: the reference rust emitter lowers a user generic variant (`type
-# Mb[T] = Jj(T) | Nn`) to an enum with type parameters (`pub enum Mb<T>`,
-# `Mb<i64>`); selfhost/emit_rust.rvl still emits the earlier form, which does
-# not build (`pub enum Mb` with a `Value` payload and `Value` for `Mb[Int]`).
-# The port is fed the reference IR here, so the difference is NAMED rather
-# than passing for agreement. The fully-native chain does not reach it:
-# selfhost/lower.rvl refuses these documents loudly first
-# (GENERIC_VARIANT_LOUD_REFUSALS in tests/test_selfhost_compile.py). Same
-# ratchet as that table: the day the port follows the reference this fails,
-# and the entry is DELETED and the document added to CORPUS. issue #2494
-GENERIC_VARIANT_PORT_GAPS: dict[str, tuple[str, str, str]] = {
-    "construct_and_match": (
-        "type Mb[T] = Jj(T) | Nn\n"
-        "fn un(m: Mb[Int]) -> Int { return match m { Jj(x) => x, Nn => 0 } }\n"
-        "fn one() -> Mb[Int] { return Jj(1) }\n",
-        "pub enum Mb<T> {",
-        "fn un(m: Value) -> i64 {"),
-}
-
-
-@pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_PORT_GAPS))
-def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_path,
-                                                     name):
-    source, reference_token, port_token = GENERIC_VARIANT_PORT_GAPS[name]
-    doc = tmp_path / f"{name}.rvl"
-    doc.write_text(source)
+# issue #2494: the enum payload's type scope is keyed by the RAW parameter
+# names, as the reference's is; only the declared `<..>` list and the phantom
+# markers are mangled. Keying the scope by the mangled names rendered a payload
+# naming a reserved Rust type (`type Rs[String] = Odd(String)`) as `Value`.
+def test_a_generic_variant_parameter_named_a_reserved_type_keeps_its_payload(
+        emitted, reference, tmp_path):
+    doc = tmp_path / "reserved_param.rvl"
+    doc.write_text(
+        "type Rs[String] = Odd(String) | Ever\n"
+        "fn one() -> Rs[Int] { return Odd(1) }\n"
+        "fn un(r: Rs[Int]) -> Int {\n"
+        "  return match r {\n"
+        "    Odd(x) => x,\n"
+        "    Ever => 0,\n"
+        "  }\n"
+        "}\n")
     ir = compile_files([str(doc)])
-    want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
-    assert reference_token in want, want
-    assert got != want and port_token in got, (
-        f"{name}: the port no longer emits {port_token!r}. If it now matches "
-        f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
-        f"add the document to CORPUS.")
-
+    want = reference.emit(ir)
+    assert "pub enum Rs<String_> {" in want
+    assert "Odd(String_)," in want
+    assert emitted["emit_rust_src"](ir) == want

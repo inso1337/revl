@@ -53,6 +53,10 @@ link                         what it means
                              re-signed with different terms is a different
                              charter, so a task minted under the old ones stops
                              verifying
+``policy-identity``          a 1.1 task names a policy digest that is not the
+                             charter this peer holds. The grant and policy the
+                             receipt will echo are the operator's decision, but
+                             the policy must be the one the peer agreed to
 ``peer-identity``            it is addressed to another peer. A task relayed to
                              a second peer is not a second admission
 ``artifact-digest``          the bytes do not hash to the digest the task
@@ -155,6 +159,7 @@ import json
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -170,7 +175,14 @@ from .tee_quote import SigningBackendUnavailable, require_signing_backend
 # ---------------------------------------------------------------------------
 
 TASK_KIND = "revl.pool-task"
-TASK_VERSION = "1.0"
+#: The task that names the authority it hands the peer (issue #2720): the
+#: granted capability set and the policy digest. A 1.0 task is still accepted,
+#: and the receipt it produces is the 1.0 shape, so an old operator is not
+#: silently given the new claim; the result simply cannot count as evidence.
+TASK_VERSION = "1.1"
+#: The shape before issue #2720. Kept as a named constant so the version field
+#: decides which members are required, never the presence of a member.
+TASK_VERSION_V1 = "1.0"
 
 #: Distinct from every other domain in the pool protocols, for the reason
 #: `peer_pool` and `pool_receipt` each give: without separation one protocol's
@@ -224,6 +236,9 @@ LINK_TASK_SHAPE = "task-shape"
 LINK_TASK_SIGNATURE = "task-signature"
 LINK_POOL_IDENTITY = "pool-identity"
 LINK_CHARTER_IDENTITY = "charter-identity"
+#: The task's policy digest is not the digest of the charter this peer holds.
+#: The operator signed a run under a policy the peer never agreed to.
+LINK_POLICY_IDENTITY = "policy-identity"
 LINK_PEER_IDENTITY = "peer-identity"
 LINK_ARTIFACT_DIGEST = "artifact-digest"
 LINK_UNKNOWN_RUNNER = "unknown-runner"
@@ -253,6 +268,7 @@ REFUSAL_LINKS: tuple[str, ...] = (
     LINK_TASK_SIGNATURE,
     LINK_POOL_IDENTITY,
     LINK_CHARTER_IDENTITY,
+    LINK_POLICY_IDENTITY,
     LINK_PEER_IDENTITY,
     LINK_ARTIFACT_DIGEST,
     LINK_UNKNOWN_RUNNER,
@@ -500,17 +516,27 @@ def classify_artifact(ir: Mapping[str, Any]
 def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
                task_id: str, artifact: Artifact, runner: str,
                effect_class: EffectClass,
-               at: Optional[datetime] = None) -> dict:
+               at: Optional[datetime] = None,
+               grant: Optional[Mapping[str, Any]] = None,
+               policy_digest: Optional[str] = None) -> dict:
     """The task BODY, before it is signed.
 
     ``artifact_digest`` is computed here from what is carried rather than
     accepted as a parameter, so the operator cannot sign a task whose declared
     digest is not the digest of the artifact it carries. A bundle travels as
     its manifest and its files, separately, with ``artifact`` empty, so the
-    peer can name a missing, extra or altered file."""
+    peer can name a missing, extra or altered file.
+
+    ``grant`` and ``policy_digest`` are the AUTHORITY the task hands the peer
+    (issue #2720): the capability set and budgets the operator decided, and the
+    digest of the policy in force. They are all-or-none. A task built with them
+    is version :data:`TASK_VERSION`; one built without them keeps the 1.0
+    shape so a direct caller is not made to invent authority it does not have.
+    The peer echoes both into its receipt, and the operator checks the echo
+    against this signed record."""
     body = {
         "kind": TASK_KIND,
-        "version": TASK_VERSION,
+        "version": TASK_VERSION_V1,
         "pool_id": pool_id,
         "charter_digest": charter_digest,
         "peer_id": peer_id,
@@ -521,6 +547,16 @@ def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
         "effect_class": effect_class.value,
         "issued_at": _iso(at or _utc_now()),
     }
+    if grant is not None or policy_digest is not None:
+        granted = pool_receipt.grant_block(grant)
+        if granted is None:
+            raise DispatchError("a bound task needs a readable granted "
+                                "capability set with budgets")
+        if not isinstance(policy_digest, str) or not policy_digest:
+            raise DispatchError("a bound task needs the policy digest in force")
+        body["version"] = TASK_VERSION
+        body["grant"] = granted
+        body["policy_digest"] = policy_digest
     if isinstance(artifact, pool_bundle.Bundle):
         body["bundle"] = artifact.to_wire()
     else:
@@ -546,17 +582,33 @@ def sign_task(body: Mapping[str, Any],
 def _task_shape(record: Any) -> str:
     """Why this is not a task, or "" if it is one. Checked before any member is
     read as meaningful, so a hostile record is refused on shape and not on
-    whatever the first field access happened to raise."""
+    whatever the first field access happened to raise.
+
+    The version decides which authority members a task must carry. A 1.1 task
+    without its grant and policy digest is malformed, never read as a 1.0 task
+    that happened to drop them: guessing is how a missing member becomes a
+    passing check."""
     if not isinstance(record, Mapping):
         return "the record is not an object"
     if record.get("kind") != TASK_KIND:
         return f"kind is {record.get('kind')!r}, expected {TASK_KIND!r}"
+    version = record.get("version")
+    if version not in (TASK_VERSION_V1, TASK_VERSION):
+        return (f"version is {version!r}, not one this peer knows "
+                f"({TASK_VERSION_V1!r} or {TASK_VERSION!r})")
     for name in ("pool_id", "charter_digest", "peer_id", "task_id",
                  "artifact_digest", "artifact", "runner", "effect_class",
                  "issued_at"):
         value = record.get(name)
         if not isinstance(value, str) or (not value and name != "artifact"):
             return f"{name} is missing or not a string"
+    if version == TASK_VERSION:
+        if pool_receipt.grant_block(record.get("grant")) is None:
+            return ("grant is missing or is not a capability set with "
+                    "non-negative integer budgets")
+        policy = record.get("policy_digest")
+        if not isinstance(policy, str) or not policy:
+            return "policy_digest is missing or not a string"
     # The task id NAMES A DIRECTORY on the peer, so it is constrained here
     # rather than sanitised at the place it is joined onto a path. A signature
     # proves who sent a task; it does not make `../../etc` a safe file name,
@@ -646,14 +698,23 @@ class DeliveryLedger:
 
     def dispatch(self, *, task_id: str, peer_id: str, artifact_digest: str,
                  runner: str, effect_class: str,
-                 bundle: Optional[Mapping[str, Any]] = None) -> dict:
+                 bundle: Optional[Mapping[str, Any]] = None,
+                 task: Optional[Mapping[str, Any]] = None) -> dict:
         """Record that a task went out. Refuses a task id that was used
         before, so a captured task id cannot open a second slot to deliver
         into.
 
         ``bundle`` is the ``{digest, files}`` block of a multi-file task. It
         is kept on the entry, so the ledger says which files, paths and modes
-        a task ran and not only the digest that covers them."""
+        a task ran and not only the digest that covers them.
+
+        ``task`` is the OPERATOR-SIGNED task itself (issue #2720). It is kept
+        on the entry because a bound receipt answers ``task_digest`` and a
+        re-count at promotion time needs the task to check that echo against;
+        the receipt alone names a digest nobody could recompute. A dispatch
+        written before this field existed simply has none, and its receipts are
+        the old shape, which cannot count as evidence for a promotion that
+        requires the binding."""
         if task_id in self.tasks:
             prior = self.tasks[task_id]
             self._event("dispatch-refused", task_id, link=LINK_REPLAYED_TASK,
@@ -673,6 +734,16 @@ class DeliveryLedger:
         if bundle is not None:
             self.tasks[task_id]["bundle"] = dict(bundle)
             detail["bundle_files"] = len(bundle.get("files") or ())
+        if isinstance(task, Mapping):
+            self.tasks[task_id]["task"] = dict(task)
+            try:
+                self.tasks[task_id]["task_digest"] = \
+                    pool_receipt.receipt_digest(task)
+            except (TypeError, ValueError) as error:
+                return _refusal(LINK_TASK_SHAPE,
+                                f"the task cannot be digested: {error}",
+                                task_id=task_id)
+            detail["task_digest"] = self.tasks[task_id]["task_digest"]
         self._event("dispatched", task_id, peer_id=peer_id,
                     artifact_digest=artifact_digest, **detail)
         return {"ok": True, "task_id": task_id, "state": STATE_DISPATCHED}
@@ -819,9 +890,14 @@ def save_ledger(pool_dir, ledger: DeliveryLedger) -> None:
 
 
 def evidence_pairs(ledger: DeliveryLedger, *,
-                   peer_id: str) -> list[tuple[dict, dict]]:
-    """The signed `(execution_receipt, attestation)` pairs this ledger already
-    holds for one peer, in ledger order.
+                   peer_id: str) -> list[tuple[dict, dict, Optional[dict]]]:
+    """The signed ``(execution_receipt, attestation, task)`` records this
+    ledger already holds for one peer, in ledger order.
+
+    ``task`` is the operator-signed task a bound receipt answers (issue #2720),
+    or ``None`` for a delivery recorded before the task was kept. A bound
+    receipt cannot be checked without it, so withholding it is safe: the check
+    refuses rather than passes.
 
     A READ ACCESSOR, NOT A JUDGE. It selects records and decides nothing.
 
@@ -829,25 +905,27 @@ def evidence_pairs(ledger: DeliveryLedger, *,
     DISPATCHER's verdict at the moment the result came back, and the judge of
     whether a pair counts NOW is ``pool_receipt.count_evidence``, which
     re-verifies the signature, the pool, the peer, the artifact digest, the
-    admission time and the attestor's authority. Filtering here would promote
-    the dispatcher's opinion into the promotion verdict -- the "second, weaker
-    policy engine" item 524 warns about -- and it would also be wrong in the
-    fail-closed direction: a pair whose flag was never written is still
-    evidence if it verifies.
+    admission time, the task binding and the attestor's authority. Filtering
+    here would promote the dispatcher's opinion into the promotion verdict --
+    the "second, weaker policy engine" item 524 warns about -- and it would
+    also be wrong in the fail-closed direction: a pair whose flag was never
+    written is still evidence if it verifies.
 
     Handing it every stored pair cannot inflate a count, because
     ``count_evidence`` deduplicates on ``task_id``: a peer can re-sign the same
     work with a new timestamp and a new digest for nothing, and neither one
     counts twice."""
-    pairs: list[tuple[dict, dict]] = []
+    records: list[tuple[dict, dict, Optional[dict]]] = []
     for _task_id, entry in sorted(ledger.tasks.items()):
         if entry.get("peer_id") != peer_id:
             continue
         receipt = entry.get("receipt")
         attestation = entry.get("attestation")
         if isinstance(receipt, Mapping) and isinstance(attestation, Mapping):
-            pairs.append((dict(receipt), dict(attestation)))
-    return pairs
+            stored = entry.get("task")
+            records.append((dict(receipt), dict(attestation),
+                            dict(stored) if isinstance(stored, Mapping) else None))
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -878,15 +956,25 @@ def _runner_argv(runner: str, names: list[str]) -> list[str]:
 
 
 def execute(runner: str, source: Artifact, workspace: Path,
-            *, timeout: float = 300.0) -> dict:
-    """Run one artifact in one workspace and return the result record.
+            *, timeout: float = 300.0) -> tuple[dict, float]:
+    """Run one artifact in one workspace and return ``(result, wall_seconds)``.
 
     The artifact is written under ``workspace`` and named RELATIVELY on the
     command line, with ``workspace`` as the working directory, so no absolute
     path reaches the process's output and the result is the same wherever the
     workspace happens to be. A bundle is written into a fresh directory of its
     own under ``workspace``, each file at its bundle path with its mode, and
-    the runner is handed its ``.rvl`` files in path order."""
+    the runner is handed its ``.rvl`` files in path order.
+
+    The wall time is returned BESIDE the result, not inside it. The result
+    record is hashed into ``result_digest``, and a duration in it would make
+    two runs of the same work two different results, which is exactly the
+    reproducibility property ``_scrub`` exists to protect. Only the peer's
+    ``budget_consumed`` claim carries it.
+
+    ``timed_out`` stays in the result because it is deterministic: it is the
+    peer's own observation of the call it made. A program is free to exit 124,
+    so the receipt never infers a timeout from the exit code."""
     if runner not in RUNNERS:
         raise DispatchError(f"unknown runner {runner!r}")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -901,6 +989,8 @@ def execute(runner: str, source: Artifact, workspace: Path,
         artifact.write_bytes(bytes(source))
         names = [artifact.name]
     argv = _runner_argv(runner, names)
+    timed_out = False
+    started = time.monotonic()
     try:
         # No stdin: the runner reads nothing from the peer process, so a
         # runner that would prompt gets end-of-file instead of waiting on
@@ -910,12 +1000,14 @@ def execute(runner: str, source: Artifact, workspace: Path,
                               timeout=timeout, check=False)
         code, out, err = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired:
+        timed_out = True
         code, out, err = 124, "", f"the runner exceeded {timeout:g}s"
     except OSError as error:  # pragma: no cover - the interpreter is gone
         code, out, err = 125, "", f"the runner could not start: {error}"
-    return {"kind": RESULT_KIND, "version": RESULT_VERSION, "runner": runner,
-            "exit_code": code, "stdout": _scrub(out, workspace),
-            "stderr": _scrub(err, workspace)}
+    result = {"kind": RESULT_KIND, "version": RESULT_VERSION, "runner": runner,
+              "exit_code": code, "stdout": _scrub(out, workspace),
+              "stderr": _scrub(err, workspace), "timed_out": timed_out}
+    return result, round(time.monotonic() - started, 6)
 
 
 def _receive_bundle(record: Mapping[str, Any], task_id: str
@@ -948,6 +1040,19 @@ def _receive_bundle(record: Mapping[str, Any], task_id: str
     return None, _refusal(LINK_TASK_SHAPE,
                           f"not a bundle: {problem.reason}",
                           paths=named, task_id=task_id)
+
+
+def _outcome_of(result: Mapping[str, Any]) -> str:
+    """How the run ended, from the peer's own measurement.
+
+    A timeout is the peer's observation, not exit code 124: a program may exit
+    124 itself, and reading that as a timeout would put a false outcome in a
+    signed record. A refusal never reaches here; the peer signs no receipt for
+    work it declined to run."""
+    if result.get("timed_out"):
+        return pool_receipt.TIMED_OUT
+    return (pool_receipt.COMPLETED if result.get("exit_code") == 0
+            else pool_receipt.FAILED)
 
 
 class PeerRunner:
@@ -1035,6 +1140,14 @@ class PeerRunner:
                 f"this peer holds {self.charter_digest[:16]}; a charter "
                 f"re-signed with different terms is a different charter",
                 task_id=task_id)
+        if record["version"] == TASK_VERSION \
+                and record["policy_digest"] != self.charter_digest:
+            return _refusal(
+                LINK_POLICY_IDENTITY,
+                f"the task was signed under policy "
+                f"{record['policy_digest'][:16]} and this peer holds "
+                f"{self.charter_digest[:16]}; the run is claimed under a policy "
+                f"the peer never agreed to", task_id=task_id)
         if record["peer_id"] != self.identity.peer_id:
             return _refusal(LINK_PEER_IDENTITY,
                             f"the task is addressed to "
@@ -1072,12 +1185,32 @@ class PeerRunner:
                 f"this peer already ran task {task_id!r}; a task is run once, "
                 f"so a captured task cannot be replayed for a second receipt",
                 task_id=task_id)
-        result = execute(runner, source, self.workspace / task_id,
-                         timeout=self.timeout)
+        result, wall_seconds = execute(runner, source,
+                                       self.workspace / task_id,
+                                       timeout=self.timeout)
+        # A 1.1 task names the authority it hands the peer, so the receipt
+        # echoes it back (issue #2720). A 1.0 task names none, and the peer
+        # signs the old shape rather than inventing a grant the operator never
+        # made: the receipt then verifies and cannot count as evidence.
+        binding: dict[str, Any] = {}
+        if record["version"] == TASK_VERSION:
+            binding = {
+                "task_digest": pool_receipt.receipt_digest(record),
+                "grant": record["grant"],
+                "policy_digest": record["policy_digest"],
+                "outcome": _outcome_of(result),
+                # The peer's own report, a CLAIM: nothing here measured the
+                # operator's budget keys, and the one quantity this runner
+                # measures is wall-clock seconds. It is passed beside the
+                # result, never inside it, so the hashed result stays
+                # reproducible.
+                "budget_consumed": {"wall_seconds": wall_seconds},
+            }
         receipt = pool_receipt.issue_receipt(
             pool_id=record["pool_id"], task_id=task_id,
             artifact_digest=actual, result=result, identity=self.identity,
-            bundle=_bundle_of(source), network_exposed=self.network_exposed)
+            bundle=_bundle_of(source), network_exposed=self.network_exposed,
+            **binding)
         self.seen[task_id] = pool_receipt.receipt_digest(receipt)
         return {"ok": True, "task_id": task_id, "receipt": receipt,
                 "result": result}
@@ -1259,13 +1392,20 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                     directory: peer_identity.IdentityDirectory,
                     attesting_identity: peer_identity.PeerIdentity,
                     when: Optional[datetime] = None,
-                    network_exposed: bool = False) -> dict:
+                    network_exposed: bool = False,
+                    task: Optional[Mapping[str, Any]] = None) -> dict:
     """Check what came back: the hash first, then the receipt.
 
     In that order deliberately. A hash failure says the bytes in hand are not
     the bytes the receipt is about, and a receipt failure says the receipt is
     not the peer's; reporting the second when the first is true would name the
     wrong fault.
+
+    ``task`` is the operator-signed task the receipt answers. A bound receipt
+    is checked against it (issue #2720), and ``require_bound`` is TRUE here
+    because a delivery this pool records as evidence must name the authority it
+    ran under. A 1.0 receipt verifies and is refused on ``unbound-receipt``, so
+    an operator cannot record it as a counted delivery by accident.
 
     The attestation is produced HERE, by the operator's attesting key, over the
     digest of the receipt the peer signed. `pool_receipt.check_receipt` then
@@ -1286,7 +1426,9 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
         peer_id=member.peer_id, artifact_digest=member.artifact_digest,
         admitted_at=member.admitted_at,
         attest_key_ids=charter_record.get("attest_key_ids") or (),
-        directory=directory, when=when)
+        directory=directory, when=when,
+        task=task if isinstance(task, Mapping) else None,
+        require_bound=True)
     if check.link:
         return _refusal(LINK_RECEIPT_REFUSED,
                         f"the receipt was refused on {check.link}: "
@@ -1314,13 +1456,25 @@ def _note_contact(pool_dir, peer_id: str, state: str, host: str, port: int,
 
 
 def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
-             task_id: str) -> dict:
+             task_id: str, dispatch_identity: peer_identity.PeerIdentity,
+             network_exposed: bool = False) -> dict:
     """Everything before the task leaves, as one transaction under the pool
-    lock: the checks, and the dispatch written into the ledger.
+    lock: the checks, the signed task, and the dispatch written into the
+    ledger.
+
+    The task is built and signed HERE, before the ledger entry is written, so
+    the entry that says a task went out carries the exact signed record it
+    went out as (issue #2720). A receipt answers a task by digest, and a
+    re-count at promotion time needs that task; writing the dispatch first and
+    the task later would leave a window in which a lost answer is outstanding
+    work nobody can re-check.
+
+    The grant and policy digest come from the MEMBER and the CHARTER, the two
+    parties the pool already trusts for them, never from a caller's parameter.
 
     Returns the refusal, or ``{"ok": True, ...}`` with what the send and the
-    settlement need. Holds the lock only for local work (the checks and a
-    compile), never across the network."""
+    settlement need. Holds the lock only for local work (the checks, a compile
+    and a local signature), never across the network."""
     with pool_state.locked(pool_dir):
         charter_record, roster = peer_pool.load_pool(pool_dir)
         ledger = load_ledger(pool_dir)
@@ -1362,10 +1516,20 @@ def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
         import secrets  # noqa: PLC0415
 
         task_id = task_id or secrets.token_hex(8)
+        charter_digest = peer_pool.canonical_digest(charter_record)
+        task = sign_task(
+            build_task(pool_id=str(charter_record.get("pool_id", "")),
+                       charter_digest=charter_digest, peer_id=peer_id,
+                       task_id=task_id, artifact=source, runner=runner,
+                       effect_class=effect_class,
+                       grant={"caps": sorted(member.caps),
+                              "budgets": dict(member.budgets)},
+                       policy_digest=charter_digest),
+            dispatch_identity, network_exposed=network_exposed)
         written = ledger.dispatch(task_id=task_id, peer_id=peer_id,
                                   artifact_digest=digest, runner=runner,
                                   effect_class=effect_class.value,
-                                  bundle=bundle)
+                                  bundle=bundle, task=task)
         if not written.get("ok"):
             return written
         roster.outstanding = ledger.outstanding()
@@ -1373,13 +1537,15 @@ def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
         save_ledger(pool_dir, ledger)
     return {"ok": True, "charter_record": charter_record, "member": member,
             "digest": digest, "effect_class": effect_class,
-            "surface": surface, "task_id": task_id, "bundle": bundle}
+            "surface": surface, "task_id": task_id, "bundle": bundle,
+            "task": task}
 
 
 def _settle(*, pool_dir, peer_id: str, task_id: str,
             member: peer_pool.Membership, answer: Mapping[str, Any],
             attesting_identity: peer_identity.PeerIdentity,
-            network_exposed: bool = False) -> dict:
+            network_exposed: bool = False,
+            task: Optional[Mapping[str, Any]] = None) -> dict:
     """Everything after the answer came back, as a second transaction under the
     pool lock.
 
@@ -1398,7 +1564,8 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
                                  task_id=task_id, member=member,
                                  answer=answer,
                                  attesting_identity=attesting_identity,
-                                 network_exposed=network_exposed)
+                                 network_exposed=network_exposed,
+                                 task=task)
         roster.outstanding = ledger.outstanding()
         peer_pool.save_roster(pool_dir, roster)
         save_ledger(pool_dir, ledger)
@@ -1409,7 +1576,8 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
                    peer_id: str, task_id: str, member: peer_pool.Membership,
                    answer: Mapping[str, Any],
                    attesting_identity: peer_identity.PeerIdentity,
-                   network_exposed: bool = False) -> dict:
+                   network_exposed: bool = False,
+                   task: Optional[Mapping[str, Any]] = None) -> dict:
     """Decide what the answer means and write it into ``ledger``."""
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
@@ -1423,7 +1591,7 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
     verdict = verify_delivery(answer, charter_record=charter_record,
                               member=member, directory=directory,
                               attesting_identity=attesting_identity,
-                              network_exposed=network_exposed)
+                              network_exposed=network_exposed, task=task)
     if not verdict.get("ok"):
         ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
                       reason=str(verdict.get("reason", "")))
@@ -1467,23 +1635,20 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
     never sent."""
     exposed = signer_exposure(host, f"a dispatch to the remote peer {host}")
     prepared = _prepare(pool_dir=pool_dir, peer_id=peer_id, source=source,
-                        runner=runner, task_id=task_id)
+                        runner=runner, task_id=task_id,
+                        dispatch_identity=dispatch_identity,
+                        network_exposed=exposed)
     if not prepared.get("ok"):
         return prepared
     charter_record = prepared["charter_record"]
     task_id = prepared["task_id"]
     effect_class = prepared["effect_class"]
-    body = build_task(pool_id=str(charter_record.get("pool_id", "")),
-                      charter_digest=peer_pool.canonical_digest(charter_record),
-                      peer_id=peer_id, task_id=task_id, artifact=source,
-                      runner=runner, effect_class=effect_class)
-    answer = send_task(sign_task(body, dispatch_identity,
-                                 network_exposed=exposed),
-                       host=host, port=port, timeout=timeout)
+    task = prepared["task"]
+    answer = send_task(task, host=host, port=port, timeout=timeout)
     outcome = _settle(pool_dir=pool_dir, peer_id=peer_id, task_id=task_id,
                       member=prepared["member"], answer=answer,
                       attesting_identity=attesting_identity,
-                      network_exposed=exposed)
+                      network_exposed=exposed, task=task)
     if answer.get("link") == LINK_PEER_UNREACHABLE:
         _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
                       host, port, link=LINK_PEER_UNREACHABLE,

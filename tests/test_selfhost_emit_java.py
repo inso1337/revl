@@ -210,6 +210,13 @@ CORPUS = [
                             # item-77 follow-up shape item 275 tracked — the reference emits
                             # `Map<V>` per site, the old mirror left `Map` raw. Pins the
                             # generic-`Map` drift in the byte-identity oracle on every run.
+    "comp_provide_ctx_bind.rvl",  # issue #3095: a `provide` component with a
+                            # `let-effect` bind named `ctx`. The apply local, the
+                            # provider field/ctor parameter, the constructor argument
+                            # and the provide-method capture all take the binding
+                            # ladder's escaped spelling, so the constructor receives
+                            # the user's Map and the field does not duplicate the
+                            # provider's own context field.
     "comp_fail.rvl",        # an `if (..) { fail ".." }` activation guard: the `fail` ->
                             # `throw new CordisException(String.valueOf(..))` lowering, the
                             # `CordisException` import widening, a body-level `if`, and a
@@ -274,6 +281,12 @@ CORPUS = [
     "../emit_py_corpus/annotated_lets.rvl",
     "../emit_rust_corpus/perf_index.rvl",
     "../emit_wasm_corpus/forloop.rvl",
+    # issue #2797 item 2: the reserved-name ladder. A parameter or binding whose
+    # underscore-stripped root is one of the emitter's own scaffolding names
+    # (`ctx`, `root`, `config`, ...) is escaped by one more `_` at its
+    # declaration AND at every use, while a record field of the same spelling
+    # stays verbatim.
+    "../emit_rust_corpus/reserved_names.rvl",
     # issue #1972 deliberately does NOT join
     # `../emit_py_corpus/ui_transaction_unit.rvl` here. That document's fourth
     # case is a computer-use extern that DECLARES `compensate`, which the
@@ -370,6 +383,39 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+def test_selfhosted_emitter_reserved_names_at_declarations_and_uses(emitted):
+    """issue #2797 item 2: the emitter's own scaffolding names join the keyword
+    ladder at the renamable roles, so a parameter or binding colliding with
+    `ctx`/`root`/`config` takes one more `_` at its DECLARATION and at every
+    USE, while a record field of the same spelling stays verbatim (`root.ctx`
+    still names the member the author declared)."""
+    src = emitted["emit_java_src"](compile_files(
+        [str(ROOT / "tests" / "fixtures" / "emit_rust_corpus" / "reserved_names.rvl")]))
+    # the declaration and the use of each colliding parameter shift together
+    assert "public static ReservedNames plugin(long root_, long root__) {" in src
+    assert "final var ctx_ = root_;" in src
+    assert "final var ctx__ = root__;" in src
+    assert "final var config__ = ctx__;" in src
+    assert ("return new ReservedNames(ctx_, ctx__, ctx_, config__, "
+            "root_, root__, ctx_, ctx__);") in src
+    assert "public static long plugin_(long ctx_, long ctx__) {" in src
+    assert "final var root_ = plugin(ctx_, ctx__);" in src
+    # a record field is a member name, not a binding: verbatim, both sides
+    for field in ("ctx", "ctx_", "config", "config_", "root", "root_",
+                  "plugin", "plugin_"):
+        assert f"    public final long {field};" in src
+    for field in ("ctx", "ctx_", "config", "config_", "root", "root_",
+                  "plugin", "plugin_"):
+        assert f"root_.{field}" in src
+    # the ladder itself, and the field ladder it must NOT leak into
+    assert emitted["ident_binding"]("root") == "root_"
+    assert emitted["ident_binding"]("root_") == "root__"
+    assert emitted["ident_binding"]("config_") == "config__"
+    assert emitted["ident_binding"]("value") == "value"
+    assert emitted["mangle"]("root") == "root"
+    assert emitted["mangle"]("root_") == "root_"
 
 
 def test_fn_type_param_refused(emitted, reference):

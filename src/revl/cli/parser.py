@@ -461,6 +461,17 @@ def build_parser() -> argparse.ArgumentParser:
              "table vouches (claimed, unverified); and each model role's "
              "binding per host with the model bindings digest (item 515). "
              "Human output only.")
+    audit.add_argument(
+        "--deploy-map", metavar="MAP", default=None, dest="deploy_map",
+        help="a deploy map (an item-56 placement map with per-process "
+             "`[deploy]` tables): print one typed participant class per "
+             "process (prepare-reversible, deferred-irreversible, "
+             "recoverable-forward, compensable, irreversible, "
+             "irreversible-needs-approval) derived from the declarations of "
+             "the components that process holds, and REFUSE (nonzero) a plan "
+             "that orders an irreversible-needs-approval participant before a "
+             "participant that can still fail (issue #2725). Not with "
+             "`--policy` or `--diff`.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -574,8 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
     # two audit graphs for authority drift, with no policy on the path).
     simulate_cmd = sub.add_parser(
         "simulate",
-        help="preview what a change would have done to recorded history "
-             "(item 468)")
+        help="preview a policy change, or re-run a component change, over "
+             "recorded history (item 468, issue #2713)")
     simulate_sub = simulate_cmd.add_subparsers(dest="simulate_command",
                                                required=True)
     sim_policy = simulate_sub.add_parser(
@@ -606,6 +617,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="with a COMPOSITION document passed to `--composition`: the "
              "project root row provenance and origins are recorded against "
              "(default: the working directory). Ignored for module arguments")
+
+    # issue #2713: `revl simulate swap OLD NEW --history RUN.wal` re-runs the
+    # recorded call outcomes of ONE component against a changed version. The
+    # preflight runs nothing and names every missing fact (a history that is
+    # not whole, a crossing whose outcome was never journalled, an absent
+    # `determinism` record, a recorded method whose arguments are not on the
+    # record, a component outside the pure subset); only a replayable history
+    # is executed, offline, and the first returned value that moved is named
+    # and stops the run. Every bound is a fact in the report rather than a
+    # caveat, and the command dispatches no host call and mutates nothing.
+    sim_swap = simulate_sub.add_parser(
+        "swap",
+        help="re-run the recorded outcomes of one component against a changed "
+             "version: the preflight names every missing fact and runs nothing, "
+             "then a pure component's recorded calls are re-executed offline "
+             "and the first returned value that moved is named")
+    sim_swap.add_argument(
+        "old", metavar="OLD",
+        help="the component version that produced the recording (a .rvl source)")
+    sim_swap.add_argument(
+        "new", metavar="NEW",
+        help="the changed component version to re-run (same accepted form)")
+    sim_swap.add_argument(
+        "--history", metavar="RUN.wal", required=True,
+        help="the recorded history to re-run (a WAL)")
+    sim_swap.add_argument(
+        "--component", default=None, metavar="NAME",
+        help="the component to swap when OLD or NEW declares more than one "
+             "(default: the only component either declares)")
+    sim_swap.add_argument("--json", action="store_true",
+                         help="machine-readable swap report an agent can consume")
 
     diff_cmd = sub.add_parser(
         "diff",
@@ -725,6 +767,32 @@ def build_parser() -> argparse.ArgumentParser:
              "arguments")
     version_cmd.add_argument("--json", action="store_true",
                              help="machine-readable derivation")
+
+    # issue #2685, first slice: plan one component version change against its
+    # real consumers. Read-only: it composes the diff, version and
+    # compatibility facts and changes nothing.
+    migrate_cmd = sub.add_parser(
+        "migrate",
+        help="plan one component version change against its real consumers: "
+             "which can move now, which need an adapter or a state hand-off, "
+             "what authority widens, and whether the old version is removable "
+             "(read-only; docs/commands-reference.md)")
+    migrate_cmd.add_argument(
+        "old", metavar="OLD",
+        help="the old version of the component: a compiled composition "
+             "document (`revl compile -o`) or a `.rvl` source")
+    migrate_cmd.add_argument(
+        "new", metavar="NEW",
+        help="the new version of the component (same accepted forms as OLD)")
+    migrate_cmd.add_argument(
+        "--against", metavar="COMPOSITION", required=True,
+        help="the compiled composition whose real consumers decide whether a "
+             "migration is safe (`revl compile <sources> -o comp.json`); it "
+             "must carry each consumer's required service, not just key lists, "
+             "and must still run the old version")
+    migrate_cmd.add_argument(
+        "--json", action="store_true",
+        help="machine-readable plan an agent or a CI gate can consume")
 
     contract = sub.add_parser(
         "contract",
@@ -1748,11 +1816,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "Credentials come from the environment variables the "
                           "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
-                     help="boundary policy file (item 33). With --backend wasm it "
-                          "enforces the item-289 least-authority chain (host "
-                          "imports subset-of declared caps subset-of policy-allowed) "
-                          "before booting; a wasm cell exceeding the allow-list is "
-                          "refused (docs/boundary-policy.md)")
+                     help="boundary policy file (item 33). On every backend, "
+                          "and under --placement, the run is refused before boot "
+                          "on any violation `revl audit --policy` refuses (deny "
+                          "and allow rules, pair and evidence rules, `requires "
+                          "approval`); under --watch an edit the policy refuses "
+                          "is rejected. With --backend wasm it also enforces the "
+                          "item-289 least-authority chain over the emitted host "
+                          "imports (docs/boundary-policy.md)")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--record", action="store_true",
@@ -1913,6 +1984,14 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument(
+        "--decision", default=None, metavar="FILE",
+        help="the conductor's ONE durable decision for this multi-node step: the "
+             "`decision.jsonl` `revl deploy` writes next to its state. Settles "
+             "this participant's WAL against that record (a commit-approved "
+             "record rolls forward; an abort record or a missing file rolls "
+             "back; an unreadable record fails closed). Not with --restore, "
+             "--forward, --operator-resolved or a placement index (issue #2725)")
     recover.add_argument("--composition", nargs="+", default=None,
                          metavar="FILE",
                          help="replay against the REAL world (issue #1477): the "
@@ -2574,17 +2653,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="cryptographic attestation of a verified composition (item 127): "
              "sign a portable record that this exact composition was admitted "
              "(canonical IR hash + verdict + guarantees + timestamp), or "
-             "--verify one (docs/revl-attest.md)")
+             "--verify one. With --anchor, sign a chain-neutral record over a "
+             "set of named digests instead (docs/revl-attest.md, "
+             "docs/revl-anchor.md)")
     attest_cmd.add_argument(
-        "target", metavar="TARGET",
+        "target", metavar="TARGET", nargs="?",
         help="what to attest: a composition (a `.rvl` source, a compiled IR, "
              "or an `audit --json` document). With --verify, the attestation "
-             "JSON to check instead")
+             "JSON to check instead. With --anchor, optional: when given, its "
+             "canonical composition hash is added under the name 'composition'")
     attest_cmd.add_argument(
         "--verify", action="store_true",
         help="verify mode: TARGET is an attestation JSON — check its signature "
              "(and, with --against, that the composition still matches). Exits "
              "nonzero if the attestation is invalid")
+    attest_cmd.add_argument(
+        "--anchor", action="store_true",
+        help="anchor mode: sign a chain-neutral record over named sha256 "
+             "digests (a composition hash, attestation digests, receipt "
+             "digests) to publish to an external log or timestamping service "
+             "(docs/revl-anchor.md). Emitted as JSON with --json")
+    attest_cmd.add_argument(
+        "--digest", action="append", metavar="NAME=DIGEST", default=None,
+        help="with --anchor: a named sha256 digest to commit to, repeatable. "
+             "The value is 64 lowercase hex characters")
     attest_cmd.add_argument(
         "--against", metavar="COMPOSITION", default=None,
         help="with --verify: the composition to re-hash and check the "
@@ -2785,13 +2877,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="recompile a .revlbundle and prove it rebuilds bit-for-bit: source "
              "and IR hashes match, deps are locked, emitted artifacts correspond "
              "to each backend, capabilities match policy, evidence is present "
-             "(item 305, docs/bundle.md)")
-    verify_cmd.add_argument("bundle", metavar="BUNDLE",
-                            help="a bundle written by `revl bundle`: either the "
-                                 ".revlbundle directory or a one-file bundle "
-                                 "(--one-file); both verify identically")
+             "(item 305, docs/bundle.md). With --anchor FILE, verify a "
+             "chain-neutral anchor record instead (docs/revl-anchor.md)")
+    verify_cmd.add_argument(
+        "bundle", metavar="BUNDLE", nargs="?",
+        help="a bundle written by `revl bundle`: either the .revlbundle "
+             "directory or a one-file bundle (--one-file); both verify "
+             "identically. Omit when using --anchor")
+    verify_cmd.add_argument(
+        "--anchor", metavar="FILE", default=None,
+        help="verify an anchor record written by `revl attest --anchor`: "
+             "recheck its signature, recompute its anchor hash from the "
+             "digests it carries, and optionally compare the digests the "
+             "verifier holds with --digest. Exits nonzero if it is invalid")
+    verify_cmd.add_argument(
+        "--key", metavar="PATH", default=None,
+        help="with --anchor: the verifying key file. Falls back to "
+             "REVL_ATTEST_KEY_FILE (a path) or REVL_ATTEST_KEY (the secret)")
+    verify_cmd.add_argument(
+        "--digest", action="append", metavar="NAME=DIGEST", default=None,
+        help="with --anchor: a named digest the verifier holds; the anchor may "
+             "not commit to a different value for that name, or omit it. "
+             "Repeatable")
     verify_cmd.add_argument("--json", action="store_true",
-                            help="machine-readable tier-by-tier report")
+                            help="machine-readable tier-by-tier report, or the "
+                                 "anchor verdict with --anchor")
 
     # `revl deploy MAP [--dry-run]` — admit a deploy map (roadmap item 118,
     # docs/design/118-revl-deploy.md §1.1). With --dry-run it is the deploy

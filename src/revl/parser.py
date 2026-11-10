@@ -1078,12 +1078,12 @@ class RemoteRowDecl:
     `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
     source text"), applied to a callee that is in no manifest at all.
 
-    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
-    CONTEXTUAL keywords,
-    recognised only in this one position inside a `composition` block. The
-    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
-    no program using any of those words as an ordinary name is broken. `in` and
-    `realm` are already keywords and are reused verbatim from `isolate`.
+    `remote`, `at`, `host`, `through`, `on_failure`, `redirect`, `pinned` and
+    `long_running` are CONTEXTUAL keywords, recognised only in this one position
+    inside a `composition` block. The lexer's KEYWORDS set is untouched, so the
+    self-host lexer needs no sync and no program using any of those words as an
+    ordinary name is broken. `in` and `realm` are already keywords and are
+    reused verbatim from `isolate`.
     """
     label: str
     key: str                       # the provision key the row claims
@@ -1118,6 +1118,16 @@ class RemoteRowDecl:
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
+    # Issue #2719: `pinned "<sha256-hex>"` — the FULL SHA-256 hex of the peer's
+    # TLS leaf SubjectPublicKeyInfo, the key the wire already presents. The pin
+    # adds no signature to the canonical envelope and no revocation source: a
+    # peer presenting any other key is a transport fault naming both
+    # fingerprints. `None` == the clause was not written, so a row with no pin
+    # behaves exactly as it did before this clause existed. `pinned` is a
+    # CONTEXTUAL keyword read only here, so the lexer's KEYWORDS set is
+    # untouched (docs/composition-rows.md).
+    pin: str | None = None
+    pin_line: int = 0
 
 
 @dataclass
@@ -2632,8 +2642,9 @@ class Parser:
                             f"expected {wanted}, found {got}", hint)
         return self.next()
 
-    def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
-        return RevlError(self.filename, line, message, hint)
+    def err(self, line: int, message: str, hint: str | None = None,
+            **fields) -> RevlError:
+        return RevlError(self.filename, line, message, hint, **fields)
 
     def _doc_above(self, line: int, floor: int | None = None) -> str | None:
         """The comment block directly above `line` (issue #1952).
@@ -5896,8 +5907,9 @@ class Parser:
         return out
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
-        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
-        [redirect(refuse|same_origin)] [long_running]`
+        at host("h:port") [pinned "<sha256-hex>"] [through <ident>]
+        [on_failure(withdraw|result)] [redirect(refuse|same_origin)]
+        [long_running]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
@@ -5958,6 +5970,8 @@ class Parser:
         redirect_line = line
         long_running = False
         long_running_line = line
+        pin: str | None = None
+        pin_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -5993,6 +6007,22 @@ class Parser:
                 host = self.next().value
                 host_line = tok.line
                 self.expect(")")
+            elif self.at("ident", "pinned"):
+                pline = self.next().line
+                if pin is not None:
+                    raise self.err(pline, f"duplicate `pinned` clause on "
+                                          f"remote row `@{label}`")
+                tok = self.peek()
+                if tok.kind != "string":
+                    raise self.err(
+                        tok.line,
+                        "a pinned identity is a static string literal",
+                        hint='write `pinned "<64 hex characters>"` — the FULL '
+                             "SHA-256 hex of the peer's TLS leaf "
+                             "SubjectPublicKeyInfo, the key the wire presents "
+                             "(issue #2719)")
+                pin = self.next().value
+                pin_line = tok.line
             elif self.at("ident", "through"):
                 tline = self.next().line
                 if transport is not None:
@@ -6061,7 +6091,7 @@ class Parser:
                              redirect=redirect, redirect_line=redirect_line,
                              long_running=long_running,
                              long_running_line=long_running_line,
-                             host_line=host_line)
+                             host_line=host_line, pin=pin, pin_line=pin_line)
 
     def host_row_decl(self, composition: str) -> HostRowDecl:
         """`host @label provides <key>: <Service> [in realm("r")]`
@@ -6416,7 +6446,7 @@ class Parser:
                              "src/revl/typecheck.py); drop the annotation",
                     )
                 acquire, undo, line, setup, is_async, mode, replay = \
-                    self.effect_form(tok.line)
+                    self.effect_form(tok.line, bind=bind)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
                                  is_async, mode=mode, replay=replay)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
@@ -6860,7 +6890,7 @@ class Parser:
         acting = self._acting_clause() if self._at_acting_clause() else None
         return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
-    def effect_form(self, line: int):
+    def effect_form(self, line: int, bind: str | None = None):
         self.expect("kw", "effect")
         # item 308 (issue #96): the ownership mode a plain acquisition may carry
         # is threaded out as the final tuple element; `owned` for spawn/lease and
@@ -7044,8 +7074,9 @@ class Parser:
                     isinstance(acquire, ExprCall)
                     and isinstance(acquire.callee, ExprVar)):
                 return acquire, None, line, setup, is_async, mode, replay
-            message, hint = missing_undo_refusal(_describe_expr(acquire))
-            raise self.err(line, message, hint=hint)
+            message, hint, fields = missing_undo_refusal(_describe_expr(acquire),
+                                                         bind=bind)
+            raise self.err(line, message, hint=hint, **fields)
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async, mode, replay
@@ -9835,9 +9866,68 @@ def _describe_expr(expr) -> str:
     return "the expression"
 
 
+_ACQUIRE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
+
+
+def _undo_acquire_fields(spelling: str, declared: str | None, derived: str,
+                         repairs: list[dict]) -> dict:
+    """The structured half of a G4 missing-undo refusal (issue #2684).
+
+    `acquire` names the extern and method; `diagnostics.classify` completes it
+    with the record's own file and line, so a raise site cannot disagree with
+    the position it refused at. `declaredClass` pairs the class an extern
+    declares (or `host` for the host-stub surface, `None` when no declaration
+    resolves) with the class the checker derived for this call. `repairs` is
+    ordered by preference; a repair whose edit is mechanical gains a verified
+    `fix_code` from the fixgen engine when the report holds the source."""
+    extern, method = spelling, None
+    if not _ACQUIRE_NAME.fullmatch(spelling):
+        # a complex acquisition expression has no extern name to report
+        extern = None
+    elif "." in spelling:
+        extern, method = spelling.rsplit(".", 1)
+    return {
+        "acquire": {"extern": extern, "method": method},
+        "declared_class": {"declared": declared, "derived": derived},
+        "repairs": repairs,
+    }
+
+
+def acquire_without_undo_fields(name: str, returns: str | None) -> dict:
+    """The structured half of G4's declaration refusal (issue #2684).
+
+    An `extern acquire fn` with no `undo` has no inverse at all, so the
+    repairs are declaration-level: declare the teardown, or say what this
+    write really is (a `local` write with no crossing, or an irreversible
+    `emission`). Neither is mechanical: the compiler cannot invent the extern
+    that releases the handle, and a reclassification changes every call site."""
+    ret = f" -> {returns}" if returns else ""
+    return {
+        "acquire": {"extern": name, "method": None},
+        "declared_class": {"declared": "acquire", "derived": "mutation"},
+        "repairs": [
+            {"kind": "declare-inverse",
+             "action": f"declare the teardown on the extern: `extern acquire fn "
+                       f"{name}(...){ret} undo <release>(result)`, where "
+                       f"`<release>` is the extern that releases the acquired "
+                       f"handle"},
+            {"kind": "reclassify",
+             "action": "if the write crosses no boundary it is `local`, called "
+                       "plainly with no bracket and no inverse; if it crosses "
+                       "irreversibly it is `emission`, and every call site is "
+                       "marked `emit`"},
+        ],
+    }
+
+
 def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
-                         declared_local: bool = False) -> tuple[str, str]:
-    """The ONE rendering of G4's bare-acquisition refusal: `(message, hint)`.
+                         declared_local: bool = False, *,
+                         bind: str | None = None) -> tuple[str, str, dict]:
+    """The ONE rendering of G4's bare-acquisition refusal.
+
+    Returns `(message, hint, fields)`: the prose both positions share, and the
+    structured `acquire` / `declaredClass` / `repairs` a record carries
+    (issue #2684).
 
     Two positions raise it and neither may drift from the other. The parser
     refuses at the point it can prove the acquisition is not a bare name
@@ -9868,8 +9958,12 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
     resolve one file at a time, after parsing, so an imported extern's
     classification is unknown there. Its domain is exactly the shapes that
     can never BE a bare-name extern call, which is why the generic wording
-    is the right one for every refusal it still raises."""
+    is the right one for every refusal it still raises.
+
+    `bind` is the name the acquisition is bound to, where the caller has it
+    (`let pool = effect …`). It only sharpens the `site-undo` repair's text."""
     spelling = head.strip("`")
+    handle = bind or "<name>"
     if declared_local:
         # item 2146: the callee IS a declared extern, and its class is `local`.
         # The generic wording below ("{head} is not pure") is true but useless
@@ -9884,7 +9978,17 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"a `local` extern writes durable local state and crosses no "
             f"boundary, so it is called plainly and takes no bracket or "
             f"inverse: write `{spelling}(...)` as a plain call "
-            f"(docs/syntax-2.0.md §6.1, G4)")
+            f"(docs/syntax-2.0.md §6.1, G4)",
+            _undo_acquire_fields(spelling, "local", "mutation", [
+                {"kind": "plain-call",
+                 "action": f"a `local` extern crosses no boundary, so drop the "
+                           f"bracket and call `{spelling}(...)` plainly"},
+                {"kind": "declare-inverse",
+                 "action": "if the write is a boundary crossing, declare it "
+                           "`extern acquire` with an `undo` (or `witnessed` "
+                           "with a `Result[..., Error]` return) and spell that "
+                           "inverse at the site"},
+            ]))
     if declared is not None:
         classification, inverse = declared
         article = "an" if classification[:1].lower() in "aeiou" else "a"
@@ -9900,7 +10004,18 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"registers it on the `Ok` branch and requires the return be "
             f"`Result[Witness, Error]` "
             f"(docs/design/243-witnessed-externs.md, G4)")
-        return message, hint
+        return (
+            message, hint,
+            _undo_acquire_fields(spelling, classification, "mutation", [
+                {"kind": "site-undo",
+                 "action": f"spell the inverse at the site: `effect "
+                           f"{spelling}(...) undo {inverse}(<the acquired "
+                           f"handle>)`"},
+                {"kind": "witnessed",
+                 "action": f"classify {head} `witnessed` with a "
+                           f"`Result[Witness, Error]` return, so its declared "
+                           f"inverse is registered by the teardown accumulator"},
+            ]))
     from .typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415
     release = _HOST_ACQUIRE_VERBS.get(spelling)
     if release is not None:
@@ -9910,11 +10025,39 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"effect has no `undo` and {head} is not pure",
             f"write `let <name> = effect {spelling}(...) undo "
             f"<name>.{release}()`: a host acquisition's inverse is its "
-            f"family's release on the handle it bound (G4)")
+            f"family's release on the handle it bound (G4)",
+            _undo_acquire_fields(spelling, "host", "mutation", [
+                {"kind": "site-undo",
+                 "action": f"bind the acquisition and spell its one inverse: "
+                           f"`let {handle} = effect {spelling}(...) undo "
+                           f"{handle}.{release}()`"},
+                {"kind": "witnessed",
+                 "action": "declare the acquisition as an `extern witnessed "
+                           "fn` that returns `Result[<handle>, Error]` with a "
+                           "declared `undo`, so the teardown accumulator "
+                           "replays it"},
+                {"kind": "service-emission",
+                 "action": "move the crossing behind a service operation "
+                           "declared `emission`, and mark its call `emit`: an "
+                           "emission is admitted as irreversible"},
+            ]))
     return (
         f"effect has no `undo` and {head} is not pure",
         f"write `effect {spelling}(...) undo <expr>`, or mark the call `emit` "
-        f"if it deliberately crosses the system boundary (G4)")
+        f"if it deliberately crosses the system boundary (G4)",
+        _undo_acquire_fields(spelling, None, "unknown", [
+            {"kind": "site-undo",
+             "action": f"give the call an inverse: `effect {spelling}(...) undo "
+                       f"<inverse>`"},
+            {"kind": "witnessed",
+             "action": f"declare `{spelling}` as an `extern witnessed fn` with "
+                       f"a declared `undo` and a `Result[..., Error]` return, "
+                       f"so the teardown accumulator replays it"},
+            {"kind": "service-emission",
+             "action": "move the crossing behind a service operation declared "
+                       "`emission`, and mark its call `emit`: an emission is "
+                       "admitted as irreversible"},
+        ]))
 
 
 def _dotted_path(expr) -> str | None:

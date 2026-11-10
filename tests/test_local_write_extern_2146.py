@@ -189,7 +189,8 @@ def test_audit_json_names_the_local_class(tmp_path, capsys):
     assert main(["audit", str(src), "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     externs = doc["boundary"]["W"]["externs"]
-    assert {"name": "record", "class": "local", "backends": ["py"]} in externs
+    assert {"name": "record", "class": "local", "inverse": "unknown",
+            "backends": ["py"]} in externs
 
 
 def test_audit_human_line_names_the_local_class(tmp_path, capsys):

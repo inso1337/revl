@@ -1,5 +1,6 @@
 // Fetcher (rim) — reads one registry entry, verbatim, as JSON
-// {source, manifest, dossier?}. A truc is exactly this triple, vendored.
+// {source, manifest, dossier (null when the entry ships none)}. A truc is
+// exactly this triple, vendored.
 
 use "../externs.rvl" { host_entry_read }
 

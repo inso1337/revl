@@ -13,6 +13,8 @@ still resolve for any caller that reaches them through the CLI module.
 
 from __future__ import annotations
 
+from .inverse import inverse_class
+
 
 # G8 audit: the pseudo-boundary recorded when a component reaches host code
 # through a first-class function dispatch (an arrow-typed parameter or
@@ -327,10 +329,21 @@ def _boundary(ir: dict) -> dict:
             "externs": [
                 {"name": _UNKNOWN_DISPATCH,
                  "class": "first-class dispatch",
-                 "backends": []}
+                 "backends": [],
+                 # issue #2692: no declaration is behind a first-class dispatch,
+                 # so there is no provenance fact at all. `unknown` is a value,
+                 # never a missing field.
+                 "inverse": inverse_class(None)}
                 if name == _UNKNOWN_DISPATCH else
                 {"name": name,
                  "class": extern_class.get(name, {}).get("class"),
+                 # issue #2692: the single derived answer to "how do we know
+                 # this crossing can be undone, and how far can the undo be
+                 # trusted", read off the declared extern's own facts (`undo`,
+                 # `compensate`, `deferred`, `register`). It is never inferred
+                 # from a name or a shape; `unknown` is a first-class value, so
+                 # every crossing carries a class.
+                 "inverse": inverse_class(extern_class.get(name)),
                  # item 396: union ref tiers so a ref-only extern shows its tier
                  # (not "no bodies"), and carry the ref provenance for the render.
                  "backends": sorted(

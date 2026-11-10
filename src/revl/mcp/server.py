@@ -77,7 +77,7 @@ from xml.etree import ElementTree as ET
 
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
-from ..diagnostics import FIXES, GUARANTEES, explain, report
+from ..diagnostics import FIXES, GUARANTEES, classify, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
@@ -2632,15 +2632,14 @@ _DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 
 def _export_next() -> dict:
-    """The call a disk note's prose names (issue #2537): `revl_export`, through
-    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb:
-    the server serves it by name, but some clients will not emit a direct call
-    to an unlisted name, and the hatch is the one form that reaches it for
-    every client (issue #2581). Ready: a disk note exists only for a
-    composition loaded from files, whose export takes no arguments."""
-    return _remedy.call(_disclosure.DISCOVERY,
-                        {_disclosure.HATCH_NAME: "revl_export",
-                         _disclosure.HATCH_ARGS: {}})
+    """The call a disk note's prose names (issues #2537, #2625): `revl_export`,
+    a listed verb since #2625, so the note hands over the direct call. It went
+    through the `revl_verbs` hatch (#2073, #2581) while the verb was outside the
+    tier, because some clients will not emit a call to a name they were not
+    shown; listing the verb removed the indirection for every client. Ready: a
+    disk note exists only for a composition loaded from files, whose export
+    takes no arguments."""
+    return _remedy.call("revl_export", {})
 
 
 def _export_next_if_owed() -> dict | None:
@@ -3598,7 +3597,8 @@ def _tool_approve(arguments: dict) -> dict:
                               "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
         return {"ok": True, **SESSION.approve_ticket(
-            ticket_hash, vote=vote or "approve", as_token=as_token,
+            ticket_hash, vote=vote or "approve",
+            proposer=arguments.get("proposer"), as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
         return _session_error(error)
@@ -4679,6 +4679,76 @@ _HELD_DOC = (" `source`/`files` are optional when the session holds a "
              "answers `queried: \"session\"`.")
 
 
+def _compiled_sources(source: str | None, modules: dict | None,
+                      held: dict | None) -> dict[str, str]:
+    """The text a check compiled, by the filename its errors name (issue #2684).
+
+    An inline candidate compiles as `<candidate>.rvl`; `modules` are overlaid
+    on the disk at their paths, so an edited buffer is the text that compiled
+    even when the path also exists on disk. `held` carries the same buffers for
+    a held-session check, plus `files_content`: the files no edit touched, as
+    they read when the session loaded them. The map is the only text the fixgen
+    engine may verify a repair against; a `files` entry with none of these is
+    left out rather than read from disk, because the disk copy may be pre-edit
+    text the compile never saw."""
+    texts: dict[str, str] = {}
+    if source is not None:
+        texts["<candidate>.rvl"] = source
+    for path, text in (modules or {}).items():
+        if isinstance(path, str) and isinstance(text, str):
+            texts[path] = text
+            texts[os.path.abspath(path)] = text
+    for path, text in ((held or {}).get("files_content") or {}).items():
+        if isinstance(path, str) and isinstance(text, str):
+            texts.setdefault(path, text)
+            texts.setdefault(os.path.abspath(path), text)
+    return texts
+
+
+def _verify_repair(patched: str, error: RevlError, source: str | None,
+                   files: list[str] | None, modules: dict | None):
+    """The fixgen repair verifier for one check candidate (issue #2684 review).
+
+    Two things the editor's own `compute_diagnostics` cannot supply:
+
+    * the SAME authoring door. A repair is verified through
+      `compile_under_authoring`, so the patched text compiles under the same
+      profile and with the same in-memory modules the check compiled with.
+      Reaching `compile_source` directly here would compile agent text
+      unprofiled.
+    * the module overlays. The patched candidate must resolve an overlay-only
+      (or edited) `use` target, or the verification stops at the `use` line
+      and never re-judges the refusal.
+
+    Returns the patched program's diagnostics as `{code, range}` records, or
+    None when the patched compile refused at or before the fixed line (or on a
+    parse error anywhere): the fix was not re-judged, so it is not verified.
+    """
+    name = error.filename
+    patched_source = source
+    patched_modules = dict(modules or {})
+    if source is not None and name == "<candidate>.rvl":
+        patched_source = patched
+    else:
+        # the refusal is in a module (or a `files` root): substitute its text
+        patched_modules[name] = patched
+        patched_modules[os.path.abspath(name)] = patched
+    try:
+        compile_under_authoring(patched_source, files,
+                                modules=patched_modules or None)
+    except RevlError as refusal:
+        refused = getattr(refusal, "errors", None) or [refusal]
+        records = [classify(e) for e in refused]
+        if any(one["line"] <= error.line or one["code"] == "SYNTAX"
+               for one in records):
+            return None
+        return [{"code": one["code"],
+                 "range": {"start": {"line": one["line"] - 1, "character": 0},
+                           "end": {"line": one["line"] - 1, "character": 0}}}
+                for one in records]
+    return []
+
+
 def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     """Compile a candidate as sent, and return `(payload, ir)`.
 
@@ -4692,10 +4762,20 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     the compile reads, while `held` carries the edited buffers the argument
     shape cannot (a `files` set's edited text rides as `modules`, but its
     `files_content` is what the comment index wants)."""
+    source, _files, modules = _candidate_of(arguments)
     try:
-        ir = _compile(*_candidate_of(arguments))
+        ir = _compile(source, _files, modules)
     except RevlError as error:
-        refused = report(error)
+        # issue #2684: hand the fixgen repair engine the text this compile read,
+        # so a G4 record's mechanical repair carries a verified `fix_code`
+        # rather than only the prose. It is never read from `error.filename`:
+        # an edited buffer rides as a `modules` overlay over a real path, and
+        # the disk copy there is pre-edit text that did not compile.
+        refused = report(
+            error,
+            sources=_compiled_sources(source, modules, held),
+            verifier=lambda patched, one: _verify_repair(
+                patched, one, source, _files, modules))
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
@@ -4707,7 +4787,6 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     # `fillSpec` — the expected type, the emission upper bound, the in-scope
     # bindings and the reachable service signatures the checker already knew at
     # that position — so the hole can be filled directly (docs/holes.md §8).
-    source, _files, modules = _candidate_of(arguments)
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
@@ -6683,6 +6762,15 @@ TOOLS = [
                           "description": "item 344: how long (ms) the standing "
                                          "grant stays live; checked at the "
                                          "crossing against the session clock"},
+                "proposer": {"type": "string",
+                             "description": "issue #3216: the operator whose "
+                                            "call this yes lets through, one "
+                                            "of the ticket's `proposers`. A "
+                                            "yes is spent only by the operator "
+                                            "it names. Required only when more "
+                                            "than one operator raised the same "
+                                            "call; otherwise it defaults to "
+                                            "the one that did"},
                 "vote": {"type": "string", "enum": ["approve", "deny"],
                          "description": "item 471: a ticket whose rule demands a "
                                         "QUORUM takes votes, not a yes/no, so it "
@@ -7840,7 +7928,7 @@ def handle(message: dict) -> dict | None:
         # lookup but a CALL of the verb it names, resolved here to that verb's
         # own name so the pipeline below cannot tell the difference. The
         # tiered list therefore stays exactly `CORE`: every verb is one listed
-        # tool away without a fifteenth listed verb.
+        # tool away, and the hatch itself adds no listed verb.
         payload = _unknown_arguments(name, arguments)
         if payload is not None:
             pass

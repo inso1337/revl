@@ -39,10 +39,12 @@ fn reason(r: Result[Int, Str]) -> Str {
   }
 }
 // A `match` over a generic variant applies the selector's type arguments to
-// each case pattern, so a bound payload is `Long`, not `Object` (issue
-// #2325). A parameter and a call to a top-level fn carry them; a `let` local
-// keeps the raw pattern. No case is built here: the self-host checker refuses
-// `Full(n)` for `Box[Int]` (issue #2472).
+// each case pattern when the selector's Java type is parameterised (a
+// parameter, a call to a top-level fn), so a bound payload is `Long`, not
+// `Object`. A `let` local keeps the raw pattern, and the arm's payload type
+// from `_arm_payload_type` declares its binding instead (issue #2325). No case
+// is built here: the self-host checker refuses `Full(n)` for `Box[Int]`
+// (issue #2472).
 fn bumped(b: Box[Int]) -> Int {
   return match b {
     Full(v) => v + 1,
@@ -64,7 +66,16 @@ fn called(b: Box[Int]) -> Int {
 fn local(b: Box[Int]) -> Int {
   let c = keep(b)
   return match c {
-    Full(_) => 1,
+    Full(v) => v + 1,
+    Empty => 0,
+  }
+}
+fn arm_bound(b: Box[Box[Int]]) -> Int {
+  return match b {
+    Full(inner) => match inner {
+      Full(v) => v + 1,
+      Empty => 0,
+    },
     Empty => 0,
   }
 }
