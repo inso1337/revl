@@ -1533,7 +1533,9 @@ def probe_reach(candidate: Candidate) -> Verdict:
             name,
             f"{len(diff)} conformance case(s) audited at {candidate.base} and "
             f"at head, {crossings} crossing(s) unchanged, none added, no reach "
-            "bound loosened and no capability scope widened"
+            "bound loosened, no capability scope widened, no backend body "
+            "added, no recovery dropped or weakened and no register floor "
+            "weakened"
             + _unmeasured_note(unmeasured),
             ["tools/promotion_evidence.py measure --kind audit"])
 
