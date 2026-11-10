@@ -886,28 +886,24 @@ def _sub(old, new):
 
 
 MUTATIONS = {
-    "N01 resolve keeps the FIRST segment at or before the column": _sub(
-        "    found = None\n"
-        "    for segment in lines[line]:\n"
-        "        if segment[0] <= column:\n"
-        "            found = segment\n"
-        "    return found",
-        "    found = None\n"
-        "    for segment in lines[line]:\n"
-        "        if segment[0] <= column and found is None:\n"
-        "            found = segment\n"
-        "    return found"),
-    "N02 resolve is off by one at the segment boundary": _sub(
-        "    for segment in lines[line]:\n"
-        "        if segment[0] <= column:\n"
-        "            found = segment",
-        "    for segment in lines[line]:\n"
-        "        if segment[0] < column:\n"
-        "            found = segment"),
-    "N03 resolve ignores the generated line": _sub(
-        "    if line < 0 or line >= len(lines):\n        return None",
-        "    if line < 0 or line >= len(lines):\n        return None\n"
-        "    line = 0"),
+    "N01 the line index keeps the FIRST segment at or before the column": _sub(
+        "        def lookup(column: int):\n"
+        "            at = bisect.bisect_right(columns, column) - 1\n"
+        "            return segments[at] if at >= 0 else None",
+        "        def lookup(column: int):\n"
+        "            at = bisect.bisect_right(columns, column) - 1\n"
+        "            return segments[0] if at >= 0 else None"),
+    "N02 the line index is off by one at the segment boundary": _sub(
+        "            at = bisect.bisect_right(columns, column) - 1",
+        "            at = bisect.bisect_left(columns, column) - 1"),
+    "N03 the line index ignores the generated line": _sub(
+        "    def _resolve_inner(line: int, column: int):\n"
+        "        if line < 0 or line >= len(inner_lines):\n"
+        "            return None",
+        "    def _resolve_inner(line: int, column: int):\n"
+        "        if line < 0 or line >= len(inner_lines):\n"
+        "            return None\n"
+        "        line = 0"),
     "N04 an uncovered mapping is deleted instead of blanked": _sub(
         "                out_segments.append((gcol, None, None, None, None))\n"
         "                continue\n"
