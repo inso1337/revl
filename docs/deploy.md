@@ -474,13 +474,18 @@ new generation reaches and the old one does not is reported in the verdict and
 refused unless that composition's `allow_capabilities` names it.
 
 A refusal happens before any participant is spawned, so the whole update stays
-on its prior generation. When the update does commit, the plan's health probes
-run after it. A failed probe writes the durable abort decision first and then
-asks every committed participant to run its own local LIFO unwind back to the
-prior generation, the same settle rule a stranded participant gets. Participant
-state lives under `<state-dir>/<generation>`, so restoring the prior generation
-is observable: the failed generation's directory unwinds to empty while the
-previous generation's directory is byte-identical.
+on its prior generation. The apply then locks its generation's state directory
+and refuses one that already holds a decision record, writes the
+`federation-decision-pending` record before the first launch (issue #2725's
+rule), and writes `federation-commit-approved` only after every participant
+committed and every declared health probe passed. A probe that fails, times
+out or raises writes the durable abort decision first and then asks every
+committed participant to run its own local LIFO unwind, the same settle rule a
+stranded participant gets. Each generation has its own state directory (the
+command's default is `<wal-dir>/federation/<federation>/<generation>`), so
+restoring the prior generation is observable: the failed generation's
+directory unwinds to empty while the previous generation's directory is
+byte-identical.
 
 This is still the co-located case only. Two-phase commit across hosts, with
 partial failure and coordinator crash, remains undefined, and every participant

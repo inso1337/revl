@@ -15,21 +15,29 @@ This module is the missing surface, and it adds no protocol of its own:
     contracts the update must hold, the generation being deployed, and an
     optional per-composition health probe;
   * :func:`federation_plan_admission` compiles the sources, reports any
-    capability the new generation reaches and the one it replaces does not, and
-    hands the whole thing to `deploy.federation_admission` UNCHANGED — the
-    refusal is the landed rule's, not a second copy;
+    capability the new generation reaches and the one it replaces does not
+    (and names every composition with no `prior`, whose widening is not
+    compared), and hands the whole thing to `deploy.federation_admission`
+    UNCHANGED: the refusal is the landed rule's, not a second copy;
   * :func:`apply_federation_plan` drives `deploy.run_deploy` over one local
     participant per composition (the co-located case the issue defines), then
-    runs the declared probes AFTER the commit. A failed probe writes the durable
-    abort decision FIRST and then asks every committed participant to run its
-    own local LIFO unwind back to the prior generation — the same settle rule
+    runs the declared probes AFTER the commit. It keeps the decision file the
+    way `revl deploy` does (issue #2725): a `federation-decision-pending`
+    record before the first participant is launched, the abort decision
+    before any abort message, and the `federation-commit-approved` record only
+    once every participant committed and every declared probe passed. A
+    failed, timed-out or interrupted probe writes the abort decision FIRST and
+    then asks every committed participant to run its own local LIFO unwind
+    back to the prior generation, the same settle rule
     `deploy.settle_stranded` applies to a stranded participant, never a
     conductor-side inverse.
 
 The generation is a real directory boundary, not a label: participant state
-lives under `<state-dir>/<generation>`, so the prior generation's WAL and world
-files are never written by a new update. A failed update unwinds its own
-generation and leaves the previous one intact. Two-phase commit across hosts,
+lives in one directory per generation, which an apply locks for its whole run
+and uses once. A directory that already holds a decision record is refused
+before anything is written, so a new update never writes into an earlier
+generation's WAL or world files, and a failed update unwinds only its own
+generation. Two-phase commit across hosts,
 with partial failure and coordinator crash, stays out (`docs/deploy.md` §4), so
 every participant here is the conductor's own child on one kernel.
 
@@ -42,10 +50,12 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from . import deploy
 from .errors import RevlError
@@ -67,6 +77,10 @@ COMPOSITION_KEYS = ("source", "prior", "health_probe", "allow_capabilities")
 
 #: One `[[contracts]]` entry.
 CONTRACT_KEYS = ("surface", "provider")
+
+#: The file an apply locks, exclusively, in its generation directory for its
+#: whole run.
+LOCK_FILE = "lock"
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +141,7 @@ def _load_document(path: Path) -> dict:
     if path.suffix == ".json":
         document = json.loads(text)
     else:
-        import tomllib  # noqa: PLC0415 — stdlib, py3.11+
+        import tomllib  # noqa: PLC0415 (stdlib, py3.11+)
 
         document = tomllib.loads(text)
     if not isinstance(document, dict):
@@ -200,6 +214,12 @@ def load_federation_plan(path: str | os.PathLike) -> dict:
                                    f"compositions.{composition_id}.prior", base)
         probe = _string_list(entry.get("health_probe"),
                              f"compositions.{composition_id}.health_probe")
+        for index, word in enumerate(probe):
+            if "\0" in word:
+                raise _refuse(
+                    f"compositions.{composition_id}.health_probe[{index}]",
+                    "may not contain a NUL byte: no program can be started "
+                    "with one, so the probe could never run")
         allow = _string_list(entry.get("allow_capabilities"),
                              f"compositions.{composition_id}.allow_capabilities")
         compositions[composition_id] = {
@@ -241,7 +261,7 @@ def load_federation_plan(path: str | os.PathLike) -> dict:
 
 
 def _compile(path: Path, where: str) -> dict:
-    from .compiler import compile_source  # noqa: PLC0415 — CLI path only
+    from .compiler import compile_source  # noqa: PLC0415 (CLI path only)
 
     try:
         source = path.read_text(encoding="utf-8")
@@ -303,20 +323,26 @@ def _contract_documents(plan: Mapping) -> tuple[list[tuple], list[dict]]:
 
 
 def _capability_widening(plan: Mapping, plans: Mapping[str, dict]
-                         ) -> tuple[list[dict], list[dict]]:
+                         ) -> tuple[list[dict], list[str], list[dict]]:
     """Compare each new generation against the one it replaces.
 
-    Returns `(widened, refusals)`. `widened` reports
-    every capability label the new generation reaches and the prior one does
-    not, whether or not the plan allows it: a refusal the author can act on has
-    to name what widened, and an allowed widening is still worth printing.
+    Returns `(widened, not_compared, refusals)`. `widened` reports every
+    capability label the new generation reaches and the prior one does not,
+    whether or not the plan allows it: a refusal the author can act on has to
+    name what widened, and an allowed widening is still worth printing.
+    `not_compared` names every composition whose plan entry has no `prior`, so
+    a widening there is reported as not checked rather than passing silently.
     """
     widened: list[dict] = []
+    not_compared: list[str] = []
     refusals: list[dict] = []
     for composition_id in sorted(plan["compositions"]):
         entry = plan["compositions"][composition_id]
         prior_path = entry.get("prior")
-        if prior_path is None or composition_id not in plans:
+        if composition_id not in plans:
+            continue
+        if prior_path is None:
+            not_compared.append(composition_id)
             continue
         try:
             prior_ir = _compile(prior_path,
@@ -362,14 +388,14 @@ def _capability_widening(plan: Mapping, plans: Mapping[str, dict]
                     "composition's `allow_capabilities` to admit the widening "
                     "deliberately."),
             })
-    return widened, refusals
+    return widened, not_compared, refusals
 
 
 def _admit_plan(plan: Mapping) -> dict:
     plans, refusals = _compile_plan(plan)
     contracts, contract_refusals = _contract_documents(plan)
     refusals.extend(contract_refusals)
-    widened, widening_refusals = _capability_widening(plan, plans)
+    widened, not_compared, widening_refusals = _capability_widening(plan, plans)
     refusals.extend(widening_refusals)
 
     admitted: dict = {"admitted": False, "refusals": [], "deferred": []}
@@ -398,6 +424,7 @@ def _admit_plan(plan: Mapping) -> dict:
         "refusals": refusals,
         "deferred": admitted.get("deferred") or [],
         "widened": widened,
+        "notCompared": not_compared,
         "compositions": sorted(plans),
         "plans": plans,
     }
@@ -418,6 +445,7 @@ def federation_plan_admission(plan: Mapping) -> dict:
          "refusals": [{kind, composition, ...reason}],
          "deferred": [...],          # the class-(b) crossings PREPARE will hold
          "widened": [{composition, capabilities, allowed}],
+         "notCompared": [id, ...],   # no `prior` named: widening not compared
          "compositions": [id, ...]}
 
     Nothing is spawned, compiled artifacts are not written, and no participant
@@ -432,22 +460,90 @@ def federation_plan_admission(plan: Mapping) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _tail(text: str | None, limit: int = 400) -> str:
-    text = (text or "").strip()
-    return text if len(text) <= limit else "…" + text[-limit:]
+def _stop_group(process) -> None:
+    """Kill the probe's whole process group, so nothing it started outlives it.
+
+    The probe is started as the leader of its own session, so its group id is
+    its pid. A group that is already empty is not an error.
+    """
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        return
+    try:  # pragma: no cover - no process groups to kill there
+        process.kill()
+    except OSError:  # pragma: no cover
+        pass
+
+
+def _reap(process) -> None:
+    process.wait()
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _run_probe(argv: Sequence[str], cwd: str, timeout: float) -> dict:
+    """Run one probe in its own process group and judge it by its exit code.
+
+    What the probe printed is counted, never copied: the report goes to a
+    terminal, a `--json` pipeline or a log, and a probe's output may carry a
+    credential the operator never meant to publish.
+    """
+    try:
+        process = subprocess.Popen(  # noqa: S603 (argv list, no shell)
+            list(argv), cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+    except FileNotFoundError as error:
+        return {"ok": False, "exit": None,
+                "reason": f"the probe could not be started: {error}"}
+    except OSError as error:
+        return {"ok": False, "exit": None,
+                "reason": f"the probe could not be run: {error}"}
+    out = err = None
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        # On every way out (exit, timeout, an interrupt) the whole group goes,
+        # so a timed-out probe's children do not keep running.
+        _stop_group(process)
+        _reap(process)
+    if out is None:
+        return {"ok": False, "exit": None,
+                "reason": (f"the probe did not finish within {timeout:g}s; "
+                           "its process group was killed")}
+    code = process.returncode
+    if code == 0:
+        return {"ok": True, "exit": code}
+    size = len(out or b"") + len(err or b"")
+    return {"ok": False, "exit": code,
+            "reason": (f"the probe exited {code}"
+                       + (f"; its {size} byte(s) of output are not copied "
+                          "into this report, run the probe by hand to read "
+                          "them" if size else ""))}
 
 
 def run_health_probes(plan: Mapping, *, timeout: float = 30.0) -> list[dict]:
     """Run every probe the plan declares, after the commit.
 
-    A probe is an argv list run in the plan's own directory: exit 0 is healthy
-    and anything else is a failed probe. It is deliberately not a shell string;
-    a plan is unauthenticated operator input, so it may name a program and its
-    arguments but not splice a command language into the conductor.
+    A probe is an argv list run in the plan's own directory, in a process
+    group of its own: exit 0 is healthy and anything else is a failed probe. A
+    probe that runs past `timeout` is failed and its whole group is killed. It
+    is deliberately not a shell string; a plan is unauthenticated operator
+    input, so it may name a program and its arguments but not splice a command
+    language into the conductor.
 
     A composition that declares no probe reports `declared: false` and does not
     fail the update: the probe is an invitation to verify, not a requirement
     this slice can invent for an author who did not write one.
+
+    Anything this function raises (an interrupt while a probe hangs, say)
+    propagates; :func:`apply_federation_plan` then aborts the update.
     """
     rows: list[dict] = []
     base = plan.get("base") or "."
@@ -459,27 +555,7 @@ def run_health_probes(plan: Mapping, *, timeout: float = 30.0) -> list[dict]:
             continue
         row = {"composition": composition_id, "declared": True,
                "argv": list(argv)}
-        try:
-            done = subprocess.run(  # noqa: S603 — argv list, no shell
-                list(argv), cwd=base, capture_output=True, text=True,
-                timeout=timeout, check=False)
-        except subprocess.TimeoutExpired:
-            row.update({"ok": False, "exit": None,
-                        "reason": f"the probe did not finish within {timeout:g}s"})
-        except FileNotFoundError as error:
-            row.update({"ok": False, "exit": None,
-                        "reason": f"the probe could not be started: {error}"})
-        except OSError as error:
-            row.update({"ok": False, "exit": None,
-                        "reason": f"the probe could not be run: {error}"})
-        else:
-            ok = done.returncode == 0
-            row.update({"ok": ok, "exit": done.returncode})
-            if not ok:
-                row["reason"] = (f"the probe exited {done.returncode}"
-                                 + (f": {_tail(done.stderr or done.stdout)}"
-                                    if (done.stderr or done.stdout).strip()
-                                    else ""))
+        row.update(_run_probe(argv, base, timeout))
         rows.append(row)
     return rows
 
@@ -491,8 +567,13 @@ def _abort_committed(participants: Sequence, report: Mapping) -> dict:
     owns the inverses: the conductor holds only the commit ledger, exactly as in
     `run_deploy`'s own abort path. A participant that cannot be reached is
     reported `unresolved` with `revl recover` named, never as restored.
+
+    An interrupt (Ctrl-C, `SystemExit`) while one participant unwinds is
+    recorded like any other failure and the remaining participants are still
+    asked to unwind; the interrupt is re-raised once every one was asked.
     """
     by_identity = {participant.identity: participant for participant in participants}
+    interrupted: Optional[BaseException] = None
     ledger = list(report.get("commitLedger") or [])
     outcomes: dict[str, dict] = {}
     unresolved: list[dict] = []
@@ -511,12 +592,15 @@ def _abort_committed(participants: Sequence, report: Mapping) -> dict:
             continue
         try:
             settled = participant.abort()
-        except Exception as error:  # noqa: BLE001 — any failure is unresolved
-            unresolved.append({"identity": identity, "reason": str(error)})
+        except BaseException as error:  # noqa: BLE001 (any failure is unresolved)
+            reason = f"{type(error).__name__}: {error}"
+            unresolved.append({"identity": identity, "reason": reason})
             outcomes[identity] = {
-                "outcome": deploy.UNRESOLVED, "reason": str(error),
+                "outcome": deploy.UNRESOLVED, "reason": reason,
                 "settleWith": "run `revl recover` on that participant's WAL",
             }
+            if not isinstance(error, Exception) and interrupted is None:
+                interrupted = error
             continue
         clean = bool((settled.get("residue") or {}).get("clean"))
         outcomes[identity] = {
@@ -530,6 +614,8 @@ def _abort_committed(participants: Sequence, report: Mapping) -> dict:
                             "outstanding": (settled.get("residue") or {})
                             .get("outstanding")})
 
+    if interrupted is not None:
+        raise interrupted
     for participant in participants:
         outcomes.setdefault(participant.identity,
                             {"outcome": deploy.NEVER_COMMITTED})
@@ -551,6 +637,68 @@ def _abort_committed(participants: Sequence, report: Mapping) -> dict:
     }
 
 
+def _try_lock(fd: int) -> bool:
+    try:
+        import fcntl  # noqa: PLC0415 (POSIX)
+    except ImportError:  # pragma: no cover - Windows
+        import msvcrt  # noqa: PLC0415
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    try:
+        import fcntl  # noqa: PLC0415 (POSIX)
+    except ImportError:  # pragma: no cover - Windows
+        import msvcrt  # noqa: PLC0415
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _generation_lock(state: Path) -> Iterator[bool]:
+    """Hold `<state>/lock` exclusively for the body, or yield False at once.
+
+    It does not wait: a second apply on one generation directory is an
+    operator error to report, and once the first finishes the directory holds
+    a decision record, which refuses the second anyway.
+    """
+    fd = os.open(str(state / LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        held = _try_lock(fd)
+        try:
+            yield held
+        finally:
+            if held:
+                _unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _refused_before_launch(phase: str, reason: str) -> dict:
+    return {
+        "verdict": deploy.DEPLOY_REFUSED,
+        "phase": phase,
+        "reason": reason,
+        "participants": {},
+        "proof": ("refused before any record was written or any participant "
+                  "was launched: no composition moved from its prior "
+                  "generation."),
+    }
+
+
 def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
                           probe_timeout: float = 30.0,
                           on_event=None) -> dict:
@@ -558,22 +706,35 @@ def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
 
     The order is the issue's and the protocol's:
 
-      1. admission (:func:`federation_plan_admission`) — a refusal here opens no
-         boundary, so every composition is still on its prior generation;
-      2. one local participant per composition, handed to
-         `deploy.run_deploy` with the durable decision file in `state_dir` under
-         the plan's generation; a COMMIT failure rolls back through the landed
-         protocol and returns its report unchanged;
-      3. the declared health probes, AFTER the commit;
-      4. on a failed probe, the durable abort decision is written FIRST, then
-         every committed participant unwinds itself back to the prior
-         generation. A failed update therefore leaves the prior generation's own
-         state directory untouched.
+      1. admission (:func:`federation_plan_admission`): a refusal here opens no
+         boundary and creates no directory, so every composition is still on
+         its prior generation;
+      2. `state_dir` is locked (`<state_dir>/lock`) for the rest of the run, and
+         refused if another apply holds it or if it already holds a decision
+         record: a generation directory is used once;
+      3. a `federation-decision-pending` record is written before the first
+         participant is launched (issue #2725, as `revl deploy` does), then one
+         local participant per composition is handed to `deploy.run_deploy`. A
+         COMMIT failure writes the abort decision before any abort message and
+         rolls back through the landed protocol;
+      4. the declared health probes, AFTER the commit, while the pending record
+         is still the last one;
+      5. every probe passed: the `federation-commit-approved` record. A probe
+         failed, timed out or raised (an interrupt included): the durable
+         abort decision is written FIRST, then every committed participant
+         unwinds itself back to the prior generation; an exception is
+         re-raised after that.
+
+    A conductor killed at any point before step 5 leaves the pending record or
+    the abort decision last, so `deploy.settle_stranded` never reads an
+    approval for this run. (Recovery's own rule still rolls forward a
+    participant whose WAL reached `activation-complete`, whatever the record
+    says; the record decides a participant stranded mid-commit.)
 
     `state_dir` is the exact directory for THIS generation's participant state
-    (the CLI derives `<wal-dir>/federation/<plan stem>/<generation>`). Keeping
-    the generation in the path is what makes "restore the prior generation" an
-    observable fact rather than a claim.
+    (the CLI derives `<wal-dir>/federation/<federation>/<generation>`).
+    Keeping the generation in the path is what makes "restore the prior
+    generation" an observable fact rather than a claim.
     """
     admitted = _admit_plan(plan)
     report: dict = {
@@ -588,15 +749,60 @@ def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
             "refusals": admitted["refusals"],
             "deferred": admitted["deferred"],
             "widened": admitted["widened"],
+            "notCompared": admitted["notCompared"],
             "participants": {},
             "proof": ("admission refused the whole update before a boundary was "
                       "opened: no composition moved from its prior generation."),
         })
         return report
 
-    plans = admitted["plans"]
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
+    with _generation_lock(state) as held:
+        if not held:
+            report.update(_refused_before_launch("lock", (
+                f"another apply holds {state / LOCK_FILE}; two applies on one "
+                "generation directory would interleave its decision file and "
+                "world files")))
+            return report
+        decision_path = state / deploy.DECISION_FILE
+        if decision_path.exists():
+            report.update(_refused_before_launch("generation", (
+                f"{decision_path} already holds a decision record, so "
+                f"{state} was already used by an apply. A generation "
+                "directory is used once, or a new update would write into an "
+                "earlier generation's WAL and world files: give the plan a new "
+                "`generation`, or a new state directory")))
+            return report
+        report.update(_apply_locked(plan, admitted, state, str(decision_path),
+                                    probe_timeout=probe_timeout,
+                                    on_event=on_event))
+        return report
+
+
+def _apply_locked(plan: Mapping, admitted: Mapping, state: Path,
+                  decision_path: str, *, probe_timeout: float,
+                  on_event) -> dict:
+    federation, generation = plan["federation"], plan["generation"]
+    plans = admitted["plans"]
+    # Issue #2725, as `revl deploy` applies it: from here on this run owns the
+    # decision file's last record, so a conductor killed before the approval
+    # reads as "this run decided nothing" (roll back).
+    deploy.write_decision_started(decision_path, federation_id=federation,
+                                  generation=generation)
+
+    def event(phase: str, identity: str, detail: dict) -> None:
+        if phase == "commit" and not detail.get("ok"):
+            # `run_deploy` aborts from this report on. Its approval is not
+            # handed the decision path (the approval waits for the probes), so
+            # the abort decision is made durable here, before `run_deploy`
+            # sends any ABORT message, which is the order it keeps itself.
+            deploy.write_abort_decision(
+                decision_path, federation_id=federation, generation=generation,
+                reason=detail.get("reason"), failed=identity)
+        if on_event is not None:
+            on_event(phase, identity, detail)
+
     participants: list = []
     try:
         for composition_id in sorted(plans):
@@ -604,16 +810,13 @@ def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
                           for component in plans[composition_id].get("components")
                           or [] if component.get("name")]
             spec_path = deploy._local_participant_spec(
-                composition_id, components, state,
-                generation=plan["generation"])
+                composition_id, components, state, generation=generation)
             target = deploy.DeployTarget(process=composition_id,
                                          via=deploy.VIA_LOCAL, raw={})
             participant, error = deploy.launch_local_participant(
                 target, spec_path=spec_path)
             if error is not None:
-                for started in participants:
-                    started.stop()
-                report.update({
+                return {
                     "verdict": deploy.DEPLOY_REFUSED,
                     "phase": "launch",
                     "refusedBy": composition_id,
@@ -622,33 +825,44 @@ def apply_federation_plan(plan: Mapping, *, state_dir: str | os.PathLike,
                     "proof": ("a participant that could not be spawned is a "
                               "PREPARE-time refusal: nothing committed, so every "
                               "composition is still on its prior generation."),
-                })
-                return report
+                }
             participants.append(participant)
 
-        decision_path = str(state / "decision.jsonl")
         report = deploy.run_deploy(
-            participants, approval_path=decision_path,
-            federation_id=plan["federation"], generation=plan["generation"],
-            on_event=on_event)
-        report.update({"federation": plan["federation"],
-                       "generation": plan["generation"],
+            participants, approval_path=None, federation_id=federation,
+            generation=generation, on_event=event)
+        report.update({"federation": federation, "generation": generation,
                        "widened": admitted["widened"],
+                       "notCompared": admitted["notCompared"],
                        "deferred": admitted["deferred"]})
         if report.get("verdict") != deploy.DEPLOY_APPLIED:
             return report
 
-        probes = run_health_probes(plan, timeout=probe_timeout)
+        try:
+            probes = run_health_probes(plan, timeout=probe_timeout)
+        except BaseException as error:
+            # Ctrl-C on a hung probe, or a probe the OS could not be handed:
+            # the update's health is unknown, so it is not kept. Decision
+            # first, then the unwind, then the error goes on up.
+            deploy.write_abort_decision(
+                decision_path, federation_id=federation, generation=generation,
+                reason=(f"the health probes did not finish: "
+                        f"{type(error).__name__}: {error}"),
+                failed=None)
+            _abort_committed(participants, report)
+            raise
         report["probes"] = probes
         failed = [probe for probe in probes if not probe.get("ok")]
         if not failed:
+            deploy.write_commit_approval(
+                decision_path, federation_id=federation, generation=generation,
+                participants=[p.identity for p in participants])
             return report
 
         # Durable decision FIRST, exactly as the protocol's abort path does, so a
         # participant stranded from here on settles against a record.
         deploy.write_abort_decision(
-            decision_path, federation_id=plan["federation"],
-            generation=plan["generation"],
+            decision_path, federation_id=federation, generation=generation,
             reason=("health probe failed for `" + failed[0]["composition"] + "`: "
                     + str(failed[0].get("reason") or "the probe failed")),
             failed=failed[0]["composition"])
@@ -687,7 +901,14 @@ def _render_admission(plan_path: str, verdict: Mapping) -> list[str]:
             where = refusal.get("composition") or "-"
             lines.append(f"  REFUSED [{refusal.get('kind')}] {where}: "
                          f"{refusal.get('reason')}")
+    lines.extend(_not_compared_lines(verdict))
     return lines
+
+
+def _not_compared_lines(verdict: Mapping) -> list[str]:
+    return [f"  {composition_id}: capability widening not compared (the plan "
+            "names no `prior`)"
+            for composition_id in verdict.get("notCompared") or ()]
 
 
 def _render_report(plan_path: str, report: Mapping) -> list[str]:
@@ -704,6 +925,7 @@ def _render_report(plan_path: str, report: Mapping) -> list[str]:
     for row in report.get("widened") or ():
         lines.append(f"  widened capabilities: {row['composition']}: "
                      f"{', '.join(row['capabilities'])}")
+    lines.extend(_not_compared_lines(report))
     participants = report.get("participants") or {}
     for identity in sorted(participants):
         lines.append(f"  participant {identity}: "
@@ -764,10 +986,18 @@ def federation_apply_command(args) -> int:
 
     state_dir = getattr(args, "state_dir", None)
     if not state_dir:
-        from . import wal  # noqa: PLC0415 — only the apply path needs it
+        from . import wal  # noqa: PLC0415 (only the apply path needs it)
 
+        # Keyed on the update's identity, not the plan file's name: two plans
+        # called `plan.toml` in different directories are different updates.
+        problem = deploy._process_name_problem(plan["federation"])
+        if problem is not None:
+            print(f"error: federation plan {args.plan!r}: the federation name "
+                  f"{plan['federation']!r} cannot name the default state "
+                  f"directory ({problem}); pass --state-dir", file=sys.stderr)
+            return 1
         state_dir = (Path(wal.default_wal_dir()) / "federation"
-                     / Path(args.plan).stem / str(plan["generation"]))
+                     / plan["federation"] / str(plan["generation"]))
     report = apply_federation_plan(
         plan, state_dir=state_dir,
         probe_timeout=float(getattr(args, "probe_timeout", 30.0)))

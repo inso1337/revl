@@ -2491,8 +2491,9 @@ provider = "billing"
 ```
 
 Relative paths resolve against the plan's own directory. An unknown key, a
-missing source, an unreadable consumer surface and a composition id that cannot
-be a file name are refused rather than ignored.
+missing source, an unreadable consumer surface, a composition id that cannot
+be a file name and a NUL byte in a `health_probe` word are refused rather than
+ignored.
 
 The run has the deploy protocol's shape:
 
@@ -2501,20 +2502,39 @@ The run has the deploy protocol's shape:
    predicate, and each composition's derived capability surface is compared with
    the generation it names in `prior`. Every capability in the new generation
    and not in the old one is reported; one the plan does not name in that
-   composition's `allow_capabilities` refuses the update. No participant is
-   spawned, so a refusal leaves every composition on its prior generation.
-2. **Commit** through the coordinated PREPARE/COMMIT/ABORT protocol over one
-   local participant per composition, under the plan's generation directory.
-   The durable `federation-commit-approved` and `federation-abort-decided`
-   records are the same ones `revl deploy` writes.
-3. **Health probes** declared per composition, run after the commit. A probe is
-   an argv list run in the plan's directory; exit 0 is healthy, and a
-   composition that declares none is reported as not declared, not failed.
-4. **Restore the prior generation.** A failed probe writes the durable abort
-   decision first, then every committed participant runs its own local LIFO
-   unwind back to the prior generation. The generation is a real directory
-   boundary in the state directory, so the previous generation's WAL and world
-   files are never written by the failed update.
+   composition's `allow_capabilities` refuses the update. A composition with no
+   `prior` is reported as not compared (`notCompared` in `--json`). No
+   participant is spawned and no directory is created, so a refusal leaves
+   every composition on its prior generation.
+2. **Lock and freshness.** The generation's state directory is locked
+   (`<state-dir>/lock`) for the whole run; a second apply on the same
+   directory is refused while the first holds it. A directory that already
+   holds a decision record (`decision.jsonl`) is refused before anything is
+   written: a generation directory is used once, so give a new update a new
+   `generation` or a new `--state-dir`.
+3. **Commit** through the coordinated PREPARE/COMMIT/ABORT protocol over one
+   local participant per composition. The decision records are the ones
+   `revl deploy` writes, in its order: `federation-decision-pending` before the
+   first participant is launched, `federation-abort-decided` before any abort
+   message, and `federation-commit-approved` only after every participant
+   committed and every declared probe passed. A conductor killed before that
+   leaves the pending record or the abort decision last, so `revl recover
+   --decision` never reads an approval for the run. Recovery still rolls
+   forward a participant whose own WAL reached `activation-complete`; the
+   record decides a participant stranded mid-commit.
+4. **Health probes** declared per composition, run after the commit. A probe is
+   an argv list run in the plan's directory in a process group of its own;
+   exit 0 is healthy, and a composition that declares none is reported as not
+   declared, not failed. A probe that runs past `--probe-timeout` fails and its
+   whole process group is killed. What a probe prints is not copied into the
+   report (only its exit code and the size of its output), since the report may
+   be logged.
+5. **Unwind the update.** A probe that fails, times out or raises (Ctrl-C on a
+   hung probe included) writes the durable abort decision first, then every
+   committed participant runs its own local LIFO unwind of this generation; an
+   interrupt is re-raised after that. Each generation has its own state
+   directory and a directory is used once, so the update never writes the
+   previous generation's WAL or world files.
 
 - `PLAN`, the plan file (TOML or JSON).
 - `--dry-run`, run only the admission half and print the verdict; opens no
@@ -2522,9 +2542,10 @@ The run has the deploy protocol's shape:
 - `--json`, machine-readable verdict: admission or deploy report, widened
   capabilities, participant outcomes and probe results.
 - `--state-dir DIR`, the participant state directory for this generation
-  (default: `<wal-dir>/federation/<plan-stem>/<generation>`).
+  (default: `<wal-dir>/federation/<federation>/<generation>`, keyed on the
+  plan's `federation` name, which must then be usable as a directory name).
 - `--probe-timeout SECONDS`, how long one declared probe may run before it
-  counts as failed (default: 30).
+  counts as failed and its process group is killed (default: 30).
 
 ```bash
 revl federation-apply federation.toml --dry-run   # admit, open nothing
@@ -2532,8 +2553,9 @@ revl federation-apply federation.toml             # apply as one unit
 revl federation-apply federation.toml --json      # machine-readable report
 ```
 
-The command exits non-zero, with the refusal named, when admission refuses or a
-health probe fails. Two-phase commit across hosts, with partial failure and
+The command exits non-zero, with the refusal named, when admission refuses, the
+state directory is locked or already used, a commit fails, or a health probe
+fails. Two-phase commit across hosts, with partial failure and
 coordinator crash, stays out of this command: every participant is the
 conductor's own child on one kernel (see [deploy.md](deploy.md) section 4).
 

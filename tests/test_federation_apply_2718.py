@@ -25,14 +25,21 @@ own; these tests pin the plan surface around it, not a second copy of the rule.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from revl import deploy  # noqa: E402
+from revl import federation_apply  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.federation import consumer_surface  # noqa: E402
 from revl.federation_apply import (  # noqa: E402
@@ -121,6 +128,12 @@ def _snapshot(directory: Path) -> dict:
 
 def _last_decision(state_dir: Path) -> tuple:
     return deploy.read_decision(str(state_dir / "decision.jsonl"))
+
+
+def _decision_kinds(state_dir: Path) -> list:
+    path = state_dir / "decision.jsonl"
+    return [json.loads(line)["record"]
+            for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def _contract_plan(tmp_path: Path, provider_source: str,
@@ -238,7 +251,10 @@ def test_a_failing_health_probe_restores_every_composition(tmp_path):
     # the failed generation unwound itself ...
     assert _world(state / "2", "alpha") == {}
     assert _world(state / "2", "beta") == {}
-    # ... and the durable decision is an abort, appended after the approval
+    # ... and the durable decision is an abort, and no approval was ever
+    # written for the unhealthy generation
+    assert _decision_kinds(state / "2") == [deploy.FEDERATION_PENDING,
+                                            deploy.FEDERATION_ABORTED]
     kind, record = _last_decision(state / "2")
     assert kind == deploy.FEDERATION_ABORTED
     assert record["failed"] == "beta"
@@ -263,6 +279,8 @@ def test_a_healthy_update_reports_its_probes_and_keeps_the_commit(tmp_path):
     kind, record = _last_decision(state / "3")
     assert kind == deploy.FEDERATION_APPROVED
     assert record["generation"] == 3
+    assert _decision_kinds(state / "3") == [deploy.FEDERATION_PENDING,
+                                            deploy.FEDERATION_APPROVED]
 
 
 def test_a_composition_with_no_probe_is_reported_not_failed(tmp_path):
@@ -397,7 +415,7 @@ probe = "typo"
         load_federation_plan(path)
     except ValueError as error:
         assert "unrecognized key" in str(error) and "probe" in str(error)
-    else:  # pragma: no cover — the assertion above is the test
+    else:  # pragma: no cover (the assertion above is the test)
         raise AssertionError("an unknown key was ignored")
 
 
@@ -436,3 +454,389 @@ def test_a_json_plan_loads_like_a_toml_plan(tmp_path):
     assert plan["federation"] == "shop"
     assert plan["generation"] == 4
     assert plan["compositions"]["alpha"]["source"] == tmp_path / "alpha.revl"
+
+
+# ==========================================================================
+# 6. the decision file, the generation directory and the lock
+# ==========================================================================
+
+posix_only = pytest.mark.skipif(os.name != "posix",
+                                reason="signals and process groups are POSIX")
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def _wait_gone(pids, seconds: float = 10.0) -> set:
+    deadline = time.monotonic() + seconds
+    alive = {pid for pid in pids if _alive(pid)}
+    while alive and time.monotonic() < deadline:
+        time.sleep(0.05)
+        alive = {pid for pid in alive if _alive(pid)}
+    return alive
+
+
+def _kill_all(pids) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+CONDUCTOR = """
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from revl import deploy, federation_apply as F
+
+plan, state, pidfile = sys.argv[2:5]
+real_launch = deploy.launch_local_participant
+
+
+def launch(target, **kwargs):
+    participant, error = real_launch(target, **kwargs)
+    if participant is not None:
+        with open(pidfile, "a", encoding="utf-8") as handle:
+            handle.write(f"{participant.process.pid}\\n")
+    return participant, error
+
+
+real_commit = deploy.ProcessParticipant.commit
+
+
+def commit(self):
+    report = real_commit(self)
+    os.kill(os.getpid(), signal.SIGKILL)   # the conductor dies right here
+    return report
+
+
+deploy.launch_local_participant = launch
+deploy.ProcessParticipant.commit = commit
+F.apply_federation_plan(F.load_federation_plan(plan), state_dir=state)
+"""
+
+
+@posix_only
+def test_a_conductor_killed_after_the_first_commit_settles_back(tmp_path):
+    """The conductor is SIGKILLed after alpha commits and before beta does.
+    The pending record written before the first launch is the last record, so
+    the stranded alpha settles against "no decision", never an approval."""
+    plan = _probe_plan(tmp_path, 1, beta_code=0)
+    state = tmp_path / "state" / "1"
+    script = _write(tmp_path / "conductor.py", CONDUCTOR)
+    pidfile = tmp_path / "participants.pid"
+    pids: list[int] = []
+    try:
+        done = subprocess.run(
+            [sys.executable, str(script), str(ROOT / "src"), str(plan),
+             str(state), str(pidfile)],
+            capture_output=True, text=True, timeout=120, check=False)
+        if pidfile.exists():
+            pids = [int(line) for line in
+                    pidfile.read_text(encoding="utf-8").split()]
+        assert done.returncode == -signal.SIGKILL, done.stderr
+        assert len(pids) == 2
+        assert not _wait_gone(pids), "a participant outlived its conductor"
+    finally:
+        _kill_all(pids)
+
+    assert _world(state, "alpha") == {"alpha:Alpha": True}   # stranded
+    assert _world(state, "beta") == {}                       # never committed
+    kind, record = _last_decision(state)
+    assert kind is None
+    assert record["record"] == deploy.FEDERATION_PENDING
+    assert record["generation"] == 1
+    settled = deploy.settle_stranded(str(state / "alpha.wal"),
+                                     str(state / "decision.jsonl"))
+    assert settled["federationDecision"] == "none", settled
+
+
+def test_reapplying_a_generation_into_its_own_directory_is_refused(tmp_path):
+    """Generation 1 applied and was approved. A second generation-1 plan aimed
+    at the same directory is refused before anything is written, so its failing
+    probe cannot unwind the generation that is live."""
+    state = tmp_path / "state" / "1"
+    first = apply_federation_plan(
+        load_federation_plan(_probe_plan(tmp_path, 1, beta_code=0)),
+        state_dir=state)
+    assert first["verdict"] == deploy.DEPLOY_APPLIED, first
+    before = _snapshot(state)
+
+    again = apply_federation_plan(
+        load_federation_plan(_probe_plan(tmp_path, 1, beta_code=1)),
+        state_dir=state)
+
+    assert again["verdict"] == deploy.DEPLOY_REFUSED, again
+    assert again["phase"] == "generation"
+    assert "already holds a decision record" in again["reason"]
+    assert _snapshot(state) == before
+    assert _world(state, "alpha") == {"alpha:Alpha": True}
+    assert _last_decision(state)[0] == deploy.FEDERATION_APPROVED
+
+
+def test_a_reused_state_dir_is_refused_by_the_command(tmp_path, capsys):
+    state = tmp_path / "state"
+    assert main(["federation-apply", str(_probe_plan(tmp_path, 1, 0)),
+                 "--state-dir", str(state)]) == 0
+    capsys.readouterr()
+    before = _snapshot(state)
+    assert main(["federation-apply", str(_probe_plan(tmp_path, 2, 1)),
+                 "--state-dir", str(state)]) == 1
+    out = capsys.readouterr().out
+    assert "refused" in out and "already holds a decision record" in out
+    assert _snapshot(state) == before
+
+
+GRANDCHILD_PROBE = """
+import subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL)
+with open("grandchild.pid", "w", encoding="utf-8") as handle:
+    handle.write(str(child.pid))
+time.sleep(60)
+"""
+
+
+def _one_probe_plan(tmp_path: Path, name: str, probe_source: str,
+                    generation: int = 1) -> Path:
+    _write(tmp_path / "alpha.revl", EMPTY_ALPHA)
+    _write(tmp_path / "beta.revl", EMPTY_BETA)
+    _write(tmp_path / f"{name}.py", probe_source)
+    return _plan(tmp_path, name, f"""
+federation = "probe-fed"
+generation = {generation}
+
+[compositions.alpha]
+source = "alpha.revl"
+health_probe = ["{sys.executable}", "{name}.py"]
+
+[compositions.beta]
+source = "beta.revl"
+""")
+
+
+@posix_only
+def test_a_timed_out_probe_is_killed_with_its_children_and_restores(tmp_path):
+    plan = load_federation_plan(
+        _one_probe_plan(tmp_path, "probe_hang", GRANDCHILD_PROBE))
+    state = tmp_path / "state" / "1"
+    pidfile = tmp_path / "grandchild.pid"
+    grandchild: list[int] = []
+    try:
+        report = apply_federation_plan(plan, state_dir=state, probe_timeout=3)
+        if pidfile.exists():
+            grandchild = [int(pidfile.read_text(encoding="utf-8"))]
+        assert report["verdict"] == deploy.DEPLOY_ABORTED_CLEAN, report
+        assert report["phase"] == "health"
+        assert "did not finish within 3s" in report["failedProbe"]["reason"]
+        assert grandchild, "the probe never started its child"
+        assert not _wait_gone(grandchild, 5.0), (
+            "the timed-out probe's child is still running")
+    finally:
+        _kill_all(grandchild)
+    assert _world(state, "alpha") == {} and _world(state, "beta") == {}
+    assert _last_decision(state)[0] == deploy.FEDERATION_ABORTED
+
+
+INTERRUPTING_PROBE = """
+import os, signal, time
+os.kill(os.getppid(), signal.SIGINT)   # the operator presses Ctrl-C
+time.sleep(60)                          # while the probe hangs
+"""
+
+
+@posix_only
+def test_an_interrupted_hung_probe_writes_the_abort_and_unwinds(tmp_path):
+    plan = load_federation_plan(
+        _one_probe_plan(tmp_path, "probe_interrupt", INTERRUPTING_PROBE))
+    state = tmp_path / "state" / "1"
+    with pytest.raises(KeyboardInterrupt):
+        apply_federation_plan(plan, state_dir=state, probe_timeout=30)
+    kind, record = _last_decision(state)
+    assert kind == deploy.FEDERATION_ABORTED, record
+    assert "KeyboardInterrupt" in record["reason"]
+    assert deploy.FEDERATION_APPROVED not in _decision_kinds(state)
+    assert _world(state, "alpha") == {} and _world(state, "beta") == {}
+
+
+def test_a_probe_that_raises_writes_the_abort_and_unwinds(tmp_path,
+                                                          monkeypatch):
+    """Anything a probe raises, not only a timeout or an OSError, aborts the
+    update before the error goes on up."""
+    plan = load_federation_plan(
+        _one_probe_plan(tmp_path, "probe_marker", "raise SystemExit(0)\n"))
+    real_popen = subprocess.Popen
+
+    def popen(args, *rest, **kwargs):
+        if isinstance(args, (list, tuple)) and any(
+                str(word).endswith("probe_marker.py") for word in args):
+            raise ValueError("embedded null byte")
+        return real_popen(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    state = tmp_path / "state" / "1"
+    with pytest.raises(ValueError, match="embedded null byte"):
+        apply_federation_plan(plan, state_dir=state)
+    assert _last_decision(state)[0] == deploy.FEDERATION_ABORTED
+    assert _world(state, "alpha") == {} and _world(state, "beta") == {}
+
+
+def test_a_nul_byte_in_a_probe_is_refused_when_the_plan_is_loaded(tmp_path):
+    _write(tmp_path / "alpha.revl", EMPTY_ALPHA)
+    path = _plan(tmp_path, "nul", """
+generation = 1
+
+[compositions.alpha]
+source = "alpha.revl"
+health_probe = ["true\\u0000x"]
+""")
+    with pytest.raises(ValueError, match="NUL byte"):
+        load_federation_plan(path)
+
+
+def test_an_interrupted_abort_still_unwinds_the_other_participants(
+        tmp_path, monkeypatch):
+    """beta's probe fails, so beta then alpha are asked to unwind. An interrupt
+    while beta unwinds is recorded, alpha is still unwound, and the interrupt
+    is re-raised; beta settles against the abort decision."""
+    real_abort = deploy.ProcessParticipant.abort
+
+    def abort(self):
+        if self.identity == "beta":
+            raise KeyboardInterrupt("Ctrl-C during the abort")
+        return real_abort(self)
+
+    monkeypatch.setattr(deploy.ProcessParticipant, "abort", abort)
+    state = tmp_path / "state" / "1"
+    with pytest.raises(KeyboardInterrupt):
+        apply_federation_plan(
+            load_federation_plan(_probe_plan(tmp_path, 1, beta_code=1)),
+            state_dir=state)
+    assert _world(state, "alpha") == {}
+    assert _world(state, "beta") == {"beta:Beta": True}      # stranded
+    assert _last_decision(state)[0] == deploy.FEDERATION_ABORTED
+    settled = deploy.settle_stranded(str(state / "beta.wal"),
+                                     str(state / "decision.jsonl"))
+    assert settled["federationDecision"] == deploy.FEDERATION_ABORTED, settled
+
+
+def test_a_second_apply_on_a_locked_state_dir_is_refused(tmp_path,
+                                                         monkeypatch):
+    """Two applies on one directory: the second starts while the first is in
+    its health probes, holding the lock, and is refused without writing."""
+    state = tmp_path / "state" / "1"
+    other = tmp_path / "other"
+    second_plan = load_federation_plan(_probe_plan(other, 1, beta_code=0))
+    seen: dict = {}
+    real_probes = federation_apply.run_health_probes
+
+    def probes(plan, **kwargs):
+        seen["kinds"] = _decision_kinds(state)
+        seen["second"] = apply_federation_plan(second_plan, state_dir=state)
+        return real_probes(plan, **kwargs)
+
+    monkeypatch.setattr(federation_apply, "run_health_probes", probes)
+    first = apply_federation_plan(
+        load_federation_plan(_probe_plan(tmp_path, 1, beta_code=0)),
+        state_dir=state)
+
+    assert first["verdict"] == deploy.DEPLOY_APPLIED, first
+    assert seen["second"]["verdict"] == deploy.DEPLOY_REFUSED, seen["second"]
+    assert seen["second"]["phase"] == "lock"
+    assert seen["kinds"] == [deploy.FEDERATION_PENDING]
+    assert _decision_kinds(state) == [deploy.FEDERATION_PENDING,
+                                      deploy.FEDERATION_APPROVED]
+
+
+# ==========================================================================
+# 7. reporting: no prior, the default state dir, probe output
+# ==========================================================================
+
+
+def test_a_composition_with_no_prior_is_reported_not_compared(tmp_path,
+                                                             capsys):
+    _write(tmp_path / "alpha.revl", EMPTY_ALPHA)
+    path = _plan(tmp_path, "noprior", """
+generation = 1
+
+[compositions.alpha]
+source = "alpha.revl"
+""")
+    verdict = federation_plan_admission(load_federation_plan(path))
+    assert verdict["admitted"] is True
+    assert verdict["notCompared"] == ["alpha"]
+    assert main(["federation-apply", str(path), "--dry-run"]) == 0
+    assert "alpha: capability widening not compared" in capsys.readouterr().out
+    assert main(["federation-apply", str(path), "--dry-run", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["notCompared"] == ["alpha"]
+    compared = federation_plan_admission(_widening_plan(tmp_path, allow=True))
+    assert compared["notCompared"] == []
+
+
+def test_the_default_state_dir_is_keyed_on_the_federation_name(
+        tmp_path, monkeypatch, capsys):
+    """Two plans both called `plan.toml` are two updates, not one."""
+    from revl import wal as wal_module
+
+    root = tmp_path / "wal"
+    monkeypatch.setattr(wal_module, "default_wal_dir", lambda: str(root))
+    for name in ("fed-a", "fed-b"):
+        _write(tmp_path / name / "alpha.revl", EMPTY_ALPHA)
+        plan = _write(tmp_path / name / "plan.toml", f"""
+federation = "{name}"
+generation = 1
+
+[compositions.alpha]
+source = "alpha.revl"
+""")
+        assert main(["federation-apply", str(plan)]) == 0, capsys.readouterr()
+    for name in ("fed-a", "fed-b"):
+        assert (root / "federation" / name / "1" / "alpha.wal").is_file()
+
+
+def test_probe_output_is_not_copied_into_the_report(tmp_path):
+    plan = load_federation_plan(_one_probe_plan(
+        tmp_path, "probe_secret",
+        "import sys\nsys.stderr.write('token=hunter2-SECRET\\n')\n"
+        "sys.exit(1)\n"))
+    report = apply_federation_plan(plan, state_dir=tmp_path / "state" / "1")
+    assert report["verdict"] == deploy.DEPLOY_ABORTED_CLEAN, report
+    reason = report["failedProbe"]["reason"]
+    assert reason.startswith("the probe exited 1")
+    assert "not copied" in reason
+    assert "hunter2" not in json.dumps(report)
+
+
+def test_a_failed_commit_writes_the_abort_before_any_abort_message(
+        tmp_path, monkeypatch):
+    real_commit = deploy.ProcessParticipant.commit
+    real_abort = deploy.ProcessParticipant.abort
+    state = tmp_path / "state" / "1"
+    seen: list = []
+
+    def commit(self):
+        if self.identity == "beta":
+            return {"ok": False, "reason": "beta: applying failed"}
+        return real_commit(self)
+
+    def abort(self):
+        seen.append(_decision_kinds(state))
+        return real_abort(self)
+
+    monkeypatch.setattr(deploy.ProcessParticipant, "commit", commit)
+    monkeypatch.setattr(deploy.ProcessParticipant, "abort", abort)
+    report = apply_federation_plan(
+        load_federation_plan(_probe_plan(tmp_path, 1, beta_code=0)),
+        state_dir=state)
+    assert report["verdict"] == deploy.DEPLOY_ABORTED_CLEAN, report
+    assert seen == [[deploy.FEDERATION_PENDING, deploy.FEDERATION_ABORTED]]
+    kind, record = _last_decision(state)
+    assert kind == deploy.FEDERATION_ABORTED and record["failed"] == "beta"
+    assert _world(state, "alpha") == {}

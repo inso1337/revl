@@ -3004,15 +3004,15 @@ def build_parser() -> argparse.ArgumentParser:
              "repeatable. These are the versions bound into the load-time "
              "measurement a later audit correlates against")
 
-    # `revl federation-apply PLAN [--dry-run]` — an all-or-nothing update of
+    # `revl federation-apply PLAN [--dry-run]`: an all-or-nothing update of
     # several co-located compositions, written as a plan file (issue #2718).
     # The admission half compiles each composition's new source, runs the
     # consumer contracts and the irreversible-crossing rule through
     # `deploy.federation_admission`, and reports any capability the new
     # generation reaches and the one it replaces does not. Without --dry-run it
     # also drives the coordinated PREPARE/COMMIT protocol, runs the plan's
-    # health probes after the commit, and restores the prior generation when a
-    # probe fails.
+    # health probes after the commit, and unwinds the update when a probe
+    # fails, times out or is interrupted.
     fed_cmd = sub.add_parser(
         "federation-apply",
         help="admit a federation plan (new sources, consumer contracts, health "
@@ -3036,12 +3036,13 @@ def build_parser() -> argparse.ArgumentParser:
     fed_cmd.add_argument(
         "--state-dir", metavar="DIR",
         help="the participant state directory for THIS generation (default: "
-             "<wal-dir>/federation/<plan-stem>/<generation>); the prior "
-             "generation's directory is never written")
+             "<wal-dir>/federation/<federation>/<generation>). It is locked "
+             "for the whole apply and used once: a directory that already "
+             "holds a decision record is refused before anything is written")
     fed_cmd.add_argument(
         "--probe-timeout", type=float, default=30.0, metavar="SECONDS",
         help="how long one declared health probe may run before it counts as "
-             "failed (default: 30)")
+             "failed and its process group is killed (default: 30)")
 
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
