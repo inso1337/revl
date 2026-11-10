@@ -639,12 +639,32 @@ _JS_SPACE = frozenset(" \t\n\r\x0b\x0c\u00a0\ufeff\u2028\u2029")
 #: JavaScript line terminators (ECMA-262 12.3).
 _JS_LINE_ENDS = frozenset("\n\r\u2028\u2029")
 
-#: A JavaScript numeric literal, with the dot that may end it (`1.`) and the
-#: fraction, exponent, radix prefix, separators and `n` suffix it may carry.
-#: Over-reading `0x1.f` as one token is harmless: either way an operand ends
-#: there.
+#: A JavaScript NumericLiteral (ECMA-262 12.9.3 and Annex B.1.1), longest
+#: match first, where D is `[0-9]` and digits may be split by single `_`:
+#:
+#:   0[xX] hex digits [n] | 0[oO] octal digits [n] | 0[bB] binary digits [n]
+#:   (a radix literal never takes a fraction or an exponent: `0x1.in` and
+#:   `0xe+1` are a member access and an addition)
+#:   0 [0-7]+, with no 8 or 9 (legacy octal: no fraction, no exponent)
+#:   0 D* [89] D* [. D*] [exponent] (legacy non-octal decimal, no `_`)
+#:   (0 | [1-9] D*) n (BigInt: no fraction, no exponent)
+#:   (0 | [1-9] D*) [. [D+]] [exponent] | . D+ [exponent]
+#:   exponent = (e | E) [+ | -] D+, with [...] optional throughout
+#:
+#: So the dot of `1.` and `1.e3` belongs to the number, and the dot after a
+#: radix, BigInt or exponent literal (`0x1.`, `1n.`, `1e3.`) is a member
+#: access. A digit or identifier character right after a literal is a host
+#: syntax error, which fails the whole module.
+_DIGITS = r"[0-9](?:_?[0-9])*"
 _JS_NUMBER = re.compile(
-    r"(?:[0-9]\w*(?:\.\w*)?|\.[0-9]\w*)(?:(?<=[eE])[+-][0-9]\w*)?")
+    r"0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*n?"
+    r"|0[oO][0-7](?:_?[0-7])*n?"
+    r"|0[bB][01](?:_?[01])*n?"
+    r"|0[0-7]+(?![0-9])"
+    r"|0[0-9]*[89][0-9]*(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?"
+    rf"|(?:0|[1-9](?:_?[0-9])*)n"
+    rf"|(?:0|[1-9](?:_?[0-9])*)(?:\.(?:{_DIGITS})?)?(?:[eE][+-]?{_DIGITS})?"
+    rf"|\.{_DIGITS}(?:[eE][+-]?{_DIGITS})?")
 
 #: Steps the scan may take per character of body before it refuses the body
 #: as too ambiguous to check (see `_Scan`). Ordinary bodies take about one.

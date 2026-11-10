@@ -168,9 +168,39 @@ def test_ts_keyword_after_a_spread_or_number_dot_is_no_property(
     "a.typeof / b", "a?.in", "x.void", "o.new", "1.5", ".5", "1.5e+3",
     "1..toString().length", "a\n  .in", "this.#in", "c ?.5", "0xFF", "10n",
     "1 .in",
+    # a radix, BigInt or exponent literal ends before the dot: a member
+    # access follows, even with a keyword name
+    "0x1.toString().length", "1e3.toFixed().length", "1n.toString().length",
+    "0x1. in", "0o7. in", "0B1. typeof", "1n. in", "1e3. in", "1_0e1. void",
 ])
 def test_ts_member_access_and_numbers_divide(expr):
     assert check_host_body("ts", f'return {expr} / f("/{{")') is None
+
+
+# A radix, BigInt or exponent literal takes no fraction, so the dot after it
+# is a member access and the `/` divides: JavaScript closes the function at
+# the `}` a regex reading would hide.
+@pytest.mark.parametrize("literal", [
+    "0x1.", "0o7.", "0B1.", "0x1_f.", "1n.", "0b1n.", "1e3.", "1E3.",
+    "0E1.", "1_0e1.", "1e+3.",
+])
+def test_ts_dot_after_a_literal_without_fraction_is_a_member_access(literal):
+    body = (f"let z = /[{{]/; let q = {literal} in /1}}; "
+            f"globalThis.PWNED = 1; function g(){{ 2/1; let w = /[}}]/")
+    with pytest.raises(HostBodyError):
+        check_host_body("ts", body)
+
+
+# A hex `e` is a digit, not an exponent: `0xe+1.` is `0xe + 1.`, and the
+# `in` after the decimal `1.` is the operator, so a regex follows.
+@pytest.mark.parametrize("prefix", [
+    "0xe+1.", "0xE-1.", "0xae+1.", "0b1+1.", "1n+1.", "1e3+1.",
+])
+def test_ts_sign_after_a_radix_digit_starts_a_new_number(prefix):
+    body = (f"let q = {prefix} in /[{{]/\n}}\nglobalThis.PWNED = 1\n"
+            f"function pad() {{ let r = {prefix} in /[}}]/")
+    with pytest.raises(HostBodyError):
+        check_host_body("ts", body)
 
 
 def test_ts_division_control_is_refused_when_misread():
