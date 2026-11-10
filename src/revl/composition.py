@@ -25,7 +25,12 @@ which is the soundness argument 426 §3.3 relies on.
 **Header-only.** Resolution parses each row's source and reads the `component`
 declaration's HEADER (`requires` / `provides` / `config`) and nothing else. No
 body is lowered, so `revl composition --check` is cheap by construction (§1.3)
-and stays cheap when the fold (S2) lands on top of it.
+and stays cheap when the fold (S2) lands on top of it. One syntactic scan of
+the body is recorded beside the header: which config fields the body spells
+(`config.<field>`). It is not a lowering and decides no dataflow; the authority
+panel reads it only to tell a field the body never reads (provably pure) from
+one it does (where §8.4's flow to an emission or extern argument cannot be
+decided header-only, so the panel fails closed).
 
 Not in this slice, and deliberately: layers and the four patch operations (S2),
 incremental admission (S3), the confinement split and the per-root profile
@@ -37,15 +42,17 @@ so writing one is a parse error naming the clauses that do exist.
 from __future__ import annotations
 
 import os
+from dataclasses import fields as _dc_fields
+from dataclasses import is_dataclass as _dc_is_dataclass
 from urllib.parse import urlsplit
 
 from ._paths import relpath_or_abs
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
-from .parser import (SLO_IR_KEYS, Address, CompositionDecl, GrantDecl,
-                     IsolateStmt, LayerDecl, PlaceDecl, Program, RowDecl,
-                     parse_file)
+from .parser import (SLO_IR_KEYS, Address, CompositionDecl, ExprField, ExprVar,
+                     GrantDecl, IsolateStmt, LayerDecl, PlaceDecl, Postfix,
+                     Program, RowDecl, parse_file)
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
@@ -83,12 +90,48 @@ def origin_of(path: str, root: str | None = None) -> str:
 
 # ---------------------------------------------------------------- headers
 
+def _body_config_refs(body) -> set[str]:
+    """The config field names a component BODY spells (`config.<field>`).
+
+    A syntactic scan of the parse tree, not a lowering: it says nothing about
+    where a value flows, only whether the body reads the field at all. Two
+    parsers spell the access (`ExprField` in pure expressions and method
+    bodies, `Postfix` in the statement/capability expression parser), so both
+    shapes are read. Used by the authority panel to keep "no token" only for a
+    numeric/bool field the body never reads (§8.4/§8.7): a field the body does
+    read cannot be proven to feed pure computation header-only, so it is
+    authority-bearing and unclassifiable.
+    """
+    out: set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, ExprField):
+            if isinstance(node.target, ExprVar) and node.target.name == "config":
+                out.add(node.name)
+        elif isinstance(node, Postfix) and node.head == "config" \
+                and node.ops and node.ops[0].args is None:
+            out.add(node.ops[0].name)
+        if _dc_is_dataclass(node):
+            for field in _dc_fields(node):
+                walk(getattr(node, field.name))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+
+    walk(body)
+    return out
+
+
 class _Header:
-    """The header half of one `component` declaration: what §1.3 needs and
-    nothing else. Built from the parse tree, with no body lowered."""
+    """The header half of one `component` declaration: what §1.3 needs, plus
+    the syntax-only record of which config fields the body reads. Built from the
+    parse tree, with no body lowered."""
 
     __slots__ = ("name", "source", "provides", "requires", "config", "realms",
-                 "line")
+                 "line", "config_uses")
 
     def __init__(self, decl, source: str):
         self.name = decl.name
@@ -97,6 +140,13 @@ class _Header:
         self.provides = {key: (svc, line) for key, svc, line in decl.provides}
         self.requires = {key: (svc, line) for key, svc, line in decl.requires}
         self.config = {cfg.name: cfg for cfg in decl.config}
+        # 426 §8.4/§8.7: the fields the body READS, so the panel can tell a
+        # numeric/bool config value that feeds pure computation (the body never
+        # mentions it) from one that might reach an emission or extern argument.
+        # Intersected with the declared header fields, so a reference to an
+        # undeclared field (refused later by lowering) cannot affect the panel.
+        self.config_uses = frozenset(
+            name for name in _body_config_refs(decl.body) if name in self.config)
         # The claim set G2 keys on is `(key, realm)` (426 §1.1), and the realm
         # comes from `isolate <key> in realm(<name>)`, which is a BODY statement.
         # `_component_header_stub` (lower.py:5195) drops it because it is
@@ -140,12 +190,12 @@ class Row:
     __slots__ = ("label", "origin", "source", "component", "claims",
                  "extra_claims", "requires", "config", "granted", "line",
                  "provenance", "remote", "seam", "open", "reach", "place",
-                 "host", "services")
+                 "host", "services", "config_uses")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
                  requires, config, granted, line, provenance=None, remote=None,
                  seam=None, open=None, reach=None, place=None, host=None,
-                 services=None):
+                 services=None, config_uses=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -177,6 +227,11 @@ class Row:
         # was not written, so a row that uses neither is byte-identical.
         self.open = open              # set[str] | None
         self.reach = reach            # dict[str, str] | None
+        # 426 §8.4/§8.7: the config fields this row's component body reads,
+        # recorded by header resolution so the authority panel can keep "no
+        # token" only for a numeric/bool field proven to feed pure computation.
+        # Not in the IR: it is a panel-input fact, not part of the row contract.
+        self.config_uses = frozenset(config_uses or ())
         # item 424 R3: the placement fact — `{"process": str, "backend": str?}`
         # — for a row a `place` statement targets. `None` for a row nobody
         # placed. Like `remote`/`seam`, an ADMISSION fact beside the wiring, not
@@ -744,10 +799,12 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
                  root: str) -> tuple[Row, _Header]:
     """One `row` declaration into one resolved `Row`, header-only.
 
-    Pure with respect to the rest of the table: nothing here looks at another
-    row, which is what lets the fold (S2) introduce and withdraw rows in any
-    order and still reach one answer (426 §3.3). The cross-row check is
-    `_check_disjoint`, and it runs ONCE, over the folded result.
+    The header is read, plus the syntax-only scan of which config fields the
+    body reads (§8.4); no body is lowered. Pure with respect to the rest of the
+    table: nothing here looks at another row, which is what lets the fold (S2)
+    introduce and withdraw rows in any order and still reach one answer
+    (426 §3.3). The cross-row check is `_check_disjoint`, and it runs ONCE,
+    over the folded result.
     """
     source = os.path.abspath(os.path.join(base, row.path))
     if not os.path.isfile(source):
@@ -802,6 +859,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
         open=open_fields,
         reach=reach,
         services={key: svc for key, (svc, _line) in header.requires.items()},
+        config_uses=header.config_uses,
     ), header
 
 
@@ -1479,8 +1537,11 @@ def resolve(decl: CompositionDecl, doc_path: str,
     """Resolve one composition declaration into its row table.
 
     Header-only: every row's source is parsed and its component header read, and
-    no body is lowered. Every failure is a REFUSAL naming the row (426 §2.4:
-    an address that resolves to nothing is a refusal, never a no-op).
+    no body is lowered. The one exception is a syntax-only scan that records
+    which config fields the body reads, so the authority panel can prove a
+    numeric/bool field pure only when nothing reads it (§8.4). Every failure is a
+    REFUSAL naming the row (426 §2.4: an address that resolves to nothing is a
+    refusal, never a no-op).
 
     This is the BASE table (level 0). `fold` (S2) starts from it and applies the
     layers the document declares; a document declaring none folds to itself.
