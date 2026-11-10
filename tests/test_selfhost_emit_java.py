@@ -210,6 +210,13 @@ CORPUS = [
                             # item-77 follow-up shape item 275 tracked — the reference emits
                             # `Map<V>` per site, the old mirror left `Map` raw. Pins the
                             # generic-`Map` drift in the byte-identity oracle on every run.
+    "comp_provide_ctx_bind.rvl",  # issue #3095: a `provide` component with a
+                            # `let-effect` bind named `ctx`. The apply local, the
+                            # provider field/ctor parameter, the constructor argument
+                            # and the provide-method capture all take the binding
+                            # ladder's escaped spelling, so the constructor receives
+                            # the user's Map and the field does not duplicate the
+                            # provider's own context field.
     "comp_fail.rvl",        # an `if (..) { fail ".." }` activation guard: the `fail` ->
                             # `throw new CordisException(String.valueOf(..))` lowering, the
                             # `CordisException` import widening, a body-level `if`, and a

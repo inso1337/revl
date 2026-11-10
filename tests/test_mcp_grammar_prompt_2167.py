@@ -196,7 +196,9 @@ def test_the_format_enum_is_still_the_parser_derived_set():
 def test_no_tool_was_added_to_the_listed_tier():
     listed = handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert [t["name"] for t in listed["result"]["tools"]] == PRESENT_CORE
-    assert len(disclosure.CORE) <= 15
+    # 16: #2625 promoted `revl_export` and the rounds-to-green run promoted
+    # `revl_context` (docs/context.md); this change adds nothing
+    assert len(disclosure.CORE) <= 16
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
     # `revl_grammar` is not a CORE verb at all — it is reached through the
     # discovery topic, so the flag could only ride on it, never be a sibling

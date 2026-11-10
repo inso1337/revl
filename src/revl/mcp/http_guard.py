@@ -17,10 +17,16 @@ its body when:
     `127.0.0.1`, `localhost` and `[::1]` (with or without the port) plus any
     `--allow-host`. This is what defeats DNS rebinding: a page that re-points its
     own name at 127.0.0.1 still sends its own name as `Host`;
-  * it carries an `Origin` that is not listed in `--allow-origin`. A request with
-    no `Origin` (every non-browser client) passes this check. The MCP transport
-    spec requires exactly this (`Origin` present and invalid: 403);
-  * it carries either header more than once.
+  * it carries an `Origin` that is not listed in `--allow-origin`. The MCP
+    transport spec requires exactly this (`Origin` present and invalid: 403);
+  * it carries no `Origin` but its Fetch Metadata marks it browser-driven from
+    another site (`Sec-Fetch-Site: cross-site`, or `same-site`). A browser sends
+    no `Origin` on the cross-site `<img>`, `<script>`, `<link>`, form GET and
+    top-level navigation it can fire at any address, so without this test any
+    page the operator visits could fire a `GET` route (issue #3186). A request
+    that sends neither header (curl, an MCP client) is not browser-driven and
+    passes, as the MCP transport spec requires;
+  * it carries any of those headers more than once.
 
 It also holds the one dispatch lock both listeners use (`DispatchLock`): a
 live `Session` runs one asyncio loop with `run_until_complete`, so two request
@@ -143,6 +149,15 @@ def _header_values(headers, name: str) -> list[str]:
     return [] if value is None else [value]
 
 
+#: The Fetch Metadata `Sec-Fetch-Site` values that mark a request as made by a
+#: browser page on ANOTHER site. Such a request carries no `Origin` when the page
+#: fires it with an `<img>`, `<script>`, `<link>`, form GET or top-level
+#: navigation, and the browser sends it to any address the page names, loopback
+#: included (issue #3186). `none` (a user-typed URL or bookmark) and
+#: `same-origin` (a page this listener itself served) stay served.
+_CROSS_SITE_FETCH_SITES = ("cross-site", "same-site")
+
+
 def request_refusal(headers, exposure: Exposure) -> str | None:
     """Why this request is refused before it is read, or None to go on."""
     hosts = _header_values(headers, "Host")
@@ -156,11 +171,21 @@ def request_refusal(headers, exposure: Exposure) -> str | None:
     origins = _header_values(headers, "Origin")
     if len(origins) > 1:
         return "the request carries more than one Origin header"
+    sites = _header_values(headers, "Sec-Fetch-Site")
+    if len(sites) > 1:
+        return "the request carries more than one Sec-Fetch-Site header"
     if origins:
         origin = origins[0].strip()
         if origin not in exposure.allow_origins:
             return (f"Origin {origin!r} is not allowed; a browser page may call "
                     f"this server only from an origin named with --allow-origin")
+        return None
+    site = sites[0].strip().lower() if sites else ""
+    if site in _CROSS_SITE_FETCH_SITES:
+        return (f"Sec-Fetch-Site {sites[0].strip()!r} says the browser made this "
+                f"request from another site, and it carries no allowed Origin; "
+                f"a page may call this server only from an origin named with "
+                f"--allow-origin")
     return None
 
 
