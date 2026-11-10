@@ -164,7 +164,7 @@ regenerated rather than edited.
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
-| state-handoff.md | needs-work | 22 |  |
+| state-handoff.md | needs-work | 26 |  |
 | stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |

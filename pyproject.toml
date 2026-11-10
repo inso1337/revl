@@ -200,13 +200,13 @@ exclude = [
 
 # The one place tracked content sits UNDER an ignore rule. `.gitignore:36` is
 # `backends/typescript/tests/generated/` — the TS harness writes throwaway
-# modules there — but seventeen fixtures in that directory were force-added and
+# modules there — but nineteen fixtures in that directory were force-added and
 # ARE tracked. Without this, hatchling's ignore handling drops them from the
 # sdist, and a wheel built out of that sdist (`pip install revl-2.0.0.tar.gz`)
-# comes out seventeen files short of one built in a checkout.
+# comes out nineteen files short of one built in a checkout.
 #
 # `artifacts` is hatchling's "include even though VCS ignores it" hook. It lists
-# the seventeen by exact path ON PURPOSE rather than as `*.ts`: a glob would
+# the nineteen by exact path ON PURPOSE rather than as `*.ts`: a glob would
 # also sweep up whatever the harness last wrote there, which is the
 # non-determinism this whole section exists to remove. Add a tracked fixture to
 # that directory and `tools/check_wheel_manifest.py` reds until the path is
@@ -217,6 +217,7 @@ artifacts = [
   "backends/typescript/tests/generated/empty_list_types.ts",
   "backends/typescript/tests/generated/fr1_loop.ts",
   "backends/typescript/tests/generated/fr3_json_int.ts",
+  "backends/typescript/tests/generated/handoff_swap.ts",
   "backends/typescript/tests/generated/instance_get.ts",
   "backends/typescript/tests/generated/r3_migrator.ts",
   "backends/typescript/tests/generated/reserved_words.ts",

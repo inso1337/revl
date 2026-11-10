@@ -1,6 +1,6 @@
-["reason", "activation-dispatcher-residuals-component-step-enters-witnes", "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards, fail, sync and async timers and the item-130 `stream-iter` step are covered (issue #106); witnessed transactions are the declared port boundary"]
+["reason", "activation-dispatcher-residuals-component-step-enters-witnes", "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards, fail, sync and async timers and the item-130 `stream-iter` step are covered (issue #106); witnessed transactions are the declared port boundary The item-53 state hand-off adds one statement, the `$revl_frame.track(...)` line, that no ts corpus document reaches until selfhost/emit_ts.rvl ports it; the budget is raised 12 to 13 for it (issue #3291)."]
 
-["function", "activation-dispatcher-residuals-component-step-enters-witnes", "_component_step", 12, 12]
+["function", "activation-dispatcher-residuals-component-step-enters-witnes", "_component_step", 13, 13]
 
 ["reason", "backends-typescript-emit-py-reject-service-key-refuses", "backends/typescript/emit.py::_reject_service_key: refuses a provide/require key that would collide with a cordis Context member, an inherited JS prototype member, or the reserved _-prefixed namespace (a loud host-safety error over a silent wrong resolution). tests/fixtures/emit_ts_refusals/reserved_service_key.rvl (issue #2390) reaches the refusal through its first refused key, `then`; the reference stops there, so the other per-case message arms stay unrun."]
 
@@ -18,9 +18,9 @@
 
 ["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_v3_surface_type", 7, 7]
 
-["reason", "component-header-refusals-component-rejects-an-unknown-servi", "Component header refusals: `_component` rejects an unknown service behind a requirement or provision, and an isolate, intercept or routed key the header does not declare; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships, and routed requires are covered (issue #106) Issue #1972 ported the UI transaction unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (joined to the ts oracle), whose `act` and `watch` are unit methods: the `uiTransaction`/`uiTransactionAsync` wrap of a unit's body now runs on both sides, which is why this budget fell 10 to 4."]
+["reason", "component-header-refusals-component-rejects-an-unknown-servi", "Component header refusals: `_component` rejects an unknown service behind a requirement or provision, and an isolate, intercept or routed key the header does not declare; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships, and routed requires are covered (issue #106) Issue #1972 ported the UI transaction unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (joined to the ts oracle), whose `act` and `watch` are unit methods: the `uiTransaction`/`uiTransactionAsync` wrap of a unit's body now runs on both sides, which is why this budget fell 10 to 4. The item-53 state hand-off emits `handoff: {key, type}` here: five statements no ts corpus document reaches until selfhost/emit_ts.rvl ports the emission, so the budget is raised 5 to 10 for it (issue #3291)."]
 
-["function", "component-header-refusals-component-rejects-an-unknown-servi", "_component", 5, 5]
+["function", "component-header-refusals-component-rejects-an-unknown-servi", "_component", 10, 10]
 
 ["function", "component-header-refusals-component-rejects-an-unknown-servi", "_context_augmentation", 2, 2]
 
@@ -153,6 +153,10 @@
 ["reason", "top-level-emitter-dispatch-emit-rejects-non-object", "Top-level emitter dispatch: `emit` rejects non-object/unsupported versions, delegates temporal IR, and rejects mixed temporal documents. The corpus supplies valid v1/v2/v3 objects; temporal delegation is a declared separate backend"]
 
 ["function", "top-level-emitter-dispatch-emit-rejects-non-object", "emit", 4, 4]
+
+["reason", "ts-handoff-emission-item-53-no-corpus-reaches", "backends/typescript/emit.py::_handoff_resource: the item-53 state hand-off selects the bound Map/Pool acquisitions that make up a provider's declared state vector. No ts corpus document declares a `handoff`, and selfhost/emit_ts.rvl does not port the hand-off emission yet, so the byte-agreement oracle cannot reach these statements (a corpus document that did would flip it RED). The runtime contract is executed by backends/typescript/tests/handoff_swap.test.ts; the selfhost port plus its corpus case are follow-up work. Recorded with a budget, the last resort in the tool's own instruction (issue #3291)."]
+
+["function", "ts-handoff-emission-item-53-no-corpus-reaches", "_handoff_resource", 7, 7]
 
 ["reason", "ts-reactive-tier-refusals-item-130-stream-iter", "ts reactive tier refusals (item 130): `_stream_iter` rejects a non-positive dedup window, `_raw_ident` an invalid event name or key, and `_refuse_required_stream` a component that declares `requires <k>: Stream[T]`, which this tier does not lower. The frontend bounds the window and validates the identifiers; the required-stream refusal is pinned by tests/test_stream_reactive.py. The stream lowering itself (`subscribe`, `merge`, `every ... in`, `on ... as`) is covered (issue #106)"]
 
