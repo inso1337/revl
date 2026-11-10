@@ -509,6 +509,20 @@
     },
     {
       "sites": [
+        "src/revl/lower.py::_is_emission_call",
+        "src/revl/taint.py::_FlowChecker._is_crossing_call"
+      ],
+      "tokens": [
+        "id",
+        "kind",
+        "method",
+        "name",
+        "target"
+      ],
+      "note": "FALSE POSITIVE. Both read the lowered IR call node's fields (kind, name, target, method, id) to decide whether a call crosses the boundary, for different consumers: lower._is_emission_call judges emission-ness for the G4 marker against the lowering Env (spawn handles, service-typed locals), taint._FlowChecker._is_crossing_call picks the nested calls in a compensate slot that get the Secret crossing rule against the TaintModel (issue #3180) and deliberately leaves spawn-handle calls out, as the forward emit path does. Neither declares the vocabulary; it is the IR schema lower.py writes. taint.py cannot import lower.py (lower imports taint), and the answers are not meant to be equal, so a field one of them starts reading is a correct one-sided edit."
+    },
+    {
+      "sites": [
         "src/revl/lower.py::_is_value_crossing",
         "src/revl/query.py::Composition._service_calls"
       ],
@@ -755,16 +769,18 @@
     {
       "sites": [
         "tools/evolution_controller.py::measured_diff",
+        "tools/evolution_progress.py::changed_paths",
         "tools/evolution_reward.py::changed_files"
       ],
       "tokens": [
         "--exclude-standard",
         "--name-only",
+        "--no-renames",
         "--others",
         "diff",
         "ls-files"
       ],
-      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
+      "note": "Three copies of the changed-files listing: the reward's scope probe, the controller's authority precondition and the progress counter. Each measures the diff inside its own module's error handling, but the git argument vector must stay identical or one part of the loop signs off paths another part never saw. `--no-renames` is the flag all three carry, so a move is judged under both of its paths."
     },
     {
       "sites": [

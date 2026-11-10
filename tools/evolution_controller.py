@@ -39,6 +39,11 @@ and what is implemented here, is the other half of the same argument:
     it is refused BY NAME rather than judged by the rules it just edited. That
     is the word "unilaterally" turned into a check: a fenced proposal is routed
     to a human, not forbidden forever;
+  * the editable set is the OPERATOR's (`--allow` or `ALLOW_ENV`), not the
+    proposal's. A measured diff outside it is refused at the `authority`
+    precondition, so the measured stages are never read for it. The declared
+    scope stays the candidate's claim; the allow set is the grant that claim is
+    checked against, and no grant is default deny (issue #2803);
   * the verdict and every scorecard carry `protocol_digest`, the evaluator's
     identity from the scorer's own checkout (issue #2802). A stage record from
     a different checkout is refused rather than read, so the two rounds cannot
@@ -113,6 +118,8 @@ failure with a NAMED code:
     a granted decider service              -> FORBIDDEN_GRANT
     the diff could not be measured         -> DIFF_UNVERIFIED
     the declared diff understates the tree -> DIFF_DISAGREES
+    no operator allow set declared         -> NO_ALLOW_SET
+    the diff leaves the operator allow set -> OUTSIDE_ALLOW
     the diff reaches the lifecycle's rules -> FENCE_TOUCHED
     the diff reaches the admission kernel  -> KERNEL_INTERSECTION
     a non-empty capability/taint/budget or
@@ -171,8 +178,12 @@ with no adapter has no record, and a stage with no record FAILS.
 
 USAGE
 -----
-    tools/evolution_controller.py --proposal proposal.json
+    tools/evolution_controller.py --proposal proposal.json --allow 'src/**,tests/**'
     tools/evolution_controller.py --proposal proposal.json --json verdict.json
+
+`--allow` (repeatable, or comma-separated) is the operator's editable set; it
+falls back to `ALLOW_ENV`. With no allow set the `authority` precondition
+refuses, because the editable set belongs to whoever starts the run.
 
 Exit status: 0 PROMOTE, 1 ROLL_BACK, 2 REFUSE, 3 proposal-recorded.
 """
@@ -199,6 +210,8 @@ from revl.promotion_barrier import AUTHORITY_AXES  # noqa: E402
 # Item 536's verdict, IMPORTED (issue #1336). The stage verdict below EXTENDS
 # it; it does not restate it. See `Verdict`.
 from evolution_reward import Verdict as ComponentVerdict  # noqa: E402
+from evolution_reward import (  # noqa: E402
+    ALLOW_ENV, _in_scope, allow_from_env, parse_allow)
 
 # The modes of work item 520 splits the lifecycle's subject into. The mode is
 # declared by the caller, so it is not an intent the controller can verify:
@@ -251,8 +264,10 @@ SUPPLIED_BY = {
                "Candidate{tree, base, scope})",
     "admit": "the standalone self-extension compile and the FORBIDDEN_GRANT "
              "rule (item 334, Gate.propose in src/revl/gate.py)",
-    "authority": "the attenuation product plus this module's fence and kernel "
-                 "enumeration (item 543 issue #1222, item 544 issue #1223)",
+    "authority": "the attenuation product, the operator allow set "
+                 "(--allow / REVL_EDIT_ALLOW), plus this module's fence and "
+                 "kernel enumeration (item 543 issue #1222, item 544 issue "
+                 "#1223, issue #2803)",
     "shadow": "a draw the candidate could not read (item 537, "
               "tools/heldout_scoring.py)",
     "canary": "the SLO contracts (docs/design/473-slo-contracts.md)",
@@ -441,12 +456,14 @@ class Candidate:
 
     Same three fields as item 536's `Candidate` (`tools/evolution_reward.py`),
     same names, same meaning: the tree the candidate produced, the base ref it
-    is diffed against, and the declared scope.
+    is diffed against, and the declared scope. `allow` is the OPERATOR's grant
+    and is not a record key.
     """
 
     tree: Path
     base: str
     scope: tuple = ()
+    allow: tuple = ()
     prose_ignored: tuple = ()
 
 
@@ -480,7 +497,7 @@ class Proposal:
         return self.candidate.base
 
 
-def load_proposal(record: dict) -> Proposal:
+def load_proposal(record: dict, allow=()) -> Proposal:
     """Build a `Proposal`, dropping every key outside `RECORD_KEYS` by name.
 
     Refuses rather than guesses. A record with no `tree`, `base` or `scope`
@@ -494,6 +511,10 @@ def load_proposal(record: dict) -> Proposal:
     the verdict has to name, not parse errors that leave only stderr. The
     record's shape is checked here; what the lifecycle permits is checked
     there.
+
+    `allow` is the operator's editable set, passed in by the caller. A record
+    that carries an `allow` key has it dropped like any other non-whitelisted
+    key: the proposal may not name the paths it is allowed to edit.
     """
     missing = [k for k in CANDIDATE_KEYS if k not in record]
     if missing:
@@ -518,6 +539,7 @@ def load_proposal(record: dict) -> Proposal:
         tree=Path(record["tree"]),
         base=str(record["base"]),
         scope=tuple(str(s) for s in scope),
+        allow=parse_allow(allow),
         prose_ignored=tuple(sorted(k for k in record if k not in RECORD_KEYS)),
     )
     return Proposal(
@@ -557,11 +579,17 @@ def measured_diff(proposal: Proposal):
     Committed and uncommitted changes both count, because a proposal is judged
     on the tree it produced and not on how tidily it was committed. This is the
     same read `tools/evolution_reward.py` performs for its `scope` component.
+
+    `--no-renames` so a move is reported under BOTH of its paths. Rename
+    detection on would list only the destination, and a file moved out of the
+    operator grant, the fence or the kernel would look like an addition
+    somewhere else. The measured set is the one those checks are made against,
+    so neither half of a move can be hidden.
     """
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", proposal.base])
+    ok, out = _git(tree, ["diff", "--no-renames", "--name-only", proposal.base])
     if not ok:
         return False, out
     paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -908,7 +936,7 @@ def judge_admit(proposal: Proposal) -> Verdict:
 def judge_authority(proposal: Proposal) -> Verdict:
     """The authority diff. A PRECONDITION, and the reason this module exists.
 
-    Four checks, every one of them computed by the controller rather than read
+    Five checks, every one of them computed by the controller rather than read
     off the record, because a proposal that can hand in a green authority
     record and be believed has not had its authority checked.
 
@@ -918,12 +946,17 @@ def judge_authority(proposal: Proposal) -> Verdict:
          is `DIFF_UNVERIFIED` and cannot promote. A self-reported diff is the
          candidate's account of itself, which is the one input this lifecycle
          does not accept.
-      2. THE FENCE. A diff reaching this module or its tests is refused: the
+      2. THE OPERATOR ALLOW SET. The editable set belongs to whoever starts the
+         run, not to the proposal (#2803). No grant is `NO_ALLOW_SET`; a
+         measured path outside it is `OUTSIDE_ALLOW`. Both fire here, before
+         shadow or canary can be read, so a diff outside the grant never gets
+         as far as a measurement.
+      3. THE FENCE. A diff reaching this module or its tests is refused: the
          proposal would be judged by rules it just edited. This is the
          invariant turned into a check.
-      3. THE KERNEL. A diff reaching `KERNEL_PATHS` is refused by name, citing
+      4. THE KERNEL. A diff reaching `KERNEL_PATHS` is refused by name, citing
          the guarantee it defends, per issue #1223's exit test.
-      4. THE AXES. A non-empty capability, taint, budget, realm or retention
+      5. THE AXES. A non-empty capability, taint, budget, realm or retention
          diff is refused by name, per issue #1222's exit test. An axis that is
          absent from the record counts as moved, not as empty.
     """
@@ -949,7 +982,27 @@ def judge_authority(proposal: Proposal) -> Verdict:
                 "the declared changed-file set understates the tree by "
                 + str(len(understated)) + " path(s): "
                 + ", ".join(understated[:6]),
-                (f"git diff --name-only {proposal.base}",))
+                (f"git diff --no-renames --name-only {proposal.base}",))
+
+    allow = proposal.candidate.allow
+    if not allow:
+        return failed(
+            "authority", "NO_ALLOW_SET",
+            f"no operator allow set was supplied (--allow or {ALLOW_ENV}), so "
+            "nothing names what this proposal may edit. The editable set "
+            "belongs to whoever starts the run, and default deny is not a "
+            "pass",
+            (f"tree={proposal.tree}",))
+    outside = [p for p in measured if not _in_scope(p, allow)]
+    if outside:
+        return failed(
+            "authority", "OUTSIDE_ALLOW",
+            f"{len(outside)} measured path(s) outside the operator allow set "
+            f"({';'.join(allow)}): " + ", ".join(outside[:6])
+            + ". The measured stages are not read for a diff outside the "
+              "operator's grant",
+            (f"git diff --no-renames --name-only {proposal.base}",
+             "allow=" + ";".join(allow)))
 
     hits = fence_hits(measured)
     if hits:
@@ -992,8 +1045,10 @@ def judge_authority(proposal: Proposal) -> Verdict:
     return verified(
         "authority",
         f"authority diff empty on all {len(AUTHORITY_AXES)} axes; "
-        f"{len(measured)} measured path(s), none in the fence or the kernel",
-        base.evidence + (f"git diff --name-only {proposal.base}",
+        f"{len(measured)} measured path(s), all inside the operator allow set "
+        f"and none in the fence or the kernel",
+        base.evidence + (f"git diff --no-renames --name-only {proposal.base}",
+                         "allow=" + ";".join(allow),
                          f"axes={';'.join(AUTHORITY_AXES)}"))
 
 
@@ -1065,6 +1120,7 @@ class LifecycleVerdict:
                       else self.proposal.tests),
             "base": self.proposal.base,
             "scope": list(self.proposal.candidate.scope),
+            "allow": list(self.proposal.candidate.allow),
             "attempt": self.proposal.attempt,
             "budget": self.proposal.budget,
             "prose_ignored": list(self.proposal.candidate.prose_ignored),
@@ -1252,7 +1308,13 @@ def main(argv=None) -> int:
                          "citation, trigger, granted, attempt, budget and the "
                          "per-stage evidence")
     ap.add_argument("--json", type=Path, help="write the verdict here")
+    ap.add_argument("--allow", action="append", metavar="GLOB", default=None,
+                    help="a path glob the operator allows the proposal to "
+                         "edit; repeatable or comma-separated, and falls back "
+                         f"to {ALLOW_ENV}. No allow set refuses at `authority`")
     args = ap.parse_args(argv)
+    allow = (parse_allow(args.allow) if args.allow is not None
+             else allow_from_env())
 
     try:
         record = json.loads(args.proposal.read_text(encoding="utf-8"))
@@ -1261,7 +1323,7 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return REFUSE
     try:
-        proposal = load_proposal(record)
+        proposal = load_proposal(record, allow=allow)
     except ValueError as exc:
         print(f"evolution_controller: {exc}", file=sys.stderr)
         return REFUSE

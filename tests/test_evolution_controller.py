@@ -125,8 +125,11 @@ def proposal_record(tree: Path, **over) -> dict:
     return record
 
 
-def run(record: dict) -> ec.LifecycleVerdict:
-    return ec.decide(ec.load_proposal(record))
+def run(record: dict, allow=("**",)) -> ec.LifecycleVerdict:
+    """`allow` is the OPERATOR's grant, not a record key. The cases that are
+    about something else grant everything, the way their old `scope` stood in
+    for "unconstrained"; the allow-set cases pass their own set."""
+    return ec.decide(ec.load_proposal(record, allow=allow))
 
 
 @pytest.fixture
@@ -630,6 +633,91 @@ def test_the_kernel_hit_is_found_even_when_the_candidate_hid_it(tmp_path):
     assert verdict.code == "KERNEL_INTERSECTION"
 
 
+# ------------------------------- the operator allow set (issue #2803)
+
+def test_a_measured_diff_outside_the_operator_allow_set_is_refused(clean_tree):
+    """Default deny at the authority precondition. The proposal may not widen
+    its own footprint by declaring one; the operator's grant bounds it."""
+    verdict = run(proposal_record(clean_tree), allow=("docs/**",))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert verdict.refusing_stage == "authority"
+    assert verdict.measurements_read is False
+    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+
+
+def test_a_proposal_with_no_operator_allow_set_is_refused(clean_tree):
+    verdict = run(proposal_record(clean_tree), allow=())
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "NO_ALLOW_SET"
+    assert ec.ALLOW_ENV in verdict.by_name()["authority"].reason
+
+
+def test_the_allow_set_does_not_choose_itself(clean_tree):
+    """`allow` is not in `RECORD_KEYS`: a proposal carrying one has it dropped
+    and reported, and the caller's grant is the one that is checked."""
+    record = proposal_record(clean_tree)
+    record["allow"] = ["src/**"]
+    proposal = ec.load_proposal(record, allow=("docs/**",))
+    assert proposal.candidate.allow == ("docs/**",)
+    assert "allow" in proposal.candidate.prose_ignored
+
+
+def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(tmp_path):
+    """A rename is two changes. With rename detection on, `git diff --name-only`
+    lists only the destination, so moving a file out of the grant and into a
+    granted directory would read as one allowed addition. The measured set is
+    what the authority precondition signs off, so both halves count.
+
+    The moved content is byte-identical to the base blob on purpose: a changed
+    file falls below git's similarity threshold, stops being detected as a
+    rename, and the test would pass without `--no-renames`.
+    """
+    tree = make_tree(tmp_path / "rename", {"src/svc.rvl": "candidate\n"})
+    (tree / "src" / "svc.rvl").write_text("base\n")
+    (tree / "tools").mkdir()
+    _git(tree, "mv", "src/svc.rvl", "tools/svc.rvl")
+    verdict = run(proposal_record(tree), allow=("tools/**",))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+
+
+def test_a_diff_inside_the_operator_allow_set_still_promotes(clean_tree):
+    """The control: the same complete proposal promotes when the grant covers
+    the measured diff, so the new precondition is not a refusal of everything."""
+    assert run(proposal_record(clean_tree), allow=("src/**",)).decision == "PROMOTE"
+
+
+def test_the_measured_stages_are_not_read_for_a_diff_outside_the_grant(
+        clean_tree):
+    """The ordering barrier applies to the new precondition too: a proposal
+    that supplied shadow and canary evidence anyway gets a finding, and every
+    measured stage is recorded as not reached."""
+    verdict = run(proposal_record(clean_tree), allow=("docs/**",))
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert verdict.measurements_read is False
+    for stage in ec.MEASURED:
+        assert verdict.by_name()[stage].code == "NOT_REACHED"
+    assert any(f.startswith("OUT_OF_ORDER") for f in verdict.findings)
+
+
+def test_the_rewards_declared_scope_fence_covers_every_evaluator_fence():
+    """Both modules take their fences from the one `EVALUATOR_PATHS`
+    enumeration (issue #2802), but from different views. The reward refuses a
+    declared scope that names an evaluator file, so its tuple must cover the
+    views the controller and the held-out scorer enforce: this is the check
+    that a view added to one cannot silently stop being declared-in-scope
+    forbidden."""
+    import evolution_reward as er  # noqa: PLC0415
+    import heldout_scoring  # noqa: PLC0415
+
+    assert set(er.EVALUATOR_FENCE) >= (
+        set(heldout_scoring.HELD_OUT_FENCE) | set(ec.AUTHORITY_FENCE))
+    assert "tools/evolution_reward.py" in er.EVALUATOR_FENCE
+    assert "tests/test_evolution_reward.py" in er.EVALUATOR_FENCE
+
+
 # --------------------------------------------------- trigger and termination
 
 def test_a_scheduled_trigger_is_refused(clean_tree):
@@ -873,8 +961,23 @@ def test_the_cli_exit_status_distinguishes_the_four_decisions(
         src = tmp_path / f"proposal-{index}.json"
         out = tmp_path / f"verdict-{index}.json"
         src.write_text(json.dumps(record))
-        assert ec.main(["--proposal", str(src), "--json", str(out)]) == status
+        assert ec.main(["--proposal", str(src), "--json", str(out),
+                        "--allow", "src/**,tests/**"]) == status
         assert json.loads(out.read_text(encoding="utf-8"))["decision"] == decision
+
+
+def test_the_cli_reads_the_operator_allow_set(clean_tree, tmp_path, monkeypatch):
+    """The grant arrives on the command line or in `ALLOW_ENV`, never in the
+    proposal. `--allow` wins over the environment, and with neither the
+    controller refuses rather than defaulting to the tree."""
+    src = tmp_path / "p.json"
+    src.write_text(json.dumps(proposal_record(clean_tree)))
+    monkeypatch.delenv(ec.ALLOW_ENV, raising=False)
+    assert ec.main(["--proposal", str(src)]) == ec.REFUSE
+    monkeypatch.setenv(ec.ALLOW_ENV, "src/**")
+    assert ec.main(["--proposal", str(src)]) == ec.PROMOTE
+    monkeypatch.setenv(ec.ALLOW_ENV, "docs/**")
+    assert ec.main(["--proposal", str(src), "--allow", "src/**"]) == ec.PROMOTE
 
 
 def test_an_unreadable_proposal_refuses(tmp_path):
@@ -890,7 +993,8 @@ def test_the_verdict_json_shows_that_measurements_were_not_read(
     src = tmp_path / "p.json"
     out = tmp_path / "v.json"
     src.write_text(json.dumps(widened_record(clean_tree)))
-    assert ec.main(["--proposal", str(src), "--json", str(out)]) == ec.REFUSE
+    assert ec.main(["--proposal", str(src), "--json", str(out),
+                    "--allow", "src/**,tests/**"]) == ec.REFUSE
     verdict = json.loads(out.read_text(encoding="utf-8"))
     assert verdict["measurements_read"] is False
     assert verdict["code"] == "AUTHORITY_WIDENED"

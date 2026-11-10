@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import json
 
-from .audit_diff import audit_report, diff_crossings
+from .audit_diff import (audit_report, diff_backends, diff_capability_scopes,
+                         diff_crossings)
 from .lower import SHARED_REALM
 
 
@@ -169,8 +170,13 @@ def diff(before: dict, after: dict) -> dict:
     removed_c = sorted(before_names - after_names)
     common_c = before_names & after_names
 
-    # authority surface — the reused drift relation
+    # authority surface: the reused drift relation. Issue #3182: besides the
+    # crossing set, carry the reach weakening and the scope and backend
+    # buckets, the drift a crossing that STAYS can carry.
     cross = diff_crossings(bf["audit"], af["audit"])
+    scopes = diff_capability_scopes(bf["audit"], af["audit"])
+    backends = diff_backends(bf["audit"], af["audit"])
+    reachers = _extern_reachers(bf["audit"], af["audit"])
 
     # providers (the DI wiring), keyed by (DI key, realm)
     prov_added, prov_removed, prov_changed = [], [], []
@@ -207,6 +213,12 @@ def diff(before: dict, after: dict) -> dict:
     changed_c = []
     for name in sorted(common_c):
         touched = any(_split(t)[1] == name for t in cross["added"] + cross["removed"])
+        touched = touched or any(
+            _split(t)[1] == name
+            for t in scopes["scope_widened"] + scopes["scope_tightened"])
+        touched = touched or any(
+            name in reachers.get(extern, ())
+            for extern in _moved_externs(cross, backends))
         req_moved = any(c == name for (c, _k, _r) in req_added + req_removed)
         prov_moved = (
             any(p["component"] == name for p in prov_added + prov_removed)
@@ -224,11 +236,35 @@ def diff(before: dict, after: dict) -> dict:
             "removed": [_edge(c, k, r) for (c, k, r) in req_removed],
             "broken": [_edge(c, k, r) for (c, k, r) in newly_broken],
         },
-        "crossings": {"added": cross["added"], "removed": cross["removed"]},
+        "crossings": {"added": cross["added"], "removed": cross["removed"],
+                      "reach_weakened": cross["reach_weakened"],
+                      "scope_widened": scopes["scope_widened"],
+                      "scope_tightened": scopes["scope_tightened"],
+                      "backends_added": backends["backends_added"],
+                      "backends_removed": backends["backends_removed"]},
     }
     delta["guarantees"] = _guarantees(delta, bf, af)
     delta["changed"] = _nonempty(delta)
     return delta
+
+
+def _extern_reachers(*audits: dict) -> dict[str, set[str]]:
+    """extern name -> the components whose boundary reaches it, in any of
+    `audits`."""
+    out: dict[str, set[str]] = {}
+    for audit in audits:
+        for comp, stats in (audit.get("boundary") or {}).items():
+            for extern in stats.get("externs") or []:
+                out.setdefault(extern["name"], set()).add(comp)
+    return out
+
+
+def _moved_externs(cross: dict, backends: dict) -> set[str]:
+    """The externs whose reach weakened or whose backend set moved."""
+    moved = {t.split(":", 1)[1] for t in cross["reach_weakened"]}
+    moved |= {t.split(":", 2)[1]
+              for t in backends["backends_added"] + backends["backends_removed"]}
+    return moved
 
 
 def _edge(component: str, key: str, realm: str) -> dict:
@@ -245,7 +281,7 @@ def _nonempty(delta: dict) -> bool:
     return bool(c["added"] or c["removed"] or c["changed"]
                 or p["added"] or p["removed"] or p["changed"]
                 or r["added"] or r["removed"]
-                or delta["crossings"]["added"] or delta["crossings"]["removed"])
+                or any(delta["crossings"].values()))
 
 
 def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
@@ -281,6 +317,27 @@ def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
             out.append(f"component `{comp}` lost emission `{label}`")
         else:
             out.append(f"component `{comp}` no longer reaches host code `{label}`")
+
+    # issue #3182: drift on a crossing that stays, which the crossing set
+    # cannot show
+    for token in delta["crossings"].get("reach_weakened") or []:
+        name = token.split(":", 1)[1]
+        out.append(f"host extern `{name}` reach weakened (its bound was "
+                   f"loosened or moved)")
+    for token in delta["crossings"].get("scope_widened") or []:
+        _kind, comp, label = _split(token)
+        scope = _emission_scope(af["audit"], comp, label)
+        tail = f" to [{', '.join(scope)}]" if scope else " to any capability"
+        out.append(f"component `{comp}` widened emission `{label}` scope{tail}")
+    for token in delta["crossings"].get("scope_tightened") or []:
+        _kind, comp, label = _split(token)
+        out.append(f"component `{comp}` narrowed emission `{label}` scope")
+    for token in delta["crossings"].get("backends_added") or []:
+        _kind, name, backend = _split(token)
+        out.append(f"host extern `{name}` gained a `{backend}` backend body")
+    for token in delta["crossings"].get("backends_removed") or []:
+        _kind, name, backend = _split(token)
+        out.append(f"host extern `{name}` lost its `{backend}` backend body")
 
     for p in delta["providers"]["changed"]:
         if p["from"] != p["to"]:
