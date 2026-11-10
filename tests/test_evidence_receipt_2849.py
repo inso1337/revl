@@ -420,6 +420,36 @@ def test_an_ambient_pythonpath_into_the_worktree_is_dropped(
     assert not out.exists()
 
 
+def test_an_ambient_pythonpath_into_the_worktree_in_another_case_is_dropped(
+        tmp_path, capsys, monkeypatch):
+    """The repository spelled in another letter case is still the repository.
+
+    On a case-insensitive disk ``REPO`` names the same directory as ``repo``,
+    so the entry must be judged by file identity rather than by its string.
+    """
+    repo, base, _head = _repo(
+        tmp_path, {".gitignore": "gen.py\n", "calc.py": _WRONG},
+        {"calc.py": _CALC_FROM_GEN, "tests/test_double.py": _DOUBLE})
+    (repo / "gen.py").write_text("K = 2\n", encoding="utf-8")
+    other_case = repo.parent / repo.name.upper()
+    if not other_case.exists():
+        pytest.skip("the tmp directory is on a case-sensitive file system: "
+                    f"{other_case} does not name the repository")
+    ambient = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(other_case), ambient])))
+    out = tmp_path / "receipt.md"
+
+    code = _run(repo, base, out=out)
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "NOT GREEN" in captured.err
+    assert "head result: PASSED" not in captured.out
+    assert not out.exists()
+
+
 def test_an_ambient_pythonpath_outside_the_repository_is_kept(
         tmp_path, capsys, monkeypatch):
     """Entries outside the repository (a third-party runtime) pass through."""

@@ -37,10 +37,12 @@ either run, and the head export is `git archive <head sha>`, so the head side
 sees only committed files, and a commit or checkout made while a run is in
 flight does not change what either run measured. Each run's PYTHONPATH is the
 export's own ``src`` and root, then the ambient PYTHONPATH with every entry
-that resolves to the repository or a path under it dropped; entries outside
-the repository (a third-party runtime) are kept. So an ignored or untracked
-file in the worktree (a generated module, a local build) cannot be imported by
-either run and cannot turn a red-before into a green-after.
+that is the repository or a path under it dropped (judged by file identity,
+so another letter case or a symlink does not hide it); entries outside the
+repository (a third-party runtime) are kept. A path the interpreter's own
+site-packages adds (a ``.pth`` file, as an editable install writes) is not
+examined, so a top-level module of the worktree reached that way is still
+importable by either run.
 
 Exit status: 0 receipt printed, 1 the claim is rejected (no red-before, or no
 green-after), 2 the receipt cannot be produced (bad ref, uncommitted or
@@ -352,13 +354,29 @@ def _run_pytest(python: str, cwd: Path, nodes: list[str],
 
 
 def _inside(path: str, root: str) -> bool:
-    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+    """True when ``path`` is ``root`` or under it, by file identity.
+
+    A string comparison is not enough: on a case-insensitive disk another
+    spelling of the repository names the same directory. The path and each
+    of its ancestors is compared with ``os.path.samefile``. A path that does
+    not exist is judged by its nearest existing ancestor, so an entry naming
+    a not-yet-built directory inside the repository is dropped; one with no
+    ancestor in the repository is kept, as nothing can be imported from it.
+    """
+    candidate = Path(path)
+    for step in (candidate, *candidate.parents):
+        try:
+            if os.path.samefile(step, root):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _pythonpath_for(export: Path, repo: Path) -> str:
     """The export's own paths, then the ambient entries outside the repository.
 
-    An ambient entry that resolves to the repository or under it would let a
+    An ambient entry that is the repository or under it would let a
     name the export lacks fall through to the live worktree (an ignored
     module, an uncommitted build), so it is dropped. A relative entry is
     resolved against the export, which is the run's working directory.
