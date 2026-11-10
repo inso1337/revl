@@ -322,6 +322,86 @@ def test_an_enum_mismatch_also_redacts_the_response():
     assert CANARY_TOKEN not in str(exc.value)
 
 
+def test_a_registered_secret_echoed_as_an_object_key_is_redacted_in_the_fault():
+    """LEAK 2, the key half. The scrub above covered dict VALUES only: a closed
+    object's UNEXPECTED property name is model content too, and a model can
+    echo the program's own prompt secret back as a key. Issue #3120."""
+    runtime = _runtime()
+    import confidential  # noqa: PLC0415
+
+    confidential.register_secret_value(CANARY_TOKEN)
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}},
+              "additionalProperties": False}
+    with pytest.raises(runtime.ResponseValidationError) as exc:
+        runtime.validate_response({CANARY_TOKEN: 1}, schema, "Agent.run")
+    assert CANARY_TOKEN not in str(exc.value)
+    assert confidential.REDACTED in str(exc.value)
+    assert exc.value.value == {confidential.REDACTED: 1}
+    assert CANARY_TOKEN not in json.dumps(exc.value.value)
+
+
+def test_a_registered_secret_echoed_as_a_map_key_is_redacted_in_the_path():
+    """The `Map[Str, V]` shape (`additionalProperties` is a schema, so the key
+    becomes part of the PATH) rather than the closed-object one above. The
+    nested error is built from that path, so the key has to be scrubbed where
+    the path is composed, not only at the leaf message. Issue #3120."""
+    runtime = _runtime()
+    import confidential  # noqa: PLC0415
+
+    confidential.register_secret_value(CANARY_TOKEN)
+    schema = {"type": "object", "additionalProperties": {"type": "integer"}}
+    with pytest.raises(runtime.ResponseValidationError) as exc:
+        runtime.validate_response({CANARY_TOKEN: "x"}, schema, "Agent.run")
+    assert CANARY_TOKEN not in str(exc.value)
+    assert confidential.REDACTED in str(exc.value)
+    assert CANARY_TOKEN not in json.dumps(exc.value.value)
+    assert exc.value.value == {confidential.REDACTED: "x"}
+
+
+def test_a_registered_secret_echoed_as_a_map_key_is_redacted_in_a_grammar_fault():
+    """`GrammarNotHonouredError` is the same validation fault over the same
+    untrusted response, raised from the same `validate_response` seam. Its
+    member-order diagnostic prints the PATH (which can carry a `Map` key) and
+    the observed member list (which is model-chosen too), so both need the same
+    scrub the schema fault got. Issue #3120."""
+    runtime = _runtime()
+    import confidential  # noqa: PLC0415
+
+    confidential.register_secret_value(CANARY_TOKEN)
+    crossing = "Agent.run.grammar3120"
+    runtime.register_grammars({crossing: {
+        "format": "gbnf", "text": "root ::= object", "digest": "d" * 64}})
+    schema = {"type": "object", "additionalProperties": {
+        "type": "object",
+        "properties": {"tag": {"const": "Final"}},
+        "required": ["tag"]}}
+    value = {CANARY_TOKEN: {CANARY_TOKEN: 1, "tag": "Final"}}
+    assert runtime.revl_constrain(crossing, ("gbnf",)) is not None
+    with pytest.raises(runtime.GrammarNotHonouredError) as exc:
+        runtime.validate_response(value, schema, "Agent.run", None, crossing)
+    message = str(exc.value)
+    assert CANARY_TOKEN not in message
+    assert message.count(confidential.REDACTED) == 2   # path and member list
+    # precise on both halves: the declared order is schema-authored and stays,
+    # the observed ordinary member stays beside the scrubbed key
+    assert "pins the members ['tag']" in message
+    assert f"the completion has ['{confidential.REDACTED}', 'tag']" in message
+
+
+def test_redact_value_scrubs_a_secret_dict_key_as_well_as_a_secret_value():
+    """`redact_value` is the funnel every capture point shares, so a secret that
+    reached a dict KEY must be scrubbed there too — otherwise `.value` and every
+    other sink that keeps a read-back structure still carries it. Issue #3120."""
+    import confidential  # noqa: PLC0415
+
+    confidential.register_secret_value(CANARY_TOKEN)
+    rendered = confidential.redact_value(
+        {CANARY_TOKEN: 1, "ok": CANARY_TOKEN, "nested": {CANARY_TOKEN: 2}})
+    assert rendered == {confidential.REDACTED: 1, "ok": confidential.REDACTED,
+                        "nested": {confidential.REDACTED: 2}}
+    assert CANARY_TOKEN not in json.dumps(rendered)
+
+
 # ---------------------------------------------------------------------------
 # FALSE POSITIVES — an ordinary (never-registered) response is untouched
 # ---------------------------------------------------------------------------
@@ -337,6 +417,19 @@ def test_an_unregistered_malformed_response_is_still_rendered_verbatim():
         runtime.validate_response({"tag": "Pending"}, schema, "Agent.run")
     assert "Pending" in str(exc.value)
     assert exc.value.value == {"tag": "Pending"}
+
+
+def test_an_unregistered_object_key_is_still_rendered_verbatim():
+    """The key scrub is exact-match only, like the value scrub: an unexpected
+    ordinary property name is what a developer reads to fix the response, so it
+    must survive both the message and the retained `.value`. Issue #3120."""
+    runtime = _runtime()
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}},
+              "additionalProperties": False}
+    with pytest.raises(runtime.ResponseValidationError) as exc:
+        runtime.validate_response({"b": 1}, schema, "Agent.run")
+    assert "'b'" in str(exc.value)
+    assert exc.value.value == {"b": 1}
 
 
 def test_a_short_or_default_registered_value_never_over_redacts():

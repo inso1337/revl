@@ -606,7 +606,21 @@ run`, and `--config` the config it ran with. Recover then:
    have any. Each such key is listed in `binding.refused` (`key`,
    `component`, `crossings`), and every call through it is declined by name
    (`would-reactivate`). A second recover with nothing open boots nothing.
-4. **Replays the open discharge descriptors through the runtime's own abort
+4. **Hands the runtime only the calls the composition declares as
+   inverses** (issue #3149). The digest check binds the log to a
+   composition, not a line to a function, and the runtime resolves a call's
+   `method` to any callable the emitted module binds. So recover reads the
+   declared set off the IR: every call in an `undo` position (registered as a
+   `transactional` entry) and every call in a `compensate` position
+   (registered as a `compensation`), at a step or on an extern, plus the
+   runtime's own `Stream.close` for a durable cursor. A descriptor whose
+   `(receiver, method)` is not in that set, for example one naming the
+   forward emission it was meant to undo, is `undeclared` and never called.
+   So is a descriptor whose `entry` is not the one its call is declared as
+   (a compensation recorded as a transactional inverse, or the reverse). A
+   legacy boundary inverse is checked by name only: it is a transactional
+   entry by construction.
+5. **Replays the open discharge descriptors through the runtime's own abort
    path** (`runtime.replay_descriptors`): witnessed inverses newest first with
    their fences, then compensations newest first under the Phase-2 budget.
    The runtime appends an `aborted` record naming every seq that ran, which
@@ -622,6 +636,7 @@ The verdict carries `"world": "real"` and a `binding` object (`composition`,
 | `failed` | residue (`restore-residue` or `compensation-residue`, outcome `failed`) |
 | `fenced` | residue (`fenced-residue`): an earlier attempt spent the at-most-once fence |
 | `unresolved` | residue (`unresolved-residue`): the call names no host body in this binding |
+| `undeclared` | residue (`unresolved-residue`, error type `undeclared`): the call is not one the composition declares as an inverse or compensation of that entry kind (step 4); not attempted |
 | `stranded` | residue (`stranded-residue`): an E-Stop is in force, nothing ran |
 | `would-reactivate` | residue (`reactivation-residue`): reaching the receiver needs a provider whose activation crosses (`binding.refused`); not attempted, and no fence is spent |
 
@@ -693,10 +708,22 @@ back, as it would the same composition run in one process. A crash between the
 index's `committed` and a process's marker is completed by recover: it stamps
 that process's `activation-complete` from the index (`commitStamped` in the
 verdict), so the process rolls forward with the others instead of back alone.
+That stamp is taken on the index's word: a process WAL records nothing when
+its process comes UP (the conductor reads `[name] UP` off the process's
+output), so recover cannot yet confirm the commit from the process WALs
+themselves (issue #3193). Keep the index and its process WALs where only the
+operator can write.
 
 `revl recover --wal FILE` on an index recovers the whole run:
 
-1. **Finds every process WAL the index names.** A missing one is residue named
+1. **Finds every process WAL the index names, as a plain file next to the
+   index.** An entry's `wal` must be exactly the name the run wrote,
+   `INDEX.<process>`. An entry naming anything else (a path with a separator,
+   `..`, an absolute path, another process's name) is refused by name before
+   any WAL is read or stamped, and so is a process WAL that is a symbolic
+   link or resolves outside the index's directory, by `revl recover` and
+   `revl estop` alike; the stamp itself does not follow a link (issue
+   #3193). A hard link is not detected. A missing one is residue named
    by its process (`missing-wal`): recover cannot tell what it crossed. An
    empty one was created by the conductor and never opened by its process,
    which crossed nothing.
@@ -731,6 +758,36 @@ successor would write a WAL the index does not name. An existing index is
 reused only for the same processes and components; recover a different
 placement's run first, or name a new path. `--restore` does not apply to a
 placement run.
+
+### 5e. Settling a stranded deploy participant (issue #2725)
+
+`revl deploy` drives one participant process per deploy-map process, each with
+its own WAL, and writes ONE durable decision next to its deploy state
+(`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`). A conductor killed after
+deciding and before telling a peer leaves that record, and the stranded
+participant is settled against it, not against a guess:
+
+```
+revl recover --wal <participant>.wal --decision decision.jsonl
+```
+
+The record is read by `deploy.settle_stranded`, which applies `recovery.py`'s
+existing rule:
+
+- `federation-commit-approved` (present): the step committed. The participant's
+  WAL is given the `commit-approved` marker recovery already keys roll-forward
+  off, so it rolls forward and replays no inverse.
+- `federation-abort-decided`, `federation-decision-pending` (written when a
+  newer run started and has not decided), or no file at all: the step did not
+  commit for this run. The WAL is recovered unchanged and rolls back LIFO.
+- an unreadable record: fails closed as `unresolved` and settles nothing.
+  Guessing between forward and back is the split-brain the record exists to
+  prevent.
+
+This is a settlement of one participant's recorded effects, not global
+atomicity. A participant the conductor could not reach is still reported
+`unresolved` by the deploy verdict, and recovering its WAL is a separate step
+that the deploy never claims to have performed.
 
 ### Recovering a session that was forked (item 250)
 

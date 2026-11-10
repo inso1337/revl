@@ -34,6 +34,10 @@ RevL.G3.linkOK_no_cycles	necessity	RevL.G3.g3_not_vacuous,RevL.G3.mutual_cycle_r
 RevL.G3.self_provision_refused	concrete	-	the Ouroboros shape, refused
 RevL.G3.mutual_cycle_refused	concrete	-	g3_dependency_cycle.rvl refused in both orderings
 RevL.G3.layering_exists_for_admitted	concrete	-	the layering certificate is reachable, not only refutable
+RevL.Lemmas.linkOK_append_tail	instance	RevL.Lemmas.append_compose_witness	a base store links and a cache is admitted over it, so the union links and withdrawing the cache recovers the base unchanged
+RevL.Lemmas.linkOK_append_of_admittedOver	instance	RevL.Lemmas.append_compose_witness,RevL.Lemmas.append_conflict_refused	extension applies to the base plus cache; with a second provider of the same slot the side condition fails and so does the union it would build
+RevL.Lemmas.append_compose_witness	concrete	-	computes LinkOK and AdmittedOver on the shape of one store plus a cache admitted over it
+RevL.Lemmas.append_conflict_refused	concrete	-	the same shape with a second kv provider, refused by the extension side condition and by LinkOK
 RevL.G4.inverse_or_emit	instance	RevL.G4.g4_shape_not_vacuous,RevL.G4Classified.g4_not_vacuous	Typed and IsMutation hold together in both conclusion branches; the raw branch closes because Typed has no constructor for it, which is why the lattice restatement carries the real refusal
 RevL.G5.teardown_registers_nothing	contentless	RevL.G5.registrations_ignores_its_argument,RevL.G5Classified.registrations_depends_on_its_argument	FINDING: registrations is the constant zero function, so the conclusion holds by definition and not by any property of undo bodies. The counting statement is G5Classified's
 RevL.G6.confinement	instance	RevL.G6.g6_not_vacuous,RevL.G6.g6_row_not_vacuous	TypedIn admits a statement with a non-empty reach surface and refuses the same shape reaching an undeclared key; the oracle C row's verdict flips when that undeclared head is accepted
