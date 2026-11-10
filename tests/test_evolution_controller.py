@@ -1,6 +1,6 @@
 """Tests for `tools/evolution_controller.py` (roadmap item 520, issue #1194).
 
-The three things these tests have to establish, in the repository's own terms:
+The four things these tests have to establish, in the repository's own terms:
 
   1. THE CONTROLLER REFUSES when a stage's evidence is missing. A controller
      that promotes on missing evidence is the fail-open shape, and this
@@ -14,6 +14,12 @@ The three things these tests have to establish, in the repository's own terms:
      PROMOTE on BOTH the clean tree and the authority-widened one. The real
      controller separates them. The difference is therefore caused by the
      barrier and not by the widened tree being obviously broken.
+  4. THE MODE IS CONTROL FLOW. An `evolution` proposal ends at
+     `proposal-recorded` and cannot reach admit or any measured stage; a record
+     that supplies one of those stages is refused with the mode named. A
+     `repair` or `feature` proposal without its citation is refused before any
+     measurement is read, and a proposal without a mode is refused rather than
+     defaulted.
 
 The trees are real git trees built in a tmp_path, because the authority stage
 MEASURES the changed-file set with git and refuses a self-declared one. A test
@@ -79,12 +85,16 @@ def proposal_record(tree: Path, **over) -> dict:
     """A COMPLETE proposal: every stage present, every one verified.
 
     Tests derive their cases by removing or spoiling exactly one thing, so the
-    difference between a promotion and a refusal is always a single edit.
+    difference between a promotion and a refusal is always a single edit. The
+    default mode is `repair` with the localized fault it cites; a test that
+    changes the mode removes the citation the other mode does not need.
     """
     record = {
         "tree": str(tree),
         "base": "HEAD~1",
         "scope": ["src/**", "tests/**"],
+        "mode": "repair",
+        "fault": "trace:9f2c4a",
         "granted": ["Clock"],
         "attempt": 1,
         "budget": 3,
@@ -142,6 +152,8 @@ def test_the_verdict_binds_proposal_evidence_and_decision(clean_tree):
     """Item 520's exit test: ONE recorded verdict, carrying all of it."""
     verdict = run(proposal_record(clean_tree)).as_dict()
     assert verdict["decision"] == "PROMOTE"
+    assert verdict["mode"] == "repair"
+    assert verdict["fault"] == "trace:9f2c4a"
     assert verdict["base"] == "HEAD~1"
     assert verdict["scope"] == ["src/**", "tests/**"]
     assert verdict["attempt"] == 1 and verdict["budget"] == 3
@@ -151,6 +163,133 @@ def test_the_verdict_binds_proposal_evidence_and_decision(clean_tree):
     # and every stage carries its own evidence, not a shared blob
     for stage in verdict["stages"]:
         assert stage["evidence"], stage
+
+
+# ------------------------------------------------------------------- the modes
+
+def test_a_proposal_without_a_mode_is_refused(clean_tree):
+    """Item 520's mode is required and has no default. Absence is a named
+    refusal at the `propose` precondition, not a fallback to one of the three."""
+    record = proposal_record(clean_tree)
+    del record["mode"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_MISSING"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+
+
+def test_an_unknown_mode_is_refused(clean_tree):
+    """A mode the controller does not know cannot choose a path."""
+    verdict = run(proposal_record(clean_tree, mode="refactor"))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_UNKNOWN"
+    assert verdict.refusing_stage == "propose"
+
+
+def test_a_repair_proposal_must_cite_the_localized_fault(clean_tree):
+    """A repair fixes a fault the trace already localized, so it must cite the
+    failing test or trace id. The refusal is before any measurement is read."""
+    record = proposal_record(clean_tree)
+    del record["fault"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "FAULT_NOT_CITED"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+    for stage in ec.MEASURED:
+        assert verdict.by_name()[stage].code == "NOT_REACHED"
+
+
+def test_a_feature_proposal_must_cite_the_tests_the_gap_names(clean_tree):
+    """A feature implements a declared gap against the tests it names, so the
+    tests are its citation. With them it is judged like any other proposal."""
+    record = proposal_record(clean_tree, mode="feature")
+    del record["fault"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "TESTS_NOT_CITED"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+    record["tests"] = ["tests/test_evolution_controller.py::test_feature"]
+    assert run(record).decision == "PROMOTE"
+
+
+def evolution_record(tree: Path, **over) -> dict:
+    """An evolution proposal: trigger and propose only, and no citation.
+
+    Evolution mode produces a proposal and nothing else, so the default
+    proposal's admit, authority and measured records are removed here; that is
+    what a record asking for nothing past the proposal looks like.
+    """
+    record = proposal_record(tree, mode="evolution")
+    del record["fault"]
+    record["stages"] = {name: value for name, value in record["stages"].items()
+                        if name in ("trigger", "propose")}
+    record.update(over)
+    return record
+
+
+def test_an_evolution_proposal_ends_at_proposal_recorded(clean_tree):
+    """Item 520: evolution mode may propose only. It ends at the record and
+    cannot reach admit, authority or any measured stage."""
+    verdict = run(evolution_record(clean_tree))
+    assert verdict.decision == ec.PROPOSAL_RECORDED, verdict.render()
+    assert verdict.code == ""
+    assert verdict.measurements_read is False
+    assert [v.component for v in verdict.verdicts] == list(ec.STAGES)
+    assert verdict.by_name()["trigger"].verified is True
+    assert verdict.by_name()["propose"].verified is True
+    for stage in ("admit", "authority") + ec.MEASURED:
+        assert verdict.by_name()[stage].code == "NOT_REACHED", stage
+    assert "evolution" in verdict.by_name()["admit"].reason
+    assert verdict.as_dict()["mode"] == "evolution"
+    assert "PROPOSAL RECORDED" in verdict.render()
+
+
+def test_an_evolution_proposal_that_asks_for_activation_is_refused(clean_tree):
+    """The record still supplies admit and every measured stage: that is a call
+    asking the lifecycle to walk past the proposal, and it is refused with the
+    mode named."""
+    record = proposal_record(clean_tree, mode="evolution")
+    del record["fault"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_REFUSES_ACTIVATION"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+    assert "evolution" in verdict.by_name()["propose"].reason
+
+
+@pytest.mark.parametrize(
+    "stage", ec.STAGES[ec.STAGES.index("propose") + 1:])
+def test_every_stage_past_the_proposal_is_refused_in_evolution_mode(
+        clean_tree, stage):
+    """The evolution path has no door to ANY later stage, not only the measured
+    ones. Reading the tail of `STAGES` rather than restating it means a future
+    stage cannot be added without a decision about which side of the mode stop
+    it is on."""
+    record = evolution_record(clean_tree)
+    record["stages"][stage] = {"verified": True, "reason": "supplied",
+                               "evidence": ["supplied"]}
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_REFUSES_ACTIVATION"
+
+
+def test_a_failing_trigger_refuses_before_the_evolution_mode_stop(clean_tree):
+    """The precondition order is not bypassed by the mode check. This record
+    supplies a stage past the proposal, but its trigger does not verify, so the
+    refusal is the trigger's code and not the mode's. Nothing past the trigger
+    is read either way."""
+    record = proposal_record(clean_tree, mode="evolution")
+    del record["fault"]
+    del record["stages"]["trigger"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.refusing_stage == "trigger"
+    assert verdict.code == "STAGE_SKIPPED"
+    assert verdict.measurements_read is False
 
 
 # -------------------------------------------- missing evidence is a refusal
@@ -806,11 +945,12 @@ def test_the_control_also_passes_a_kernel_edit(tmp_path):
 
 # ------------------------------------------------------------------- the CLI
 
-def test_the_cli_exit_status_distinguishes_the_three_decisions(
+def test_the_cli_exit_status_distinguishes_the_four_decisions(
         clean_tree, tmp_path):
     cases = [
         (proposal_record(clean_tree), ec.PROMOTE, "PROMOTE"),
         (widened_record(clean_tree), ec.REFUSE, "REFUSE"),
+        (evolution_record(clean_tree), ec.RECORDED, ec.PROPOSAL_RECORDED),
     ]
     rolled = proposal_record(clean_tree)
     rolled["stages"]["canary"] = {"verified": False, "reason": "p99 regressed",

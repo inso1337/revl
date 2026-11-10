@@ -42,11 +42,14 @@ before a single measured record has been read, so there is no code path on which
 a canary number can be compared against a precondition's verdict. The result is
 one recorded `LifecycleVerdict` binding the proposal, one verdict per stage with
 its own evidence, whether the measurements were read at all, and a terminal
-decision drawn from three names (`PROMOTE`, `ROLL_BACK`, `REFUSE`) rather than
-from a number. Every failure is named, and the failure direction is closed in
-every direction: a missing record, an empty evidence list, an absent authority
-axis, an unmeasurable diff and a raising judge are all failures, never passes.
-The tool is `tools/evolution_controller.py`.
+decision drawn from four names (`PROMOTE`, `ROLL_BACK`, `REFUSE`,
+`proposal-recorded`) rather than from a number. Every failure is named, and the
+failure direction is closed in every direction: a missing record, an empty
+evidence list, an absent authority axis, an unmeasurable diff, a raise inside a
+judge and a proposal that does not declare one of the three modes are all
+failures, never passes. The mode is a required field, and it is control flow
+rather than prose: an `evolution` proposal ends at `proposal-recorded` and the
+stages past it are never reached. The tool is `tools/evolution_controller.py`.
 
 ## 1. The gap, measured
 
@@ -100,7 +103,35 @@ rendered into every verdict, and `test_every_stage_has_a_named_supplier` refuses
 a stage without one. Item 520 requires each stage to cite the mechanism that
 supplies it, so the citation is data rather than a paragraph.
 
-### 2.1 Where this maps onto the two shorter spellings
+### 2.1 The three modes, and one of them may not act
+
+Item 520 splits the work this lifecycle governs three ways, and the split is a
+`mode` field on the proposal record, required and with no default:
+
+| mode | the proposal must cite | where the path ends |
+|---|---|---|
+| `repair` | `fault`: the localized fault, a failing test or trace id | the normal lifecycle |
+| `feature` | `tests`: the tests the declared gap names | the normal lifecycle |
+| `evolution` | nothing | `proposal-recorded`, before `admit` |
+
+A feature's gap is the `trigger` stage's `gap`, required for every mode and
+already refused as `NO_TRIGGER` when absent; the mode's own citation is the
+tests that gap names. The citation is checked at `propose`, before any measured
+record is read, and a missing one is a named refusal (`FAULT_NOT_CITED`,
+`TESTS_NOT_CITED`). The mode itself is checked first at that stage: an absent
+mode is `MODE_MISSING` and a value outside the three is `MODE_UNKNOWN`. The
+controller cannot verify that a caller meant what it declared, and the design
+does not pretend otherwise: what the mode enforces is the **shape of the
+path**. An `evolution` record stops the walk after a verified `propose`, and
+every later stage is recorded `NOT_REACHED`. Once `trigger` verifies, a record
+that supplies evidence for any stage past `propose` is refused with
+`MODE_REFUSES_ACTIVATION`; a failing trigger refuses first, at `trigger`,
+because the preconditions stay in order. Either way the evolution path has no
+door to admission, activation or deployment rather than a label the controller
+trusts. This field is what turns "evolution proposes only" from a convention in
+this document into a property of the controller's control flow.
+
+### 2.2 Where this maps onto the two shorter spellings
 
 Issue #1194 names five stages (propose, admit, activate, observe, decide) and
 item 543 names nine (observe, diagnose, propose, compile, admission-check,
@@ -174,33 +205,36 @@ reading a green as permission to run code the gate never admitted".
 
 `LifecycleVerdict` is the one recorded object item 520 asks for, and it binds:
 
-* the proposal (tree, base, scope, attempt, budget, and the keys that were
-  dropped by name);
+* the proposal (tree, base, scope, mode, and the citation the mode requires,
+  attempt, budget, and the keys that were dropped by name);
 * one `Verdict` per stage in lifecycle order, each with its own `reason`,
   `evidence` and refusal `code`, including the stages that were not reached;
 * `measurements_read`, the barrier's own receipt;
 * `findings`, the out-of-order report;
-* the terminal `decision` and the `code` that produced it.
+* the terminal `decision`, the `mode` and the `code` that produced it.
 
 There is exactly one place in the module that constructs a decision, so there is
 exactly one place a reader has to look and one place a future stage is added.
 
-**Three decisions, no number.**
+**Four decisions, no number.**
 
 | decision | when | exit |
 |---|---|---|
 | `PROMOTE` | every precondition satisfied and every measurement satisfied | 0 |
 | `ROLL_BACK` | a measurement failed and a `canary` record exists, so the candidate had gone live | 1 |
 | `REFUSE` | a precondition is not satisfied, or a measurement failed and the candidate never went live | 2 |
+| `proposal-recorded` | an `evolution` proposal verified its trigger, mode and citation and asked for nothing past the proposal | 3 |
 
 `ROLL_BACK` versus `REFUSE` turns on one fact and not on severity: did the
 candidate go live. `canary` is the stage that puts it in front of traffic, so a
 canary record is the evidence that there is something to undo. Reporting a
 rollback with no canary would claim an undo that never ran, which is the same
 mislabel `Gate.propose` avoids when it refuses to report an E-Stop as
-`SWAP_REVERTED`. The three exit statuses keep the distinction at the process
+`SWAP_REVERTED`. The four exit statuses keep the distinctions at the process
 boundary, the way `tools/heldout_scoring.py` separates `REFUSED` from
-`DIVERGENT`.
+`DIVERGENT`: a recorded proposal is neither a promotion nor a refusal, and an
+exit status that collapsed it into either would let a caller treat a proposal
+as an activation.
 
 ## 5. The authority invariant, enforced rather than asserted
 
@@ -333,7 +367,7 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
-fail-open default hides. Seventeen named codes:
+fail-open default hides. Twenty-two named codes:
 
 | code | fires when |
 |---|---|
@@ -344,6 +378,11 @@ fail-open default hides. Seventeen named codes:
 | `SCHEDULED_TRIGGER` | a trigger whose kind is a schedule |
 | `UNBOUNDED_RETRY` | no positive `budget` or no positive `attempt` |
 | `BUDGET_EXHAUSTED` | `attempt` past `budget` |
+| `MODE_MISSING` | the proposal declared no mode |
+| `MODE_UNKNOWN` | the mode is not one of `repair`, `feature`, `evolution` |
+| `FAULT_NOT_CITED` | a `repair` proposal with no `fault` |
+| `TESTS_NOT_CITED` | a `feature` proposal with no `tests` |
+| `MODE_REFUSES_ACTIVATION` | an `evolution` proposal supplies a stage past `propose` |
 | `UNSCOPED` | the proposal declared no scope |
 | `FORBIDDEN_GRANT` | the granted set names a decider service |
 | `DIFF_UNVERIFIED` | the tree's diff cannot be measured |
@@ -372,7 +411,7 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-Three demonstrations, all in `tests/test_evolution_controller.py`: 77 tests,
+Four demonstrations, all in `tests/test_evolution_controller.py`: 119 tests,
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four
@@ -391,6 +430,12 @@ all passing.
    `PROMOTE` on a tree that edits `src/revl/attest.py`. The controller returns
    `PROMOTE`, `REFUSE` and `REFUSE`. The separation is therefore produced by
    the barrier and not by the widened tree being obviously broken.
+4. **The mode stop is control flow, not a label.** An `evolution` proposal that
+   supplies nothing past `propose` ends at `proposal-recorded` with every later
+   stage `NOT_REACHED`; one that supplies a record for any later stage is
+   refused with `MODE_REFUSES_ACTIVATION`. That refusal is parametrized over
+   all five later stages, so a stage added without a decision about which side
+   of the mode stop it belongs on becomes a failing test.
 
 Issue #1222's exit test is met directly and in its own words: a candidate with
 perfect canary numbers (`p99 18ms` against a base of 41ms, zero refusals, plus
@@ -411,7 +456,7 @@ diff would be exercising the path that cannot promote.
 
 **Slice 1 (this change).** The reduction, the stage table, the barrier, the
 fence, the kernel enumeration, the named refusals, the single verdict, the CLI
-and its three exit statuses, and the reward-scorecard adapter for `observe`.
+and its four exit statuses, and the reward-scorecard adapter for `observe`.
 Oracle: `tests/test_evolution_controller.py`. Fixture: a git tree per case,
 built in `tmp_path`, one edited path per case so the difference between a
 promotion and a refusal is always a single edit.

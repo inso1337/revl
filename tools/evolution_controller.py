@@ -56,6 +56,28 @@ Seven stages and a terminal decision, in this order:
     trigger -> propose -> admit -> authority || shadow -> canary -> observe
     ---------------- preconditions ----------    ------- measured -------
 
+THE THREE MODES, AND ONE OF THEM MAY NOT ACT
+--------------------------------------------
+Item 520 splits the work this lifecycle governs three ways, and the split is the
+proposal's `mode`: `repair` fixes a fault a trace has already localized,
+`feature` implements a declared gap against the tests the gap names, and
+`evolution` proposes a behaviour change. The mode is REQUIRED and has no
+default. It is declared by the caller, so the controller cannot verify intent;
+what it enforces is the SHAPE of the path each mode is allowed to take.
+
+A `repair` proposal cites the localized fault (`fault`: a failing test or trace
+id). A `feature` proposal cites the tests its gap names (`tests`). A proposal
+missing its citation is refused at `propose`, before any measured record is
+read.
+
+An `evolution` proposal ENDS at `proposal-recorded`. It does not reach `admit`,
+`authority`, `shadow`, `canary` or `observe`: the controller returns as soon as
+`propose` verifies and records every later stage `NOT_REACHED`. Once `trigger`
+verifies, a record that supplies evidence for one of those stages is refused
+with `MODE_REFUSES_ACTIVATION`; a missing or failing trigger refuses first, at
+`trigger`, because the preconditions stay in order. Either way the evolution
+path has no door to activation rather than a label the controller trusts.
+
 The `||` is the barrier and it is the point of the whole module. Issue #1222
 (item 543): a canary on one percent of traffic measures latency, refusal rate
 and answer quality ON THE PATHS THAT TRAFFIC HAPPENS TO TAKE, while capability
@@ -86,6 +108,13 @@ failure with a NAMED code:
     a trigger that is a schedule           -> SCHEDULED_TRIGGER
     no retry budget declared               -> UNBOUNDED_RETRY
     the retry budget is spent              -> BUDGET_EXHAUSTED
+    a proposal with no scope               -> UNSCOPED
+    no declared mode                       -> MODE_MISSING
+    a mode outside the three               -> MODE_UNKNOWN
+    a repair with no fault citation        -> FAULT_NOT_CITED
+    a feature with no tests citation       -> TESTS_NOT_CITED
+    an evolution proposal asking for a
+    stage past the proposal                -> MODE_REFUSES_ACTIVATION
     a granted decider service              -> FORBIDDEN_GRANT
     the diff could not be measured         -> DIFF_UNVERIFIED
     the declared diff understates the tree -> DIFF_DISAGREES
@@ -95,6 +124,8 @@ failure with a NAMED code:
     the diff reaches the admission kernel  -> KERNEL_INTERSECTION
     a non-empty capability/taint/budget or
     retention diff                         -> AUTHORITY_WIDENED
+    a judge raised, or answered for the
+    wrong stage                            -> JUDGE_RAISED
     the controller cannot name its own
     evaluator                              -> PROTOCOL_UNAVAILABLE
 
@@ -109,16 +140,23 @@ Same argument item 536 (issue #1206) makes for the reward, one level up. Under
 any weighting with positive weight on the measured stages, a candidate with a
 marginally non-empty reachability diff and excellent canary numbers clears a
 threshold. A lifecycle satisfiable in a way its own preconditions refuse is a
-defect, not a design choice. So the decision is an enumeration of three
+defect, not a design choice. So the decision is an enumeration of four
 terminal shapes, never a number:
 
-    PROMOTE    every precondition satisfied and every measurement satisfied
-    ROLL_BACK  a measurement failed AND the candidate had gone live (a
-               `canary` record exists). The undo is the verdict. This is item
-               334's `SWAP_REVERTED` shape, at the lifecycle level.
-    REFUSE     a precondition is not satisfied, or a measurement failed while
-               the candidate was never activated. There is nothing to undo,
-               and reporting a rollback would claim an undo that never ran.
+    PROMOTE            every precondition satisfied and every measurement
+                       satisfied
+    ROLL_BACK          a measurement failed AND the candidate had gone live (a
+                       `canary` record exists). The undo is the verdict. This
+                       is item 334's `SWAP_REVERTED` shape, at the lifecycle
+                       level.
+    REFUSE             a precondition is not satisfied, or a measurement failed
+                       while the candidate was never activated. There is
+                       nothing to undo, and reporting a rollback would claim an
+                       undo that never ran.
+    proposal-recorded  the proposal is in `evolution` mode, its citation is in
+                       order, and it asks for nothing past the proposal. This
+                       is not a promotion and not a refusal: for that mode the
+                       lifecycle's product is the recorded proposal itself.
 
 TERMINATION IS A PROOF OBLIGATION
 ---------------------------------
@@ -147,7 +185,7 @@ USAGE
 falls back to `ALLOW_ENV`. With no allow set the `authority` precondition
 refuses, because the editable set belongs to whoever starts the run.
 
-Exit status: 0 PROMOTE, 1 ROLL_BACK, 2 REFUSE.
+Exit status: 0 PROMOTE, 1 ROLL_BACK, 2 REFUSE, 3 proposal-recorded.
 """
 
 from __future__ import annotations
@@ -175,16 +213,33 @@ from evolution_reward import Verdict as ComponentVerdict  # noqa: E402
 from evolution_reward import (  # noqa: E402
     ALLOW_ENV, _in_scope, allow_from_env, parse_allow)
 
+# The modes of work item 520 splits the lifecycle's subject into. The mode is
+# declared by the caller, so it is not an intent the controller can verify:
+# what it decides is which path the record is allowed to take. See the docstring
+# section "THE THREE MODES".
+MODES = ("repair", "feature", "evolution")
+
+# The terminal shape for an evolution-mode proposal. Spelled as the roadmap
+# writes it, because it is not one of the three decisions proper (`PROMOTE`,
+# `ROLL_BACK`, `REFUSE`): the lifecycle did not promote, roll back or refuse
+# anything; it recorded a proposal and stopped.
+PROPOSAL_RECORDED = "proposal-recorded"
+
 # Exit statuses. REFUSE is distinct from ROLL_BACK for the same reason
 # `tools/heldout_scoring.py` separates REFUSED from DIVERGENT: a reader has to
 # be able to tell "the candidate went live and was undone" from "the candidate
-# never went live", and one non-zero status collapses exactly that.
+# never went live", and one non-zero status collapses exactly that. RECORDED is
+# distinct again because a recorded proposal is neither: it is the successful
+# product of evolution mode, and a caller that cannot tell it from a promotion
+# would treat a proposal as an activation.
 PROMOTE = 0
 ROLL_BACK = 1
 REFUSE = 2
+RECORDED = 3
 
-DECISIONS = ("PROMOTE", "ROLL_BACK", "REFUSE")
-_EXIT = {"PROMOTE": PROMOTE, "ROLL_BACK": ROLL_BACK, "REFUSE": REFUSE}
+DECISIONS = ("PROMOTE", "ROLL_BACK", "REFUSE", PROPOSAL_RECORDED)
+_EXIT = {"PROMOTE": PROMOTE, "ROLL_BACK": ROLL_BACK, "REFUSE": REFUSE,
+         PROPOSAL_RECORDED: RECORDED}
 
 
 # --------------------------------------------------------------- stage table
@@ -360,14 +415,35 @@ def not_reached(component: str, blocker: str) -> Verdict:
         f"measurement was never read", (), "NOT_REACHED")
 
 
+def recorded_only(component: str, mode: str) -> Verdict:
+    """A stage an evolution-mode proposal may not reach, recorded not read.
+
+    This is `not_reached`'s sibling for the mode stop. The precondition did not
+    fail: the lifecycle ended at the proposal because that is the whole of what
+    evolution mode may produce. Saying "the propose precondition is not
+    satisfied" here would be false, and a false reason in a verdict is worse
+    than no reason.
+    """
+    return Verdict(
+        component, False,
+        f"not reached: the proposal is in `{mode}` mode, which produces a "
+        f"proposal only and may not admit, activate or deploy", (),
+        "NOT_REACHED")
+
+
 # ----------------------------------------------------------------- candidate
 
 # The only keys read off a proposal record. The whitelist is what makes "the
 # controller does not read the candidate's account of itself" structural rather
 # than a convention: a key that is not here never reaches a check, whatever it
 # says. Item 536 uses the same mechanism and reports the dropped keys back.
-RECORD_KEYS = ("tree", "base", "scope", "trigger", "granted", "attempt",
-               "budget", "changed", "stages")
+#
+# `mode` and the two citation keys are this module's, not item 536's. They are
+# here so that a record written for the reward scorer stays a valid proposal
+# record only when it also declares which mode of work it is, which is item
+# 520's rule and not a field the reward has an opinion about.
+RECORD_KEYS = ("tree", "base", "scope", "mode", "fault", "tests", "trigger",
+               "granted", "attempt", "budget", "changed", "stages")
 
 # The three that item 536's `Candidate` carries. Kept as a named subset so the
 # two lanes can be held to the same shape by a test.
@@ -393,9 +469,18 @@ class Candidate:
 
 @dataclass(frozen=True)
 class Proposal:
-    """A candidate plus the lifecycle facts the controller needs to judge it."""
+    """A candidate plus the lifecycle facts the controller needs to judge it.
+
+    `mode` has no default. It is read raw off the record so that an absent or
+    unknown value is refused by the `propose` stage with a named code, rather
+    than replaced with one of the three modes here. A default is exactly the
+    convention this field exists to remove.
+    """
 
     candidate: Candidate
+    mode: object
+    fault: object = None
+    tests: object = None
     trigger: dict = field(default_factory=dict)
     granted: tuple = ()
     attempt: object = None
@@ -418,7 +503,14 @@ def load_proposal(record: dict, allow=()) -> Proposal:
     Refuses rather than guesses. A record with no `tree`, `base` or `scope`
     cannot be judged, and an unjudgeable proposal is not a promotable one. The
     three are exactly item 536's required keys, so a candidate record written
-    for the reward scorer is a valid proposal record here.
+    for the reward scorer is a valid proposal record here once it declares the
+    `mode` item 520 requires.
+
+    `mode`, `fault` and `tests` are read raw and validated by `judge_propose`:
+    a missing mode, a mode outside `MODES`, and a mode's citation are failures
+    the verdict has to name, not parse errors that leave only stderr. The
+    record's shape is checked here; what the lifecycle permits is checked
+    there.
 
     `allow` is the operator's editable set, passed in by the caller. A record
     that carries an `allow` key has it dropped like any other non-whitelisted
@@ -452,6 +544,9 @@ def load_proposal(record: dict, allow=()) -> Proposal:
     )
     return Proposal(
         candidate=candidate,
+        mode=record.get("mode"),
+        fault=record.get("fault"),
+        tests=record.get("tests"),
         trigger=dict(trigger),
         granted=tuple(str(g) for g in granted),
         attempt=record.get("attempt"),
@@ -680,15 +775,93 @@ def judge_trigger(proposal: Proposal) -> Verdict:
         base.evidence + (f"artifact={artifact}",))
 
 
-def judge_propose(proposal: Proposal) -> Verdict:
-    """The candidate record, its scope, and the TERMINATION obligation.
+def _judge_citation(proposal: Proposal) -> Verdict | None:
+    """`None` when the proposal's mode citation is present, or its refusal.
 
-    Item 520: a proposal that cannot reach a verdict halts rather than loops.
-    That is a proof obligation about the loop, and the checkable projection of
-    it onto one proposal is the retry budget. A proposal with no declared
-    budget is the unbounded case and fails closed; a proposal past its budget
-    HALTS with a named code instead of being handed back to the proposer.
+    This is the check the roadmap states as a rule rather than a label. The
+    controller cannot verify that a "repair" really repaired a localized fault
+    or that a "feature" really implements the gap it names, so it does not
+    pretend to. It checks the one thing a caller must hand over before any
+    measured evidence can matter: a citation of the thing the mode is for. A
+    missing citation is a named refusal, not a warning.
     """
+    if proposal.mode == "repair":
+        fault = proposal.fault
+        if not isinstance(fault, str) or not fault.strip():
+            return failed(
+                "propose", "FAULT_NOT_CITED",
+                "a `repair` proposal must cite the localized fault it fixes: "
+                "the failing test or trace id the trace already localized. A "
+                "repair with no diagnosis is a change with no fault, which is "
+                "not the work item 520's repair mode is for")
+        return None
+    if proposal.mode == "feature":
+        tests = proposal.tests
+        if (not isinstance(tests, (list, tuple)) or not tests
+                or not all(isinstance(t, str) and t.strip() for t in tests)):
+            return failed(
+                "propose", "TESTS_NOT_CITED",
+                "a `feature` proposal must cite the tests the declared gap "
+                "names (`tests`, a non-empty list of test selectors). Without "
+                "them the gap is a wish, not a declared gap against the tests "
+                "it names")
+        return None
+
+    # Evolution mode. It may produce a proposal and nothing else, so any
+    # record for a stage past `propose` is a call asking the lifecycle to walk
+    # through a door this mode does not have. Refusing here keeps that check on
+    # the same precondition that carries the mode, before `admit` is reached.
+    beyond = sorted(s for s in proposal.stages
+                    if s not in ("trigger", "propose"))
+    if beyond:
+        return failed(
+            "propose", "MODE_REFUSES_ACTIVATION",
+            "the proposal is in `evolution` mode, which produces a proposal "
+            "only: it may not merge, admit, activate or deploy. The record "
+            "supplies evidence for " + ", ".join(f"`{s}`" for s in beyond)
+            + ", so it asks the lifecycle to walk past the proposal. Refused "
+              "with the mode named",
+            (f"mode={proposal.mode}", f"stages={';'.join(beyond)}"))
+    return None
+
+
+def judge_propose(proposal: Proposal) -> Verdict:
+    """The mode and its citation, the scope, and the TERMINATION obligation.
+
+    Item 520 splits the work this lifecycle governs into three modes, and the
+    mode is a field the controller reads rather than a convention it assumes.
+    It is checked FIRST, before the stage record or the budget, because a
+    proposal that has not said which mode it is cannot be judged by any later
+    check: the three modes do not have the same citation and do not reach the
+    same stages.
+
+    Item 520 also says a proposal that cannot reach a verdict halts rather than
+    loops. That is a proof obligation about the loop, and the checkable
+    projection of it onto one proposal is the retry budget. A proposal with no
+    declared budget is the unbounded case and fails closed; a proposal past its
+    budget HALTS with a named code instead of being handed back to the
+    proposer.
+    """
+    mode = proposal.mode
+    if mode is None:
+        return failed(
+            "propose", "MODE_MISSING",
+            "the proposal declares no `mode`. Item 520 splits the work this "
+            "lifecycle governs into `repair`, `feature` and `evolution`, and "
+            "the mode decides which path the proposal may take. It has no "
+            "default, so a proposal that does not say which it is cannot be "
+            "judged")
+    if mode not in MODES:
+        return failed(
+            "propose", "MODE_UNKNOWN",
+            f"the proposal declares mode {mode!r}, not one of "
+            + ", ".join(f"`{m}`" for m in MODES)
+            + ". A mode the controller does not know is not evidence of a "
+              "path, so it cannot choose one",
+            (f"mode={mode!r}",))
+    citation = _judge_citation(proposal)
+    if citation is not None:
+        return citation
     ok, record = _record_for(proposal, "propose")
     if not ok:
         return record
@@ -940,6 +1113,11 @@ class LifecycleVerdict:
             "preconditions": list(PRECONDITIONS),
             "measured": list(MEASURED),
             "supplied_by": dict(SUPPLIED_BY),
+            "mode": self.proposal.mode,
+            "fault": self.proposal.fault,
+            "tests": (list(self.proposal.tests)
+                      if isinstance(self.proposal.tests, (list, tuple))
+                      else self.proposal.tests),
             "base": self.proposal.base,
             "scope": list(self.proposal.candidate.scope),
             "allow": list(self.proposal.candidate.allow),
@@ -951,6 +1129,7 @@ class LifecycleVerdict:
     def render(self) -> str:
         lines = [f"evolution controller over {self.proposal.tree}",
                  f"base {self.proposal.base}",
+                 f"mode {self.proposal.mode}",
                  f"protocol {self.protocol or 'unavailable'}", ""]
         for v in self.verdicts:
             kind = "precondition" if v.component in PRECONDITIONS else "measured"
@@ -958,9 +1137,14 @@ class LifecycleVerdict:
             lines.append(f"  {mark} {v.component:<10} [{kind:<12}] {v.reason}")
         lines.append("")
         if not self.measurements_read:
-            lines.append(
-                "the measured stages were NOT read: a precondition refused "
-                "first, and no measured objective may buy a precondition.")
+            if self.decision == PROPOSAL_RECORDED:
+                lines.append(
+                    "the measured stages were NOT read: evolution mode ends at "
+                    "the proposal, so no measured stage was reached.")
+            else:
+                lines.append(
+                    "the measured stages were NOT read: a precondition refused "
+                    "first, and no measured objective may buy a precondition.")
         for note in self.findings:
             lines.append(f"finding: {note}")
         lines.append("")
@@ -972,6 +1156,11 @@ class LifecycleVerdict:
                 f"ROLL BACK ({self.code}): the preconditions were satisfied so "
                 f"the candidate was entitled to activate, and a measurement "
                 f"then failed. The undo is the verdict.")
+        elif self.decision == PROPOSAL_RECORDED:
+            lines.append(
+                "PROPOSAL RECORDED (evolution mode): the proposal is recorded "
+                "and nothing past it was reached. Evolution mode may not "
+                "merge, admit, activate or deploy.")
         else:
             lines.append(
                 f"REFUSE ({self.code}) at `{self.refusing_stage}`: nothing was "
@@ -1008,6 +1197,12 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
     That is item 543's barrier expressed as control flow rather than as a
     weighting: there is no path on which a canary number can reach a comparison
     with a precondition's verdict, because the comparison does not exist.
+
+    A verified `propose` for an `evolution` proposal stops here as well, and
+    for the same reason: the mode's product is the proposal, so there is no
+    code path from it to `admit`, `authority` or a measured stage. The stages it
+    did not reach are recorded `NOT_REACHED`, so the artifact says the stop was
+    the mode and not a failed precondition.
 
     The checkout's protocol identity is read HERE, once, so a controller that
     cannot name its own evaluator refuses with a code instead of failing to
@@ -1050,6 +1245,19 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
             return LifecycleVerdict(
                 proposal, verdicts, "REFUSE", verdict.code,
                 measurements_read=False, findings=findings, protocol=own)
+
+        if stage == "propose" and proposal.mode == "evolution":
+            # The mode stop, and the whole of the enforcement: it is control
+            # flow, not a check on a field. The record has already been refused
+            # if it supplied a stage past `propose` (`MODE_REFUSES_ACTIVATION`),
+            # so reaching this line means the proposal asked for nothing past
+            # itself. Every later stage is recorded as not reached and the
+            # lifecycle ends without reading a single measurement.
+            for rest in STAGES[STAGES.index(stage) + 1:]:
+                verdicts.append(recorded_only(rest, proposal.mode))
+            return LifecycleVerdict(
+                proposal, verdicts, PROPOSAL_RECORDED, "",
+                measurements_read=False, protocol=own)
 
     # Only now. Every precondition is satisfied, so the candidate was entitled
     # to enter shadow, and the measurements decide keep versus undo.
@@ -1096,8 +1304,9 @@ def decide(proposal: Proposal) -> LifecycleVerdict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--proposal", type=Path, required=True,
-                    help="JSON record: tree/base/scope plus trigger, granted, "
-                         "attempt, budget and the per-stage evidence")
+                    help="JSON record: tree/base/scope/mode plus the mode's "
+                         "citation, trigger, granted, attempt, budget and the "
+                         "per-stage evidence")
     ap.add_argument("--json", type=Path, help="write the verdict here")
     ap.add_argument("--allow", action="append", metavar="GLOB", default=None,
                     help="a path glob the operator allows the proposal to "
