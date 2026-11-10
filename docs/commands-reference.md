@@ -1978,10 +1978,15 @@ for the key lifecycle and what the signature binds.
   (`outstanding=N`) and its liveness: `health=live@<instant>`,
   `health=unreachable` or `health=unverified` with `since`, `failures`, the
   link and `last-live`, or `health=unknown` if nothing ever contacted it.
+  A member with a recorded violation also carries `violations=N` on its row,
+  and a `violations` block below the members lists each record: the member, the
+  closed kind (`receipt-artifact-mismatch`, `attestation-rejected`,
+  `offer-drift`, `probe-unanswered`), the instant and the refusal detail.
+  Recording one is not an action: it moves no tier and removes nobody.
   Needs no key.
   - `--dir DIR`
   - `--json` - the charter, the roster with its event ledger, the identity
-    directory and the health record.
+    directory, the violation census and the health record.
   - `--require-live SECONDS` - a health check: exit 1, naming the members on
     stderr, if any member's most recent contact was not a verified heartbeat
     or delivery within SECONDS. It withdraws nobody.
