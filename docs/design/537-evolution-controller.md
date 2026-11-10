@@ -295,9 +295,13 @@ accept the candidate's account of it. It does not:
 * when the tree is a git tree, the set comes from
   `git diff --no-renames --name-only <base>` plus untracked files, exactly the
   read `tools/evolution_reward.py` performs for its `scope` component, and that
-  set wins. `--no-renames` so a move is judged by both paths: rename detection
-  on would list only the destination, and a file moved out of the grant, the
-  fence or the kernel would read as an allowed addition;
+  set wins;
+* `--no-renames` is load-bearing, so a move is judged by both paths. With
+  git's rename detection on, `--name-only` prints only the destination of a
+  rename, so a `git mv` out of a domain, the operator grant, the fence or the
+  kernel would hide the removed path and read as an allowed addition.
+  `--no-renames` reports the removal as a deletion and the arrival as an
+  addition, so both are measured;
 * a declared set that **understates** the measured one is `DIFF_DISAGREES`;
 * a tree whose diff cannot be measured is `DIFF_UNVERIFIED` and has no
   satisfiable path, so a proposal on an unreadable tree cannot promote.
@@ -305,6 +309,9 @@ accept the candidate's account of it. It does not:
 `test_the_kernel_hit_is_found_even_when_the_candidate_hid_it` is the test that
 matters here: a candidate declaring a clean diff while the tree edits
 `src/revl/attest.py` is still refused with `KERNEL_INTERSECTION`.
+`test_a_rename_out_of_the_domain_is_a_domain_escape` is the same argument for a
+`git mv`: the removed path is measured even though `--name-only` alone would
+print only its destination.
 
 ### 5.3a The measured diff must also sit inside the operator's grant
 
@@ -367,7 +374,7 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
-fail-open default hides. Twenty-two named codes:
+fail-open default hides. Twenty-six named codes:
 
 | code | fires when |
 |---|---|
@@ -384,7 +391,10 @@ fail-open default hides. Twenty-two named codes:
 | `TESTS_NOT_CITED` | a `feature` proposal with no `tests` |
 | `MODE_REFUSES_ACTIVATION` | an `evolution` proposal supplies a stage past `propose` |
 | `UNSCOPED` | the proposal declared no scope |
+| `APPLIES_TO_MISSING` | the proposal declared no `applies_to` tag |
 | `FORBIDDEN_GRANT` | the granted set names a decider service |
+| `PROMOTION_INVALID` | the promotion target is not a known target |
+| `DOMAIN_PROMOTED` | a domain-scoped change targets the shared part |
 | `DIFF_UNVERIFIED` | the tree's diff cannot be measured |
 | `DIFF_DISAGREES` | the declared diff understates the tree |
 | `NO_ALLOW_SET` | the operator supplied no allow set |
@@ -392,6 +402,7 @@ fail-open default hides. Twenty-two named codes:
 | `FENCE_TOUCHED` | the diff reaches the lifecycle's own rules |
 | `KERNEL_INTERSECTION` | the diff reaches the admission kernel |
 | `AUTHORITY_WIDENED` | a non-empty or absent authority axis |
+| `DOMAIN_ESCAPE` | a domain-scoped diff leaves its declared domain |
 | `JUDGE_RAISED` | a judge raised, or answered for the wrong stage |
 
 `EVIDENCE_MISSING` is the one the item warns about directly. A controller that
@@ -405,13 +416,20 @@ for an empty evidence list.
 name** on a non-empty diff, and a single generic code would satisfy the letter
 of that while losing what a reader needs: which authority moved.
 
+`DOMAIN_ESCAPE` and `DOMAIN_PROMOTED` are separate codes for the two ways a
+domain-scoped change can become global (issue #2807): the measured diff leaving
+the declared domain, and the promotion target being the shared realm or the
+default composition. The first is measured and the second is the declared
+target, and both are refusals routed to a human rather than a judgement that
+the scoped lesson is general.
+
 `JUDGE_RAISED` is the fail-closed arm for an exception inside a judge. A
 `try`-less implementation would abort the run and leave a human to decide what
 it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-Four demonstrations, all in `tests/test_evolution_controller.py`: 119 tests,
+Four demonstrations, all in `tests/test_evolution_controller.py`: 138 tests,
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four
