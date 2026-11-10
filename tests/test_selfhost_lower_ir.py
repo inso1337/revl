@@ -927,6 +927,28 @@ def test_native_ir_matches_reference_services(lower_to_ir, rel):
     assert native["services"] == reference["services"]
 
 
+@pytest.mark.parametrize("returns,qual", [
+    ("Result[Untrusted[Str], Str]", "Untrusted"),
+    ("Opt[Secret[Str]]", "Secret"),
+    ("Result[Untrusted[Str], Secret[Str]]", "Untrusted"),
+    ("Secret[Str]", "Secret"),
+    ("Result[Str, Str]", None),
+    ("Opt[(Secret[Str]) -> Int]", None),
+])
+def test_native_ir_stamps_a_nested_return_qualifier_like_the_reference(
+        lower_to_ir, returns, qual):
+    """Issue #3192: the services IR's `returns_qualifier` is read inside a
+    container, so a unit compiled against the manifest mints the source. The
+    native producer stamps the same value."""
+    src = (f"service W {{ emission[web] fn get(u: Str) -> {returns} }}\n"
+           "component C requires w: W { }\n")
+    native = json.loads(lower_to_ir(src))
+    reference = compile_source(src)
+    assert native["services"] == reference["services"]
+    assert reference["services"]["W"]["methods"]["get"].get(
+        "returns_qualifier") == qual
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_component_headers(lower_to_ir, rel):
     """Each component's source/config/requires/provides header is byte-identical."""

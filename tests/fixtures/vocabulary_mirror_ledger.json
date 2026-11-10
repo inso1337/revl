@@ -509,6 +509,20 @@
     },
     {
       "sites": [
+        "src/revl/lower.py::_is_emission_call",
+        "src/revl/taint.py::_FlowChecker._is_crossing_call"
+      ],
+      "tokens": [
+        "id",
+        "kind",
+        "method",
+        "name",
+        "target"
+      ],
+      "note": "FALSE POSITIVE. Both read the lowered IR call node's fields (kind, name, target, method, id) to decide whether a call crosses the boundary, for different consumers: lower._is_emission_call judges emission-ness for the G4 marker against the lowering Env (spawn handles, service-typed locals), taint._FlowChecker._is_crossing_call picks the nested calls in a compensate slot that get the Secret crossing rule against the TaintModel (issue #3180) and deliberately leaves spawn-handle calls out, as the forward emit path does. Neither declares the vocabulary; it is the IR schema lower.py writes. taint.py cannot import lower.py (lower imports taint), and the answers are not meant to be equal, so a field one of them starts reading is a correct one-sided edit."
+    },
+    {
+      "sites": [
         "src/revl/lower.py::_is_value_crossing",
         "src/revl/query.py::Composition._service_calls"
       ],
