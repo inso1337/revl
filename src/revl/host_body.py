@@ -28,6 +28,7 @@ are unchanged.
 
 from __future__ import annotations
 
+import heapq
 import unicodedata
 
 __all__ = ["HostBodyError", "body_lines", "check_host_body"]
@@ -65,13 +66,19 @@ _HOST = {
 #: byte/C-string flavour) and any number of `#` before the quote.
 _RUST_RAW_PREFIXES = ("br", "cr", "r")
 
-#: After these words JavaScript reads `/` as the start of a regex literal
-#: rather than as division, unless the word follows a `.` (then it is a
-#: property name). `_Scan._js_code` covers the punctuation, and scans both
-#: readings where the token before the `/` does not decide it.
+#: The ECMAScript keywords an expression may follow, so a `/` after them
+#: opens a regex literal, unless the word follows a `.` (then it is a
+#: property name): `case`, `default` (`export default`), `delete`, `do`,
+#: `else`, `extends`, `in`, `instanceof`, `new`, `return`, `throw`,
+#: `typeof`, `void`, and the contextual `await`, `yield` and `of`, which are
+#: also plain identifiers (see `_CONTEXTUAL_KEYWORDS`). The other keywords
+#: are followed by `(`, `{`, a name or a line end (`break`, `continue`,
+#: `debugger`), or are operands that divide (`this`, `super`, `null`,
+#: `true`, `false`); a line end after an operand is read both ways.
+#: `_Scan._js_code` covers the punctuation.
 _REGEX_KEYWORDS = frozenset({
-    "await", "case", "delete", "do", "else", "in", "instanceof", "new",
-    "of", "return", "throw", "typeof", "void", "yield",
+    "await", "case", "default", "delete", "do", "else", "extends", "in",
+    "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield",
 })
 
 _REGEX_OPENERS = frozenset("([{,;:=!&|?+-*%^~<>")
@@ -214,17 +221,32 @@ class _Scan:
     can open a regex literal or be the division operator and the choice
     depends on the grammar, not on the characters around it (`o.return / 1`
     divides, `return /1/` is a regex; `if (a) /x/` is a regex, `f(a) / x`
-    divides). Where the token before a `/` does not settle it, the scan
-    follows BOTH readings and the body must be balanced under each of them,
-    so the scanner never has to guess which one the host picks.
+    divides; `let a` then a line break then `/x/` is a regex, because the
+    line break ends the statement). Only a `/` the token before it proves to
+    be division is read as division alone; every other `/` that can open a
+    regex is read both ways, and the body must be balanced under each
+    reading, so the scanner never has to guess which one the host picks.
 
-    A reading is a state `(position, depth, before)`; `before` is what the
-    token before the next `/` allows (``_REGEX``, ``_DIV``, ``_EITHER``, or
-    ``_DOT`` after a member access). States are deduplicated, so the number
-    of readings stays bounded by the body's length.
+    The scan is a forward pass over lexical states. A state's key is the
+    reading context at a position: what a `/` there may be (``_REGEX``,
+    ``_DIV``, ``_EITHER``, ``_DOT`` after a member access, ``_HEAD`` after
+    `if`, `while`, `for` or `with`), how many template literals are open,
+    whether the position is code or template text, and which open
+    parentheses are statement heads (so `if (a) /x/` opens a regex and
+    `f(a) / x` divides). Its value is, for the top level and for each open
+    template interpolation, the interval of brace depths the readings that
+    reach it can have. Readings that reach the same key at the same
+    position are merged by widening the intervals, so each key at each
+    position is stepped once and the work stays linear in the body. The
+    lower bound is exact, so an underflow is never missed; a widened upper
+    bound only adds refusals, never removes one. A body whose number of
+    steps still exceeds `_STEPS_PER_CHAR` per character (readings that keep
+    disagreeing), or that nests more than `_MAX_NESTING` templates or
+    parentheses, is refused rather than scanned on.
     """
 
-    __slots__ = ("s", "n", "p", "depth", "underflow", "separator", "_ends")
+    __slots__ = ("s", "n", "p", "depth", "underflow", "separator", "steps",
+                 "limit", "exhausted", "stops", "unterminated")
 
     def __init__(self, src: str, profile: dict) -> None:
         self.s = src
@@ -233,115 +255,182 @@ class _Scan:
         self.depth = 0
         self.underflow = False
         self.separator: str | None = None
-        self._ends: dict[int, tuple[int, ...]] = {}
+        self.steps = 0
+        self.limit = _STEPS_PER_CHAR * self.n + _STEPS_FLOOR
+        self.exhausted = False
+        self.unterminated = False
+        self.stops = _plain_stops(profile)
 
     def run(self) -> None:
-        work = [(0, 0, _REGEX)]
-        seen: set[tuple[int, int, str]] = set()
-        while work and not self.underflow:
-            state = work.pop()
-            if state in seen:
-                continue
-            seen.add(state)
-            self._walk(*state, work, None)
+        # pending: position -> {key: depth intervals}; a key is
+        # (before, open templates, in code, open parens)
+        start = (_REGEX, 0, True, ())
+        if not self.n:
+            return
+        pending: dict[int, dict[tuple, tuple]] = {0: {start: ((0, 0),)}}
+        heap = [0]
+        while heap:
+            pos = heapq.heappop(heap)
+            for key, depths in pending.pop(pos).items():
+                self.steps += 1
+                if self.steps > self.limit:
+                    self.exhausted = True
+                    return
+                for nxt, nkey, ndepths in self._step(pos, key, depths):
+                    if self.underflow or self.exhausted:
+                        return
+                    if nkey[1] > _MAX_NESTING or len(nkey[3]) > _MAX_NESTING:
+                        self.exhausted = True
+                        return
+                    if nxt >= self.n:
+                        self._finish(nxt, nkey, ndepths)
+                        continue
+                    bucket = pending.get(nxt)
+                    if bucket is None:
+                        bucket = pending[nxt] = {}
+                        heapq.heappush(heap, nxt)
+                    known = bucket.get(nkey)
+                    bucket[nkey] = (ndepths if known is None
+                                    else _widen(known, ndepths))
 
-    def _walk(self, i: int, depth: int, before: str,
-              work: list, ends: set | None) -> None:
-        """Follow one reading from `i` until the body ends or a `/` forks.
+    def _finish(self, end: int, key: tuple, depths: tuple) -> None:
+        # A skipper returns one past the end for a string, comment or
+        # template the body leaves open: the emitter writes code after the
+        # body, and the host would read that code as part of the literal
+        # until a later body closes it.
+        if end > self.n or key[1] or not key[2]:
+            self.unterminated = True
+        lo, hi = depths[0]
+        if (lo or hi) and not self.depth:
+            self.depth = hi or lo
 
-        `ends` is None at the top of the body, where a close below depth 0
-        leaves the function (an underflow). Inside a template interpolation
-        it collects the position after the `}` that closes the
-        interpolation, and separators are not noted (the template is a
-        literal at the top level).
-        """
-        s, n, p = self.s, self.n, self.p
+    def _step(self, i: int, key: tuple, depths: tuple) -> list:
+        """The states one token at `i` leads to: `(position, key, depths)`."""
+        before, templates, code, parens = key
+        s, p = self.s, self.p
+        if not code:
+            return [self._template_text(i, templates, parens, depths)]
+        c = s[i]
+        if p["regex"] and c == "/" and not s.startswith(("//", "/*"), i):
+            end = None if before == _DIV else self._skip_regex(i)
+            out = []
+            if end is not None:
+                out.append((end, (_DIV, templates, True, parens), depths))
+            if end is None or before != _REGEX:
+                out.append((i + 1, (_REGEX, templates, True, parens), depths))
+            return out
+        if p["template"] and c == "`":
+            return [(i + 1, (_DIV, templates + 1, False, parens), depths)]
+        token = self._token(i)
+        if token is not None:
+            end, literal = token
+            if literal:
+                before = _DIV
+            else:
+                self._note_separators(i, end)
+                if before == _DIV and _has_line_end(s, i, end):
+                    before = _EITHER
+            return [(end, (before, templates, True, parens), depths)]
+        lo, hi = depths[-1]
+        if c == p["open"]:
+            grown = depths[:-1] + ((lo + 1, hi + 1),)
+            return [(i + 1, (_REGEX, templates, True, parens), grown)]
+        if c == p["close"]:
+            return self._close(i, templates, parens, depths)
+        if p["separators"] and c in _SEPARATORS and self.separator is None:
+            self.separator = c
+        if p["regex"]:
+            end, before, parens = self._js_code(i, before, parens)
+        else:
+            end = self._plain_run(i)
+        return [(end, (before, templates, True, parens), depths)]
+
+    def _close(self, i: int, templates: int, parens: tuple,
+               depths: tuple) -> list:
+        lo, hi = depths[-1]
+        if not templates:
+            if lo == 0:
+                # some reading closes the function the body is spliced into
+                self.underflow = True
+                return []
+            return [(i + 1, (_EITHER, 0, True, parens), ((lo - 1, hi - 1),))]
+        out = []
+        if lo == 0:
+            # closes the innermost interpolation: back to its template text
+            out.append((i + 1, (_DIV, templates, False, parens), depths[:-1]))
+        if hi > 0:
+            inner = (max(lo, 1) - 1, hi - 1)
+            out.append((i + 1, (_EITHER, templates, True, parens),
+                        depths[:-1] + (inner,)))
+        return out
+
+    def _template_text(self, i: int, templates: int, parens: tuple,
+                       depths: tuple) -> tuple:
+        s, n = self.s, self.n
         while i < n:
             c = s[i]
-            if p["regex"] and c == "/" and not s.startswith(("//", "/*"), i):
-                end = None if before == _DIV else self._skip_regex(i)
-                if end is None:
-                    i, before = i + 1, _REGEX
-                    continue
-                if before == _REGEX:
-                    i, before = end, _DIV
-                    continue
-                work.append((end, depth, _DIV))
-                work.append((i + 1, depth, _REGEX))
-                return
-            if p["template"] and c == "`":
-                after = self._template_ends(i)
-                if len(after) == 1:
-                    i, before = after[0], _DIV
-                    continue
-                work.extend((end, depth, _DIV) for end in after)
-                return
-            token = self._token(i)
-            if token is not None:
-                end, literal = token
-                if literal:
-                    before = _DIV
-                elif ends is None:
-                    self._note_separators(i, end)
-                i = end
+            if c == "\\":
+                i += 3 if s.startswith("\r\n", i + 1) else 2
                 continue
-            if c == p["open"]:
-                depth += 1
-                i, before = i + 1, _REGEX
-                continue
-            if c == p["close"]:
-                depth -= 1
-                if depth < 0:
-                    if ends is None:
-                        self.underflow = True
-                    else:
-                        ends.add(i + 1)
-                    return
-                i, before = i + 1, _EITHER
-                continue
-            if (ends is None and p["separators"] and c in _SEPARATORS
-                    and self.separator is None):
-                self.separator = c
-            if p["regex"]:
-                i, before = self._js_code(i, before)
-            else:
-                i += 1
-        if ends is not None:
-            ends.add(n)
-        elif depth and not self.depth:
-            self.depth = depth
+            if c == "`":
+                return i + 1, (_DIV, templates - 1, True, parens), depths
+            if c == "$" and s.startswith("{", i + 1):
+                return (i + 2, (_REGEX, templates, True, parens),
+                        depths + ((0, 0),))
+            i += 1
+        return n, (_DIV, templates, False, parens), depths
 
-    def _js_code(self, i: int, before: str) -> tuple[int, str]:
-        """Step over one JavaScript code token at `i` and say what it allows
-        a following `/` to be."""
+    def _plain_run(self, i: int) -> int:
+        """Past a run of characters no rule of a non-JavaScript host reads."""
+        s, n, stops = self.s, self.n, self.stops
+        i += 1
+        while i < n and s[i] not in stops:
+            i += 1
+        return i
+
+    def _js_code(self, i: int, before: str,
+                 parens: tuple) -> tuple[int, str, tuple]:
+        """Step over one JavaScript code token at `i`: where it ends, what it
+        allows a following `/` to be, and the open parentheses after it
+        (True for the head of `if`, `while`, `for` or `with`)."""
         s, n = self.s, self.n
         c = s[i]
         if _js_space(c):
-            return i + 1, before
+            if before == _DIV and c in _JS_LINE_ENDS:
+                # `let a` + line break + `/x/`: the line break may end the
+                # statement, so the operand no longer proves division
+                before = _EITHER
+            return i + 1, before, parens
         if _js_word_char(c) or c == "#":
             j = i + 1
             while j < n and _js_word_char(s[j]):
                 j += 1
-            return j, _word_before_slash(s[i:j], before)
+            return j, _word_before_slash(s[i:j], before), parens
         if c == ".":
-            return i + 1, _DOT
-        operand = before == _REGEX  # an operand is expected here
+            return i + 1, _DOT, parens
+        if c == "(":
+            return i + 1, _REGEX, parens + (before == _HEAD,)
+        if c == ")":
+            if not parens:
+                return i + 1, _EITHER, parens
+            # the head of `if (c) /x/` is followed by a statement; any other
+            # parenthesis (a call, a group, a parameter list) by an operator
+            return i + 1, _REGEX if parens[-1] else _DIV, parens[:-1]
+        operand = before in (_REGEX, _HEAD)  # an operand is expected here
         if c in "+-" and i + 1 < n and s[i + 1] == c:
             # a prefix `++` is an operator; a postfix one ends an operand
-            return i + 2, _REGEX if operand else _EITHER
+            return i + 2, _REGEX if operand else _EITHER, parens
         if c == "!":
             # a prefix `!` is an operator; TypeScript's non-null `x!` ends
-            # an operand, so `x! / y` divides
-            return i + 1, _REGEX if operand else _EITHER
-        if c == "]":
-            return i + 1, _DIV
+            # an operand
+            return i + 1, _REGEX if operand else _EITHER, parens
         if c == ">" and i and s[i - 1] == "=":
-            return i + 1, _REGEX  # `=>`
+            return i + 1, _REGEX, parens  # `=>`
         if c in _REGEX_OPENERS and c != ">":
-            return i + 1, _REGEX
-        # `)` ends both a condition (regex next) and an operand (division
-        # next); a TypeScript type argument list's `>` can end an operand.
-        return i + 1, _EITHER
+            return i + 1, _REGEX, parens
+        # `]` ends an operand (division next on the same line); a TypeScript
+        # type argument list's `>` can end an operand.
+        return i + 1, _DIV if c == "]" else _EITHER, parens
 
     def _note_separators(self, start: int, end: int) -> None:
         if not self.p["separators"] or self.separator is not None:
@@ -401,7 +490,7 @@ class _Scan:
                     return i
             else:
                 i += 1
-        return n
+        return n + 1  # unterminated
 
     def _skip_quote(self, i: int, quote: str) -> int:
         s, n = self.s, self.n
@@ -409,7 +498,8 @@ class _Scan:
         while i < n:
             c = s[i]
             if c == "\\":
-                i += 2
+                # a backslash before CR LF continues the line as one unit
+                i += 3 if s.startswith("\r\n", i + 1) else 2
                 continue
             if c == quote:
                 return i + 1
@@ -418,12 +508,12 @@ class _Scan:
                 # brace the host would see structural cannot be swallowed
                 return i
             i += 1
-        return n
+        return n + 1  # unterminated
 
     def _skip_raw_quote(self, i: int, quote: str) -> int:
         # Go's backtick raw string: no escapes and the quote only closes it.
         end = self.s.find(quote, i + 1)
-        return self.n if end < 0 else end + 1
+        return self.n + 1 if end < 0 else end + 1
 
     def _skip_char(self, i: int) -> int | None:
         s, n = self.s, self.n
@@ -471,7 +561,7 @@ class _Scan:
                 continue
             close = '"' + "#" * hashes
             end = s.find(close, j + 1)
-            return n if end < 0 else end + len(close)
+            return n + 1 if end < 0 else end + len(close)
         return None
 
     def _skip_java_text_block(self, i: int) -> int:
@@ -484,55 +574,7 @@ class _Scan:
             if s.startswith('"""', i):
                 return i + 3
             i += 1
-        return n
-
-    def _template_ends(self, i: int) -> tuple[int, ...]:
-        """Every position the template literal opening at `i` can end at.
-
-        An interpolation may hold a `/` with two readings, so a template can
-        have more than one end. Memoised by start: the ends do not depend on
-        the reading that reached the template."""
-        known = self._ends.get(i)
-        if known is not None:
-            return known
-        s, n = self.s, self.n
-        ends: set[int] = set()
-        work, seen = [i + 1], set()
-        while work:
-            j = work.pop()
-            if j in seen:
-                continue
-            seen.add(j)
-            while j < n:
-                c = s[j]
-                if c == "\\":
-                    j += 2
-                    continue
-                if c == "`":
-                    ends.add(j + 1)
-                    break
-                if c == "$" and j + 1 < n and s[j + 1] == "{":
-                    work.extend(self._interpolation_ends(j + 2))
-                    break
-                j += 1
-            else:
-                ends.add(n)
-        result = tuple(sorted(ends))
-        self._ends[i] = result
-        return result
-
-    def _interpolation_ends(self, i: int) -> set[int]:
-        """Every position after the `}` closing the interpolation at `i`."""
-        ends: set[int] = set()
-        work = [(i, 0, _REGEX)]
-        seen: set[tuple[int, int, str]] = set()
-        while work:
-            state = work.pop()
-            if state in seen:
-                continue
-            seen.add(state)
-            self._walk(*state, work, ends)
-        return ends
+        return n + 1  # unterminated
 
     def _skip_regex(self, i: int) -> int | None:
         s, n = self.s, self.n
@@ -541,9 +583,11 @@ class _Scan:
         while i < n:
             c = s[i]
             if c == "\\":
+                if i + 1 < n and s[i + 1] in _JS_LINE_ENDS:
+                    return None  # a regex literal cannot continue a line
                 i += 2
                 continue
-            if c in "\n\r":
+            if c in _JS_LINE_ENDS:
                 return None
             if c == "[":
                 in_class = True
@@ -563,13 +607,56 @@ class _Scan:
 #: whatever the following property name allows.
 _REGEX, _DIV, _EITHER, _DOT = "regex", "div", "either", "dot"
 
+#: After one of these a `(` opens a statement head, and the `)` closing it
+#: is followed by a statement, so a `/` there opens a regex literal.
+_HEAD = "head"
+_HEAD_KEYWORDS = frozenset({"if", "while", "for", "with"})
+
 #: Words in `_REGEX_KEYWORDS` that are also ordinary identifiers outside a
 #: generator, an async function or a `for` head, so either reading is real.
 _CONTEXTUAL_KEYWORDS = frozenset({"await", "yield", "of"})
 
 #: JavaScript white space and line terminators (ECMA-262 12.2, 12.3); the
 #: rest of the Zs category is checked through `unicodedata`.
-_JS_SPACE = frozenset(" \t\n\r\x0b\x0c ﻿  ")
+_JS_SPACE = frozenset(" \t\n\r\x0b\x0c\u00a0\ufeff\u2028\u2029")
+
+
+#: JavaScript line terminators (ECMA-262 12.3).
+_JS_LINE_ENDS = frozenset("\n\r\u2028\u2029")
+
+#: Steps the scan may take per character of body before it refuses the body
+#: as too ambiguous to check (see `_Scan`). Ordinary bodies take about one.
+_STEPS_PER_CHAR = 8
+_STEPS_FLOOR = 4096
+
+#: Open template literals or parentheses one reading may nest; past it the
+#: body is refused, so a state's key stays small.
+_MAX_NESTING = 64
+
+
+def _has_line_end(s: str, start: int, end: int) -> bool:
+    return any(c in _JS_LINE_ENDS for c in s[start:end])
+
+
+def _widen(a: tuple, b: tuple) -> tuple:
+    """Two readings at one state: the interval hull of their depths."""
+    return tuple((min(x[0], y[0]), max(x[1], y[1])) for x, y in zip(a, b))
+
+
+def _plain_stops(profile: dict) -> frozenset:
+    """The characters at which a rule of a non-JavaScript host can start."""
+    stops = set(profile["open"] + profile["close"])
+    stops.update(opener[0] for opener in profile["line_comments"])
+    stops.update(opener[0] for opener, _ in profile["block_comments"])
+    stops.update(profile["strings"])
+    stops.update(profile["raw_quotes"])
+    stops.update(prefix[0] for prefix in profile["raw"] or ())
+    if profile["char"] is not None:
+        stops.add("'")
+    if profile["text_block"]:
+        stops.add('"')
+    stops.update(_SEPARATORS)
+    return frozenset(stops)
 
 
 def _js_space(c: str) -> bool:
@@ -588,6 +675,8 @@ def _js_word_char(c: str) -> bool:
 def _word_before_slash(word: str, before: str) -> str:
     if before == _DOT:
         return _DIV  # a property name: `o.return / 2` divides
+    if word in _HEAD_KEYWORDS or (word == "await" and before == _HEAD):
+        return _HEAD  # `for await (`
     if word in _CONTEXTUAL_KEYWORDS:
         return _EITHER
     if word in _REGEX_KEYWORDS:
@@ -646,11 +735,34 @@ def check_host_body(backend: str, body: str, *, where: str = "",
     profile = _PROFILES.get(backend)
     if profile is None:
         raise ValueError(f"unknown host body backend {backend!r}")
+    if profile["separators"]:
+        # what the emitter writes: `body_lines` ends lines at CR LF and CR
+        body = body.replace("\r\n", "\n").replace("\r", "\n")
     if profile["unicode_escapes"]:
         body = _decode_unicode_escapes(body)
     scan = _Scan(body, profile)
-    scan.run()
+    try:
+        scan.run()
+    except RecursionError:
+        scan.exhausted = True
     prefix = f"{where}: " if where else ""
+    if scan.unterminated:
+        raise error(
+            f"{prefix}the @{backend} host body ends inside a string, "
+            f"comment or template literal under {_HOST[backend]} lexical "
+            f"rules, so the code the emitter writes after the body would be "
+            f"read as part of it. Close it inside the body."
+        )
+    if scan.exhausted:
+        raise error(
+            f"{prefix}the @{backend} host body has more possible readings "
+            f"under {_HOST[backend]} lexical rules than the scanner checks "
+            f"(at most {scan.limit} steps for {scan.n} characters, and "
+            f"{_MAX_NESTING} nested template literals or parentheses): too "
+            f"many `/` that may open a regex literal or divide, whose "
+            f"readings disagree. Split the body or simplify those "
+            f"expressions."
+        )
     if scan.underflow:
         raise error(
             f"{prefix}the @{backend} host body is not "

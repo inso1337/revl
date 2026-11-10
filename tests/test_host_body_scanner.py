@@ -17,6 +17,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from revl import host_body  # noqa: E402
 from revl.host_body import (  # noqa: E402
     HostBodyError,
     body_lines,
@@ -165,6 +166,82 @@ def test_java_even_backslashes_and_balanced_escapes_are_accepted(body):
     assert check_host_body("java", body) is None
 
 
+# ------------------------------------------------ bodies left open at the end
+# The emitter writes code after the body; a literal or comment the body leaves
+# open would swallow it, up to a later body that closes it.
+@pytest.mark.parametrize("backend,body", [
+    ("ts", "return `a"),
+    ("ts", "return `${a}"),
+    ("ts", 'return "a\\'),
+    ("ts", "return x /* c"),
+    ("rs", 'return "a'),
+    ("rs", 'return r#"a'),
+    ("go", "return `a"),
+    ("java", 'return """\na'),
+    ("java", "return x; /* c"),
+])
+def test_body_ending_inside_a_literal_or_comment_is_refused(backend, body):
+    with pytest.raises(HostBodyError) as excinfo:
+        check_host_body(backend, body)
+    assert "ends inside a string, comment or template" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("backend,body", [
+    ("ts", "return x // c"),
+    ("ts", 'return "a\\\r\nb"'),
+    ("ts", "return `a\\\r\nb`"),
+    ("rs", "return x // c"),
+    ("go", "return x // c"),
+])
+def test_body_ending_in_a_line_comment_or_continued_string_is_accepted(
+        backend, body):
+    assert check_host_body(backend, body) is None
+
+
+# ------------------------------------------------------ cost of the scan
+class _TooMuchWork(AssertionError):
+    pass
+
+
+def _count_tokens(monkeypatch, bound):
+    """Count the tokens the scanner steps over; stop past `bound`."""
+    calls = [0]
+    token = host_body._Scan._token
+
+    def counted(self, i):
+        calls[0] += 1
+        if calls[0] > bound:
+            raise _TooMuchWork(f"more than {bound} tokens")
+        return token(self, i)
+
+    monkeypatch.setattr(host_body._Scan, "_token", counted)
+    return calls
+
+
+@pytest.mark.parametrize("unit", ["`${(a)/[{]/}`;", "(a) /[{]/ ;\n"])
+def test_ambiguous_slashes_are_scanned_in_linear_work(monkeypatch, unit):
+    body = unit * 2000
+    calls = _count_tokens(monkeypatch, 2 * len(body))
+    with pytest.raises(HostBodyError):
+        check_host_body("ts", body)
+    assert calls[0] <= 2 * len(body)
+
+
+def test_readings_past_the_step_cap_are_refused(monkeypatch):
+    # every `/(/` may open a parenthesis, so the readings keep disagreeing
+    body = "{} /(/ ;\n" * 300
+    _count_tokens(monkeypatch, 16 * len(body) + 8192)
+    with pytest.raises(HostBodyError) as excinfo:
+        check_host_body("ts", body)
+    assert "more possible readings" in str(excinfo.value)
+
+
+def test_deeply_nested_templates_are_refused_without_recursion():
+    with pytest.raises(HostBodyError) as excinfo:
+        check_host_body("ts", "return " + "`${" * 5000)
+    assert "more possible readings" in str(excinfo.value)
+
+
 # --------------------------------------------------------- separators (#3131)
 @pytest.mark.parametrize("backend", ["ts", "rs", "java", "go"])
 @pytest.mark.parametrize(
@@ -173,6 +250,18 @@ def test_java_even_backslashes_and_balanced_escapes_are_accepted(body):
 def test_separators_outside_a_string_are_refused(backend, separator):
     with pytest.raises(HostBodyError) as excinfo:
         check_host_body(backend, f"// c{separator}code\nreturn x")
+    assert "outside a string literal" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("body", [
+    # code inside a template interpolation is code, not template text
+    "return `${a /* */}`",
+    # a regex literal cannot hold a line terminator, so this `/` divides
+    "return a /b / c",
+])
+def test_ts_separators_in_interpolation_or_regex_reading_are_refused(body):
+    with pytest.raises(HostBodyError) as excinfo:
+        check_host_body("ts", body)
     assert "outside a string literal" in str(excinfo.value)
 
 

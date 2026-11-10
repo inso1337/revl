@@ -254,3 +254,46 @@ def test_java_even_backslashes_are_not_a_unicode_escape():
         "pub fn g(a: Int) -> Str = f(a)\n",
     )
     assert '"\\\\u007d"' in out
+
+
+# ------------------------------------- second review of #3313: ts readings
+# Each body is accepted by a scanner that settles a `/` from the word before
+# it, and each one, emitted and run, assigned PWNED at module load. The first
+# `/[{]/` hides a `{` from a division reading; the last line pads the count
+# back with `/[}]/`. A line break after an operand (`let a`, `continue`,
+# `debugger`, `break x`, a type annotation) can end the statement, so the
+# `/` after it is read both ways; `extends` is followed by an expression.
+_TS_SECOND_REVIEW = {
+    "let": ('let a\n  /[{]/.test("")\n  }\n',
+            'function pad() { let b\n  /[}]/.test("")'),
+    "extends": ("class A extends /[{]/.constructor {}\n  }\n",
+                "function pad() { class B extends /[}]/.constructor {}"),
+    "break_label": ('x: { break x\n  /[{]/.test("") }\n  }\n',
+                    'function pad() { y: { break y\n  /[}]/.test("") }'),
+    "continue": ('for (;;) { if (1) break; continue\n  /[{]/.test("") }\n  }\n',
+                 'function pad() { for (;;) { break; continue\n'
+                 '  /[}]/.test("") }'),
+    "debugger": ('debugger\n  /[{]/.test("")\n  }\n',
+                 'function pad() { debugger\n  /[}]/.test("")'),
+    "array_type": ('let a: string[]\n  /[{]/.test("")\n  }\n',
+                   'function pad() { let b: string[]\n  /[}]/.test("")'),
+    "string_type": ('let a: "x"\n  /[{]/.test("")\n  }\n',
+                    'function pad() { let b: "y"\n  /[}]/.test("")'),
+    "template_type": ('let a: `x`\n  /[{]/.test("")\n  }\n',
+                      'function pad() { let b: `y`\n  /[}]/.test("")'),
+    # a backslash before CR LF continues the string, so its `{` is text
+    "string_crlf": ('"\\\r\n{"\n  }\n', 'function pad() { "\\\r\n}"'),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_TS_SECOND_REVIEW))
+def test_ts_body_that_runs_at_module_load_is_refused(case):
+    head, pad = _TS_SECOND_REVIEW[case]
+    source = (
+        "extern pure fn dead(x: Int) -> Str = @ts {\n  " + head
+        + '  globalThis.PWNED = "module-load"\n  ' + pad + "\n}\n"
+        "pub fn use_it(a: Int) -> Str = dead(a)\n"
+    )
+    message = _refusal("ts", source)
+    assert "extern `dead`" in message
+    assert "brace-balanced" in message
