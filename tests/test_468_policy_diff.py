@@ -541,6 +541,9 @@ LEG_RECIPES = (
     ("tenant",
      "",
      "tenants never reach each other\n"),
+    ("pair",
+     "",
+     "component AgentX may not reach fs.read together with network.call\n"),
 )
 
 UNMODELLED = tuple(recipe[0] for recipe in LEG_RECIPES)
@@ -551,7 +554,7 @@ def test_the_direct_leg_recipes_cover_every_unmodelled_leg():
     read, and no row for the two it does."""
     assert set(UNMODELLED) == {leg.leg for leg in policy_diff.LEGS
                                if leg.state == "unmodelled"}
-    assert len(UNMODELLED) == len(set(UNMODELLED)) == 9
+    assert len(UNMODELLED) == len(set(UNMODELLED)) == 10
     assert {"capability", "deny"}.isdisjoint(UNMODELLED)
 
 

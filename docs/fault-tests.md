@@ -609,3 +609,61 @@ provider dying mid-life, network timeouts, a dropped mutual-TLS connection and
 a process crash at a chosen point (for the crash between an effect and its record, see
 [crash-recovery.md](crash-recovery.md), section 4c) are not drawn by the profile
 yet.
+
+## 12. A faulted component's pending work (issue #2711)
+
+A fault test proves the unwind of the activation itself. It does not state
+what happened to the work the activation had already put somewhere else when
+it died: a stream item the consumer never read, a timer, a deferred emission,
+a spawned child, a caller, a dependent. Each of those had an outcome in the
+runtime, but none was written down or pinned. This section is the inventory
+for the cordis-py reference tier.
+
+**Scope.** A component can land FAILED only during activation (A8): its body
+raised at a step. Such a component never served a call, and a cleanly
+activated component does not fault at all (taking it down is teardown, not
+this inventory). So the question is exactly this: what becomes of the work an
+activation had queued before the fault reached it?
+
+**The constraint.** The unwind has already reverted the activation's
+accumulated effects, newest first. Whatever route pending work takes must
+only deliver, report, refuse or cancel it; it must never run an undo a second
+time. The last column of the table names the test that pins the row.
+
+| kind of pending work | where it is held | outcome at FAILED | pinned by |
+| --- | --- | --- | --- |
+| the activation's own body, including an `await` in flight | the fiber | the raising step's exception is recorded on the fiber, which lands FAILED; siblings are unaffected | `tests/test_fault_tests.py` (`test_a_real_activation_unwinds_lifo_with_no_residue`) |
+| accumulated inverses (brackets, transactional entries, compensations) | the activation's LIFO stack | Phase 1 replays newest first, owed compensations run in Phase 2; no residue, and a raise is recorded as residue | `tests/test_fault_tests.py` (`test_a_real_activation_unwinds_lifo_with_no_residue`); [teardown-contract.md](design/teardown-contract.md) |
+| emissions already performed | past the host boundary | they stand; each is reported, never reverted; a `compensate` offsets but is not an inversion | `tests/test_fault_tests.py` (`test_no_emissions_really_fails_when_the_body_emitted`) |
+| a deferred emission enqueued before the fault | the session's deferral queue, not the activation | it stays queued: a commit enumerates and flushes it FIFO, an abort drops it. The component's fault alone neither fires nor drops it | `tests/test_faulted_pending_work_2711.py` (deferred); `tests/test_session_commit.py` |
+| stream items buffered for the activation's subscription | the subscription's bounded buffer | the bracket inverse closes the subscription and the unread items are discarded with the dead consumer; the count is recorded (`stream.discard N`) and the buffer is released; a later provider emit returns `False`, because the provider's own bracket has closed the source too | `tests/test_faulted_pending_work_2711.py` (buffered) |
+| a parked `next` | the subscription's park | resolved by exactly one terminal: `Closed` on owner withdrawal, `Faulted(err)` on provider abort; never silence | `tests/test_faulted_pending_work_2711.py` (parked, the `Faulted` leg); `backends/python/tests/test_stream_runtime.py` (`test_cancel_reaches_a_parked_next`, `test_provider_death_is_a_terminal`) |
+| an armed timer | the clock's timer registry | cancelled by its bracket inverse; no orphaned firing; `Clock.pending()` returns to 0 | `tests/test_faulted_pending_work_2711.py` (timer); `tests/test_time_coeffect.py` |
+| a spawned child instance | the parent's spawn handle and the live-instance registry | disposed by the handle's inverse; the child's own LIFO teardown runs and it leaves the live registry | `tests/test_faulted_pending_work_2711.py` (spawn) |
+| a request addressed to the component | nothing: a call is dispatched to a live provider | refused by name, naming the provider and its activation error; nothing is queued for later | `tests/test_faulted_pending_work_2711.py` (refusal); issue #1895 |
+| a dependent waiting on the component's provision | the dependent's own fiber, PENDING | it is not failed and is not handed a dead provider: it stays PENDING on the unmet requirement (R2) | `tests/test_faulted_pending_work_2711.py` (dependent); [lifecycle-contract.md](lifecycle-contract.md) |
+
+Every kind ends in a named outcome: reverted, delivered at commit, refused by
+name, resolved by a terminal event, cancelled, disposed, or visibly waiting.
+With the discarded-item count recorded in the buffered-items row, no kind is
+silently dropped. That is why no generic declared `fail` or `escalation
+target` clause is added here: the terminal events, the named refusals and the
+session commit already cover every case. If a target clause is ever added,
+the deferral queue and the refusal path are the only places where delivery or
+reporting already happens, and it must extend those, never re-run an undo.
+
+The only behaviour this inventory changed is the buffered-items row: a close
+now records the discarded count and releases the buffer it used to leave to
+garbage collection. Every other outcome was already the runtime's, and the
+tests exist to stop it drifting.
+
+**Not in this inventory.** A session abort is the session's verdict, not a
+component fault: it drops the deferral queue and reverts the escrowed entries
+([245-session-commit.md](design/245-session-commit.md)). An E-Stop is a third
+verdict that strands every registered entry rather than reverting it
+([443-estop.md](design/443-estop.md)). A provide-method error is not a fiber
+fault either: it propagates to the caller and the component stays ACTIVE, so
+the entries that method registered belong to the teardown contract. And the
+other five tiers do not execute fault tests (section 6), so this is a
+reference-tier inventory: the bracket-inverse lowering is mirrored, but no
+per-tier claim is made here.

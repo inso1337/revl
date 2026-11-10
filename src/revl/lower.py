@@ -113,6 +113,7 @@ from .parser import (
     recursion_headroom,
     _describe_expr,
     missing_undo_refusal,
+    acquire_without_undo_fields,
     AbortStmt,
     AdvanceStmt,
     AssertStmt,
@@ -2591,12 +2592,29 @@ def _is_sized_type(type_name: str | None) -> bool:
 
 
 def _variant_case_payload(types: dict, type_name: str | None, case_name: str) -> str | None:
-    spec = types.get(type_name or "")
+    """The payload a case binds, with the selector's type arguments substituted.
+
+    A generic variant is declared once (`type Box[T] = Full(T) | Empty`), so
+    the case table is keyed by the head. `Box[Int]` must answer `Int` for
+    `Full`, not the bare parameter `T`: the arm's payload type is what a
+    backend types the binding with, and a bare `T` names no Java type (issue
+    #2325). A raw generic selector (`Box`) has no arguments to substitute and
+    stays unknown; so does an arity mismatch.
+    """
+    head, args = parse_type(type_name)
+    spec = types.get(head or "")
     if spec is None or spec.get("kind") != "variant":
         return None
+    params = spec.get("params") or []
+    if params and len(args) != len(params):
+        return None
+    subst = dict(zip(params, args)) if params else {}
     for case in spec.get("cases", []):
         if case["name"] == case_name:
-            return case["payload"]
+            payload = case.get("payload")
+            if payload is None:
+                return None
+            return substitute(payload, subst)
     return None
 
 
@@ -4733,6 +4751,13 @@ _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
 _ROUTE_QUERY_METHODS = ("get", "head", "delete")
 _ROUTE_BODY_METHODS = ("post", "put", "patch")
 
+#: the two verbs a browser sends from ANY page without an `Origin` header: an
+#: `<img>`, `<script>` or `<link>` GET, a form GET, or a top-level navigation.
+#: Issue #3186: a mutating operation routed with one is reachable from every page
+#: the operator visits, so an operation whose reach is an emission may not use
+#: them.
+_ROUTE_ORIGINLESS_METHODS = ("get", "head")
+
 
 def _route_scalar(type_name: str | None) -> bool:
     return type_name in _ROUTE_SCALARS
@@ -4768,6 +4793,9 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
         template does not name;
       * a `Bearer` / `Request` parameter appearing more than once;
       * a non-scalar / non-`Opt[scalar]` query parameter on a safe verb;
+      * a `route get` or `route head` on an `emission` operation (issue #3186):
+        a browser sends no `Origin` on the cross-site GET a page can fire, so an
+        emission reached by one fires from any page the operator visits;
       * anything other than exactly one record body on an unsafe verb;
       * a body / query / path type that is not `fully_expressible` (item 257);
       * a `Result[T, E]` return whose `E` is not `ApiError`.
@@ -4785,6 +4813,14 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
     def refuse(message: str, hint: str | None = None):
         raise RevlError(filename, line, message, hint=hint,
                         code="G4", category="route")
+
+    if m.emission and method in _ROUTE_ORIGINLESS_METHODS:
+        refuse(f"{where} is an `emission` operation, but is routed with `{method}`",
+               hint="a browser sends no Origin on a cross-site GET (an <img>, "
+                    "<script>, <link>, form GET or top-level navigation), so any "
+                    "page the operator visits could fire it; route an emission "
+                    "with `post`, which a cross-site page cannot send without a "
+                    "preflighted Origin")
 
     try:
         template = _route_template_names(path)
@@ -5046,6 +5082,7 @@ def _lower_externs(program: Program, filename: str, types: dict,
                 filename, decl.line,
                 f"acquire extern `{decl.name}` must declare `undo` (G4)",
                 hint="an `acquire` crosses into an observable effect and needs a teardown inverse",
+                **acquire_without_undo_fields(decl.name, decl.returns)
             )
         # R0 (item 308): an `acquire` return must be a NOMINAL OPAQUE HANDLE
         # type. A primitive (`Int`) or a structural carrier (`Result[..]`,
@@ -6959,6 +6996,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
         _pin_return_only_call(declared, lowered_value, types)
+        _pin_record_expected(declared, lowered_value, types)
         body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -7515,6 +7553,36 @@ def _return_only_tparams(sig: dict | None) -> list[str]:
         if w in tparams and w not in in_params and w not in found:
             found.append(w)
     return found
+
+
+def _pin_record_expected(local_type: str | None, node: dict | None,
+                         types: dict) -> None:
+    """An annotated `let`-bound generic record literal carries the local's type
+    (issue #2325).
+
+    `let b: Bx[List[Int]] = { v: [] }` is not diamond-inferable by javac:
+    `new Bx(List.of())` infers `Bx<List<Object>>` and `b` stays raw, so a field
+    read is an `Object` operation. The annotation is the pin, and the frontend
+    is the only stage that knows it, so it rides the literal as
+    ``"expected": "Bx[List[Int]]"``, the same marker an empty collection gets.
+    The emitter renders the arguments from it instead of a diamond or a raw
+    constructor.
+
+    Only a DECLARED type is pinned. An unannotated literal's type is what the
+    checker inferred, and the Java argument must be the same type the native
+    (self-host) producer infers for the byte-identical IR; where that inference
+    differs (a generic variant constructor or generic call field), the literal
+    stays raw. The marker is additive and appears only on such a literal, so
+    every other document is byte-identical.
+    """
+    if not local_type or not isinstance(node, dict) or node.get("kind") != "record":
+        return
+    head, args = parse_type(local_type)
+    spec = types.get(head or "")
+    if isinstance(spec, dict) and spec.get("kind") == "record":
+        params = list(spec.get("params") or ())
+        if params and len(args) == len(params):
+            node["expected"] = local_type
 
 
 def _pin_return_only_call(declared: str | None, node: dict | None,
@@ -9963,6 +10031,7 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
             if st.type is not None:
                 check_type_wellformed(filename, st.line, st.type)
                 env.type_env[safe] = st.type
+                _pin_record_expected(st.type, value, env.types)
             else:
                 inferred = infer_ir(value, env.type_env, env.types, env.services)
                 if inferred is not None:
@@ -12619,7 +12688,7 @@ def _refuse_builtin_type_value(name: str, env: "Env", filename: str,
         hint = ("a bracket inverse releases the handle its bracket bound: "
                 "`let h = effect Map.new() undo h.drop()`. A builtin method "
                 "computes a new value and releases nothing, so it is never an "
-                "inverse (docs/rejections.md#g4--inverse-or-emit)")
+                "inverse (docs/rejections.md#g4-inverse-or-emit)")
     else:
         hint = ("a builtin method is called on a value of the type "
                 "(`xs.<method>()`), never on the type, and a builtin type is "
@@ -12990,10 +13059,11 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
             # the class so the refusal tells the author to drop the bracket
             # rather than to reclassify the write `pure`.
             declared_local = True
-        message, hint = missing_undo_refusal(head, declared, declared_local)
+        message, hint, fields = missing_undo_refusal(
+            head, declared, declared_local, bind=bind)
         raise RevlError(
             filename, line, message, hint=hint,
-            code="G4", category="witnessed",
+            code="G4", category="witnessed", **fields
         )
     else:
         # G5 (docs/design/teardown-contract.md): a bracket inverse may NOT emit
@@ -15369,6 +15439,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 check_type_wellformed(filename, ms.line, ms.type)
                 env.type_env[safe] = ms.type
                 _pin_empty_literal(ms.type, value)
+                _pin_record_expected(ms.type, value, env.types)
             elif swept is not None:
                 env.type_env[safe] = swept
             out.append({"step": "let", "name": safe, "value": value,

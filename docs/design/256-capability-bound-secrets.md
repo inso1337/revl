@@ -436,9 +436,10 @@ crossing kind. Each is a distinct code path and gets its own test:
    G-SECRET. An ordinary extern that is neither a declared `Trusted[T]` sink nor
    an `emit` still must not receive a `secret` value.
 
-3. **The unnameable indirect / `*` callable** (the `indirect and self.any_sink
-   and self._is_unnameable(resolved)` path in `_taint_of_call`, which already
-   over-approximates every argument as a sink via `_on_sink`). Extend the
+3. **The unnameable indirect / `*` callable** (the `indirect and
+   self._is_unnameable(resolved)` path in `_taint_of_call`, whose every-argument
+   sink over-approximation via `_on_sink` is gated on `any_sink`, and whose
+   result now always joins the callee VALUE's taint, issue #3110). Extend the
    over-approximation to fire for a `secret`-carrying argument independently of
    `any_sink`: a first-class emitting callable revl cannot name must refuse a
    `secret` argument, because what cannot be named cannot be proven to re-emit
@@ -682,6 +683,12 @@ refused (a new code, G-SECRET-FLOW):
 - **an LLM prompt**: an argument to a `model.*` emission;
 - **an MCP tool return**: the value a `provide` method returns across the MCP
   bridge;
+- **the error text of a failed activation**: a `fail` step's message is
+  recorded on the FAILED fiber, returned by `revl_load` / `revl_state`
+  (`components[].error.message`) and printed in the run trace; the runtime also
+  funnels the built message through `confidential.redact_text` as a backstop,
+  and a host error that quotes a registered secret is scrubbed at the same two
+  sinks (issues #3141 / #3142);
 - **an un-approved realm crossing**: a spawn/realm boundary without an approval
   edge;
 - **any capability-boundary crossing without explicit declaration**: an `emit`

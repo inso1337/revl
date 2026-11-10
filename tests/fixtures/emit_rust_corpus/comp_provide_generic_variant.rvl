@@ -1,0 +1,20 @@
+// Issue #2494: a user generic variant on the component tier. A service whose
+// methods take and return `Mb[Str]` or `Mb[Int]`, provide methods that build
+// and match the variant (the instantiated case struct under an applied
+// scrutinee, the substituted payload type), and an unpinned list literal
+// (`[Jj(n), Nn]`) typed from the declared return.
+type Mb[T] = Jj(T) | Nn
+
+service S {
+  fn read(m: Mb[Str]) -> Str
+  fn bump(m: Mb[Int]) -> Mb[Int]
+  fn many(n: Int) -> List[Mb[Int]]
+}
+
+component P provides s: S {
+  provide s {
+    fn read(m) = match m { Jj(s) => s, Nn => "none" }
+    fn bump(m) = match m { Jj(x) => Jj(x + 1), Nn => Nn }
+    fn many(n) = [Jj(n), Nn]
+  }
+}

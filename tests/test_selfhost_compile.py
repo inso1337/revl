@@ -795,7 +795,7 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Opt-gap document, the issue #1631 erased-Result document, and the
         # combined path's `comp_provide_pure.rvl`.)
         # no other residual: the fully-native chain reproduces the rest of the
-        # go corpus.
+        # go corpus, except the entries below.
         # issue #2495: the generic-function document. Emitter-exact from the
         # reference IR (selfhost/emit_go.rvl mirrors the type-parameter list
         # and the call binding); the native IR producer reads a call to a
@@ -805,6 +805,20 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
+        # issue #2472: the native chain still refuses a user generic variant,
+        # so both emitter corpus documents that declare one diverge through
+        # the fully-native chain. The emitter half is byte-exact on the
+        # reference IR (tests/test_selfhost_emit_go.py).
+        "../emit_rust_corpus/generic_variant.rvl",
+        "../emit_rust_corpus/comp_provide_generic_variant.rvl",
+        # issue #2898: a provide-method `let pinned: List[Str] = []` in the
+        # combined document. The emitter half is byte-exact from the reference
+        # IR; the native IR producer drops the annotation's `expected` on a
+        # component-body literal, so the port falls back to `_comp_infer`'s
+        # `List[Int]` guess (`pinned := []int64{}` instead of `[]string{}`).
+        # That is a selfhost/lower.rvl gap, not an emitter one: the reference
+        # frontend threads the declared type onto the itemless node.
+        "comp_provide_empty_list.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -819,7 +833,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `stdlib_builtins.rvl` and the borrowed
         # `../emit_ts_corpus/property_edges.rvl` — left it with the
         # `sized_length` property form.)
-        # no residual: the fully-native chain reproduces the whole java corpus.
+        # issue #3095: the native producer leaves the component's `let-effect`
+        # binder raw (`ctx` stays `ctx` in its IR), so the native emitter's
+        # binding ladder lands on `ctx_` while the reference frontend escaped
+        # the binder to `ctx_` and the ladder reaches `ctx__`. The java byte
+        # oracle in tests/test_selfhost_emit_java.py holds this document
+        # byte-exact on the REFERENCE IR, so the residual is the producer's
+        # `_safe_name` handling, not the emitter.
+        "comp_provide_ctx_bind.rvl",
     ),
     "rust": (
         # (`component_edges.rvl` left this list with issue #1818: its provide
@@ -879,6 +900,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Both now read through `fn_params_i` and this document reproduces
         # byte-exactly, so the ledger no longer carries it. A non-generic
         # control of the same shape was already byte-exact.
+        # issue #2472: the native chain still refuses a user generic variant,
+        # so both emitter corpus documents that declare one diverge through
+        # the fully-native chain. The emitter half is byte-exact on the
+        # reference IR (tests/test_selfhost_emit_rust.py).
+        "generic_variant.rvl",
+        "comp_provide_generic_variant.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -975,8 +1002,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     refusal = (
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 6 "
-        "is not supported by the self-host compiler, which would emit the "
-        "component without its body.")
+        "(a `let`/`var` binding whose value the producer cannot read) is not "
+        "supported by the self-host compiler, which would emit the component "
+        "without its body.")
     got = compile_to(_BODYLESS_COMPONENT_SRC, tier)
     assert got == refusal, got[:200]
     # the manifest-aware driver runs its own emit, so it carries its own guard
@@ -985,7 +1013,9 @@ def test_a_component_whose_body_cannot_be_lowered_is_refused_by_name(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert "body" not in native
-    assert native["unlowered"] == "the body statement at line 6"
+    assert native["unlowered"] == (
+        "the body statement at line 6 "
+        "(a `let`/`var` binding whose value the producer cannot read)")
 
 
 def test_a_bodyless_component_refusal_names_the_inner_statement(
@@ -1007,6 +1037,26 @@ def test_a_bodyless_component_refusal_names_the_inner_statement(
 
     native = json.loads(lower_to_ir(_BODYLESS_COMPONENT_SRC))["components"][0]
     assert _refused_line(native["unlowered"]) == 6
+
+
+def test_a_bodyless_component_refusal_carries_the_failing_statements_reason(
+        compile_to, lower_to_ir):
+    """Every `cir_method_stmts`/`cir_prov_methods` failure point records why it
+    stopped the producer (issue #2594), and `ir_component` carries that reason
+    into the component's refusal next to the line. Two documents that stop on
+    different statements carry different reasons, not one generic sentence."""
+    arity = load_by_path("test_case_call_arity",
+                         ROOT / "tests" / "test_case_call_arity.py")
+    source, _ = arity.REFUSED["provide_block_body"]
+    reasons = {}
+    for name, doc in (("block arm", _BODYLESS_COMPONENT_SRC),
+                      ("case arity", source)):
+        comp = json.loads(lower_to_ir(doc))["components"][0]
+        match = re.search(r"\((.+)\)$", comp["unlowered"])
+        assert match is not None, comp["unlowered"]
+        reasons[name] = match.group(1)
+        assert reasons[name] in compile_to(doc, "py")
+    assert reasons["block arm"] != reasons["case arity"], reasons
 
 
 def _refused_line(text: str) -> int:
@@ -2392,9 +2442,13 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # — the gate admits it, and its `lower_to_ir` externs section was already
     # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
     #
-    # The table is EMPTY, and that is the ratchet having worked rather than a
-    # list nobody maintained: both entries it ever held closed by returning "",
-    # and a closed entry is DELETED rather than reworded.
+    # The table holds the two generic-variant documents in the Rust emit
+    # corpus (issue #2472). The reference admits them while selfhost/lower.rvl
+    # still constructs a nullary case as a bare `Mb`, so the native gate
+    # refuses them by name; they are a self-host FRONTEND gap, not an emitter
+    # one, since selfhost/emit_rust.rvl is byte-exact on the reference IR, and
+    # their residual is also named in LOWER_GAP_DOCS above. Every earlier entry
+    # closed by returning "" and was DELETED rather than reworded.
     #
     # The stream entry (`emit_rust_corpus/comp_stream.rvl`, pinned to
     # `G1|`sub` is not a declared requirement of Parked`) was the second of the
@@ -2412,7 +2466,15 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # returns "" here, and the document's residual moved to the byte comparison
     # `LOWER_GAP_DOCS` above rather than leaving the corpus: the rust emit
     # oracle holds it byte-exact against the reference, stream runtime and all.
-NATIVE_GATE_GAPS: dict[str, str] = {}
+NATIVE_GATE_GAPS: dict[str, str] = {
+    # issue #2472: the native gate still refuses a user generic variant, so the
+    # two generic-variant documents in the Rust emitter corpus are a named
+    # false refusal until selfhost/lower.rvl follows the reference.
+    "emit_rust_corpus/comp_provide_generic_variant.rvl":
+        "T1|`bump` returns expects `Mb[Int]`, got `Mb`",
+    "emit_rust_corpus/generic_variant.rvl":
+        "T1|this function's return expects `Mb[Int]`, got `Mb`",
+}
 
 
 def test_native_gate_admits_the_whole_emit_surface(admit):
@@ -3307,16 +3369,21 @@ _BOX = "type Box[T] = { v: T }\n"
 _EXTERN = "extern pure fn g() = @py { return [1] }\n"
 
 _ISSUE_2399_REFUSED.update({
-    # an arm binder is typed only where `_arm_payload_type` types it
+    # an arm binder is typed only where `_arm_payload_type` types it; an
+    # applied user variant now is (issue #2325), so the two builtin
+    # mismatches below are the remaining unknown-payload arms.
     "arm_opt_matched_with_ok": (
         "fn f(o: Opt[Int]) -> Int {\n"
         "  return match o { Ok(x) => { let k = x\n k }, _ => 0 }\n}\n"),
     "arm_result_matched_with_some": (
         "fn f(o: Result[Int, Str]) -> Int {\n"
         "  return match o { Some(x) => { let k = x\n k }, _ => 0 }\n}\n"),
-    "arm_binder_of_applied_declared_generic": (
-        "type Option[T] = Some(T) | None\nfn f(o: Option[Int]) -> Int {\n"
-        "  return match o { Some(x) => { let k = x\n k }, None => 0 }\n}\n"),
+    # issue #2325: a raw generic selector has no arguments to substitute, so the
+    # binder stays unknown. The arm returns a literal so the reference reaches
+    # the arm check and refuses there, matching the native message.
+    "raw_generic_selector_block_arm": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n 1 }, Nothing => 0 }\n}\n"),
     # a test written right after an extern is still checked
     "test_body_host_method_after_extern": (
         _EXTERN + "test \"t\" {\n  let a = g()\n  let n = a.length()\n  assert true\n}\n"),
@@ -3494,6 +3561,27 @@ _ISSUE_2399_ADMITTED = {
     "arm_binder_of_declared_variant": (
         "type Sh = Circle(Int) | Pt\nfn f(s: Sh) -> Int {\n"
         "  return match s { Circle(r) => { let k = r\n k }, Pt => 0 }\n}\n"),
+    # issue #2325: an applied user variant's binder is typed now, so this arm
+    # reads a value of known type and both sides admit it. `Option`/`Some`/`None`
+    # is the issue's own spelling even though the native table reserves those
+    # names for Opt; the type's own `cases` row resolves the owner.
+    "arm_binder_of_applied_declared_generic": (
+        "type Option[T] = Some(T) | None\nfn f(o: Option[Int]) -> Int {\n"
+        "  return match o { Some(x) => { let k = x\n k }, None => 0 }\n}\n"),
+    "arm_binder_of_applied_declared_generic_renamed": (
+        "type Holder[T] = Has(T) | Nothing\nfn f(o: Holder[Int]) -> Int {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => 0 }\n}\n"),
+    # a case name two user types share resolves by the type's own case list
+    "arm_binder_of_shared_case_name": (
+        "type A[T] = Same(T) | OnlyA\ntype B[T] = Same(T) | OnlyB\n"
+        "fn f(a: A[Int]) -> Int {\n"
+        "  return match a { Same(x) => { let k = x\n k }, OnlyA => 0 }\n}\n"),
+    # issue #2325: a generic fn's applied selector now types the binder too, so
+    # a block arm reading it is admitted
+    "arm_binder_of_applied_declared_generic_fn": (
+        "type Holder[T] = Has(T) | Nothing\n"
+        "fn f[T](o: Holder[T], d: T) -> T {\n"
+        "  return match o { Has(x) => { let k = x\n k }, Nothing => d }\n}\n"),
     "arm_rebinds_untyped_name": (
         "fn f(o: Option[Int]) -> Int {\n"
         "  return match o { Some(x) => { let x2 = 1\n x2 }, None => 0 }\n}\n"),
@@ -4245,11 +4333,13 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
     # issue #2594: the producer cannot lower this provide step, and the
-    # bodyless component it used to emit is now refused by name.
+    # bodyless component it used to emit is now refused by name, with the
+    # failing statement's reason.
     "provide_block_body":
         "REFUSED|UNSUPPORTED|component `C`: the body statement at line 7 "
-        "is not supported by the self-host compiler, which would emit the "
-        "component without its body.",
+        "(a `let`/`var` binding whose value is outside the producer's "
+        "expression surface) is not supported by the self-host compiler, which "
+        "would emit the component without its body.",
     "provide_expression_body": "EMITS",
     "ok_extra": "EMITS",
     "some_extra": "EMITS",
@@ -4286,13 +4376,20 @@ def test_case_arity_refusal_is_a_recorded_native_difference(compile_to, name):
 # Issue #2483: the reference checks an effect call's arguments against the
 # effect's declared parameter types, a case payload nested in them included.
 # The documents are tests/test_423_component_body_call_checking.py's
-# `EFFECT_ARG_REFUSED`. The self-host already gives the reference's refusal for
-# a wrong-typed service argument; the rest it admits, so each is recorded as
-# the native verdict on py ("EMITS" is a silent admit). The day the self-host
-# gives the reference's refusal, the entry fails and is DELETED. A wrong
-# payload type is issue #2448; a wrong payload count and a wrong-typed built-in
-# case in an effect argument are issue #2489.
-EFFECT_ARG_NATIVE_AGREES = ("service_argument_type",)
+# `EFFECT_ARG_REFUSED`. The self-host now gives the reference's refusal for a
+# wrong-typed service argument and for a wrong-typed case payload nested in an
+# effect argument (issue #2448); the rest it admits, so each is recorded as the
+# native verdict on py ("EMITS" is a silent admit). The day the self-host gives
+# the reference's refusal, the entry fails and is DELETED. The remaining ones
+# are a wrong payload count, a payload on a nullary case, and the acquire
+# argument shapes (issue #2489).
+EFFECT_ARG_NATIVE_AGREES = (
+    "service_argument_type",
+    # issue #2448
+    "service_payload_in_provide_method",
+    "service_payload_type",
+    "service_some_payload_type",
+)
 EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
     # issue #2489
     "acquire_err_payload_type": "EMITS",
@@ -4301,10 +4398,6 @@ EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
     "service_argument_to_nullary": "EMITS",
     "service_payload_extra": "EMITS",
     "service_payload_missing": "EMITS",
-    # issue #2448
-    "service_payload_in_provide_method": "EMITS",
-    "service_payload_type": "EMITS",
-    "service_some_payload_type": "EMITS",
 }
 
 
@@ -4531,6 +4624,54 @@ def test_native_gate_checks_a_verb_on_a_host_local_as_the_reference(
         assert got == "REFUSED|" + want, got[:200]
     else:
         assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
+
+
+# The requirement-call argument walk descends into an arrow body and a match
+# arm, which are new scopes. An arrow parameter is untyped in the reference's
+# component lowering (`env.type_env.pop(param, None)`), so it shadows a
+# same-named typed local; a match binder is the scrutinee's payload
+# (`Opt[Int]` -> `Int`). Reading the enclosing local's `Str` instead refused
+# `emit k.put(n)` with the reference's message against a call the reference
+# admits. These documents are otherwise clean, so the only verdict is the gate's.
+_SCOPED_ARG_HEAD = (
+    "type Shape = Dot | Box(Int)\n"
+    "service Sink { emission fn put(x: Int) }\n"
+    "service R { emission fn run(n: Str) -> Int }\n"
+    "fn apply(cb: (Int) -> Unit) -> Int { return 1 }\n"
+    "component C requires k: Sink provides r: R {\n"
+    "  provide r { fn run(n) {\n"
+)
+_SCOPED_ARG_TAIL = "  } }\n}\n"
+
+
+def _scoped_arg(body: str, setup: str = "") -> str:
+    return _SCOPED_ARG_HEAD + setup + "    return " + body + "\n" + _SCOPED_ARG_TAIL
+
+
+_SCOPED_ARG_BINDERS = {
+    # an arrow parameter, untyped, shadowing the method parameter `n: Str`
+    "arrow_bare": _scoped_arg("apply((n) => emit k.put(n))"),
+    "arrow_arithmetic": _scoped_arg("apply((n) => emit k.put(n + 1))"),
+    # an arm binder shadows the method parameter `n: Str`; its payload is `Int`
+    "match_arm": _scoped_arg(
+        "apply((x) => match o { Some(n) => emit k.put(n),"
+        " None => emit k.put(0) })",
+        "    let o: Opt[Int] = Some(1)\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SCOPED_ARG_BINDERS))
+def test_a_binder_shadows_a_typed_local_in_a_requirement_argument(
+        admit, compile_to, reference_emit, name):
+    source = _SCOPED_ARG_BINDERS[name]
+    reference_emit["py"](compile_source(source, "doc.rvl"))  # the reference admits it
+    assert admit(source) == ""
+    # the native producer drops this match expression beside an emit, so only
+    # the gate's verdict is pinned for the arm document
+    if name == "match_arm":
+        return
+    got = compile_to(source, "py")
+    assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
 
 
 # Issue #2569, continued. A timer body (`every 30s { … }`) records emissions

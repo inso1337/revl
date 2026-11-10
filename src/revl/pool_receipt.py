@@ -21,11 +21,14 @@ The shape of a receipt
 Two signatures, because two different parties are saying two different things
 and collapsing them would lose the distinction that matters.
 
-1. The **execution receipt** is signed by the PEER, over what it ran and what
-   came out: the pool, itself, the task, the artifact digest it was admitted
-   with, and the digest of the result. Under asymmetric identity (issue #1278)
-   this is attributable to the peer by anyone holding its public key, so it is
-   the peer's own non-repudiable statement "I ran this and produced that".
+1. The **execution receipt** is signed by the PEER, over what it ran, what
+   came out and the authority it ran under (issue #2720): the pool, itself,
+   the task digest, the granted capability set, the policy digest, the
+   artifact digest it was admitted with, the result digest, the outcome and its
+   own budget claim. Under asymmetric identity (issue #1278) this is
+   attributable to the peer by anyone holding its public key, so it is the
+   peer's own non-repudiable statement "I ran this, under this authority, and
+   produced that".
 
 2. The **attestation** is signed by an ATTESTING AUTHORITY named in the
    charter, over the DIGEST of the peer's receipt. The attestor is saying "I
@@ -72,6 +75,20 @@ timestamp and get a fresh digest for free; only the task identity is stable.
 A resubmitted receipt is refused on :data:`LINK_REPLAYED_RECEIPT` and recorded
 rather than dropped, so a delivered-twice attempt is visible in the ledger
 instead of being silently absorbed.
+
+The authority binding, and the version that carries it
+======================================================
+
+A receipt used to say who ran what and nothing about the authority the run
+happened under (issue #2720). Version :data:`RECEIPT_VERSION` adds
+``task_digest``, ``grant``, ``policy_digest``, ``outcome`` and
+``budget_consumed``. The first three are CHECKED against the operator-signed
+task presented to :func:`check_receipt`; the last two are the peer's own
+CLAIMS, carried and never proven. The version field decides which shape a
+record must have, so a 1.1 receipt that drops a member is malformed rather than
+read as 1.0. A 1.0 receipt still verifies as a statement about work, but
+:func:`count_evidence` requires the binding by default: authority is not
+evidence for authority.
 """
 
 from __future__ import annotations
@@ -95,7 +112,15 @@ from .peer_identity import (
 # ---------------------------------------------------------------------------
 
 RECEIPT_KIND = "revl.pool-execution-receipt"
-RECEIPT_VERSION = "1.0"
+#: The receipt that records the authority the run happened under (issue #2720).
+#: A 1.0 receipt is still a valid statement about work; it just cannot say what
+#: grant or policy was in force, so it verifies and does not count as evidence
+#: for a promotion that requires the binding.
+RECEIPT_VERSION = "1.1"
+#: The shape before issue #2720: no task digest, grant, policy digest, outcome
+#: or budget claim. Kept as a named constant so the reader decides by VERSION
+#: and never by looking at which members happen to be present.
+RECEIPT_VERSION_V1 = "1.0"
 
 ATTESTATION_KIND = "revl.pool-receipt-attestation"
 ATTESTATION_VERSION = "1.0"
@@ -110,6 +135,18 @@ ATTESTATION_DOMAIN = b"revl.pool-receipt-attestation/v1\x00"
 #: The verdict an attestation carries. Named rather than free text so an
 #: attestation that says nothing cannot be read as saying yes.
 ADMITTED = "admitted"
+
+#: How a RUN ended (issue #2720). A refusal happens BEFORE a run: the peer
+#: returns a refusal record with a link and signs no receipt for work it did not
+#: do, so ``REFUSED`` is reserved for a receipt a peer issues for a run the
+#: runner itself declined and is not produced by this tree today. ``TIMED_OUT``
+#: is measured by `pool_dispatch.execute`, never inferred from exit code 124,
+#: because a program is free to exit 124 on its own.
+COMPLETED = "completed"
+REFUSED = "refused"
+FAILED = "failed"
+TIMED_OUT = "timed_out"
+OUTCOMES: tuple[str, ...] = (COMPLETED, REFUSED, FAILED, TIMED_OUT)
 
 # ---------------------------------------------------------------------------
 # refusal links
@@ -146,6 +183,21 @@ LINK_SELF_ATTESTATION = "self-attestation"
 #: The attestation's ``receipt_digest`` is not the digest of the receipt it was
 #: presented with, so it attests something else.
 LINK_RECEIPT_BINDING = "receipt-binding"
+#: The receipt names a task digest, and no task was presented, or the task
+#: presented does not hash to it. A bound receipt is only checkable against the
+#: task it answers.
+LINK_RECEIPT_TASK = "receipt-task"
+#: The receipt echoes a granted capability set (or its budgets) that is not the
+#: one the operator signed into the task. One of the two says something the
+#: other does not, and the task is the decision.
+LINK_RECEIPT_GRANT = "receipt-grant"
+#: The receipt echoes a policy digest that is not the one the operator signed
+#: into the task. The run is claimed under a policy that was not in force.
+LINK_RECEIPT_POLICY = "receipt-policy"
+#: The receipt is version 1.0: it verifies, but it names no grant, policy,
+#: outcome or budget claim, so it cannot count as evidence for a promotion that
+#: requires the binding. Refused rather than read as the new shape.
+LINK_UNBOUND_RECEIPT = "unbound-receipt"
 #: A second receipt for a task already counted.
 LINK_REPLAYED_RECEIPT = "replayed-receipt"
 
@@ -161,6 +213,10 @@ LINKS: tuple[str, ...] = (
     LINK_ATTESTATION_AUTHORITY,
     LINK_SELF_ATTESTATION,
     LINK_RECEIPT_BINDING,
+    LINK_RECEIPT_TASK,
+    LINK_RECEIPT_GRANT,
+    LINK_RECEIPT_POLICY,
+    LINK_UNBOUND_RECEIPT,
     LINK_REPLAYED_RECEIPT,
 )
 
@@ -210,8 +266,65 @@ def receipt_digest(record: Mapping[str, Any]) -> str:
 
     Over the WHOLE signed record, signature included, so two receipts that
     differ only in their signature are two different digests and an attestation
-    cannot be slid from one onto the other."""
+    cannot be slid from one onto the other. Also the digest a bound receipt
+    pins its task by (``task_digest``): the whole signed task, signature
+    included, so the peer's echo names the exact record it answered."""
     return hashlib.sha256(_canonical_bytes(dict(record))).hexdigest()
+
+
+def grant_block(grant: Any) -> Optional[dict]:
+    """A granted capability set with its budgets, normalized, or ``None``.
+
+    One spelling for one grant: ``caps`` sorted and ``budgets`` sorted by key,
+    so the task the operator signed and the receipt the peer echoes compare by
+    value and not by the order two JSON writers happened to use. A budget is a
+    plain non-negative integer, following `peer_authority`: a negative or
+    fractional budget is not a smaller budget, it is a malformed one."""
+    if not isinstance(grant, Mapping):
+        return None
+    caps = grant.get("caps")
+    budgets = grant.get("budgets", {})
+    if not isinstance(caps, (list, tuple)):
+        return None
+    if not all(isinstance(cap, str) and cap for cap in caps):
+        return None
+    if not isinstance(budgets, Mapping):
+        return None
+    clean: dict[str, int] = {}
+    for name, amount in budgets.items():
+        if not isinstance(name, str) or not name:
+            return None
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            return None
+        clean[name] = amount
+    return {"caps": sorted(caps),
+            "budgets": {name: clean[name] for name in sorted(clean)}}
+
+
+def budget_block(consumed: Any) -> Optional[dict]:
+    """A peer's claim of what it consumed, normalized, or ``None``.
+
+    Numbers, not integers: the one quantity a runner here measures is wall-clock
+    seconds. Nothing checks this map against the granted budgets and nothing
+    should: it is the peer's own report, labelled as a claim wherever it is
+    read."""
+    if consumed is None:
+        return {}
+    if not isinstance(consumed, Mapping):
+        return None
+    clean: dict[str, Any] = {}
+    for name, amount in consumed.items():
+        if not isinstance(name, str) or not name:
+            return None
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            return None
+        if isinstance(amount, float) and (amount != amount or amount < 0
+                                          or amount == float("inf")):
+            return None
+        if isinstance(amount, int) and amount < 0:
+            return None
+        clean[name] = amount
+    return {name: clean[name] for name in sorted(clean)}
 
 
 def verify_result(record: Mapping[str, Any], result: Any) -> tuple[bool, str]:
@@ -243,7 +356,12 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                   result: Any, identity: PeerIdentity,
                   at: Optional[datetime] = None,
                   bundle: Optional[Mapping[str, Any]] = None,
-                  network_exposed: bool = False) -> dict:
+                  network_exposed: bool = False,
+                  task_digest: Optional[str] = None,
+                  grant: Optional[Mapping[str, Any]] = None,
+                  policy_digest: Optional[str] = None,
+                  outcome: str = COMPLETED,
+                  budget_consumed: Optional[Mapping[str, Any]] = None) -> dict:
     """The peer signs what it ran and what came out.
 
     ``identity.peer_id`` is the peer named in the receipt; it is not a separate
@@ -256,6 +374,16 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
     :func:`check_receipt` refuses one whose block disagrees with its
     ``artifact_digest``.
 
+    ``task_digest``, ``grant`` and ``policy_digest`` are the authority binding
+    (issue #2720): the exact task the peer answered, the capability set that
+    task granted and the policy digest it named. They are all-or-none. A
+    receipt issued with them is version :data:`RECEIPT_VERSION`; one issued
+    without them is version :data:`RECEIPT_VERSION_V1`, the old shape, which
+    still verifies but cannot count for a promotion that requires the binding.
+    ``outcome`` and ``budget_consumed`` travel with the binding; ``outcome`` is
+    the run's ending, and ``budget_consumed`` is the peer's own report and a
+    CLAIM, not a proof.
+
     ``network_exposed`` is passed to :func:`revl.peer_identity.sign_record`
     (issue #1460)."""
     if not isinstance(identity, PeerIdentity):
@@ -264,9 +392,30 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                         ("artifact_digest", artifact_digest)):
         if not isinstance(value, str) or not value:
             raise ReceiptError(f"a receipt needs a non-empty {name}")
+    bound = (task_digest is not None or grant is not None
+             or policy_digest is not None)
+    if bound:
+        if not isinstance(task_digest, str) or not task_digest:
+            raise ReceiptError("a bound receipt needs the task digest it answers")
+        if not isinstance(policy_digest, str) or not policy_digest:
+            raise ReceiptError("a bound receipt needs the policy digest in force")
+        granted = grant_block(grant)
+        if granted is None:
+            raise ReceiptError("a bound receipt needs a readable granted "
+                               "capability set with budgets")
+        if outcome not in OUTCOMES:
+            raise ReceiptError(f"outcome {outcome!r} is not one of "
+                               f"{', '.join(OUTCOMES)}")
+        consumed = budget_block(budget_consumed)
+        if consumed is None:
+            raise ReceiptError("budget_consumed is not a map of non-negative "
+                               "numbers")
+    elif outcome != COMPLETED or budget_consumed:
+        raise ReceiptError("an unbound receipt states no outcome and no budget "
+                           "use; give it a task digest, grant and policy digest")
     body = {
         "kind": RECEIPT_KIND,
-        "version": RECEIPT_VERSION,
+        "version": RECEIPT_VERSION if bound else RECEIPT_VERSION_V1,
         "pool_id": pool_id,
         "peer_id": identity.peer_id,
         "task_id": task_id,
@@ -274,6 +423,10 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
         "result_digest": result_digest(result),
         "issued_at": _iso(at or _utc_now()),
     }
+    if bound:
+        body.update({"task_digest": task_digest, "grant": granted,
+                     "policy_digest": policy_digest, "outcome": outcome,
+                     "budget_consumed": consumed})
     if bundle is not None:
         body["bundle"] = {"digest": bundle.get("digest", ""),
                           "files": [dict(e) for e in bundle.get("files", ())]}
@@ -368,19 +521,40 @@ def _shape_ok(record: Any, kind: str) -> str:
     """The reason ``record`` is not a ``kind`` record, or an empty string.
 
     Every member a later check reads is required to be a string HERE, so the
-    refusal path never indexes into something hostile and never raises."""
+    refusal path never indexes into something hostile and never raises. The
+    version decides which members a receipt must carry: a 1.1 receipt without
+    the authority binding is malformed, never quietly read as the 1.0 shape,
+    because guessing is exactly how a missing field becomes a passing check."""
     if not isinstance(record, Mapping):
         return f"expected a {kind} record, got {type(record).__name__}"
     if record.get("kind") != kind:
         return f"expected kind {kind!r}, got {record.get('kind')!r}"
+    if kind == RECEIPT_KIND:
+        version = record.get("version")
+        if version not in (RECEIPT_VERSION_V1, RECEIPT_VERSION):
+            return (f"its version is {version!r}, not one this checker knows "
+                    f"({RECEIPT_VERSION_V1!r} or {RECEIPT_VERSION!r})")
     required = ("pool_id", "peer_id", "task_id")
     if kind == RECEIPT_KIND:
         required += ("artifact_digest", "result_digest", "issued_at")
+        if record.get("version") == RECEIPT_VERSION:
+            required += ("task_digest", "policy_digest", "outcome")
     else:
         required += ("receipt_digest", "verdict", "attestor")
     for member in required:
         if not isinstance(record.get(member), str) or not record.get(member):
             return f"its {member} is missing or is not a string"
+    if kind == RECEIPT_KIND and record.get("version") == RECEIPT_VERSION:
+        if "grant" not in record or grant_block(record.get("grant")) is None:
+            return ("its grant is missing or is not a capability set with "
+                    "non-negative integer budgets")
+        if record["outcome"] not in OUTCOMES:
+            return (f"its outcome is {record['outcome']!r}, not one of "
+                    f"{', '.join(OUTCOMES)}")
+        if "budget_consumed" not in record \
+                or budget_block(record.get("budget_consumed")) is None:
+            return ("its budget_consumed is missing or is not a map of "
+                    "non-negative numbers")
     return ""
 
 
@@ -388,7 +562,9 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
                   peer_id: str, artifact_digest: str, admitted_at: str,
                   attest_key_ids: Iterable[str],
                   directory: IdentityDirectory,
-                  when: Optional[datetime] = None) -> ReceiptCheck:
+                  when: Optional[datetime] = None,
+                  task: Optional[Mapping[str, Any]] = None,
+                  require_bound: bool = False) -> ReceiptCheck:
     """Check one receipt and its attestation against one member's admission.
 
     Never raises. A hostile record gets a verdict, like
@@ -397,7 +573,26 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
 
     The binding checks are all of the form "is this receipt about the thing the
     pool admitted": the same pool, the same peer, the same artifact digest, and
-    issued no earlier than the admission that is being counted toward."""
+    issued no earlier than the admission that is being counted toward.
+
+    ``task`` is the signed task the receipt claims to answer. A version
+    :data:`RECEIPT_VERSION` receipt REQUIRES it: the receipt echoes the task
+    digest, the granted capability set and the policy digest, and each is
+    compared against the operator-signed task, which is the party that decided
+    them. The task's ``task_id``, ``peer_id``, ``pool_id`` and
+    ``artifact_digest`` must also equal the receipt's, because a digest match
+    names a record and the record has to describe the work the receipt claims;
+    otherwise a receipt for one task could cite another task's record. Those
+    are checkable facts. The receipt's ``outcome`` and ``budget_consumed`` are
+    the peer's own claims and are carried through, not proven here.
+
+    ``require_bound`` is what a promotion asks for. A version
+    :data:`RECEIPT_VERSION_V1` receipt still VERIFIES with this flag false: the
+    signature arithmetic is real and the work really happened. With it true,
+    the receipt is refused on :data:`LINK_UNBOUND_RECEIPT` after every other
+    check passes, because it names no authority and cannot be evidence for a
+    gate that requires one. The version field decides which branch runs; the
+    presence or absence of members never does."""
     moment = when or _utc_now()
 
     shape = _shape_ok(record, RECEIPT_KIND)
@@ -473,6 +668,62 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
                       f"this membership began at {admitted_at}; evidence does "
                       f"not carry across a withdrawal")
 
+    # The authority binding (issue #2720). The receipt echoes what the
+    # operator-signed task decided, so a reader of the receipt alone can tell
+    # which grant and policy the run happened under, and the echo is checkable
+    # against the task rather than trusted. The ORDER is deliberate: a receipt
+    # that names another task is refused as that before its attestation is
+    # even looked at, because an attestation over the wrong task is a
+    # downstream fact.
+    if record["version"] == RECEIPT_VERSION:
+        if not isinstance(task, Mapping):
+            return refuse(LINK_RECEIPT_TASK,
+                          "the receipt echoes a task digest and no task was "
+                          "presented to check it against; a bound receipt is "
+                          "only evidence together with the task it answers")
+        try:
+            expected_task = receipt_digest(task)
+        except (NotCanonicalizable, TypeError, ValueError) as error:
+            return refuse(LINK_RECEIPT_TASK,
+                          f"the task presented cannot be digested: {error}")
+        if record["task_digest"] != expected_task:
+            return refuse(LINK_RECEIPT_TASK,
+                          f"the receipt answers task {record['task_digest'][:16]} "
+                          f"and the task presented is {expected_task[:16]}")
+        # The digest matches, so the task is the record the receipt echoed.
+        # That record must still be ABOUT the task the receipt names: a
+        # receipt for task-1 whose peer signed a claim pointing at task-2's
+        # record would otherwise verify against task-2 and cite it as
+        # evidence for work it does not describe.
+        for member in ("task_id", "peer_id", "pool_id", "artifact_digest"):
+            if task.get(member) != record[member]:
+                return refuse(
+                    LINK_RECEIPT_TASK,
+                    f"the receipt names {member} {record[member]!r} and the "
+                    f"task it answers names {task.get(member)!r}; a receipt "
+                    f"answers the task it names, not another record that "
+                    f"carries the same digest")
+        task_grant = grant_block(task.get("grant"))
+        if task_grant is None:
+            return refuse(LINK_RECEIPT_GRANT,
+                          "the task presented carries no readable granted "
+                          "capability set")
+        receipt_grant = grant_block(record["grant"])
+        if receipt_grant != task_grant:
+            return refuse(LINK_RECEIPT_GRANT,
+                          f"the receipt echoes a grant "
+                          f"({', '.join(receipt_grant['caps']) or 'no caps'}; "
+                          f"{len(receipt_grant['budgets'])} budgets) and the "
+                          f"task granted "
+                          f"({', '.join(task_grant['caps']) or 'no caps'}; "
+                          f"{len(task_grant['budgets'])} budgets)")
+        if record["policy_digest"] != task.get("policy_digest"):
+            return refuse(LINK_RECEIPT_POLICY,
+                          f"the receipt echoes policy "
+                          f"{record['policy_digest'][:16]} and the task was "
+                          f"signed under "
+                          f"{str(task.get('policy_digest'))[:16] or 'no policy'}")
+
     # The attestation. Its binding to THIS receipt is checked before its
     # authority, so an attestation for another receipt is refused as the wrong
     # binding rather than as an authority failure.
@@ -509,6 +760,16 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
                       f"the attestation verifies under key "
                       f"{attestor_attr.key_id} and that key confers nothing "
                       f"now: {attestor_attr.reason}")
+
+    if require_bound and record["version"] != RECEIPT_VERSION:
+        # Last, not first: everything this receipt CAN say has been checked,
+        # so an operator auditing a refusal sees the specific fault when there
+        # is one and the weakness of the shape only when there is not.
+        return refuse(LINK_UNBOUND_RECEIPT,
+                      f"the receipt is version {record['version']} and carries "
+                      f"no task, grant, policy, outcome or budget claim; it "
+                      f"verifies but a promotion that requires the authority "
+                      f"binding cannot count it")
 
     return ReceiptCheck(task_id=task_id, digest=digest, peer=peer_attr,
                         attestor=attestor_attr, link="",
@@ -549,13 +810,26 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
                    artifact_digest: str, admitted_at: str,
                    attest_key_ids: Iterable[str],
                    directory: IdentityDirectory,
-                   when: Optional[datetime] = None) -> EvidenceCount:
+                   when: Optional[datetime] = None,
+                   require_bound: bool = True) -> EvidenceCount:
     """Count the distinct tasks this peer has a verified, attested receipt for.
 
-    ``pairs`` is a sequence of ``(receipt, attestation)``. The fold is
-    deterministic: pairs are ordered by the receipt's ``issued_at`` and then by
-    its digest before counting, so which of two receipts for one task is the
-    counted one does not depend on the order a caller happened to pass them in.
+    ``pairs`` is a sequence of ``(receipt, attestation)`` or
+    ``(receipt, attestation, task)``; the task is what a version
+    :data:`RECEIPT_VERSION` receipt is checked against. A pair without one is
+    still accepted so an old ledger reads, and its receipt is refused on
+    :data:`LINK_RECEIPT_TASK` if it claims the binding.
+
+    ``require_bound`` defaults to TRUE, which is what a promotion requires: a
+    version :data:`RECEIPT_VERSION_V1` receipt verifies and states no grant,
+    policy, outcome or budget, so it cannot be evidence for authority it never
+    named. The version field decides, never the members that happen to be
+    present.
+
+    The fold is deterministic: pairs are ordered by the receipt's ``issued_at``
+    and then by its digest before counting, so which of two receipts for one
+    task is the counted one does not depend on the order a caller happened to
+    pass them in.
 
     Deduplication is on ``task_id``. A peer can re-sign the same work with a
     new timestamp and get a new digest for nothing, so the digest is not the
@@ -563,10 +837,16 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
     peer inflate its own evidence at no cost."""
     ordered = []
     for pair in pairs:
+        record: Any = None
+        attestation: Any = None
+        task: Any = None
         try:
-            record, attestation = pair
+            if isinstance(pair, (tuple, list)) and len(pair) == 3:
+                record, attestation, task = pair
+            else:
+                record, attestation = pair
         except (TypeError, ValueError):
-            ordered.append(("", "", pair, None))
+            ordered.append(("", "", pair, None, None))
             continue
         key_time = record.get("issued_at", "") \
             if isinstance(record, Mapping) else ""
@@ -575,7 +855,7 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
                 if isinstance(record, Mapping) else ""
         except (NotCanonicalizable, TypeError, ValueError):
             key_digest = ""
-        ordered.append((str(key_time), key_digest, record, attestation))
+        ordered.append((str(key_time), key_digest, record, attestation, task))
     ordered.sort(key=lambda row: (row[0], row[1]))
 
     digests: list[str] = []
@@ -584,11 +864,13 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
     rejected: list[ReceiptCheck] = []
     seen_tasks: set[str] = set()
 
-    for _, _, record, attestation in ordered:
+    for _, _, record, attestation, task in ordered:
         check = check_receipt(
             record, attestation, pool_id=pool_id, peer_id=peer_id,
             artifact_digest=artifact_digest, admitted_at=admitted_at,
-            attest_key_ids=attest_key_ids, directory=directory, when=when)
+            attest_key_ids=attest_key_ids, directory=directory, when=when,
+            task=task if isinstance(task, Mapping) else None,
+            require_bound=require_bound)
         if not check.counts:
             rejected.append(check)
             continue

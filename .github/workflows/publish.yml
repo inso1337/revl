@@ -8,6 +8,11 @@ name: publish
 #
 # The publish is gated on the full CI suite (the same one that gates main),
 # re-run on the tagged commit: a version on PyPI is a claim that suite passed.
+#
+# The upload is then gated again on the tag being a FINAL release. A pre-release
+# tag such as `v2.0.0rc1` runs the tagged commit's CI, but it never reaches
+# PyPI: an index entry cannot be deleted, and a pre-release version is not the
+# release the project means to serve.
 on:
   push:
     tags:
@@ -24,12 +29,18 @@ jobs:
 
   # Sanity gate: the tag must match the version in pyproject.toml. A tag of
   # v2.0.1 publishing a wheel that says 2.0.0 (or vice versa) is a footgun; fail
-  # loudly before building rather than shipping a mislabeled release.
+  # loudly before building rather than shipping a mislabeled release. The same
+  # step classifies the version so the publish job below can refuse a
+  # pre-release.
   check-version:
     runs-on: ubuntu-latest
+    outputs:
+      # `stable` or `prerelease`, from tools/release_channel.py.
+      channel: ${{ steps.version.outputs.channel }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - name: Tag matches pyproject version
+        id: version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           proj=$(python3 - <<'PY'
@@ -46,10 +57,17 @@ jobs:
           if [ "$tag" != "$proj" ]; then
             echo "::error::tag v$tag does not match pyproject version $proj"; exit 1
           fi
+          channel=$(python3 tools/release_channel.py "$proj")
+          echo "channel=$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
   publish:
     needs: [ci, check-version]
     runs-on: ubuntu-latest
+    # Fail closed: only a version `check-version` classified `stable` uploads.
+    # The comparison is explicit, so an empty or unrecognized output skips this
+    # job instead of publishing something nobody classified.
+    if: ${{ needs.check-version.outputs.channel == 'stable' }}
     # A dedicated environment lets the maintainer add manual-approval and
     # branch/tag protection rules around every release from the repo settings.
     environment:

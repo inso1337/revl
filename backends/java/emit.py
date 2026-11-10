@@ -1228,6 +1228,14 @@ _V3_BOXED = {
     "void": "java.lang.Void",
 }
 
+# The erased-dynamic builtins have no declaration to point at, so every
+# rendered position spells them as `Object`; a bare `Any`/`Value` would name a
+# class that does not exist. `Any` is the type algebra's wildcard (roadmap 79);
+# `Value` (stdlib/value.rvl, docs/stdlib-value.md) is its named counterpart and
+# used to fall through to `_ident`, emitting `java.util.List<Value>` and
+# `Value v` that javac rejects with `cannot find symbol` (issue #3019).
+_V3_ERASED = {"Any": "Object", "Value": "Object"}
+
 
 def _java_v3_type(name: object, *, boxed: bool = False) -> str:
     """IR v3 surface type -> Java type for emitted v3 classes."""
@@ -1242,10 +1250,9 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
         if not boxed:
             return java_type
         return _V3_BOXED.get(java_type, java_type)
-    if name == "Any":
-        # No TYPE_MAP entry: `Any` is the open type, so it is `Object` in every
-        # position (a bare `Any` would name a class that does not exist).
-        return "Object"
+    erased = _V3_ERASED.get(name)
+    if erased is not None:
+        return erased
     if "[" in name:
         base = name[: name.index("[")]
         inner = name[name.index("[") + 1 : name.rindex("]")]
@@ -2592,7 +2599,18 @@ def _expr(
         # `Bx` whose fields read as `Object` (`b.v + 1L` is rejected).
         diamond = "<>" if spec.get("params") and all(
             _infers_exactly(v, ctx) for _, v in fields) else ""
-        return f"new {_ident(type_name, 'type name')}{diamond}({', '.join(args)})"
+        ctor = f"{_ident(type_name, 'type name')}{diamond}"
+        if not diamond and spec.get("params"):
+            # When javac cannot infer the arguments from the fields alone
+            # (an empty list, `None`, a variant case, a generic call), the
+            # frontend pins the let-bound local's applied type on the node.
+            # Name the arguments from it rather than leaving the local raw,
+            # which is what made a field read an `Object` operation.
+            expected = node.get("expected")
+            if (isinstance(expected, str) and expected.startswith(type_name + "[")
+                    and _names_a_v3_class(expected, ctx)):
+                ctor = _java_v3_type(expected)
+        return f"new {ctor}({', '.join(args)})"
 
     if kind == "list":
         return "java.util.List.of(" + ", ".join(
@@ -2925,6 +2943,21 @@ def _selector_type_args(scrutinee: object, owner: str, ctx: _V3Ctx,
     return java[len(head):]
 
 
+def _names_a_v3_class(type_name: object, ctx: _V3Ctx) -> bool:
+    """Whether a payload spelling names a class Java can declare.
+
+    A raw-pattern match arm is declared at its payload type (`_arm_payload_type`
+    substitutes the selector's arguments). A bare type parameter (`T`, or the
+    checker's `?T`), an inferred bottom (`Never`) and a structural record shape
+    name no class, so those arms keep the untyped `final var` binding.
+    """
+    name = type_name if isinstance(type_name, str) else ""
+    head = name.split("[", 1)[0]
+    shape = bool(name) and "{" not in name and "Never" not in name and "?" not in name
+    return shape and (head in TYPE_MAP or head in ctx.types or head in (
+        "Any", "Unit", "List", "Opt", "Map", "Result", "Set", "Stream"))
+
+
 def _infers_exactly(node: object, ctx: _V3Ctx) -> bool:
     """True when javac, inferring from *node* alone, gets the revl type
     (issue #2325).
@@ -3074,7 +3107,22 @@ def _v3_match_expr(
             case_var = f"__revl_case_{ctx._match_counter + 1}"
             ctx._match_counter += 1
             lines.append(f"            case {qualified} {case_var} -> {{")
-            lines.append(f"                final var {bind} = {case_var}.value;")
+            # issue #2325: a raw case pattern (`case Box.Full c` over a
+            # selector whose Java type is not parameterised, e.g. a `let`
+            # local bound to a variant constructor) binds `c.value` as an
+            # `Object`, and javac refuses `v + 1L` in the arm. The frontend
+            # now carries the arm's payload type (`_arm_payload_type`
+            # substitutes the selector's type arguments), so declare the
+            # binding at that type and cast the untyped `value` once.
+            payload_type = arm.get("payload_type")
+            if (not type_args and isinstance(payload_type, str)
+                    and not payload_type.startswith("{")
+                    and _names_a_v3_class(payload_type, ctx)):
+                ptype = _java_v3_type(payload_type, boxed=True)
+                lines.append(
+                    f"                final {ptype} {bind} = ({ptype}) {case_var}.value;")
+            else:
+                lines.append(f"                final var {bind} = {case_var}.value;")
             lines.append(f"                yield ({body});")
             lines.append("            }")
         else:
@@ -6993,7 +7041,7 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
                     f"operation declared to return a value"
                 )
             return "return;"
-        rename = {b: f"this.{b}" for b in _binds(env.component)}
+        rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
         # A required service is a field of the provider class, same as a bind.
         rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
         value = _expr(steps[0]["expr"], None, rename, env)
@@ -8349,7 +8397,7 @@ def _method_body_lines(
     lines: list[str] = []
     v3_ctx.arrows = {}  # arrow bindings are local to one body
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
-    rename = {b: f"this.{b}" for b in _binds(env.component)}
+    rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
     rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
 
     def render(steps: list, lines: list[str], pad: str) -> None:
@@ -8832,7 +8880,13 @@ def _emit_component_stmts(
                 # declaration (`Map<...> store = Map.create();`) — `var` would
                 # infer `Map<Object>` from the generic static factory and the
                 # emitted insert/get calls would lose their static types.
-                surface = (map_values or {}).get(bind)
+                # The type table is keyed by the IR's raw bind name while the
+                # local is declared through the binding ladder, so a bind that
+                # the ladder escaped (`ctx` -> `ctx_`) still gets its declared
+                # type here; a lookup by the escaped spelling leaves `var` and
+                # the provider constructor's `Map<V>` parameter then rejects
+                # `Map<Object>` (issue #3095).
+                surface = (map_values or {}).get(step["bind"])
                 decl = f"Map<{_java_v3_type(surface, boxed=True)}>" if surface else "var"
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
@@ -8853,7 +8907,8 @@ def _emit_component_stmts(
             struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
                 ["ctx", "fx"] + (["frame"] if frame_expr else [])
-                + [env.req_fields[b] for b in env.reqs] + list(_binds(component))
+                + [env.req_fields[b] for b in env.reqs]
+                + [_ident(b, "binding") for b in _binds(component)]
                 + [_ident(f.get("name"), "config field")
                    for f in _provider_config_fields(component)]
             )
@@ -9245,7 +9300,7 @@ def _emit_component_modern(
             out.append(f"    private final {service} {env.req_fields[local]};")
         for b in _binds(component):
             btype = _bind_type(component, b, v3_ctx, map_values, env, functions)
-            out.append(f"    private final {btype} {b};")
+            out.append(f"    private final {btype} {_ident(b, 'binding')};")
         # A provide method that reads `config.<f>` needs the field HERE, not
         # only on the plugin (see `_provider_config_fields`).
         for f in provider_config:
@@ -9255,7 +9310,8 @@ def _emit_component_modern(
             ["Context ctx", "Context.EffectScope fx"]
             + (["RevlFrame frame"] if needs_frame else [])
             + [f"{service} {env.req_fields[local]}" for local, service in env.reqs.items()]
-            + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} {b}"
+            + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} "
+               f"{_ident(b, 'binding')}"
                for b in _binds(component)]
             + [f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
                for f in provider_config]
@@ -9269,7 +9325,8 @@ def _emit_component_modern(
             field = env.req_fields[local]
             out.append(f"        this.{field} = {field};")
         for b in _binds(component):
-            out.append(f"        this.{b} = {b};")
+            field = _ident(b, "binding")
+            out.append(f"        this.{field} = {field};")
         for f in provider_config:
             fname = _ident(f.get("name"), "config field")
             out.append(f"        this.{fname} = {fname};")
@@ -9527,18 +9584,18 @@ def _emit_component(
             out.append(f"    private final {req_service} {env.req_fields[local]};")
         for b in _binds(component):
             out.append(
-                f"    private final {bind_decl(b)} {b};")
+                f"    private final {bind_decl(b)} {_ident(b, 'binding')};")
         ctor_args = ", ".join(
             [f"{req_service} {env.req_fields[local]}"
              for local, req_service in env.reqs.items()]
-            + [f"{bind_decl(b)} {b}"
+            + [f"{bind_decl(b)} {_ident(b, 'binding')}"
                for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_args}) {{")
         for local in env.reqs:
             out.append(f"        this.{env.req_fields[local]} = {env.req_fields[local]};")
         for b in _binds(component):
-            out.append(f"        this.{b} = {b};")
+            out.append(f"        this.{_ident(b, 'binding')} = {_ident(b, 'binding')};")
         out.append("    }")
         provide = next(
             (s for s in component.get("body") or []
@@ -9605,7 +9662,8 @@ def _emit_component(
             service = step.get("service")
             struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
-                [env.req_fields[b] for b in env.reqs] + list(_binds(component)))
+                [env.req_fields[b] for b in env.reqs]
+                + [_ident(b, "binding") for b in _binds(component)])
             # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.

@@ -37,6 +37,7 @@ so writing one is a parse error naming the clauses that do exist.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 
 from ._paths import relpath_or_abs
 from .admit_profile import AdmissionProfile
@@ -48,6 +49,7 @@ from .parser import (SLO_IR_KEYS, Address, CompositionDecl, GrantDecl,
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
+from .tls_pin import check_pin
 from .typecheck import compatible
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
@@ -543,22 +545,29 @@ def _host_of(value: object) -> str | None:
 
     A `host("h:port")` bound and a config value like
     `"postgres://primary:5432/app"` are compared on this normalized authority
-    (host, and port when present). The extraction is deliberately syntactic and
-    conservative: anything it cannot parse to a host returns `None` and is
-    treated by the caller as UNCLASSIFIABLE, which is the fail-closed direction
-    §8.5 conjunct 5 requires — never silence.
+    (host, and port when present). The value is read with the same URL parser a
+    client uses (`urllib.parse.urlsplit`), so a fragment, query or path that
+    holds an `@` or a `:` cannot pose as the authority. The extraction is
+    conservative: a value with a backslash, whitespace or a control character,
+    an empty host, or a port that does not parse returns `None`, which the
+    caller treats as UNCLASSIFIABLE and refuses on a bounded field, the
+    fail-closed direction §8.5 conjunct 5 requires, never silence.
     """
     if not isinstance(value, str) or not value:
         return None
-    text = value.strip()
-    if "://" in text:
-        text = text.split("://", 1)[1]
-    # drop any path/query and any userinfo
-    text = text.split("/", 1)[0].split("?", 1)[0]
-    if "@" in text:
-        text = text.rsplit("@", 1)[1]
-    text = text.strip()
-    return text or None
+    if any(ch == "\\" or ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in value):
+        return None
+    # a bare `h:port` (the bound's own spelling) is an authority, not a scheme
+    try:
+        parts = urlsplit(value if "://" in value else "//" + value)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    return host if port is None else f"{host}:{port}"
 
 
 def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
@@ -576,7 +585,18 @@ def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
             continue
         got = _host_of(config[field])
         want = _host_of(bound) or bound
-        if got is not None and got != want:
+        if got is None:
+            raise RevlError(
+                doc, line,
+                f"row `@{label}` configures `{field}` ({where}) to a value "
+                f"whose host cannot be read, so it cannot be checked against "
+                f"the reach declared for it in the composition",
+                hint=f"declared:  host(\"{want}\")\n"
+                     f"requested: {config[field]!r}\n"
+                     "a bounded field takes a value with one plain host "
+                     "authority (no backslash, empty host or bad port); fix "
+                     "the value or refuse the layer (426 §8.3)")
+        if got != want:
             raise RevlError(
                 doc, line,
                 f"row `@{label}` configures `{field}` ({where}) to a value "
@@ -899,13 +919,18 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
     check_remotable(service, doc=doc, line=remote.line, label=remote.label,
                     on_failure=remote.on_failure,
                     on_failure_line=remote.on_failure_line)
+    # Issue #2719: the pin is admitted here, before synthesis, so a malformed
+    # identifier refuses the row at admission rather than failing at run time.
+    pin = check_pin(remote.pin, doc=doc, line=remote.pin_line or remote.line,
+                    label=remote.label)
 
     capability = cap_token(remote.host)
     component, text = synthesize_provider(service, "remote", {
         "label": remote.label, "key": remote.key, "host": remote.host,
         "realm": remote.realm, "capability": capability,
         "on_failure": remote.on_failure, "transport": remote.transport,
-        "redirect": remote.redirect,
+        "redirect": remote.redirect, "pin": pin,
+        "pin_line": remote.pin_line,
         "long_running": remote.long_running,
         "long_running_line": remote.long_running_line,
         "doc": doc, "line": remote.line,
@@ -933,6 +958,10 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
             "serviceSource": service_source,
             "capability": capability,
             "onFailure": remote.on_failure,
+            # Issue #2719: the pinned TLS leaf SPKI, on the row table so the
+            # manifest and `revl audit` carry what the crossing will refuse at
+            # run time. It is present only when the row wrote `pinned`.
+            **({"pin": pin} if pin else {}),
             # The row's redirect policy, on the row table so the audit surface
             # and the manifest carry it: "where this crossing may reach" is not
             # readable from the peer address alone if the transport may be

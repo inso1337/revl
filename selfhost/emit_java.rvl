@@ -184,23 +184,53 @@ fn java_reserved() -> List[Str] {
           "this", "throw", "throws", "transient", "try", "void", "volatile",
           "while", "var", "record", "yield"]
 }
-// `_EMITTER_RESERVED`: `_fn_name` also renames a callable colliding with these.
-fn emitter_reserved() -> List[Str] { return ["ctx", "config", "root"] }
+// `_EMITTER_RESERVED`: the names this emitter's own scaffolding occupies in the
+// emitted module (generated locals `ctx`/`fx`/`frame`/`undos`, the nested
+// `Components` wrapper, the `java.lang` prelude the thrown exceptions name, and
+// the runtime records it nests). `_fn_name` renames a callable colliding with
+// one, and `_ident` folds the same set into the keyword ladder at the
+// scaffolding-renamable roles (see `ident_binding`).
+fn emitter_reserved() -> List[Str] {
+  return ["ctx", "config", "root",
+          "fx", "frame", "undos", "_revlRoot", "_revlLoaded", "Components",
+          "String", "Object", "Long", "Double", "Integer", "Float", "Boolean",
+          "Byte", "Character", "Number", "Void", "Math", "System", "Thread",
+          "Runnable", "Error", "Exception",
+          "RevlSecretShape", "RevlResult", "RevlActivation",
+          "RevlFrame", "RevlSpawnHandle"]
+}
 
-// `_mangle` (== `_ident`'s rename for a binding/param/name/type). INJECTIVE:
-// escape a name iff the name or any name reachable from it by dropping trailing
-// `_` is reserved, by exactly one `_`, so the whole `kw`/`kw_`/`kw__` ladder
-// shifts up a rung (`double` -> `double_`, `double_` -> `double__`) instead of
-// collapsing two distinct revl identifiers onto one Java identifier.
-fn mangle(name: Str) -> Str {
+// `_mangle` (== `_ident`'s rename for a field/type/other non-renamable role).
+// INJECTIVE: escape a name iff the name or any name reachable from it by
+// dropping trailing `_` is reserved, by exactly one `_`, so the whole
+// `kw`/`kw_`/`kw__` ladder shifts up a rung (`double` -> `double_`, `double_`
+// -> `double__`) instead of collapsing two distinct revl identifiers onto one
+// Java identifier. `extra` folds a position-specific reserved set into every
+// rung, as the reference's `_mangle(name, extra)` does.
+fn mangle_extra(name: Str, extra: List[Str]) -> Str {
   var root = name
   while (root.length() > 0) {
-    if (list_contains(java_reserved(), root)) { return name.concat("_") }
+    if (list_contains(java_reserved(), root) || list_contains(extra, root)) {
+      return name.concat("_")
+    }
     if (root.charAt(root.length() - 1) != "_") { return name }
     root = root.slice(0, root.length() - 1)
   }
   return name
 }
+fn mangle(name: Str) -> Str { return mangle_extra(name, []) }
+
+// `_ident` at `_JAVA_SCAFFOLDING_RENAMABLE_ROLES` (binding, name, parameter,
+// parameter name, loop binding, match bind, lifecycle binding). Those spellings
+// are internal to the emitted module, so a user name that collides with the
+// scaffolding (`ctx`, `root`, `config`, `fx`, `frame`, ...) is RENAMED on the
+// same injective ladder rather than refused: `ctx` -> `ctx_`, `ctx_` -> `ctx__`.
+// Every declaration and every use of such a name goes through this same
+// function, so they agree by construction. Record fields are NOT here: a
+// member name is emitted verbatim (the reference's `record field`/`field`
+// roles), and a type/service/component name is refused by the reference, not
+// renamed.
+fn ident_binding(name: Str) -> Str { return mangle_extra(name, emitter_reserved()) }
 // `_method_name` (issue #1512): the one Java spelling of a service method, at
 // the interface, the provider and every call. The service table stays keyed by
 // the contract name.
@@ -442,8 +472,9 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   let tm = type_map(name)
   if (tm != "") { return box(tm, boxed) }
   // `Any` has no `type_map` entry; it is the open type, `Object` in every
-  // position (issue #2303).
-  if (name == "Any") { return "Object" }
+  // position (issue #2303). `Value` (stdlib/value.rvl) is the named
+  // erased-dynamic builtin and takes the same erasure (issue #3019).
+  if (name == "Any" || name == "Value") { return "Object" }
   if (name.indexOf("[") >= 0) {
     let lb = name.indexOf("[")
     let base = name.slice(0, lb)
@@ -600,7 +631,7 @@ fn host_root_of(hfn: Str) -> Str {
 fn render_var(node: Any, ctx: Ctx) -> Str {
   let name = value_str(value_field(node, "name"))
   if (has_fn(ctx, name)) { return fn_name(name) }
-  let m = mangle(name)
+  let m = ident_binding(name)
   if (name == "None") { return "java.util.Optional.empty()" }
   return m
 }
@@ -849,13 +880,24 @@ fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
     out_args = out_args.push(map_get(by, fname))
   }
   // issue #2325: a generic record is built with the diamond when javac infers
-  // its type arguments exactly from the values (`infers_exactly`).
+  // its type arguments exactly from the values (`infers_exactly`). When it
+  // cannot, the frontend pins the let-bound local's applied type on the node
+  // (`expected`); naming the arguments from it keeps the local parameterised,
+  // where a raw constructor made a field read an `Object` operation.
   var diamond = ""
   if (bool_get(ctx.gen, tn)) {
     diamond = "<>"
     for (f of fields) { if (!infers_exactly(value_at(f, 1), ctx)) { diamond = "" } }
   }
-  return { text: `new ${mangle(tn)}${diamond}(${out_args.join(", ")})`, counter: c }
+  var ctor = `${mangle(tn)}${diamond}`
+  if (diamond == "" && bool_get(ctx.gen, tn)) {
+    let expected = value_str(value_field(node, "expected"))
+    if (expected.startsWith(`${tn}[`) && expected.endsWith("]")
+        && nameable_v3_type(expected, ctx)) {
+      ctor = java_v3_type(expected, false)
+    }
+  }
+  return { text: `new ${ctor}(${out_args.join(", ")})`, counter: c }
 }
 
 // `_match_bind_names`: every name a `match` arm binds anywhere under *node* (a
@@ -1050,7 +1092,7 @@ fn result_match(scrutinee: Str, arms: List[Any], ctx: Ctx, counter: Int) -> Rend
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "" && bind != "_") {
         let ptype = java_v3_type(value_field(arm, "payload_type"), true)
-        lines = lines.push(`                final var ${mangle(bind)} = (${ptype}) ${ignored}.value();`)
+        lines = lines.push(`                final var ${ident_binding(bind)} = (${ptype}) ${ignored}.value();`)
       }
       lines = lines.push(`                yield (${br.text});`)
       lines = lines.push(`            }`)
@@ -1064,7 +1106,7 @@ fn opt_bind(arms: List[Any]) -> Str {
   for (arm of arms) {
     if (value_str(value_field(arm, "pattern")) == "Some") {
       let b = value_str(value_field(arm, "bind"))
-      if (b != "" && b != "_") { return mangle(b) }
+      if (b != "" && b != "_") { return ident_binding(b) }
     }
   }
   return "__revl_v"
@@ -1140,7 +1182,21 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
         c = c + 1
         let case_var = `__revl_case_${c}`
         lines = lines.push(`            case ${qualified} ${case_var} -> {`)
-        lines = lines.push(`                final var ${mangle(bind)} = ${case_var}.value;`)
+        // issue #2325: a raw case pattern binds `.value` as `Object`, so an
+        // arm reading the payload (`v + 1L`) did not compile. The frontend
+        // carries the arm's payload type (`_arm_payload_type` substitutes the
+        // selector's type arguments), so declare the binding at that type and
+        // cast the untyped `value` once. The NAME still goes through the
+        // binding ladder (issue #2797), so a case bind colliding with the
+        // emitter scaffolding is escaped at the declaration and every use.
+        let ptype = value_str(value_field(arm, "payload_type"))
+        if (type_args == "" && ptype != "" && !ptype.startsWith("{")
+            && nameable_v3_type(ptype, ctx)) {
+          let jt = java_v3_type(ptype, true)
+          lines = lines.push(`                final ${jt} ${ident_binding(bind)} = (${jt}) ${case_var}.value;`)
+        } else {
+          lines = lines.push(`                final var ${ident_binding(bind)} = ${case_var}.value;`)
+        }
         lines = lines.push(`                yield (${br.text});`)
         lines = lines.push(`            }`)
       } else {
@@ -1171,10 +1227,10 @@ fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   if (kind == "var") { return { text: render_var(node, ctx), counter: counter } }
   if (kind == "name") {
     // A modern component capture (`this.sink`) arrives via the rename map;
-    // otherwise a bare `name` is a plain identifier (`_ident` = `mangle`).
+    // otherwise a bare `name` is `_ident(.., "binding")`.
     let idv = value_str(value_field(node, "id"))
     if (ctx.rn.has(idv)) { return { text: map_get(ctx.rn, idv), counter: counter } }
-    return { text: mangle(idv), counter: counter }
+    return { text: ident_binding(idv), counter: counter }
   }
   // component dialect (item 225): a required-service reference — `this.sink` inside
   // a provide-method body (via the rename map), else the bare requirement local.
@@ -1316,6 +1372,21 @@ fn declarable_type(raw: Str, ctx: Ctx) -> Bool {
   return true
 }
 
+// `_names_a_v3_class`: whether a payload spelling names a class Java can
+// declare. A raw-pattern arm is declared at its payload type; a bare type
+// parameter (`?T`), an inferred bottom (`Never`) and a structural shape name no
+// class, so those arms keep the untyped `final var` binding.
+fn nameable_v3_type(raw: Str, ctx: Ctx) -> Bool {
+  let name = trim(raw)
+  let lb = name.indexOf("[")
+  let head = lb < 0 ? name : name.slice(0, lb)
+  let shape = name != "" && name.indexOf("{") < 0
+    && name.indexOf("Never") < 0 && name.indexOf("?") < 0
+  return shape && (type_map(head) != "" || bool_get(ctx.tys, head)
+    || head == "Any" || head == "Unit" || head == "List" || head == "Opt"
+    || head == "Map" || head == "Result" || head == "Set" || head == "Stream")
+}
+
 // `_let_keyword`: an empty list literal declares as the List type its
 // `expected` pin names (issue #2296: a raw `java.util.List` iterates as
 // `Object`, so a loop over an annotated list lost its element type), and as
@@ -1368,7 +1439,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
   let pad = ind(indent)
   let step = value_str(value_field(node, "step"))
   if (step == "let" || step == "assign") {
-    let nm = mangle(value_str(value_field(node, "name")))
+    let nm = ident_binding(value_str(value_field(node, "name")))
     let r = render_expr(value_field(node, "value"), ctx, counter)
     if (step == "let") {
       return { lines: [pad.concat(`${let_keyword(node, ctx)} ${nm} = ${r.text};`)], counter: r.counter }
@@ -1407,7 +1478,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
   }
   if (step == "for") {
     let ir = render_expr(value_field(node, "iterable"), ctx, counter)
-    let bind = mangle(value_str(value_field(node, "bind")))
+    let bind = ident_binding(value_str(value_field(node, "bind")))
     var out = [pad.concat(`for (var ${bind} : ${ir.text}) {`)]
     let br = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1, ir.counter)
     out = out.concat(br.lines)
@@ -1625,7 +1696,7 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
     let name = fn_name(value_str(value_field(fnode, "name")))
     var ps = []
     for (p of value_list(value_field(fnode, "params"))) {
-      ps = ps.push(`${java_v3_type(value_field(p, "type"), false)} ${mangle(value_str(value_field(p, "name")))}`)
+      ps = ps.push(`${java_v3_type(value_field(p, "type"), false)} ${ident_binding(value_str(value_field(p, "name")))}`)
     }
     let ret = java_v3_type(value_field(fnode, "returns"), false)
     lines = lines.push(`public static ${ret} ${name}(${ps.join(", ")}) {`)
@@ -1811,7 +1882,7 @@ fn emit_service_interfaces_v3(services: Any) -> List[Str] {
       let method = value_field(methods, mname)
       var params = []
       for (p of value_list(value_field(method, "params"))) {
-        params = params.push(`${java_v3_type(value_field(p, "type"), false)} ${mangle(value_str(value_field(p, "name")))}`)
+        params = params.push(`${java_v3_type(value_field(p, "type"), false)} ${ident_binding(value_str(value_field(p, "name")))}`)
       }
       var ret = "void"
       let r = value_field(method, "returns")
@@ -1827,12 +1898,13 @@ fn emit_service_interfaces_v3(services: Any) -> List[Str] {
 // The v1 method-body expression surface for the simple provider path: only the
 // two kinds a pure `return` forces (`lit`/`name`), every other kind DEFERRED. The
 // simple unit carries no binds/reqs, so the reference's `rename` map is empty and
-// a `name` is just `_ident` (mangle). A user-case `name` cannot occur here (the
+// a `name` is just `_ident(.., "binding")` (a body-reference role, so the
+// scaffolding ladder applies). A user-case `name` cannot occur here (the
 // method returns a scalar), so no ADT/ctx lookup is needed.
 fn v1_method_expr(node: Any) -> Str {
   let k = node_kind(node)
   if (k == "lit") { return java_lit(node) }
-  if (k == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (k == "name") { return ident_binding(value_str(value_field(node, "id"))) }
   return `<<UNSUPPORTED-method-expr:${k}>>`
 }
 
@@ -3260,8 +3332,12 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
         c = sr.counter
       }
       if (kind == "let-effect") {
-        let bind = mangle(value_str(value_field(step, "bind")))
-        let surface = map_get(map_values, bind)
+        // The local is declared through the binding ladder (`_ident(...,
+        // "binding")`); the type table and the provider field stay keyed by
+        // the IR's raw bind name, exactly as the reference.
+        let raw_bind = value_str(value_field(step, "bind"))
+        let bind = ident_binding(raw_bind)
+        let surface = map_get(map_values, raw_bind)
         var decl = "var"
         if (surface != "") { decl = `Map<${java_v3_type(surface, true)}>` }
         let ar = render_expr(value_field(step, "acquire"), ctx, c)
@@ -3311,7 +3387,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       var cargs = ["ctx", "fx"]
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
-      for (b of bind_names) { cargs = cargs.push(b) }
+      for (b of bind_names) { cargs = cargs.push(ident_binding(b)) }
       for (f of provider_config_fields(comp)) {
         cargs = cargs.push(mangle(value_str(value_field(f, "name"))))
       }
@@ -3708,7 +3784,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // The provide-method capture rename: each requirement AND each host bind is a
   // `this.<name>` field (item 238 adds the binds).
   var rn: Map[Str, Str] = Map.empty()
-  for (b of bind_names) { rn = rn.set(b, `this.${b}`) }
+  for (b of bind_names) { rn = rn.set(b, `this.${ident_binding(b)}`) }
   for (local of req_map.keys()) { rn = rn.set(local, `this.${mangle(local)}`) }
   let mctx = set_rn(base_ctx, rn)
   // `has_await` (a top-level `await` body step) colors the plugin async: the
@@ -3730,7 +3806,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       out = out.push(`    private final ${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)};`)
     }
     for (b of bind_names) {
-      out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
+      out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${ident_binding(b)};`)
     }
     // A provide method that reads `config.<f>` needs the field HERE, not only
     // on the plugin (see `provider_config_fields`).
@@ -3743,7 +3819,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       cparams = cparams.push(`${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)}`)
     }
     for (b of bind_names) {
-      cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
+      cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${ident_binding(b)}`)
     }
     for (f of provider_cfg) {
       cparams = cparams.push(`${java_v3_type(value_field(f, "type"), false)} ${mangle(value_str(value_field(f, "name")))}`)
@@ -3756,7 +3832,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       out = out.push(`        this.${mangle(b)} = ${mangle(b)};`)
     }
     for (b of bind_names) {
-      out = out.push(`        this.${b} = ${b};`)
+      let field = ident_binding(b)
+      out = out.push(`        this.${field} = ${field};`)
     }
     for (f of provider_cfg) {
       let cfn = mangle(value_str(value_field(f, "name")))
@@ -3771,7 +3848,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       var params = []
       for (pn of value_list(value_field(method, "params"))) {
         let pname = value_str(pn)
-        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${pname}`)
+        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${ident_binding(pname)}`)
       }
       var ret_is_void = true
       var ret = "void"
@@ -3893,7 +3970,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
       var params = []
       for (pn of value_list(value_field(method, "params"))) {
         let pname = value_str(pn)
-        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${pname}`)
+        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${ident_binding(pname)}`)
       }
       var ret_is_void = true
       var ret = "void"
@@ -4366,6 +4443,25 @@ test "the Java rename is injective" {
   // a name with no reserved root is verbatim, trailing underscores and all
   assert mangle("value_") == "value_"
   assert fn_name("add_") == "add_"
+}
+
+test "emitter scaffolding joins the binding ladder, not the field ladder" {
+  // `_ident` at `_JAVA_SCAFFOLDING_RENAMABLE_ROLES`: a binding, param, loop
+  // bind, match bind or bare name whose underscore root is scaffolding takes
+  // one more `_` (`ctx` -> `ctx_`, `ctx_` -> `ctx__`), so a user name and the
+  // generated local stay distinct. A RECORD FIELD is a member name: verbatim.
+  assert ident_binding("ctx") == "ctx_"
+  assert ident_binding("ctx_") == "ctx__"
+  assert ident_binding("config_") == "config__"
+  assert ident_binding("root") == "root_"
+  assert ident_binding("root_") == "root__"
+  assert ident_binding("value") == "value"
+  assert mangle("ctx") == "ctx"
+  assert mangle("root_") == "root_"
+  // `_fn_name` folds the same set into the callable ladder (`fx` is a
+  // generated `EffectScope` local, `String` a prelude type).
+  assert fn_name("fx") == "fx_"
+  assert fn_name("String") == "String_"
 }
 
 test "the field-set key canonicalises regardless of order" {

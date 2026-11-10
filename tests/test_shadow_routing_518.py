@@ -956,6 +956,7 @@ def test_a_window_of_really_sealed_records_promotes():
                 placement_digest=placement,
                 prompt_binding={"mode": "content-addressed",
                                 "value": DIGEST_C, "reason": None},
+                template_digest=DIGEST_C,
                 origins=["input"], candidates=[DIGEST_A], chosen=0,
                 outcome="validated",
                 sampling={"max_tokens": 256, "seed": 7, "stop_digest": None,

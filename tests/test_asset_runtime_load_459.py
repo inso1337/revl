@@ -938,7 +938,10 @@ _MUTATIONS = {
         '        raise ConfinementError(\n'
         '            "EOUTSIDE",\n'
         '            "path escapes the session workspace root",\n'
-        '            real,\n'
+        '            # the CALLER\'s spelling, never `real`: the resolved path expands\n'
+        '            # every symlink outside the root, a fact about what lives there\n'
+        '            # (#3184)\n'
+        '            _sanitized(path),\n'
         '        )',
         '    if False:\n'
         '        raise ConfinementError("EOUTSIDE", "x", real)'),

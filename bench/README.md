@@ -41,6 +41,12 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   across every attempt up to the admitted one. Free — reads committed data, no
   model. Committed number: `results/tokens-to-green.md`; the protocol-side
   companion analysis: `results/token-surface-audit.md`.
+- `mcp_response_size.py`: the **response side** of the token economy (item 50).
+  Drives a fixed scripted session (a passing `revl_ship`, a refused one, a
+  `revl_plan`) through the real MCP dispatcher and reports the text each
+  measured answer puts into the agent's context, in the same proxy tokens as
+  `tokens.py`, per call and per verb. Pinned by
+  `tests/test_mcp_response_size.py`. Free, no model, no transport.
 - `framework_unload_survey.py`: the third host's selection evidence. Named,
   falsifiable claims about each candidate framework's published API, checked
   against the artifact the package index serves at a pinned version.
@@ -442,9 +448,18 @@ registers (the entry row includes its own gate, and the report subtracts it),
 and states what it cannot isolate: the capability check is a compile-time
 refusal (G4) with no per-call runtime step, and the WAL discharge record is
 not on the path unless a recorder is attached. The report also names the
-residual it cannot decompose: allocation at the emitted call site. The
-cross-tier harness (TypeScript, Rust, wasm) the issue asks for next is not
-built yet.
+residual it cannot decompose: allocation at the emitted call site.
+
+The second half of the issue is the cross-tier harness,
+[cross_tier_kernels/](cross_tier_kernels/README.md). Seven kernel shapes run
+on the Python, TypeScript, Rust and wasm tiers, against the same work in a
+handwritten native Rust reference as the floor. It gates every tier's checksum
+against that reference before reporting a latency, then writes latency,
+throughput, artifact size, cold start, peak memory, loop overhead and
+capability-enforcement overhead. It states that call overhead across a
+boundary is not isolated here; the Python tier's extern crossing is the first
+slice's result. The committed run is
+[results/cross-tier-kernels.md](results/cross-tier-kernels.md).
 
 The decision rule it exists to serve, stated now so the cross-tier numbers
 land against it instead of being read as a win by themselves: **native work is
@@ -574,16 +589,20 @@ The committed figure today: **mean ~149 est. output tokens-to-green** across 136
 admitted components (real as-run cost $0.29). The costliest cells and the
 per-variant breakdown are in `results/tokens-to-green.md`.
 
-This is only the *generation* half of the token economy. The larger,
-protocol-side half — tokens an agent burns re-sending source and running chatty
-MCP verb sequences — is ranked in `results/token-surface-audit.md`, an
+`tokens.py` measures the *generation* half of the token economy; the
+protocol-side half, tokens an agent burns re-sending source and running chatty
+MCP verb sequences, is ranked in `results/token-surface-audit.md`, an
 analysis-only audit cross-referenced with the item-38 demand ranking (demand =
-what agents retry; tokens = what retries cost). That audit is the map of *where
-the spend goes*; the optimizations item 50 will weigh against this metric (a
-compound one-intent verb, a terser authoring wire-form, `revl_edit` structured
-patches) each have to move tokens-to-green here before they ship — no trick
-ships on taste. Where the paying tricks eventually land is the "How you're
-measured" contract in `../docs/guide-ai-agents.md`; this metric is the scale.
+what agents retry; tokens = what retries cost). The third, *response* half is
+the text each verb's answer puts back into the agent's context, paid again on
+every later turn: `mcp_response_size.py` measures it over a fixed scripted
+session and `tests/test_mcp_response_size.py` pins a ceiling per scripted call.
+That audit is the map of *where the spend goes*; the optimizations item 50 will
+weigh against these metrics (a compound one-intent verb, a terser authoring
+wire-form, `revl_edit` structured patches) each have to move a measured number
+before they ship; no trick ships on taste. Where the paying tricks eventually
+land is the "How you're measured" contract in `../docs/guide-ai-agents.md`;
+these metrics are the scale.
 
 ## Reading the results
 

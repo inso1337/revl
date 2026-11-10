@@ -1,9 +1,12 @@
 // issue #2325: a generic record literal is built with the diamond when javac
 // infers its type arguments exactly from the values alone (a literal, a fn
 // parameter, arithmetic over those, a call to a non-generic fn, `Some` of one,
-// a non-empty list of them, a record literal built from them), and raw
-// otherwise (an empty list, `None`, a variant case, a local, a field, a call to
-// a generic fn, a parameter name a match arm rebinds).
+// a non-empty list of them, a record literal built from them). An ANNOTATED
+// local whose fields javac cannot infer names the arguments from its declared
+// type instead (the `annotated_*` fns below). An unannotated local is not
+// pinned: its inferred type must agree with the native producer for the
+// byte-identical IR, and that producer does not instantiate a generic variant
+// constructor or a generic call field (issue #2472), so those stay raw.
 type Bx[T] = { v: T }
 type Pair[A, B] = { first: A, second: B }
 type Pt = { x: Int, y: Int }
@@ -100,5 +103,20 @@ fn local_nested(n: Int) -> Bx[Bx[Int]] {
 fn local_some(n: Int) -> Bx[Opt[Int]] {
   let x = n
   let b = { v: Some(x) }
+  return b
+}
+// The local's DECLARED type is the pin when the fields alone are not
+// diamond-inferable: `[]` and `None` would infer `List<Object>` and an empty
+// `Optional`, so the arguments are named from the annotation (issue #2325).
+fn annotated_empty() -> Bx[List[Int]] {
+  let b: Bx[List[Int]] = { v: [] }
+  return b
+}
+fn annotated_none() -> Bx[Opt[Int]] {
+  let b: Bx[Opt[Int]] = { v: None }
+  return b
+}
+fn annotated_nested() -> Bx[Bx[List[Int]]] {
+  let b: Bx[Bx[List[Int]]] = { v: { v: [] } }
   return b
 }

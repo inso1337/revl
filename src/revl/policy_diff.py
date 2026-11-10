@@ -138,6 +138,10 @@ LEGS = (
         "the recovery surface a composition carries"),
     Leg("tenant", "unmodelled",
         "the realms of every other tenant and the reach it shares"),
+    Leg("pair", "unmodelled",
+        "the component's WHOLE reach set: a per-component pair rule refuses "
+        "only when one component holds both capabilities, which one recorded "
+        "crossing does not carry"),
 )
 
 
@@ -357,9 +361,16 @@ def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
     An evidence rule is fail-closed over a conjunction of facets, so its surface
     is the facets and their thresholds, not the rule text: raising a threshold
     under an unchanged rule is exactly the kind of widening a diff of the rule
-    text would miss."""
+    text would miss.
+
+    A SOFT rule (`outcome` set, issue #2753) never refuses and never changes the
+    gate, so it is not part of this leg's surface. Including it would mark a
+    recorded pair undecided and report widening when the operator only added an
+    advisory grade, while changing the grade would move nothing."""
     rows = []
     for rule in policy.evidence_rules:
+        if rule.outcome is not None:
+            continue
         if rule.scope == "capability":
             selected = _policy._matches_any(token, (rule.selector,))
         elif rule.scope == "component":
@@ -439,6 +450,13 @@ def leg_surfaces(policy, name: str, token: str, realms) -> dict:
         # the floor `policy.py:1696-1697` reduces the rules to, not the rule list
         "teardown": _teardown_rows(policy),
         "tenant": (policy.tenants_isolated,),
+        # `policy.py`'s pair leg selects on the component glob and reads the
+        # whole reach set; a rule the selector arms makes the pair undecided
+        # rather than leaving it unchanged, because the other capability of the
+        # pair is not a fact this row's recorded token carries.
+        "pair": _rows((rule.selector, rule.first, rule.second)
+                      for rule in policy.pair_rules
+                      if rule.selects(name)),
     }
 
 

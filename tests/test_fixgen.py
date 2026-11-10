@@ -308,5 +308,49 @@ def test_agent_fix_code_when_source_does_not_reproduce_the_rejection():
     assert payload["ok"] is False
 
 
+# ------------------------------------------------------------ G4 (issue #2684)
+
+# a host acquisition bound with no `undo`: the family's release is its inverse
+G4_SITE = (
+    "\n"
+    "service S { fn go(u: Str) -> Int }\n"
+    "\n"
+    "component Leaky provides s: S {\n"
+    "  config { url: Str }\n"
+    '  let pool = effect Pool.open("u", 1)\n'
+    "  provide s { fn go(u) = 1 }\n"
+    "}\n"
+)
+
+# the unbound spelling has no handle to release, so no mechanical edit exists
+G4_SITE_UNBOUND = (
+    "\n"
+    "service S { fn go(u: Str) -> Int }\n"
+    "\n"
+    "component Leaky provides s: S {\n"
+    "  config { url: Str }\n"
+    '  effect Pool.open("u", 1)\n'
+    "  provide s { fn go(u) = 1 }\n"
+    "}\n"
+)
+
+
+def test_g4_missing_undo_spells_the_family_release():
+    rejection = _rejection(G4_SITE)
+    assert rejection["code"] == "G4"
+    payload = fix_code(rejection, G4_SITE)
+    assert payload["ok"] is True
+    patched = apply_edits(G4_SITE, payload["edits"])
+    compile_source(patched)              # the patched source checks clean
+    assert "undo pool.close()" in patched
+
+
+def test_g4_unbound_acquisition_declines_a_mechanical_fix():
+    rejection = _rejection(G4_SITE_UNBOUND)
+    payload = fix_code(rejection, G4_SITE_UNBOUND)
+    assert payload["ok"] is False
+    assert "reason" in payload
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -168,7 +168,7 @@ def _cargo(subcommand: str, cwd: Path, *extra: str) -> subprocess.CompletedProce
 
 
 @pytest.fixture(scope="module")
-def prefilter(tmp_path_factory) -> Path:
+def prefilter(tmp_path_factory, cargo_target_dir) -> Path:
     """Build the COMMITTED example, out of tree.
 
     The example is copied to a temp dir and its path dependency rewritten to an
@@ -176,6 +176,9 @@ def prefilter(tmp_path_factory) -> Path:
     that is not this checkout — the same "genuinely external" shape
     `tests/test_gate_consumer_example.py` gets on py by assembling an isolated
     package copy. Building in place would also write `target/` into the repo.
+
+    The build lands in the session's shared `cargo_target_dir` (issue #2216),
+    so the other consumer builds reuse its dependency artifacts.
     """
     work = tmp_path_factory.mktemp("agent-prefilter")
     project = work / "agent-prefilter"
@@ -186,11 +189,11 @@ def prefilter(tmp_path_factory) -> Path:
                                 f'path = "{CRATE.as_posix()}"')
     (project / "Cargo.toml").write_text(manifest, encoding="utf-8")
 
-    built = _cargo("build", project)
+    built = _cargo("build", project, "--target-dir", str(cargo_target_dir))
     assert built.returncode == 0, (
         "the committed rust consumer example failed to build against "
         "crates/revl-gate:\n" + (built.stderr or built.stdout or "")[-4000:])
-    binary = project / "target" / "debug" / "agent-prefilter"
+    binary = cargo_target_dir / "debug" / "agent-prefilter"
     assert binary.exists(), f"consumer binary not found at {binary}"
     return binary
 

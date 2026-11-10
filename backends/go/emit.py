@@ -470,10 +470,40 @@ class _Env:
 _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
                 "defer", "return", "var", "const", "package", "import"}
 
+#: Names the emitted go code binds for the emitter at a scope a user binding
+#: shares. Go has no identifier sigil a revl name cannot spell (unlike ts's
+#: `$` or python's refused `_revl` namespace), so the collision is closed the
+#: way rust closes `root`: the USER name moves one rung of the same injective
+#: ladder and the emitter keeps the bare token.
+#:
+#: The function-scope half is the lifecycle driver's `revlT` receiver
+#: parameter, the `root` context, the `_fibers` registry, the `_revlLoadOrder`
+#: teardown order and the `_revlAt` step breadcrumb. A user `let` of any of
+#: those spellings emitted a second declaration in the same block ("root
+#: redeclared in this block", issue #3053).
+#:
+#: The call-step half (`_svc`, `_err`, `_r`, `_ok`) is block-scoped, but the
+#: driver writes the call result to the USER's binding by name (`<bind> =
+#: (_svc).Label()`), and a short declaration in the step's own block shadows
+#: that name first, so a user binding of one of these spellings made the
+#: assignment target the wrong variable (a go build type error). `_f`, `i`,
+#: `_i` and `_j` stay unreserved: their shadows are never read as a user value.
+#: issue #3095 adds the component activation/provide-impl scaffolding a
+#: `let-effect` bind shares scope with: `ctx` is the activation's
+#: `*stc.Context` and the impl's own field, `cfg` the config struct, the rest
+#: are the emitted frames, method receiver and apply results.
+_EMITTER_RESERVED = {
+    "revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
+    "_svc", "_err", "_r", "_ok",
+    "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+    "_revlUi", "_revlApplyInv", "_revlApplyErr",
+}
+
 
 def _safe_local(name: str) -> str:
-    """Rename a revl identifier that collides with a *Go* keyword so it emits
-    as a usable Go local (roadmap item 165).
+    """Rename a revl identifier that collides with a *Go* keyword (or a name
+    the emitted lifecycle driver binds at the user's scope) so it emits as a
+    usable Go local (roadmap item 165, issue #3053).
 
     The rename must be a pure function of the name (declaration site and use
     sites agree without a table) AND INJECTIVE: two distinct revl identifiers
@@ -486,18 +516,21 @@ def _safe_local(name: str) -> str:
     compiler CI does not run.
 
     The injective rule: escape a name iff the name OR any name reachable from
-    it by dropping trailing `_` is a Go keyword, and escape it by exactly ONE
-    `_`. Names whose underscore-stripped root is a keyword shift up one rung of
-    the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
-    which is injective; every other name is returned unchanged and can never
-    equal a shifted name, because a shifted name's root is a keyword and an
-    unchanged name's root is not. The output is never itself a keyword: no
-    member of `_GO_KEYWORDS` ends in `_`. Only a name whose root is a keyword
-    can change, so no existing program's output moves."""
+    it by dropping trailing `_` is a Go keyword or an `_EMITTER_RESERVED` name,
+    and escape it by exactly ONE `_`. Names whose underscore-stripped root is
+    reserved shift up one rung of the `kw`/`kw_`/`kw__` ladder (`func` ->
+    `func_`, `func_` -> `func__`), which is injective; every other name is
+    returned unchanged and can never equal a shifted name, because a shifted
+    name's root is reserved and an unchanged name's root is not. The output is
+    never itself reserved: no member of `_GO_KEYWORDS` or `_EMITTER_RESERVED`
+    ends in `_`. Only a name whose root is reserved can change, so a program
+    that binds no reserved name emits byte-identically to before; binding one
+    of the driver's own spellings now moves the USER name one rung clear
+    (issue #3053)."""
     n = str(name)
     root = n
     while root:
-        if root in _GO_KEYWORDS:
+        if root in _GO_KEYWORDS or root in _EMITTER_RESERVED:
             return n + "_"
         if not root.endswith("_"):
             break
@@ -506,7 +539,18 @@ def _safe_local(name: str) -> str:
 
 
 def _bind_field(name: str) -> str:
-    return _lower_camel(name)
+    """The Go spelling of a component `let-effect` bind.
+
+    `_lower_camel` drops the trailing underscores the frontend's `_safe_name`
+    added to keep binders apart, so the raw binder `ctx` and the escaped one
+    `ctx_` both spelled `ctx`, and `ctx` is also the activation's context
+    parameter and the provide impl's own field. Preserve the trailing rung and
+    escape the component scaffolding through `_safe_local`'s ladder; a bind
+    that lands on no reserved name is unchanged, so ordinary output is
+    byte-identical (issue #3095).
+    """
+    return _safe_local(_lower_camel(str(name))
+                       + "_" * (len(str(name)) - len(str(name).rstrip("_"))))
 
 
 def _req_field(name: str) -> str:
@@ -7019,9 +7063,13 @@ class _FlowHints(dict):
         return self.keys.get(id(step), step.get("name"))
 
     def offer(self, name, declared) -> bool:
-        """Record `declared` as a target of `name`; True if it is new."""
-        if not (isinstance(name, str) and isinstance(declared, str)):
-            return False
+        """Record `declared` as a target of `name`; True if it is new.
+
+        `name` and `declared` are always strings: every caller reads them off
+        an IR node's `name`/`id` or a declared type, and each one checks that
+        before offering. A guard here for a non-string never ran, which the
+        line-coverage ledger recorded as an unreachable statement.
+        """
         seen = self.targets.setdefault(name, [])
         if declared not in seen:
             seen.append(declared)
@@ -8403,6 +8451,26 @@ def _go_v3_match_result(node, ctx: _V3GoCtx, expected, scrut_node,
     return "\n".join(lines)
 
 
+def _v3_infer_arm_body(arm, scrut_t, ctx: _V3GoCtx):
+    """The surface type of a match arm's body with the arm's binder in scope.
+
+    A binder shadows any outer binding of its name, so it is typed as the
+    arm's payload (the whole scrutinee for a wildcard) and, when that is
+    unknown, as nothing, never as the outer binding (issue #3075)."""
+    bind = arm.get("bind")
+    if not bind or bind == "_":
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    bound = scrut_t if arm.get("pattern") == "_" else arm.get("payload_type")
+    outer = ctx.var_types
+    ctx.var_types = {k: v for k, v in outer.items() if k != bind}
+    if bound is not None:
+        ctx.var_types[bind] = bound
+    try:
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    finally:
+        ctx.var_types = outer
+
+
 def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     scrut_node = node.get("scrutinee")
     scrutinee = _go_v3_expr(scrut_node, ctx)
@@ -8411,7 +8479,7 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     exp_t = _go_v3_type(expected, ctx.types) if expected else None
     if not exp_t:
         for arm in arms:
-            exp_t = _go_v3_type(_go_v3_infer_type(arm.get("body"), ctx), ctx.types)
+            exp_t = _go_v3_type(_v3_infer_arm_body(arm, st, ctx), ctx.types)
             if exp_t:
                 break
     exp_t = exp_t or "any"
@@ -9054,9 +9122,14 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             # but pinning the declared type is still correct and keeps a bare
             # `None` / `Err(..)` binding well-typed.
             out.append(f"{pad}var {name} {go_t} = {value}")
+        elif name == "_":
+            # the blank identifier declares nothing: `_ := v` is no new
+            # variable, and `_ = _` reads `_` as a value (issue #3074)
+            out.append(f"{pad}_ = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
-        out.append(f"{pad}_ = {name}")
+        if name != "_":
+            out.append(f"{pad}_ = {name}")
     elif step == "assign":
         raw = node.get("name")
         name = _v3_ident(raw, "binding")

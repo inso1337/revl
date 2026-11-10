@@ -1,0 +1,17 @@
+// An untyped `[]` read only as an element of another list literal. The
+// frontend admits it, and the go reference REFUSES it by name: there is no
+// declared List type anywhere the binding flows, and Go fixes a composite
+// literal's element type at the literal (issue #2898).
+//
+// An element position is not a flow target: the outer `[row]` types its own
+// element from its items, and an itemless `row` names no element type, so the
+// inner literal has neither a target, nor pushed evidence, nor any read the
+// only-sized fallback allows (its one read is the element position itself).
+// The reference refuses instead of printing `[]any{}` and letting `go build`
+// reject the module.
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS.
+fn w() -> List[List[Int]] {
+  var row = []
+  return [row]
+}

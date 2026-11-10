@@ -48,6 +48,8 @@
 
 ["reference", "src/revl/hostref.py"]
 
+["reference", "src/revl/inverse.py"]
+
 ["reference", "src/revl/kernel_boundary.py"]
 
 ["reference", "src/revl/lexer.py"]

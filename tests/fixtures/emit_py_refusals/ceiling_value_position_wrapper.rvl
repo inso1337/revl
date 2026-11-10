@@ -1,0 +1,23 @@
+// A value-position emission of a local function that reaches a budgeted
+// extern (issue #2688). The runtime meter only sees a crossing fired through
+// `extern_emit`; `let a = emit go("a")` goes through the value path instead
+// (the marker leaves no trace on the IR node), so the declared ceiling would
+// be silently unenforced. The reference refuses it at emit time with the named
+// `CeilingUnattributable`, naming the capability and the shape. No corpus
+// document can reach that refusal because the reference REFUSES this document,
+// so it lives here where `tools/selfhost_line_coverage.py` drives both halves.
+extern emission[net(calls=1)] fn call(x: Str) -> Int = @py { return 1 }
+fn go(x: Str) -> Int { return call(x) }
+
+service Ops {
+  emission fn m() -> Int
+}
+
+component C provides ops: Ops {
+  provide ops {
+    fn m() {
+      let a = emit go("a")
+      return a
+    }
+  }
+}

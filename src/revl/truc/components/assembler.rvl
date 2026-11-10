@@ -90,15 +90,18 @@ component Assembler
     // `assemble`, but the Planner's check_report forces empty compose-sources
     // so write_assembly is a no-op: --check answers "is my assembly still
     // valid?" (with the why-trace on invalid) and writes NOTHING to disk.
+    // The manifest/dossier drift is read here as a value because a dry run
+    // never reaches write_assembly, where `assemble` is refused on it.
     fn assemble_check(thc) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.assemble_spec(m)
       let g = emit ws.read_sources(".", spec)
       let d = plan.drift(lock, g)
+      let vd = emit ws.vendored_drift(".")
       let ordered = plan.ordered_sources(g)
       let v = emit gate.admit_all(ordered, lock, thc)
-      let r = plan.check_report(d, v, g)
+      let r = plan.check_report(d, vd, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))
       emit ws.print(plan.report_msg(r))
       return plan.report_code(r)

@@ -7266,6 +7266,13 @@ class _V3Ctx:
                  components: list | None = None,
                  analyses: "_V3Analyses | None" = None) -> None:
         self.types = types or {}
+        # The reverse of `_ident` for declaration names, built once: a record
+        # literal carries the EMITTED ident (`Box_`) while `var_types` /
+        # `_v3_infer_type` carry the RAW surface name (`Box`), and both must
+        # reach the same declaration without scanning the whole type table (or
+        # confusing a declared `Box_` with `Box`).
+        self.raw_by_emitted = {_ident(name, "type name"): name
+                               for name in self.types}
         # issue #540: the whole-program scans (`fn_borrow`, `fn_list_borrow`,
         # the char views, the recursive-Box edges) are pure in `functions`/
         # `types`; `_emit_v3` computes them once and passes the bundle in, so
@@ -7477,13 +7484,30 @@ class _V3Ctx:
                       "type name")
 
     def record_field_types(self, type_name: str) -> dict[str, str | None]:
-        """The declared field -> type map of an emitted record type, so a field
-        VALUE can be lowered with its target type as context. Empty for a
-        synthesized/unknown name."""
-        spec = self.types.get(type_name)
-        if spec is None or spec.get("kind") != "record":
-            return {}
-        return dict(spec.get("fields") or {})
+        """The declared field -> type map of a record type, so a field VALUE can
+        be lowered with its target type as context. Empty for a
+        synthesized/unknown name.
+
+        Callers pass either the RAW surface name (a declared type read from
+        `var_types`/`_v3_infer_type`) or the EMITTED ident (a record literal).
+        The raw key wins when it exists, because a declared `Box_` is a
+        different declaration from the `Box` that mangles to `Box_`; otherwise
+        the ident is resolved through the `_ident` reverse map.
+        """
+        raw = (type_name if type_name in self.types
+               else self.raw_by_emitted.get(type_name))
+        spec = self.types.get(raw) if raw is not None else None
+        record = isinstance(spec, dict) and spec.get("kind") == "record"
+        return dict(spec.get("fields") or {}) if record else {}
+
+    def declaration_params(self, type_name: str) -> frozenset:
+        """The type parameters of the record/variant whose RAW or EMITTED ident
+        is `type_name` (empty for a non-generic or unknown declaration). A field
+        typed as one of these is a parameter, not the erased `Value`."""
+        raw = (type_name if type_name in self.types
+               else self.raw_by_emitted.get(type_name))
+        spec = self.types.get(raw) if raw is not None else None
+        return frozenset(spec.get("params") or []) if spec else frozenset()
 
     def record_type_for_names(self, names: list[str],
                               expected: str | None = None) -> str:
@@ -8025,6 +8049,15 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         def _field_value(k, v):
             rendered = _by_value_arg(
                 v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)
+            # A concrete value flowing INTO an erased `Any`/`Value` FIELD is the
+            # same coercion a call argument gets: the field holds `cordis::Value`
+            # and an `i64`/`String` does not implement `Into<Value>`, so
+            # `{ v: 1 }` against a `v: Value` field was E0308 (issue #3019). A
+            # generic record's field typed as its own parameter (`Cell[T].v`) is
+            # a parameter, not the erased value, and must not be boxed.
+            declared = field_types.get(k)
+            if declared not in ctx.declaration_params(type_name):
+                rendered = _coerce_any_arg(v, rendered, declared, ctx)
             if ctx.field_is_boxed(type_name, _ident(k, "record field")):
                 # recursive struct field -> the struct holds `Box<T>` (E0072);
                 # move the field value onto the heap to match.
@@ -9245,6 +9278,90 @@ def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
     return boxed_cases, boxed_fields
 
 
+# The derive set of a v3 record/variant. `PartialEq` is load-bearing (revl's
+# equality is structural) and the serde pair is what lets a value cross the
+# generated RPC bridge; an item that CONTAINS the opaque erased `Value` cannot
+# derive any of the three (issue #3019).
+_V3_DERIVES = "Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize"
+_V3_ERASED_DERIVES = "Clone, Debug"
+_VALUE_WORD = re.compile(r"\bValue\b")
+# The head of a surface type (`Map[Str, Int]`, `Inner`, `Mb[Int]`) and the
+# bracketed argument list after it. Used to resolve a surface type STRUCTURALLY
+# to the declarations it names.
+_SURFACE_HEAD = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)")
+_SURFACE_ARGS = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\[(.*)\]\s*$", re.S)
+
+
+def _declaration_surfaces(spec: dict) -> list:
+    """Every surface type a record field or variant payload names."""
+    fields = spec.get("fields") or {}
+    cases = spec.get("cases") or []
+    surfaces = list(fields.values()) if isinstance(fields, dict) else []
+    surfaces += [case["payload"] for case in cases
+                 if isinstance(case, dict) and case.get("payload") is not None]
+    return surfaces
+
+
+def _surface_reaches_carrying(surface: object, carrying: set,
+                              shadowed: frozenset) -> bool:
+    """Whether a surface type NAMES a declaration that carries the erased value.
+
+    Resolved structurally (a declared name, or the arguments of `Head[..]`)
+    rather than by matching a rendered spelling: a user type named `HashMap`
+    emits `HashMap`, and the `std::collections::HashMap<..>` an unrelated `Map`
+    field renders must not be mistaken for it. `shadowed` is the declaration's
+    own type parameters, which name a parameter, not a declaration.
+    """
+    text = surface.strip() if isinstance(surface, str) else ""
+    head = _SURFACE_HEAD.match(text)
+    name = head.group(1) if head else ""
+    args = _SURFACE_ARGS.match(text)
+    inner = _split_generic(args.group(1)) if args else []
+    return ((name not in shadowed and name in carrying)
+            or any(_surface_reaches_carrying(arg, carrying, shadowed)
+                   for arg in inner))
+
+
+def _value_carrying_types(types: dict) -> set:
+    """The declared types whose emitted Rust item CONTAINS the opaque `Value`.
+
+    `Value` (stdlib/value.rvl, docs/stdlib-value.md) and every surface type that
+    erases to it (`Any`, an unknown name, `Row`, `Stream[..]`) is the tier's
+    dynamic value: a `cordis::Value`, which implements `Clone` and `Debug` and
+    nothing else. A record or variant containing one therefore cannot derive
+    `PartialEq` or the serde traits, so `_emit_v3_types` reduces its derive set
+    (#3019).
+
+    Containment is transitive: a record holding a record holding a `Value` needs
+    the same reduction, because the inner item no longer implements what the
+    outer derive would require of it. The surfaces are rendered with the
+    declaration's own type parameters in scope, so a field typed as a parameter
+    (`Cell[T].v`) is not the erased value, even when a DECLARED type shares the
+    parameter's name.
+    """
+    rendered: dict[str, list[str]] = {}
+    shadowed: dict[str, frozenset] = {}
+    for name, spec in types.items():
+        params = spec.get("params") or []
+        scope = (dict(types, **{p: {"kind": "param"} for p in params})
+                 if params else types)
+        rendered[name] = [
+            _rust_type(surface, scope) for surface in _declaration_surfaces(spec)]
+        shadowed[name] = frozenset(params)
+    carrying = {name for name, spellings in rendered.items()
+                if any(_VALUE_WORD.search(spelling) for spelling in spellings)}
+    changed = True
+    while changed:
+        changed = False
+        extra = {name for name, spec in types.items()
+                 if name not in carrying
+                 and any(_surface_reaches_carrying(surface, carrying, shadowed[name])
+                         for surface in _declaration_surfaces(spec))}
+        carrying |= extra
+        changed = bool(extra)
+    return carrying
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     # PartialEq is not decoration: revl has one equality and it is
     # structural (syntax-2.0 §3.4), so `{a: 1} == {a: 1}` must compile and
@@ -9252,6 +9369,11 @@ def _emit_v3_types(types: dict) -> list[str]:
     # the comparison outright (E0369) and legal revl fails on this tier.
     out: list[str] = []
     boxed_cases, boxed_fields = _recursive_boxed_edges(types)
+    # The erased dynamic value is the one exception (see
+    # `_value_carrying_types`): `cordis::Value` has no PartialEq and no serde
+    # impls, so an item containing one derives only what it supports rather than
+    # emitting a crate rustc rejects (#3019).
+    carrying = _value_carrying_types(types)
     # Two records with the IDENTICAL field->type shape are interchangeable in
     # revl (structural equality, item 268), so a value of one is admitted where
     # the other is declared -- `let one = [Bind {..}]` then `ArrowN { params:
@@ -9270,6 +9392,7 @@ def _emit_v3_types(types: dict) -> list[str]:
             canonical[rn] = _by_shape.setdefault(shape, rn)
     for raw_name, spec in types.items():
         name = _ident(raw_name, "type name")
+        derives = _V3_ERASED_DERIVES if raw_name in carrying else _V3_DERIVES
         if spec.get("kind") == "record":
             twin = canonical.get(raw_name)
             if twin is not None and twin != raw_name:
@@ -9277,7 +9400,7 @@ def _emit_v3_types(types: dict) -> list[str]:
                     f"pub type {name} = {_ident(twin, 'type name')};")
                 out.append("")
                 continue
-            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
+            out.append(f"#[derive({derives})]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
                 rendered = _rust_type(ftype, types)
@@ -9292,12 +9415,17 @@ def _emit_v3_types(types: dict) -> list[str]:
                     # told the real key — without this a record round-trips under
                     # a name no other tier writes, and any `from_value` decode of
                     # the wire object faults on a field the schema just accepted.
-                    out.append(f'    #[serde(rename = "{field}")]')
+                    out.append(
+                        f'    #[serde(rename = "{field}")]'
+                        if raw_name not in carrying
+                        else "    // no serde derive: the item carries the erased `Value`")
                 out.append(f"    {fname}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
-            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
-            out.append('#[serde(tag = "$kind", content = "$value")]')
+            out.append(f"#[derive({derives})]")
+            out.append('#[serde(tag = "$kind", content = "$value")]'
+                       if raw_name not in carrying
+                       else "// no serde derive: the variant carries the erased `Value`")
             # issue #2471: a generic variant declares its type parameters, and
             # a payload naming one keeps it (`Jj(T)`), not the `Value` an
             # unknown name falls back to
@@ -9324,7 +9452,9 @@ def _emit_v3_types(types: dict) -> list[str]:
                 # match already ends in `_ => unreachable!()`
                 marker = ", ".join(_ident(p, "type name") for p in phantom)
                 out.append("    #[doc(hidden)]")
-                out.append("    #[serde(skip)]")
+                out.append("    #[serde(skip)]"
+                           if raw_name not in carrying
+                           else "    // no serde derive: the variant carries the erased `Value`")
                 out.append(f"    __RevlPhantom(std::marker::PhantomData<fn() -> ({marker},)>),")
             out.append("}")
         else:
@@ -11280,13 +11410,41 @@ def _revl_ftoa_helper() -> list[str]:
 # the first cut, so the golden holds). Anything else that is not the opaque
 # cordis `Value` is marshalled generically through serde (records, ADTs, Map,
 # Result, and their Vec/Option nestings, once the emitted types derive
-# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque.
+# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque, and
+# so is a declared record/variant that CONTAINS one, because `_emit_v3_types`
+# gives it only `Clone, Debug` (#3019).
 _SCALAR_OPTION = ("Option<String>", "Option<i64>", "Option<bool>", "Option<f64>")
+
+# The EMITTED idents of the declarations that carry the erased value, set by
+# `_emit_bridge` for the marshalling predicates below. Empty for a document
+# without one, so every existing bridge emits byte-identically.
+_BRIDGE_OPAQUE_TYPES: frozenset = frozenset()
+
+# A rendered Rust type's BARE identifiers. A user declaration always renders
+# bare (`Blob`, `HashMap`), while a path segment (`std::collections::HashMap`)
+# is preceded by `::` and belongs to the prelude, so only the former can name a
+# declaration. Matching without that rule made a value-carrying user type named
+# `HashMap` mark every unrelated `Map[..]` service parameter as opaque.
+_BARE_TYPE_WORD = re.compile(r"(?<!::)\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 
 def _bridge_serde_ok(rtype: str) -> bool:
-    """True when `rtype` can cross via serde: not the opaque cordis `Value`."""
-    return not re.search(r"\bValue\b", rtype)
+    """True when `rtype` can cross via serde: not the opaque cordis `Value`, nor
+    a declared type that carries one and so does not derive the serde traits."""
+    if re.search(r"\bValue\b", rtype):
+        return False
+    return not any(word in _BRIDGE_OPAQUE_TYPES
+                   for word in _BARE_TYPE_WORD.findall(rtype))
+
+
+def _result_is_opaque(ok_type: str, err_type: str) -> bool:
+    """True when either half of a `Result` cannot cross via serde.
+
+    `_result_to_json`/`_result_ok_err` serde-serialize BOTH halves, so one
+    opaque half (a record carrying the erased `Value`) makes the whole Result
+    unmarshallable; the method is then treated as the opaque `Value` itself.
+    """
+    return not (_bridge_serde_ok(ok_type) and _bridge_serde_ok(err_type))
 
 
 def _split_result(rtype: str):
@@ -11342,7 +11500,8 @@ def _bridge_arg_ser(name: str, rtype: str) -> str:
     """Serialize a proxy method argument to a serde_json::Value."""
     if rtype in ("String", "i64", "f64", "bool"):
         return f"serde_json::json!({name})"
-    if _split_result(rtype):
+    result = _split_result(rtype)
+    if result is not None and not _result_is_opaque(*result):
         return _result_to_json(name)
     if _bridge_serde_ok(rtype):
         return f"serde_json::to_value(&{name}).unwrap_or(serde_json::Value::Null)"
@@ -11360,7 +11519,7 @@ def _bridge_arg_extract(index: int, rtype: str) -> str | None:
     if rtype == "bool":
         return f"args[{index}].as_bool().unwrap_or(false)"
     result = _split_result(rtype)
-    if result:
+    if result is not None and not _result_is_opaque(*result):
         return _result_ok_err(f"args[{index}]", result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>(args[{index}].clone()).expect("bridge: decode arg")'
@@ -11384,7 +11543,7 @@ def _bridge_ret_deser(value: str, rtype: str) -> str | None:
     if rtype in table:
         return table[rtype]
     result = _split_result(rtype)
-    if result:
+    if result is not None and not _result_is_opaque(*result):
         return _result_ok_err(value, result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>({value}.clone()).expect("bridge: decode return")'
@@ -11401,7 +11560,8 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
         return (f"{{ let _r = {call}; serde_json::json!(_r.iter().map(|v| "
                 f"v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default())"
                 f".collect::<Vec<_>>()) }}")
-    if _split_result(rtype):
+    result = _split_result(rtype)
+    if result is not None and not _result_is_opaque(*result):
         # item 421 F5: only a document that declares a `Secret[T]` carries the
         # funnel, so a marking-free unit stays byte-identical (`_SECRET_MODE`).
         return _result_to_json_funneled(call) if _SECRET_MODE else _result_to_json(call)
@@ -11416,6 +11576,9 @@ def _emit_bridge(ir: dict) -> list[str]:
     types = ir.get("types") or {}
     if not services:
         return []
+    global _BRIDGE_OPAQUE_TYPES
+    _BRIDGE_OPAQUE_TYPES = frozenset(
+        _ident(name, "type name") for name in _value_carrying_types(types))
     provided: dict[str, str] = {}
     for component in components:
         for key, service in (component.get("provides") or {}).items():

@@ -441,14 +441,24 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             code="L4", category="termination",
         )
     arity = _GENERIC_ARITY.get(head or "")
+    if arity is None and head in _CONFIG_DATA_SCALARS:
+        # issue #2963: a builtin scalar is not parametric, so a written
+        # application (`Int[Str]`) has no meaning; it used to type through with
+        # the head read as `Int` and the written arguments dropped.
+        arity = 0
     if arity is not None and len(args) != arity:
-        example = {"Opt": "Opt[Int]", "List": "List[Int]",
-                   "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
+        if arity == 0:
+            hint = (f"`{head}` is a builtin scalar and takes no type "
+                    f"arguments; write `{head}`")
+        else:
+            example = {"Opt": "Opt[Int]", "List": "List[Int]",
+                       "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
+            hint = f"write e.g. `{example}` — a bare `{head}` is not a type"
         raise RevlError(
             filename, line,
             f"`{head}` takes {arity} type argument(s), got {len(args)} "
             f"(`{type_name}`)",
-            hint=f"write e.g. `{example}` — a bare `{head}` is not a type",
+            hint=hint,
         )
     for i, arg in enumerate(args):
         # Only the *immediate* function type's return position may carry an
@@ -2516,6 +2526,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
             return targs[0] if targs else None
+        if thead == "Map":
+            # issue #2949: a `Map[K, V]` subscript yields `V`, so an operand
+            # read out of a map is a `Float`/`Int32`/`Int` like any other.
+            # Without this the equality site saw an unknown type and never
+            # marked `m["a"] == 3` for the mixed-width widening, so TypeScript
+            # compared a number with a bigint and rust/java disagreed with
+            # python. A `List` read has answered its element type here for the
+            # same reason.
+            return targs[1] if len(targs) > 1 else None
         if thead == "Str":
             return "Str"
         return None
@@ -4034,6 +4053,14 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
             return targs[0] if targs else None
+        if thead == "Map":
+            # issue #2949: a subscript on a `Map[K, V]` yields `V`, so the
+            # equality site can mark `m["a"] == 3` for the mixed-width
+            # widening exactly as it already does for a `List` element. The
+            # lowered node's own `value_type` (set by `_map_key_value_types`)
+            # answers first: it is the declared value type even when the target
+            # type is no longer recoverable here.
+            return node.get("value_type") or (targs[1] if len(targs) > 1 else None)
         if thead == "Str":
             return "Str"
         return None

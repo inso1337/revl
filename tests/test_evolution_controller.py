@@ -1,6 +1,6 @@
 """Tests for `tools/evolution_controller.py` (roadmap item 520, issue #1194).
 
-The three things these tests have to establish, in the repository's own terms:
+The four things these tests have to establish, in the repository's own terms:
 
   1. THE CONTROLLER REFUSES when a stage's evidence is missing. A controller
      that promotes on missing evidence is the fail-open shape, and this
@@ -14,6 +14,12 @@ The three things these tests have to establish, in the repository's own terms:
      PROMOTE on BOTH the clean tree and the authority-widened one. The real
      controller separates them. The difference is therefore caused by the
      barrier and not by the widened tree being obviously broken.
+  4. THE MODE IS CONTROL FLOW. An `evolution` proposal ends at
+     `proposal-recorded` and cannot reach admit or any measured stage; a record
+     that supplies one of those stages is refused with the mode named. A
+     `repair` or `feature` proposal without its citation is refused before any
+     measurement is read, and a proposal without a mode is refused rather than
+     defaulted.
 
 The trees are real git trees built in a tmp_path, because the authority stage
 MEASURES the changed-file set with git and refuses a self-declared one. A test
@@ -79,7 +85,9 @@ def proposal_record(tree: Path, **over) -> dict:
     """A COMPLETE proposal: every stage present, every one verified.
 
     Tests derive their cases by removing or spoiling exactly one thing, so the
-    difference between a promotion and a refusal is always a single edit.
+    difference between a promotion and a refusal is always a single edit. The
+    default mode is `repair` with the localized fault it cites; a test that
+    changes the mode removes the citation the other mode does not need.
     """
     record = {
         "tree": str(tree),
@@ -87,6 +95,8 @@ def proposal_record(tree: Path, **over) -> dict:
         "scope": ["src/**", "tests/**"],
         "applies_to": "invariant",
         "promotion": "candidate",
+        "mode": "repair",
+        "fault": "trace:9f2c4a",
         "granted": ["Clock"],
         "attempt": 1,
         "budget": 3,
@@ -117,8 +127,11 @@ def proposal_record(tree: Path, **over) -> dict:
     return record
 
 
-def run(record: dict) -> ec.LifecycleVerdict:
-    return ec.decide(ec.load_proposal(record))
+def run(record: dict, allow=("**",)) -> ec.LifecycleVerdict:
+    """`allow` is the OPERATOR's grant, not a record key. The cases that are
+    about something else grant everything, the way their old `scope` stood in
+    for "unconstrained"; the allow-set cases pass their own set."""
+    return ec.decide(ec.load_proposal(record, allow=allow))
 
 
 @pytest.fixture
@@ -141,6 +154,8 @@ def test_the_verdict_binds_proposal_evidence_and_decision(clean_tree):
     """Item 520's exit test: ONE recorded verdict, carrying all of it."""
     verdict = run(proposal_record(clean_tree)).as_dict()
     assert verdict["decision"] == "PROMOTE"
+    assert verdict["mode"] == "repair"
+    assert verdict["fault"] == "trace:9f2c4a"
     assert verdict["base"] == "HEAD~1"
     assert verdict["scope"] == ["src/**", "tests/**"]
     assert verdict["attempt"] == 1 and verdict["budget"] == 3
@@ -150,6 +165,133 @@ def test_the_verdict_binds_proposal_evidence_and_decision(clean_tree):
     # and every stage carries its own evidence, not a shared blob
     for stage in verdict["stages"]:
         assert stage["evidence"], stage
+
+
+# ------------------------------------------------------------------- the modes
+
+def test_a_proposal_without_a_mode_is_refused(clean_tree):
+    """Item 520's mode is required and has no default. Absence is a named
+    refusal at the `propose` precondition, not a fallback to one of the three."""
+    record = proposal_record(clean_tree)
+    del record["mode"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_MISSING"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+
+
+def test_an_unknown_mode_is_refused(clean_tree):
+    """A mode the controller does not know cannot choose a path."""
+    verdict = run(proposal_record(clean_tree, mode="refactor"))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_UNKNOWN"
+    assert verdict.refusing_stage == "propose"
+
+
+def test_a_repair_proposal_must_cite_the_localized_fault(clean_tree):
+    """A repair fixes a fault the trace already localized, so it must cite the
+    failing test or trace id. The refusal is before any measurement is read."""
+    record = proposal_record(clean_tree)
+    del record["fault"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "FAULT_NOT_CITED"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+    for stage in ec.MEASURED:
+        assert verdict.by_name()[stage].code == "NOT_REACHED"
+
+
+def test_a_feature_proposal_must_cite_the_tests_the_gap_names(clean_tree):
+    """A feature implements a declared gap against the tests it names, so the
+    tests are its citation. With them it is judged like any other proposal."""
+    record = proposal_record(clean_tree, mode="feature")
+    del record["fault"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "TESTS_NOT_CITED"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+    record["tests"] = ["tests/test_evolution_controller.py::test_feature"]
+    assert run(record).decision == "PROMOTE"
+
+
+def evolution_record(tree: Path, **over) -> dict:
+    """An evolution proposal: trigger and propose only, and no citation.
+
+    Evolution mode produces a proposal and nothing else, so the default
+    proposal's admit, authority and measured records are removed here; that is
+    what a record asking for nothing past the proposal looks like.
+    """
+    record = proposal_record(tree, mode="evolution")
+    del record["fault"]
+    record["stages"] = {name: value for name, value in record["stages"].items()
+                        if name in ("trigger", "propose")}
+    record.update(over)
+    return record
+
+
+def test_an_evolution_proposal_ends_at_proposal_recorded(clean_tree):
+    """Item 520: evolution mode may propose only. It ends at the record and
+    cannot reach admit, authority or any measured stage."""
+    verdict = run(evolution_record(clean_tree))
+    assert verdict.decision == ec.PROPOSAL_RECORDED, verdict.render()
+    assert verdict.code == ""
+    assert verdict.measurements_read is False
+    assert [v.component for v in verdict.verdicts] == list(ec.STAGES)
+    assert verdict.by_name()["trigger"].verified is True
+    assert verdict.by_name()["propose"].verified is True
+    for stage in ("admit", "authority") + ec.MEASURED:
+        assert verdict.by_name()[stage].code == "NOT_REACHED", stage
+    assert "evolution" in verdict.by_name()["admit"].reason
+    assert verdict.as_dict()["mode"] == "evolution"
+    assert "PROPOSAL RECORDED" in verdict.render()
+
+
+def test_an_evolution_proposal_that_asks_for_activation_is_refused(clean_tree):
+    """The record still supplies admit and every measured stage: that is a call
+    asking the lifecycle to walk past the proposal, and it is refused with the
+    mode named."""
+    record = proposal_record(clean_tree, mode="evolution")
+    del record["fault"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_REFUSES_ACTIVATION"
+    assert verdict.refusing_stage == "propose"
+    assert verdict.measurements_read is False
+    assert "evolution" in verdict.by_name()["propose"].reason
+
+
+@pytest.mark.parametrize(
+    "stage", ec.STAGES[ec.STAGES.index("propose") + 1:])
+def test_every_stage_past_the_proposal_is_refused_in_evolution_mode(
+        clean_tree, stage):
+    """The evolution path has no door to ANY later stage, not only the measured
+    ones. Reading the tail of `STAGES` rather than restating it means a future
+    stage cannot be added without a decision about which side of the mode stop
+    it is on."""
+    record = evolution_record(clean_tree)
+    record["stages"][stage] = {"verified": True, "reason": "supplied",
+                               "evidence": ["supplied"]}
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "MODE_REFUSES_ACTIVATION"
+
+
+def test_a_failing_trigger_refuses_before_the_evolution_mode_stop(clean_tree):
+    """The precondition order is not bypassed by the mode check. This record
+    supplies a stage past the proposal, but its trigger does not verify, so the
+    refusal is the trigger's code and not the mode's. Nothing past the trigger
+    is read either way."""
+    record = proposal_record(clean_tree, mode="evolution")
+    del record["fault"]
+    del record["stages"]["trigger"]
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.refusing_stage == "trigger"
+    assert verdict.code == "STAGE_SKIPPED"
+    assert verdict.measurements_read is False
 
 
 # -------------------------------------------- missing evidence is a refusal
@@ -292,6 +434,127 @@ def test_every_fenced_path_exists_in_this_tree(path):
     assert (ROOT / path).exists(), path
 
 
+def test_a_diff_that_changes_only_the_reward_is_refused(tmp_path):
+    """Issue #2802's acceptance: the scorecard assembler was on no list.
+
+    `tools/evolution_reward.py` holds `COMPONENTS` and the retention rule, so a
+    proposal that edits it and is then judged by it has not been judged. Before
+    issue #2802 this diff promoted.
+    """
+    tree = make_tree(tmp_path / "rewardfence",
+                     {"tools/evolution_reward.py": "changed\n"})
+    verdict = run(proposal_record(tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "FENCE_TOUCHED"
+    assert "tools/evolution_reward.py" in verdict.by_name()["authority"].reason
+
+
+def test_the_controller_fence_is_a_view_of_the_evaluator_set():
+    """The fence is derived, not restated: a path added to `EVALUATOR_PATHS` and
+    tagged `authority` arrives here without a second list being edited. The AST
+    test in `tests/test_evaluator_protocol.py` holds the assignment itself, so
+    a literal copy of today's members does not pass either."""
+    from revl import kernel_boundary as kb  # noqa: PLC0415
+
+    assert tuple(ec.AUTHORITY_FENCE) == kb.evaluator_fence("authority")
+    assert set(ec.KERNEL_PATHS) == set(kb.KERNEL_PATHS)
+    for path in ("tools/evolution_reward.py", "tools/evolution_progress.py",
+                 "tests/test_evolution_reward.py",
+                 "tests/test_evolution_progress.py"):
+        assert path in ec.AUTHORITY_FENCE, path
+
+
+def test_the_verdict_carries_the_protocol_digest(clean_tree):
+    """Item 520's one verdict now binds the protocol that produced it."""
+    from revl import kernel_boundary as kb  # noqa: PLC0415
+
+    blob = run(proposal_record(clean_tree)).as_dict()
+    assert blob["protocol_digest"] == kb.protocol_digest(ROOT)
+    assert blob["protocol_digest"].startswith("sha256:")
+
+
+def test_a_controller_that_cannot_name_its_protocol_refuses(
+        clean_tree, monkeypatch):
+    """A broken checkout is a named refusal, not an import traceback, and not
+    a verdict that omits the identity it could not read."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("git is not available")
+
+    monkeypatch.setattr(ec, "protocol_digest", boom)
+    verdict = run(proposal_record(clean_tree))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "PROTOCOL_UNAVAILABLE"
+    assert verdict.measurements_read is False
+    assert verdict.as_dict()["protocol_digest"] is None
+
+
+def test_a_stage_record_from_another_protocol_is_refused(clean_tree):
+    """A record from a different evaluator is not evidence about this one."""
+    record = proposal_record(clean_tree)
+    record["stages"]["authority"]["protocol_digest"] = "sha256:" + "0" * 64
+    verdict = run(record)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "authority"
+    assert ec.own_protocol_digest() in verdict.by_name()["authority"].reason
+
+
+def test_a_stage_record_from_this_protocol_is_read(clean_tree):
+    """The control for the case above: the same digest this checkout computes
+    is not refused, so the check discriminates rather than refusing every
+    record that names a protocol."""
+    record = proposal_record(clean_tree)
+    record["stages"]["shadow"]["protocol_digest"] = ec.own_protocol_digest()
+    assert run(record).decision == "PROMOTE"
+
+
+def test_the_scorecard_adapter_carries_the_protocol_digest_through(clean_tree):
+    """`_normalise` rebuilds the observe record; it must not drop the field the
+    mismatch check reads, or a scorecard from another protocol would pass."""
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [], "components": [],
+        "protocol_digest": "sha256:" + "0" * 64,
+    }
+    verdict = run(record)
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "observe"
+
+
+def test_a_scorecard_whose_protocol_is_null_is_refused(clean_tree):
+    """A scorer that could not name its protocol is not a pass.
+
+    `evolution_reward.score()` writes `protocol_digest: null` when its own
+    checkout cannot be read (a missing git, a missing member). The adapter used
+    to treat that null like an ABSENT key, so the record was read and could
+    promote; the held-out scorer refuses the same situation, so one of the two
+    was failing open.
+    """
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [],
+        "components": [{"component": "tests"}],
+        "protocol_digest": None,
+    }
+    verdict = run(record)
+    assert verdict.code == "PROTOCOL_MISMATCH"
+    assert verdict.refusing_stage == "observe"
+    assert "null" in verdict.by_name()["observe"].reason
+
+
+def test_a_scorecard_from_this_protocol_promotes(clean_tree):
+    """The control for the two cases above: a present digest equal to this
+    checkout's is read, so the adapter did not turn the check into a refusal of
+    every scorecard."""
+    record = proposal_record(clean_tree)
+    record["stages"]["observe"] = {
+        "retained": True, "blockers": [],
+        "components": [{"component": "tests"}],
+        "protocol_digest": ec.own_protocol_digest(),
+    }
+    assert run(record).decision == "PROMOTE"
+
+
 # ----------------------------------------- the kernel (item 544, #1223)
 
 @pytest.mark.parametrize("path", [
@@ -370,6 +633,91 @@ def test_the_kernel_hit_is_found_even_when_the_candidate_hid_it(tmp_path):
     verdict = run(record)
     assert verdict.decision == "REFUSE"
     assert verdict.code == "KERNEL_INTERSECTION"
+
+
+# ------------------------------- the operator allow set (issue #2803)
+
+def test_a_measured_diff_outside_the_operator_allow_set_is_refused(clean_tree):
+    """Default deny at the authority precondition. The proposal may not widen
+    its own footprint by declaring one; the operator's grant bounds it."""
+    verdict = run(proposal_record(clean_tree), allow=("docs/**",))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert verdict.refusing_stage == "authority"
+    assert verdict.measurements_read is False
+    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+
+
+def test_a_proposal_with_no_operator_allow_set_is_refused(clean_tree):
+    verdict = run(proposal_record(clean_tree), allow=())
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "NO_ALLOW_SET"
+    assert ec.ALLOW_ENV in verdict.by_name()["authority"].reason
+
+
+def test_the_allow_set_does_not_choose_itself(clean_tree):
+    """`allow` is not in `RECORD_KEYS`: a proposal carrying one has it dropped
+    and reported, and the caller's grant is the one that is checked."""
+    record = proposal_record(clean_tree)
+    record["allow"] = ["src/**"]
+    proposal = ec.load_proposal(record, allow=("docs/**",))
+    assert proposal.candidate.allow == ("docs/**",)
+    assert "allow" in proposal.candidate.prose_ignored
+
+
+def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(tmp_path):
+    """A rename is two changes. With rename detection on, `git diff --name-only`
+    lists only the destination, so moving a file out of the grant and into a
+    granted directory would read as one allowed addition. The measured set is
+    what the authority precondition signs off, so both halves count.
+
+    The moved content is byte-identical to the base blob on purpose: a changed
+    file falls below git's similarity threshold, stops being detected as a
+    rename, and the test would pass without `--no-renames`.
+    """
+    tree = make_tree(tmp_path / "rename", {"src/svc.rvl": "candidate\n"})
+    (tree / "src" / "svc.rvl").write_text("base\n")
+    (tree / "tools").mkdir()
+    _git(tree, "mv", "src/svc.rvl", "tools/svc.rvl")
+    verdict = run(proposal_record(tree), allow=("tools/**",))
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+
+
+def test_a_diff_inside_the_operator_allow_set_still_promotes(clean_tree):
+    """The control: the same complete proposal promotes when the grant covers
+    the measured diff, so the new precondition is not a refusal of everything."""
+    assert run(proposal_record(clean_tree), allow=("src/**",)).decision == "PROMOTE"
+
+
+def test_the_measured_stages_are_not_read_for_a_diff_outside_the_grant(
+        clean_tree):
+    """The ordering barrier applies to the new precondition too: a proposal
+    that supplied shadow and canary evidence anyway gets a finding, and every
+    measured stage is recorded as not reached."""
+    verdict = run(proposal_record(clean_tree), allow=("docs/**",))
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert verdict.measurements_read is False
+    for stage in ec.MEASURED:
+        assert verdict.by_name()[stage].code == "NOT_REACHED"
+    assert any(f.startswith("OUT_OF_ORDER") for f in verdict.findings)
+
+
+def test_the_rewards_declared_scope_fence_covers_every_evaluator_fence():
+    """Both modules take their fences from the one `EVALUATOR_PATHS`
+    enumeration (issue #2802), but from different views. The reward refuses a
+    declared scope that names an evaluator file, so its tuple must cover the
+    views the controller and the held-out scorer enforce: this is the check
+    that a view added to one cannot silently stop being declared-in-scope
+    forbidden."""
+    import evolution_reward as er  # noqa: PLC0415
+    import heldout_scoring  # noqa: PLC0415
+
+    assert set(er.EVALUATOR_FENCE) >= (
+        set(heldout_scoring.HELD_OUT_FENCE) | set(ec.AUTHORITY_FENCE))
+    assert "tools/evolution_reward.py" in er.EVALUATOR_FENCE
+    assert "tests/test_evolution_reward.py" in er.EVALUATOR_FENCE
 
 
 # --------------------------------------------------- trigger and termination
@@ -760,11 +1108,12 @@ def test_the_control_also_passes_a_kernel_edit(tmp_path):
 
 # ------------------------------------------------------------------- the CLI
 
-def test_the_cli_exit_status_distinguishes_the_three_decisions(
+def test_the_cli_exit_status_distinguishes_the_four_decisions(
         clean_tree, tmp_path):
     cases = [
         (proposal_record(clean_tree), ec.PROMOTE, "PROMOTE"),
         (widened_record(clean_tree), ec.REFUSE, "REFUSE"),
+        (evolution_record(clean_tree), ec.RECORDED, ec.PROPOSAL_RECORDED),
     ]
     rolled = proposal_record(clean_tree)
     rolled["stages"]["canary"] = {"verified": False, "reason": "p99 regressed",
@@ -775,8 +1124,23 @@ def test_the_cli_exit_status_distinguishes_the_three_decisions(
         src = tmp_path / f"proposal-{index}.json"
         out = tmp_path / f"verdict-{index}.json"
         src.write_text(json.dumps(record))
-        assert ec.main(["--proposal", str(src), "--json", str(out)]) == status
+        assert ec.main(["--proposal", str(src), "--json", str(out),
+                        "--allow", "src/**,tests/**"]) == status
         assert json.loads(out.read_text(encoding="utf-8"))["decision"] == decision
+
+
+def test_the_cli_reads_the_operator_allow_set(clean_tree, tmp_path, monkeypatch):
+    """The grant arrives on the command line or in `ALLOW_ENV`, never in the
+    proposal. `--allow` wins over the environment, and with neither the
+    controller refuses rather than defaulting to the tree."""
+    src = tmp_path / "p.json"
+    src.write_text(json.dumps(proposal_record(clean_tree)))
+    monkeypatch.delenv(ec.ALLOW_ENV, raising=False)
+    assert ec.main(["--proposal", str(src)]) == ec.REFUSE
+    monkeypatch.setenv(ec.ALLOW_ENV, "src/**")
+    assert ec.main(["--proposal", str(src)]) == ec.PROMOTE
+    monkeypatch.setenv(ec.ALLOW_ENV, "docs/**")
+    assert ec.main(["--proposal", str(src), "--allow", "src/**"]) == ec.PROMOTE
 
 
 def test_an_unreadable_proposal_refuses(tmp_path):
@@ -792,7 +1156,8 @@ def test_the_verdict_json_shows_that_measurements_were_not_read(
     src = tmp_path / "p.json"
     out = tmp_path / "v.json"
     src.write_text(json.dumps(widened_record(clean_tree)))
-    assert ec.main(["--proposal", str(src), "--json", str(out)]) == ec.REFUSE
+    assert ec.main(["--proposal", str(src), "--json", str(out),
+                    "--allow", "src/**,tests/**"]) == ec.REFUSE
     verdict = json.loads(out.read_text(encoding="utf-8"))
     assert verdict["measurements_read"] is False
     assert verdict["code"] == "AUTHORITY_WIDENED"

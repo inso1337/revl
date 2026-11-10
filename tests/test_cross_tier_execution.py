@@ -437,10 +437,13 @@ test "its underscore twin keeps its own body"                { assert pick(false
     # type for the same reason it carries the key type: a subscript whose type
     # the tier cannot name is treated as a `List` element downstream, and
     # `let v: Str = m[k]  v.length()` picked go's LIST length helper and did not
-    # build. The binding is ANNOTATED because the checker still infers no type
-    # for a map subscript, so `m[k].slice(0, 1)` is refused outright as a
-    # method on an unknown receiver — a frontend gap, separate from this
-    # lowering the way the unchecked non-`K` key is (see the issue's shape 2).
+    # build. The binding is ANNOTATED because when this probe landed the checker
+    # still inferred no type for a map subscript, so `m[k].slice(0, 1)` was
+    # refused outright as a method on an unknown receiver. Since issue #2949 the
+    # map read answers its declared value type (which is also what lets the
+    # equality marker see it), and the annotation stays as the declared form of
+    # the same contract. The unchecked non-`K` key is a separate frontend gap
+    # (see the issue's shape 2).
     "a Str-keyed Map is indexed by its key": """
 type Point = { x: Int, y: Int }
 
@@ -473,6 +476,54 @@ test "and carries its declared value type" { assert measured() == 5 }
 test "a read is a key for the next read" { assert nested("a") == 1 }
 test "the total form still answers Opt" { assert table().lookup("a") == Some({ x: 1, y: 2 }) }
 test "and `has` still agrees with it" { assert table().has("a") && !table().has("zz") }
+""",
+
+    # Issue #2949. A `Map` subscript has carried the declared `value_type`
+    # since #957, but the equality site typed the read as unknown, so
+    # `m["a"] == 3` with a `Float` (or `Int32`) value reached the tiers
+    # unmarked: TypeScript compared `revlEq(revlMapIndex(m, "a"), 3n)` (a
+    # number against a bigint, false), rust did not build (E0308) and java
+    # failed this assertion, while python and go absorbed the mix. A `List`
+    # element read was marked correctly, which is the behaviour a map read now
+    # matches. Both operand orders, both value widths and the unchanged `Int`
+    # row execute here; the IR marker itself is pinned in
+    # tests/test_2949_map_index_equality_widen.py, and the wasm tier keeps
+    # refusing a Map value outright (there is no subscript there to fix).
+    "a Map index widens against an Int literal": """
+fn float_value_is_three(m: Map[Str, Float]) -> Bool { return m["a"] == 3 }
+fn int_is_a_float_value(m: Map[Str, Float]) -> Bool { return 3 == m["a"] }
+fn int32_value_is_three(m: Map[Str, Int32]) -> Bool { return m["a"] == 3 }
+fn int_is_an_int32_value(m: Map[Str, Int32]) -> Bool { return 3 == m["a"] }
+fn int_value_is_three(m: Map[Str, Int]) -> Bool { return m["a"] == 3 }
+fn int_value_is_a_float(m: Map[Str, Int]) -> Bool { return m["a"] == 3.0 }
+
+fn floats() -> Map[Str, Float] {
+  var m: Map[Str, Float] = Map.empty()
+  m = m.set("a", 3.0)
+  return m
+}
+fn i32s() -> Map[Str, Int32] {
+  var m: Map[Str, Int32] = Map.empty()
+  m = m.set("a", 3.to_int32())
+  return m
+}
+fn ints() -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  m = m.set("a", 3)
+  return m
+}
+
+test "a Float map value equals an Int literal" { assert float_value_is_three(floats()) }
+test "the reverse order widens too" { assert int_is_a_float_value(floats()) }
+test "a whole Float map value is not equal" {
+  var m: Map[Str, Float] = Map.empty()
+  m = m.set("a", 3.5)
+  assert !float_value_is_three(m)
+}
+test "an Int32 map value equals an Int literal" { assert int32_value_is_three(i32s()) }
+test "the reverse Int32 order widens too" { assert int_is_an_int32_value(i32s()) }
+test "an Int map value equals an Int literal" { assert int_value_is_three(ints()) }
+test "an Int map value widens against a Float literal" { assert int_value_is_a_float(ints()) }
 """,
 }
 

@@ -1208,6 +1208,10 @@ jobs:
           SEL_FULL: ${{ steps.select.outputs.full }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: 4
+          # Issue #2216: this is a fast lane. Tests marked `slow` (a fuzz grown
+          # to a size bound, a wall-clock comparison) are deselected here; the
+          # merge-queue `frontend` job runs the full suite and keeps them.
+          REVL_SKIP_SLOW: "1"
         run: |
           set -euo pipefail
           set -f
@@ -1619,15 +1623,19 @@ jobs:
   #   0  scored clean                          -> pass
   #   1  scored, a zero-tolerance finding      -> FAIL
   #   2  refused, `diff-reaches-fence`         -> pass, annotated for review
+  #   2  refused, `diff-too-large`             -> pass, annotated for review
   #   2  refused, anything else                -> FAIL
-  # Exit 2 on the fence is the one refusal that is not a failure of the check:
-  # the design's own words are that a candidate changing the scorer is making a
-  # semantic change, and REFUSED is the routing of that change to a human
-  # rather than a verdict about the candidate. Every other refusal means the
-  # question could not be asked, and a question that could not be asked has not
-  # been answered green. There is no path here that scores against the in-tree
-  # corpus when the draw is unavailable, which is the fail-open shape the item
-  # exists to prevent.
+  # Exit 2 on the fence or on the size bound is not a failure of the check:
+  # a candidate changing the scorer is making a semantic change, and REFUSED is
+  # the routing of that change to a human rather than a verdict about the
+  # candidate. The size bound is a review bound, and the regenerated artifacts
+  # it would otherwise count (census records and catalogue, the crate's
+  # generated selfhost module, the corpus provenance manifest) are excluded
+  # from its line count, so a batch push or a regeneration does not red this
+  # job. Every other refusal means the question could not be asked, and a
+  # question that could not be asked has not been answered green. There is no
+  # path here that scores against the in-tree corpus when the draw is
+  # unavailable, which is the fail-open shape the item exists to prevent.
   held-out:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1664,12 +1672,23 @@ jobs:
                && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
             base="${BEFORE_SHA}"
           fi
-          # One seed, this run only, never written down. `set +x` is not needed
-          # because nothing traces here, and the value is printed only on the
-          # failure path below where a reproducer is worth more than the draw.
+          # One seed, this run only, held in an owner-only file OUTSIDE the
+          # checkout. `tools/heldout_scoring.py` accepts a seed only as a file
+          # path: a literal on a command line leaves nothing to check, and a
+          # file in the workspace is readable by everything that reads the
+          # workspace. The rotation ledger is created beside it and is
+          # discarded with the runner, so no digest survives the run. The value
+          # is printed only on the failure path below, where a reproducer is
+          # worth more than the draw.
           seed="$(openssl rand -hex 32)"
+          seed_dir="${RUNNER_TEMP:-/tmp}/heldout-seed-$$"
+          mkdir -p "$seed_dir"
+          chmod 700 "$seed_dir"
+          seed_file="$seed_dir/seed"
+          (umask 077; printf '%s' "$seed" > "$seed_file")
+          chmod 600 "$seed_file"
           status=0
-          REVL_HELDOUT_SEED="$seed" python3 tools/heldout_scoring.py \
+          REVL_HELDOUT_SEED_FILE="$seed_file" python3 tools/heldout_scoring.py \
             --diff-base "$base" --count 200 --json /tmp/heldout.json || status=$?
           refusal="$(python3 -c "import json;print(json.load(open('/tmp/heldout.json')).get('refusal') or '')" 2>/dev/null || echo "")"
           if [ "$status" = "0" ]; then
@@ -1685,6 +1704,14 @@ jobs:
                 echo "review (docs/design/535-held-out-scoring.md section 3.2)."
                 exit 0
                 ;;
+              diff-too-large:*)
+                echo "::warning title=held-out scoring refused::$refusal"
+                echo "This diff is over the size bound, so it was NOT scored by"
+                echo "the held-out draw. The bound is a review bound and not a"
+                echo "verdict about the candidate (docs/design/535-held-out-"
+                echo "scoring.md section 3.2)."
+                exit 0
+                ;;
             esac
             echo "::error title=held-out scoring refused::$refusal"
             echo "No score was produced, and none was substituted."
@@ -1692,7 +1719,9 @@ jobs:
           fi
           echo "::error title=held-out scoring found a divergence::seed $seed"
           echo "Reproduce with:"
-          echo "  REVL_HELDOUT_SEED=$seed python3 tools/heldout_scoring.py \\"
+          repro="${RUNNER_TEMP:-/tmp}/heldout-repro-seed"
+          echo "  printf %s '$seed' > \"$repro\" && chmod 600 \"$repro\""
+          echo "  REVL_HELDOUT_SEED_FILE=\"$repro\" python3 tools/heldout_scoring.py \\"
           echo "    --diff-base $base --count 200"
           exit 1
 
@@ -2072,8 +2101,15 @@ jobs:
       # exactly its own category.
       - run: cd bench/mcp_host && npm ci && npm test
       # the ROOT, not a named file — naming files is what let the six above rot
-      # unseen. Measured at ~2s for 42 tests, 0 skips with node present.
+      # unseen. Measured at ~2s for 42 tests, 0 skips with node present; the
+      # browser target's headless Chrome run below adds about 30s.
+      # issue #3294: the browser target's gate loads an emitted module in
+      # headless Chrome. `ubuntu-latest` carries `google-chrome`, and this
+      # variable makes a missing engine a failure that names the command to
+      # install one, rather than a silent skip in the one job that can run it.
       - run: pytest backends/typescript/ -q
+        env:
+          REVL_BROWSER_REQUIRED: "1"
 
   # Gap G5 of docs/webapp-competitiveness-report.md, and the structural half of
   # roadmap item 459: NO job built or typechecked the frontend. The suite already

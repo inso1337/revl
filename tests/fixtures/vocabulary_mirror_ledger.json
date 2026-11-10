@@ -509,6 +509,20 @@
     },
     {
       "sites": [
+        "src/revl/lower.py::_is_emission_call",
+        "src/revl/taint.py::_FlowChecker._is_crossing_call"
+      ],
+      "tokens": [
+        "id",
+        "kind",
+        "method",
+        "name",
+        "target"
+      ],
+      "note": "FALSE POSITIVE. Both read the lowered IR call node's fields (kind, name, target, method, id) to decide whether a call crosses the boundary, for different consumers: lower._is_emission_call judges emission-ness for the G4 marker against the lowering Env (spawn handles, service-typed locals), taint._FlowChecker._is_crossing_call picks the nested calls in a compensate slot that get the Secret crossing rule against the TaintModel (issue #3180) and deliberately leaves spawn-handle calls out, as the forward emit path does. Neither declares the vocabulary; it is the IR schema lower.py writes. taint.py cannot import lower.py (lower imports taint), and the answers are not meant to be equal, so a field one of them starts reading is a correct one-sided edit."
+    },
+    {
+      "sites": [
         "src/revl/lower.py::_is_value_crossing",
         "src/revl/query.py::Composition._service_calls"
       ],
@@ -548,6 +562,20 @@
         "var"
       ],
       "note": "FALSE POSITIVE. Two unrelated functions that read the same four node fields. Nothing is re-declared."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_variant_case_payload",
+        "src/revl/model_answer.py::applied_spec"
+      ],
+      "tokens": [
+        "cases",
+        "kind",
+        "name",
+        "params",
+        "payload"
+      ],
+      "note": "FALSE POSITIVE. Two functions that read the same variant-spec fields, one from the document's declared user types and one from the provided model-answer types. Neither declares the vocabulary; lowering produces it and both consume it."
     },
     {
       "sites": [
@@ -752,7 +780,7 @@
         "diff",
         "ls-files"
       ],
-      "note": "Three copies of the changed-files listing, one in the controller, one in the reward and one in the progress counter. Near-clones down to the git argument vector, and the three tools are run and imported separately, so the copies are kept in step here rather than by an import. A flag added to one must be added to all: --no-renames is what keeps a renamed file visible on both sides, so a move out of a domain or a scope is measured."
+      "note": "Three copies of the changed-files listing: the reward's scope probe, the controller's authority precondition and the progress counter. Each measures the diff inside its own module's error handling, but the git argument vector must stay identical or one part of the loop signs off paths another part never saw. `--no-renames` is the flag all three carry, so a move is judged under both of its paths, and a move out of a domain, a scope or the operator grant is measured."
     },
     {
       "sites": [

@@ -63,9 +63,21 @@ it will execute, never trusts the attestation's self-declared hash"), and it is
 tested with a perfectly signed task whose declared digest is one the charter
 admits and whose bytes are different.
 
-Eight checks on the peer side, each naming one lowercase link, each failing
+Since issue #2720 the envelope also carries the AUTHORITY the task hands the
+peer: a `grant` (`caps` and `budgets`, read off the member's tier grant rather
+than accepted from the caller) and a `policy_digest` (the charter digest, the
+policy in force). The peer checks the policy digest against the charter it
+holds and echoes the grant and policy into its receipt, so a reader of the
+receipt alone can tell what the run was authorised to do. A task built without
+them keeps the 1.0 shape, and the receipt it produces is the 1.0 shape, which
+verifies and cannot count as evidence for a promotion that requires the
+binding. See
+[566-pool-execution-receipts.md](566-pool-execution-receipts.md#the-grant-the-policy-the-outcome-and-the-budget-claim-issue-2720).
+
+Nine checks on the peer side, each naming one lowercase link, each failing
 closed: `task-shape`, `task-signature`, `pool-identity`, `charter-identity`,
-`peer-identity`, `artifact-digest`, `unknown-runner`, `replayed-task`. A
+`policy-identity`, `peer-identity`, `artifact-digest`, `unknown-runner`,
+`replayed-task`. A
 multi-file task adds four, each naming the file it is about: `bundle-path`,
 `bundle-missing-file`, `bundle-extra-file` and `bundle-file-digest` (see
 "Multi-file artifacts" below). Four more on the way back: `peer-unreachable`, `result-digest`, `receipt-refused`,
@@ -248,11 +260,16 @@ the other is inadmissible everywhere.
   business: a peer without one answers with the runtime's own message and a
   nonzero exit code rather than pretending to have run it.
 
-The result record is `{runner, exit_code, stdout, stderr}` and the peer's own
-workspace path is replaced in every line before it is signed. A receipt is a
-signed record that leaves the peer's machine, so a local absolute path in it is
-both a reproducibility problem - the digest would differ per run for the same
-work - and a needless disclosure about the peer.
+The result record is `{runner, exit_code, stdout, stderr, timed_out}` and the
+peer's own workspace path is replaced in every line before it is signed. A
+receipt is a signed record that leaves the peer's machine, so a local absolute
+path in it is both a reproducibility problem - the digest would differ per run
+for the same work - and a needless disclosure about the peer. `timed_out` is in
+the record because it is deterministic, the peer's own observation of the call
+it made. The wall time is NOT in the record, for the same reason the path is
+not: it would make two runs of the same work two different results. It is
+returned beside the result and appears only in the receipt's `budget_consumed`
+claim.
 
 ## A flag that is ignored is not implemented
 

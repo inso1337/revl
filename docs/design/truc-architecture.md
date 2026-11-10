@@ -289,14 +289,23 @@ extends the table without breaking existing files.
 The lock row's metadata is a verbatim projection of the index row
 (`src/revl/registry.py::_entry_index_row`): `version`, `capabilities`,
 `emissions`, `provides`, `requires` are copied, never recomputed by truc.
-The hash fields are not copied. `sourceHash` and `manifestHash` are the
-sha256 of the `component.rvl` and `manifest.json` text truc writes under
-`trucs/<name>/`, and each must agree with the index row's value, or the
-add is refused with nothing written: the registry is read again when the
-plan is carried out, so a disagreement means it changed between plan and
-commit. A vendored `dossier.json` is pinned the same way as `dossierHash`,
-which the index does not carry. `registry/index.json` already carries every
-other field the lock needs; truc adds only *when* and *from-where*.
+The hash fields are not copied. `sourceHash`, `manifestHash` and
+`dossierHash` are the sha256 of the `component.rvl`, `manifest.json` and
+`dossier.json` text truc writes under `trucs/<name>/`. The commit plan
+carries the hash of each file `truc add` read and checked (`component.rvl` is
+also the text the gate admits; `manifest.json`/`dossier.json` never enter the
+gate; a file the entry does not ship is carried as ""); `commit_add` reads the
+registry again to vendor it and refuses, with nothing written, unless the text
+it is about to write hashes to the checked value, and a re-add drops a
+vendored dossier the entry no longer ships. The commit-time index row must
+agree too, so a registry that rewrote its own hashes is refused rather than
+believed. A disagreement means the registry changed between plan and commit,
+and it is refused even when an entry and its index row were replaced together:
+the index cannot vouch for itself. A vendored `dossier.json` is pinned the
+same way as `dossierHash`, which the index does not carry, so the plan's own
+hash is the only check on it.
+`registry/index.json` already carries every other field the lock needs; truc
+adds only *when* and *from-where*.
 
 ### 4.3 `truc.lock`: the proof (generated, committed, JSON)
 
@@ -325,11 +334,12 @@ not exist and is not worth building for a machine-only file.
 ```
 
 - `sourceHash`/`manifestHash`/`dossierHash`: computed from the vendored
-  text at `add` and required to agree with the index row (section 4.2);
-  `assemble` recomputes sha256 of each pinned file under `trucs/<name>/`
-  and refuses on mismatch, naming the file (drift is a refusal, not a
-  warning: the `registry.verify` regenerate-or-red discipline,
-  `src/revl/registry.py:194`, applied to the vendor dir).
+  text at `add` and required to equal the hash `truc add` read and checked
+  (section 4.2); `assemble` recomputes sha256 of each pinned file under
+  `trucs/<name>/` and refuses on mismatch, naming the file, and
+  `assemble --check` reports the same drift without writing (drift is a
+  refusal, not a warning: the `registry.verify` regenerate-or-red
+  discipline, `src/revl/registry.py:194`, applied to the vendor dir).
 - `capabilities`/`emissions`: the authority the assembly accepted when it
   admitted this truc. `assemble` re-reports the totals so a lockfile diff
   in review *shows authority growth*: the least-authority ranking of
@@ -483,9 +493,15 @@ cli.run(["add", name])              (or ["add", name, "--trust-host-code"])
    │    each row joins the rows before it; a vendored row compiles as an
    │    untrusted author unless thc or its lock record lifts that
    │    drift/G2 refusal → print diagnostic + why-trace, exit 1, disk untouched
-   ├ ws.write(trucs/<name>/component.rvl, manifest.json[, dossier.json])
-   ├ plan.lock_row(name, indexRow)  → ws.write(truc.lock)     pure → emission[fs]
-   └ ws.write(truc.toml with the new [trucs] entry)
+   ├ plan.add_report(...) → commit plan {name, admission,
+   │    sourceHash, manifestHash, dossierHash}          pure
+   ├ ws.commit_add(".", commit)                        host_commit_add
+   │    reads the entry again, hashes the text it is about to write, and
+   │    refuses unless each hash equals the one `truc add` checked and the
+   │    index row agrees; on agreement it vendors trucs/<name>/ (dropping a
+   │    dossier the entry no longer ships) and writes the lock row and the
+   │    truc.toml entry. An empty commit writes nothing.
+   └ (refusal leaves the disk untouched)
 ```
 
 `truc rm <name>` is the inverse minus the gate: drop the toml entry, the

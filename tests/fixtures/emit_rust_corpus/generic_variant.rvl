@@ -1,0 +1,190 @@
+// Issue #2494: a user generic variant, the document the self-host Go and Rust
+// ports used to diverge on. Construction and a match that binds the
+// substituted payload, functions taking and returning `Mb[Int]`, two
+// instantiations (`Mb[Int]`, `Mb[Str]`) and a nested one, a two-parameter
+// variant, a parameter no case names (`Ph[T]`, the phantom lowering), `List`
+// payloads, a record field, a list of variants, lets and structural equality,
+// and unpinned list literals (`[Nn, Jj(4)]`, `[None, Some(5)]`, and the nested
+// `[Jj(Nn), Jj(Jj(1)), Nn]` case from issue #2497). The reference emitters and
+// the ports must agree byte-for-byte here.
+type Mb[T] = Jj(T) | Nn
+type Ei[L, R] = Le(L) | Ri(R)
+type Ph[T] = Aa | Bb
+type Holder = { name: Str, slot: Mb[Str] }
+
+fn len_of(s: Str) -> Int { return s.length() }
+fn show(n: Int) -> Str { return n.to_str() }
+fn count(xs: List[Int]) -> Int { return xs.length() }
+
+fn un(m: Mb[Int]) -> Int {
+  return match m {
+    Jj(x) => x,
+    Nn => 0,
+  }
+}
+
+fn bump(m: Mb[Int]) -> Mb[Int] {
+  return match m {
+    Jj(x) => Jj(x + 1),
+    Nn => Nn,
+  }
+}
+
+fn label(m: Mb[Str]) -> Str {
+  return match m {
+    Jj(s) => "got " + s,
+    Nn => "none",
+  }
+}
+
+fn size(m: Mb[Str]) -> Mb[Int] {
+  return match m {
+    Jj(s) => Jj(len_of(s)),
+    Nn => Nn,
+  }
+}
+
+fn pick(c: Bool) -> Mb[Int] {
+  let v: Mb[Int] = Nn
+  let w = Jj(7)
+  if (c) {
+    return w
+  }
+  return v
+}
+
+fn deep(m: Mb[Mb[Int]]) -> Int {
+  return match m {
+    Jj(inner) => un(inner) * 10,
+    Nn => 0 - 1,
+  }
+}
+
+fn side(e: Ei[Int, Str]) -> Str {
+  return match e {
+    Le(n) => "left " + show(n),
+    Ri(s) => "right " + s,
+  }
+}
+
+fn total(m: Mb[List[Int]]) -> Int {
+  return match m {
+    Jj(xs) => count(xs),
+    Nn => 0,
+  }
+}
+
+fn reuse() -> Str {
+  let m = Jj("a")
+  let n: Mb[Str] = Nn
+  let a = label(m)
+  let b = label(m)
+  let c = label(n)
+  return `${a}/${b}/${c}`
+}
+
+fn held(h: Holder) -> Str {
+  let s = label(h.slot)
+  return `${h.name}:${s}`
+}
+
+fn firsts(ms: List[Mb[Int]]) -> Int {
+  var acc = 0
+  for (m of ms) {
+    acc = acc + match m {
+      Jj(x) => x,
+      Nn => 100,
+    }
+  }
+  return acc
+}
+
+// issue #2497: an unpinned list literal whose items are nested applied
+// variants; the element type comes from the first item with no unbound type
+// argument at any depth, `Mb[Mb[Int]]` here.
+fn nested_list() -> Int {
+  let xs = [Jj(Nn), Jj(Jj(1)), Nn]
+  var acc = 0
+  for (m of xs) {
+    acc = acc + deep(m)
+  }
+  return acc + xs.length()
+}
+
+fn wild(m: Mb[Int]) -> Int {
+  return match m {
+    Jj(_) => 1,
+    _ => 2,
+  }
+}
+
+fn flip(p: Ph[Int]) -> Ph[Int] {
+  return match p {
+    Aa => Bb,
+    Bb => Aa,
+  }
+}
+
+fn is_aa(p: Ph[Int]) -> Bool {
+  return match p {
+    Aa => true,
+    Bb => false,
+  }
+}
+
+fn opt_of(o: Opt[Int]) -> Int {
+  return match o {
+    Some(x) => x,
+    None => 0,
+  }
+}
+
+fn literal() -> Int {
+  let xs = [Nn, Jj(4)]
+  let os = [None, Some(5)]
+  var acc = 0
+  for (m of xs) {
+    acc = acc + un(m)
+  }
+  for (o of os) {
+    acc = acc + opt_of(o)
+  }
+  return acc
+}
+
+test "construct and match a generic variant" {
+  assert un(Jj(41)) == 41
+  assert un(Nn) == 0
+  assert un(bump(Jj(1))) == 2
+  assert un(bump(Nn)) == 0
+  assert bump(Jj(4)) == Jj(5)
+  assert bump(Nn) == Nn
+  assert label(Jj("hi")) == "got hi"
+  assert label(Nn) == "none"
+  assert un(size(Jj("four"))) == 4
+  assert size(Nn) == Nn
+  assert un(pick(true)) == 7
+  assert un(pick(false)) == 0
+  assert deep(Jj(Jj(3))) == 30
+  assert deep(Jj(Nn)) == 0
+  assert deep(Nn) == 0 - 1
+  assert side(Le(2)) == "left 2"
+  assert side(Ri("r")) == "right r"
+  assert total(Jj([1, 2, 3])) == 3
+  assert total(Nn) == 0
+}
+
+test "generic variant values in lets, records and lists" {
+  assert reuse() == "got a/got a/none"
+  assert held({ name: "n", slot: Jj("s") }) == "n:got s"
+  assert held({ name: "n", slot: Nn }) == "n:none"
+  assert firsts([Jj(1), Nn, Jj(2)]) == 103
+  assert wild(Jj(5)) == 1
+  assert wild(Nn) == 2
+  assert Jj("a") != Nn
+  assert literal() == 9
+  assert nested_list() == 12
+  assert is_aa(flip(Bb))
+  assert !is_aa(flip(Aa))
+  assert flip(Aa) == Bb
+}

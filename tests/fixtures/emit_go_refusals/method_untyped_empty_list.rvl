@@ -1,0 +1,21 @@
+// A provide-method `var out = []` read in a way the only-sized fallback
+// cannot excuse (`out.join`). The frontend admits it and the go reference
+// REFUSES the document by name: nothing types the literal and Go would reject
+// the module (issue #2898).
+//
+// `_only_sized_or_appended` excuses a binding only when every read of it is a
+// `.length()` (or an allowed alias position, with `appends` false in a method
+// body). `out.join(",")` is a value read of the list, so the fallback does not
+// apply and no push, assignment or declared target types the literal either.
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS.
+service Count { fn count() -> Int }
+component C provides count: Count {
+  provide count {
+    fn count() {
+      var out = []
+      let s = out.join(",")
+      return s.length()
+    }
+  }
+}
