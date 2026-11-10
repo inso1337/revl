@@ -298,7 +298,7 @@ def test_activity_named_input_refused_in_a_component_with_config():
 
 
 @pytest.mark.parametrize("name", [
-    "recordResidue", "proxyActivities", "RevlActivities", "SagaReport",
+    "recordResidue", "proxyActivities", "setHandler", "COMPENSATION_BUDGET_MS",
 ])
 def test_component_named_temporal_scaffolding_refused(name):
     ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
@@ -388,7 +388,8 @@ def test_near_miss_binding_does_not_shadow_the_saga_stack():
 
 # The host globals the emitted workflow module itself reads: `Date.now()` in
 # the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers,
-# `Promise` in its types. No `@ts` body is emitted into this module, so a
+# and `Promise`, which the async functions read as a value once compiled
+# below ES2017 (`__awaiter`). No `@ts` body is emitted into this module, so a
 # global it does not read is not shadowed by anything.
 _JS_GLOBALS_AT_MODULE_SCOPE = [
     "Date", "String", "Set", "Promise", "Object", "Array",
@@ -452,8 +453,8 @@ def _bracket_src(undo: str, acquire: str = "r_open") -> str:
 def test_pure_extern_named_a_host_global_refused(name):
     """A pure extern is never declared in the workflow module: `undo fetch(h)`
     renders as a bare `fetch(h)`, which would call the host's `fetch` instead
-    of the extern. So a name the module reads free avoids every host global,
-    not only the ones the scaffolding reads."""
+    of the extern. So a name the module reads free avoids the globals listed
+    in `JS_GLOBAL_RESERVED`, not only the ones the scaffolding reads."""
     ir = compile_source(_bracket_src(name), f"{name}_pure.rvl")
     with pytest.raises(EMIT.EmitError, match="reserves"):
         EMIT.emit(ir, target="temporal")
@@ -510,6 +511,42 @@ def test_free_read_refusal_names_the_host_call_not_scaffolding():
     assert "scaffolding" not in text
 
 
+# Names the emitted module uses ONLY as types: the TS lib `Record` and the
+# module's own `SagaStep`/`Residue`/`SagaReport` aliases and `RevlActivities`
+# interface. A value binding lives in another namespace, so an activity or a
+# component may take these spellings.
+_TYPE_ONLY_NAMES = ["Record", "SagaStep", "Residue", "SagaReport",
+                    "RevlActivities"]
+
+
+@pytest.mark.parametrize("name", _TYPE_ONLY_NAMES)
+def test_emission_extern_named_a_type_only_name_emits(name):
+    got = EMIT.emit(compile_source(_extern_crossing_src(name), f"{name}.rvl"),
+                    target="temporal")
+    assert f'await {name}("visa")' in got
+    assert f"  {name}(card: string): Promise<string>" in got
+
+
+@pytest.mark.parametrize("name", _TYPE_ONLY_NAMES)
+def test_component_named_a_type_only_name_emits(name):
+    got = EMIT.emit(compile_source(f"component {name} {{ }}\n", f"{name}.rvl"),
+                    target="temporal")
+    assert f"export async function {name}(): Promise<void>" in got
+
+
+def test_free_read_global_gets_the_free_read_reason():
+    """`Date` is also in the module scope, but a pure extern named `Date` is
+    never bound, so the refusal gives the free-read reason, not the shadow
+    one."""
+    ir = compile_source(_bracket_src("Date"), "Date_pure.rvl")
+    with pytest.raises(EMIT.EmitError) as info:
+        EMIT.emit(ir, target="temporal")
+    text = str(info.value)
+    assert "reserves the name 'Date' for a pure extern" in text
+    assert "would reach the host's own 'Date'" in text
+    assert "scaffolding" not in text
+
+
 # ------------------------------- reserved names derived from the emitted module
 
 # Every author-chosen name in this workflow starts with `zq`, so whatever else
@@ -561,6 +598,37 @@ def _strip_ts_comments_and_strings(code: str) -> str:
         lambda m: " " * len(m.group(0)), code)
 
 
+_TS_TYPE = r"[A-Za-z_$][\w$.]*(?:\[\])*"
+
+
+def _blank_type_positions(code: str) -> str:
+    """`code` with every TYPE position blanked (same length, so offsets keep):
+    generic arguments, `type` aliases, `interface` blocks, annotations on a
+    `const`/`let`, on a function parameter or on a return, and `as` casts. A
+    name the module reads only there is not a value read, and a value binding
+    with that spelling shadows nothing."""
+    def blank(m):
+        return " " * len(m.group(0))
+    code = re.sub(r"(?m)^(?:export\s+)?type\s[^\n]*", blank, code)
+    for m in list(re.finditer(r"(?m)^(?:export\s+)?interface\s", code))[::-1]:
+        a, b = _brace_span(code, m.start())
+        code = code[:a] + " " * (b - a) + code[b:]
+    while True:  # innermost generic arguments first, so nesting unwinds
+        new = re.sub(r"(?<=[\w$])<[^<>()=]*>", blank, code)
+        if new == code:
+            break
+        code = new
+    code = re.sub(rf"(?<=\))\s*:\s*{_TS_TYPE}", blank, code)
+    code = re.sub(rf"(\b(?:const|let)\s+{_TS_IDENT})(\s*:\s*{_TS_TYPE})",
+                  lambda m: m.group(1) + " " * len(m.group(2)), code)
+    code = re.sub(rf"(?<![*\s])\s+as\s+{_TS_TYPE}", blank, code)
+
+    def params(m):
+        inner = re.sub(rf"(:\s*{_TS_TYPE})", blank, m.group(2))
+        return m.group(1) + inner + ")"
+    return re.sub(rf"(\bfunction\s+{_TS_IDENT}\s*\()([^()]*)\)", params, code)
+
+
 def _brace_span(code: str, start: int) -> tuple[int, int]:
     """[start, end) from `start` through the brace that closes the first `{`
     after it."""
@@ -594,8 +662,8 @@ def _scaffolding_identifiers():
     no author code is emitted there, so an author name cannot meet them. A
     component also may take a name the workflow function binds for itself
     (`saga`, `input`, ...): its function is never called from its own body."""
-    code = _strip_ts_comments_and_strings(EMIT.emit(
-        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal"))
+    code = _blank_type_positions(_strip_ts_comments_and_strings(EMIT.emit(
+        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal")))
     seen: dict = {}
     for m in re.finditer(rf"(?<![\w$])({_TS_IDENT})", code):
         before = code[:m.start()]
@@ -672,6 +740,10 @@ def test_scaffolding_identifier_collector_sees_every_kind_of_name():
     assert {"proxyActivities", "redactResidueError", "Date", "String", "Set",
             "recordResidue", "saga", "input"} <= externs
     assert "deadline" not in externs and "zqSettle" not in externs
+    # names read only in a type position are skipped (`Record<...>`, `SagaStep[]`)
+    assert not {"Record", "SagaStep", "Residue", "SagaReport", "RevlActivities",
+                "Promise"} & externs
+    assert "activities" in externs  # a type-only import, but TS2440 binds it
     assert "Date" in components and "saga" not in components
 
 

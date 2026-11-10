@@ -148,14 +148,19 @@ _HOST_PINNED_COEFFECTS = frozenset({
 
 # ------------------------------------------------------------ reserved names
 
-# Every name the emitted workflow module binds at MODULE scope (issue #3187):
-# the SDK import, the retry-policy constants, the residue types and redaction
-# helpers, the durable residue sink, the activities contract, and, per
-# component, the workflow function and its residue query. An extern whose
-# crossing becomes an activity, an activity name derived from a service-method
-# crossing, or a component would bind one of these at that same scope and
-# shadow or collide with the generated binding. Kept next to the template
-# below: a module-scope name added there must be added here.
+# Every VALUE name the emitted workflow module binds at MODULE scope (issue
+# #3187): the SDK import, the retry-policy constants, the redaction helpers,
+# the durable residue sink, and, per component, the workflow function and its
+# residue query. An extern whose crossing becomes an activity, an activity
+# name derived from a service-method crossing, or a component would bind one
+# of these at that same scope and shadow or collide with the generated
+# binding. The module's TYPE-only names (`SagaStep`, `Residue`, `SagaReport`,
+# the `RevlActivities` interface) are not listed: a value binding lives in
+# another namespace and never shadows a type, so an activity or component
+# with one of those spellings emits and type-checks. `activities` is listed
+# although its import is type-only, because TypeScript refuses a local value
+# declaration beside an import of the same name (TS2440). Kept next to the
+# template below: a module-scope value name added there must be added here.
 TEMPORAL_MODULE_RESERVED = frozenset({
     # `import { proxyActivities, ApplicationFailure, setHandler, defineQuery }`
     "proxyActivities", "ApplicationFailure", "setHandler", "defineQuery",
@@ -163,24 +168,25 @@ TEMPORAL_MODULE_RESERVED = frozenset({
     "activities",
     # the retry policies and the workflow-side budget
     "AT_MOST_ONCE", "DEDUP_SAFE_RETRY", "COMPENSATION_BUDGET_MS",
-    # the redaction funnel: constants, helpers, and the types they use
+    # the redaction funnel: constants and helpers
     "REDACTED_ARG", "MIN_MATCHABLE_ARG", "argNeedles", "redactResidueError",
-    "SagaStep", "Residue", "SagaReport",
     # the durable residue sink activity
     "recordResidue",
-    # the activities.ts contract emitted after the workflow
-    "RevlActivities",
 })
 
 # The module scope an author name may not take is wider than the names the
 # module declares: the scaffolding also READS host globals (`Date.now()` for
 # the compensation budget in the abort path, `String(...)`, `new Set()`,
 # `Array.isArray` and `Object.values` in the redaction helpers, `undefined` for
-# a bracket's holder, `Promise` and `Record` in its types). An extern
-# destructured as `Date`, or a component declared as
-# `export async function Date()`, would shadow the global for the whole module,
-# so the abort path would throw before the drain loop and no compensation or
-# residue record would run.
+# a bracket's holder). An extern destructured as `Date`, or a component
+# declared as `export async function Date()`, would shadow the global for the
+# whole module, so the abort path would throw before the drain loop and no
+# compensation or residue record would run. `Promise` appears in the template
+# only as a type, but the module's async functions read it as a value once
+# compiled below ES2017: TypeScript's `__awaiter` helper builds
+# `new (P || (P = Promise))(...)`, which would resolve to a component or
+# activity named `Promise`. The TS lib type `Record` is read only as a type,
+# so it is not reserved.
 #
 # Which globals an author name must avoid depends on how the module uses it.
 # A name the module BINDS (an emission extern, destructured as an activity
@@ -199,8 +205,7 @@ TEMPORAL_MODULE_RESERVED = frozenset({
 # `test_temporal_target.py` derives the read set from the emitted module, so a
 # global the template starts reading fails there until it is listed here.
 TEMPORAL_GLOBALS_READ = frozenset({
-    "Array", "Date", "Object", "Promise", "Record", "Set", "String",
-    "undefined",
+    "Array", "Date", "Object", "Promise", "Set", "String", "undefined",
 })
 
 TEMPORAL_MODULE_SCOPE = TEMPORAL_MODULE_RESERVED | TEMPORAL_GLOBALS_READ
@@ -273,8 +278,7 @@ def _check_temporal_names(ir: dict) -> frozenset:
             _refuse_reserved(name, "a component")
     for ext in ir.get("externs") or []:
         name = ext.get("name")
-        if name in reserved:
-            _refuse_reserved(name, "an extern")
+        cls = ext.get("class") or "non-emission"
         # Only an emission extern is bound in this module. Every other class
         # (pure, acquire, witnessed, local) is called through `_mangle` of its
         # name and never declared, so a name `_mangle` leaves as is (anything
@@ -283,9 +287,12 @@ def _check_temporal_names(ir: dict) -> frozenset:
         # not every host global (see `TEMPORAL_MODULE_SCOPE`). The loop covers
         # every extern in the IR, reached by a component or not: an unused
         # free-read extern with such a name is refused too, which fails safe.
-        cls = ext.get("class") or "non-emission"
+        # Checked first, so a free-read `Date` gets the free-read reason
+        # rather than the module-scope one: such an extern is never bound.
         if cls != "emission" and name in JS_GLOBAL_RESERVED:
             _refuse_free_global(name, cls)
+        if name in reserved:
+            _refuse_reserved(name, "an extern")
     return frozenset(reserved | set(component_names) | set(residue_names))
 
 
