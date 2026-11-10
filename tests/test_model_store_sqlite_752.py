@@ -219,27 +219,62 @@ def test_sqlite_table_and_column_identifiers_are_declared_and_validated():
     assert "ident(" in body
 
 
-def _execute_literals(py_body: str) -> list:
-    """Every string constant in the statement argument of each
-    `conn.execute(...)` call of a `@py` extern body."""
+def _is_ident_call(node) -> bool:
+    """`conn.ident(...)`, or one item of it (`conn.ident(...)[0]`)."""
+    import ast
+
+    if isinstance(node, ast.Subscript):
+        node = node.value
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "ident")
+
+
+def _execute_statements(py_body: str) -> list:
+    """The statement argument of each `conn.execute(...)` in a `@py` extern
+    body, as `(text, stray)`. The statement must be a string constant or a `+`
+    chain of operands; `text` joins the constant operands in order with each
+    name bound from `conn.ident` rendered as `?ident?`, and `stray` lists every
+    operand that is neither (a caller's value, another call, a format)."""
     import ast
     import textwrap
 
     tree = ast.parse("def _body():\n" + textwrap.indent(py_body, "    "))
+    admitted = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_ident_call(node.value):
+            for target in node.targets:
+                elts = target.elts if isinstance(target, ast.Tuple) else [target]
+                admitted |= {e.id for e in elts if isinstance(e, ast.Name)}
+
+    def operands(node):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return operands(node.left) + operands(node.right)
+        return [node]
+
     found = []
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "execute" and node.args):
-            found += [c.value for c in ast.walk(node.args[0])
-                      if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+            continue
+        text, stray = "", []
+        for op in operands(node.args[0]):
+            if isinstance(op, ast.Constant) and isinstance(op.value, str):
+                text += op.value
+            elif isinstance(op, ast.Name) and op.id in admitted:
+                text += "?ident?"
+            else:
+                stray.append(ast.unparse(op))
+        found.append((text, stray))
     return found
 
 
 def test_every_statement_takes_its_identifiers_from_the_declared_check():
-    """Issue #3001: no statement names a table or column in its own text. Each
-    `conn.execute` in the driver builds its identifiers from `conn.ident`, so a
-    declared name never appears as a literal word of the statement, and every
-    statement-bearing extern calls the check."""
+    """Issue #3001: every `conn.execute` statement in the driver is built only
+    from string constants and names bound from `conn.ident`: no caller value,
+    call or format reaches statement text (values travel as bound `?`
+    parameters). The constants, joined as the statement joins them, never
+    spell a declared table or column name, so every identifier comes from the
+    declared check. Every statement-bearing extern is counted."""
     import ast
     import re
 
@@ -252,12 +287,12 @@ def test_every_statement_takes_its_identifiers_from_the_declared_check():
     statements = 0
     for ext in ir["externs"]:
         body = (ext.get("bodies") or {}).get("py") or ""
-        literals = _execute_literals(body)
-        if not literals:
+        found = _execute_statements(body)
+        if not found:
             continue
         statements += 1
-        assert "conn.ident(" in body, ext["name"]
-        for text in literals:
+        for text, stray in found:
+            assert stray == [], (ext["name"], stray)
             assert not word.search(text), (ext["name"], text)
     # sq_open, sq_next_id, sq_get, sq_list, sq_insert, sq_remove, sq_update,
     # sq_restore, sq_delete
@@ -364,7 +399,11 @@ def test_a_value_that_looks_like_sql_is_bound_and_stored_verbatim(tmp_path):
     """Issue #3001: a VALUE is a bound `?` parameter, never statement text. A
     body that looks like SQL round-trips byte for byte through create, update,
     read and delete, and the notes table still answers afterwards; had any of
-    those values been interpolated, the DROP or DELETE would have run."""
+    those values been interpolated, the DROP or DELETE would have run. The same
+    kind of text sent as the KEY to get, update and delete matches no row and
+    changes nothing: the row set afterwards is exactly the one kept row. An
+    interpolated key would raise on the DROP text or match every row on the
+    OR text."""
     src = SQLITE.read_text(encoding="utf-8") + r'''
 lifecycle test "a hostile value is data, not SQL" {
   load SqliteStore
@@ -379,6 +418,22 @@ lifecycle test "a hostile value is data, not SQL" {
   assert removed == Some({ id: "note-0", body: "y'); DELETE FROM notes; --" })
   let gone = call store.get(id)
   assert gone == None
+  let kept = call store.create({ body: "kept" })
+  assert kept == "note-1"
+  let by_drop = call store.get("x'); DROP TABLE notes; --")
+  assert by_drop == None
+  let by_or = call store.get("x' OR '1'='1")
+  assert by_or == None
+  let upd_drop = call store.update("x'); DROP TABLE notes; --", { body: "z" })
+  assert upd_drop == None
+  let upd_or = call store.update("x' OR '1'='1", { body: "z" })
+  assert upd_or == None
+  let del_drop = call store.delete("x'); DROP TABLE notes; --")
+  assert del_drop == None
+  let del_or = call store.delete("x' OR '1'='1")
+  assert del_or == None
+  let rows = call store.list()
+  assert rows == [{ id: "note-1", body: "kept" }]
   unload SqliteStore
   assert no_residue
 }

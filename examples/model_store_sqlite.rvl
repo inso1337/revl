@@ -68,8 +68,9 @@ service Store {
 // driver's `@py` bodies (Minato keeps SQL inside its `sqlite` driver package,
 // never in the model). `sq_open` is an `acquire` extern: it validates the
 // declared identifiers, opens the embedded database and returns the live
-// connection handle (which carries the identifier check as `conn.ident`), whose site-declared inverse closes it, so the resource is
-// released on teardown.
+// connection handle (which carries the identifier check as `conn.ident`),
+// whose site-declared inverse closes it, so the resource is released on
+// teardown.
 extern acquire fn sq_open() -> Conn undo sq_close(result) = @py {
     import re
     import sqlite3
@@ -176,8 +177,9 @@ extern pure fn sq_update(conn: Conn, id: Str, body: Str) -> Unit = @py {
 }
 
 // Restore a row EXACTLY (insert, or overwrite the row already there): the
-// inverse of `update` (put the previous body back) and of `delete` (put the
-// removed row back). Its value is bound, never interpolated.
+// inverse of `delete`, which puts the removed row back. (`update` restores
+// with another plain `sq_update`, never this.) Its value is bound, never
+// interpolated.
 extern pure fn sq_restore(conn: Conn, id: Str, body: Str) -> Unit = @py {
     t, i, b = conn.ident("notes", "id", "body")
     conn.execute("INSERT OR REPLACE INTO " + t + " (" + i + ", " + b + ") VALUES (?, ?)",
