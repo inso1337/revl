@@ -19,6 +19,7 @@ service reaches, are not checked.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -221,6 +222,239 @@ component Cache provides cache: Store {{ provide cache {{ fn bump(n) = 1 }} }}
     old = compile_source(base.format(t="Int", reader=reader), "c.rvl")
     compile_source(base.format(t="Float", reader=""), "c.rvl",
                    manifest=old, replacing=("Cache",))
+
+
+# -- a merged document carries the running declarations ------------------------
+#
+# The composition `revl apply` installs, and the document an admission against
+# a manifest returns, both carry the running services. Each is the running
+# manifest of a later admission, so each carries the declarations those
+# signatures are spelled against: without them the next swap, changed or not,
+# meets a running name it cannot read and is refused.
+
+HELLO = ("service Hello { fn hi() -> Int }\n"
+         "component Hello provides hello: Hello { provide hello "
+         "{ fn hi() = 1 } }\n")
+
+
+def _applied(old: dict, new_src: str, replacing=("Cache",)) -> dict:
+    """The composition `revl apply` installs for this admission."""
+    from revl.plan import plan
+
+    out = plan(source=new_src, manifest=old, replacing=replacing,
+               include_ir=True)
+    return out["resultingIR"]
+
+
+def test_the_applied_composition_keeps_the_running_declarations():
+    old = _running()
+    now = _applied(old, HELLO, replacing=())
+    assert now["types"]["Rec"] == old["types"]["Rec"]
+
+
+def test_a_swap_that_changes_nothing_is_admitted_after_an_apply():
+    now = _applied(_running(), _prog(version=2))
+    _swap(now, _prog(version=3))
+    _swap(now, _prog(store=False, version=3))
+
+
+def test_a_swap_that_changes_nothing_is_admitted_after_an_unrelated_apply():
+    now = _applied(_running(), HELLO, replacing=())
+    _swap(now, _prog(version=2))
+    _swap(now, _prog(store=False, version=2))
+
+
+def test_a_changed_record_is_refused_after_an_apply():
+    now = _applied(_running(), _prog(version=2))
+    exc = _refused(now, _prog("{ a: Int, b: Int }", version=3))
+    _assert_drift(exc)
+    assert "`Rec = {a: Int}`" in str(exc)
+    assert "`Rec = {a: Int, b: Int}`" in str(exc)
+
+
+def test_a_document_compiled_against_a_manifest_keeps_its_declarations():
+    old = _running()
+    now = compile_source(HELLO, "c.rvl", manifest=old)
+    assert "Store" in now["services"]
+    assert now["types"]["Rec"] == old["types"]["Rec"]
+    # the candidate's own declaration of a running name is the one kept
+    over = compile_source("type Other = { x: Str }\n" + HELLO, "c.rvl",
+                          manifest=compile_source(
+                              _prog(reader=True, decls="type Other = { x: Int }"),
+                              "c.rvl"))
+    assert over["types"]["Other"] == compile_source(
+        "type Other = { x: Str }\n", "c.rvl")["types"]["Other"]
+
+
+def test_a_program_with_no_manifest_and_no_types_carries_no_table():
+    assert "types" not in compile_source(HELLO, "c.rvl")
+
+
+# -- a turn admitted into a live session ---------------------------------------
+#
+# A session that admits a turn adopts its components and services. The
+# declarations the turn's signatures are written against have to be adopted
+# with them: otherwise the running manifest holds a service spelled over a name
+# it does not declare, and the next turn that declares that name the same way
+# cannot be proved unchanged.
+
+needs_cordis = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="a turn is admitted into a live cordis-py composition; install it "
+           "with `sh backends/python/setup.sh`",
+)
+
+_T_BASE = ("service Ops { fn ping() -> Int }\n"
+           "component Agent provides ops: Ops { provide ops { fn ping() = 1 } }\n")
+
+
+def _turn(n: int, rec: str = "{ a: Int }", name: str = "Rec",
+          body: str = "r.a") -> str:
+    return (f"type {name} = {rec}\n"
+            f"service Turn{n} {{ fn run(r: {name}) -> Int }}\n"
+            f"component T{n} provides turn{n}: Turn{n} "
+            f"{{ provide turn{n} {{ fn run(r) = {body} }} }}\n")
+
+
+def _session(base: str = _T_BASE):
+    import copy
+
+    from revl.mcp.session import Session
+
+    s = Session()
+    s.load(copy.deepcopy(compile_source(base, "base.rvl")))
+    return s
+
+
+def _session_after_one_turn():
+    s = _session()
+    assert s.admit(_turn(1), granted=["Ops"], filename="t1.rvl").admitted
+    return s
+
+
+def _decl(source: str, name: str) -> dict:
+    return compile_source(source, "c.rvl")["types"][name]
+
+
+def _queue_turns(monkeypatch, s, *turns: str) -> None:
+    """Admit `turns` the way a live call does: each decided against the
+    composition as it stands, all of them wired when the call returns."""
+    monkeypatch.setattr(s._loop, "is_running", lambda: True)
+    for n, source in enumerate(turns, 1):
+        verdict = s.admit(source, granted=["Ops"], filename=f"q{n}.rvl")
+        assert verdict.admitted, verdict.message
+    monkeypatch.undo()
+    s._drain_pending_admits()
+
+
+@needs_cordis
+def test_a_session_adopts_the_declarations_of_an_admitted_turn():
+    s = _session_after_one_turn()
+    try:
+        assert "Turn1" in s.ir["services"]
+        assert s.ir["types"]["Rec"] == compile_source(
+            "type Rec = { a: Int }\n", "c.rvl")["types"]["Rec"]
+    finally:
+        s.unload()
+
+
+@needs_cordis
+def test_a_second_turn_redeclaring_an_unchanged_record_is_admitted():
+    s = _session_after_one_turn()
+    try:
+        verdict = s.admit(_turn(2), granted=["Ops"], filename="t2.rvl")
+        assert verdict.admitted, verdict.message
+    finally:
+        s.unload()
+
+
+@needs_cordis
+def test_a_second_turn_changing_a_record_a_running_turn_uses_is_refused():
+    s = _session_after_one_turn()
+    try:
+        verdict = s.admit(_turn(2, "{ a: Int, b: Int }"), granted=["Ops"],
+                          filename="t2.rvl")
+        assert not verdict.admitted
+        assert "service `Turn1` differs from the running manifest" in verdict.message
+        assert "the running manifest declares `Rec = {a: Int}`" in verdict.message
+        assert "the candidate declares `Rec = {a: Int, b: Int}`" in verdict.message
+    finally:
+        s.unload()
+
+
+@needs_cordis
+def test_two_turns_queued_in_one_call_both_keep_their_declarations(monkeypatch):
+    # the second turn's document never saw the first: wiring it adds its
+    # declarations to the table and leaves the first turn's in it
+    s = _session()
+    try:
+        _queue_turns(monkeypatch, s, _turn(1),
+                     _turn(2, "{ x: Str }", name="Other", body="1"))
+        assert {"Turn1", "Turn2"} <= set(s.ir["services"])
+        assert s.ir["types"]["Rec"] == _decl("type Rec = { a: Int }\n", "Rec")
+        assert s.ir["types"]["Other"] == _decl("type Other = { x: Str }\n",
+                                               "Other")
+    finally:
+        s.unload()
+
+
+@needs_cordis
+def test_a_queued_turn_does_not_put_back_a_declaration_an_earlier_one_changed(
+        monkeypatch):
+    # nothing running reads `Cfg`, so the first turn may redeclare it; the
+    # second was compiled before that and carries the old one in its document
+    s = _session("type Cfg = { a: Int }\n" + _T_BASE)
+    try:
+        _queue_turns(monkeypatch, s,
+                     _turn(1, "{ a: Int, b: Int }", name="Cfg"),
+                     _turn(2, "{ x: Str }", name="Other", body="1"))
+        assert s.ir["types"]["Cfg"] == _decl(
+            "type Cfg = { a: Int, b: Int }\n", "Cfg")
+        assert s.ir["types"]["Other"] == _decl("type Other = { x: Str }\n",
+                                               "Other")
+    finally:
+        s.unload()
+
+
+_CFG_BASE = "type Cfg = { a: Int, b: Int }\n" + _T_BASE
+_CFG_NARROW = _turn(1, "{ a: Int }", name="Cfg")
+_CFG_WIDE = _turn(2, "{ a: Int, b: Int }", name="Cfg", body="r.b")
+
+
+@needs_cordis
+def test_one_at_a_time_the_second_of_two_turns_that_disagree_is_refused():
+    # nothing running reads `Cfg`, so the first turn may narrow it; the second
+    # then spells the record `Turn1` no longer takes
+    s = _session(_CFG_BASE)
+    try:
+        assert s.admit(_CFG_NARROW, granted=["Ops"], filename="t1.rvl").admitted
+        verdict = s.admit(_CFG_WIDE, granted=["Ops"], filename="t2.rvl")
+        assert not verdict.admitted
+        assert "service `Turn1` differs from the running manifest" in verdict.message
+    finally:
+        s.unload()
+
+
+@needs_cordis
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "issue #3346: turns admitted during one call are each decided against the "
+    "composition before any of them is wired, so they are not checked against "
+    "each other"))
+def test_two_queued_turns_that_disagree_on_a_declaration_do_not_both_run(
+        monkeypatch):
+    # the pair the test above refuses, admitted during one call: both are
+    # wired, and `Turn2` then runs beside a `Cfg` it was not checked against
+    s = _session(_CFG_BASE)
+    try:
+        monkeypatch.setattr(s._loop, "is_running", lambda: True)
+        first = s.admit(_CFG_NARROW, granted=["Ops"], filename="q1.rvl")
+        second = s.admit(_CFG_WIDE, granted=["Ops"], filename="q2.rvl")
+        monkeypatch.undo()
+        s._drain_pending_admits()
+        assert first.admitted, first.message
+        assert not (second.admitted and "Turn2" in s.ir["services"])
+    finally:
+        s.unload()
 
 
 # -- `revl migrate` reports the same verdict ----------------------------------

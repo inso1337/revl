@@ -303,6 +303,173 @@ def test_nested_nominal_record_unchanged_is_admitted_through_a_json_round_trip()
                    manifest=old, replacing=("Cache",))
 
 
+# -- after `revl apply` --------------------------------------------------------
+#
+# The composition `revl apply` installs is the running manifest of the next
+# swap, so it keeps the declarations a running hand-off is spelled against.
+
+def _applied(old: dict, new_src: str) -> dict:
+    from revl.plan import plan
+
+    out = plan(source=new_src, manifest=old, replacing=("Cache",),
+               include_ir=True)
+    return out["resultingIR"]
+
+
+def test_nominal_record_unchanged_is_admitted_after_an_apply():
+    decl = "type St = { a: Int }"
+    old = compile_source(_with_decls(decl, "St"), "c.rvl")
+    now = _applied(old, _with_decls(decl, "St", version=2))
+    assert now["types"]["St"] == old["types"]["St"]
+    compile_source(_with_decls(decl, "St", version=3), "c.rvl",
+                   manifest=now, replacing=("Cache",))
+
+
+def test_nominal_record_field_added_is_refused_after_an_apply():
+    decl = "type St = { a: Int }"
+    now = _applied(compile_source(_with_decls(decl, "St"), "c.rvl"),
+                   _with_decls(decl, "St", version=2))
+    with pytest.raises(RevlError) as info:
+        compile_source(_with_decls("type St = { a: Int, b: Int }", "St",
+                                   version=3), "c.rvl",
+                       manifest=now, replacing=("Cache",))
+    _assert_drift(info.value)
+    assert "`St = {a: Int}`" in str(info.value)
+    assert "`St = {a: Int, b: Int}`" in str(info.value)
+
+
+# -- a hand-off the admission KEEPS -------------------------------------------
+#
+# The replacement check above reads a candidate that accepts the state. A
+# candidate that leaves the stateful provider alone and declares the provider's
+# type name over another record never reaches it, and the document it produces
+# carries the candidate's declaration: the kept provider's `handoff` would then
+# be spelled against a record it was never checked against, and a later swap to
+# that record would read as unchanged. So a name a kept hand-off reaches must
+# stay declared as the running manifest declares it.
+
+_HELLO = ("service Hello { fn hi() -> Int }\n"
+          "component Hello provides hello: Hello { provide hello "
+          "{ fn hi() = 1 } }\n")
+_KEPT = ("state hand-off on `cache` differs from the running manifest: "
+         "`Cache` is kept and exports `St`")
+
+
+def _kept_refusal(old: dict, new_src: str, replacing=()):
+    with pytest.raises(RevlError) as info:
+        compile_source(new_src, "c.rvl", manifest=old, replacing=replacing)
+    return info.value
+
+
+def test_kept_handoff_redeclared_differently_is_refused():
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    exc = _kept_refusal(old, "type St = { a: Int, b: Int }\n" + _HELLO)
+    assert _KEPT in str(exc), str(exc)
+    assert "`St = {a: Int}`" in str(exc) and "`St = {a: Int, b: Int}`" in str(exc)
+    assert exc.why is not None and exc.why.kind == "state-handoff-drift"
+    assert {step.kind for step in exc.why.steps} == {"export", "redeclare"}
+    redeclare = next(s for s in exc.why.steps if s.kind == "redeclare")
+    assert (redeclare.name, redeclare.file, redeclare.line) == ("St", "c.rvl", 1)
+
+
+def test_kept_handoff_redeclared_differently_is_refused_by_plan():
+    from revl.plan import plan
+
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    out = plan(source="type St = { a: Int, b: Int }\n" + _HELLO, manifest=old,
+               include_ir=True)
+    assert out["admissible"] is False and "resultingIR" not in out
+    assert any(_KEPT in d["message"] for d in out["diagnostics"]), out
+
+
+def test_kept_handoff_cannot_be_moved_under_a_later_swap():
+    # the sequence the check closes: an unrelated admission may not change
+    # what `St` means under the kept `Cache`, so the composition that stands
+    # after it still declares `St` as before and the next swap of `Cache` is
+    # compared against the record its state was built as
+    from revl.plan import plan
+
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    _kept_refusal(old, "type St = { a: Int, b: Int }\n" + _HELLO)
+    now = plan(source=_HELLO, manifest=old, include_ir=True)["resultingIR"]
+    assert {c["name"] for c in now["components"]} == {"Cache", "Hello"}
+    assert now["types"]["St"] == old["types"]["St"]
+    exc = _kept_refusal(
+        now, _with_decls("type St = { a: Int, b: Int }", "St", version=2),
+        replacing=("Cache",))
+    _assert_drift(exc)
+
+
+def test_kept_handoff_nested_change_is_refused():
+    old = compile_source(
+        _with_decls("type Inner = { x: Int }\ntype St = { i: Inner }",
+                    "Map[Str, List[St]]"), "c.rvl")
+    exc = _kept_refusal(old, "type Inner = { x: Str }\n" + _HELLO)
+    assert ("`Cache` is kept and exports `Map[Str, List[St]]` "
+            "(`Inner = {x: Int}`)") in str(exc), str(exc)
+    assert "(`Inner = {x: Str}`)" in str(exc)
+
+
+def test_kept_handoff_identical_redeclaration_is_admitted():
+    decl = "type St = { a: Int }"
+    old = compile_source(_with_decls(decl, "St"), "c.rvl")
+    now = compile_source(decl + "\n" + _HELLO, "c.rvl", manifest=old)
+    assert now["types"]["St"] == old["types"]["St"]
+
+
+def test_kept_handoff_unrelated_declaration_is_admitted():
+    old = compile_source(_with_decls("type St = { a: Int }\ntype Other = { x: Int }",
+                                     "St"), "c.rvl")
+    compile_source("type Other = { x: Str }\ntype New = { n: Int }\n" + _HELLO,
+                   "c.rvl", manifest=old)
+
+
+def test_withdrawn_handoff_is_not_held_to_the_running_declaration():
+    # `Cache` leaves in this admission, replaced by a stateless successor or
+    # withdrawn outright, so nothing kept is spelled against `St` any more
+    old = compile_source(_with_decls("type St = { a: Int }", "St"), "c.rvl")
+    stateless = _cache(version=2).replace("  handoff cache: Map[Str, Str]\n", "")
+    compile_source("type St = { a: Int, b: Int }\n" + stateless, "c.rvl",
+                   manifest=old)
+    compile_source("type St = { a: Int, b: Int }\n" + _HELLO, "c.rvl",
+                   manifest=old, replacing=("Cache",))
+
+
+def test_a_provided_type_is_not_a_redeclaration():
+    # `Answer[T]` is the language's own and no program can declare it. A
+    # program that names it applied gets the declaration seeded into its table
+    # and one that only hands it off does not: that is the same type on both
+    # sides, kept or replaced.
+    old = compile_source(_with_decls("", "Answer[Int]"), "c.rvl")
+    assert "Answer" not in (old.get("types") or {})
+    compile_source("type Q = { a: Answer[Int] }\n" + _HELLO, "c.rvl",
+                   manifest=old)
+    compile_source(_with_decls("type Q = { a: Answer[Int] }", "Answer[Int]",
+                               version=2), "c.rvl",
+                   manifest=old, replacing=("Cache",))
+
+
+def test_a_record_under_a_provided_type_is_still_compared():
+    old = compile_source(_with_decls("type St = { a: Int }", "Answer[St]"),
+                         "c.rvl")
+    exc = _kept_refusal(old, "type St = { a: Int, b: Int }\n" + _HELLO)
+    assert "`Cache` is kept and exports `Answer[St]`" in str(exc), str(exc)
+    assert "`St = {a: Int}`" in str(exc) and "`St = {a: Int, b: Int}`" in str(exc)
+    assert "Answer[T]" not in str(exc)
+
+
+def test_kept_handoff_without_running_types_fails_closed():
+    import copy
+
+    decl = "type St = { a: Int }"
+    old = copy.deepcopy(compile_source(_with_decls(decl, "St"), "c.rvl"))
+    old.pop("types")
+    exc = _kept_refusal(old, decl + "\n" + _HELLO)
+    assert _KEPT in str(exc) and "`St` is not declared" in str(exc)
+    # a candidate that says nothing about `St` leaves its meaning alone
+    compile_source(_HELLO, "c.rvl", manifest=old)
+
+
 # -- the same declared-shape check on the agent-authored swap path -------------
 #
 # `Session._enforce_declared_disclosure` (before teardown) and

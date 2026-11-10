@@ -94,7 +94,9 @@ retyping a field, a `Secret[Str]` field becoming `Str`, a variant changing a
 case. This runs for every service a running component provides or consumes,
 **whether or not the candidate redeclares it**, so a type-only edit is checked
 too. A service nothing running touches, and a type no touched service reaches,
-are not checked. A field reorder is not a change (fields compare as a set).
+are not checked. A field reorder is not a change (fields compare as a set). A
+type the language provides, such as `Answer[T]`, is the same on both sides; the
+declared names under it are still compared.
 
 It is deliberately strict, as the state hand-off check is (it shares the
 declaration comparison): declarations are compared for identity, so a harmless
@@ -103,6 +105,28 @@ candidate does not declare keeps the running meaning. A running manifest with
 no `types` cannot prove any name the candidate declares unchanged, so those are
 refused. `revl migrate` applies the same comparison per consumer (a changed
 record reads as a reshaped provision and the consumer is not `movable`).
+
+A document compiled against a manifest, and the composition `revl apply`
+installs, carry the running declarations next to the candidate's own (the
+candidate's wins on a shared name), so either can stand as the next running
+manifest and a later swap that changes nothing is admitted. A live session
+adopts the declarations of each admitted turn the same way, so a later turn
+that redeclares an unchanged record is admitted and one that changes a record a
+running turn's service uses is refused. A turn admitted while a call is running
+is wired when the call returns and adds the declarations it wrote itself, so it
+neither drops nor puts back what a turn wired before it declared.
+
+The candidate's declaration winning on a shared name is safe only because a
+changed one is refused wherever something running still depends on the old
+meaning: here for a service signature, and in `docs/state-handoff.md` for the
+state of a component the admission keeps.
+
+The self-host gate (`selfhost/lower.rvl`, `crates/revl-gate`) does not make
+this comparison yet. It does not run the compatibility relation on a
+redeclared service at all, so on that path a changed declaration behind a
+running signature is admitted where the reference refuses
+(`tests/test_selfhost_lower.py`,
+`test_service_declared_type_changed_is_refused_by_the_gate`).
 
 ## Consumer/provider identification, and the conservative fallback
 
@@ -152,7 +176,7 @@ would silently cross the boundary (G4/G8)
   genuine identity elsewhere (`plan`, capability round-trip tests). Two
   declarations of one service in a single compilation remain a **duplicate**,
   never a compatible swap.
-* `admission._admit_service_types` / `admission._service_type_drift` — the
+* `admission._admit_service_types` / `admission._service_type_drift`: the
   declared-types check above, called from `check_and_lower` right after the
   candidate's types are lowered; `migrate` reuses `_service_type_drift`.
 * `compiler._provision_services` / the `provision_services` ambient field —

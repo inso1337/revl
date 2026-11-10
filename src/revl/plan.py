@@ -186,11 +186,21 @@ def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
     # merges by name the same way; a candidate's fn replaces a running one
     functions = {f["name"]: f for f in running_ir.get("functions") or []}
     functions.update({f["name"]: f for f in candidate_ir.get("functions") or []})
+    # the declared types the merged services and hand-offs are spelled
+    # against. This document is the running manifest of the next admission,
+    # which reads a name in a running signature against these declarations
+    # and refuses a name it cannot find here (`admission._admit_service_types`).
+    # A candidate compiled against the running document already carries its
+    # table; the union is spelled out, as it is for `services` below, so a
+    # caller that compiled the candidate alone loses nothing
+    types = {**(running_ir.get("types") or {}),
+             **(candidate_ir.get("types") or {})}
     return {
         "ir_version": candidate_ir.get("ir_version") or running_ir.get("ir_version"),
         "components": components,
         "services": {**(running_ir.get("services") or {}),
                      **(candidate_ir.get("services") or {})},
+        **({"types": types} if types else {}),
         "functions": list(functions.values()),
         "externs": list(externs.values()),
         "manifest": candidate_ir.get("manifest") or running_ir.get("manifest") or {},
