@@ -373,12 +373,9 @@ def verify_pin(record, pin: dict, *, now: datetime | None = None
         return {"ok": False, "changed": changed,
                 "reason": ("the tool manifest does not match the pin: "
                            + ", ".join(changed))}
-    if pin.get("capabilities"):
-        extra = sorted(set(attested) - set(pin["capabilities"]))
-        if extra:
-            return {"ok": False, "changed": extra,
-                    "reason": ("the server attests tools outside the pinned "
-                               "capability scope: " + ", ".join(extra))}
+    # `pin["capabilities"]` is not checked here: it narrows what the proxy
+    # serves (an attested tool outside it is excluded, never proxied), so a
+    # narrowed pin must still verify against the whole attested manifest.
     return {"ok": True, "reason": "valid: the pinned key signed this tool "
                                   "manifest", "changed": []}
 

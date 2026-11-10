@@ -461,8 +461,10 @@ class Proxy:
                 # Compare the ACCUMULATED list once pagination ends: a
                 # paginated upstream may sign its whole manifest once, so
                 # checking page one against the full signed list would refuse
-                # a perfectly honest unpinned server (fix-verify #3103).
-                if isinstance(record, dict):
+                # a perfectly honest server (fix-verify #3103). Only a pinned
+                # proxy compares: without a pin the record is unverified, and
+                # the upstream is relayed unchanged whatever it carries.
+                if self.pin is not None and isinstance(record, dict):
                     self._refuse_served_manifest(tools, record)
                 return tools
         raise UpstreamError("the upstream server's tools/list did not terminate")
@@ -902,6 +904,12 @@ class Proxy:
                 result = self.call_tool(name, params.get("arguments") or {},
                                         params.get("_meta"))
         elif method in PASSTHROUGH:
+            # a resource or a prompt comes from the same upstream, so a pinned
+            # proxy that refuses it for tools refuses it here too
+            refusal = self._attestation_refusal()
+            if refusal is not None:
+                return None if request_id is None else _error(
+                    request_id, -32603, refusal)
             try:
                 result = self.upstream.request(method, params)
                 # issue #2990: a resource read or a prompt is an external MCP

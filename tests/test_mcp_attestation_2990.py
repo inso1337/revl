@@ -430,11 +430,92 @@ def test_an_unpinned_attesting_upstream_that_paginates_is_compared_as_a_whole():
     assert [t["name"] for t in tools] == [t["name"] for t in TOOLS]
 
 
-def test_an_unpinned_served_list_mismatch_is_still_refused():
+def test_an_unpinned_served_list_mismatch_is_proxied_unchanged():
+    """Review item 3 at 5172d0073: without a pin the record is unverified, so
+    an inconsistent record under `_meta` does not refuse an upstream the proxy
+    would otherwise relay unchanged. The pinned side is the next test."""
     record = _record()
     proxy = _proxy()
     edited = [dict(TOOLS[0], description="edited after signing"), TOOLS[1]]
     proxy.upstream.answers["tools/list"] = {"tools": edited, **_meta(record)}
+    tools = proxy._list_upstream_tools()
+    assert tools == edited
+
+
+def test_a_pinned_served_list_mismatch_is_refused():
+    record = _record()
+    proxy = _proxy(pin=_pin())
+    proxy._adopt_attestation(_meta(record), phase="initialize")
+    edited = [dict(TOOLS[0], description="edited after signing"), TOOLS[1]]
+    proxy.upstream.answers["tools/list"] = {"tools": edited, **_meta(record)}
     with pytest.raises(proxy_mod.UpstreamError) as caught:
         proxy._list_upstream_tools()
-    assert "list_notes" in str(caught.value)
+    assert "does not match the manifest it signed: list_notes" in str(
+        caught.value)
+
+
+def _narrowed_proxy():
+    """A pin narrowed to `list_notes` against a server that attests both
+    tools, adopted from initialize and tools/list."""
+    record = _record()
+    proxy = _proxy(pin=_pin(capabilities=["list_notes"]))
+    proxy._adopt_attestation(_meta(record), phase="initialize")
+    proxy.upstream.answers["tools/list"] = {"tools": TOOLS, **_meta(record)}
+    proxy.manifest = {"tools": proxy._list_upstream_tools()}
+    return proxy
+
+
+def test_a_narrowed_pin_is_adopted_and_excludes_the_tool_outside_it():
+    """Review item 1 at 5172d0073: `verify_pin` refused a narrowed pin whole at
+    initialize, so the exclusion in `_classify` never ran."""
+    proxy = _narrowed_proxy()
+    assert proxy.attestation is not None
+    proxied, excluded = proxy._classify()
+    assert [t["name"] for t in proxied] == ["list_notes"]
+    assert [t["name"] for t in excluded] == ["delete_note"]
+    assert excluded[0]["excludedBecause"] == \
+        "outside the pinned capability scope"
+
+
+def test_a_tool_outside_the_narrowed_pin_is_not_listed_or_callable():
+    proxy = _narrowed_proxy()
+    proxied, excluded = proxy._classify()
+    proxy.tools, proxy.excluded = proxied, excluded
+    proxy.by_name = {t["name"]: t for t in proxied}
+    proxy._ensure_loaded = lambda: None
+    listed = proxy.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = [t["name"] for t in listed["result"]["tools"]]
+    assert "list_notes" in names and "delete_note" not in names
+    called = proxy.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                           "params": {"name": "delete_note",
+                                      "arguments": {"id": "n1"}}})
+    assert called["error"]["message"] == "unknown tool: delete_note"
+
+
+def test_a_narrowed_pin_still_refuses_a_changed_or_missing_tool():
+    """The scope only narrows: a pinned tool the server no longer attests, or
+    an attested tool that differs from the pin, is refused as before."""
+    pin = _pin(capabilities=["list_notes"])
+    edited = [dict(TOOLS[0], description="edited"), TOOLS[1]]
+    for tools, named in ((TOOLS[:1], "delete_note"), (edited, "list_notes")):
+        proxy = _proxy(pin=pin)
+        with pytest.raises(proxy_mod.UpstreamError) as caught:
+            proxy._adopt_attestation(_meta(_record(tools=tools)),
+                                     phase="initialize")
+        assert f"does not match the pin: {named}" in str(caught.value)
+
+
+def test_an_expired_pinned_proxy_refuses_prompts_and_resources():
+    """Review item 2 at 5172d0073: the passthrough branch forwarded without
+    asking `_attestation_refusal`."""
+    proxy = _proxy(pin=_pin(), **{"prompts/get": {"messages": []},
+                                  "resources/read": {"contents": []}})
+    proxy._adopt_attestation(_meta(_record()), phase="initialize")
+    live = proxy.handle({"jsonrpc": "2.0", "id": 1, "method": "prompts/get",
+                         "params": {"name": "p"}})
+    assert "result" in live
+    proxy.attestation = _record(ttl=0.0)
+    for method in ("prompts/get", "resources/read"):
+        response = proxy.handle({"jsonrpc": "2.0", "id": 2, "method": method,
+                                 "params": {"name": "p", "uri": "notes://1"}})
+        assert "expired" in response["error"]["message"], method

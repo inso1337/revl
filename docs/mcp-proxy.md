@@ -118,7 +118,12 @@ startup error (`error: revl mcp proxy cannot gate ...: refused the upstream
 `capabilities` in the pin is the client's declared scope. A tool the server
 attests but the pin does not grant is listed as excluded (`outside the pinned
 capability scope`) and cannot be called, so a proxied call can never exceed
-what the client declared for that origin.
+what the client declared for that origin. The scope only narrows: a pinned
+tool the server no longer attests, or an attested manifest that differs from
+the pinned one, is still refused as above.
+
+Only a pinned proxy compares the served tool list with the record's manifest;
+an unpinned proxy relays the upstream unchanged, whatever record it carries.
 
 ### What is authenticated, and what is not
 
@@ -301,7 +306,9 @@ own handler so the operator gate applies: `revl_approve`, `revl_revoke`,
 The client gets no verb that loads, swaps or edits code.
 
 `resources/*`, `prompts/*`, `completion/complete` and `logging/setLevel` are
-forwarded to the upstream unchanged. Upstream notifications are relayed to the
+forwarded to the upstream unchanged, except that a pinned proxy whose held
+attestation no longer verifies (an expired record) refuses them exactly as it
+refuses `tools/list` and `tools/call`. Upstream notifications are relayed to the
 client, except `notifications/tools/list_changed`, which the proxy acts on: it
 lists the tools again, reclassifies them, and sends its own
 `notifications/tools/list_changed`. Over HTTP, which caller receives each
