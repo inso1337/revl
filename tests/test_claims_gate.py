@@ -6,13 +6,13 @@ path, the repository's own annotations, and a claim whose witness disappears.
 """
 from __future__ import annotations
 
-import importlib.util
 import io
 import subprocess
 import sys
 from pathlib import Path
 
 from revl.claims import load_registry
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "check_claims.py"
@@ -28,11 +28,7 @@ def _run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
 
 def _tool():
     """The gate module itself, for the one test that injects a selector."""
-    spec = importlib.util.spec_from_file_location("check_claims_gate_tool", TOOL)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_by_path("check_claims_gate_tool", TOOL)
 
 
 def test_the_self_test_passes():
