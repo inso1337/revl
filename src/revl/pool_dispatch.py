@@ -1603,17 +1603,31 @@ def _violation_for_receipt_refusal(receipt_link: str,
 
 
 def _record_refusal_violation(roster: peer_pool.Roster, peer_id: str,
-                              verdict: Mapping[str, Any]) -> None:
+                              verdict: Mapping[str, Any], *,
+                              receipt: Any, member: peer_pool.Membership,
+                              task: Optional[Mapping[str, Any]]) -> None:
     """Record one violation for a refused answer, in the roster's ledger.
 
     RECORD ONLY: the member row is not touched and nothing here can move a tier
     or a grant. A peer that is no longer a member by the time the answer
     settles is not recorded against, because a violation is a record about a
-    member and the ledger already holds the refused delivery."""
+    member and the ledger already holds the refused delivery.
+
+    Nor is a receipt that is not this membership's answer to this task: one
+    issued before the membership began, or one whose ``task_digest`` is not the
+    task being settled. ``check_receipt`` runs the artifact check before those
+    two, so such a receipt (a replay from another pool directory with the same
+    pool id, say) is refused on ``receipt-artifact``; it stays refused as
+    before, and nothing is written against the member, because what it shows
+    is what the key signed elsewhere, not what this member did here."""
     kind = _violation_for_receipt_refusal(
         str(verdict.get("receipt_link", "")),
         str(verdict.get("attestation_verdict", "")))
     if not kind or peer_id not in roster.members:
+        return
+    if not pool_receipt.answers_membership_task(
+            receipt if isinstance(receipt, Mapping) else {},
+            admitted_at=member.admitted_at, task=task):
         return
     peer_pool.record_violation(
         roster, peer_id, kind, detail=str(verdict.get("reason", "")),
@@ -1649,7 +1663,9 @@ def _record_answer(ledger: "DeliveryLedger", *, roster: peer_pool.Roster,
                               attesting_identity=attesting_identity,
                               network_exposed=network_exposed, task=task)
     if not verdict.get("ok"):
-        _record_refusal_violation(roster, peer_id, verdict)
+        _record_refusal_violation(roster, peer_id, verdict,
+                                  receipt=answer.get("receipt"),
+                                  member=member, task=task)
         ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
                       reason=str(verdict.get("reason", "")))
         return dict(verdict, task_id=task_id)

@@ -26,12 +26,18 @@ The claims, and the mutation that makes each fail:
 * V6  recording is record-only: the member row is unchanged, and a record
       survives the withdrawal that later removes the member. Mutation: make
       the record a member field that withdrawal deletes.
+* V7  a receipt refused on its artifact is recorded only when it is this
+      membership's answer to the task being settled: one issued before the
+      membership began, or for another task (a replay from another pool
+      directory with the same pool id), is refused as before and records
+      nothing. Mutation: record on the refusal link alone.
 """
 
 import io
 import json
 import sys
 from contextlib import redirect_stdout
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -383,3 +389,61 @@ def test_pool_status_escapes_control_characters_in_a_detail(tmp_path):
     events = status_json(pool_dir)["roster"]["events"]
     assert [event["detail"] for event in events
             if event.get("kind") == pp.VIOLATION_KIND] == [hostile]
+
+
+# ---------------------------------------------------------------------------
+# V7: a receipt is recorded against the membership and task it answers only
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ["replay-from-another-pool", "stale-only",
+                                  "other-task-only"])
+def test_a_receipt_from_another_membership_or_task_records_nothing(
+        tmp_path, case):
+    """The pool check refuses the artifact before it reads the issue time or
+    the task, so a receipt this key signed in another pool directory with the
+    same pool id reaches the settle path refused on ``receipt-artifact``. It
+    stays refused, and nothing is recorded against the member of THIS pool.
+    Mutation: record on the refusal link alone."""
+    # Pool A: the same charter, so the same pool id, in another directory.
+    record_a = make_charter()
+    task_a = signed_task(record_a, task_id="t-a")
+
+    pool_dir, record, roster = pool_on_disk(tmp_path)
+    task_b = dispatch_a_task(pool_dir, record, task_id="t-b")
+    admitted = pp._parse_iso(roster.members[WORKER].admitted_at)
+    earlier = admitted - timedelta(minutes=5)
+    later = admitted + timedelta(seconds=1)
+    issued_at, answered = {
+        "replay-from-another-pool": (earlier, task_a),
+        "stale-only": (earlier, task_b),
+        "other-task-only": (later, task_a),
+    }[case]
+    receipt = pr.issue_receipt(
+        pool_id=record_a["pool_id"], task_id=answered["task_id"],
+        artifact_digest=CROSSING_DIGEST, result={"exit_code": 0},
+        identity=WORKER_ID, at=issued_at,
+        task_digest=pr.receipt_digest(answered),
+        grant={"caps": sorted(ENTRY_CAPS), "budgets": {}},
+        policy_digest=pp.canonical_digest(record_a))
+
+    outcome = pd._settle(
+        pool_dir=pool_dir, peer_id=WORKER, task_id="t-b",
+        member=roster.members[WORKER],
+        answer={"ok": True, "receipt": receipt, "result": {"exit_code": 0}},
+        attesting_identity=ATTESTOR_ID, task=task_b)
+
+    # Refused exactly as before: the reason a caller sees is unchanged.
+    assert outcome["link"] == pd.LINK_RECEIPT_REFUSED, outcome
+    assert outcome["receipt_link"] == pr.LINK_RECEIPT_ARTIFACT, outcome
+    assert pd.load_ledger(pool_dir).tasks["t-b"]["state"] == pd.STATE_REFUSED
+    _charter, reread = pp.load_pool(pool_dir)
+    assert pp.violation_events(reread) == ()
+
+    # Positive control: this membership's own receipt for B's own task, with
+    # the wrong artifact, is still recorded.
+    answer_with_artifact(pool_dir, record, reread, task_id="t-b2",
+                         artifact_digest=CROSSING_DIGEST)
+    _charter, reread = pp.load_pool(pool_dir)
+    assert [event["violation"] for event in pp.violations_of(reread, WORKER)] \
+        == [pp.VIOLATION_RECEIPT_ARTIFACT]
