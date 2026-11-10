@@ -467,6 +467,49 @@ def test_acquire_extern_named_a_host_global_refused(name):
         EMIT.emit(ir, target="temporal")
 
 
+def test_witnessed_extern_named_a_host_global_refused():
+    """A witnessed extern is not an activity either: `effect fetch("a")`
+    renders as a bare `fetch("a")` the module never declares."""
+    src = (
+        "type WT = { id: Str }\n"
+        "extern pure fn zqChk(w: WT) -> Int = @ts { return 1 }\n"
+        "extern witnessed fn fetch(x: Str) -> Result[WT, Str] undo pure"
+        " zqChk(result) = @ts { return x }\n"
+        "component Res {\n"
+        '  effect fetch("a")\n'
+        "}\n"
+    )
+    ir = compile_source(src, "fetch_witnessed.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves the name 'fetch' for a witnessed extern"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_unused_local_extern_named_a_host_global_refused():
+    """The check covers every extern in the program, reached by a component
+    or not, so an unused `local` extern named `fetch` is refused too (it fails
+    safe)."""
+    src = (
+        "extern local fn fetch(n: Int) -> Unit = @ts { return }\n"
+        "component Res { }\n"
+    )
+    ir = compile_source(src, "fetch_local.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves the name 'fetch' for a local extern"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_free_read_refusal_names_the_host_call_not_scaffolding():
+    """`fetch` is not scaffolding: the refusal says the bare call would reach
+    the host's own function, with the article the class takes."""
+    ir = compile_source(_bracket_src("r_close", acquire="fetch"),
+                        "fetch_acquire_msg.rvl")
+    with pytest.raises(EMIT.EmitError) as info:
+        EMIT.emit(ir, target="temporal")
+    text = str(info.value)
+    assert "for an acquire extern" in text
+    assert "would reach the host's own 'fetch'" in text
+    assert "scaffolding" not in text
+
+
 # ------------------------------- reserved names derived from the emitted module
 
 # Every author-chosen name in this workflow starts with `zq`, so whatever else

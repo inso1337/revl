@@ -189,9 +189,13 @@ TEMPORAL_MODULE_RESERVED = frozenset({
 # the module's own names plus exactly the globals the template reads. Any
 # other host global (`fetch`, `process`, ...) stays a legal activity or
 # component name. A name the module READS FREE (every other extern class,
-# rendered as a bare call to its own name and never declared here) resolves
-# to the host global of that spelling, so it must avoid every host global
-# (`JS_GLOBAL_RESERVED`) as well; see `_check_temporal_names`.
+# called through `_mangle` of its name, so the name itself unless it is a JS
+# keyword such as `class`, which becomes `class__`, and never declared here)
+# resolves to the host global of that spelling. Such a name is also checked
+# against the globals listed in `JS_GLOBAL_RESERVED`; see
+# `_check_temporal_names`. That list is not every host global: a free-read
+# extern named `setImmediate`, `Headers` or `navigator` still reaches the
+# host's own value, because the module binds no non-emission extern.
 # `test_temporal_target.py` derives the read set from the emitted module, so a
 # global the template starts reading fails there until it is listed here.
 TEMPORAL_GLOBALS_READ = frozenset({
@@ -215,6 +219,16 @@ def _refuse_reserved(name: object, role: str) -> None:
         f"--target temporal reserves the name {name!r}: the emitted workflow "
         f"uses it for its own scaffolding, so {role} with that spelling would "
         f"shadow or collide with generated code. Rename it."
+    )
+
+
+def _refuse_free_global(name: object, cls: str) -> None:
+    article = "an" if cls[:1] in "aeiou" else "a"
+    raise EmitError(
+        f"--target temporal reserves the name {name!r} for {article} {cls} "
+        f"extern: the emitted workflow never declares {article} {cls} extern "
+        f"and calls it by its bare name, so that call would reach the host's "
+        f"own {name!r} instead of the extern. Rename it."
     )
 
 
@@ -262,12 +276,16 @@ def _check_temporal_names(ir: dict) -> frozenset:
         if name in reserved:
             _refuse_reserved(name, "an extern")
         # Only an emission extern is bound in this module. Every other class
-        # (pure, acquire, witnessed, local) is rendered as a bare call and
-        # never declared, so its name is read free and a host-global spelling
-        # (`undo fetch(h)`) would call the host's own function.
-        if ext.get("class") != "emission" and name in JS_GLOBAL_RESERVED:
-            _refuse_reserved(
-                name, f"a {ext.get('class')} extern, called by its bare name,")
+        # (pure, acquire, witnessed, local) is called through `_mangle` of its
+        # name and never declared, so a name `_mangle` leaves as is (anything
+        # but a JS keyword) is read free, and `undo fetch(h)` would call the
+        # host's own `fetch`. Checked against `JS_GLOBAL_RESERVED`, which is
+        # not every host global (see `TEMPORAL_MODULE_SCOPE`). The loop covers
+        # every extern in the IR, reached by a component or not: an unused
+        # free-read extern with such a name is refused too, which fails safe.
+        cls = ext.get("class") or "non-emission"
+        if cls != "emission" and name in JS_GLOBAL_RESERVED:
+            _refuse_free_global(name, cls)
     return frozenset(reserved | set(component_names) | set(residue_names))
 
 

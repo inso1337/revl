@@ -459,11 +459,15 @@ This goes in the compiler spec, not the runtimes.
     emission extern, destructured as an activity, and a component) is checked
     against that module scope, so `fetch` or `process` stays a legal activity
     or component name. A name it reads free (a pure, acquire, witnessed or
-    local extern, rendered as a bare call and never declared) is also checked
-    against every host global (`JS_GLOBAL_RESERVED`), since `undo fetch(h)`
-    would otherwise call the host's `fetch`. A config field stays allowed: it
-    is only a property key (`input.<field>`), never a bare identifier, so it
-    cannot shadow the scaffolding.
+    local extern, called by its own name and never declared) is also checked
+    against the globals listed in `JS_GLOBAL_RESERVED`, since `undo fetch(h)`
+    would otherwise call the host's `fetch`. The check covers every extern in
+    the program, used by a component or not, which fails safe. Known limit:
+    that list is not every host global, so a free-read extern named, for
+    example, `setImmediate`, `Headers` or `navigator` still reaches the
+    host's own value, because the module binds no non-emission extern. A
+    config field stays allowed: it is only a property key (`input.<field>`),
+    never a bare identifier, so it cannot shadow the scaffolding.
   - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
     `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
     flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding
