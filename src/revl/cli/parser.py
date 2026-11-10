@@ -917,6 +917,52 @@ def build_parser() -> argparse.ArgumentParser:
     retention_cmd.add_argument("--json", action="store_true",
                                help="machine-readable receipt or verdict")
 
+    # issue #2757: signed, chained receipts for consequential actions. Two
+    # verbs that point in opposite directions: export signs a session's
+    # actions, verify checks a chain somebody presents. Routed before the
+    # shared compile step because both read a JSON document, not `.rvl`.
+    receipts_cmd = sub.add_parser(
+        "receipts",
+        help="export a session's consequential actions as a signed receipt "
+             "chain, or verify one somebody presents (issue #2757)")
+    receipts_sub = receipts_cmd.add_subparsers(
+        dest="receipts_command", metavar="{export,verify}")
+    receipts_export = receipts_sub.add_parser(
+        "export", help="sign a receipt per action and chain them")
+    receipts_export.add_argument(
+        "--actions", required=True, metavar="FILE",
+        help='a JSON document of actions: a bare list or {"actions": [...], '
+             '"session_verdict": "committed"|"aborted"}')
+    receipts_export.add_argument(
+        "--session", required=True, metavar="NAME",
+        help="the session the chain belongs to (one session per chain)")
+    receipts_export.add_argument(
+        "--session-verdict", default="committed", metavar="VERDICT",
+        # mirrors action_receipt.SESSION_VERDICTS; kept a literal so parser
+        # assembly stays import-light
+        choices=("committed", "aborted"),
+        help="the session's verdict, bound into every receipt")
+    receipts_export.add_argument(
+        "--key", action="append", default=[], metavar="PATH",
+        help="the signing key file. Falls back to REVL_RECEIPT_KEY_FILE (a "
+             "path) or REVL_RECEIPT_KEY (the secret); never hardcoded")
+    receipts_export.add_argument(
+        "--salt", default=None, metavar="HEX",
+        help="the 64-hex commitment salt; random when omitted")
+    receipts_export.add_argument(
+        "--out", default=None, metavar="FILE",
+        help="write the chain here instead of stdout")
+    receipts_verify = receipts_sub.add_parser(
+        "verify", help="check a receipt chain, fail closed")
+    receipts_verify.add_argument("file", metavar="CHAIN",
+                                 help="the chain document to check")
+    receipts_verify.add_argument(
+        "--key", action="append", default=[], metavar="PATH",
+        help="a verification key; repeat to check a chain that spans a key "
+             "rotation. Falls back to REVL_RECEIPT_KEY_FILE / REVL_RECEIPT_KEY")
+    receipts_verify.add_argument("--json", action="store_true",
+                                 help="machine-readable verdict")
+
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
     plan_cmd.add_argument("files", nargs="+")

@@ -12,11 +12,11 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  update  version
-migrate  contract  erase-report  retention-receipt  plan  apply  undo
-canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
-import  export  sourcemap  serve  run  dev  recover  act  estop  slo
-branch  compare  replay  why  metrics  trace  profile  pool  attest
-dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
+migrate  contract  erase-report  retention-receipt  receipts  plan
+apply  undo  canary  promote  query  fmt  quarantine  analyze  test  mcp
+gen-types  import  export  sourcemap  serve  run  dev  recover  act
+estop  slo  branch  compare  replay  why  metrics  trace  profile  pool
+attest  dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -2153,6 +2153,42 @@ policy at all are each exit `1` with nothing on stdout. Verifying: a receipt
 that IS presented and does not verify is exit `1` naming the one reason -
 including when no key can be resolved, because "could not check it" is never
 "valid". An ABSENT receipt is not a refusal here at all; that is the issue path.
+
+### `revl receipts`
+
+Signed, chained receipts for consequential actions (issue #2757). `export` signs
+one receipt per action and chains them; `verify` checks a chain somebody
+presents. Each receipt binds the bundle and policy digests, the approval used,
+the capability crossed, a commitment to the input and a commitment to the
+result, the worker identity, the session verdict and the previous receipt's
+digest, so a receipt that is removed, reordered or altered breaks a link. A
+value carrying a `secret` or `confidential` origin is committed to as a
+suppressed commitment with the reason, never as a digest a reader could use as
+a confirmation oracle. The design note, including key custody, rotation and the
+anchoring option, is [design/570-action-receipt-chain.md](design/570-action-receipt-chain.md).
+
+- `--actions FILE` - the actions to sign, as JSON: a bare list, or
+  `{"actions": [...], "session_verdict": "committed"|"aborted"}`. Each action
+  names `receipt_kind` (`effect-crossing` or `approval-use`), `task`,
+  `component`, `capability`, `worker`, `input` and `result`; `bundle`,
+  `policy`, `approval` and the two origins lists are optional.
+- `--session NAME` - the session the chain belongs to (required).
+- `--session-verdict VERDICT` - `committed` or `aborted`, bound into every
+  receipt. Absence of the session commit marker is the abort verdict.
+- `--key PATH` - the signing key file; falls back to `REVL_RECEIPT_KEY_FILE` (a
+  path) then `REVL_RECEIPT_KEY` (the secret), never a default in the tree.
+- `--salt HEX` - the 64-hex commitment salt; random when omitted.
+- `--out FILE` - write the chain here instead of stdout.
+- `CHAIN` (for `verify`) - the chain document to check.
+- `--key PATH` (for `verify`) - a verification key; repeat after a rotation,
+  because every receipt names the fingerprint of the key that signed it.
+- `--json` (for `verify`) - machine-readable verdict.
+
+Exit codes: `verify` exits `0` only on a full pass and `1` on any refusal,
+naming the check that fired; a chain this process cannot check, including one
+presented with no key resolvable, is a refusal and never "valid". `export` is
+the opposite direction: a chain that cannot be signed is never printed, so an
+unresolvable key or a malformed action is exit `1` with nothing on stdout.
 
 ### `revl dash`
 
