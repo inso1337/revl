@@ -21,6 +21,22 @@ BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
 REPLAY_MODES = ("exact", "tool-only", "model-substitute", "counterfactual")
 
 
+class _StoreOnce(argparse.Action):
+    """A single-value flag that refuses to be given twice.
+
+    A plain `store` flag keeps the last value, so a host-side wrapper that pins
+    a rule and a later argument list that repeats the flag would let the later,
+    weaker value win without a word. A rule flag that is repeated is a usage
+    error naming the flag instead of a silent override."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            raise argparse.ArgumentError(
+                self, f"{option_string or self.option_strings[0]} was given "
+                      f"more than once; give it exactly once")
+        setattr(namespace, self.dest, values)
+
+
 def _attempt_limit(text: str) -> int:
     """A positive attempt budget for `--attempt-limit` (issue #2690). Zero or
     a negative value would only ever report `attemptsRemaining: 0`, so it is
@@ -3044,6 +3060,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="REFUSE a chain that binds no item-306 conformance cert for the "
              "request's backend. The host is the floor: a request may add this "
              "requirement but never turn it off (S2.4)")
+    admit_cmd.add_argument(
+        "--max-age", metavar="SECONDS", type=float, action=_StoreOnce,
+        help="REFUSE an attestation whose signed timestamp is more than SECONDS "
+             "old (freshness TTL). Off by default: a host that names no window "
+             "accepts any past attestation a trusted key once signed")
+    admit_cmd.add_argument(
+        "--not-before", metavar="INSTANT", action=_StoreOnce,
+        help="REFUSE an attestation signed before INSTANT, a unix timestamp or "
+             "an ISO-8601 instant (typically the last deploy this host "
+             "accepted). An independent anchor: replaying an old-but-still-in-"
+             "window attestation fails against it")
+    admit_cmd.add_argument(
+        "--capability-ceiling", metavar="NAME", action="append",
+        help="REFUSE a staged composition that reaches a capability outside "
+             "these names; repeatable. Measured from the signature-bound "
+             "ir/ir.json, not from policy.json")
+    admit_cmd.add_argument(
+        "--revoked-key", metavar="KEY_ID", action="append",
+        help="REFUSE a chain signed by KEY_ID; repeatable. Revokes one signer "
+             "while the other key files it trusts stay in force")
+    admit_cmd.add_argument(
+        "--recheck-source", action="store_true",
+        help="re-run THIS host's frontend over the staged source and REFUSE "
+             "unless it admits and reproduces the staged IR, instead of trusting "
+             "the signer's gate run")
     admit_cmd.add_argument(
         "--runtime-version", metavar="NAME=VER", action="append",
         help="a runtime this host reports on its verdicts (e.g. python=3.14); "

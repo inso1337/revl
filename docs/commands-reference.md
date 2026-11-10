@@ -2487,11 +2487,27 @@ own local trust store, rather than the conductor checking in its own process.
 - `--require-gauntlet` / `--require-conformance` - refuse a chain that binds no
   item-31 gauntlet or item-306 conformance evidence. The host is the floor: a
   request may add either requirement but never turn one off.
+- `--max-age SECONDS` - refuse an attestation whose signed timestamp is more
+  than SECONDS old (the receiver's freshness TTL). Off by default.
+- `--not-before INSTANT` - refuse an attestation signed before INSTANT, a unix
+  timestamp or an ISO-8601 instant, typically the last deploy this host
+  accepted. An independent anchor, so replaying old-but-in-window evidence
+  still fails.
+- `--capability-ceiling NAME` - refuse a staged composition that reaches a
+  capability outside these names; repeatable. Measured from the signature-bound
+  `ir/ir.json`, not from `policy.json`.
+- `--revoked-key KEY_ID` - refuse a chain signed by KEY_ID; repeatable. Revokes
+  one signer while the other key files this host trusts stay in force.
+- `--recheck-source` - re-run THIS host's frontend over the staged source and
+  refuse unless it admits and reproduces the staged IR, instead of trusting the
+  signer's gate run.
 - `--runtime-version NAME=VER` - a runtime this host reports on its verdicts
   (e.g. `python=3.14`); repeatable.
 
 The trust configuration is the runner's own, never anything the request carries:
 a request can ASK for admission but cannot supply the trust that would grant it.
+Behind a `via = ssh` deploy map the same flags reach the far runner through the
+target's `extra_args` (the allowlist there is exactly the runner's own flags).
 Locally the conductor spawns the `revl deploy-admit` runner as a local child
 process and speaks to it over stdin/stdout (`deploy.StdioRunnerTransport`);
 across a machine boundary it
