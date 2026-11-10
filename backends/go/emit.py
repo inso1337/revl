@@ -488,9 +488,15 @@ _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
 #: that name first, so a user binding of one of these spellings made the
 #: assignment target the wrong variable (a go build type error). `_f`, `i`,
 #: `_i` and `_j` stay unreserved: their shadows are never read as a user value.
+#: issue #3095 adds the component activation/provide-impl scaffolding a
+#: `let-effect` bind shares scope with: `ctx` is the activation's
+#: `*stc.Context` and the impl's own field, `cfg` the config struct, the rest
+#: are the emitted frames, method receiver and apply results.
 _EMITTER_RESERVED = {
     "revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
     "_svc", "_err", "_r", "_ok",
+    "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+    "_revlUi", "_revlApplyInv", "_revlApplyErr",
 }
 
 
@@ -533,7 +539,18 @@ def _safe_local(name: str) -> str:
 
 
 def _bind_field(name: str) -> str:
-    return _lower_camel(name)
+    """The Go spelling of a component `let-effect` bind.
+
+    `_lower_camel` drops the trailing underscores the frontend's `_safe_name`
+    added to keep binders apart, so the raw binder `ctx` and the escaped one
+    `ctx_` both spelled `ctx`, and `ctx` is also the activation's context
+    parameter and the provide impl's own field. Preserve the trailing rung and
+    escape the component scaffolding through `_safe_local`'s ladder; a bind
+    that lands on no reserved name is unchanged, so ordinary output is
+    byte-identical (issue #3095).
+    """
+    return _safe_local(_lower_camel(str(name))
+                       + "_" * (len(str(name)) - len(str(name).rstrip("_"))))
 
 
 def _req_field(name: str) -> str:
@@ -8434,6 +8451,26 @@ def _go_v3_match_result(node, ctx: _V3GoCtx, expected, scrut_node,
     return "\n".join(lines)
 
 
+def _v3_infer_arm_body(arm, scrut_t, ctx: _V3GoCtx):
+    """The surface type of a match arm's body with the arm's binder in scope.
+
+    A binder shadows any outer binding of its name, so it is typed as the
+    arm's payload (the whole scrutinee for a wildcard) and, when that is
+    unknown, as nothing, never as the outer binding (issue #3075)."""
+    bind = arm.get("bind")
+    if not bind or bind == "_":
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    bound = scrut_t if arm.get("pattern") == "_" else arm.get("payload_type")
+    outer = ctx.var_types
+    ctx.var_types = {k: v for k, v in outer.items() if k != bind}
+    if bound is not None:
+        ctx.var_types[bind] = bound
+    try:
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    finally:
+        ctx.var_types = outer
+
+
 def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     scrut_node = node.get("scrutinee")
     scrutinee = _go_v3_expr(scrut_node, ctx)
@@ -8442,7 +8479,7 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     exp_t = _go_v3_type(expected, ctx.types) if expected else None
     if not exp_t:
         for arm in arms:
-            exp_t = _go_v3_type(_go_v3_infer_type(arm.get("body"), ctx), ctx.types)
+            exp_t = _go_v3_type(_v3_infer_arm_body(arm, st, ctx), ctx.types)
             if exp_t:
                 break
     exp_t = exp_t or "any"
@@ -9085,9 +9122,14 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             # but pinning the declared type is still correct and keeps a bare
             # `None` / `Err(..)` binding well-typed.
             out.append(f"{pad}var {name} {go_t} = {value}")
+        elif name == "_":
+            # the blank identifier declares nothing: `_ := v` is no new
+            # variable, and `_ = _` reads `_` as a value (issue #3074)
+            out.append(f"{pad}_ = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
-        out.append(f"{pad}_ = {name}")
+        if name != "_":
+            out.append(f"{pad}_ = {name}")
     elif step == "assign":
         raw = node.get("name")
         name = _v3_ident(raw, "binding")

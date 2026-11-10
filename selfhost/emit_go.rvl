@@ -1438,6 +1438,17 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
   return `${tn}{${body.join(", ")}}`
 }
 
+// `_v3_infer_arm_body`: an arm body's type with its binder in scope, typed as the
+// arm's payload (the scrutinee for a wildcard), else as nothing, never as an
+// outer binding of the same name (issue #3075).
+fn infer_arm_body(arm: Any, st: Str, ctx: Ctx) -> Str {
+  let body = value_field(arm, "body")
+  let bind = value_str(value_field(arm, "bind"))
+  if (bind == "" || bind == "_") { return infer_type(body, ctx) }
+  let bound = value_str(value_field(arm, "pattern")) == "_" ? st : value_str(value_field(arm, "payload_type"))
+  return infer_type(body, with_vt_map(ctx, bound == "" ? ctx.vt.remove(bind) : ctx.vt.set(bind, bound)))
+}
+
 // `_go_v3_match`: a `match` over a user variant as a Go type switch wrapped in an
 // IIFE (`func() T { switch _m := scrut.(type) { .. } }()`). The switch/case/body
 // lines carry a LITERAL one/two-tab indent (the reference builds them with a
@@ -1456,7 +1467,7 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (exp_t == "") {
     var i = 0
     while (i < arms.length() && exp_t == "") {
-      exp_t = go_type(infer_type(value_field(arms[i], "body"), ctx), ctx.gv)
+      exp_t = go_type(infer_arm_body(arms[i], st, ctx), ctx.gv)
       i = i + 1
     }
   }
@@ -2959,10 +2970,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     let pinned = inferred != "" && is_interface(inferred, ctx)
     if (got == "int64" || got == "float64" || pinned) {
       out = out.push(line(indent, `var ${nm} ${got} = ${value}`))
+    } else if (nm == "_") {
+      // the blank identifier declares nothing (issue #3074)
+      out = out.push(line(indent, `_ = ${value}`))
     } else {
       out = out.push(line(indent, `${nm} := ${value}`))
     }
-    out = out.push(line(indent, `_ = ${nm}`))
+    if (nm != "_") { out = out.push(line(indent, `_ = ${nm}`)) }
     return { lines: out, ctx: nctx }
   }
   if (step == "assign") {
@@ -4816,10 +4830,14 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
-// issue #3053: the lifecycle driver's own names; go renames the USER binding. Mirrors backends/go/emit.py.
+// issue #3053: the lifecycle driver's own names; go renames the USER binding.
+// issue #3095 adds the component activation/provide-impl scaffolding a
+// `let-effect` bind shares scope with. Mirrors backends/go/emit.py.
 fn is_emitter_reserved(name: Str) -> Bool {
   return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
-                        "_svc", "_err", "_r", "_ok"], name)
+                        "_svc", "_err", "_r", "_ok",
+                        "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+                        "_revlUi", "_revlApplyInv", "_revlApplyErr"], name)
 }
 
 fn safe_local(name: Str) -> Str {

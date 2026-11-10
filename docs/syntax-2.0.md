@@ -1186,8 +1186,12 @@ resolves it to a bind table (path scalars by name, a `Bearer` header credential,
 a `Request` escape hatch, query parameters on safe verbs, one record body on
 unsafe verbs) and a return classification (`T`, `Result[T, ApiError]`, or a
 handler-owned `Response`), refusing anything ambiguous while naming the operation
-and the parameter. `revl serve --http` honours the route, `revl export openapi`
-projects it, and `revl export client` builds a typed method from it. Authorization
+and the parameter. A `route get` or `route head` on an operation whose reach is
+an emission is refused too (issue #3186): a browser sends no `Origin` on the
+cross-site GET a page can fire at any address, so a state-changing route must use
+`post`, `put`, `patch` or `delete`. `revl serve --http` honours the route, `revl
+export openapi` projects it, and `revl export client` builds a typed method from
+it. Authorization
 is deliberately NOT in the clause: it is the explicit `auth.validate` step a
 handler makes on a required `Auth` service, and neither the router, the exported
 document nor the client carries anything that could stand in for it.

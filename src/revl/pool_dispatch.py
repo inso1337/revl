@@ -159,6 +159,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -221,6 +222,18 @@ POOL_PRIVATE = "private"
 #: The most a peer may send back. A peer is untrusted, so the operator bounds
 #: the read rather than letting the far side choose how much memory it takes.
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+
+#: How long a whole frame may take to arrive, however its bytes are spaced:
+#: measured from ``accept`` on the peer and from the start of the exchange on
+#: the operator. This is not the task-run timeout, which may legitimately be
+#: minutes, and it is not a per-``recv`` timeout, which a far side renews by
+#: sending one byte before every expiry (issue #3153).
+FRAME_READ_DEADLINE = 10.0
+
+#: Most frames the peer has mid-read at once, so a flood of idle connections
+#: cannot become an unbounded number of reader threads. A connection over the
+#: cap proved nothing and is closed unanswered.
+MAX_PENDING_FRAMES = 16
 
 # ---------------------------------------------------------------------------
 # refusal links
@@ -1079,6 +1092,10 @@ class PeerRunner:
         self.operator_public = operator_public
         self.workspace = Path(workspace)
         self.timeout = timeout
+        #: One workspace and one result per task, so two frames must never be
+        #: handled at once. The lock lives here rather than in `serve` so a
+        #: second transport sharing this runner cannot reopen the race.
+        self._handle_lock = threading.Lock()
         #: Task ids this peer has already run. One result per task on the peer
         #: side too, so a captured task cannot be re-run for a second receipt.
         self.seen: dict[str, str] = {}
@@ -1094,6 +1111,10 @@ class PeerRunner:
         """Check one task and, if it passes every check, run it and sign a
         receipt. Never raises: the wire is hostile.
 
+        Calls are serialized: the peer has one workspace and one result per
+        task, so a transport that reads frames concurrently still hands them
+        to this one at a time.
+
         A liveness probe shares the channel and is answered by
         `pool_health.answer_probe`, which checks it against the same pinned
         operator key and signs a heartbeat. It runs nothing and does not
@@ -1104,12 +1125,13 @@ class PeerRunner:
         give, naming the extra, rather than raising (issue #1460). The
         construction and `serve` checks make that unreachable in practice;
         the contract holds without them."""
-        try:
-            return self._handle(record)
-        except SigningBackendUnavailable as error:
-            return _refusal(LINK_TASK_SHAPE,
-                            f"the frame could not be processed: "
-                            f"{type(error).__name__}: {error}")
+        with self._handle_lock:
+            try:
+                return self._handle(record)
+            except SigningBackendUnavailable as error:
+                return _refusal(LINK_TASK_SHAPE,
+                                f"the frame could not be processed: "
+                                f"{type(error).__name__}: {error}")
 
     def _handle(self, record: Any) -> dict:
         if pool_health.is_probe(record):
@@ -1256,12 +1278,25 @@ def signer_exposure(host: str, purpose: str) -> bool:
     return exposed
 
 
-def _read_frame(conn: socket.socket, limit: int = MAX_FRAME_BYTES) -> bytes:
-    """One newline-terminated frame, bounded. A far side that never sends a
-    newline cannot make the near side grow without limit."""
+def _read_frame(conn: socket.socket, *, deadline: Optional[float] = None,
+                limit: int = MAX_FRAME_BYTES) -> bytes:
+    """One newline-terminated frame, bounded in bytes and in time. A far side
+    that never sends a newline cannot make the near side grow without limit,
+    and one that sends a byte before every expiry cannot renew the wait: the
+    deadline is absolute and is checked across the whole ``recv`` loop.
+
+    ``deadline`` is a ``time.monotonic()`` value. A caller that has already
+    spent part of its budget passes the instant it started from; omitted, the
+    frame gets ``FRAME_READ_DEADLINE`` from now, so no read is unbounded."""
+    if deadline is None:
+        deadline = time.monotonic() + FRAME_READ_DEADLINE
     chunks: list[bytes] = []
     total = 0
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DispatchError("the frame did not arrive before its deadline")
+        conn.settimeout(remaining)
         chunk = conn.recv(65536)
         if not chunk:
             break
@@ -1295,6 +1330,71 @@ def serve(runner: PeerRunner, *, host: str = "127.0.0.1", port: int = 0,
             f"`revl pool serve` bound to {host}, which signs a receipt for "
             f"every task a remote party sends")
     served = 0
+    served_lock = threading.Lock()
+    event_lock = threading.Lock()
+    event_errors: list[Exception] = []
+    pending = threading.BoundedSemaphore(MAX_PENDING_FRAMES)
+
+    def answer(conn: socket.socket, deadline: float) -> None:
+        nonlocal served
+        try:
+            try:
+                frame = _read_frame(conn, deadline=deadline)
+                record = json.loads(frame)
+            except (DispatchError, ValueError) as error:
+                response = _refusal(LINK_TASK_SHAPE,
+                                    f"unreadable frame: {error}")
+            except Exception as error:   # noqa: BLE001 - see below
+                # The frame is parsed BEFORE any signature is checked, so an
+                # unauthenticated party reaches this code. A worker that a
+                # stranger can kill is a worker a stranger can take off the
+                # pool, so the loop survives anything one frame can do and
+                # answers with a refusal. `handle` is written never to raise
+                # and the corpus pins that; this is the backstop for what the
+                # corpus has not thought of, not a substitute.
+                response = _refusal(
+                    LINK_TASK_SHAPE,
+                    f"the frame could not be processed: "
+                    f"{type(error).__name__}")
+            else:
+                try:
+                    response = runner.handle(record)
+                except Exception as error:   # noqa: BLE001
+                    response = _refusal(
+                        LINK_TASK_SHAPE,
+                        f"the frame could not be processed: "
+                        f"{type(error).__name__}")
+            # The frame deadline was spent on the frame. The ANSWER gets the
+            # task timeout, which is what this connection had before.
+            conn.settimeout(runner.timeout)
+            try:
+                conn.sendall(json.dumps(response, sort_keys=True).encode()
+                             + b"\n")
+            except OSError as error:
+                # The far side went away between its request and its answer.
+                # Nothing to do about it and nothing to stop for: the work
+                # either ran or was refused, and both are already recorded on
+                # this side.
+                response = _refusal(
+                    LINK_PEER_UNREACHABLE,
+                    f"the answer could not be sent back: {error}",
+                    task_id=response.get("task_id", ""))
+        finally:
+            conn.close()
+            pending.release()
+            with served_lock:
+                served += 1
+        if on_event is not None:
+            try:
+                with event_lock:
+                    on_event(response)
+            except Exception as error:   # noqa: BLE001
+                # One connection's reporting must not kill the loop, but a
+                # broken callback still stops serve as it did when the loop was
+                # serial: keep it and re-raise it on the accept thread.
+                with event_lock:
+                    event_errors.append(error)
+
     with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
                        socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1304,48 +1404,36 @@ def serve(runner: PeerRunner, *, host: str = "127.0.0.1", port: int = 0,
         if on_listen is not None:
             on_listen(bound[0], bound[1])
         while True:
+            if event_errors:
+                raise event_errors[0]
             conn, _peer = server.accept()
-            with conn:
-                # A connection that says nothing must not hold the worker.
-                # This loop serves one task at a time, so an unauthenticated
-                # party that connects and never writes would otherwise take
-                # the peer off the pool with no packets at all.
-                conn.settimeout(runner.timeout)
-                try:
-                    frame = _read_frame(conn)
-                    response = runner.handle(json.loads(frame))
-                except (DispatchError, ValueError) as error:
-                    response = _refusal(LINK_TASK_SHAPE,
-                                        f"unreadable frame: {error}")
-                except Exception as error:   # noqa: BLE001 - see below
-                    # The frame is parsed BEFORE any signature is checked, so
-                    # an unauthenticated party reaches this code. A worker that
-                    # a stranger can kill is a worker a stranger can take off
-                    # the pool, so the loop survives anything one frame can do
-                    # and answers with a refusal. `handle` is written never to
-                    # raise and the corpus pins that; this is the backstop for
-                    # what the corpus has not thought of, not a substitute.
-                    response = _refusal(
-                        LINK_TASK_SHAPE,
-                        f"the frame could not be processed: "
-                        f"{type(error).__name__}")
-                try:
-                    conn.sendall(json.dumps(response, sort_keys=True).encode()
-                                 + b"\n")
-                except OSError as error:
-                    # The far side went away between its request and its
-                    # answer. Nothing to do about it and nothing to stop for:
-                    # the work either ran or was refused, and both are already
-                    # recorded on this side.
-                    response = _refusal(
-                        LINK_PEER_UNREACHABLE,
-                        f"the answer could not be sent back: {error}",
-                        task_id=response.get("task_id", ""))
-            served += 1
-            if on_event is not None:
-                on_event(response)
+            # From accept, not from the first byte: a connection that says
+            # nothing must not hold the worker for the task timeout, and one
+            # that drips a byte before every expiry must not renew the wait.
+            deadline = time.monotonic() + FRAME_READ_DEADLINE
+            if not pending.acquire(blocking=False):
+                # Too many frames already mid-read. This connection proved
+                # nothing; drop it rather than let idle sockets grow without
+                # bound.
+                conn.close()
+                continue
+            # A reader thread per connection keeps the accept loop (and every
+            # other client's answer) moving while one frame is still arriving.
+            worker = threading.Thread(target=answer, args=(conn, deadline),
+                                      daemon=True)
+            try:
+                worker.start()
+            except RuntimeError:
+                # No thread for it: hand the permit and the socket back before
+                # the failure leaves the cap short by one connection.
+                pending.release()
+                conn.close()
+                raise
             if once:
+                worker.join()
                 break
+        if event_errors:
+            raise event_errors[0]
     return served
 
 
@@ -1353,16 +1441,25 @@ def send_task(task_record: Mapping[str, Any], *, host: str, port: int,
               timeout: float = 300.0) -> dict:
     """Hand one signed task to a peer and read its answer.
 
+    ``timeout`` bounds the whole exchange, not each ``recv``: a peer that
+    drips its answer before every expiry cannot stretch it (issue #3153).
+
     An unreachable peer is NOT a refusal of the peer: it is
     `peer-unreachable`, and the caller leaves the task outstanding, because a
     task whose fate is unknown must not be recorded as either done or
     dropped."""
     payload = json.dumps(dict(task_record), sort_keys=True).encode() + b"\n"
+    deadline = time.monotonic() + timeout
     try:
-        with socket.create_connection((host, port), timeout=timeout) as conn:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DispatchError("the exchange ran out of time before it began")
+        with socket.create_connection((host, port),
+                                      timeout=remaining) as conn:
+            conn.settimeout(max(deadline - time.monotonic(), 0.001))
             conn.sendall(payload)
             conn.shutdown(socket.SHUT_WR)
-            frame = _read_frame(conn)
+            frame = _read_frame(conn, deadline=deadline)
     except (OSError, DispatchError) as error:
         return _refusal(LINK_PEER_UNREACHABLE,
                         f"peer at {host}:{port} did not answer: {error}",

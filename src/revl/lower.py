@@ -4751,6 +4751,13 @@ _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
 _ROUTE_QUERY_METHODS = ("get", "head", "delete")
 _ROUTE_BODY_METHODS = ("post", "put", "patch")
 
+#: the two verbs a browser sends from ANY page without an `Origin` header: an
+#: `<img>`, `<script>` or `<link>` GET, a form GET, or a top-level navigation.
+#: Issue #3186: a mutating operation routed with one is reachable from every page
+#: the operator visits, so an operation whose reach is an emission may not use
+#: them.
+_ROUTE_ORIGINLESS_METHODS = ("get", "head")
+
 
 def _route_scalar(type_name: str | None) -> bool:
     return type_name in _ROUTE_SCALARS
@@ -4786,6 +4793,9 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
         template does not name;
       * a `Bearer` / `Request` parameter appearing more than once;
       * a non-scalar / non-`Opt[scalar]` query parameter on a safe verb;
+      * a `route get` or `route head` on an `emission` operation (issue #3186):
+        a browser sends no `Origin` on the cross-site GET a page can fire, so an
+        emission reached by one fires from any page the operator visits;
       * anything other than exactly one record body on an unsafe verb;
       * a body / query / path type that is not `fully_expressible` (item 257);
       * a `Result[T, E]` return whose `E` is not `ApiError`.
@@ -4803,6 +4813,14 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
     def refuse(message: str, hint: str | None = None):
         raise RevlError(filename, line, message, hint=hint,
                         code="G4", category="route")
+
+    if m.emission and method in _ROUTE_ORIGINLESS_METHODS:
+        refuse(f"{where} is an `emission` operation, but is routed with `{method}`",
+               hint="a browser sends no Origin on a cross-site GET (an <img>, "
+                    "<script>, <link>, form GET or top-level navigation), so any "
+                    "page the operator visits could fire it; route an emission "
+                    "with `post`, which a cross-site page cannot send without a "
+                    "preflighted Origin")
 
     try:
         template = _route_template_names(path)
@@ -12711,7 +12729,7 @@ def _refuse_builtin_type_value(name: str, env: "Env", filename: str,
         hint = ("a bracket inverse releases the handle its bracket bound: "
                 "`let h = effect Map.new() undo h.drop()`. A builtin method "
                 "computes a new value and releases nothing, so it is never an "
-                "inverse (docs/rejections.md#g4--inverse-or-emit)")
+                "inverse (docs/rejections.md#g4-inverse-or-emit)")
     else:
         hint = ("a builtin method is called on a value of the type "
                 "(`xs.<method>()`), never on the type, and a builtin type is "

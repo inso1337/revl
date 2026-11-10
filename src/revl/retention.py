@@ -144,9 +144,16 @@ def persistence_sink_of(capabilities) -> Optional[str]:
     """The durable-storage scope head a crossing declares, or None when the
     crossing is not a persistence sink. The exact shape of `taint._sink_of`, on
     this module's scope set: only the FIRST capability is consulted for its
-    head, because a crossing declares one resource scope."""
+    head, because a crossing declares one resource scope.
+
+    The parameter list is stripped before the head split, exactly as
+    `taint._sink_of` does: parenthesized parameters (a ceiling such as `calls`
+    or `size`, or a resource dimension such as `path` or `table`) narrow the
+    crossing's cone under the same scope, they do not change the scope. So
+    `db(calls=3)` still declares the `db` sink, and the retention guarantee
+    cannot be switched off by spelling one more parameter (#3194)."""
     for cap in capabilities or ():
-        head = str(cap).split(".", 1)[0]
+        head = str(cap).split("(", 1)[0].split(".", 1)[0]
         if head in PERSISTENCE_SINK_SCOPES:
             return head
     return None
