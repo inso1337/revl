@@ -204,3 +204,53 @@ def test_3166_separator_inside_a_string_literal_is_allowed():
         "pub fn g(a: Int) -> Str = f(a)\n",
     )
     assert "a\u2028b" in out
+
+
+# ------------------------------------------- review of #3313: regex reading
+# `o.return / 1` divides in JavaScript (a keyword after `.` is a property
+# name), so the `}` closes the extern's function and the assignment runs at
+# module load. The last line pads the count back: `/}/` after `if (1)` is a
+# regex. The scanner follows both readings of an ambiguous `/`.
+_TS_REGEX_READING_ESCAPE = '''extern pure fn dead(x: Int) -> Int = @ts {
+  // {
+  const r = o.return /1}/1/g
+  globalThis.PWNED = "module-load"
+  function pad() { if (1) /}/.test("")
+}
+pub fn use_it(a: Int) -> Int = dead(a)
+'''
+
+
+def test_ts_division_read_as_a_regex_is_refused():
+    message = _refusal("ts", _TS_REGEX_READING_ESCAPE)
+    assert "extern `dead`" in message
+    assert "brace-balanced" in message
+    assert "JavaScript" in message
+
+
+# ----------------------------------------- review of #3313: unicode escapes
+# javac decodes `\uXXXX` before it lexes (JLS 3.3), so `}` is a real
+# `}`: it closes the extern's method and the static initialiser runs at
+# class load.
+_JAVA_UNICODE_ESCAPE = (
+    "extern pure fn dead(x: Int) -> Int = @java { return x; \\u007d "
+    "static \\u007b System.out.println(1); \\u007d "
+    "static long pad() \\u007b return 0; }\n"
+    "pub fn use_it(a: Int) -> Int = dead(a)\n"
+)
+
+
+def test_java_brace_spelled_as_a_unicode_escape_is_refused():
+    message = _refusal("java", _JAVA_UNICODE_ESCAPE)
+    assert "extern `dead`" in message
+    assert "brace-balanced" in message
+    assert "Java" in message
+
+
+def test_java_even_backslashes_are_not_a_unicode_escape():
+    out = _emit(
+        "java",
+        'extern pure fn f(x: Int) -> Str = @java { return "\\\\u007d"; }\n'
+        "pub fn g(a: Int) -> Str = f(a)\n",
+    )
+    assert '"\\\\u007d"' in out

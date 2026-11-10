@@ -90,6 +90,81 @@ def test_unbalanced_bodies_are_refused(backend, body):
         check_host_body(backend, body)
 
 
+# ------------------------------------------ JavaScript: `/` with two readings
+# Each body is balanced under one reading of its `/` and leaves the function
+# under the other, the one JavaScript (or TypeScript) takes. The last line
+# pads the count back, so a scanner that picks one reading accepts the body.
+_TS_PAD = '\nglobalThis.PWNED = 1\nfunction pad() { if (1) /}/.test("")'
+_TS_EITHER_READING = [
+    # a keyword after `.` is a property name: `o.return / 1` divides
+    "// {\nconst r = o.return /1}/1/g" + _TS_PAD,
+    "// {\nconst r = o?.typeof /1}/1/g" + _TS_PAD,
+    # a private name is not the keyword it ends with
+    "// {\nconst r = this.#return /1}/1/g" + _TS_PAD,
+    # TypeScript's non-null `o!` and a postfix `++` end an operand
+    "// {\nconst r = o! /1}/1/g" + _TS_PAD,
+    "// {\nconst r = o++ /1}/1/g" + _TS_PAD,
+    # no-break space is JavaScript white space, so `/{/` follows `return`
+    "return\u00a0/{/\n}\nglobalThis.PWNED = 1\nfunction pad() { return\u00a0/}/",
+    # a comment between `return` and the `/` does not make it division
+    "return // c\n/{/\n}\nglobalThis.PWNED = 1\n"
+    "function pad() { return // c\n/}/",
+]
+
+
+@pytest.mark.parametrize("body", _TS_EITHER_READING)
+def test_ts_slash_is_scanned_under_both_readings(body):
+    with pytest.raises(HostBodyError):
+        check_host_body("ts", body)
+
+
+_TS_ONE_READING = [
+    "return !/[}]/.test(s)",
+    "return s.split(/}/).length",
+    "return xs.filter(x => /}/.test(x)).length",
+    "if (s) { return /[{]/.test(s) }\nreturn false",
+    "const h = (a + b) / 2 / c\nif (h) { return h }\nreturn a.return / 2",
+    'return `${ {a: 1}.a } ${ s.replace(/[{]/g, "") }`',
+]
+
+
+@pytest.mark.parametrize("body", _TS_ONE_READING)
+def test_ts_slash_with_one_reading_is_accepted(body):
+    assert check_host_body("ts", body) is None
+
+
+# ----------------------------------------------- Java unicode escapes (JLS 3.3)
+_JAVA_ESCAPED = [
+    "return x; \\u007d static \\u007b System.out.println(1); \\u007d "
+    "static long pad() \\u007b return 0;",
+    # any number of `u`
+    "return x; \\uuu007d static \\u007b System.out.println(1); \\u007d "
+    "static long pad() \\u007b return 0;",
+    # an escaped line feed ends a `//` comment; an escaped backslash keeps
+    # the last string open, so its `}` pads the count back
+    "// \\u000a return x; } static { System.out.println(1); }\n"
+    'static long pad() { String t = "\\u005c" }"; return 0;',
+    # three backslashes: a pair, then an escape
+    'String s = "\\\\\\u0022; } static { System.out.println(1); '
+    '} static long pad() { String t = "";',
+]
+
+
+@pytest.mark.parametrize("body", _JAVA_ESCAPED)
+def test_java_unicode_escapes_are_decoded_before_the_scan(body):
+    with pytest.raises(HostBodyError):
+        check_host_body("java", body)
+
+
+@pytest.mark.parametrize("body", [
+    'return "\\\\u007d";',
+    "// a \\\\u000a }\nreturn x;",
+    "char c = '\\u007b'; return c;",
+])
+def test_java_even_backslashes_and_balanced_escapes_are_accepted(body):
+    assert check_host_body("java", body) is None
+
+
 # --------------------------------------------------------- separators (#3131)
 @pytest.mark.parametrize("backend", ["ts", "rs", "java", "go"])
 @pytest.mark.parametrize(

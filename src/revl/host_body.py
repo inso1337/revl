@@ -28,6 +28,8 @@ are unchanged.
 
 from __future__ import annotations
 
+import unicodedata
+
 __all__ = ["HostBodyError", "body_lines", "check_host_body"]
 
 #: Characters ``str.splitlines`` treats as a line end but the host languages
@@ -64,8 +66,9 @@ _HOST = {
 _RUST_RAW_PREFIXES = ("br", "cr", "r")
 
 #: After these words JavaScript reads `/` as the start of a regex literal
-#: rather than as division. The character heuristic below covers the
-#: punctuation that can also start an expression.
+#: rather than as division, unless the word follows a `.` (then it is a
+#: property name). `_Scan._js_code` covers the punctuation, and scans both
+#: readings where the token before the `/` does not decide it.
 _REGEX_KEYWORDS = frozenset({
     "await", "case", "delete", "do", "else", "in", "instanceof", "new",
     "of", "return", "throw", "typeof", "void", "yield",
@@ -85,7 +88,8 @@ _IDENT_CONT = frozenset(
 #: raw-string prefix set; `text_block` is Java's `\"\"\"`; `template` is
 #: JavaScript's backtick; `regex` is JavaScript's regex literal; and
 #: `separators` says whether this host's body is split line by line by its
-#: emitter (wasm splices the body whole, so only its parens matter).
+#: emitter (wasm splices the body whole, so only its parens matter);
+#: `unicode_escapes` says the host decodes `\uXXXX` before it lexes (Java).
 _PROFILES = {
     "ts": {
         "open": "{", "close": "}",
@@ -102,6 +106,7 @@ _PROFILES = {
         "template": True,
         "regex": True,
         "separators": True,
+        "unicode_escapes": False,
     },
     "rs": {
         "open": "{", "close": "}",
@@ -118,6 +123,7 @@ _PROFILES = {
         "template": False,
         "regex": False,
         "separators": True,
+        "unicode_escapes": False,
     },
     "java": {
         "open": "{", "close": "}",
@@ -134,6 +140,7 @@ _PROFILES = {
         "template": False,
         "regex": False,
         "separators": True,
+        "unicode_escapes": True,
     },
     "go": {
         "open": "{", "close": "}",
@@ -150,6 +157,7 @@ _PROFILES = {
         "template": False,
         "regex": False,
         "separators": True,
+        "unicode_escapes": False,
     },
     "wasm": {
         "open": "(", "close": ")",
@@ -166,6 +174,7 @@ _PROFILES = {
         "template": False,
         "regex": False,
         "separators": False,
+        "unicode_escapes": False,
     },
 }
 
@@ -199,44 +208,140 @@ def body_lines(body: str) -> list[str]:
 
 
 class _Scan:
-    """A single pass over a host body with the host language's lexical rules."""
+    """Every reading of a host body under the host language's lexical rules.
 
-    __slots__ = ("s", "n", "p", "i", "depth", "underflow", "separator")
+    The rules are deterministic for every host but JavaScript, where a `/`
+    can open a regex literal or be the division operator and the choice
+    depends on the grammar, not on the characters around it (`o.return / 1`
+    divides, `return /1/` is a regex; `if (a) /x/` is a regex, `f(a) / x`
+    divides). Where the token before a `/` does not settle it, the scan
+    follows BOTH readings and the body must be balanced under each of them,
+    so the scanner never has to guess which one the host picks.
+
+    A reading is a state `(position, depth, before)`; `before` is what the
+    token before the next `/` allows (``_REGEX``, ``_DIV``, ``_EITHER``, or
+    ``_DOT`` after a member access). States are deduplicated, so the number
+    of readings stays bounded by the body's length.
+    """
+
+    __slots__ = ("s", "n", "p", "depth", "underflow", "separator", "_ends")
 
     def __init__(self, src: str, profile: dict) -> None:
         self.s = src
         self.n = len(src)
         self.p = profile
-        self.i = 0
         self.depth = 0
         self.underflow = False
         self.separator: str | None = None
+        self._ends: dict[int, tuple[int, ...]] = {}
 
     def run(self) -> None:
+        work = [(0, 0, _REGEX)]
+        seen: set[tuple[int, int, str]] = set()
+        while work and not self.underflow:
+            state = work.pop()
+            if state in seen:
+                continue
+            seen.add(state)
+            self._walk(*state, work, None)
+
+    def _walk(self, i: int, depth: int, before: str,
+              work: list, ends: set | None) -> None:
+        """Follow one reading from `i` until the body ends or a `/` forks.
+
+        `ends` is None at the top of the body, where a close below depth 0
+        leaves the function (an underflow). Inside a template interpolation
+        it collects the position after the `}` that closes the
+        interpolation, and separators are not noted (the template is a
+        literal at the top level).
+        """
         s, n, p = self.s, self.n, self.p
-        while self.i < n:
-            token = self._token(self.i)
+        while i < n:
+            c = s[i]
+            if p["regex"] and c == "/" and not s.startswith(("//", "/*"), i):
+                end = None if before == _DIV else self._skip_regex(i)
+                if end is None:
+                    i, before = i + 1, _REGEX
+                    continue
+                if before == _REGEX:
+                    i, before = end, _DIV
+                    continue
+                work.append((end, depth, _DIV))
+                work.append((i + 1, depth, _REGEX))
+                return
+            if p["template"] and c == "`":
+                after = self._template_ends(i)
+                if len(after) == 1:
+                    i, before = after[0], _DIV
+                    continue
+                work.extend((end, depth, _DIV) for end in after)
+                return
+            token = self._token(i)
             if token is not None:
                 end, literal = token
-                if not literal:
-                    self._note_separators(self.i, end)
-                self.i = end
+                if literal:
+                    before = _DIV
+                elif ends is None:
+                    self._note_separators(i, end)
+                i = end
                 continue
-            c = s[self.i]
             if c == p["open"]:
-                self.depth += 1
-                self.i += 1
+                depth += 1
+                i, before = i + 1, _REGEX
                 continue
             if c == p["close"]:
-                self.depth -= 1
-                self.i += 1
-                if self.depth < 0:
-                    self.underflow = True
+                depth -= 1
+                if depth < 0:
+                    if ends is None:
+                        self.underflow = True
+                    else:
+                        ends.add(i + 1)
                     return
+                i, before = i + 1, _EITHER
                 continue
-            if p["separators"] and c in _SEPARATORS and self.separator is None:
+            if (ends is None and p["separators"] and c in _SEPARATORS
+                    and self.separator is None):
                 self.separator = c
-            self.i += 1
+            if p["regex"]:
+                i, before = self._js_code(i, before)
+            else:
+                i += 1
+        if ends is not None:
+            ends.add(n)
+        elif depth and not self.depth:
+            self.depth = depth
+
+    def _js_code(self, i: int, before: str) -> tuple[int, str]:
+        """Step over one JavaScript code token at `i` and say what it allows
+        a following `/` to be."""
+        s, n = self.s, self.n
+        c = s[i]
+        if _js_space(c):
+            return i + 1, before
+        if _js_word_char(c) or c == "#":
+            j = i + 1
+            while j < n and _js_word_char(s[j]):
+                j += 1
+            return j, _word_before_slash(s[i:j], before)
+        if c == ".":
+            return i + 1, _DOT
+        operand = before == _REGEX  # an operand is expected here
+        if c in "+-" and i + 1 < n and s[i + 1] == c:
+            # a prefix `++` is an operator; a postfix one ends an operand
+            return i + 2, _REGEX if operand else _EITHER
+        if c == "!":
+            # a prefix `!` is an operator; TypeScript's non-null `x!` ends
+            # an operand, so `x! / y` divides
+            return i + 1, _REGEX if operand else _EITHER
+        if c == "]":
+            return i + 1, _DIV
+        if c == ">" and i and s[i - 1] == "=":
+            return i + 1, _REGEX  # `=>`
+        if c in _REGEX_OPENERS and c != ">":
+            return i + 1, _REGEX
+        # `)` ends both a condition (regex next) and an operand (division
+        # next); a TypeScript type argument list's `>` can end an operand.
+        return i + 1, _EITHER
 
     def _note_separators(self, start: int, end: int) -> None:
         if not self.p["separators"] or self.separator is not None:
@@ -250,7 +355,8 @@ class _Scan:
     def _token(self, i: int) -> tuple[int, bool] | None:
         """The end of the string or comment starting at `i`, and whether it
         is a string (separators inside one are allowed). None for ordinary
-        code."""
+        code. Templates and regex literals are read by `_walk`, since they
+        can have more than one end."""
         s, p = self.s, self.p
         for opener, closer in p["block_comments"]:
             if s.startswith(opener, i):
@@ -258,8 +364,6 @@ class _Scan:
         for opener in p["line_comments"]:
             if s.startswith(opener, i):
                 return self._skip_line(i, opener), False
-        if p["template"] and s[i] == "`":
-            return self._skip_template(i), True
         if p["text_block"] and s.startswith('"""', i):
             return self._skip_java_text_block(i), True
         if p["raw"] is not None:
@@ -272,10 +376,6 @@ class _Scan:
             return self._skip_quote(i, s[i]), True
         if p["char"] is not None and s[i] == "'":
             end = self._skip_char(i)
-            if end is not None:
-                return end, True
-        if p["regex"] and s[i] == "/" and self._regex_allowed(i):
-            end = self._skip_regex(i)
             if end is not None:
                 return end, True
         return None
@@ -386,56 +486,53 @@ class _Scan:
             i += 1
         return n
 
-    def _skip_template(self, i: int) -> int:
-        s, n = self.s, self.n
-        i += 1
-        while i < n:
-            c = s[i]
-            if c == "\\":
-                i += 2
-                continue
-            if c == "`":
-                return i + 1
-            if c == "$" and i + 1 < n and s[i + 1] == "{":
-                i = self._skip_interpolation(i + 2)
-                continue
-            i += 1
-        return n
+    def _template_ends(self, i: int) -> tuple[int, ...]:
+        """Every position the template literal opening at `i` can end at.
 
-    def _skip_interpolation(self, i: int) -> int:
+        An interpolation may hold a `/` with two readings, so a template can
+        have more than one end. Memoised by start: the ends do not depend on
+        the reading that reached the template."""
+        known = self._ends.get(i)
+        if known is not None:
+            return known
         s, n = self.s, self.n
-        depth = 1
-        while i < n:
-            c = s[i]
-            if c == "{":
-                depth += 1
-                i += 1
-            elif c == "}":
-                depth -= 1
-                i += 1
-                if depth == 0:
-                    return i
+        ends: set[int] = set()
+        work, seen = [i + 1], set()
+        while work:
+            j = work.pop()
+            if j in seen:
+                continue
+            seen.add(j)
+            while j < n:
+                c = s[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == "`":
+                    ends.add(j + 1)
+                    break
+                if c == "$" and j + 1 < n and s[j + 1] == "{":
+                    work.extend(self._interpolation_ends(j + 2))
+                    break
+                j += 1
             else:
-                token = self._token(i)
-                i = token[0] if token is not None else i + 1
-        return n
+                ends.add(n)
+        result = tuple(sorted(ends))
+        self._ends[i] = result
+        return result
 
-    def _regex_allowed(self, i: int) -> bool:
-        s = self.s
-        j = i - 1
-        while j >= 0 and s[j] in " \t\r\n":
-            j -= 1
-        if j < 0:
-            return True
-        c = s[j]
-        if c in _REGEX_OPENERS:
-            return True
-        if c in _IDENT_CONT:
-            k = j
-            while k >= 0 and s[k] in _IDENT_CONT:
-                k -= 1
-            return s[k + 1:j + 1] in _REGEX_KEYWORDS
-        return False
+    def _interpolation_ends(self, i: int) -> set[int]:
+        """Every position after the `}` closing the interpolation at `i`."""
+        ends: set[int] = set()
+        work = [(i, 0, _REGEX)]
+        seen: set[tuple[int, int, str]] = set()
+        while work:
+            state = work.pop()
+            if state in seen:
+                continue
+            seen.add(state)
+            self._walk(*state, work, ends)
+        return ends
 
     def _skip_regex(self, i: int) -> int | None:
         s, n = self.s, self.n
@@ -461,6 +558,77 @@ class _Scan:
         return None
 
 
+#: What the token before a `/` lets it be in JavaScript: a regex literal, the
+#: division operator, either (both readings are scanned), or, after a `.`,
+#: whatever the following property name allows.
+_REGEX, _DIV, _EITHER, _DOT = "regex", "div", "either", "dot"
+
+#: Words in `_REGEX_KEYWORDS` that are also ordinary identifiers outside a
+#: generator, an async function or a `for` head, so either reading is real.
+_CONTEXTUAL_KEYWORDS = frozenset({"await", "yield", "of"})
+
+#: JavaScript white space and line terminators (ECMA-262 12.2, 12.3); the
+#: rest of the Zs category is checked through `unicodedata`.
+_JS_SPACE = frozenset(" \t\n\r\x0b\x0c ﻿  ")
+
+
+def _js_space(c: str) -> bool:
+    return c in _JS_SPACE or unicodedata.category(c) == "Zs"
+
+
+def _js_word_char(c: str) -> bool:
+    """A character that can continue an identifier, keyword or number. Any
+    non-ASCII character that is not white space counts, so a keyword glued
+    to a non-ASCII identifier character is never read as the keyword."""
+    if c in _IDENT_CONT or c == "\\":
+        return True
+    return ord(c) > 127 and c not in _SEPARATORS and not _js_space(c)
+
+
+def _word_before_slash(word: str, before: str) -> str:
+    if before == _DOT:
+        return _DIV  # a property name: `o.return / 2` divides
+    if word in _CONTEXTUAL_KEYWORDS:
+        return _EITHER
+    if word in _REGEX_KEYWORDS:
+        return _REGEX
+    return _DIV
+
+
+def _decode_unicode_escapes(src: str) -> str:
+    """Java's translation of unicode escapes, done before lexing (JLS 3.3).
+
+    A `\\` starts an escape when an odd number of contiguous raw backslashes
+    ends at it (so `\\\\u007d` is a backslash pair followed by text) and it
+    is followed by one or more `u` and four hex digits. javac reads the
+    decoded character as source, so a `}` spelled as an escape closes a
+    block. A decoded character never starts another escape. A decoded line
+    or paragraph separator becomes a space: the emitter splits the raw text,
+    which holds no separator there.
+    """
+    out: list[str] = []
+    i, n, run = 0, len(src), 0
+    while i < n:
+        c = src[i]
+        if c == "\\" and run % 2 == 0 and src.startswith("u", i + 1):
+            j = i + 1
+            while j < n and src[j] == "u":
+                j += 1
+            digits = src[j:j + 4]
+            if len(digits) == 4 and all(d in _HEX_DIGITS for d in digits):
+                decoded = chr(int(digits, 16))
+                out.append(" " if decoded in _SEPARATORS else decoded)
+                i, run = j + 4, 0
+                continue
+        run = run + 1 if c == "\\" else 0
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
 def check_host_body(backend: str, body: str, *, where: str = "",
                     error: type[Exception] = HostBodyError) -> None:
     """Refuse a host body that would leave the function it is spliced into.
@@ -478,6 +646,8 @@ def check_host_body(backend: str, body: str, *, where: str = "",
     profile = _PROFILES.get(backend)
     if profile is None:
         raise ValueError(f"unknown host body backend {backend!r}")
+    if profile["unicode_escapes"]:
+        body = _decode_unicode_escapes(body)
     scan = _Scan(body, profile)
     scan.run()
     prefix = f"{where}: " if where else ""
