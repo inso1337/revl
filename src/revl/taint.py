@@ -1479,11 +1479,19 @@ class _Signature:
     # one hop further in, inside a top-level fn or a provider body that names no
     # route of its own.
     models_at: dict = field(default_factory=dict)
+    # issue #3113: parameter index -> `(declassifier_name, via)`, the verified-fn
+    # parser declassifiers an argument reaches transitively. The declassifier
+    # sibling of `persists_at`, and the reason the `secret` / `confidential`
+    # refusal at a declassifier does not stop at a plain wrapper fn: the
+    # declassifier returns CLEAN, so without this record the wrapper's signature
+    # says its parameter goes nowhere and the caller's value comes back clean.
+    declassifies_at: dict = field(default_factory=dict)
 
     def merge(self, flows: set, mints: set, sink_hits: dict,
               clears: dict | None = None,
               persistence_hits: dict | None = None,
-              model_hits: dict | None = None) -> bool:
+              model_hits: dict | None = None,
+              declassify_hits: dict | None = None) -> bool:
         """Fold one body-walk's findings in. Returns whether the monotone part
         (the parameter sets, the per-parameter cleared-origin sets, and the sink
         key set) grew — the fixed point's `changed` signal. A shorter `via` for an
@@ -1523,6 +1531,13 @@ class _Signature:
                 changed = True
             elif len(hit[2]) < len(prev[2]):
                 self.models_at[index] = hit  # shorter chain, not a growth
+        for index, hit in (declassify_hits or {}).items():
+            prev = self.declassifies_at.get(index)
+            if prev is None:
+                self.declassifies_at[index] = hit
+                changed = True
+            elif len(hit[1]) < len(prev[1]):
+                self.declassifies_at[index] = hit  # shorter chain, not a growth
         return changed
 
 
@@ -1693,6 +1708,10 @@ class _FlowChecker:
         # crossing an argument reaches with the naming chain behind it. The
         # placement sibling of `persistence_hits`. See `_on_model_crossing`.
         self.model_hits: dict[int, tuple] = {}
+        # inference-mode accumulator (issue #3113): per parameter index, the
+        # verified-fn declassifier an argument reaches with the naming chain
+        # behind it. See `_check_declassifier_reach`.
+        self.declassify_hits: dict[int, tuple] = {}
         # inference-mode accumulator (item 249, Finding 1): per parameter index,
         # the concrete origins a body-internal `endorse[<origin>]` on that
         # parameter downgrades. Folded into the callable's `_Signature.clears` so
@@ -1959,6 +1978,53 @@ class _FlowChecker:
                 prev = self.persistence_hits.get(pidx)
                 if prev is None or len(via) < len(prev[2]):
                     self.persistence_hits[pidx] = (sink_name, scope, via)
+
+    def _on_declassifier(self, declassifier: str, arg_taints: list,
+                         internal_via: tuple) -> None:
+        """A parameter of this body reaches a verified-fn declassifier (issue
+        #3113). Inference mode only, the exact shape of `_on_persistence`: the
+        refusal needs the CONCRETE `secret` / `confidential` origin, and only the
+        symbolic parameter marker is in hand while a body is walked for its shape.
+        Recording the reach on this callable's signature is what lets the refusal
+        happen at the caller that hands the value to a wrapper of the
+        declassifier, rather than nowhere."""
+        for at in arg_taints:
+            for origin in at.origins:
+                pidx = _param_index(origin)
+                if pidx is None:
+                    continue
+                via = ((self.qualname,) + internal_via if self.qualname
+                       else internal_via)
+                prev = self.declassify_hits.get(pidx)
+                if prev is None or len(via) < len(prev[1]):
+                    self.declassify_hits[pidx] = (declassifier, via)
+
+    def _check_declassifier_reach(self, callee: str, arg_taints: list,
+                                  node) -> None:
+        """A call whose callee's inferred signature says an argument reaches a
+        verified-fn declassifier (issue #3113). In inference mode the reach is
+        carried onto this body's own signature, so a wrapper of a wrapper is
+        covered; in refusal mode a `secret` or `confidential` argument at that
+        position is refused here, exactly as it is at a direct call of the
+        declassifier (4a.3)."""
+        sig = self.signatures.get(callee)
+        if not sig or not sig.declassifies_at:
+            return
+        for index, (declassifier, via) in sorted(sig.declassifies_at.items()):
+            if index >= len(arg_taints):
+                continue
+            at = arg_taints[index]
+            if self.infer:
+                self._on_declassifier(declassifier, [at], via)
+                continue
+            if not self.enforce:
+                continue
+            chain = " -> ".join(via + (declassifier,))
+            kind = f"a verified-fn declassifier (`{declassifier}`, via {chain})"
+            if _carries_secret(at):
+                self._refuse_secret(callee, kind, index, at, node)
+            if _carries_confidential(at):
+                self._refuse_confidential(callee, kind, index, at, node)
 
     def _on_model_crossing(self, crossing: str, capability: str,
                            arg_taints: list, node, internal_via: tuple) -> None:
@@ -2825,6 +2891,7 @@ class _FlowChecker:
         # sink checks (both tiers): a directly-declared `Trusted[T]` parameter,
         # and a parameter a callee's inferred signature reaches transitively.
         self._check_sinks(callee, arg_taints, node)
+        self._check_declassifier_reach(callee, arg_taints, node)
 
         # item 472 follow-up: the same retention refusal THROUGH a call. The
         # direct lookup above finds a sink the CALLER names; this finds one the
@@ -2870,11 +2937,24 @@ class _FlowChecker:
             # launder a `secret`-carrying argument - the parser-declassifier clean
             # is SKIPPED for the bound key and the crossing is refused. There is no
             # declassifier for a bound provider key, verified-fn or otherwise.
+            # Issue #3113: it does NOT launder a `confidential` argument either.
+            # The parser declassifier is a G9 downgrade for the `untrusted`
+            # authority origin, not a §7c downgrade for `confidential`: without
+            # this check a one-line identity `verified fn wash(x) -> Trusted[Str]`
+            # cleared a `Secret[T]` payment token and the value reached a log or
+            # an LLM prompt with no declared, audited `endorse[confidential]`.
+            # A `confidential` value downgrades ONLY at that declared slot, so
+            # the crossing is refused here exactly as the bound key is.
             if not self.infer and self.enforce:
                 for index, at in enumerate(arg_taints):
                     if _carries_secret(at):
                         self._refuse_secret(callee, "a verified-fn declassifier",
                                             index, at, node)
+                    if _carries_confidential(at):
+                        self._refuse_confidential(
+                            callee, "a verified-fn declassifier", index, at, node)
+            if self.infer:
+                self._on_declassifier(callee, arg_taints, ())
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
             return CLEAN
@@ -3605,7 +3685,8 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
             if signatures[key].merge(flows, mints, checker.sink_hits,
                                      checker.endorse_clears,
                                      checker.persistence_hits,
-                                     checker.model_hits):
+                                     checker.model_hits,
+                                     checker.declassify_hits):
                 changed = True
     return signatures
 
@@ -3620,7 +3701,7 @@ def _lattice_size(signatures: dict, scope_env: dict) -> int:
     for sig in signatures.values():
         total += (len(sig.flows_to_return) + len(sig.mints)
                   + len(sig.reaches_sink) + len(sig.persists_at)
-                  + len(sig.models_at))
+                  + len(sig.models_at) + len(sig.declassifies_at))
         total += sum(len(v) for v in sig.clears.values())
     for taint in scope_env.values():
         total += len(taint.origins)
