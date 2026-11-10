@@ -10,12 +10,13 @@ text, so the reviewer asks for the counts again, in most reviews.
 
 This tool makes the claim checkable. It exports the base ref with `git
 archive`, overlays the head's changed test files onto that export, runs the
-requested pytest node there and then on the head tree, and prints one
-paste-ready block naming the exact commands, the base failure line, the head
-pass line and the diff range. It refuses to call anything evidence when the
-node passes on base (no red-before), when the base export cannot be built,
-when the head side does not pass, or when the working tree is not the commit
-the receipt would name (a tracked edit or an untracked file).
+requested pytest node there, then exports the head commit the same way and
+runs the node in that export, and prints one paste-ready block naming the
+exact commands, the base failure line, the head pass line and the diff range.
+It refuses to call anything evidence when the node passes on base (no
+red-before), when an export cannot be built, when the head side does not
+pass, when either run outlives ``--timeout``, or when the working tree is not
+the commit the receipt would name (a tracked edit or an untracked file).
 
     python3 tools/evidence_receipt.py --base origin/main \
         --node tests/test_foo.py::test_bar
@@ -30,9 +31,18 @@ side measured on uncommitted edits is the stale-count failure again.
 The base side runs the head test files; the implementation stays at the base
 ref unless ``--overlay`` names a file explicitly.
 
+Both sides run in a `git archive` export, never in the live worktree. What
+binds the head run to the head sha is that sha itself: it is read once, before
+either run, and the head export is `git archive <head sha>`, so the head side
+sees only committed files. An ignored or untracked file in the worktree (a
+generated module, a local build) cannot turn a red-before into a green-after,
+and a commit or checkout made while a run is in flight does not change what
+either run measured.
+
 Exit status: 0 receipt printed, 1 the claim is rejected (no red-before, or no
 green-after), 2 the receipt cannot be produced (bad ref, uncommitted or
-untracked changes, unreadable run).
+untracked changes, unreadable run, or a run stopped by ``--timeout``, which
+prints ``TIMED OUT``).
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ import argparse
 import io
 import os
 import re
+import signal
 import subprocess
 import sys
 import tarfile
@@ -67,6 +78,14 @@ _NO_TESTS = re.compile(r"\bno tests ran\b")
 # untouched.
 _PYTEST_FLAGS = ("-q", "-p", "no:cacheprovider")
 
+# pytest cuts its short summary ("FAILED node - message") at the terminal
+# width, which is 80 columns for a child with no terminal. A wide COLUMNS keeps
+# the cause whole in the line the receipt quotes.
+_CHILD_COLUMNS = "4096"
+
+# Seconds each pytest run may take before the tool stops it and refuses.
+DEFAULT_TIMEOUT = 600.0
+
 
 class Refused(Exception):
     """The run cannot produce evidence: an environment or usage problem."""
@@ -78,6 +97,10 @@ class NoRedBefore(Refused):
 
 class NoGreenAfter(Refused):
     """The node did not pass on head, so the receipt's green side is missing."""
+
+
+class TimedOut(Refused):
+    """A pytest run outlived ``--timeout``; a run that never ended is no side."""
 
 
 @dataclass(frozen=True)
@@ -160,15 +183,15 @@ def _git_ok(repo: Path, *args: str) -> bool:
         ["git", "-C", str(repo), *args], capture_output=True).returncode == 0
 
 
-def _git_archive(repo: Path, sha: str) -> bytes:
-    """The base tree as a tar archive, read without touching the repository."""
+def _git_archive(repo: Path, sha: str, side: str = "base") -> bytes:
+    """A commit's tree as a tar archive, read without touching the repository."""
     proc = subprocess.run(
         ["git", "-C", str(repo), "archive", "--format=tar", sha],
         capture_output=True)
     if proc.returncode != 0:
         detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
         raise Refused(
-            f"the base export cannot be built: git archive {sha} failed: "
+            f"the {side} export cannot be built: git archive {sha} failed: "
             + (detail[-1] if detail else f"exit {proc.returncode}"))
     return proc.stdout
 
@@ -193,10 +216,14 @@ def _head_info(repo: Path) -> tuple[str, str]:
 def _require_committed(repo: Path) -> None:
     """A receipt pins a commit; the working tree has to be that commit.
 
-    The head side runs in the worktree, so anything git does not have at HEAD
-    (a tracked edit, an untracked module) is code the receipt would claim to
-    have measured while the base export cannot contain it. Ignored build
-    output is not code and stays allowed.
+    The measurement no longer depends on this check: the head side runs in an
+    export of the head sha, so a tracked edit or an untracked module is never
+    run. The check stays for the claim. A receipt is pasted as the evidence for
+    the author's change, and a tree with edits git does not have at HEAD is not
+    that change: a green on the commit says nothing about the edits about to be
+    committed on top of it, which is the stale-count failure of issue #2849.
+    Ignored build output is not part of the change and stays allowed (it is
+    not in either export).
     """
     state = _git(repo, "status", "--porcelain",
                  "--untracked-files=all").strip()
@@ -242,9 +269,9 @@ def _overlay_paths(repo: Path, base: str, head: str,
     return present
 
 
-def _export_base(repo: Path, sha: str, dest: Path) -> None:
-    """Unpack the base tree under ``dest``; refuse when it cannot be built."""
-    data = _git_archive(repo, sha)
+def _export(repo: Path, sha: str, dest: Path, side: str) -> None:
+    """Unpack ``sha``'s tree under ``dest``; refuse when it cannot be built."""
+    data = _git_archive(repo, sha, side)
     try:
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             if hasattr(tarfile, "data_filter"):
@@ -252,7 +279,7 @@ def _export_base(repo: Path, sha: str, dest: Path) -> None:
             else:
                 archive.extractall(dest)
     except (tarfile.TarError, OSError) as exc:
-        raise Refused(f"the base export cannot be unpacked: {exc}") from None
+        raise Refused(f"the {side} export cannot be unpacked: {exc}") from None
 
 
 def _overlay(repo: Path, head: str, dest: Path, paths: list[str]) -> None:
@@ -267,8 +294,21 @@ def _overlay(repo: Path, head: str, dest: Path, paths: list[str]) -> None:
         target.write_bytes(blob.stdout)
 
 
+def _stop(proc: subprocess.Popen) -> None:
+    """Kill the run and everything it started, then reap it."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
+    proc.communicate()
+
+
 def _run_pytest(python: str, cwd: Path, nodes: list[str],
-                pythonpath: str | None) -> Run:
+                pythonpath: str | None, *, timeout: float,
+                side: str, label: str) -> Run:
     command = [python, "-m", "pytest", *nodes, *_PYTEST_FLAGS]
     env = os.environ.copy()
     # Ambient pytest config would make a receipt depend on the machine rather
@@ -276,12 +316,29 @@ def _run_pytest(python: str, cwd: Path, nodes: list[str],
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PYTEST_PLUGINS", None)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["COLUMNS"] = _CHILD_COLUMNS
     if pythonpath:
         env["PYTHONPATH"] = pythonpath
-    proc = subprocess.run(
+    # Its own process group, so a timeout stops the tests' own children too
+    # rather than leaving them holding the output pipes.
+    proc = subprocess.Popen(
         command, cwd=str(cwd), env=env,
-        capture_output=True, text=True, errors="replace")
-    output = proc.stdout + proc.stderr
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace",
+        start_new_session=(os.name == "posix"))
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop(proc)
+        raise TimedOut(
+            f"the {side} run on {label} did not finish within {timeout:g}s "
+            "and was stopped; a run that never ended is neither red nor "
+            "green. Raise --timeout if the node is slow.") from None
+    except BaseException:
+        # An interrupt must not leave the run alive in its own group.
+        _stop(proc)
+        raise
+    output = stdout + stderr
     return Run(tuple(command), cwd, proc.returncode, output,
                parse_summary(output))
 
@@ -320,20 +377,19 @@ def _failure_lines(run: Run) -> list[str]:
     """The lines a reviewer checks: the exact failing or erroring node ids.
 
     pytest's short summary ("FAILED node - message", "ERROR node - message")
-    wins. A collection error's summary line carries only the path, so the
-    traceback's last ``E`` line is added for the cause; when no summary line
-    was printed at all, the detail lines are the whole evidence.
+    comes first. The traceback's last ``E`` line is always added for the
+    cause: a collection error's summary line carries only the path, and a
+    summary line can still be cut short by pytest. When no summary line was
+    printed at all, the detail lines are the whole evidence.
     """
     text = _ANSI.sub("", run.output or "")
     lines = [raw.strip() for raw in text.splitlines()]
     summary = [line for line in lines if line.startswith(("FAILED ", "ERROR "))]
     detail = [line for line in lines if line.startswith("E   ")]
     if summary:
-        chosen = summary[:4]
-        # A collection error's short-summary line is only ``ERROR <path>``;
-        # the traceback's last ``E`` line is the cause a reviewer needs.
-        if detail and not any(" - " in line for line in chosen):
-            chosen = chosen[:2] + detail[-1:]
+        chosen = summary[:3]
+        if detail and detail[-1] not in chosen:
+            chosen.append(detail[-1])
         return chosen
     return detail[-4:]
 
@@ -437,13 +493,27 @@ def build_receipt(*, base_ref: str, base_sha: str, head_sha: str,
     for line in _failure_lines(base_run):
         lines.append(f"  - `{line}`")
     lines += [
-        f"- head command: `{head_cmd} {flags}`",
+        "- head export: `git archive " + head_sha + "` into a temporary "
+        "directory, nothing overlaid",
+        f"- head command: `{head_cmd} {flags}` (in the head export, "
+        "`PYTHONPATH` pointing at its `src`)",
         f"- head result: PASSED (`{head_run.counts.summary_line}`)",
         "",
         "The automatic overlay is the change's test files; the implementation "
         "stays at the base ref unless an `--overlay` path is named above.",
     ]
     return "\n".join(lines)
+
+
+def _positive_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a number of seconds: {text!r}") from None
+    if not value > 0:
+        raise argparse.ArgumentTypeError("the timeout must be above zero")
+    return value
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -465,6 +535,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                         metavar="PATH",
                         help="extra head file to overlay on the base export "
                              "(repeatable)")
+    parser.add_argument("--timeout", type=_positive_seconds,
+                        default=DEFAULT_TIMEOUT, metavar="SECONDS",
+                        help="stop each pytest run after SECONDS and refuse "
+                             f"(default: {DEFAULT_TIMEOUT:g})")
     return parser.parse_args(argv)
 
 
@@ -504,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="evidence-receipt-") as tmp:
             export = Path(tmp) / "base"
             export.mkdir()
-            _export_base(repo, base_sha, export)
+            _export(repo, base_sha, export, "base")
             _overlay(repo, head_sha, export, overlayed)
             for node in nodes:
                 part = node.split("::", 1)[0]
@@ -512,15 +586,24 @@ def main(argv: list[str] | None = None) -> int:
                     raise Refused(
                         f"the node's file {part} is neither at the base ref "
                         "nor overlaid from head")
-            base_run = _run_pytest(python, export, nodes,
-                                   _pythonpath_for(export))
+            base_run = _run_pytest(
+                python, export, nodes, _pythonpath_for(export),
+                timeout=args.timeout, side="base",
+                label=f"{args.base} ({base_sha[:12]})")
             _check_base(base_run, args.base, base_sha)
             if not _failure_lines(base_run):
                 raise Refused(
                     "the base run was red but no FAILED or ERROR line could "
                     "be read from its output; the receipt needs that line")
-            head_run = _run_pytest(python, repo, nodes,
-                                   _pythonpath_for(repo))
+            # The head side runs in an export of the sha read above, exactly
+            # as the base side does: only committed files, whatever the
+            # worktree holds or becomes while the runs are in flight.
+            head_export = Path(tmp) / "head"
+            head_export.mkdir()
+            _export(repo, head_sha, head_export, "head")
+            head_run = _run_pytest(
+                python, head_export, nodes, _pythonpath_for(head_export),
+                timeout=args.timeout, side="head", label=head_sha[:12])
             _check_head(head_run, head_sha)
             receipt = build_receipt(
                 base_ref=args.base, base_sha=base_sha, head_sha=head_sha,
@@ -533,6 +616,9 @@ def main(argv: list[str] | None = None) -> int:
     except NoGreenAfter as exc:
         print(f"NOT GREEN: {exc}", file=sys.stderr)
         return 1
+    except TimedOut as exc:
+        print(f"TIMED OUT: {exc}", file=sys.stderr)
+        return 2
     except Refused as exc:
         print(f"NO RECEIPT: {exc}", file=sys.stderr)
         return 2

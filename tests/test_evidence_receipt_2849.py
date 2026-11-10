@@ -14,6 +14,7 @@ reader rather than a mock of them.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -64,12 +65,32 @@ def _repo(tmp_path: Path, base_files: dict[str, str],
     return repo, base, head
 
 
+_GEN_TEST = (
+    "from gen import VALUE\n\n\ndef test_gen():\n    assert VALUE == 1\n")
+_LONG_CAUSE = ("fixture store missing at /var/data/" + "segment-" * 30
+               + "END")
+_LOADER_BROKEN = (
+    "def load():\n"
+    f"    raise FileNotFoundError({_LONG_CAUSE!r})\n")
+_LOADER_FIXED = "def load():\n    return 1\n"
+_TEST_LOADER = (
+    "from loader import load\n\n\ndef test_load():\n"
+    "    assert load() == 1\n")
+_SLEEP_ALWAYS = (
+    "import time\n\n\ndef test_double():\n    time.sleep(60)\n")
+_SLEEP_WHEN_RIGHT = (
+    "import time\n\nfrom calc import double\n\n\ndef test_double():\n"
+    "    if double(3) == 6:\n        time.sleep(60)\n"
+    "    assert double(3) == 6\n")
+
+
 def _run(repo: Path, base: str, out: Path | None = None,
-         node: str = "tests/test_double.py::test_double") -> int:
+         node: str = "tests/test_double.py::test_double",
+         extra: list[str] | None = None) -> int:
     argv = ["--repo", str(repo), "--base", base, "--node", node]
     if out is not None:
         argv += ["--out", str(out)]
-    return receipt.main(argv)
+    return receipt.main(argv + (extra or []))
 
 
 def _receipt_from(capsys) -> str:
@@ -224,7 +245,7 @@ def test_uncommitted_tracked_changes_are_refused(tmp_path, capsys):
 
 
 def test_an_untracked_module_is_refused(tmp_path, capsys):
-    """The head run imports the worktree, so untracked code is measured code."""
+    """Untracked code is not the commit the receipt names, so it is refused."""
     repo, base, _head = _repo(
         tmp_path, {"calc.py": _WRONG},
         {"calc.py": _RIGHT, "tests/test_double.py": _DOUBLE})
@@ -266,3 +287,79 @@ def test_summary_reader_reads_a_collection_error():
         "===============================\n")
     assert counts.found is True
     assert counts.errors == 1
+
+
+def test_an_ignored_module_only_in_the_worktree_is_not_a_green_after(
+        tmp_path, capsys):
+    """Both sides see only committed files.
+
+    The test imports a gitignored ``gen.py`` that exists only in the live
+    worktree, and the head commit changes nothing the test reads (a README).
+    The base export cannot import it; if the head side ran in the worktree it
+    could, and a difference in environment would read as red-before and
+    green-after. Run in the head export, the head side is red too.
+    """
+    repo, base, _head = _repo(
+        tmp_path,
+        {".gitignore": "gen.py\n", "tests/test_gen.py": _GEN_TEST},
+        {"README.md": "notes\n"})
+    (repo / "gen.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+    out = tmp_path / "receipt.md"
+
+    code = _run(repo, base, out=out, node="tests/test_gen.py::test_gen")
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "NOT GREEN" in captured.err
+    assert "did not pass on head" in captured.err
+    assert "head result: PASSED" not in captured.out
+    assert not out.exists()
+
+
+def test_a_long_cause_is_carried_whole_into_the_receipt(
+        tmp_path, capsys, monkeypatch):
+    """pytest cuts its short summary at the terminal width; the cause stays."""
+    monkeypatch.setenv("COLUMNS", "80")
+    # pytest leaves the summary uncut on CI; this test must guard both.
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("BUILD_NUMBER", raising=False)
+    repo, base, _head = _repo(
+        tmp_path, {"loader.py": _LOADER_BROKEN},
+        {"loader.py": _LOADER_FIXED, "tests/test_loader.py": _TEST_LOADER})
+
+    code = _run(repo, base, node="tests/test_loader.py::test_load")
+    text = _receipt_from(capsys)
+
+    assert code == 0
+    assert len(_LONG_CAUSE) > 200
+    assert f"FileNotFoundError: {_LONG_CAUSE}" in text
+
+
+@pytest.mark.parametrize(
+    ("side", "test_text", "seconds"),
+    [("base", _SLEEP_ALWAYS, "1"), ("head", _SLEEP_WHEN_RIGHT, "8")],
+    ids=["base", "head"])
+def test_a_run_that_outlives_the_timeout_is_refused(
+        tmp_path, capsys, side, test_text, seconds):
+    """A hanging run is stopped and refused, on either side, never a receipt.
+
+    The head case leaves the base run (a quick red) room to finish on a loaded
+    machine, so the timeout it reports is the head one.
+    """
+    repo, base, _head = _repo(
+        tmp_path, {"calc.py": _WRONG},
+        {"calc.py": _RIGHT, "tests/test_double.py": test_text})
+    out = tmp_path / "receipt.md"
+
+    started = time.monotonic()
+    code = _run(repo, base, out=out, extra=["--timeout", seconds])
+    elapsed = time.monotonic() - started
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "TIMED OUT" in captured.err
+    assert f"the {side} run" in captured.err
+    assert "Red-before" not in captured.out
+    assert not out.exists()
+    assert elapsed < 30

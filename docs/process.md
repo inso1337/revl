@@ -121,16 +121,19 @@ python3 tools/evidence_receipt.py --base origin/main \
 
 The tool exports `origin/main` with `git archive`, overlays the head's changed
 test files (the implementation stays at the base ref unless `--overlay` names
-a file), runs the node there and then on the head tree, and prints a
+a file), runs the node there, then runs it in a `git archive` export of the head
+commit (both sides see only committed files), and prints a
 paste-ready block with the exact commands, the base failure line, the head
 pass line and the diff range. Paste that block into the PR's Verification section; the reviewer reads
 it instead of asking for the counts again.
 
 The tool refuses rather than invent evidence: `NO RED-BEFORE` when the node
 passes on base, `NOT GREEN` when it does not pass on head, `NO RECEIPT` when
-the base export cannot be built, the tree has uncommitted or untracked
-changes, or the test file is not committed. The head side runs in the
-worktree, so an untracked module is code the receipt cannot pin to a commit. A red produced by mutating the implementation is not a base
+an export cannot be built, the tree has uncommitted or untracked
+changes, or the test file is not committed, and `TIMED OUT` when a run
+outlives `--timeout` (600 seconds by default). An ignored or untracked file
+in the worktree never reaches either run, and a dirty tree is refused because
+it is not the commit the receipt names. A red produced by mutating the implementation is not a base
 failure and is not a receipt.
 
 ## What an agent does not do
