@@ -78,7 +78,6 @@ from typing import Any
 # shared module, keeping a single copy of the emitter machinery (`EmitError`
 # identity, the `_Ctx` counter cell) no matter which entry point dispatched.
 from emit import (  # type: ignore[import-not-found]  # noqa: E402
-    JS_GLOBAL_RESERVED,
     EmitError,
     _Ctx,
     _Scope,
@@ -173,18 +172,24 @@ TEMPORAL_MODULE_RESERVED = frozenset({
 })
 
 # The module scope an author name may not take is wider than the names the
-# module declares: the scaffolding also READS the host's own globals
-# (`Date.now()` for the compensation budget in the abort path, `String(...)`,
-# `new Set()`, `Array.isArray` and `Object.values` in the redaction helpers).
-# An extern destructured as `Date`, or a component declared as
+# module declares: the scaffolding also READS host globals (`Date.now()` for
+# the compensation budget in the abort path, `String(...)`, `new Set()`,
+# `Array.isArray` and `Object.values` in the redaction helpers, `undefined` for
+# a bracket's holder, `Promise` and `Record` in its types). An extern
+# destructured as `Date`, or a component declared as
 # `export async function Date()`, would shadow the global for the whole module,
 # so the abort path would throw before the drain loop and no compensation or
-# residue record would run. `JS_GLOBAL_RESERVED` is the emitter's own list of
-# those globals (`emit.py`), reserved here for this target's module scope,
-# together with the TS lib type `Record` the `Residue` type reads (reserved
-# like the module's own type names above).
-TEMPORAL_MODULE_SCOPE = (TEMPORAL_MODULE_RESERVED | JS_GLOBAL_RESERVED
-                         | frozenset({"Record"}))
+# residue record would run. Exactly the globals the template reads are
+# reserved; any other host global (`fetch`, `process`, ...) stays a legal
+# activity or component name, since nothing in this module reads it.
+# `test_temporal_target.py` derives the read set from the emitted module, so a
+# global the template starts reading fails there until it is listed here.
+TEMPORAL_GLOBALS_READ = frozenset({
+    "Array", "Date", "Object", "Promise", "Record", "Set", "String",
+    "undefined",
+})
+
+TEMPORAL_MODULE_SCOPE = TEMPORAL_MODULE_RESERVED | TEMPORAL_GLOBALS_READ
 
 # The names the emitted activation body binds for itself: `saga` is the
 # compensation stack the body pushes to, `input` is the config object every

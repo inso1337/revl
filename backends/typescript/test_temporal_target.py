@@ -386,13 +386,17 @@ def test_near_miss_binding_does_not_shadow_the_saga_stack():
     assert 'saga.push({ name: "saga_.undo"' in got
 
 
-# The host globals the scaffolding reads (`Date.now()` in the abort path,
-# `String`/`Set`/`Array`/`Object` in the redaction helpers) plus the ones an
-# extern or component would shadow for every `@ts`-adjacent read in the module.
+# The host globals the emitted workflow module itself reads: `Date.now()` in
+# the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers,
+# `Promise` in its types. No `@ts` body is emitted into this module, so a
+# global it does not read is not shadowed by anything.
 _JS_GLOBALS_AT_MODULE_SCOPE = [
-    "Date", "String", "Set", "Promise", "Object", "Array", "Error", "JSON",
-    "Math",
+    "Date", "String", "Set", "Promise", "Object", "Array",
 ]
+
+# Host globals the emitted workflow module never reads: an activity or a
+# component may take these spellings on this target, as on the main TS target.
+_JS_GLOBALS_THE_MODULE_NEVER_READS = ["fetch", "console", "setTimeout", "Map"]
 
 
 @pytest.mark.parametrize("name", _JS_GLOBALS_AT_MODULE_SCOPE)
@@ -416,25 +420,55 @@ def test_component_named_a_js_global_refused(name):
         EMIT.emit(ir, target="temporal")
 
 
+@pytest.mark.parametrize("name", _JS_GLOBALS_THE_MODULE_NEVER_READS)
+def test_extern_named_an_unread_js_global_emits(name):
+    """Only the globals the module reads are reserved: an activity named
+    `fetch` is destructured and called like any other, since nothing in the
+    workflow module reads the host's `fetch`."""
+    got = EMIT.emit(compile_source(_extern_crossing_src(name), f"{name}.rvl"),
+                    target="temporal")
+    assert f'await {name}("visa")' in got
+    assert f"  {name}(card: string): Promise<string>" in got
+
+
+def test_component_named_an_unread_js_global_emits():
+    got = EMIT.emit(compile_source("component fetch { }\n", "fetch.rvl"),
+                    target="temporal")
+    assert "export async function fetch(): Promise<void>" in got
+
+
 # ------------------------------- reserved names derived from the emitted module
 
 # Every author-chosen name in this workflow starts with `zq`, so whatever else
-# the emitted module names is the target's own scaffolding. It exercises the
-# whole template: a service crossing with a compensation, a keyed extern (the
-# second retry group), an acquire bracket, and a config read.
+# the emitted module names is the target's own scaffolding. Its two components
+# render every step branch a source program can reach on this target: a
+# service crossing with a compensation, a keyed extern (the second retry
+# group), an acquire bracket bound to a name, an acquire whose site undo names
+# no binding, config reads, and a unary operand. The renderer's other branches
+# are not reachable from source: a component `if` guard may only hold `fail`,
+# which the step allowlist refuses, and an `acquire` needs a site `undo`, so an
+# effect without one never compiles. A template change in one of those
+# branches is not seen here.
 _SCAFFOLDING_PROBE = (
     "service ZqLedger { emission fn zqCharge(zqCard: Str) -> Str\n"
     "                   emission fn zqRefund(zqCard: Str) -> Str }\n"
     "extern emission idempotent(key: zqCard) fn zqSettle(zqCard: Str) -> Str\n"
     "  = @ts { return zqCard }\n"
     "extern pure fn zqClose(zqH: RHandle) = @ts { return }\n"
+    "extern pure fn zqDrop(zqN: Int) = @ts { return }\n"
     "extern acquire fn zqOpen(zqN: Int) -> RHandle undo zqClose(result)"
+    ' = @ts { return "h" }\n'
+    "extern acquire fn zqLease(zqN: Int) -> RHandle undo zqDrop(0)"
     ' = @ts { return "h" }\n'
     "component ZqPay requires zqLedger: ZqLedger {\n"
     '  config { zqLevel: Str = "x" }\n'
     "  let zqH = effect zqOpen(0) undo zqClose(zqH)\n"
     '  emit zqLedger.zqCharge("visa") compensate zqLedger.zqRefund("visa")\n'
     "  emit zqSettle(config.zqLevel)\n"
+    "}\n"
+    "component ZqDrain {\n"
+    "  config { zqCount: Int = 2 }\n"
+    "  effect zqLease(-1) undo zqDrop(config.zqCount)\n"
     "}\n"
 )
 

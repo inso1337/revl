@@ -451,12 +451,14 @@ This goes in the compiler spec, not the runtimes.
     `input` parameter shadow it), any component that would collide with the
     module scope, and any binding spelled one of the body names. The module
     scope also covers the host globals the scaffolding reads (`Date.now()` in
-    the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers):
-    `JS_GLOBAL_RESERVED` and the TS `Record` type are reserved there too, since
-    an extern destructured as `Date` made the abort path throw before any
-    compensation ran. A config field stays allowed: it is only a property key
-    (`input.<field>`), never a bare identifier, so it cannot shadow the
-    scaffolding.
+    the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers,
+    `undefined`, and `Promise`/`Record` in its types): exactly those are
+    reserved there too (`TEMPORAL_GLOBALS_READ`), since an extern destructured
+    as `Date` made the abort path throw before any compensation ran. A host
+    global the module does not read (`fetch`, `process`) stays a legal
+    activity or component name. A config field stays allowed: it is only a
+    property key (`input.<field>`), never a bare identifier, so it cannot
+    shadow the scaffolding.
   - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
     `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
     flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding
