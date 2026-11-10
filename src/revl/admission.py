@@ -614,6 +614,91 @@ def _tag_names(spelling: str | None, names: list[str], tag: str) -> str | None:
                       else m.group(0), spelling)
 
 
+# ------------------------------------------- declared types behind a service
+#
+# A service signature spells a record or variant by NAME, and `compatible`
+# takes the same name on both sides to be the same type. The running manifest
+# fixes what each name meant when its consumers and providers were checked
+# (`Rec = {a: Int}`), and a candidate may declare the same name differently
+# (`Rec = {a: Int, b: Int}`) over a signature whose spelling did not move, or
+# without redeclaring the service at all. Both are the hand-off gate's
+# problem (see `_handoff_compatible`), read at the service boundary: the
+# running service's signature is resolved against the running declarations and
+# against the candidate's, and a name it reaches whose meaning differs between
+# the two is a signature difference, whatever the spelling says.
+
+
+def _service_type_drift(old: ServiceDecl, candidate_types: dict | None,
+                        running_types: dict | None) -> _Drift | None:
+    """The first method of the running service `old` whose signature reaches a
+    declared type that means something else in `candidate_types` than in
+    `running_types`, else `None`.
+
+    The comparison is the hand-off gate's (`_decl_differs`): a declaration is
+    compared for identity, and so is everything it reaches, so a record gaining,
+    losing or retyping a field, a `Secret` field becoming plain, or a change
+    nested under another record, a `Map` or a `List` is all a difference. It
+    is stricter than a field-by-field relation on purpose, as it is there. A
+    name declared on neither side is an opaque nominal and means itself; a name
+    declared on one side only differs, so a running manifest that carries no
+    `types` makes every name the candidate declares unprovable and refused."""
+    mine, theirs = candidate_types or {}, running_types or {}
+    for mname, method in old.methods.items():
+        spelled = [t for _, t in method.params if t]
+        if method.returns:
+            spelled.append(method.returns)
+        names = set().union(*(_spelling_names(t) for t in spelled)) \
+            if spelled else set()
+        changed = sorted(n for n in names if _decl_differs(n, mine, theirs))
+        if not changed:
+            continue
+        shown = _own_differences(changed, mine, theirs)
+        both = "; ".join(
+            f"the running manifest declares {_render_decl(n, theirs.get(n))} "
+            f"and the candidate declares {_render_decl(n, mine.get(n))}"
+            for n in shown)
+        used = ", ".join(f"`{n}`" for n in changed)
+        return _Drift(
+            mname, "signature",
+            f"`{mname}` uses {used}, whose declaration differs ({both}) — a "
+            f"running consumer or provider was checked against the running "
+            f"declaration")
+    return None
+
+
+def _admit_service_types(program: Program, running: dict[str, ServiceDecl],
+                         redeclared: dict[str, ServiceDecl], ambient: dict,
+                         types: dict) -> None:
+    """Gate the declared types behind every running service a running
+    component touches (§5/§6.6, the half `_admit_service_replacement` cannot
+    see because it reads signatures as spellings).
+
+    `running` is the running manifest's services, `redeclared` the candidate's
+    own, `types` the candidate's declared-type table and
+    `ambient["handoff_types"]` the running version's (the manifest's `types`).
+    The candidate's meaning for a name is its own declaration where it has one
+    and the running declaration otherwise: a name it does not mention keeps
+    the meaning every running component was checked against, and a record it
+    does not redeclare still reaches a record it does.
+
+    It runs for a service the candidate does not redeclare too, which is the
+    case a type-only edit hides in. A service nothing running consumes or
+    provides is not checked, so an edit to the types of an untouched service
+    does not refuse (and neither does an edit to a type no touched service
+    reaches). The refusal is the interface-drift refusal, naming the running
+    components it breaks and both declarations."""
+    running_types = ambient.get("handoff_types") or {}
+    effective = {**running_types, **(types or {})}
+    for name, old in running.items():
+        touch = _service_touchers(name, ambient)
+        if not (touch.consumers or touch.providers or touch.unresolved):
+            continue
+        drift = _service_type_drift(old, effective, running_types)
+        if drift is not None:
+            raise _drift_error(program, redeclared.get(name) or old, drift,
+                               touch)
+
+
 def _admit_handoff_replacement(program: Program, components: list[dict],
                                ambient: dict,
                                types: dict | None = None) -> None:
