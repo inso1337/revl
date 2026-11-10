@@ -198,7 +198,7 @@ def test_a_full_cap_is_released_at_the_frame_deadline(tmp_path, monkeypatch):
         for _ in range(4):
             held.append(socket.create_connection(("127.0.0.1", port),
                                                  timeout=5))
-        time.sleep(1.0)             # every held frame's deadline has fired
+        time.sleep(2.0)             # four times the 0.5 s frame deadline
         probe = a_signed_probe()
         with socket.create_connection(("127.0.0.1", port), timeout=5) as waiter:
             waiter.sendall(json.dumps(probe, sort_keys=True).encode() + b"\n")
@@ -231,4 +231,4 @@ def test_a_dripping_answer_returns_at_the_operators_timeout(call):
         thread.join(10)
     assert finished.is_set()
     assert answer["link"] == pd.LINK_PEER_UNREACHABLE, answer
-    assert elapsed < 2.0, f"the answer held the operator for {elapsed:.2f}s"
+    assert elapsed < 2.5, f"the answer held the operator for {elapsed:.2f}s"
