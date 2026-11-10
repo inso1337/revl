@@ -69,9 +69,9 @@ What Slice 1 does build, in the four pieces the design names:
    holds every irreversible crossing as an item-245 class-(b) deferred
    emission, so a plan that NECESSARILY crosses a non-deferrable irreversible
    effect is REFUSED admission (:func:`federation_admission`) rather than
-   silently degrading atomicity. A stranded participant applies
-   `recovery.py`'s existing rule VERBATIM — record present, roll forward;
-   absent, roll back — and fails closed on a guess (:func:`settle_stranded`).
+   silently degrading atomicity. For a stranded participant the record
+   chooses the direction (present, roll forward; absent, roll back) and
+   `recovery.recover` performs it; a guess fails closed (:func:`settle_stranded`).
 
 **Slice 2a** (§5) adds the written form of a deploy and the plan-time
 admission of it. Slice 1 had no way to WRITE a deploy down — the caller built
@@ -114,6 +114,7 @@ import subprocess
 import sys
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3329,7 +3330,7 @@ def _abort_proof(ledger: list, unresolved: list, residue: list) -> str:
 #: The durable record whose PRESENCE authorizes crossing an irreversible effect.
 #: Deliberately the same spelling `recovery.py` already keys roll-forward off
 #: (`commit-approved`), prefixed for the federation scope, so `settle_stranded`
-#: can hand the rule to `recovery.recover` VERBATIM rather than re-deciding it.
+#: can tell `recovery.recover` which direction to take rather than re-implementing it.
 FEDERATION_APPROVED = "federation-commit-approved"
 FEDERATION_ABORTED = "federation-abort-decided"
 #: Written when a deploy run STARTS, before any participant is launched. It
@@ -3649,11 +3650,69 @@ def read_decision(path: str) -> tuple[str | None, dict | None]:
     return decision, record
 
 
+#: The lock file a `revl federation-apply` holds in its state directory for
+#: its whole run, next to the decision file.
+STATE_LOCK_FILE = "lock"
+
+
+def _try_lock(fd: int) -> bool:
+    """Take an exclusive lock on `fd` without waiting; False if it is held."""
+    try:
+        import fcntl  # noqa: PLC0415 (POSIX)
+    except ImportError:  # pragma: no cover - Windows
+        import msvcrt  # noqa: PLC0415
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    try:
+        import fcntl  # noqa: PLC0415 (POSIX)
+    except ImportError:  # pragma: no cover - Windows
+        import msvcrt  # noqa: PLC0415
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _existing_state_lock(path: Path):
+    """Hold an EXISTING state lock for the body. Yields None when there is no
+    lock file (nothing is created), True when it was taken, False when another
+    process holds it."""
+    try:
+        fd = os.open(str(path), os.O_RDWR)
+    except FileNotFoundError:
+        yield None
+        return
+    try:
+        held = _try_lock(fd)
+        try:
+            yield held
+        finally:
+            if held:
+                _unlock(fd)
+    finally:
+        os.close(fd)
+
+
 def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
     """Settle a participant that was stranded mid-federation-update.
 
-    The rule is `recovery.py`'s, applied VERBATIM — this function decides
-    nothing on its own:
+    The durable federation decision chooses the direction and
+    `recovery.recover` performs it; nothing here re-implements recovery's
+    roll-forward or roll-back:
 
       * the durable `federation-commit-approved` record is PRESENT: the
         federation committed. The participant's own WAL is given the
@@ -3670,8 +3729,31 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
         record.
       * the record is UNREADABLE: there is no definite answer. Fails CLOSED with
         `unresolved` and settles nothing — a guess here is the split-brain.
+      * the decision file's directory holds a `lock` another process holds
+        (a `revl federation-apply` still running): its decision is not final,
+        so this also settles nothing and reports `unresolved`.
+
+    The verdict is computed against `world`; with none given that is
+    recovery's in-memory model, not the participant's own boundary state.
     """
-    from .recovery import recover  # noqa: PLC0415 — lazy, keeps import cheap
+    with _existing_state_lock(Path(decision_path).parent
+                              / STATE_LOCK_FILE) as held:
+        if held is False:
+            return {
+                "verdict": UNRESOLVED,
+                "decision": (
+                    f"{Path(decision_path).parent / STATE_LOCK_FILE} is held: "
+                    "the apply that owns this decision file is still running, "
+                    "so its decision is not final. Settle after it ends."),
+                "residue": {"clean": False, "outstanding": [decision_path],
+                            "proof": "nothing was settled while the run "
+                                     "held its lock."},
+            }
+        return _settle_stranded(wal_path, decision_path, world=world)
+
+
+def _settle_stranded(wal_path: str, decision_path: str, *, world) -> dict:
+    from .recovery import recover  # noqa: PLC0415 (lazy, keeps import cheap)
 
     try:
         decision, record = read_decision(decision_path)

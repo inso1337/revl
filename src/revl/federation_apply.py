@@ -80,8 +80,8 @@ COMPOSITION_KEYS = ("source", "prior", "health_probe", "allow_capabilities")
 CONTRACT_KEYS = ("surface", "provider")
 
 #: The file an apply locks, exclusively, in its generation directory for its
-#: whole run.
-LOCK_FILE = "lock"
+#: whole run. `deploy.settle_stranded` refuses to settle while it is held.
+LOCK_FILE = deploy.STATE_LOCK_FILE
 
 
 # ---------------------------------------------------------------------------
@@ -636,36 +636,6 @@ def _abort_committed(participants: Sequence, report: Mapping) -> dict:
     }
 
 
-def _try_lock(fd: int) -> bool:
-    try:
-        import fcntl  # noqa: PLC0415 (POSIX)
-    except ImportError:  # pragma: no cover - Windows
-        import msvcrt  # noqa: PLC0415
-
-        try:
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
-        return True
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
-
-
-def _unlock(fd: int) -> None:
-    try:
-        import fcntl  # noqa: PLC0415 (POSIX)
-    except ImportError:  # pragma: no cover - Windows
-        import msvcrt  # noqa: PLC0415
-
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        return
-    fcntl.flock(fd, fcntl.LOCK_UN)
-
-
 @contextmanager
 def _generation_lock(state: Path) -> Iterator[bool]:
     """Hold `<state>/lock` exclusively for the body, or yield False at once.
@@ -678,12 +648,12 @@ def _generation_lock(state: Path) -> Iterator[bool]:
     """
     fd = os.open(str(state / LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        held = _try_lock(fd)
+        held = deploy._try_lock(fd)
         try:
             yield held
         finally:
             if held:
-                _unlock(fd)
+                deploy._unlock(fd)
     finally:
         os.close(fd)
 

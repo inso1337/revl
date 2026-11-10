@@ -2523,8 +2523,11 @@ The run has the deploy protocol's shape:
    message, and `federation-commit-approved` only after every participant
    committed and every declared probe passed. A conductor killed before that
    leaves the pending record or the abort decision last, so `revl recover
-   --decision` never reads an approval for the run and rolls every stranded
-   participant back, including one whose own commit finished.
+   --decision` never reads an approval for the run and returns `rolled-back`
+   for every stranded participant, including one whose own commit finished.
+   That verdict is computed against a model world unless `--composition`
+   binds the real one; it does not rewrite the participant's world file. It
+   refuses (`unresolved`) while the apply still holds `<state-dir>/lock`.
 4. **Health probes** declared per composition, run after the commit. A probe is
    an argv list run in the plan's directory in a process group of its own;
    exit 0 is healthy, and a composition that declares none is reported as not

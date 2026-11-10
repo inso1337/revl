@@ -993,6 +993,9 @@ os.kill(os.getppid(), signal.SIGKILL)
 @posix_only
 def test_a_conductor_killed_during_the_probes_settles_every_participant_back(
         tmp_path):
+    """No approval was written, so settle returns `rolled-back` for both
+    committed participants. The verdict is computed against the model world
+    handed in; it does not claim their world files were rewritten."""
     from revl.recovery import DictWorld
 
     plan = _one_probe_plan(tmp_path, "probe_kill", PARENT_KILLING_PROBE)
@@ -1024,4 +1027,27 @@ def test_a_conductor_killed_during_the_probes_settles_every_participant_back(
                                          world=world)
         assert settled["verdict"] == "rolled-back", settled
         assert settled["residue"]["clean"] is True, settled
-        assert world.remaining() == []
+        assert settled["world"] == "model"
+        assert world.remaining() == []   # the model world, not the file
+
+
+def test_settle_refuses_while_the_apply_still_holds_its_lock(tmp_path):
+    """A settle run while the apply is still in its probes would report a
+    participant rolled back just before the conductor approves it."""
+    state = tmp_path / "state" / "1"
+    report = apply_federation_plan(
+        load_federation_plan(_probe_plan(tmp_path, 1, beta_code=0)),
+        state_dir=state)
+    assert report["verdict"] == deploy.DEPLOY_APPLIED, report
+    wal = state / "alpha.wal"
+    before = wal.read_bytes()
+    with federation_apply._generation_lock(state) as held:
+        assert held is True
+        settled = deploy.settle_stranded(str(wal),
+                                         str(state / "decision.jsonl"))
+    assert settled["verdict"] == deploy.UNRESOLVED, settled
+    assert "is held" in settled["decision"]
+    assert wal.read_bytes() == before, "settle wrote while the lock was held"
+    # once the lock is free the same call settles against the approval
+    assert deploy.settle_stranded(
+        str(wal), str(state / "decision.jsonl"))["verdict"] == "rolled-forward"

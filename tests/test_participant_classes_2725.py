@@ -360,7 +360,9 @@ def test_a_stranded_peer_settles_against_the_conductor_abort_decision(
 def test_a_committed_participant_settles_back_under_an_abort_decision(tmp_path):
     """A real participant runs its whole commit, so its WAL carries
     `activation-complete`; the conductor then decides ABORT and dies before
-    sending it. The record decides: roll back, every referent removed."""
+    sending it. The record decides the verdict: roll back. The inverses run
+    against the world handed in, here the model, which ends empty; the
+    participant's own world file is not what settle rewrites."""
     from revl import _deploy_participant as dp
     from revl.recovery import DictWorld
 
@@ -382,4 +384,5 @@ def test_a_committed_participant_settles_back_under_an_abort_decision(tmp_path):
     settled = deploy.settle_stranded(str(wal), str(decision), world=world)
     assert settled["verdict"] == "rolled-back", settled
     assert settled["residue"]["clean"] is True, settled
-    assert world.remaining() == []
+    assert settled["world"] == "model"
+    assert world.remaining() == []   # the model world, not db.world.json
