@@ -7,7 +7,10 @@ cannot map (0x9d, for instance) raised `UnicodeDecodeError` out of the capture
 instead of producing a result, exactly as it did inside `revl test` before
 #2977. Nothing about what revl hands a child changes that: revl writes every
 child's input as UTF-8, so every child's output is read back as UTF-8 too, and
-a byte that is not valid UTF-8 is shown as U+FFFD rather than raised.
+a byte that is not valid UTF-8 is shown as U+FFFD rather than raised. A Python
+child before 3.15 on Windows would still write its pipes in the locale
+codepage, so the seam also sets `PYTHONIOENCODING=utf-8` in the child's
+environment unless the caller already set it; other programs ignore it.
 
 Every capture outside the test driver goes through `run`/`popen` here, so the
 rule is stated once instead of at each call site. `src/revl/test.py` keeps its
@@ -17,6 +20,7 @@ top of the same decoding (#2977).
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 #: What a child's output is decoded as; revl writes every child's input as UTF-8.
@@ -26,12 +30,27 @@ ENCODING = "utf-8"
 #: printable on a console that has no encoding for it either.
 ERRORS = "replace"
 
+#: The variable that makes a Python child write its pipes as UTF-8. A Python
+#: before 3.15 on Windows writes them in the locale codepage unless told
+#: otherwise, so the seam tells it. Every other program ignores it.
+PYTHON_STDIO_ENV = "PYTHONIOENCODING"
+
+
+def _child_env(env):
+    """The child's environment with `PYTHONIOENCODING` set when the caller did
+    not set it. Never mutates the caller's mapping: `None` (inherit) becomes a
+    copy of this process's environment, a mapping becomes a copy of itself."""
+    merged = dict(os.environ if env is None else env)
+    merged.setdefault(PYTHON_STDIO_ENV, ENCODING)
+    return merged
+
 
 def run(argv, **kwargs) -> subprocess.CompletedProcess:
     """`subprocess.run` with the child's output decoded as UTF-8, never strictly."""
     kwargs.setdefault("text", True)
     kwargs.setdefault("encoding", ENCODING)
     kwargs.setdefault("errors", ERRORS)
+    kwargs["env"] = _child_env(kwargs.get("env"))
     return subprocess.run(argv, **kwargs)
 
 
@@ -40,4 +59,5 @@ def popen(argv, **kwargs) -> subprocess.Popen:
     kwargs.setdefault("text", True)
     kwargs.setdefault("encoding", ENCODING)
     kwargs.setdefault("errors", ERRORS)
+    kwargs["env"] = _child_env(kwargs.get("env"))
     return subprocess.Popen(argv, **kwargs)

@@ -153,22 +153,85 @@ def test_capture_ignores_a_non_utf8_preferred_encoding():
         (0, f"before{CHECK}{REPLACEMENT}after\n", f"err{REPLACEMENT}tail\n"))
 
 
-def _text_mode_calls():
-    """Every `subprocess` call in `src/revl` that asks for text mode."""
-    for path in sorted((ROOT / "src" / "revl").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "subprocess"
-                    and node.func.attr in {"run", "Popen", "check_output", "call"}):
-                continue
-            keywords = {keyword.arg: keyword.value for keyword in node.keywords
-                        if keyword.arg}
-            text = keywords.get("text") or keywords.get("universal_newlines")
-            if isinstance(text, ast.Constant) and text.value is True:
-                yield path, node, keywords
+_SUBPROCESS_CALLS = {"run", "Popen", "check_output", "call", "check_call"}
+_ALLOWED_ERRORS = {"replace", "surrogateescape"}
+
+
+def _subprocess_names(tree):
+    """`(module aliases, function aliases)` that this module binds to subprocess.
+
+    `import subprocess [as X]` binds a module alias; `from subprocess import
+    run/Popen/... [as Y]` binds a function alias. Resolved per module, so a
+    renamed import cannot hide a call from the guard.
+    """
+    modules, functions = set(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    modules.add(alias.asname or "subprocess")
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for alias in node.names:
+                if alias.name in _SUBPROCESS_CALLS:
+                    functions[alias.asname or alias.name] = alias.name
+    return modules, functions
+
+
+def _is_dunder_import_subprocess(node):
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "__import__" and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "subprocess")
+
+
+def _is_subprocess_call(node, modules, functions):
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in functions
+    if isinstance(func, ast.Attribute) and func.attr in _SUBPROCESS_CALLS:
+        value = func.value
+        return ((isinstance(value, ast.Name) and value.id in modules)
+                or _is_dunder_import_subprocess(value))
+    return False
+
+
+def _not_false(node):
+    return not (isinstance(node, ast.Constant) and not node.value)
+
+
+def _text_mode_calls_in(source):
+    """Every subprocess call in `source` that is in text mode.
+
+    Text mode is `text=` or `universal_newlines=` that is not a constant
+    false, and equally `encoding=` or `errors=` alone, which turns it on too.
+    """
+    tree = ast.parse(source)
+    modules, functions = _subprocess_names(tree)
+    for node in ast.walk(tree):
+        if not _is_subprocess_call(node, modules, functions):
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords
+                    if keyword.arg}
+        text = any(_not_false(keywords[name]) for name in ("text", "universal_newlines")
+                   if name in keywords)
+        if text or "encoding" in keywords or "errors" in keywords:
+            yield node, keywords
+
+
+def _offenders_in(source, where):
+    offenders = []
+    for node, keywords in _text_mode_calls_in(source):
+        encoding = keywords.get("encoding")
+        errors = keywords.get("errors")
+        at = f"{where}:{node.lineno}"
+        if not (isinstance(encoding, ast.Constant) and encoding.value == "utf-8"):
+            offenders.append(f"{at}: text mode does not name encoding=\"utf-8\"")
+        if not (isinstance(errors, ast.Constant) and errors.value in _ALLOWED_ERRORS):
+            offenders.append(f"{at}: text mode does not name a constant errors= "
+                             f"in {sorted(_ALLOWED_ERRORS)}")
+    return offenders
 
 
 def test_no_text_capture_leaves_the_decoding_to_the_host():
@@ -176,20 +239,54 @@ def test_no_text_capture_leaves_the_decoding_to_the_host():
 
     A capture written as `subprocess.run(..., text=True)` would put the host's
     locale back in charge of whether a result survives, which is the defect in
-    one line. Every text-mode subprocess call here must name its encoding and
-    its error handling; `rg -n "text=True" src/revl | rg -v encoding` is the
-    same statement in the issue's words, and it lists nothing.
+    one line. Every text-mode subprocess call here, under whatever name the
+    module imported subprocess by, must name its encoding and a constant
+    error handling that never raises.
     """
     offenders = []
-    for path, node, keywords in _text_mode_calls():
-        encoding = keywords.get("encoding")
-        errors = keywords.get("errors")
-        where = f"{path.relative_to(ROOT)}:{node.lineno}"
-        if not (isinstance(encoding, ast.Constant) and encoding.value == "utf-8"):
-            offenders.append(f"{where}: text mode does not name encoding=\"utf-8\"")
-        if not isinstance(errors, ast.Constant):
-            offenders.append(f"{where}: text mode does not name errors=")
+    for path in sorted((ROOT / "src" / "revl").rglob("*.py")):
+        offenders += _offenders_in(path.read_text(encoding="utf-8"),
+                                   str(path.relative_to(ROOT)))
     assert offenders == []
+
+
+_BARE_SPELLINGS = {
+    "from-import alias": (
+        "from subprocess import run as _r\n"
+        "_r(['x'], capture_output=True, text=True)\n"),
+    "__import__ with strict errors": (
+        "__import__('subprocess').run(['x'], capture_output=True,\n"
+        "                             encoding='utf-8', errors='strict')\n"),
+    "module alias": (
+        "import subprocess as _sp\n"
+        "_sp.run(['x'], capture_output=True, text=True)\n"),
+    "encoding alone turns text mode on": (
+        "import subprocess\n"
+        "subprocess.check_output(['x'], encoding='cp1252')\n"),
+    "non-constant errors": (
+        "import subprocess\n"
+        "subprocess.run(['x'], text=True, encoding='utf-8', errors=mode)\n"),
+    "universal_newlines": (
+        "from subprocess import Popen\n"
+        "Popen(['x'], universal_newlines=True)\n"),
+}
+
+
+def test_the_guard_catches_every_bare_spelling():
+    for label, source in _BARE_SPELLINGS.items():
+        assert _offenders_in(source, "scratch.py"), f"guard missed: {label}"
+
+
+def test_the_guard_passes_the_allowed_shapes():
+    allowed = (
+        "import subprocess\n"
+        "subprocess.run(['x'], capture_output=True)\n"
+        "subprocess.run(['x'], capture_output=True, text=False)\n"
+        "subprocess.run(['x'], text=True, encoding='utf-8',\n"
+        "               errors='surrogateescape')\n"
+        "from subprocess import run as _r\n"
+        "_r(['x'], text=True, encoding='utf-8', errors='replace')\n")
+    assert _offenders_in(allowed, "scratch.py") == []
 
 
 def test_every_module_that_captured_now_uses_the_shared_seam():
@@ -218,3 +315,35 @@ def test_the_seam_names_utf8_and_replacement():
     """The one decoding rule, stated where the static check can read it."""
     assert _childproc.ENCODING == "utf-8"
     assert _childproc.ERRORS in {"replace", "surrogateescape"}
+
+
+def test_the_seam_sets_utf8_stdio_for_a_python_child_without_mutating_the_env():
+    probe = [sys.executable, "-c",
+             "import os; print(os.environ.get('PYTHONIOENCODING', 'unset'))"]
+    before = dict(os.environ)
+    inherited = _childproc.run(probe, capture_output=True, timeout=120)
+    assert inherited.stdout.strip() == ("utf-8" if "PYTHONIOENCODING" not in before
+                                        else before["PYTHONIOENCODING"])
+    assert dict(os.environ) == before
+
+    caller_env = {key: value for key, value in os.environ.items()
+                  if key != "PYTHONIOENCODING"}
+    snapshot = dict(caller_env)
+    given = _childproc.run(probe, capture_output=True, timeout=120, env=caller_env)
+    assert given.stdout.strip() == "utf-8"
+    assert caller_env == snapshot
+
+    own = dict(caller_env, PYTHONIOENCODING="latin-1")
+    kept = _childproc.run(probe, capture_output=True, timeout=120, env=own)
+    assert kept.stdout.strip() == "latin-1"
+
+
+def test_a_real_caller_survives_an_undecodable_byte():
+    """`sandbox_runtime._run` is a converted caller: it must hand back U+FFFD,
+    not raise, when the child prints a byte that is not UTF-8."""
+    from revl import sandbox_runtime
+
+    code, out, err = sandbox_runtime._run(_child(_BAD_BYTE_CHILD), timeout=120)
+
+    assert code == 0
+    _assert_replaced(out, err)

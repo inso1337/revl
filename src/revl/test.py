@@ -140,8 +140,9 @@ def _capture(argv: list, **kwargs) -> subprocess.CompletedProcess:
     The one place the capture's decoding is decided: UTF-8, and a byte that
     cannot be decoded is reported rather than raised.
     """
-    result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                            errors="surrogateescape", **kwargs)
+    result = subprocess.run(argv, capture_output=True, text=True,
+                            encoding="utf-8", errors="surrogateescape",
+                            **kwargs)
     return _captured(list(argv), result.returncode, result.stdout, result.stderr)
 
 
@@ -672,9 +673,9 @@ def _ts_foreground(argv: list, cwd: Path, timeout: int,
     pid IS the group id, and no `getpgid` lookup is needed.
     """
     process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                               errors="surrogateescape", start_new_session=True,
-                               env=env)
+                               stderr=subprocess.PIPE, text=True,
+                               encoding="utf-8", errors="surrogateescape",
+                               start_new_session=True, env=env)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except BaseException:

@@ -514,9 +514,8 @@ NOT_A_RULE = {
     "_childproc": "the one decoding rule (UTF-8, undecodable bytes replaced) "
                   "for the output of every child process revl runs, reached "
                   "from `placement`'s conductor and the per-tier runners "
-                  "(issue #3108). It wraps `subprocess` and raises no "
-                  "refusal: it runs after the frontend has admitted the "
-                  "document, like `sandbox_runtime` and `deploy`.",
+                  "(issue #3108). It wraps `subprocess`, raises no "
+                  "refusal, and no check reads the text it decodes.",
     "synthesize": "`revl synthesize`, a generator rather than a checker.",
     "tee_attestation": "TEE quote verification at run time.",
     "model_schedule": "item 515's model scheduler, reached from `placement`'s "
