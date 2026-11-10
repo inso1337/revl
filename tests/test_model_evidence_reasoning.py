@@ -114,6 +114,36 @@ def test_a_host_that_reports_nothing_is_none_reported():
     assert me.verify(sealed(reasoning=span), KEY).ok
 
 
+def test_a_reported_count_of_zero_with_no_text_is_none_reported():
+    """A model that did not reason reports a reasoning token count of 0 (the
+    provider wrappers carry it). That is a report of no span, not of a hidden
+    one, so it derives `none-reported`, and the record the builder emits for
+    it verifies: `none-reported` carries no count, so the 0 is not kept."""
+    for text in ("", None):
+        span = me.reasoning_span(tokens=0, text=text, origins=["input"])
+        assert span == {"visibility": "none-reported",
+                        "tokens": {"value": None,
+                                   "provenance": "host-reported"},
+                        "digest": None}
+        assert me.verify(sealed(reasoning=span), KEY).ok
+
+
+def test_a_count_above_zero_with_no_text_is_still_hidden():
+    """The boundary of the zero case: one reported token is a span."""
+    span = me.reasoning_span(tokens=1, text="", origins=["input"])
+    assert span["visibility"] == "hidden"
+    assert span["tokens"]["value"] == 1
+    assert me.verify(sealed(reasoning=span), KEY).ok
+
+
+def test_no_count_and_no_text_is_unchanged_and_a_bool_count_is_refused():
+    """None keeps its reading, and `False` is not mistaken for a count of 0."""
+    assert me.reasoning_span(tokens=None, text="",
+                             origins=["input"])["visibility"] == "none-reported"
+    with pytest.raises(ValueError):
+        me.reasoning_span(tokens=False, text="", origins=["input"])
+
+
 def test_a_summary_is_never_inferred_and_carries_its_digest():
     """`summary` is the one value only the host knows: the returned text is a
     summary rather than the span. revl reports it and binds the returned text
@@ -281,6 +311,20 @@ def test_a_none_reported_span_with_a_retained_answer_is_rederivable(tmp_path):
     assert entry["fromRecord"] is True
     assert entry["rederivable"] is True
     assert entry["rederivableReason"] == ""
+
+
+def test_a_zero_count_span_with_a_retained_answer_is_rederivable(tmp_path):
+    """The replay reading of the zero case: a host that reported 0 reasoning
+    tokens is not an opaque span, so the entry is rederivable."""
+    span = me.reasoning_span(tokens=0, text="", origins=["input"])
+    path = _wal(tmp_path, [_decision(0, _retained(reasoning=span))])
+    doc = rm.plan(path, evidence_key=KEY)
+    (entry,) = doc["decisions"]
+    assert entry["reasoningVisibility"] == "none-reported"
+    assert entry["reasoningTokens"] is None
+    assert entry["opaqueReasoning"] is False
+    assert entry["rederivable"] is True
+    assert doc["opaqueSpans"]["count"] == 0
 
 
 def test_an_unretained_answer_is_not_served_from_the_record(tmp_path):

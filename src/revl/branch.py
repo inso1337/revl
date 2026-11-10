@@ -65,7 +65,8 @@ class BranchError(RuntimeError):
 NOT_COMPARABLE = (
     {"axis": "decisionCause",
      "why": "a model decision records the model, usage, latency and attempts "
-            "(item 250 Slice 3a), and since item 517's envelope 3.0 each "
+            "(item 250 Slice 3a) but no prompt/response digest, tool call, "
+            "temperature or seed. Since envelope 3.0 (issue #2808) each "
             "decision says whether the host returned its reasoning span in "
             "full, as a summary, hidden, or not at all, and how many tokens it "
             "reported. A per-entry replay plan names the entries whose "

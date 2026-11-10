@@ -44,7 +44,7 @@ Every member of :data:`BODY_MEMBERS` is REQUIRED and covered by the MAC.
 * ``origins`` — the item 249 origin classes the input carried, drawn from
   :data:`ORIGIN_CLASSES`, which is :mod:`revl.taint`'s own lattice and not a
   second copy of it.
-* ``reasoning`` — how much of the model's reasoning span the host returned
+* ``reasoning``: how much of the model's reasoning span the host returned
   (``full``, ``summary``, ``hidden`` or ``none-reported``), the span's size as
   the host reported it, and a digest of the returned reasoning text only when
   the input's origins permit it. Version 3.0; see "The reasoning span" below.
@@ -136,13 +136,13 @@ whether the model also reasoned in a span the host did not return. Silence
 there reads like a run that had nothing to hide. Version ``3.0`` adds one
 required member, ``reasoning``, with three parts:
 
-* ``visibility`` — ``full`` or ``summary`` when the host returned the span or a
+* ``visibility``: ``full`` or ``summary`` when the host returned the span or a
   summary of it, ``hidden`` when it reported a span without the text, and
   ``none-reported`` when it reported no span at all;
-* ``tokens`` — ``{"value": <non-negative int or None>, "provenance":
+* ``tokens``: ``{"value": <non-negative int or None>, "provenance":
   "host-reported"}``. revl cannot measure the reasoning channel, so the tag is
   the host's own report and not a measurement;
-* ``digest`` — the SHA-256 of the returned reasoning text, and ONLY that. The
+* ``digest``: the SHA-256 of the returned reasoning text, and ONLY that. The
   text itself is never written. Over an input whose ``origins`` carry
   ``secret`` or ``confidential`` the digest is refused, because a digest of
   reasoning derived from such a prompt is the same cross-run confirmation
@@ -257,7 +257,7 @@ Public surface
 ``CrossingSealer(key, route_table)`` — Slice 2: seal at the crossing
 ``reconstruct(record, key)``  — Slice 3: the decision, from the artifact alone
 ``from_wal_record(decision)`` — the evidence riding on a WAL record
-``reasoning_span(**host)``    — the 3.0 ``reasoning`` member from what the host returned
+``reasoning_span(**host)``    - the 3.0 ``reasoning`` member from what the host returned
 ``digest(text)`` / ``key_id(key)``
 """
 
@@ -589,6 +589,16 @@ def key_id(key: bytes) -> str:
                           + bytes(key)).hexdigest()[:16]
 
 
+def _reports_no_span(tokens: Any) -> bool:
+    """True when a host's reasoning token count says no span existed: no count
+    at all, or a count of exactly zero. A bool is not a count, so ``False``
+    is left for :func:`reasoning_span` to refuse."""
+    if tokens is None:
+        return True
+    return isinstance(tokens, int) and not isinstance(tokens, bool) \
+        and tokens == 0
+
+
 def reasoning_span(*, tokens: Optional[int] = None,
                    text: Optional[str] = None,
                    visibility: Optional[str] = None,
@@ -597,8 +607,11 @@ def reasoning_span(*, tokens: Optional[int] = None,
 
     ``visibility`` omitted is derived from the observed fields, which is the
     common case a host body has: returned reasoning text is ``full``, a
-    reported token count with no text is ``hidden``, and neither is
-    ``none-reported``. A host that returned a SUMMARY says so by passing
+    reported token count above zero with no text is ``hidden``, and neither
+    is ``none-reported``. A reported count of zero with no text is also
+    ``none-reported``: a model that did not reason reports 0, and that is a
+    report of no span, not of a hidden one. The member then carries no count,
+    because ``none-reported`` carries neither a size nor a digest. A host that returned a SUMMARY says so by passing
     ``visibility="summary"`` because only it knows the text was a summary, not
     the span.
 
@@ -613,10 +626,11 @@ def reasoning_span(*, tokens: Optional[int] = None,
     if visibility is None:
         if returned:
             visibility = "full"
-        elif tokens is not None:
-            visibility = "hidden"
-        else:
+        elif _reports_no_span(tokens):
             visibility = "none-reported"
+            tokens = None
+        else:
+            visibility = "hidden"
     if visibility not in REASONING_VISIBILITIES:
         raise ValueError(
             f"reasoning visibility {visibility!r} is outside "
@@ -889,7 +903,7 @@ def _check_reasoning(reasoning: Any, discloses: bool) -> Optional[Verdict]:
       reported, so neither exists;
     * ``hidden`` cannot carry a digest: there was no returned text to digest;
     * ``full`` and ``summary`` DID return text, so over a non-disclosing input
-      the digest is required rather than optional — otherwise the record is
+      the digest is required rather than optional; otherwise the record is
       silent about the one thing it could bind;
     * over a ``secret`` or ``confidential`` input the digest is REFUSED, for the
       same reason a content-addressed ``prompt_binding`` is: a digest of
@@ -1202,7 +1216,8 @@ def seal(key: bytes, *, component: str, step_index: int, role: str,
     ``reasoning`` (version 3.0) has no default either, and for the same reason:
     a record that omits it reads exactly like a run that had nothing to hide.
     A host that reported no span says ``none-reported``, which
-    :func:`reasoning_span` builds when given neither a token count nor text.
+    :func:`reasoning_span` builds when given no text and no token count, or a
+    count of zero.
     """
     if retained is not None and not retain_content:
         raise EvidenceRefused(

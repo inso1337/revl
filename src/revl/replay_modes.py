@@ -325,9 +325,9 @@ def _reading(record: dict, key) -> dict:
 
     Per-entry replay status (issue #2808, Slice 2) rides beside the reading:
 
-    * ``fromRecord`` — the recorded ANSWER can be served without calling the
+    * ``fromRecord``: the recorded ANSWER can be served without calling the
       model. True only when a verified record retained its completion text.
-    * ``rederivable`` — the answer can be reproduced from the prompt. A
+    * ``rederivable``: the answer can be reproduced from the prompt. A
       ``hidden`` or ``summary`` reasoning span makes it false, with the reason
       named, because part of the decision was not visible. A pre-3.0 record is
       also not claimed rederivable: it does not say whether an opaque span
