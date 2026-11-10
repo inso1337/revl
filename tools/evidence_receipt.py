@@ -34,10 +34,13 @@ ref unless ``--overlay`` names a file explicitly.
 Both sides run in a `git archive` export, never in the live worktree. What
 binds the head run to the head sha is that sha itself: it is read once, before
 either run, and the head export is `git archive <head sha>`, so the head side
-sees only committed files. An ignored or untracked file in the worktree (a
-generated module, a local build) cannot turn a red-before into a green-after,
-and a commit or checkout made while a run is in flight does not change what
-either run measured.
+sees only committed files, and a commit or checkout made while a run is in
+flight does not change what either run measured. Each run's PYTHONPATH is the
+export's own ``src`` and root, then the ambient PYTHONPATH with every entry
+that resolves to the repository or a path under it dropped; entries outside
+the repository (a third-party runtime) are kept. So an ignored or untracked
+file in the worktree (a generated module, a local build) cannot be imported by
+either run and cannot turn a red-before into a green-after.
 
 Exit status: 0 receipt printed, 1 the claim is rejected (no red-before, or no
 green-after), 2 the receipt cannot be produced (bad ref, uncommitted or
@@ -303,7 +306,12 @@ def _stop(proc: subprocess.Popen) -> None:
             proc.kill()
     except (ProcessLookupError, PermissionError):
         pass
-    proc.communicate()
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        # The group is already killed; a pipe still held open by a process
+        # that left it is not worth hanging the refusal for.
+        pass
 
 
 def _run_pytest(python: str, cwd: Path, nodes: list[str],
@@ -343,15 +351,32 @@ def _run_pytest(python: str, cwd: Path, nodes: list[str],
                parse_summary(output))
 
 
-def _pythonpath_for(export: Path) -> str:
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _pythonpath_for(export: Path, repo: Path) -> str:
+    """The export's own paths, then the ambient entries outside the repository.
+
+    An ambient entry that resolves to the repository or under it would let a
+    name the export lacks fall through to the live worktree (an ignored
+    module, an uncommitted build), so it is dropped. A relative entry is
+    resolved against the export, which is the run's working directory.
+    Entries outside the repository, such as a third-party runtime, are kept.
+    """
     parts = []
     src = export / "src"
     if src.is_dir():
         parts.append(str(src))
     parts.append(str(export))
-    existing = os.environ.get("PYTHONPATH")
-    if existing:
-        parts.append(existing)
+    root = os.path.realpath(repo)
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        resolved = os.path.realpath(os.path.join(export, entry))
+        if _inside(resolved, root):
+            continue
+        parts.append(entry)
     return os.pathsep.join(parts)
 
 
@@ -587,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"the node's file {part} is neither at the base ref "
                         "nor overlaid from head")
             base_run = _run_pytest(
-                python, export, nodes, _pythonpath_for(export),
+                python, export, nodes, _pythonpath_for(export, repo),
                 timeout=args.timeout, side="base",
                 label=f"{args.base} ({base_sha[:12]})")
             _check_base(base_run, args.base, base_sha)
@@ -602,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
             head_export.mkdir()
             _export(repo, head_sha, head_export, "head")
             head_run = _run_pytest(
-                python, head_export, nodes, _pythonpath_for(head_export),
+                python, head_export, nodes, _pythonpath_for(head_export, repo),
                 timeout=args.timeout, side="head", label=head_sha[:12])
             _check_head(head_run, head_sha)
             receipt = build_receipt(

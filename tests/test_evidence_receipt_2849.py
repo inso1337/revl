@@ -13,6 +13,7 @@ reader rather than a mock of them.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -78,6 +79,7 @@ _TEST_LOADER = (
     "    assert load() == 1\n")
 _SLEEP_ALWAYS = (
     "import time\n\n\ndef test_double():\n    time.sleep(60)\n")
+_CALC_FROM_GEN = "from gen import K\n\n\ndef double(x):\n    return x * K\n"
 _SLEEP_WHEN_RIGHT = (
     "import time\n\nfrom calc import double\n\n\ndef test_double():\n"
     "    if double(3) == 6:\n        time.sleep(60)\n"
@@ -336,30 +338,104 @@ def test_a_long_cause_is_carried_whole_into_the_receipt(
     assert f"FileNotFoundError: {_LONG_CAUSE}" in text
 
 
-@pytest.mark.parametrize(
-    ("side", "test_text", "seconds"),
-    [("base", _SLEEP_ALWAYS, "1"), ("head", _SLEEP_WHEN_RIGHT, "8")],
-    ids=["base", "head"])
-def test_a_run_that_outlives_the_timeout_is_refused(
-        tmp_path, capsys, side, test_text, seconds):
-    """A hanging run is stopped and refused, on either side, never a receipt.
-
-    The head case leaves the base run (a quick red) room to finish on a loaded
-    machine, so the timeout it reports is the head one.
-    """
+def test_a_base_run_that_outlives_the_timeout_is_refused(tmp_path, capsys):
+    """A hanging run is stopped and refused, never a receipt."""
     repo, base, _head = _repo(
         tmp_path, {"calc.py": _WRONG},
-        {"calc.py": _RIGHT, "tests/test_double.py": test_text})
+        {"calc.py": _RIGHT, "tests/test_double.py": _SLEEP_ALWAYS})
     out = tmp_path / "receipt.md"
 
     started = time.monotonic()
-    code = _run(repo, base, out=out, extra=["--timeout", seconds])
+    code = _run(repo, base, out=out, extra=["--timeout", "1"])
     elapsed = time.monotonic() - started
 
     captured = capsys.readouterr()
     assert code == 2
     assert "TIMED OUT" in captured.err
-    assert f"the {side} run" in captured.err
+    assert "the base run" in captured.err
     assert "Red-before" not in captured.out
     assert not out.exists()
     assert elapsed < 30
+
+
+def test_a_head_run_that_outlives_the_timeout_is_refused(
+        tmp_path, capsys, monkeypatch):
+    """The timeout reaches the head run too.
+
+    Both runs must receive the ``--timeout`` value; that is recorded. The base
+    run (a quick red) is then given 120 seconds so a loaded machine cannot
+    make it the run that times out, and the head run keeps the 2 seconds.
+    """
+    repo, base, _head = _repo(
+        tmp_path, {"calc.py": _WRONG},
+        {"calc.py": _RIGHT, "tests/test_double.py": _SLEEP_WHEN_RIGHT})
+    out = tmp_path / "receipt.md"
+    real_run = receipt._run_pytest
+    asked: dict[str, float] = {}
+
+    def run(*args, timeout, side, **kwargs):
+        asked[side] = timeout
+        if side == "base":
+            timeout = 120.0
+        return real_run(*args, timeout=timeout, side=side, **kwargs)
+
+    monkeypatch.setattr(receipt, "_run_pytest", run)
+
+    code = _run(repo, base, out=out, extra=["--timeout", "2"])
+
+    captured = capsys.readouterr()
+    assert asked == {"base": 2.0, "head": 2.0}
+    assert code == 2
+    assert "TIMED OUT" in captured.err
+    assert "the head run" in captured.err
+    assert "Red-before" not in captured.out
+    assert not out.exists()
+
+
+def test_an_ambient_pythonpath_into_the_worktree_is_dropped(
+        tmp_path, capsys, monkeypatch):
+    """A PYTHONPATH entry naming the repository cannot reach the worktree.
+
+    The head's tracked ``calc.py`` imports a gitignored ``gen.py`` that exists
+    only in the worktree. With the repository on the ambient PYTHONPATH, a
+    name the head export lacks would fall through to the worktree and the
+    head would pass, though the commit errors in a clean checkout.
+    """
+    repo, base, _head = _repo(
+        tmp_path, {".gitignore": "gen.py\n", "calc.py": _WRONG},
+        {"calc.py": _CALC_FROM_GEN, "tests/test_double.py": _DOUBLE})
+    (repo / "gen.py").write_text("K = 2\n", encoding="utf-8")
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+    ambient = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join(filter(None, [str(repo), ambient])))
+    out = tmp_path / "receipt.md"
+
+    code = _run(repo, base, out=out)
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "NOT GREEN" in captured.err
+    assert "head result: PASSED" not in captured.out
+    assert not out.exists()
+
+
+def test_an_ambient_pythonpath_outside_the_repository_is_kept(
+        tmp_path, capsys, monkeypatch):
+    """Entries outside the repository (a third-party runtime) pass through."""
+    repo, base, _head = _repo(
+        tmp_path, {"calc.py": _WRONG},
+        {"calc.py": _CALC_FROM_GEN, "tests/test_double.py": _DOUBLE})
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    (vendor / "gen.py").write_text("K = 2\n", encoding="utf-8")
+    ambient = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join(filter(None, [str(vendor), ambient])))
+
+    code = _run(repo, base)
+
+    text = _receipt_from(capsys)
+    assert code == 0
+    assert "base result: FAILED" in text
+    assert "head result: PASSED" in text

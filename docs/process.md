@@ -131,9 +131,10 @@ The tool refuses rather than invent evidence: `NO RED-BEFORE` when the node
 passes on base, `NOT GREEN` when it does not pass on head, `NO RECEIPT` when
 an export cannot be built, the tree has uncommitted or untracked
 changes, or the test file is not committed, and `TIMED OUT` when a run
-outlives `--timeout` (600 seconds by default). An ignored or untracked file
-in the worktree never reaches either run, and a dirty tree is refused because
-it is not the commit the receipt names. A red produced by mutating the implementation is not a base
+outlives `--timeout` (600 seconds by default). Both runs drop every ambient
+`PYTHONPATH` entry inside the repository and keep the entries outside it, so
+an ignored or untracked file in the worktree cannot be imported by either run.
+A dirty tree is refused because it is not the commit the receipt names. A red produced by mutating the implementation is not a base
 failure and is not a receipt.
 
 ## What an agent does not do
