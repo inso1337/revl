@@ -8689,9 +8689,109 @@ def test_verified_totality_matches_the_reference(admit):
     mutual_short = ("verified fn a(n: Int) -> Int = b(n)\n"
                     "fn b(n: Int) -> Int = a(n)\n")
     plain = "fn recurse(n: Int) -> Int {\n  return recurse(n - 1)\n}\n"
-    for src in (direct, mutual, direct_short, mutual_short):
+    # `_fn_call_graph` walks an `assert` and a pattern `let` too, which the
+    # statement reader behind `FnD.callees` skips: each of these was admitted
+    # by the gate until the edges came from a reader of every statement kind.
+    in_assert = ("verified fn f(n: Int) -> Int {\n"
+                 "  assert f(n) > 0\n  return 0\n}\n")
+    assert_in_if = ("verified fn f(n: Int) -> Int {\n"
+                    "  if (n > 0) { assert f(n) > 0 }\n  return 0\n}\n")
+    mutual_assert = ("verified fn a(n: Int) -> Int {\n"
+                     "  assert b(n) > 0\n  return 0\n}\n"
+                     "fn b(n: Int) -> Int { return a(n) }\n")
+    pattern_let = ("type P = { a: Int }\n"
+                   "verified fn f(n: Int) -> P {\n"
+                   "  let { a } = f(n)\n  return { a: a }\n}\n")
+    for src in (direct, mutual, direct_short, mutual_short, in_assert,
+                assert_in_if, mutual_assert, pattern_let):
         ref_tag, ref_msg = _ref(src)
         assert ref_tag == "G7", (ref_tag, ref_msg)
-        assert admit(src) == "G7|" + ref_msg
+        assert admit(src) == "G7|" + ref_msg, src
     assert _ref(plain) == ("", "")
     assert admit(plain) == ""
+
+
+@pytest.mark.parametrize("src", [
+    "verified fn f(g: (Int) -> Async[Int]) -> Int { return 1 }\n",
+    "pub verified fn f(g: (Int) -> Async[Int]) -> Int = 1\n",
+], ids=["verified", "pub_verified_shorthand"])
+def test_a_verified_fn_takes_no_async_function_parameter(admit, src):
+    # `_validate_declared_types` passes `allow_async_param=not fn.verified`: the
+    # one position that admits an async function type is closed to a verified
+    # fn, under A1 and the type-wellformedness sentence.
+    assert _ref(src)[0] == "A1"
+    _agree(admit, src)
+    plain = src.replace("pub verified ", "").replace("verified ", "")
+    assert _ref(plain) == ("", "")
+    assert admit(plain) == ""
+
+
+# The parse-stage refusals around the two spellings, in the reference's words.
+# Like `PARSE_REFUSED_PROGRAMS` they classify as "OUT:" in the oracle and BAD
+# in the gate, so only the message is compared. `= emit x` is refused by
+# `_lower_pure_expr` rather than the parser, with the same shape.
+GATE_3107_SPELLED = [
+    ("eq_nothing", "fn f(x: Int) -> Int =\n"),
+    ("eq_block", "fn f(x: Int) -> Int = { let y = x\n return y }\n"),
+    ("eq_await", "fn f(x: Int) -> Int = await x\n"),
+    ("eq_emit", "fn f(x: Int) -> Int = emit x\n"),
+    ("eq_nested_emit", "fn f(x: Int) -> Int = 1 + emit x\n"),
+    ("cache_unknown_class", "fn f(x: Int) -> Int cache forever = x\n"),
+    ("cache_number", "fn f(x: Int) -> Int cache 5 = x\n"),
+    ("verified_type", "verified type T = { a: Int }\n"),
+    ("verified_alone", "verified\n"),
+    ("verified_number", "verified 5\n"),
+]
+
+
+@pytest.mark.parametrize("name,src", GATE_3107_SPELLED,
+                         ids=[n for n, _ in GATE_3107_SPELLED])
+def test_the_spellings_around_3107_are_refused_in_the_reference_words(
+        admit, name, src):
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "OUT:" + ref_msg, (name, ref_tag)
+    assert admit(src) == "BAD|" + ref_msg, name
+
+
+# Programs the reference ADMITS and the gate refuses, named so the difference
+# cannot read as agreement. The convention is `NATIVE_GATE_GAPS` and
+# `GENERIC_VARIANT_LOUD_REFUSALS` in tests/test_selfhost_compile.py: each entry
+# is pinned to the gate's exact verdict, fails the day either side changes, and
+# is DELETED rather than reworded when the gate follows the reference.
+#   * `match_arm_recursion`: `_fn_call_graph` does not enter a `match`, so the
+#     reference sees no edge there; the gate's edge walk (`calls_in`) does.
+#   * `endorse_before_verified`, `verified_before_endorse`: the gate does not
+#     read the `endorse[...]` declaration slot in either position.
+#   * `endorse_expression_in_verified`: the gate's expression reader cannot read
+#     an `endorse[...](...)` expression, so the verified fn's edge set may be
+#     short and the totality question is left open, loudly.
+GATE_3107_LOUD_REFUSALS: dict[str, tuple[str, str]] = {
+    "match_arm_recursion": (
+        "type C = Red | Green\n"
+        "verified fn f(c: C) -> Int = match c { Red => f(Green), Green => 0 }\n",
+        "G7|verified fn `f` is not total: it participates in direct or mutual "
+        "recursion (verified totality, syntax-2.0 §7)"),
+    "endorse_before_verified": (
+        "endorse[web] verified fn f(n: Int) -> Int = n\n",
+        "BAD|unexpected token at top level"),
+    "verified_before_endorse": (
+        "verified endorse[web] fn f(n: Int) -> Int = n\n",
+        "BAD|unexpected declaration"),
+    "endorse_expression_in_verified": (
+        "verified fn f(n: Int) -> Int {\n"
+        "  let s = endorse[web](n, reason = \"ok\")\n  return n\n}\n",
+        "UNSUPPORTED|the totality of verified fn `f` is not checked by the "
+        "self-host gate: a statement of fn `f` is one its call-graph reader "
+        "does not read"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(GATE_3107_LOUD_REFUSALS))
+def test_a_known_3107_loud_refusal_is_still_open(admit, name):
+    src, pinned = GATE_3107_LOUD_REFUSALS[name]
+    assert _ref(src) == ("", ""), f"{name}: the reference no longer admits it"
+    got = admit(src)
+    assert got == pinned, (
+        f"{name}: recorded as {pinned!r}, now {got!r}. If the gate now admits "
+        f"it, DELETE the entry; if the refusal merely changed shape, read it "
+        f"before rewriting it.")

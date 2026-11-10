@@ -583,7 +583,7 @@ def test_native_ir_preserves_function_visibility(lower_to_ir):
 
 
 def test_native_ir_preserves_visibility_of_a_pub_verified_fn(lower_to_ir):
-    """Issue #3107 — the `verified` prefix sits between `pub` and `fn`, so a
+    """Issue #3107: the `verified` prefix sits between `pub` and `fn`, so a
     walker that only looked for `pub fn` reached the `fn` with the visibility
     already consumed and stamped the function PRIVATE. The reference's
     `fn_decl(True, verified)` keeps it public.

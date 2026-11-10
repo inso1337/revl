@@ -286,11 +286,15 @@ use "./types.rvl" { WfR, check_type_wellformed, int_str }
 // `verified` marks a `verified fn` (syntax-2.0 §7). It carries no IR and no
 // emission meaning; `_check_verified_totality` reads it off `Program.fn_decls`
 // and is mirrored over this flag by `verified_totality_refusal`.
+// `totCalls` is the fn's edge set in that check's call graph, read by
+// `tot_block` over every statement kind `_fn_call_graph` walks, and
+// `totOpaque` is true when some statement of the body could not be read, so
+// the edge set may be short (both empty/false for an extern; issue #3107).
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
              params: List[ParamN], body: List[Stmt], cachePure: Bool,
              line: Int, caps: List[Str],
-             inv: Str, isVerified: Bool }
+             inv: Str, isVerified: Bool, totCalls: List[Str], totOpaque: Bool }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -1305,7 +1309,8 @@ fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
           cps: List[Str], ver: Bool) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
            asyncSlots: slots, asyncParams: aps, params: ps, body: bd, cachePure: false,
-           line: ln, caps: cps, inv: "", isVerified: ver }
+           line: ln, caps: cps, inv: "", isVerified: ver, totCalls: [],
+           totOpaque: false }
 }
 
 fn fnd_with_inv(f: FnD, inv: Str) -> FnD {
@@ -1313,7 +1318,8 @@ fn fnd_with_inv(f: FnD, inv: Str) -> FnD {
            callees: f.callees, asyncSlots: f.asyncSlots,
            asyncParams: f.asyncParams, params: f.params, body: f.body,
            cachePure: f.cachePure,
-           line: f.line, caps: f.caps, inv: inv, isVerified: f.isVerified }
+           line: f.line, caps: f.caps, inv: inv, isVerified: f.isVerified,
+           totCalls: f.totCalls, totOpaque: f.totOpaque }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
@@ -2813,7 +2819,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
 // (the declaration walkers below) keeps `p_fn`'s shape.
 //
 // The body is a brace block OR the reference's `= <pure expr>` shorthand
-// (`fn_decl`). The `=` is unambiguous — a block body opens with `{` — and it
+// (`fn_decl`). The `=` is unambiguous (a block body opens with `{`), and it
 // desugars to a single `return`, the identical AST a `{ return <expr> }` body
 // produces, so the statement layer, the two fixed points and every guarantee
 // check see one shape. Without this arm the gate refused every expression-bodied
@@ -2830,10 +2836,17 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
     return mk_step(bad_prog(pg, "parameter `".concat(dmiss)
       .concat("` has no default but follows a defaulted parameter")), rti)
   }
+  let cbad = cache_class_miss(ts, rti)
+  if (cbad != "") { return mk_step(bad_prog(pg, cbad), rti) }
   if (atk(ts, rti, "=")) {
+    let shbad = eq_body_miss(ts, rti)
+    if (shbad != "") { return mk_step(bad_prog(pg, shbad), rti) }
     let sh = expr_at(ts, rti + 1)
-    if (is_bad(sh.e)) {
-      return mk_step(bad_prog(pg, "bad expression body of fn"), rti)
+    // `_lower_pure_expr` has no arm for an `emit`, so the reference refuses one
+    // anywhere in the body. The brace spelling `{ return emit x }` is a
+    // separate, older gap; this spelling does not widen it.
+    if (expr_has_emit(sh.e)) {
+      return mk_step(bad_prog(pg, "unexpected expression in fn body"), rti)
     }
     let ebody: List[Stmt] = [mkstmt("return", sh.e)]
     return mk_step(push_fn(pg, { name: nm, isEmExtern: false,
@@ -2843,7 +2856,8 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
                                 asyncParams: async_params_of(ps.ps),
                                 params: ps.ps, body: ebody, cachePure: cachePure,
                                 line: tkc(ts, i).line, caps: [], inv: "",
-                                isVerified: ver }), sh.i)
+                                isVerified: ver, totCalls: calls_in(sh.e, []),
+                                totOpaque: false }), sh.i)
   }
   if (!atk(ts, rti, "{")) {
     return mk_step(bad_prog(pg, "expected { after fn signature"), rti)
@@ -2853,6 +2867,7 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
     return { pg: bad_prog(pg, "unbalanced braces in fn body"), i: ts.length() }
   }
   let body = p_stmts(ts, rti + 1, bend - 1, [])
+  let tot = tot_block(ts, rti, [])
   return mk_step(push_fn(pg, { name: nm, isEmExtern: false,
                               isAsyncExtern: false,
                               callees: body_callees(body, 0, []),
@@ -2860,7 +2875,210 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
                               asyncParams: async_params_of(ps.ps),
                               params: ps.ps, body: body, cachePure: cachePure,
                               line: tkc(ts, i).line, caps: [], inv: "",
-                              isVerified: ver }), bend)
+                              isVerified: ver, totCalls: tot.calls,
+                              totOpaque: !tot.ok }), bend)
+}
+
+// `_cache_clause`'s refusal of a class word it does not know, for a `cache` at
+// `k`, or "". The class is `pure`, `capability` or `external`; the reference
+// names the token with python's `repr`, which only a word round-trips here
+// (`py_word_repr`), so any other token keeps the generic refusal below.
+fn cache_class_miss(ts: List[Token], k: Int) -> Str {
+  if (!ati(ts, k, "cache")) { return "" }
+  if (atw(ts, k + 1, "pure") || ati(ts, k + 1, "capability")
+      || ati(ts, k + 1, "external")) { return "" }
+  let found = py_word_repr(tkc(ts, k + 1))
+  if (found == "") { return "" }
+  return "`cache` must name a class — `pure`, `capability`, or `external` — found "
+    .concat(found)
+}
+
+// The reference's `{tok.value!r}` for a word, a plain decimal integer or the
+// end of the file, or "" for a token whose python value this reader does not
+// spell (a float, a string, an integer with a leading zero or a separator).
+fn py_word_repr(t: Token) -> Str {
+  if (t.kind == "eof") { return "None" }
+  if ((t.kind == "ident") || (t.kind == "kw")) { return "'".concat(t.text).concat("'") }
+  if ((t.kind != "int") || (t.text == "")) { return "" }
+  if ((t.text.length() > 1) && (t.text.charAt(0) == "0")) { return "" }
+  var k = 0
+  while (k < t.text.length()) {
+    if ("0123456789".indexOf(t.text.charAt(k)) < 0) { return "" }
+    k += 1
+  }
+  return t.text
+}
+
+// The parse refusal of an `= <expr>` body whose `=` sits at `eq`, or "" when
+// the expression reads. `_reject_equals_block_body` comes first: an `= {` whose
+// next token can only open a statement is a block body written after `=`.
+// Otherwise the reference's own expression error (`sg_expr`), and the generic
+// sentence only where that reader cannot name one.
+fn eq_body_miss(ts: List[Token], eq: Int) -> Str {
+  if (atk(ts, eq + 1, "{") && sg_stmt_only(tkc(ts, eq + 2))) {
+    return "a body written with `=` takes a single expression, not statements"
+  }
+  if (!is_bad(expr_at(ts, eq + 1).e)) { return "" }
+  let r = sg_expr(ts, eq + 1)
+  if (r.i == 0 - 1) { return r.why }
+  return "bad expression body of fn"
+}
+
+// Whether an `emit` sits anywhere in `e`, arrows, arms and template parts
+// included.
+fn expr_has_emit(e: Expr) -> Bool {
+  return match e {
+    IntLit(_)   => false,
+    FloatLit(_) => false,
+    StrLit(_)   => false,
+    BoolLit(_) => false,
+    NullLit    => false,
+    Var(_)     => false,
+    Hole(_)    => false,
+    Asset(_)    => false,
+    Bad(_)     => false,
+    Bin(b)     => expr_has_emit(b.l) || expr_has_emit(b.r),
+    Un(u)      => expr_has_emit(u.e),
+    Emit(u)    => true,
+    Call(c)    => expr_has_emit(c.target) || exprs_have_emit(c.args, 0),
+    Field(f)   => expr_has_emit(f.target),
+    OptField(f) => expr_has_emit(f.target),
+    OptCall(c) => expr_has_emit(c.target) || exprs_have_emit(c.args, 0),
+    Index(x)   => expr_has_emit(x.target) || expr_has_emit(x.idx),
+    If(x)      => expr_has_emit(x.cond) || expr_has_emit(x.then_) || expr_has_emit(x.els),
+    Rec(r)     => inits_have_emit(r.fields, 0),
+    Lst(l)     => exprs_have_emit(l.items, 0),
+    Arrow(a)   => expr_has_emit(a.body),
+    Match(m)   => expr_has_emit(m.scrut) || arms_have_emit(m.arms, 0),
+    Templ(t)   => parts_have_emit(t.parts, 0),
+    RecUpd(r)  => expr_has_emit(r.base) || inits_have_emit(r.upds, 0),
+  }
+}
+
+fn exprs_have_emit(xs: List[Expr], i: Int) -> Bool {
+  if (i >= xs.length()) { return false }
+  return expr_has_emit(xs[i]) || exprs_have_emit(xs, i + 1)
+}
+
+fn inits_have_emit(xs: List[InitN], i: Int) -> Bool {
+  if (i >= xs.length()) { return false }
+  return expr_has_emit(xs[i].value) || inits_have_emit(xs, i + 1)
+}
+
+fn arms_have_emit(xs: List[ArmN], i: Int) -> Bool {
+  if (i >= xs.length()) { return false }
+  return expr_has_emit(xs[i].body) || arms_have_emit(xs, i + 1)
+}
+
+fn parts_have_emit(xs: List[PartN], i: Int) -> Bool {
+  if (i >= xs.length()) { return false }
+  return expr_has_emit(xs[i].e) || parts_have_emit(xs, i + 1)
+}
+
+// ------------------------------------------------ verified totality edges
+//
+// Issue #3107. `_fn_call_graph` walks every statement of a fn body: `let` and
+// a pattern `let`, an assignment, `return`, `if` (condition and both arms),
+// `while` and `for` (head and body), an expression statement and `assert`.
+// `p_stmts` reads only the statements its other walks need and skips the rest
+// (an `assert`, a pattern `let`), so `FnD.callees` can miss an edge, and a
+// verified fn recursing through one was admitted. This reader follows the
+// reference's statement grammar (`fn_stmt`, as `sg_fstmt` does) and collects
+// the named callees of every expression it holds. `ok` is false where a
+// statement or an expression could not be read: the edges are then a lower
+// bound, which `verified_totality_refusal` never takes for an answer.
+type TotR = { calls: List[Str], i: Int, ok: Bool }
+
+fn tot_no(acc: List[Str]) -> TotR { return { calls: acc, i: 0, ok: false } }
+
+fn tot_expr(ts: List[Token], i: Int, acc: List[Str]) -> TotR {
+  let r = expr_at(ts, i)
+  if (is_bad(r.e)) { return tot_no(acc) }
+  return { calls: calls_in(r.e, acc), i: r.i, ok: true }
+}
+
+// `( <expr> )` at `i`: an `if` or `while` condition.
+fn tot_cond(ts: List[Token], i: Int, acc: List[Str]) -> TotR {
+  if (!atk(ts, i, "(")) { return tot_no(acc) }
+  let c = tot_expr(ts, i + 1, acc)
+  if (!c.ok || !atk(ts, c.i, ")")) { return tot_no(c.calls) }
+  return { calls: c.calls, i: c.i + 1, ok: true }
+}
+
+// A `{ stmt* }` block at `i`, or one statement.
+fn tot_block(ts: List[Token], i: Int, acc: List[Str]) -> TotR {
+  if (!atk(ts, i, "{")) { return tot_stmt(ts, i, acc) }
+  var j = i + 1
+  var calls = acc
+  while (true) {
+    while (atk(ts, j, ";")) { j += 1 }
+    if (atk(ts, j, "}")) { return { calls: calls, i: j + 1, ok: true } }
+    if ((j >= ts.length()) || atk(ts, j, "eof")) { return tot_no(calls) }
+    let s = tot_stmt(ts, j, calls)
+    if (!s.ok) { return s }
+    calls = s.calls
+    j = s.i
+  }
+  return tot_no(calls)
+}
+
+fn tot_if(ts: List[Token], i: Int, acc: List[Str]) -> TotR {
+  let c = tot_cond(ts, i + 1, acc)
+  if (!c.ok) { return c }
+  let th = tot_block(ts, c.i, c.calls)
+  if (!th.ok || !atw(ts, th.i, "else")) { return th }
+  if (atw(ts, th.i + 1, "if")) { return tot_if(ts, th.i + 1, th.calls) }
+  return tot_block(ts, th.i + 1, th.calls)
+}
+
+// `let`/`var` at `i`: a record or list pattern, or a name with an optional
+// `: Type`, then `= <expr>`.
+fn tot_let(ts: List[Token], i: Int, acc: List[Str]) -> TotR {
+  var j = i + 1
+  if (atk(ts, j, "{") || atk(ts, j, "[")) {
+    j = sg_group_end(ts, j)
+    if (j < 0) { return tot_no(acc) }
+  } else {
+    if (!atk(ts, j, "ident")) { return tot_no(acc) }
+    j += 1
+    if (atk(ts, j, ":")) {
+      let t = sg_type(ts, j + 1)
+      if (t.i < 0) { return tot_no(acc) }
+      j = t.i
+    }
+  }
+  if (!atk(ts, j, "=")) { return tot_no(acc) }
+  return tot_expr(ts, j + 1, acc)
+}
+
+fn tot_stmt(ts: List[Token], i: Int, acc: List[Str]) -> TotR {
+  if (atw(ts, i, "let") || atw(ts, i, "var")) { return tot_let(ts, i, acc) }
+  if (atw(ts, i, "return")) {
+    if (atk(ts, i + 1, "}")) { return { calls: acc, i: i + 1, ok: true } }
+    return tot_expr(ts, i + 1, acc)
+  }
+  if (atw(ts, i, "if")) { return tot_if(ts, i, acc) }
+  if (atw(ts, i, "while")) {
+    let c = tot_cond(ts, i + 1, acc)
+    if (!c.ok) { return c }
+    return tot_block(ts, c.i, c.calls)
+  }
+  if (atw(ts, i, "for")) {
+    if (!atk(ts, i + 1, "(") || !atk(ts, i + 2, "ident") || !atw(ts, i + 3, "of")) {
+      return tot_no(acc)
+    }
+    let it = tot_expr(ts, i + 4, acc)
+    if (!it.ok || !atk(ts, it.i, ")")) { return tot_no(it.calls) }
+    return tot_block(ts, it.i + 1, it.calls)
+  }
+  if (atw(ts, i, "assert")) { return tot_expr(ts, i + 1, acc) }
+  if (atw(ts, i, "break") || atw(ts, i, "continue")) {
+    return { calls: acc, i: i + 1, ok: true }
+  }
+  if (sg_assign_ahead(ts, i)) {
+    return tot_expr(ts, atk(ts, i + 1, "=") ? i + 2 : i + 3, acc)
+  }
+  return tot_expr(ts, i, acc)
 }
 
 // Issue #2397: defaults are trailing (`parser.py::fn_decl`, item 187). The
@@ -3950,6 +4168,16 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (atw(ts, i, "pub") && atw(ts, i + 1, "verified") && atw(ts, i + 2, "fn")) {
     let sv = p_fn_v(ts, i + 2, pg, true)
     return p_top(ts, sv.i, sv.pg)
+  }
+  // `verified` before anything else is the parser's refusal at the next token,
+  // after the `endorse[...]` slot it reads there; a slot is not read here, so
+  // that spelling keeps the generic refusal below.
+  if (atw(ts, i, "verified") && !ati(ts, i + 1, "endorse")) {
+    let vf = py_word_repr(tkc(ts, i + 1))
+    if (vf != "") {
+      return p_top(ts, skip_line(ts, i),
+                   bad_prog(pg, "expected `fn` after `verified`, found ".concat(vf)))
+    }
   }
   if (at_pub_prefix(ts, i)) { return p_top(ts, i + 1, pg) }
   if (t.text == "use" || t.text == "test" || t.text == "type") {
@@ -14040,10 +14268,10 @@ type WfAcc = { fns: List[WfSite], exts: List[WfSite] }
 
 // A module `fn` parameter is the one v1 position that admits an async function
 // type (item 92): the reference passes `allow_async_param=not fn.verified`.
-// A `verified fn` heads its declaration with the `verified` keyword, which this
-// walk steps over with every other unrecognised head, so such a declaration
-// contributes no site at all and the gate withholds there.
+// The walk steps over a `verified` prefix to the `fn` it heads (issue #3107),
+// so a `verified fn`'s parameters are sites too, with no async allowance.
 fn wf_fn_sites(ts: List[Token], i: Int, retFirst: Bool) -> List[WfSite] {
+  let asyncOk = !atw(ts, i - 1, "verified")
   let p0 = fn_params_i(ts, i)
   let tps = explicit_tparams(ts, i)
   let pe = close_paren(ts, p0 - 1)
@@ -14056,9 +14284,9 @@ fn wf_fn_sites(ts: List[Token], i: Int, retFirst: Bool) -> List[WfSite] {
     if (pe != 0 - 1) {
       ret = wf_ret_from(ts, pe, tkc(ts, i).line, tps, ret)
     }
-    return wf_params_from(ts, p0, true, tps, ret)
+    return wf_params_from(ts, p0, asyncOk, tps, ret)
   }
-  let ps = wf_params_from(ts, p0, true, tps, [])
+  let ps = wf_params_from(ts, p0, asyncOk, tps, [])
   if (pe == 0 - 1) { return ps }
   return wf_ret_from(ts, pe, tkc(ts, i).line, tps, ps)
 }
@@ -18707,7 +18935,7 @@ fn fb_params_tys(ps: List[ParamN], i: Int, acc: List[Bind],
 // `eq` is the index of the `=` of an expression-bodied module `fn` (issue
 // #3107), or -1 for a brace body. `lo`/`hi` are the brace body's statement span
 // and are 0/0 in the expression form, whose single `pure_expr` is typed directly
-// by `fb_function` — the reference desugars it to one `return`, so the return
+// by `fb_function`: the reference desugars it to one `return`, so the return
 // position is the whole body.
 type FbSpan = { ps: List[ParamN], ret: Str, lo: Int, hi: Int, next: Int,
                 ok: Bool, name: Str, line: Int, retDecl: Str, eq: Int }
@@ -18733,7 +18961,7 @@ fn fb_span(ts: List[Token], i: Int) -> FbSpan {
     reti = tr.i
   }
   if (ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")) { reti += 2 }
-  // issue #3107: `fn f(...) -> T = expr` — the reference's expression body.
+  // issue #3107: `fn f(...) -> T = expr`, the reference's expression body.
   if (atk(ts, reti, "=")) {
     let e = expr_at(ts, reti + 1)
     if (is_bad(e.e)) { return fb_no_span() }
@@ -21407,15 +21635,32 @@ fn model_council_refusal(ts: List[Token]) -> Verd {
 //
 // Issue #3107, docs/design/457 §1 phase 7: `_check_verified_totality` is the
 // FIRST thing `_lower_fns` does. A `verified fn` may not participate in a cycle
-// of the direct-call graph — direct or mutual recursion — because the checker
+// of the direct-call graph (direct or mutual recursion), because the checker
 // cannot prove structural descent, so the conservative rule refuses every
-// cycle. `FnD.callees` is the same edge set `_fn_call_graph` builds (a named
-// call's callee, arrows and loop bodies included); `seen` holds the names whose
-// successors were already queued, so the walk terminates on any graph.
-fn callees_of(fs: List[FnD], n: Str, i: Int) -> List[Str] {
-  if (i >= fs.length()) { return [] }
-  if (fs[i].name == n) { return fs[i].callees }
-  return callees_of(fs, n, i + 1)
+// cycle. `FnD.totCalls` is the edge set `_fn_call_graph` builds, read over the
+// same statement kinds (`tot_block`); the graph is keyed by name, so two
+// declarations of one name pool their edges as the reference's `graph[name]`
+// does. `seen` holds the names whose successors were already queued, so the
+// walk terminates on any graph.
+//
+// The gate's expression walk (`calls_in`) is WIDER than the reference's
+// `collect_expr`, which does not enter a `match`, an interpolation, an `emit` or
+// a `?.` chain. A cycle through one of those is refused here and admitted by the
+// reference: a loud difference, recorded in tests/test_selfhost_lower.py
+// (`GATE_3107_LOUD_REFUSALS`), never a silent one.
+fn callees_of(fs: List[FnD], n: Str, i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= fs.length()) { return acc }
+  if (fs[i].name == n) { return callees_of(fs, n, i + 1, push_all(acc, fs[i].totCalls, 0)) }
+  return callees_of(fs, n, i + 1, acc)
+}
+
+fn fn_opaque(fs: List[FnD], n: Str) -> Bool {
+  var i = 0
+  while (i < fs.length()) {
+    if ((fs[i].name == n) && fs[i].totOpaque) { return true }
+    i += 1
+  }
+  return false
 }
 
 fn fn_reaches_self(fs: List[FnD], start: Str, work: List[Str],
@@ -21424,21 +21669,51 @@ fn fn_reaches_self(fs: List[FnD], start: Str, work: List[Str],
   let n = work[k]
   if (n == start) { return true }
   if (contains(seen, n)) { return fn_reaches_self(fs, start, work, seen, k + 1) }
-  return fn_reaches_self(fs, start, push_all(work, callees_of(fs, n, 0), 0),
+  return fn_reaches_self(fs, start, push_all(work, callees_of(fs, n, 0, []), 0),
                          seen.push(n), k + 1)
+}
+
+// The first fn reachable from `start` (itself included) whose body the edge
+// reader could not read through, or "". Without a cycle over the edges it did
+// read, such a fn leaves the answer open: an edge the reference sees may be
+// the one missing.
+fn fn_reaches_opaque(fs: List[FnD], start: Str) -> Str {
+  var work: List[Str] = [start]
+  var seen: List[Str] = []
+  var k = 0
+  while (k < work.length()) {
+    let n = work[k]
+    if (!contains(seen, n)) {
+      if (fn_opaque(fs, n)) { return n }
+      seen = seen.push(n)
+      work = push_all(work, callees_of(fs, n, 0, []), 0)
+    }
+    k += 1
+  }
+  return ""
 }
 
 // The first `verified` fn, in declaration order, that reaches itself. The
 // message is the reference's byte for byte (`lower.py::_check_verified_totality`),
 // and the line is the `fn` keyword's, which is the line the reference reports.
+// Where the cycle question is open (`fn_reaches_opaque`), the gate refuses
+// under UNSUPPORTED rather than admit a program the reference may refuse.
 fn verified_totality_refusal(pg: Prog) -> Verd {
   var i = 0
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
-    if (f.isVerified && fn_reaches_self(pg.fns, f.name, f.callees, [f.name], 0)) {
-      return mk_verd(tagged("G7", "verified fn `".concat(f.name)
-        .concat("` is not total: it participates in direct or mutual recursion "
-          .concat("(verified totality, syntax-2.0 §7)"))), f.line)
+    if (f.isVerified) {
+      if (fn_reaches_self(pg.fns, f.name, callees_of(pg.fns, f.name, 0, []), [f.name], 0)) {
+        return mk_verd(tagged("G7", "verified fn `".concat(f.name)
+          .concat("` is not total: it participates in direct or mutual recursion "
+            .concat("(verified totality, syntax-2.0 §7)"))), f.line)
+      }
+      let op = fn_reaches_opaque(pg.fns, f.name)
+      if (op != "") {
+        return mk_verd(tagged("UNSUPPORTED", "the totality of verified fn `".concat(f.name)
+          .concat("` is not checked by the self-host gate: a statement of fn `")
+          .concat(op).concat("` is one its call-graph reader does not read")), f.line)
+      }
     }
     i += 1
   }
@@ -21533,7 +21808,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   let sav = svc_arg_at(ts, 0)
   if (sav.v != "") { return { done: true, refs: [sav] } }
   // issue #3107: `_lower_fns` opens with `_check_verified_totality`, before its
-  // per-fn binding walk, so the phase sits here — after the `_refuse_*`
+  // per-fn binding walk, so the phase sits here: after the `_refuse_*`
   // validations above and ahead of the fn binding discipline below.
   let vtv = verified_totality_refusal(pg)
   if (vtv.v != "") { return { done: true, refs: [vtv] } }

@@ -176,7 +176,7 @@ pub const NATIVE_SOURCE: &str = "revl-native";
 /// The self-host gate's tag for "my own parser could not read this". It is a
 /// FRONTIER statement wearing a refusal's clothes — it says the self-host front
 /// end does not cover the construct (`commutative service`, `endorse[...] fn`,
-/// ...), not that the reference would refuse the program — so it is never shown.
+/// ...), not that the reference would refuse the program, so it is never shown.
 /// A construct the native gate DOES decide is mirrorable instead, and
 /// `extra_diagnostics` adds it only when the reference reported no row with the
 /// same code (`verified fn` totality, issue #3107, is one such row).
