@@ -19,7 +19,11 @@ pin the two-run case the way the issue reports it:
   finished;
 * the same crash driven through `revl recover --wal` (the CLI an operator or a
   supervisor script trusts) takes the roll-back branch;
-* a prior opening's `commit-approved` does not roll the later crash forward;
+* a prior opening's `commit-approved` does not roll the later crash forward,
+  and that approved opening's owed discharge is still rolled forward;
+* an opening an earlier recover already rolled back is not rolled back again
+  once a later opening committed on top of it;
+* a compiled tier's repeated `header` is an opening boundary too;
 * both openings completing still reads CLEAN, so the change is per-opening
   scoping and not a blanket "a reused WAL is dirty".
 """
@@ -41,7 +45,9 @@ if str(BACKEND) not in sys.path:
 import replay  # noqa: E402
 from revl import wal as wal_core  # noqa: E402
 from revl.__main__ import main  # noqa: E402
-from revl.recovery import DictWorld, recover  # noqa: E402
+from revl.recovery import DictWorld, recover, render  # noqa: E402
+from revl.run_wasm import (  # noqa: E402
+    wal_activation_complete, wal_descriptor, wal_discharge, wal_header)
 
 #: A non-empty IR is what makes a REOPENED log write its `generation` record
 #: (replay.WriteAheadLog.open): the boundary this issue is about. A bare log
@@ -128,7 +134,9 @@ def test_prior_opening_commit_approved_does_not_commit_the_later_crash(tmp_path)
     committed session and its interval must never be rolled back. Run 2 reused
     the file and crashed mid-activation. The prior opening's approval must not
     roll Run 2's uncommitted write forward as discharged; recover rolls Run 2
-    back and leaves the committed interval's transaction alone."""
+    back and leaves the committed interval's transaction alone. Run 1 is still
+    a committed session (item 245, Decision 3), so its missing discharge is
+    rolled forward, as a single-opening recover of Run 1 would have done."""
     path = str(tmp_path / "approved.wal")
     wal = replay.WriteAheadLog(path, ir=IR, generation=1).open()
     wal.record_discharge_descriptor(
@@ -147,8 +155,102 @@ def test_prior_opening_commit_approved_does_not_commit_the_later_crash(tmp_path)
     assert report.get("transactionalRolledBack", []) == []
     # ... and the later crash is not rolled FORWARD as a committed session.
     assert report.get("rolledForwardDischarge") is None
+    # Run 1's owed discharge IS rolled forward: its approval is a commit.
+    descriptor = next(r for r in wal_core.read_wal(path)["records"]
+                      if r.get("record") == "discharge-descriptor")
     after = wal_core.read_wal(path)["records"]
-    assert not any(r.get("record") == "discharge" for r in after)
+    assert [r["discharged"] for r in after
+            if r.get("record") == "discharge"] == [[descriptor["seq"]]]
+    [window] = report["priorWindows"]
+    assert window["opening"] == 1
+    assert window["rolledForwardDischarge"] == [descriptor["seq"]]
+    assert "committed earlier opening 1" in render(report)
+
+    # a second recover reads the same verdict and appends nothing more.
+    again = recover(path, world=DictWorld())
+    assert again["verdict"] == "rolled-back"
+    assert again["priorWindows"][0]["rolledForwardDischarge"] == []
+    assert sum(r.get("record") == "discharge"
+               for r in wal_core.read_wal(path)["records"]) == 1
+
+
+def test_an_opening_already_recovered_is_not_rolled_back_again(tmp_path):
+    """Three openings on one file. Run 1 crashes mid-activation and recover
+    rolls it back; Run 2 writes data.txt again and completes; Run 3 crashes
+    mid-activation. Only Run 3 is this crash's work: replaying Run 1's inverse
+    again would delete the data.txt Run 2 committed."""
+    path = str(tmp_path / "three.wal")
+    wal = replay.WriteAheadLog(path, ir=IR, generation=1).open()
+    wal.record_boundary("Store", "write data.txt", resource="file:data.txt",
+                        inverse_op=_unlink("data.txt"))
+    wal.close()   # <-- run 1 crashes
+    first = recover(path, world=DictWorld())
+    assert [(e["op"]["method"], e["op"]["args"]) for e in first["ran"]] == [
+        ("unlink", ["data.txt"])]
+
+    wal = replay.WriteAheadLog(path, ir=IR, generation=2).open()
+    wal.record_boundary("Store", "write data.txt", resource="file:data.txt",
+                        inverse_op=_unlink("data.txt"))
+    wal.commit_activation(["Store"])
+    wal.commit_run()
+    wal.close()   # run 2 completes
+
+    wal = replay.WriteAheadLog(path, ir=IR, generation=3).open()
+    wal.record_boundary("Store", "write data3.txt", resource="file:data3.txt",
+                        inverse_op=_unlink("data3.txt"))
+    wal.close()   # <-- run 3 crashes
+
+    assert len(wal_core.opening_intervals(
+        wal_core.read_wal(path)["records"])) == 3
+    report = recover(path, world=DictWorld())
+    assert report["verdict"] == "rolled-back"
+    assert [(e["op"]["method"], e["op"]["args"]) for e in report["ran"]] == [
+        ("unlink", ["data3.txt"])]
+
+
+def _compiled_tier_opening(path: str, seq: int, row: str, *,
+                           completes: bool) -> None:
+    """One opening the way the go, java and rust sinks write it when REVL_WAL
+    already exists: append, stamp a fresh `header`, restart seq at 0."""
+    lines = [wal_header(), wal_descriptor(seq, "db", "delete", row)]
+    if completes:
+        lines += [wal_discharge([seq]), wal_activation_complete()]
+    with open(path, "a", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(json.dumps(line) + "\n")
+
+
+def test_a_repeated_header_is_an_opening_boundary(tmp_path):
+    """Issue #3147 on the compiled tiers. Run 1 completes, Run 2 appends to
+    the same REVL_WAL with its own `header` (no `generation` record, seq from 0)
+    and crashes. Run 1's marker must not roll Run 2 forward, and Run 1's
+    `discharge [0]` must not read as discharging Run 2's seq 0."""
+    path = str(tmp_path / "compiled.wal")
+    _compiled_tier_opening(path, 0, "row#1", completes=True)
+    _compiled_tier_opening(path, 0, "row#2", completes=False)
+
+    loaded = wal_core.read_wal(path)
+    assert loaded["complete"] is False
+    assert len(wal_core.opening_intervals(loaded["records"])) == 2
+    assert loaded == replay.WriteAheadLog.read(path)
+
+    report = recover(path, world=DictWorld())
+    assert report["verdict"] == "rolled-back"
+    assert [e["referent"] for e in report["transactionalRolledBack"]] == [
+        "db:row#2"]
+    assert [e["seq"] for e in report["transactionalRolledBack"]] == [0]
+    assert not report.get("dischargedSkipped")
+
+
+def test_a_single_header_wal_still_reads_as_one_opening(tmp_path):
+    """The counterpart: one compiled-tier opening that completed is one
+    interval and rolls forward, exactly as before."""
+    path = str(tmp_path / "single.wal")
+    _compiled_tier_opening(path, 0, "row#1", completes=True)
+    loaded = wal_core.read_wal(path)
+    assert loaded["complete"] is True
+    assert all(r.get("record") != "header" for r in loaded["records"])
+    assert recover(path, world=DictWorld())["verdict"] == "rolled-forward"
 
 
 def test_reused_wal_where_both_runs_complete_still_reads_clean(tmp_path):

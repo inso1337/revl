@@ -3268,6 +3268,12 @@ class WriteAheadLog:
                 ) from None
             kind = entry.get("record")
             if kind == "header":
+                if header:
+                    # issue #3147: a REPEATED header is a later opening's
+                    # boundary (a compiled tier appending to REVL_WAL); kept
+                    # in the record list, in step with revl.wal.read_wal.
+                    complete = False
+                    records.append(entry)
                 header = entry
                 version = header.get("walVersion")
                 if version not in SUPPORTED_WAL_VERSIONS:

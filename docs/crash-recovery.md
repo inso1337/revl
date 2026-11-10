@@ -238,7 +238,7 @@ the write-ahead discipline). Three record shapes:
  "label": "file_host", "within": {"seq": 4, "component": "Agent",
                                   "label": "tickets.file", "process": "agent"}, …}
 
-// 3. activation marker — present iff THIS opening's activation finished
+// 3. activation marker: present iff THIS opening's activation finished
 //    cleanly (a later opening's `generation` record starts the next opening's
 //    marker, issue #3147). NOT the end of the log: the WAL stays open for the
 //    whole run, so steady-state effects (below) are appended AFTER this line.
@@ -521,16 +521,25 @@ the exit status, and section 5c how to recover against the real world.
 that restarts under the same `--wal` path reuses it the same way. A later
 opening that is opened with a composition writes a `generation` record before
 its first effect (section 5c; a bare reopen records no boundary, so its file
-still reads as one opening), and the earlier opening's `activation-complete`
-and `commit-approved` prove only that the EARLIER opening finished. They are
-scoped to their own opening:
+still reads as one opening). The go, java and rust sinks append to an existing
+`REVL_WAL` with a second `header` instead, and a repeated `header` is read as
+the same boundary. The earlier opening's `activation-complete` and
+`commit-approved` prove only that the EARLIER opening finished. They are scoped
+to their own opening:
 
 - the LATEST opening's own `activation-complete` rolls forward; its own
   `commit-approved` rolls the approved-to-discharged window forward;
 - otherwise the latest opening is rolled back like any mid-activation crash;
-- a roll-back walks every opening that never committed (a crash-looping service
-  leaves one per restart); an opening that did commit is committed work and is
-  never inverted.
+- a roll-back walks back from the latest opening and stops at the last opening
+  that committed: several crashed openings in a row (a crash-looping service
+  leaves one per restart) are all rolled back, but an uncommitted opening
+  BEFORE a committed one is not, because an earlier recover already rolled it
+  back or the committed opening ran on top of it. An opening that did commit is
+  committed work and is never inverted;
+- an EARLIER opening that crashed in the approved-to-discharged window is a
+  committed session: its missing `discharge` is rolled forward and its owed
+  flushes are reported (under `priorWindows`), next to the latest opening's
+  verdict.
 
 So the reported crash of a later run mid-activation is `ROLLED-BACK` even
 though the file still carries the prior run's marker, and its uncommitted

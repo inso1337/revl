@@ -356,20 +356,29 @@ def resolve_crossing(path: str, seq: int) -> None:
 COMMITTING_RECORDS = ("activation-complete", "commit-approved")
 
 
+#: The records that START a later opening of a reused WAL: the py writer's
+#: ``generation`` record, and a repeated ``header`` from a compiled tier (the
+#: first header is never in the record list, see :func:`read_wal`).
+OPENING_BOUNDARIES = ("generation", "header")
+
+
 def opening_intervals(records: list) -> list:
     """The records each OPENING of a WAL file owns, in order (issue #3147).
 
     A WAL opened more than once -- a later run appending to the same ``--wal``
     path, or a ``--watch`` reload -- starts a later opening with a
-    ``generation`` record when that opening carries an IR (#641/#642).
-    Everything from that record until the next one belongs to that opening; the
-    records before the first belong to the first opening, whose generation the
-    header carried. A single-opening WAL yields one interval, so every
-    single-run caller reads exactly as before.
+    ``generation`` record when that opening carries an IR (#641/#642). A
+    compiled tier (go, java, rust) that appends to an existing ``REVL_WAL``
+    stamps a second ``header`` instead, which :func:`read_wal` keeps in the
+    record list for exactly this split. Everything from either boundary until
+    the next one belongs to that opening; the records before the first belong
+    to the first opening, whose generation the header carried. A
+    single-opening WAL yields one interval, so every single-run caller reads
+    exactly as before.
     """
     intervals: list = [[]]
     for record in records:
-        if record.get("record") == "generation":
+        if record.get("record") in OPENING_BOUNDARIES:
             intervals.append([])
         intervals[-1].append(record)
     return intervals
@@ -469,6 +478,15 @@ def read_wal(path: str) -> dict:
                     f"{path}` recovers all of them; read one process's WAL by "
                     f"its own path.")
             if kind == "header":
+                if header:
+                    # issue #3147: the go, java and rust sinks append to an
+                    # existing REVL_WAL and stamp a fresh `header` (seq from 0)
+                    # instead of a `generation` record. A REPEATED header is
+                    # therefore a later opening's boundary: keep it in the
+                    # record list for `opening_intervals` and reset `complete`
+                    # exactly as a `generation` record does.
+                    complete = False
+                    records.append(entry)
                 header = entry
                 _check_version(header, path)
             elif kind == "activation-complete":
