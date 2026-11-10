@@ -472,10 +472,12 @@ def evolve(
 # proposer's biases, so a probe may order candidates and may never admit one.
 # This hook is that one direction and only that one.
 #
-#   * a candidate whose row names a first dangerous crossing, newly refuses a
-#     recorded crossing, or regraded fewer crossings than the record holds (or
-#     the record holds none), is DEFERRED: `probe_order` returns it in
-#     `deferred` and `evolve_ordered` does not offer it to the Gate;
+#   * a candidate whose row names a first dangerous crossing, or whose row
+#     newly refuses a recorded crossing, is DEFERRED: `probe_order` returns it
+#     in `deferred` and `evolve_ordered` does not offer it to the Gate;
+#   * a candidate whose answerable row has a coverage gap (it regraded fewer
+#     crossings than the record holds, or the record holds none) is DEMOTED:
+#     it is still offered, after every candidate without a gap;
 #   * a candidate with a clean row, or with no row at all (not answerable),
 #     keeps its place and is admitted by the Gate and nothing else;
 #   * a clean row never admits. `probe_order` never calls the Gate, and
@@ -494,19 +496,24 @@ def probe_row_is_adverse(row: Optional[dict]) -> bool:
 
     Adverse means the recorded run crossed a boundary this candidate would not
     be permitted to cross: a first dangerous crossing, or any newly refused
-    recorded crossing. An answerable row with a coverage gap is adverse too: a
-    row that regraded fewer crossings than the record holds, or a record with
-    no crossings, read `newlyRefused 0` without checking the candidate against
-    them, so it is not a clean row (`counterfactual.row_coverage_gap`). A row
-    that is absent or not answerable is NOT adverse; it carries no evidence
-    either way and ordering must not turn silence into a deferral."""
+    recorded crossing. A row that is absent or not answerable is NOT adverse;
+    it carries no evidence either way and ordering must not turn silence into a
+    deferral. A row with a coverage gap is not adverse either: it is demoted in
+    the order (`probe_row_is_demoted`), never deferred."""
     if not row:
         return False
     if row.get("firstDangerousCrossing"):
         return True
-    if int(row.get("newlyRefused") or 0) > 0:
-        return True
-    if row.get("answerable") is False:
+    return int(row.get("newlyRefused") or 0) > 0
+
+
+def probe_row_is_demoted(row: Optional[dict]) -> bool:
+    """Whether one probe row demotes its candidate: an answerable row with a
+    coverage gap (`counterfactual.row_coverage_gap`). Such a row regraded fewer
+    crossings than the record holds, or the record holds none, so its
+    `newlyRefused 0` was not checked against them. An absent or not-answerable
+    row is not demoted."""
+    if not row or row.get("answerable") is False:
         return False
     return row_coverage_gap(row)
 
@@ -526,8 +533,12 @@ def probe_order(candidates: list[Candidate],
 
     One `probe(candidate)` call per candidate, in the order given, so the
     caller can batch a probe report over the same compositions. A candidate
-    with an adverse row is returned in `deferred`; every other candidate keeps
-    its original relative order in `ordered`. `rows` is positional, one entry
+    with an adverse row is returned in `deferred`. `ordered` holds every other
+    candidate in two groups: first the candidates whose row is not demoted
+    (an answerable row with no coverage gap, or an absent or not-answerable
+    row), then the candidates whose answerable row has a coverage gap
+    (`probe_row_is_demoted`). Inside each group the input order is kept, so
+    the order is stable. `rows` is positional, one entry
     per candidate in the order given, each `{"candidate": probe_identity,
     "row": row}`, so two equal candidates keep two rows rather than one
     overwriting the other.
@@ -537,13 +548,19 @@ def probe_order(candidates: list[Candidate],
     if not isinstance(candidates, list):
         raise TypeError("probe_order takes a list of candidates")
     ordered: list[Candidate] = []
+    demoted: list[Candidate] = []
     deferred: list[Candidate] = []
     rows: list[dict] = []
     for candidate in candidates:
         row = probe(candidate)
         rows.append({"candidate": probe_identity(candidate), "row": row})
-        (deferred if probe_row_is_adverse(row) else ordered).append(candidate)
-    return {"ordered": ordered, "deferred": deferred, "rows": rows}
+        if probe_row_is_adverse(row):
+            deferred.append(candidate)
+        elif probe_row_is_demoted(row):
+            demoted.append(candidate)
+        else:
+            ordered.append(candidate)
+    return {"ordered": ordered + demoted, "deferred": deferred, "rows": rows}
 
 
 def evolve_ordered(

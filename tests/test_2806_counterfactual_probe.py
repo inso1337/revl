@@ -40,7 +40,7 @@ from revl.counterfactual import (  # noqa: E402
     PROBE_ROW_FIELDS, candidate_hash, probe, probe_row, render_probe)
 from revl.evolve_loop import (  # noqa: E402
     Candidate, evolve_ordered, probe_identity, probe_order,
-    probe_row_is_adverse)
+    probe_row_is_adverse, probe_row_is_demoted)
 
 # ---------------------------------------------------------------------------
 # Fixtures: one recording, two candidates, one alternate policy.
@@ -72,6 +72,11 @@ WIDE = NARROW.replace(
 #: widened candidate reaches. The narrow candidate is admitted and no recorded
 #: crossing is refused.
 ALLOW_NARROW = "component Agent may reach sink_cap, metrics_cap\n"
+
+#: The narrow candidate with the recorded `sink.shout` crossing removed, the
+#: usual fix for a dangerous crossing: it regrades one of the two recorded
+#: crossings and does not declare the other.
+PARTIAL = NARROW.replace("      emit sink.shout(msg)\n", "")
 
 #: A candidate that declares none of the recorded crossings: it has no `Agent`
 #: component, so neither recorded crossing is regraded against it.
@@ -117,7 +122,7 @@ def _fixtures(tmp_path) -> dict:
     wal = _write_wal(tmp_path / "incident.wal")
     paths = {}
     for name, text in (("narrow", NARROW), ("wide", WIDE),
-                       ("unrelated", UNRELATED)):
+                       ("unrelated", UNRELATED), ("partial", PARTIAL)):
         p = tmp_path / f"{name}.rvl"
         p.write_text(text, encoding="utf-8")
         paths[name] = str(p)
@@ -281,7 +286,8 @@ def test_a_candidate_that_declares_no_recorded_crossing_is_a_coverage_gap(
         tmp_path):
     """A candidate that declares none of the recorded crossings regrades none
     of them and newly refuses none. That row was checked against nothing, so
-    the report and the adverse test mark it instead of reading it as clean."""
+    the report marks it and the order demotes it, instead of reading it as
+    clean; it is never deferred, because a gap is not evidence against it."""
     fx = _fixtures(tmp_path)
     row = probe_row(fx["wal"], fx["policy"], [fx["unrelated"]])
 
@@ -290,7 +296,9 @@ def test_a_candidate_that_declares_no_recorded_crossing_is_a_coverage_gap(
     assert row["undeclared"] == 2
     assert row["newlyRefused"] == 0
     assert row["firstDangerousCrossing"] is None
-    assert probe_row_is_adverse(row) is True
+    assert row["coverageGap"] is True
+    assert probe_row_is_adverse(row) is False
+    assert probe_row_is_demoted(row) is True
 
     text = render_probe(probe(fx["wal"], fx["policy"], [[fx["unrelated"]]]))
     assert "COVERAGE GAP: 0 of 2 recorded crossings regraded" in text
@@ -299,24 +307,33 @@ def test_a_candidate_that_declares_no_recorded_crossing_is_a_coverage_gap(
     # The positive control: a row that regraded every crossing is not marked.
     narrow = probe_row(fx["wal"], fx["policy"], [fx["narrow"]])
     assert probe_row_is_adverse(narrow) is False
+    assert probe_row_is_demoted(narrow) is False
+    assert narrow["coverageGap"] is False
     assert "COVERAGE GAP" not in render_probe(
         probe(fx["wal"], fx["policy"], [[fx["narrow"]]]))
 
 
-def test_a_record_with_no_crossing_is_a_coverage_gap(tmp_path):
-    fx = _fixtures(tmp_path)
+def _empty_wal(tmp_path) -> str:
     empty = tmp_path / "empty.wal"
     empty.write_text("\n".join(json.dumps(line) for line in (
         {"record": "header", "walVersion": 1, "generation": 1,
          "guarantee": "at-least-once"},
         {"record": "activation-complete", "components": ["Agent"],
          "generation": 1})) + "\n", encoding="utf-8")
-    row = probe_row(str(empty), fx["policy"], [fx["narrow"]])
+    return str(empty)
+
+
+def test_a_record_with_no_crossing_is_a_coverage_gap(tmp_path):
+    fx = _fixtures(tmp_path)
+    empty = _empty_wal(tmp_path)
+    row = probe_row(empty, fx["policy"], [fx["narrow"]])
 
     assert row["recordedCrossings"] == 0
     assert row["firstDangerousCrossing"] is None
-    assert probe_row_is_adverse(row) is True
-    text = render_probe(probe(str(empty), fx["policy"], [[fx["narrow"]]]))
+    assert row["coverageGap"] is True
+    assert probe_row_is_adverse(row) is False
+    assert probe_row_is_demoted(row) is True
+    text = render_probe(probe(empty, fx["policy"], [[fx["narrow"]]]))
     assert "COVERAGE GAP: the record holds no crossing" in text
 
 
@@ -531,3 +548,80 @@ def test_the_budget_is_shared_across_the_ordered_list():
     assert len(offered) == 2
     assert [a.candidate for a in short.attempts] == candidates[:2]
     assert short.unoffered == [candidates[2]]
+
+
+def _file_candidate(path: str) -> Candidate:
+    return Candidate(sources={path: Path(path).read_text(encoding="utf-8")})
+
+
+def _real_probe(wal: str, policy: str):
+    def run(candidate):
+        return probe_row(wal, policy, list(candidate.sources))
+    return run
+
+
+def test_removing_the_dangerous_crossing_is_offered_after_a_clean_candidate(
+        tmp_path):
+    """The candidate that removes `sink.shout` regrades one of two recorded
+    crossings. It is demoted behind the fully regraded clean candidate, never
+    deferred, and the Gate is offered both."""
+    fx = _fixtures(tmp_path)
+    partial, narrow = (_file_candidate(fx["partial"]),
+                       _file_candidate(fx["narrow"]))
+    real = _real_probe(fx["wal"], fx["policy"])
+    row = real(partial)
+    assert (row["regraded"], row["undeclared"], row["newlyRefused"]) == (1, 1, 0)
+
+    order = probe_order([partial, narrow], real)
+    assert order["ordered"] == [narrow, partial]
+    assert order["deferred"] == []
+
+    def gate(sources_json, manifest):
+        return _refusal()
+
+    result = evolve_ordered([partial, narrow], real, budget=2, admit=gate,
+                            proposer=lambda packet: packet.candidate)
+    assert [a.candidate for a in result.attempts] == [narrow, partial]
+    assert result.deferred == []
+
+
+def test_an_empty_record_defers_nobody(tmp_path):
+    fx = _fixtures(tmp_path)
+    narrow, wide = _file_candidate(fx["narrow"]), _file_candidate(fx["wide"])
+    offered = []
+
+    def gate(sources_json, manifest):
+        offered.append(sources_json)
+        return _refusal()
+
+    result = evolve_ordered(
+        [narrow, wide], _real_probe(_empty_wal(tmp_path), fx["policy"]),
+        budget=2, admit=gate, proposer=lambda packet: packet.candidate)
+    assert result.deferred == []
+    assert result.all_deferred is False
+    assert [a.candidate for a in result.attempts] == [narrow, wide]
+    assert len(offered) == 2
+
+
+def test_a_gap_row_and_a_clean_row_order_the_same_either_way():
+    clean, gap = _candidate("clean"), _candidate("gap")
+    rows = {probe_identity(clean): _row(),
+            probe_identity(gap): {**_row(), "regraded": 1, "undeclared": 1}}
+
+    def probe(candidate):
+        return rows[probe_identity(candidate)]
+
+    assert probe_order([clean, gap], probe)["ordered"] == [clean, gap]
+    assert probe_order([gap, clean], probe)["ordered"] == [clean, gap]
+
+
+def test_the_json_row_carries_the_coverage_gap(tmp_path):
+    fx = _fixtures(tmp_path)
+    code, out, _ = _run_cli([
+        "replay", fx["wal"], "--under", fx["policy"],
+        "--candidate", fx["narrow"], "--candidate", fx["partial"],
+        "--probe", "--json"])
+    assert code == 0
+    rows = json.loads(out)["rows"]
+    assert [row["coverageGap"] for row in rows] == [False, True]
+    assert [row["newlyRefused"] for row in rows] == [0, 0]

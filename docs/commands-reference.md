@@ -812,7 +812,8 @@ nothing, the same offline-reader contract as `revl branch` and `revl compare`.
   declare, the newly refused and newly allowed counts, the first dangerous
   crossing and the bounds. A row that regraded fewer crossings than the record
   holds, or a record with no crossings, is marked as a coverage gap rather than
-  read as clean. It is ordering evidence
+  read as clean: a `COVERAGE GAP` line in the text report and `coverageGap:
+  true` in the `--json` row. It is ordering evidence
   only: a clean row admits nothing and a refused admission does not fail the
   command, which exits 0 whenever the report is produced.
 - `--json` - machine-readable output.

@@ -258,8 +258,9 @@ attempt history.
   `candidate_digest` and the original brief.
 - **bounded rounds**: a failed round ends the run and keeps the last retained
   component; `budget` and `max_rounds` are validated and fixed before the run.
-- **probe ordering**: a candidate with a newly refused row, or a row with a
-  coverage gap, is deferred and is never offered to the Gate; a clean row only
+- **probe ordering**: a candidate with a newly refused row is deferred and is
+  never offered to the Gate; a row with a coverage gap is demoted, never
+  deferred; a clean row only
   orders, so a clean probe with a refusing Gate is still refused; one result
   carries every offered candidate's attempts and the deferred candidates; the
   budget is shared across the ordered list
@@ -278,12 +279,15 @@ record carries. The probe is evidence only, so the loop uses it in one direction
   candidates keep two rows. The identity is `probe_identity(candidate)`, the
   same hash (`counterfactual.sources_digest`) the CLI probe row carries as
   `candidate` for the same files; it covers the sources only, because the probe
-  never reads the running manifest. A candidate whose row names a first
-  dangerous crossing, whose `newlyRefused` is above zero, or whose row has a
-  coverage gap (it regraded fewer crossings than the record holds, or the record
-  holds none) is deferred; every other candidate keeps its relative order. An
-  absent or not-answerable row is not adverse: silence must not become a
-  deferral.
+  never reads the running manifest. The sources are hashed with their paths as
+  given, so the same bytes under another file name, or under a relative instead
+  of an absolute path, are a different identity. A candidate whose row names a
+  first dangerous crossing, or whose `newlyRefused` is above zero, is deferred.
+  An absent or not-answerable row is not adverse: silence must not become a
+  deferral. A coverage gap (an answerable row that regraded fewer crossings than
+  the record holds, or a record that holds none) demotes a candidate in the
+  order and never defers it: candidates without a gap come first, then the
+  demoted ones, each group in input order.
 - `evolve_ordered(candidates, probe, budget=...)` is the loop that consumes it.
   Deferred candidates are not offered to the Gate; every ordered candidate goes
   through `evolve` unchanged, so the Gate is the only admission. A clean probe

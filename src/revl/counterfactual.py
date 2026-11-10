@@ -466,7 +466,7 @@ def replay_under(wal_path: str, policy_path: str,
 #: ORDERING evidence only; nothing in this module reads it as an admission.
 PROBE_ROW_FIELDS = (
     "candidate", "files", "recordedCrossings", "regraded", "undeclared",
-    "newlyRefused", "newlyAllowed", "firstDangerousCrossing", "admission",
+    "coverageGap", "newlyRefused", "newlyAllowed", "firstDangerousCrossing", "admission",
     "answerable", "bounds",
 )
 
@@ -528,7 +528,8 @@ def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
     (no such component, or no emission with that label), so `regraded` plus
     `undeclared` is `recordedCrossings`. A row with `undeclared` above zero, or
     over a record with no crossings, is a coverage gap (`row_coverage_gap`),
-    not a clean row.
+    not a clean row; `coverageGap` carries that flag in the row itself, so a
+    JSON reader sees it as the text render does.
 
     Both counts are the alternate policy's verdict over the CANDIDATE's declared
     reach at a recorded crossing label, not a comparison with the scope the
@@ -560,6 +561,7 @@ def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
         "answerable": doc["answerable"],
         "bounds": doc["bounds"],
     }
+    row["coverageGap"] = row_coverage_gap(row)
     return {key: row[key] for key in PROBE_ROW_FIELDS}
 
 
