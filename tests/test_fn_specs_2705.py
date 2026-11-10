@@ -290,12 +290,12 @@ def _record(tmp_path, capsys, name: str, source: str):
     return code, src, report
 
 
-def _audit_line(capsys, src, report) -> str:
+def _audit_line(capsys, src, report, fn: str = "clamp") -> str:
     from revl.__main__ import main
 
     assert main(["audit", "--spec-results", str(report), str(src)]) == 0
     return next(line.strip() for line in capsys.readouterr().out.splitlines()
-                if line.strip().startswith("fn clamp ensures"))
+                if line.strip().startswith(f"fn {fn} ensures"))
 
 
 def test_a_recorded_pass_is_not_shown_after_the_body_changes(tmp_path, capsys):
@@ -329,6 +329,70 @@ def test_a_record_without_a_digest_does_not_match(tmp_path, capsys):
     row.pop("digest", None)
     report.write_text(json.dumps(payload), encoding="utf-8")
     assert _audit_line(capsys, src, report).endswith("(last result: unrun)")
+
+
+HELPER = """
+fn helper(x: Int) -> Int { return 0 }
+fn clamp(x: Int) -> Int ensures result <= 0 { return helper(x) }
+"""
+
+
+def test_a_recorded_pass_is_not_shown_after_a_callee_changes(tmp_path, capsys):
+    from revl.__main__ import main
+
+    code, src, report = _record(tmp_path, capsys, "spec.rvl", HELPER)
+    assert code == 0
+    assert _audit_line(capsys, src, report).endswith("(last result: pass)")
+    # the fn's own text is unchanged; only the helper it calls now breaks it
+    src.write_text(HELPER.replace("{ return 0 }", "{ return 5 }"), encoding="utf-8")
+    assert main(["test", str(src)]) == 1
+    capsys.readouterr()
+    assert _audit_line(capsys, src, report).endswith("(last result: unrun)")
+
+
+VARIANTS = """
+type Sh = A(Int) | B
+fn g(s: Sh) -> Int ensures result <= 0 {
+  return match s {
+    A(n) => 0,
+    B => 0,
+    _ => 5,
+  }
+}
+"""
+
+
+def test_a_recorded_pass_is_not_shown_after_a_parameter_type_gains_a_variant(
+        tmp_path, capsys):
+    from revl.__main__ import main
+
+    code, src, report = _record(tmp_path, capsys, "spec.rvl", VARIANTS)
+    assert code == 0
+    assert _audit_line(capsys, src, report, "g").endswith("(last result: pass)")
+    # the fn's text is unchanged; the generator now reaches the `_` arm
+    src.write_text(VARIANTS.replace("A(Int) | B", "A(Int) | B | C"),
+                   encoding="utf-8")
+    assert main(["test", str(src)]) == 1
+    capsys.readouterr()
+    assert _audit_line(capsys, src, report, "g").endswith("(last result: unrun)")
+
+
+def test_a_record_still_matches_when_the_checkout_moves(tmp_path, capsys,
+                                                        monkeypatch):
+    """The digest names the file relative to the project root (the working
+    directory), so a report recorded in one checkout, on CI say, matches an
+    audit of the same tree in another."""
+    first = tmp_path / "one"
+    first.mkdir()
+    monkeypatch.chdir(first)
+    code, _, report = _record(first, capsys, "spec.rvl", CLAMP)
+    assert code == 0
+    second = tmp_path / "two"
+    second.mkdir()
+    (second / "spec.rvl").write_text(CLAMP, encoding="utf-8")
+    monkeypatch.chdir(second)
+    line = _audit_line(capsys, second / "spec.rvl", report)
+    assert line.endswith("(last result: pass)")
 
 
 def test_the_ts_tier_compiles_a_spec_fn_and_ignores_the_clause(tmp_path):

@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 
 from .cardinality import cardinality
 from .distribute import distributability
@@ -232,25 +233,83 @@ def spec_results_from_report(report: dict) -> dict:
     return results
 
 
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _names_in(node, out: set) -> None:
+    """Every identifier spelled in any string of a lowered IR node: a callee, a
+    type in a signature or a payload, a constructor, a field. Reading strings
+    rather than node kinds over-approximates what a node reaches, which only
+    ever makes the digest more sensitive, never less."""
+    if isinstance(node, str):
+        out.update(_IDENT.findall(node))
+    elif isinstance(node, dict):
+        for value in node.values():
+            _names_in(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _names_in(item, out)
+
+
+def _spec_closure(ir: dict, unit: dict) -> dict:
+    """The lowered declarations a spec's result depends on: the generated
+    property, then every function, extern and type declaration reachable from
+    it by name, transitively. A helper the fn calls and a type its parameters
+    reach (a new variant changes what the generator draws) are both in it."""
+    functions = {fn.get("name"): fn for fn in ir.get("functions") or []}
+    externs = {ex.get("name"): ex for ex in ir.get("externs") or []}
+    types = ir.get("types") or {}
+    case_owner = {case.get("name"): name for name, decl in types.items()
+                  for case in decl.get("cases") or []}
+    reached: dict = {"functions": {}, "externs": {}, "types": {}}
+    pending = {"params": unit.get("params"), "body": unit.get("body")}
+    while pending is not None:
+        names: set = set()
+        _names_in(pending, names)
+        pending = None
+        fresh = []
+        for name in sorted(names):
+            for table, section in ((functions, "functions"), (externs, "externs"),
+                                   (types, "types")):
+                if name in table and name not in reached[section]:
+                    reached[section][name] = table[name]
+                    fresh.append(table[name])
+            owner = case_owner.get(name)
+            if owner is not None and owner not in reached["types"]:
+                reached["types"][owner] = types[owner]
+                fresh.append(types[owner])
+        if fresh:
+            pending = fresh
+    return reached
+
+
+def _project_path(path: str | None) -> str | None:
+    """The file a fn is declared in, relative to the project root (the working
+    directory, as `revl composition` uses it), so a report recorded in one
+    checkout matches an audit run in another."""
+    if not path:
+        return None
+    return os.path.relpath(os.path.abspath(path)).replace(os.sep, "/")
+
+
 def function_spec_digest(ir: dict, unit: dict) -> str:
     """The identity a recorded spec result is bound to (issue #2705).
 
-    A sha256 over the function's lowered signature and body (its `functions`
-    entry), the clause, the generated property body and the absolute path of
-    the file the function is declared in. `revl test --report json` records it
-    and `function_specs_table` recomputes it from the program being audited,
-    so a result recorded before the body, the clause or the file changed is
-    never attributed to what the audit is showing now.
+    A sha256 over the clause, the generated property, every lowered function,
+    extern and type declaration the property reaches (the fn's own signature
+    and body, its transitive callees and the types its parameters and callees
+    use) and the path of the fn's file relative to the project root.
+    `revl test --report json` records it and `function_specs_table` recomputes
+    it from the program being audited, so a result recorded before any of
+    those changed is never attributed to what the audit is showing now.
     """
-    function = unit.get("spec_of")
-    entry = next((fn for fn in ir.get("functions") or []
-                  if fn.get("name") == function), None)
-    spec_file = unit.get("spec_file")
     document = {
-        "file": os.path.abspath(spec_file) if spec_file else None,
-        "function": entry,
+        "file": _project_path(unit.get("spec_file")),
+        "function": unit.get("spec_of"),
         "spec": unit.get("spec") or "",
+        "params": unit.get("params"),
         "property": unit.get("body"),
+        "reaches": _spec_closure(ir, unit),
     }
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

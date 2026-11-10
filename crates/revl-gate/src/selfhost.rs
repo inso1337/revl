@@ -11124,6 +11124,9 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut k = ret_at(ts.clone(), ps.i);
+    if ati(&ts, k, "ensures") {
+        return PStep { pg: bad_prog(pg, String::from("a spec (`ensures`) is only supported on a top-level `fn`, not on an extern")), i: skip_line(&ts, k) };
+    }
     let inv = if isAcq { declared_inverse_at(&ts, k) } else { String::from("") };
     while ((((((((k < ts.revl_length()) && (!atw(&ts, k, "service"))) && (!atw(&ts, k, "component"))) && (!atw(&ts, k, "extern"))) && (!atw(&ts, k, "fn"))) && (!atw(&ts, k, "pub"))) && (!atw(&ts, k, "type"))) && (!atk(&ts, k, "eof"))) {
         if atk(&ts, k, "{") {

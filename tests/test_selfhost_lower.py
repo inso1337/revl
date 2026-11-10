@@ -4348,6 +4348,9 @@ component C provides ops: Ops {
 # statement grammar ported the reference's `type_` rule (issue #2396).
 PARSE_REFUSED_PROGRAMS = [
     ("issue 2396: a return arrow with no type", "fn f() -> { }"),
+    # the gate's host-body skip stepped over the clause and admitted it
+    ("issue 2705: a spec on an extern",
+     "extern pure fn f(x: Int) -> Int ensures result == x = @py { return x }"),
 ]
 
 

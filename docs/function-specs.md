@@ -107,12 +107,17 @@ function specs (last recorded result):
   fn min1 ensures result <= 0  (last result: fail)
 ```
 
-Each recorded row carries a `digest`: a sha256 over the function's signature
-and body, the clause and the path of the file it is declared in. The audit
+Each recorded row carries a `digest`: a sha256 over the clause, the function's
+signature and body, every function, extern and type declaration it reaches
+(its transitive callees and the types its parameters and callees use), and the
+path of its file relative to the project root (the working directory). The
+audit
 recomputes it from the program it is auditing and shows a recorded result only
-when the two agree. A record taken before the body or the clause changed, a
-record for a function of the same name in another file, and a record with no
-digest all read `unrun`, never the old result.
+when the two agree. A record taken before the body, the clause, a callee or a
+reached type changed, a record for a function of the same name in another
+file, and a record with no digest all read `unrun`, never the old result. A
+report recorded in another checkout of the same tree, on CI say, still matches
+when both runs start from the project root.
 
 Without `--spec-results`, every spec is listed with `last result: unrun`.
 `unrun` is not a failure and not a pass; it says no recorded run has checked the

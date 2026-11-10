@@ -2733,6 +2733,14 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var k = ret_at(ts, ps.i)
+  // issue #2705: a spec is checked as a generated `prop test` that calls the
+  // fn, which an extern cannot be; the reference refuses the clause at parse
+  // (`parser.py::_spec_outside_fn`), in these words. The host-body skip below
+  // would otherwise step over it and admit the extern silently.
+  if (ati(ts, k, "ensures")) {
+    return { pg: bad_prog(pg, "a spec (`ensures`) is only supported on a top-level `fn`, not on an extern"),
+             i: skip_line(ts, k) }
+  }
   let inv = isAcq ? declared_inverse_at(ts, k) : ""
   // skip any `= @host { ... }` bodies without letting a brace end the decl early.
   //
