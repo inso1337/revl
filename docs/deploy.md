@@ -159,10 +159,17 @@ leave these flags out, and the far runner then starts with none of the rules
 set. A host that needs its rules to hold whatever the conductor sends pins them
 itself: an sshd forced command (`command=` on the conductor's key in
 `authorized_keys`, or `ForceCommand`) or a host-side wrapper script that runs
-`revl deploy-admit` with the flags already on its command line. A wrapper
-that also forwards the conductor's arguments gets one more guard: a second
-`--max-age` or `--not-before` is refused at startup, so it cannot replace the
-one the wrapper set. A rule the wrapper does not carry stays off.
+`revl deploy-admit` with the flags already on its command line. A rule the
+wrapper does not carry stays off.
+
+A wrapper must not forward the conductor's arguments to `revl deploy-admit`.
+Most of the runner's flags can be repeated or replaced, so forwarded arguments
+can widen a `--capability-ceiling`, add a trusted `--key` or replace
+`--host-key`. If a wrapper has to forward any, it filters them down to the
+switches that only tighten the rules: `--require-gauntlet`,
+`--require-conformance` and `--recheck-source`. The startup refusal of a
+repeated `--max-age` or `--not-before` covers those two flags only; it is not a
+guard for the others.
 
 The local `revl deploy --bundle` check (`admit_bundle_chain`) is the conductor
 verifying a bundle on its own disk; it takes the keys, the backend and the two
