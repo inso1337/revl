@@ -585,8 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
     # two audit graphs for authority drift, with no policy on the path).
     simulate_cmd = sub.add_parser(
         "simulate",
-        help="preview what a change would have done to recorded history "
-             "(item 468)")
+        help="preview a policy change, or re-run a component change, over "
+             "recorded history (item 468, issue #2713)")
     simulate_sub = simulate_cmd.add_subparsers(dest="simulate_command",
                                                required=True)
     sim_policy = simulate_sub.add_parser(
@@ -617,6 +617,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="with a COMPOSITION document passed to `--composition`: the "
              "project root row provenance and origins are recorded against "
              "(default: the working directory). Ignored for module arguments")
+
+    # issue #2713: `revl simulate swap OLD NEW --history RUN.wal` re-runs the
+    # recorded call outcomes of ONE component against a changed version. The
+    # preflight runs nothing and names every missing fact (a history that is
+    # not whole, a crossing whose outcome was never journalled, an absent
+    # `determinism` record, a recorded method whose arguments are not on the
+    # record, a component outside the pure subset); only a replayable history
+    # is executed, offline, and the first returned value that moved is named
+    # and stops the run. Every bound is a fact in the report rather than a
+    # caveat, and the command dispatches no host call and mutates nothing.
+    sim_swap = simulate_sub.add_parser(
+        "swap",
+        help="re-run the recorded outcomes of one component against a changed "
+             "version: the preflight names every missing fact and runs nothing, "
+             "then a pure component's recorded calls are re-executed offline "
+             "and the first returned value that moved is named")
+    sim_swap.add_argument(
+        "old", metavar="OLD",
+        help="the component version that produced the recording (a .rvl source)")
+    sim_swap.add_argument(
+        "new", metavar="NEW",
+        help="the changed component version to re-run (same accepted form)")
+    sim_swap.add_argument(
+        "--history", metavar="RUN.wal", required=True,
+        help="the recorded history to re-run (a WAL)")
+    sim_swap.add_argument(
+        "--component", default=None, metavar="NAME",
+        help="the component to swap when OLD or NEW declares more than one "
+             "(default: the only component either declares)")
+    sim_swap.add_argument("--json", action="store_true",
+                         help="machine-readable swap report an agent can consume")
 
     diff_cmd = sub.add_parser(
         "diff",
