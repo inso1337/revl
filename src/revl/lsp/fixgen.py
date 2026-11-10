@@ -491,16 +491,23 @@ class CompileBudget:
     Each candidate check is a full compile, so `diagnostics.report` makes ONE
     budget per call and hands it to every record's `generate_repairs`: a report
     with many refusals then spends at most that many compiles in all, not that
-    many per record (issue #2759 review)."""
+    many per record (issue #2759 review).
+
+    A record is checked whole or not at all: `reserve` takes every compile the
+    record needs up front, so no record carries a list cut short by the
+    budget. The first record that does not fit closes the budget, so every
+    later record is unchecked too, even a smaller one, and the checked records
+    are always a prefix of the report."""
 
     def __init__(self, compiles: int) -> None:
         self.remaining = compiles
 
-    def take(self) -> bool:
-        """Spend one compile, or say there is none left."""
-        if self.remaining <= 0:
+    def reserve(self, compiles: int) -> bool:
+        """Spend `compiles` at once, or spend nothing and close the budget."""
+        if compiles > self.remaining:
+            self.remaining = 0
             return False
-        self.remaining -= 1
+        self.remaining -= compiles
         return True
 
 
@@ -509,7 +516,8 @@ def generate_repairs(text: str, diagnostic: dict,
                      widens_authority: bool = False, verify=None,
                      baseline: list[tuple[str, int]] | None = None,
                      limit: int = 8,
-                     budget: CompileBudget | None = None) -> list[Repair]:
+                     budget: CompileBudget | None = None
+                     ) -> list[Repair] | None:
     """Every verified way out of one admission refusal, in a fixed order.
 
     One candidate generator per covered code (see ``_REPAIR_GENERATORS``) emits
@@ -530,9 +538,11 @@ def generate_repairs(text: str, diagnostic: dict,
     authority. They are omitted otherwise, which is the whole point: nothing
     here suggests widening authority by default. At most ``limit`` candidates
     are re-checked (each check is a full compile, so the cap is a cost bound as
-    well); a shared ``budget`` bounds the compiles across several calls, and a
-    candidate past it is not checked and not returned. Survivors are ordered narrowest authority first, then smallest
-    edit, then kind, so the list is deterministic and a learned ordering can
+    well). A shared ``budget`` bounds the compiles across several calls: the
+    record's seeds are reserved from it together, and when they do not all fit
+    none is checked and the result is None (unchecked), never a partial list.
+    Seeds are checked narrowing first. Survivors are ordered narrowest
+    authority first, then smallest edit, then kind, so the list is deterministic and a learned ordering can
     only reorder these verified entries later (issue #2759)."""
     code = diagnostic.get("code")
     generator = _REPAIR_GENERATORS.get(code)
@@ -543,17 +553,21 @@ def generate_repairs(text: str, diagnostic: dict,
     known.update(baseline or ())
     survivors: list[Repair] = []
     seen: set[tuple] = set()
-    seeds = [candidate for candidate in generator(text, diagnostic, filename) or ()
-             if candidate.edits
-             and (widens_authority or not candidate.widens_authority)]
-    for candidate in seeds[:limit]:
+    seeds: list[Repair] = []
+    for candidate in generator(text, diagnostic, filename) or ():
+        if not candidate.edits or (candidate.widens_authority
+                                   and not widens_authority):
+            continue
         signature = (candidate.kind, candidate.widens_authority,
                      tuple(_edit_signature(edit) for edit in candidate.edits))
-        if signature in seen:
-            continue
-        seen.add(signature)
-        if budget is not None and not budget.take():
-            break
+        if signature not in seen:
+            seen.add(signature)
+            seeds.append(candidate)
+    seeds.sort(key=lambda candidate: candidate.widens_authority)
+    seeds = seeds[:limit]
+    if budget is not None and not budget.reserve(len(seeds)):
+        return None
+    for candidate in seeds:
         patched = apply_edits(text, candidate.edits)
         if verify is not None:
             patched_diagnostics = verify(patched)
@@ -598,12 +612,23 @@ def _repair_clears(target: tuple[str, int], known: set[tuple[str, int]],
     or adds lines shifts every record below it, and a shifted pre-existing
     record is not a new one."""
     moved = {(code, _patched_line(edits, line)) for code, line in known
-             if (code, line) != target}
+             if (code, line) != target and not _deleted(edits, line)}
     for diag in patched:
         pair = (diag.get("code"), diag["range"]["start"]["line"])
         if pair not in moved:
             return False                 # the refusal itself, or a new one
     return True
+
+
+def _deleted(edits, line: int) -> bool:
+    """Whether an edit removes original `line` whole, so a record that sat on
+    it no longer stands for anything in the patched file."""
+    for edit in edits:
+        start, end = edit["range"]["start"], edit["range"]["end"]
+        if start["line"] <= line < end["line"] and (
+                line > start["line"] or start["character"] == 0):
+            return True
+    return False
 
 
 def _patched_line(edits, line: int) -> int:

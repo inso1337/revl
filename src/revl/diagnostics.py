@@ -827,6 +827,8 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
             return verifier(patched, refusal)
 
         if repairs and any(r.get("kind") == "site-undo" for r in repairs):
+            if not budget.reserve(1):
+                continue                 # the prose repairs stay, unverified
             fix = fixgen.fix_code(record, text, one.filename,
                                   diagnostic=diagnostic, verify=verify)
             if not fix.get("ok"):
@@ -851,6 +853,8 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
             text, diagnostic, one.filename,
             widens_authority=widens_authority, verify=verify,
             baseline=baseline, budget=budget)
+        if generated is None:
+            continue                     # did not fit the budget: unchecked
         # The list is present even when it is empty: the engine ran and found no
         # candidate that verifies, which a caller must be able to tell from "no
         # engine ran" (the same split issue #2845 made for `repair`).

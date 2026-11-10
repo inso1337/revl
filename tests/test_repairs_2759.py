@@ -395,6 +395,84 @@ def test_a_line_removal_is_kept_when_later_refusals_shift_up():
         assert len(refused.value.errors) == 2
 
 
+def _component(i: int, body: str) -> str:
+    return (f"service S{i} {{ fn go() -> Int }}\n"
+            f"component C{i} provides s{i}: S{i} {{\n"
+            f"  provide s{i} {{\n    fn go() -> Int {{\n{body}    }}\n  }}\n}}\n")
+
+
+def test_a_record_is_checked_whole_or_not_at_all():
+    # C0 has one candidate, C1 to C5 two each: 1 + 2 + 2 + 2 = 7 fit the
+    # budget of 8, C4 needs 2 with 1 left, so C4 and C5 are unchecked rather
+    # than C4 getting a list cut short to its first candidate
+    source = "service Clock { fn now() -> Int }\n" + _component(
+        0, "      return clock.now()\n")
+    for i in range(1, 6):
+        source += _component(i, "      let t = clock.now()\n      return 1\n")
+    payload, compiles = _report_counting(source, widens_authority=True)
+    records = payload["diagnostics"]
+    assert len(records) == 6
+    lists = [[(r["kind"], r["widens_authority"]) for r in record["repairs"]]
+             if "repairs" in record else None for record in records]
+    both = [("remove-call", False), ("add-requires", True)]
+    assert lists == [[("add-requires", True)], both, both, both, None, None]
+    assert len(compiles) == 7
+    # the narrowing candidate is checked before the widening one
+    first = apply_edits(source, records[1]["repairs"][0]["fix_code"]["edits"])
+    assert compiles[1] == first
+
+
+def test_the_g4_site_undo_check_draws_from_the_same_budget():
+    # the compiler reports one G4 per compile, but `report` takes any
+    # collected set; each G4 record costs one compile, inside the budget
+    from revl.errors import RevlErrors
+
+    source = (
+        "\nservice S { fn go(u: Str) -> Int }\n\n"
+        "component Leaky provides s: S {\n"
+        "  config { url: Str }\n"
+        '  let pool = effect Pool.open("u", 1)\n'
+        "  provide s { fn go(u) = 1 }\n"
+        "}\n")
+    try:
+        compile_source(source, "<candidate>.rvl")
+    except RevlError as refusal:
+        one = (getattr(refusal, "errors", None) or [refusal])[0]
+    else:                                    # pragma: no cover
+        raise AssertionError("expected a refusal")
+    compiles: list[str] = []
+    check = _verifier_for(source)
+
+    def verify(patched: str, error: RevlError):
+        compiles.append(patched)
+        return check(patched, error)
+
+    payload = report(RevlErrors([one] * 10),
+                     sources={"<candidate>.rvl": source}, verifier=verify)
+    records = payload["diagnostics"]
+    assert [record["code"] for record in records] == ["G4"] * 10
+    assert len(compiles) == 8
+    verified = ["fix_code" in record["repairs"][0] for record in records]
+    assert verified == [True] * 8 + [False] * 2
+    # an unchecked G4 record keeps its prose repairs, as #2684 pins
+    assert all(record["repairs"][0]["kind"] == "site-undo" for record in records)
+
+
+def test_a_known_record_on_a_deleted_line_does_not_excuse_a_new_one():
+    # removing line 5 moves line 6 up onto 5: a C record there now is new,
+    # not the known C record that sat on the deleted line
+    def diag(code: str, line: int) -> dict:
+        return {"code": code, "range": {"start": {"line": line, "character": 0}}}
+
+    remove = {"range": {"start": {"line": 5, "character": 0},
+                        "end": {"line": 6, "character": 0}}, "newText": ""}
+    target = ("G1", 5)
+    assert fixgen._repair_clears(target, {target, ("C", 5)},
+                                 [diag("C", 5)], [remove]) is False
+    assert fixgen._repair_clears(target, {target, ("C", 7)},
+                                 [diag("C", 6)], [remove]) is True
+
+
 # ------------------------------------------------------------ explain, records
 
 def test_explain_shows_the_candidate_kinds_for_the_covered_codes():
