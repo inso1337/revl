@@ -586,3 +586,83 @@ def test_a_declared_endorse_confidential_before_the_verified_fn_is_admitted():
         + "      let c = wash(d)\n      let x = emit logit(c)\n"
         + "      return 0\n    }\n  }\n}\n")
     compile_source(src, "verified_fn_endorse.rvl")  # must not raise
+
+
+# ===========================================================================
+# 9. A wrapper of the verified-fn declassifier does not launder either (#3113).
+# ===========================================================================
+#
+# The declassifier returns CLEAN, so a plain fn that wraps it used to get a
+# signature in which its parameter goes nowhere: the caller's `confidential` (or
+# bound `secret`) value came back clean and reached a log. The wrapper's
+# signature now records that the parameter reaches a declassifier
+# (`_Signature.declassifies_at`, the sibling of `persists_at`), transitively,
+# and the caller that hands it a `secret` or `confidential` value is refused.
+
+_LAUNDER = _WASH + "fn launder(p: Str) -> Str { return wash(p) }\n"
+
+
+def test_a_wrapper_of_the_declassifier_does_not_launder_a_secret_return():
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = launder(t)\n"
+        "      let x = emit logit(c)", extra=_LAUNDER))
+    assert "verified-fn declassifier (`wash`" in err.message
+    assert "argument 1 of `launder`" in err.message
+
+
+def test_a_trusted_returning_wrapper_does_not_launder_a_secret_return():
+    """The same wrapper declaring `-> Trusted[Str]`: a plain (non-verified) fn is
+    not a declassifier, so the qualifier on its return changes nothing."""
+    _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = launder(t)\n"
+        "      let x = emit logit(c)",
+        extra=_WASH + "fn launder(p: Str) -> Trusted[Str] { return wash(p) }\n"))
+
+
+def test_a_wrapper_of_a_wrapper_does_not_launder_a_secret_return():
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = outer(t)\n"
+        "      let x = emit logit(c)",
+        extra=_LAUNDER + "fn outer(q: Str) -> Str { return launder(q) }\n"))
+    assert "outer -> launder -> wash" in err.message
+
+
+def test_a_wrapper_of_the_declassifier_does_not_launder_a_bound_key():
+    """The bound-key twin: `launder(emit complete(u))` into a host sink. The
+    direct call of the declassifier was already refused (4a.3); through a
+    wrapper it is now refused the same way, with G-SECRET."""
+    src = (
+        _BOUND_PRELUDE
+        + "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+        + _LAUNDER
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u) {\n      let c = launder(emit complete(u))\n"
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
+    assert _code_of(src) == "G-SECRET"
+
+
+def test_a_service_method_wrapping_the_declassifier_does_not_launder():
+    """The method-call shape: a required-service operation whose in-unit
+    provider body washes its parameter. The provide method's signature carries
+    the same record, so `emit l.launder(t)` is refused at the caller."""
+    src = (
+        _PRELUDE + _WASH
+        + "service Laund { emission fn launder(x: Str) -> Str }\n"
+        + "component Washer provides l: Laund {\n  provide l {\n"
+        + "    fn launder(x) {\n      return wash(x)\n    }\n  }\n}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent requires l: Laund provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit charge(u)\n      let c = emit l.launder(t)\n"
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
+    err = _refuses(src)
+    assert "Washer.launder -> wash" in err.message
+
+
+def test_a_clean_value_through_the_wrapper_still_compiles():
+    """The record refuses only a `secret` or `confidential` argument: a plain
+    value with neither origin still passes through the wrapper to the log."""
+    compile_source(_agent(
+        "      let c = launder(u)\n      let x = emit logit(c)", extra=_LAUNDER),
+        "wrapper_clean.rvl")  # must not raise
