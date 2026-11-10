@@ -401,9 +401,11 @@ layer Tune for Demo {
 
 
 def test_a_pure_numeric_config_change_gets_no_token(tmp_path):
-    """426 §8.7: `pool: 8 -> 16` feeds pure computation, so it is NOT
-    authority-bearing and produces no `config:` token — the panel stays clean on
-    a numeric-only change."""
+    """426 §8.7: `pool: 8 -> 16` on a component whose body never reads `pool`
+    feeds no computation, so it is NOT authority-bearing and produces no
+    `config:` token — the panel stays clean on a numeric-only change. The case
+    where the body DOES read the field is
+    `test_a_numeric_or_bool_config_the_body_reads_prevents_clean` below."""
     doc = _panel_project(
         tmp_path, site="tune", tune="""
 layer Tune for Demo {
