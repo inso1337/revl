@@ -152,8 +152,10 @@ RevL.A8.abort_drops_deferred	instance	RevL.A8.deferred_abort_run	a real step set
 RevL.A8.abort_run_drops_deferred	instance	RevL.A8.deferred_abort_run	the whole run enqueues seq 2 and then settles on abort, so the fired-unchanged half is not a claim about the empty run
 RevL.A8.commit_discharges_deferred	instance	RevL.A8.deferred_commit_run	a real step settles on commit with queued seqs 2 and 4, so the FIFO firing and the flushed records are not about an empty queue
 RevL.A8.commit_run_queue_empty	instance	RevL.A8.deferred_commit_run	the whole run enqueues two entries and then settles on commit
+RevL.A8.commit_run_discharges_deferred	instance	RevL.A8.deferred_commit_run_from_queued	a whole run from a frame already holding seq 2 enqueues seq 4 and settles on commit, firing 2 then 4 with a flushed record each, so neither the queued-at-start part nor the run-enqueued part is empty
 RevL.A8.deferred_abort_run	concrete	-	the abort step on a non-empty deferral queue, and the whole run that reaches it
 RevL.A8.deferred_commit_run	concrete	-	the commit step fires the queue in program order and the whole run that reaches it
+RevL.A8.deferred_commit_run_from_queued	concrete	-	the same commit reached from a frame with seq 2 already queued, the run enqueueing seq 4
 RevL.A8.revert_witness	concrete	-	the step relation genuinely takes the run
 RevL.A8.revert_witness_restores	concrete	-	replaying that trace empties the world again
 RevL.Lemmas.reach_mono_fuel	instance	RevL.G5Classified.fold_must_run_to_stability	fuel 0 and fuel 1 give different verdicts on the wrapped program, so monotonicity is not over a constant fold

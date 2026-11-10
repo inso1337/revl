@@ -168,8 +168,10 @@ python3 scripts/axioms_gate.py \
   RevL.A8.abort_run_drops_deferred \
   RevL.A8.commit_discharges_deferred \
   RevL.A8.commit_run_queue_empty \
+  RevL.A8.commit_run_discharges_deferred \
   RevL.A8.deferred_abort_run \
   RevL.A8.deferred_commit_run \
+  RevL.A8.deferred_commit_run_from_queued \
   RevL.A8.revert_witness \
   RevL.A8.revert_witness_restores \
   RevL.CapCeilings.derived_held_tokens_are_declared_keys \
