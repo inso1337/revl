@@ -4830,10 +4830,14 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
-// issue #3053: the lifecycle driver's own names; go renames the USER binding. Mirrors backends/go/emit.py.
+// issue #3053: the lifecycle driver's own names; go renames the USER binding.
+// issue #3095 adds the component activation/provide-impl scaffolding a
+// `let-effect` bind shares scope with. Mirrors backends/go/emit.py.
 fn is_emitter_reserved(name: Str) -> Bool {
   return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
-                        "_svc", "_err", "_r", "_ok"], name)
+                        "_svc", "_err", "_r", "_ok",
+                        "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+                        "_revlUi", "_revlApplyInv", "_revlApplyErr"], name)
 }
 
 fn safe_local(name: Str) -> Str {
